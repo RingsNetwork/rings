@@ -42,6 +42,7 @@ use crate::provider::AsyncSigner;
 use crate::provider::Provider;
 use crate::provider::ProviderStores;
 use crate::provider::Signer;
+use crate::release::StoresReleased;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
 mod listener;
@@ -279,6 +280,7 @@ impl Provider {
             evidence: evidence_storage,
             guards: onion_entry_guard_storage,
             replay: Some(replay_storage),
+            released: StoresReleased::default(),
         })
         .await?;
         provider.install_relay_onion_runtime()?;
@@ -345,6 +347,7 @@ impl Provider {
                     evidence: evidence_storage,
                     guards: onion_entry_guard_storage,
                     replay: Some(replay_storage),
+                    released: StoresReleased::default(),
                 },
             )
             .await?;
@@ -400,6 +403,7 @@ impl Provider {
                     evidence: evidence_storage,
                     guards: onion_entry_guard_storage,
                     replay: Some(replay_storage),
+                    released: StoresReleased::default(),
                 },
                 move |config| config.onion_role(OnionRole::Exit(offer)),
             )

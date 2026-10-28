@@ -730,7 +730,11 @@ impl PeerRing {
         }
         Ok(PeerRingAction::RemoteAction(
             member,
-            RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation { placement, op })),
+            RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
+                placement,
+                op,
+                report: false,
+            })),
         ))
     }
 
@@ -740,6 +744,26 @@ impl PeerRing {
         &self,
         op: EntryOperation,
         redundancy: u16,
+    ) -> Result<PeerRingAction> {
+        self.entry_operate_with(op, redundancy, false).await
+    }
+
+    /// [`Self::entry_operate`] whose remote placements ask their owners for a store report
+    /// (`message::types::store_report`, #866).
+    pub(crate) async fn entry_operate_reported(
+        &self,
+        op: EntryOperation,
+        redundancy: u16,
+    ) -> Result<PeerRingAction> {
+        self.entry_operate_with(op, redundancy, true).await
+    }
+
+    /// [`Self::entry_operate`], each remote placement asking a store report iff `report`.
+    async fn entry_operate_with(
+        &self,
+        op: EntryOperation,
+        redundancy: u16,
+        report: bool,
     ) -> Result<PeerRingAction> {
         let now_ms = get_epoch_ms();
         let op = self.stamp_operation(op, now_ms, None).await?;
@@ -764,6 +788,7 @@ impl PeerRing {
                     RemoteAction::FindEntryForOperate(Box::new(PlacedEntryOperation {
                         placement,
                         op: op.clone(),
+                        report,
                     })),
                 )),
             }

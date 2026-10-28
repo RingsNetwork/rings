@@ -33,7 +33,7 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
         <section class="landing-hero" aria-labelledby="landing-title">
             <div class="landing-hero-copy">
                 <p class="landing-kicker">{ PROJECT_NAME }</p>
-                <h2 id="landing-title">{ PROJECT_TAGLINE }</h2>
+                <h1 id="landing-title">{ PROJECT_TAGLINE }</h1>
                 <p class="landing-lede">
                     { PROJECT_INTRODUCTION }
                 </p>

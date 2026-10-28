@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
-use rings_runtime::Spawner;
 use tokio::net::UdpSocket;
 
 use super::inject_accepted;
@@ -18,6 +17,7 @@ use super::UDP_BUF;
 use crate::extension::ext::Scope;
 use crate::extension::transport::Frame;
 use crate::extension::transport::RELAY_IDLE_TIMEOUT;
+use crate::tasks::NodeSpawner;
 
 impl TransportSessions {
     /// Bind a UDP socket; route each datagram. A datagram from a **known** source (in the
@@ -33,7 +33,7 @@ impl TransportSessions {
         peer: Did,
         service: String,
     ) {
-        let Ok(spawner) = Spawner::current() else {
+        let Ok(spawner) = scope.tasks().spawner() else {
             tracing::error!("transport udp listen on {local_addr} requires a runtime");
             return;
         };
@@ -158,7 +158,7 @@ pub(super) fn spawn_udp_sendto(
     task: RelayTask,
     socket: Arc<UdpSocket>,
     dest: SocketAddr,
-    spawner: &Spawner,
+    spawner: &NodeSpawner,
 ) {
     spawner.spawn(relay_udp_sendto(task, socket, dest, RELAY_IDLE_TIMEOUT));
 }

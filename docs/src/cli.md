@@ -176,3 +176,25 @@ table.
 delegation-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
 RPC client commands do not. A native node stores the resulting delegatee key in plain
 text, so never derive it from a key that holds assets.
+
+A delegation bounds the life of the process that uses it (#1063). Every frame a node sends
+carries its own delegation, and from 25 s before the delegation expires (one delivery bound,
+the margin that keeps a frame from expiring in flight) every frame is refused. The node can
+send nothing from then on, and the delegation cannot be replaced without a restart. So
+`rings run`:
+
+- refuses to start with a delegatee key that has less than those 25 s left
+  (`DelegationHorizonReached`, error code 1003);
+- logs a warning once the end is less than a day away, giving the end in Unix milliseconds;
+- exits with a non-zero status at that end, with the same error, instead of running on mute.
+
+`--ttl` of `rings init` and `rings new-delegation` (default 30 days) therefore sets how long a
+node can run. Run it under a supervisor that restarts it (`Restart=always` under systemd,
+`--restart unless-stopped` under Docker), and write a fresh delegatee key before the restart,
+with `rings new-delegation`. A restart with the old key fails at startup with that error, so
+the outage is explicit rather than silent. A plain `Restart=always` alone only repeats that
+error: the restart needs its re-mint step, for example `ExecStartPre=` running
+`rings new-delegation` for the node's key.
+
+The deadline is checked at least once a minute against the wall clock, so a host suspended
+across it still exits within a minute of resuming.

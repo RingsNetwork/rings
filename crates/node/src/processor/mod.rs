@@ -27,6 +27,8 @@ use rings_core::message::OriginQuotaConfig;
 use rings_core::message::OriginQuotaCounters;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::storage_api::StoreQuorum;
+use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -84,10 +86,15 @@ use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
+use crate::registration::early_publish_armed;
+use crate::registration::republish_due;
 use crate::registration::validate_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
+use crate::registration::RegistrationReadiness;
 use crate::registration::RegistrationTask;
+use crate::release::StoresReleased;
+use crate::tasks::NodeTasks;
 
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -95,7 +102,9 @@ mod builder;
 mod config;
 /// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
 pub(crate) mod handshake;
+mod horizon;
 mod messaging;
+mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
@@ -104,6 +113,10 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
+pub use horizon::DelegationHorizon;
+pub use horizon::SigningState;
+pub use horizon::SIGNING_HORIZON_LEAD_MS;
+pub(crate) use registration_daemon::sleep_unless_stopped;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -113,31 +126,6 @@ const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: u32 = 40;
 /// Whether the fetch-cache read numbered `attempt` (from 0) is a DHT fetch's last one.
 const fn is_final_lookup_poll(attempt: u32) -> bool {
     attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
-}
-
-async fn sleep_registration_interval_with_stop(
-    interval: Duration,
-    stop: &StopToken,
-    sibling_stop: &StopToken,
-) -> Result<bool> {
-    use futures::future::select;
-    use futures::pin_mut;
-
-    let stopped = async {
-        let own_stop = stop.stopped();
-        let maintenance_stop = sibling_stop.stopped();
-        pin_mut!(own_stop, maintenance_stop);
-        let _ = select(own_stop, maintenance_stop).await;
-    };
-    let interval_elapsed = sleep(interval);
-    pin_mut!(stopped, interval_elapsed);
-    match select(interval_elapsed, stopped).await {
-        futures::future::Either::Left((result, _)) => {
-            result?;
-            Ok(true)
-        }
-        futures::future::Either::Right(((), _)) => Ok(false),
-    }
 }
 
 /// Processor for rings-node rpc server.
@@ -157,6 +145,10 @@ pub struct Processor {
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
     measure: Option<Arc<PeriodicMeasure>>,
+    /// The release witnesses of the file stores this processor is built over (#1085).
+    stores_released: StoresReleased,
+    /// The stop and the task set of this node (`crate::tasks`), shared by every clone.
+    tasks: NodeTasks,
     /// Serializes listener generations across every clone and wrapper of this processor.
     /// Ownership includes graceful maintenance shutdown and measurement flushing.
     listener_lifecycle_lock: Arc<futures::lock::Mutex<()>>,
@@ -165,6 +157,8 @@ pub struct Processor {
     /// The cover floor of this node's idle onion links (#880).
     onion_idle_floor: OnionIdleFloor,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
+    /// Whether each registration task is stored at its owners (#866), in task order.
+    registration_readiness: Arc<RegistrationReadiness>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
 }
@@ -186,6 +180,23 @@ impl Processor {
 
     pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
         &self.delegatee_key
+    }
+
+    /// The signing horizon of this node's own delegation: from it on, the node can send
+    /// nothing until it restarts with a fresh delegation (#1063). A native daemon ends there; a
+    /// browser or FFI embedder reads it here, or as `overlay_ready = false`, and acts itself.
+    pub fn signing_horizon(&self) -> DelegationHorizon {
+        DelegationHorizon::of(&self.delegatee_key.delegation())
+    }
+
+    /// The stop and the task set of this node (`crate::tasks`).
+    pub(crate) fn tasks(&self) -> &NodeTasks {
+        &self.tasks
+    }
+
+    /// The release witnesses of the file stores this processor is built over (#1085).
+    pub(crate) fn stores_released(&self) -> StoresReleased {
+        self.stores_released.clone()
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -400,60 +411,6 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
-    async fn run_registration_once(
-        &self,
-        task: &dyn RegistrationTask,
-        stop: StopToken,
-    ) -> Result<()> {
-        let context = RegistrationContext::new_with_stop(self, stop);
-        task.register_once(&context).await
-    }
-
-    async fn registration_task_daemon_with(
-        &self,
-        task: &dyn RegistrationTask,
-        stop: StopToken,
-        sibling_stop: StopToken,
-    ) {
-        loop {
-            if stop.should_stop() || sibling_stop.should_stop() {
-                return;
-            }
-            if let Err(error) = self.run_registration_once(task, stop.clone()).await {
-                if matches!(error, Error::RegistrationStopped) {
-                    tracing::debug!(
-                        "Stopping {} registration task after cooperative stop",
-                        task.name()
-                    );
-                    return;
-                }
-                tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
-            }
-            if stop.should_stop() || sibling_stop.should_stop() {
-                return;
-            }
-            match sleep_registration_interval_with_stop(task.interval(), &stop, &sibling_stop).await
-            {
-                Ok(true) => {}
-                Ok(false) => return,
-                Err(error) => {
-                    tracing::warn!(
-                        "Stopping {} registration task after timer error: {error:?}",
-                        task.name()
-                    );
-                    return;
-                }
-            }
-        }
-    }
-
-    async fn registration_daemons_with(&self, stop: StopToken, sibling_stop: StopToken) {
-        join_all(self.registration_tasks.iter().map(|task| {
-            self.registration_task_daemon_with(task.as_ref(), stop.clone(), sibling_stop.clone())
-        }))
-        .await;
-    }
-
     /// Run stabilization and node registration tasks until this future is dropped or aborted.
     ///
     /// This is a long-running task; do not await completion as a readiness signal. Concurrent
@@ -484,7 +441,35 @@ impl Processor {
     where F: FnOnce() {
         let _listener_lifecycle_guard = self.listener_lifecycle_lock.lock().await;
         on_started();
-        self.run_listener_generation(stop).await;
+        self.run_listener_generation_until(stop).await;
+    }
+
+    /// Run one listener generation until `stop` or the node's stop asks it to exit: each is
+    /// forwarded to the one stop the generation observes, so it winds down cooperatively on
+    /// either, and a close (#1085) ends it as the caller's stop does.
+    async fn run_listener_generation_until(&self, stop: StopToken) {
+        let generation = StopSource::new();
+        let node = self.tasks.stop_token();
+        let forward = async {
+            let caller = stop.stopped();
+            let node = node.stopped();
+            futures::pin_mut!(caller, node);
+            let _ = futures::future::select(caller, node).await;
+            generation.request_stop();
+        };
+        let run = self.run_listener_generation(generation.token());
+        futures::pin_mut!(forward, run);
+        if let futures::future::Either::Left(((), run)) =
+            futures::future::select(forward, run).await
+        {
+            run.await;
+        }
+    }
+
+    /// Wait until no listener generation runs: the one running, if any, has ended with its
+    /// cleanup and measurement flush.
+    pub(crate) async fn await_listener_generations(&self) {
+        drop(self.listener_lifecycle_lock.lock().await);
     }
 
     /// Run maintenance and registration loops for the generation holding the lifecycle lock.
@@ -529,7 +514,7 @@ impl Processor {
         Ok(())
     }
 
-    #[cfg(all(test, feature = "ffi"))]
+    #[cfg(all(test, rings_native))]
     pub(crate) async fn record_authenticated_measurement_for_test(
         &self,
         peer: Did,
@@ -557,12 +542,11 @@ impl Processor {
     /// Close this node's network: the swarm opens no connection from now on and closes every
     /// one it has (`Swarm::close`, #1098), then the applied measurements are flushed.
     ///
-    /// Call it before dropping the last handle of a node that stops in a process that goes on:
-    /// dropping the node frees it (#1093), but a peer connection that was never closed keeps
-    /// its sockets bound. Stop a listener (`listen_with`) first; one still running finds every
-    /// new connection refused. Each peer sees its connection close at once instead of waiting
-    /// for an ICE timeout. Awaiting the release of the node's stores and the end of its
-    /// background tasks is #1085.
+    /// These are steps (c) and (d) of [`Provider::close`](crate::provider::Provider::close)
+    /// only: this stops no task and releases no store. A node that stops in a process that
+    /// goes on is closed with `Provider::close`, which also stops the node's tasks and awaits
+    /// the release of its stores (#1085). Each peer sees its connection close at once instead
+    /// of waiting for an ICE timeout.
     ///
     /// Both steps run even if the first fails; the first failure is returned.
     pub async fn close(&self) -> Result<()> {
@@ -619,6 +603,27 @@ impl Processor {
     pub async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         self.swarm
             .storage_append_data(topic, data)
+            .await
+            .map_err(Error::EntryError)
+    }
+
+    /// Append the elements `data` to the data topic `topic` as one delta, requesting the
+    /// retention bound `now + lifetime_ms`, whose owners report it (core's
+    /// [`storage_extend_reported`](rings_core::swarm::storage_api::ScopedStorage::storage_extend_reported)):
+    /// the receipt resolves once their reports decide `quorum`.
+    ///
+    /// Rerouted as [`Self::storage_fetch`] documents, its rerouting waits ending at `stop`.
+    pub async fn storage_extend_reported(
+        &self,
+        topic: &str,
+        data: Vec<Bytes>,
+        lifetime_ms: u64,
+        quorum: StoreQuorum,
+        stop: &StopToken,
+    ) -> Result<StoreReceipt> {
+        self.swarm
+            .scoped_storage(stop.clone())
+            .storage_extend_reported(topic, data, lifetime_ms, quorum)
             .await
             .map_err(Error::EntryError)
     }
@@ -797,7 +802,9 @@ impl Processor {
                 has_admitted_peer,
                 has_successor,
                 has_predecessor,
-                overlay_ready: has_admitted_peer && has_successor,
+                overlay_ready: has_admitted_peer
+                    && has_successor
+                    && self.signing_horizon().signs_at(generated_at_ms),
             },
         })
     }

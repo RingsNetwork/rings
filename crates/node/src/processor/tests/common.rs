@@ -7,6 +7,7 @@ use super::controlled::ControlledNetwork;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::consts::DATA_REDUNDANT;
+use crate::test_support::TestTask;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::record_activity;
 use crate::tests::exit_descriptor::ExitDescriptorFixture;
@@ -54,7 +55,7 @@ pub(super) struct ApplicationRecorder {
     /// The application data read so far, in arrival order.
     inbound: Arc<Mutex<Vec<ApplicationData>>>,
     /// The task reading the inbox; aborted with the recorder.
-    reader: tokio::task::JoinHandle<()>,
+    _reader: TestTask<()>,
 }
 
 impl ApplicationRecorder {
@@ -67,7 +68,7 @@ impl ApplicationRecorder {
             .expect("the test processor's inbox is unclaimed");
         let inbound = Arc::new(Mutex::new(Vec::new()));
         let recorded = inbound.clone();
-        let reader = tokio::spawn(async move {
+        let reader = TestTask::spawn(async move {
             while let Some(delivery) = inbox.next().await {
                 if let ApplicationDelivery::Message(message) = delivery {
                     recorded.lock().unwrap().push(message.data);
@@ -75,13 +76,10 @@ impl ApplicationRecorder {
                 record_activity();
             }
         });
-        Arc::new(Self { inbound, reader })
-    }
-}
-
-impl Drop for ApplicationRecorder {
-    fn drop(&mut self) {
-        self.reader.abort();
+        Arc::new(Self {
+            inbound,
+            _reader: reader,
+        })
     }
 }
 

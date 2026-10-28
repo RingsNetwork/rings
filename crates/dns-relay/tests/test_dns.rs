@@ -1,5 +1,6 @@
-//! The DNS authority over a real UDP socket: a resolver's queries for a relayed zone, answered
-//! from a fixed directory.
+//! The DNS authority over real sockets: a resolver's queries for a relayed zone, answered from a
+//! fixed directory by the authority alone, and by a whole relay listening where its default
+//! configuration does.
 
 #![allow(
     clippy::expect_used,
@@ -9,6 +10,7 @@
 )]
 
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,14 +30,23 @@ use hickory_server::Server;
 use rings_dns_relay::AddressRegistry;
 use rings_dns_relay::Announcement;
 use rings_dns_relay::AnswerTtl;
+use rings_dns_relay::Connection;
 use rings_dns_relay::Directory;
 use rings_dns_relay::DnsAuthority;
+use rings_dns_relay::DnsRelay;
+use rings_dns_relay::DnsRelayConfig;
+use rings_dns_relay::Forward;
 use rings_dns_relay::Owner;
 use rings_dns_relay::ProxyProtocol;
 use rings_dns_relay::Zone;
 use rings_dns_relay::Zones;
 use rings_dns_relay::SMTP_PORT;
+use socket2::Domain;
+use socket2::Protocol;
+use socket2::Socket;
+use socket2::Type;
 use tokio::net::UdpSocket;
+use tokio::sync::oneshot;
 
 /// An owner named `o<n>`.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -70,6 +81,35 @@ impl Directory for Fixed {
             return Err(Unreachable);
         }
         Ok(self.0.get(&owner).cloned())
+    }
+}
+
+impl Fixed {
+    /// The directory the cases share.
+    fn new() -> Self {
+        Self(BTreeMap::from([
+            (
+                Numbered(1),
+                Announcement::new([(SMTP_PORT, ProxyProtocol::Off)], []).unwrap(),
+            ),
+            (
+                Numbered(2),
+                Announcement::new([(22, ProxyProtocol::Off)], []).unwrap(),
+            ),
+        ]))
+    }
+}
+
+/// A forward for a relay whose ingress no case connects to.
+struct Unused;
+
+#[async_trait]
+impl Forward for Unused {
+    type Error = std::io::Error;
+    type Owner = Numbered;
+
+    async fn forward(&self, _connection: Connection<Numbered>) -> Result<(), std::io::Error> {
+        Ok(())
     }
 }
 
@@ -109,16 +149,6 @@ async fn relay() -> Relay {
         name("hostmaster.example.net"),
     )])
     .unwrap();
-    let directory = Fixed(BTreeMap::from([
-        (
-            Numbered(1),
-            Announcement::new([(SMTP_PORT, ProxyProtocol::Off)], []).unwrap(),
-        ),
-        (
-            Numbered(2),
-            Announcement::new([(22, ProxyProtocol::Off)], []).unwrap(),
-        ),
-    ]));
     let authority = DnsAuthority::new(
         Arc::new(zones),
         AnswerTtl {
@@ -126,7 +156,7 @@ async fn relay() -> Relay {
             negative: 30,
         },
         Arc::clone(&registry),
-        Arc::new(directory),
+        Arc::new(Fixed::new()),
     );
     let socket = UdpSocket::bind("[::1]:0").await.unwrap();
     let address = socket.local_addr().unwrap();
@@ -140,9 +170,13 @@ async fn relay() -> Relay {
     }
 }
 
-/// Send `query` to `server` and return the response.
+/// Send `query` to `server` from the loopback address of its family, and return the response.
 async fn ask(server: SocketAddr, query: Message) -> Message {
-    let socket = UdpSocket::bind("[::1]:0").await.unwrap();
+    let loopback = match server {
+        SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+    };
+    let socket = UdpSocket::bind(loopback).await.unwrap();
     socket
         .send_to(&query.to_vec().unwrap(), server)
         .await
@@ -162,6 +196,26 @@ fn query(qname: &str, qtype: RecordType) -> Message {
     message.add_query(Query::query(name(qname), qtype));
     message.set_edns(Edns::new());
     message
+}
+
+/// A port free for UDP and TCP in both families while the returned sockets live: a dual-stack
+/// UDP socket and TCP socket on the IPv6 wildcard, which the kernel binds only where no socket
+/// of either family holds the port.
+fn reserve_port() -> (u16, [Socket; 2]) {
+    let dual_stack = |kind, protocol| {
+        let socket = Socket::new(Domain::IPV6, kind, Some(protocol)).unwrap();
+        socket.set_only_v6(false).unwrap();
+        socket
+    };
+    let udp = dual_stack(Type::DGRAM, Protocol::UDP);
+    udp.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())
+        .unwrap();
+    let port = udp.local_addr().unwrap().as_socket().unwrap().port();
+    let tcp = dual_stack(Type::STREAM, Protocol::TCP);
+    tcp.set_reuse_address(true).unwrap();
+    tcp.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())
+        .unwrap();
+    (port, [udp, tcp])
 }
 
 #[tokio::test]
@@ -248,4 +302,63 @@ async fn test_a_later_edns_version_is_refused_with_badvers() {
         u16::from(response.metadata.response_code),
         u16::from(ResponseCode::BADVERS)
     );
+}
+
+/// A relay listening as the default `dns_listen` does, on `[::]:p` and `0.0.0.0:p`, binds both
+/// and answers over each family. Were `[::]:p` dual-stack, as Linux makes it by default, it would
+/// hold IPv4 port `p` and the second bind would fail.
+#[tokio::test]
+async fn test_a_relay_serves_dns_on_both_wildcards_of_one_port() {
+    let (dns, dns_reservation) = reserve_port();
+    let (ingress, ingress_reservation) = reserve_port();
+    let state = tempfile::tempdir().unwrap();
+    let wildcards = [
+        SocketAddr::from((Ipv6Addr::UNSPECIFIED, dns)),
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, dns)),
+    ];
+    let config: DnsRelayConfig = serde_json::from_value(serde_json::json!({
+        "zones": [{
+            "origin": "rings.rs",
+            "nameservers": ["ns.example.net"],
+            "contact": "hostmaster.example.net",
+        }],
+        "prefix": "2001:db8:1::/64",
+        "ports": [ingress],
+        "state_dir": state.path(),
+        "dns_listen": wildcards,
+        "ingress_listen": Ipv6Addr::LOCALHOST,
+    }))
+    .unwrap();
+    let relay = DnsRelay::open(&config, Arc::new(Fixed::new()), Arc::new(Unused))
+        .await
+        .unwrap();
+    let (serving, served) = oneshot::channel();
+    let (stop, stopped) = oneshot::channel();
+    drop((dns_reservation, ingress_reservation));
+    let running = relay.run(async move {
+        let _case_gone = serving.send(());
+        let _stop_dropped = stopped.await;
+    });
+    let asking = async move {
+        // `run` polls its stop once every socket is served, and drops it unpolled when a bind
+        // fails: its error is then the case's failure.
+        if served.await.is_err() {
+            return;
+        }
+        for server in [
+            SocketAddr::from((Ipv6Addr::LOCALHOST, dns)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, dns)),
+        ] {
+            let response = ask(server, query("o1.rings.rs", RecordType::AAAA)).await;
+            assert_eq!(
+                response.metadata.response_code,
+                ResponseCode::NoError,
+                "{server}"
+            );
+            assert_eq!(response.answers.len(), 1, "{server}");
+        }
+        let _relay_gone = stop.send(());
+    };
+    let (ran, ()) = tokio::join!(running, asking);
+    ran.unwrap();
 }

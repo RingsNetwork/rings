@@ -573,7 +573,7 @@ fn panic_wait_for_msgs_timeout(
             .outbound_admitted_transfer_total_for_test()
     });
     let inbound_nodes = active_node_counts(nodes, did_names, |node| {
-        node.swarm.transport.inbound_admitted_count_for_test()
+        node.swarm.transport.inbound_live_events_for_test()
     });
     let (sent, arrived) = nodes.iter().fold((0_u64, 0_u64), |(sent, arrived), node| {
         let frames = node.swarm.transport.frames_for_test().sample();

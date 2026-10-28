@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -30,12 +31,15 @@ use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
 use crate::message::handlers::relay_replica::replicate_taken_hold;
 use crate::message::handlers::HandlerContext;
+use crate::message::types::EntryStoreReport;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
+use crate::message::types::OperationDigest;
 use crate::message::types::RelayCarrierHeld;
 use crate::message::types::RelayCarrierRefused;
 use crate::message::types::RelayHoldDigest;
 use crate::message::types::SearchEntry;
+use crate::message::types::StoreOutcome;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::HandleMsg;
@@ -46,6 +50,8 @@ use crate::swarm::transport::egress::Application;
 use crate::swarm::transport::egress::Discipline;
 use crate::swarm::transport::egress::Egress;
 use crate::swarm::transport::reroute;
+use crate::swarm::transport::store_reports::StoreQuorum;
+use crate::swarm::transport::store_reports::StoreReceipt;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
@@ -305,17 +311,24 @@ async fn place_entry_operation(
     match route {
         OperateRoute::Owned => {
             let now_ms = get_epoch_ms();
-            let op = dht
+            let applied = match dht
                 .stamp_operation(msg.op.clone(), now_ms, Some(msg.placement))
-                .await?;
-            dht.operate_storage_entry(
-                now_ms,
-                msg.placement,
-                op,
-                ctx.transaction.origin(),
-                context.introducer(),
-            )
-            .await
+                .await
+            {
+                Ok(op) => {
+                    dht.operate_storage_entry(
+                        now_ms,
+                        msg.placement,
+                        op,
+                        ctx.transaction.origin(),
+                        context.introducer(),
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+            report_store(handler, ctx, msg, applied.is_ok()).await;
+            applied
         }
         // A relay carrier is sent to the holder its writer's view names, never routed toward
         // one: a holder that disagrees refuses it rather than pass it on (`dht::relay_holder`).
@@ -323,6 +336,46 @@ async fn place_entry_operation(
             Err(Error::RelayCarrierNotHeldHere)
         }
         OperateRoute::Remote(next) => reset_storage_relay_destination(handler, ctx, next).await,
+    }
+}
+
+/// Report `msg` to its origin as stored or refused here, the owner of its placement, iff it asks
+/// a report and comes from another node (the one-report law of `message::types::store_report`).
+/// A report that cannot be sent is lost: its origin's receipt waits, and its next publish asks
+/// again.
+async fn report_store(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    msg: &PlacedEntryOperation,
+    stored: bool,
+) {
+    if !msg.report || ctx.transaction.origin() == handler.dht.did {
+        return;
+    }
+    let operation = match OperationDigest::of(&msg.op) {
+        Ok(operation) => operation,
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "store report not encoded; the origin publishes again"
+            );
+            return;
+        }
+    };
+    let report = Message::EntryStoreReport(EntryStoreReport {
+        operation,
+        placement: msg.placement,
+        outcome: if stored {
+            StoreOutcome::Stored
+        } else {
+            StoreOutcome::Refused
+        },
+    });
+    if let Err(error) = handler
+        .run_effects([CoreEffect::send_report_message(ctx, report)])
+        .await
+    {
+        tracing::debug!(?error, "store report not sent; the origin publishes again");
     }
 }
 
@@ -416,6 +469,65 @@ pub(crate) async fn operate_entry(
         .entry_operate(operation, transport.storage_redundancy())
         .await?;
     handle_storage_store_act(transport.clone(), action, attempts).await
+}
+
+/// [`operate_entry`] whose remote placements ask their owners for a store report
+/// (`message::types::store_report`, #866): the receipt resolves once their reports decide
+/// `quorum`, or with why they will not (`swarm::transport::store_reports`).
+///
+/// The reports are awaited before the operation leaves, so none can precede the receipt. A
+/// placement settled here after a deferral reports itself (`OperatePlacement::settle`), and one
+/// settled here at once is not awaited: it is stored, since a refusal here fails the operation,
+/// so it decides [`StoreQuorum::Any`] at once.
+pub(crate) async fn operate_entry_reported(
+    transport: &Arc<SwarmTransport>,
+    operation: EntryOperation,
+    attempts: Attempts,
+    quorum: StoreQuorum,
+) -> Result<StoreReceipt> {
+    let redundancy = transport.storage_redundancy();
+    let placed = usize::from(operation.kind().replication(redundancy));
+    let action = transport
+        .dht
+        .entry_operate_reported(operation, redundancy)
+        .await?;
+    let mut placements = BTreeSet::new();
+    let mut digest = None;
+    collect_reported_placements(&action, &mut digest, &mut placements)?;
+    // The operation's placements are `placed` distinct rotations of its key
+    // (`Did::rotate_affine`), each one settled here or among the remote `placements`; one
+    // settled here is stored.
+    let decided_here = placed > placements.len() && quorum.decided_by(StoreOutcome::Stored);
+    let receipt = match digest {
+        Some(digest) if !decided_here => transport.store_reports.expect(digest, placements, quorum),
+        _ => StoreReceipt::stored(),
+    };
+    handle_storage_store_act(transport.clone(), action, attempts).await?;
+    Ok(receipt)
+}
+
+/// Add to `placements` every remote placement of `action` that asks a store report, and set
+/// `digest` to the digest of the operation they carry: one stamped operation, so one digest.
+fn collect_reported_placements(
+    action: &PeerRingAction,
+    digest: &mut Option<OperationDigest>,
+    placements: &mut BTreeSet<Did>,
+) -> Result<()> {
+    match action {
+        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindEntryForOperate(placed))
+            if placed.report =>
+        {
+            if digest.is_none() {
+                *digest = Some(OperationDigest::of(&placed.op)?);
+            }
+            placements.insert(placed.placement);
+            Ok(())
+        }
+        PeerRingAction::MultiActions(actions) => actions
+            .iter()
+            .try_for_each(|action| collect_reported_placements(action, digest, placements)),
+        _ => Ok(()),
+    }
 }
 
 /// Remove `removal`, the recipient's tombstone of elements of its inbox, at `member`, the member
@@ -541,6 +653,26 @@ impl HandleMsg<FoundEntry> for MessageHandler {
 impl HandleMsg<PlacedEntryOperation> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &PlacedEntryOperation) -> Result<()> {
         handle_placed_entry_operation(self, context, msg).await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<EntryStoreReport> for MessageHandler {
+    /// Pass a store report on toward its origin, or take it here, where it advances the receipt
+    /// of the operation it names (`swarm::transport::store_reports`). A report of an operation
+    /// this node does not await changes nothing.
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &EntryStoreReport) -> Result<()> {
+        let ctx = context.payload();
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+        self.transport
+            .store_reports
+            .report(msg.operation, msg.placement, msg.outcome);
+        Ok(())
     }
 }
 

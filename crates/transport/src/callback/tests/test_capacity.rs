@@ -10,76 +10,181 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 
-/// Law (soft bound): while the node's connections hold at least its soft limit, a lane
-/// whose releases complete a batch defers its advertisement; the release, on any connection,
-/// that brings the load below the limit makes it.
+/// Law 3 (pool, rebalance) and Prop. 3(5): a data lane is lent within its edge's fair claim
+/// `⌈P_F / n⌉`, first come, first served; when an edge below its share `⌊P_F / n⌋` finds the
+/// pool full, every edge above its share is shrunk to it, and the returns pay the waiting edge,
+/// which ends at its claim with the pool full and no edge above its claim. A closed edge gives
+/// its share back.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
-fn test_a_loaded_node_defers_credit_until_any_release_relieves_it() {
-    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
-    let frame = u64::try_from(custom.len()).expect("a frame length fits u64");
-    // The production batch: half a window.
-    let batch = LANE_CREDIT_WINDOW / 2;
-    // The limit sits where one connection's batch of releases leaves the node.
-    let load = NodeReceiveLoad::with_limit((2 * LANE_CREDIT_WINDOW - batch) * frame);
-    let (deferred, relieving) = (
-        loaded_callback("deferred", load.clone()),
-        loaded_callback("relieving", load.clone()),
-    );
-    let lane = ChannelLane::new(1);
-    let credit = |callback: &InnerTransportCallback| take_due_credit(callback, lane);
-    let (mut held, mut other) = (
-        admit_window(&deferred, &custom, lane),
-        admit_window(&relieving, &custom, lane),
-    );
-    assert_eq!(load.held(), 2 * LANE_CREDIT_WINDOW * frame);
+fn test_the_pool_lends_within_fair_claims_and_rebalances_to_the_shares() {
+    use crate::core::credit::LaneSignal;
 
-    // A batch released with the node still at its limit: deferred.
-    held.truncate(held.len() - usize::try_from(batch).expect("the batch fits usize"));
-    assert_eq!(
-        credit(&deferred),
-        None,
-        "a loaded node defers the advertisement"
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    let lane = ChannelLane::new(1);
+    let pool = NodeFramePool::with_capacity(40);
+    let (first, second, third) = (
+        pooled_callback("first", pool.clone()),
+        pooled_callback("second", pool.clone()),
+        pooled_callback("third", pool.clone()),
     );
-    // A release on the other connection brings the node below the limit: the deferred credit
-    // is advertised, while the relieving lane, whose batch is not complete, advertises nothing.
-    other.pop();
-    assert_eq!(credit(&deferred), Some(batch + LANE_CREDIT_WINDOW));
-    assert_eq!(credit(&relieving), None);
-    drop((held, other));
-    assert_eq!(load.held(), 0);
+    let admit = |callback: &InnerTransportCallback| match callback
+        .admit_inbound_frame(custom.clone(), lane)
+    {
+        InboundFrameAdmission::Admitted(frame) => frame,
+        _ => panic!("a frame within the credit is admitted"),
+    };
+    let held_by = |callback: &InnerTransportCallback| pool.held_by(callback.link_credit());
+    // Alone, then two: each is lent its lane's whole window, within its claim.
+    drop(admit_window(&first, &custom, lane));
+    drop(admit(&second));
+    assert_eq!((held_by(&first), held_by(&second)), (15, 15));
+
+    // A third edge's claim is ⌈40 / 3⌉ = 14, its share ⌊40 / 3⌋ = 13: lent the 10 free, it is
+    // below its share, so both others are shrunk to 13.
+    let third_frame = admit(&third);
+    assert_eq!(held_by(&third), 10);
+    assert_eq!(
+        take_due_signal(&first, lane),
+        Some(LaneSignal::Shrink {
+            limit: 30,
+            generation: 1,
+        })
+    );
+    assert_eq!(
+        take_due_signal(&second, lane),
+        Some(LaneSignal::Shrink {
+            limit: 15,
+            generation: 1,
+        })
+    );
+    // The returns give the excess back, and the waiting edge is paid up to its claim.
+    for (callback, bound) in [(&first, 30), (&second, 15)] {
+        callback.link_credit().apply(lane, LaneSignal::Returned {
+            bound,
+            generation: 1,
+        });
+    }
+    assert_eq!(
+        (held_by(&first), held_by(&second), held_by(&third)),
+        (13, 13, 14)
+    );
+    assert_eq!(pool.used(), 40);
+    assert_eq!(take_due_signal(&third, lane), Some(credit(1 + 14)));
+    assert_eq!(
+        pool.waiting(),
+        1,
+        "the third edge, at its claim, still wants one frame"
+    );
+
+    third.link_credit().close();
+    drop(third_frame);
+    assert_eq!(pool.used(), 26, "a closed edge gives its share back");
+    assert_eq!(pool.waiting(), 0);
 }
 
-/// The priority lane is never deferred: while the node holds its soft limit, a batch released
-/// on [`ChannelLane::PRIORITY`] is advertised at once, and a batch released on any other lane is
-/// deferred, so a peer's control traffic never waits for what other traffic makes the node hold.
+/// A link that ends without `close` leaves the pool as it found it: its drop releases whatever
+/// the pool counts for its edge and its waiting demands, and a later link never shares its
+/// edge, since edges are keyed by a number the pool never gives twice.
 #[cfg(any(feature = "dummy", feature = "native-webrtc"))]
 #[test]
-fn test_a_loaded_node_still_advertises_the_priority_lane() {
+fn test_a_link_dropped_without_close_leaves_the_pool_unchanged() {
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
-    let frame = u64::try_from(custom.len()).expect("a frame length fits u64");
-    let batch = usize::try_from(LANE_CREDIT_WINDOW / 2).expect("the batch fits usize");
-    // One full window loads the node.
-    let load = NodeReceiveLoad::with_limit(LANE_CREDIT_WINDOW * frame);
-    let callback = loaded_callback("loaded", load.clone());
-    let credit = |lane| take_due_credit(&callback, lane);
-    let bulk_lane = ChannelLane::new(1);
-    let (mut control, mut bulk) = (
-        admit_window(&callback, &custom, ChannelLane::PRIORITY),
-        admit_window(&callback, &custom, bulk_lane),
+    let lane = ChannelLane::new(1);
+    let pool = NodeFramePool::with_capacity(20);
+    let (lender, waiter) = (
+        pooled_callback("lender", pool.clone()),
+        pooled_callback("waiter", pool.clone()),
+    );
+    drop(admit_window(&lender, &custom, lane));
+    let waiting = match waiter.admit_inbound_frame(custom.clone(), lane) {
+        InboundFrameAdmission::Admitted(frame) => frame,
+        _ => panic!("the floor frame is admitted"),
+    };
+    assert_eq!((pool.used(), pool.edges()), (20, 2));
+    assert_eq!(pool.waiting(), 1);
+    drop(waiting);
+    drop(waiter);
+    assert_eq!(pool.waiting(), 0, "the dropped link's demand left the pool");
+    assert_eq!(pool.used(), 15, "and so did its share");
+    drop(lender);
+    assert_eq!((pool.used(), pool.edges(), pool.waiting()), (0, 0, 0));
+
+    let fresh = pooled_callback("fresh", pool.clone());
+    drop(admit_window(&fresh, &custom, lane));
+    assert_eq!(pool.held_by(fresh.link_credit()), 15);
+    assert_eq!((pool.used(), pool.edges()), (15, 1));
+}
+
+/// Law 3 and Prop. 3(5): the priority lane's floor is its whole window, so it admits a full
+/// window and advertises at once with the pool empty, while a data lane is held to its floor.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+#[test]
+fn test_the_priority_lane_never_waits_for_the_pool() {
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    let pool = NodeFramePool::with_capacity(0);
+    let callback = pooled_callback("loaded", pool.clone());
+    let mut control = admit_window(&callback, &custom, ChannelLane::PRIORITY);
+    control.truncate(control.len() - usize::try_from(LANE_CREDIT_WINDOW / 2).unwrap_or(0));
+    assert_eq!(
+        take_due_signal(&callback, ChannelLane::PRIORITY),
+        Some(credit(LANE_CREDIT_WINDOW / 2 + LANE_CREDIT_WINDOW))
     );
 
-    control.truncate(control.len() - batch);
-    assert_eq!(
-        credit(ChannelLane::PRIORITY),
-        Some(LANE_CREDIT_WINDOW / 2 + LANE_CREDIT_WINDOW),
-        "the priority lane advertises while the node is loaded"
+    let bulk = ChannelLane::new(1);
+    let floor = callback.admit_inbound_frame(custom.clone(), bulk);
+    assert!(matches!(floor, InboundFrameAdmission::Admitted(_)));
+    assert!(matches!(
+        callback.admit_inbound_frame(custom.clone(), bulk),
+        InboundFrameAdmission::CreditExceeded {
+            received: 1,
+            advertised: 1,
+        }
+    ));
+    assert_eq!(pool.used(), 0);
+    drop((control, floor));
+}
+
+/// Law 3 (idle) and Def. Reclaim: a data lane that holds a share and admitted no frame between
+/// two idle checks is shrunk to its floor in a new generation; it advertises nothing until the
+/// sender's return, which ends the shrink and gives the share back to the pool.
+#[cfg(any(feature = "dummy", feature = "native-webrtc"))]
+#[test]
+fn test_an_idle_lane_is_shrunk_and_returns_its_share() {
+    use crate::core::credit::LaneSignal;
+
+    let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
+    let lane = ChannelLane::new(2);
+    let pool = NodeFramePool::with_capacity(64);
+    let callback = pooled_callback("idle", pool.clone());
+    let link = callback.link_credit();
+    drop(admit_window(&callback, &custom, lane));
+    assert_eq!(pool.used(), LANE_CREDIT_WINDOW - 1);
+    take_due_signal(&callback, lane);
+
+    assert!(
+        link.idle_check(),
+        "the window's admissions keep the lane active"
     );
-    bulk.truncate(bulk.len() - batch);
-    assert!(load.held() >= LANE_CREDIT_WINDOW * frame);
-    assert_eq!(credit(bulk_lane), None, "any other lane defers");
-    drop((control, bulk));
-    assert_eq!(load.held(), 0);
+    assert_eq!(take_due_signal(&callback, lane), None);
+    assert!(link.idle_check());
+    let shrink = LaneSignal::Shrink {
+        limit: LANE_CREDIT_WINDOW + 1,
+        generation: 1,
+    };
+    assert_eq!(take_due_signal(&callback, lane), Some(shrink));
+    assert_eq!(
+        pool.used(),
+        LANE_CREDIT_WINDOW - 1,
+        "the share is counted until the return"
+    );
+
+    link.apply(lane, LaneSignal::Returned {
+        bound: LANE_CREDIT_WINDOW + 1,
+        generation: 1,
+    });
+    assert_eq!(pool.used(), 0, "the return gives the share back");
+    assert_eq!(take_due_signal(&callback, lane), None);
 }
 
 /// A connection admits exactly one credit window per lane, and a full lane leaves every other
@@ -119,7 +224,12 @@ fn test_each_lane_admits_exactly_its_own_credit_window() {
 #[test]
 fn test_credit_frames_are_applied_and_never_admitted() {
     let callback = callback("peer");
-    let credit = wire(&TransportMessage::Credit(40));
+    let credit = wire(&TransportMessage::Signal(
+        crate::core::credit::LaneSignal::Credit {
+            limit: 40,
+            generation: 0,
+        },
+    ));
     for _ in 0..LANE_CREDIT_WINDOW.saturating_mul(2) {
         assert!(matches!(
             callback.admit_inbound_frame(credit.clone(), ChannelLane::new(2)),
@@ -275,7 +385,7 @@ async fn test_a_lane_hands_its_frames_over_in_arrival_order() {
             seen,
         }),
         crate::notifier::Notifier::default(),
-        NodeReceiveLoad::new(),
+        NodeFramePool::new(),
     ));
     let lane = ChannelLane::new(1);
     let count = u8::try_from(LANE_CREDIT_WINDOW).expect("the window fits a byte");
@@ -327,9 +437,9 @@ fn test_a_send_carrying_another_connections_credit_is_refused() {
     ));
 }
 
-/// A credit whose send failed is queued again, joined with any credit released meanwhile, so the
-/// peer's sender is never left without the last advertisement; once the generation is closed
-/// nothing is queued, since no send can succeed.
+/// A signal whose send failed is queued again, joined with any credit released meanwhile, so
+/// the peer's sender is never left without the last advertisement; once the generation is
+/// closed nothing is queued, since no send can succeed.
 #[cfg(feature = "native-webrtc")]
 #[test]
 fn test_a_credit_whose_send_failed_is_queued_again() {
@@ -343,14 +453,18 @@ fn test_a_credit_whose_send_failed_is_queued_again() {
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
     drop(admit_window(&callback, &custom, lane));
     let link = callback.link_credit();
-    let advertised = take_due_credit(&callback, lane).expect("a released window advertises");
+    let Some(crate::core::credit::LaneSignal::Credit { limit, .. }) =
+        take_due_signal(&callback, lane)
+    else {
+        panic!("a released window advertises");
+    };
 
-    assert!(link.requeue(index, advertised - 1));
-    assert!(link.requeue(index, advertised));
-    assert_eq!(take_due_credit(&callback, lane), Some(advertised));
-    assert!(link.next_credit(index).now_or_never().is_none());
+    assert!(link.requeue(index, credit(limit - 1)));
+    assert!(link.requeue(index, credit(limit)));
+    assert_eq!(take_due_signal(&callback, lane), Some(credit(limit)));
+    assert!(link.next_signal(index).now_or_never().is_none());
 
     link.close();
-    assert!(!link.requeue(index, advertised));
-    assert_eq!(link.next_credit(index).now_or_never(), Some(None));
+    assert!(!link.requeue(index, credit(limit)));
+    assert_eq!(link.next_signal(index).now_or_never(), Some(None));
 }

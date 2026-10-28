@@ -49,6 +49,7 @@ use chacha20::cipher::StreamCipher;
 use chacha20::ChaCha20;
 use hmac::digest::Key;
 use hmac::Hmac;
+use hmac::KeyInit;
 use hmac::Mac;
 use rand::CryptoRng;
 use rand::RngCore;
@@ -309,7 +310,7 @@ impl OnionHopSecrets {
         key.iter_mut()
             .zip(self.mac_key.iter())
             .for_each(|(slot, byte)| *slot = *byte);
-        let mut mac = <Hmac<Sha256> as Mac>::new(&key);
+        let mut mac = <Hmac<Sha256> as KeyInit>::new(&key);
         mac.update(&class.mac_label());
         mac.update(routing.as_flattened());
         let mut truncated = [0; ONION_HEADER_MAC_BYTES];

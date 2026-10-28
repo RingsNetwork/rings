@@ -9,6 +9,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true
@@ -17,8 +18,8 @@ workspace = true
 # Include nothing by default
 # The crate root rejects native+wasm backend combinations.
 default = ["tokio/rt", "tokio/time", "tokio-util", "rings-runtime/tokio"]
-dummy = ["webrtc", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
-native-webrtc = ["webrtc", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
+dummy = ["webrtc", "dep:webrtc-sctp", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
+native-webrtc = ["webrtc", "dep:webrtc-sctp", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
 web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures", "rings-runtime/browser"]
 
 [dependencies]
@@ -26,6 +27,12 @@ web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js
 tokio = { version = "1.32.0", optional = true }
 tokio-util = { version = "0.7.8", optional = true }
 webrtc = { workspace = true, optional = true }
+# The SCTP crate `webrtc` 0.17.1 builds against, pinned: webrtc-sctp 0.17.2 added a field to
+# `association::Config` that `webrtc` 0.17.1 does not set, so a published rings-transport would
+# resolve 0.17.2 and fail to compile. In the workspace, `[patch.crates-io]` still replaces it
+# with `vendor/webrtc-sctp`, which is 0.17.1 too. `webrtc` is pinned to =0.17.1 with it (the
+# workspace manifest). Drop both pins with the patch, at #1071.
+webrtc-sctp = { version = "=0.17.1", optional = true }
 
 # Dependencies for dummy feature
 lazy_static = { version = "1.4.0", optional = true }

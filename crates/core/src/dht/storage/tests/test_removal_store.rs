@@ -24,6 +24,7 @@ use crate::dht::StorageKey;
 use crate::dht::REMOVAL_SHARES;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::SlotFloorUse;
 use crate::message::Principal;
 use crate::message::ShareRefusal;
 use crate::storage::KvStorageInterface;
@@ -106,8 +107,8 @@ async fn test_a_slot_past_its_claim_is_refused_and_another_floor_is_not() -> Res
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
     let (flooder, honest) = (Did::from(70u32), Did::from(71u32));
-    node.edges().arrive(flooder);
-    node.edges().arrive(honest);
+    node.edges().arrive(flooder, &SlotFloorUse::default());
+    node.edges().arrive(honest, &SlotFloorUse::default());
     let flooder = node.edges().principal_of(Some(flooder));
     let honest = node.edges().principal_of(Some(honest));
     assert_eq!((flooder, honest), (Principal::Slot(0), Principal::Slot(1)));
@@ -155,11 +156,13 @@ async fn test_a_slot_keeps_its_removes_until_they_are_stable() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
     let (rotated, fresh) = (Did::from(70u32), Did::from(72u32));
-    node.edges().arrive(rotated);
+    node.edges().arrive(rotated, &SlotFloorUse::default());
     let slot = node.edges().principal_of(Some(rotated));
     fill_floor_and_pool(&node, slot, 1_000, now_ms).await?;
     node.edges().depart(rotated);
-    node.edges().arrive(fresh);
+    // Every slot read as clean, so the fresh edge takes the least index, the rotated slot: the
+    // subject here is the inheritance, not the choice of slot (`slot_roster`, cleanest first).
+    node.edges().arrive(fresh, &SlotFloorUse::default());
     assert_eq!(node.edges().principal_of(Some(fresh)), slot);
 
     let topic = Did::from(9u32);

@@ -9,6 +9,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage.workspace = true
 
 [lints]
 workspace = true
@@ -150,5 +151,7 @@ wasm-bindgen-test = { workspace = true }
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 # Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
 # it (and the test_dht_stateright module that uses it) is non-wasm only.
+# Format reflection for the wire golden vectors (#1107).
+serde-reflection = "0.6.0"
 stateright = "0.31.0"
 tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

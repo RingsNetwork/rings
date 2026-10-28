@@ -709,7 +709,7 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
             .admitted_count_for_test(),
         0
     );
-    assert_eq!(transport.reassembly_budget().buffered_cost_for_test(), 0);
+    assert_eq!(transport.inbound_capacity().admitted_count_for_test(), 0);
     Ok(())
 }
 

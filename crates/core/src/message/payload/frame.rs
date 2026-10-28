@@ -19,11 +19,27 @@
 //! carries it as well, so two nodes of different wire versions never exchange a frame, and a
 //! connected overlay holds one wire version.
 //!
-//! Bump rule: [`WIRE_VERSION`] goes up by exactly one with every change that a node of the
-//! previous wire version would reject or misread: a frame, a message, a signature domain, a
-//! handshake rule. A change no peer can observe never bumps it, and the crate version moves
-//! independently. Every bump is a total cutover, as every wire change before 1.0 is: no build
-//! decodes the `rest` of another version, and nothing is negotiated.
+//! Bump rule: [`WIRE_VERSION`] goes up by exactly one per release, relative to the last
+//! released wire version, when the release changes anything a node of that version would
+//! reject or misread: a frame, a message, a transport signal, a signature domain, a handshake
+//! rule. Changes between two releases share the one bump; a change no peer can observe never
+//! bumps it, and the crate version moves independently. Every bump is a total cutover, as
+//! every wire change before 1.0 is: no build decodes the `rest` of another version, and
+//! nothing is negotiated.
+//!
+//! Enforcement (#1107): golden vectors pin [`WIRE_VERSION`] together with the hash of the serde
+//! format of every type the frames reach, every variant of every enum included, one canonical
+//! frame per message and link-control variant, the recorded signaling path, the transcript of
+//! every signing domain tag, and the handshake offer string (`test_wire_goldens`). The
+//! formats rings-node adds on top (onion cells, sealed mail, descriptors) are not pinned there
+//! yet; #1141 adds the sibling test, pinning this same version. Bump procedure, when the test
+//! fails: the change moved the wire.
+//! If the last release already shipped [`WIRE_VERSION`], add one to it; if the version is
+//! already this release's, keep it. Then set the pinned pair to that version and the hash the
+//! failure reports, in the same commit. A change that moves no golden byte never fails it. If
+//! only `format/registry` moved, and only because the tracer or the lockfile changed (the
+//! registry is serde reflection's rendering of the formats, not wire bytes), re-pin the hash
+//! without bumping [`WIRE_VERSION`].
 
 use std::fmt;
 
@@ -33,7 +49,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// The wire version of this build; see the bump rule.
-pub const WIRE_VERSION: u16 = 1;
+pub const WIRE_VERSION: u16 = 2;
 
 /// The opening of every frame, fixed forever (the frame-header law).
 const FRAME_MAGIC: &[u8] = b"RINGS\0";

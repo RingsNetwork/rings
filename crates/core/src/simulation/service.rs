@@ -9,14 +9,14 @@ use super::SimulationRuntimeError;
 use super::SimulationRuntimeGuard;
 
 // This deliberately slower actor-local cost keeps reassembly callbacks pending
-// for barrier and legacy pressure witnesses. The regular storm drain uses its
+// for the reassembly barrier's pressure witness. The regular storm drain uses its
 // own 256 B/ms, 64 ms-capped transport-dispatch cost and disables this adapter
 // before applying the recovery bound; the two clocks model distinct effects.
 const REASSEMBLY_BYTES_PER_MS: usize = 32;
 const MAX_REASSEMBLY_FRAME_SERVICE_MS: u64 = 2_000;
 
 /// Bounded virtual service cost for one real reassembly frame.
-pub(crate) fn reassembly_frame_service_ms(bytes: usize) -> u64 {
+fn reassembly_frame_service_ms(bytes: usize) -> u64 {
     u64::try_from(bytes.max(1).div_ceil(REASSEMBLY_BYTES_PER_MS))
         .unwrap_or(MAX_REASSEMBLY_FRAME_SERVICE_MS)
         .min(MAX_REASSEMBLY_FRAME_SERVICE_MS)

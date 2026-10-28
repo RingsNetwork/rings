@@ -6,7 +6,7 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 ## Milestones
 
 - **Pre-1.0 (now).** The wire protocol is not versioned; a release that changes it is a
-  network-wide upgrade, marked in the [CHANGELOG](./CHANGELOG.md).
+  network-wide upgrade.
 - **1.0: a stable network.** The protocol freezes once connectivity, churn handling, and
   convergence are stable.
 - **2.0: DRanking.** Verifiable peer ranking from service receipts

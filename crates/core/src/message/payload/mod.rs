@@ -650,3 +650,5 @@ pub trait PayloadSender {
 
 #[cfg(test)]
 pub mod test_payload;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+mod test_wire_goldens;

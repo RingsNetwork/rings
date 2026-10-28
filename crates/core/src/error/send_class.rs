@@ -277,9 +277,7 @@ impl Error {
             | Self::OutboundSchedulerRuntimeUnavailable | Self::LockPoisoned
             | Self::ApplicationInboxClaimed | Self::SwarmStopped | Self::SwarmClosed
             // inbound processing
-            | Self::InboundMailboxCapacityExceeded { .. }
             | Self::InboundMailboxMemoryCapacityExceeded { .. }
-            | Self::InboundPeerCapacityExceeded { .. }
             | Self::InboundPeerMemoryCapacityExceeded { .. } | Self::InboundMailboxClosed
             | Self::InboundMailboxRuntimeUnavailable | Self::InboundActorInvariantViolation
             | Self::InboundLaneMismatch

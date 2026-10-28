@@ -7,7 +7,6 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
-use rings_runtime::Spawner;
 
 #[cfg(test)]
 use crate::error::OnionQueueAdmissionReason;
@@ -158,7 +157,7 @@ impl ControlOutbox {
         to: Did,
         payload: Bytes,
     ) -> crate::error::Result<()> {
-        let spawner = Spawner::current()?;
+        let spawner = scope.tasks().spawner()?;
         let permit = ControlPermit::acquire(Arc::clone(&self.budget), to)?;
         let send = ControlSend {
             scope,

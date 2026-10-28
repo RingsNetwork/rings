@@ -148,7 +148,9 @@ pub(crate) struct WeakLogical(Weak<SwarmTransport>);
 #[derive(Clone)]
 pub(super) struct InboundProcessor<L = LogicalInbound> {
     logical: L,
-    reassembler: Arc<FuturesMutex<MessageReassembler>>,
+    /// The connection's reassembler, whose open messages hold the mailbox charges their first
+    /// chunks took (#932).
+    reassembler: Arc<FuturesMutex<MessageReassembler<Option<inbound::HeldCharge>>>>,
     reassembly_clock: ReassemblyClock,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the

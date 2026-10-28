@@ -638,29 +638,61 @@ mod tests {
         ));
     }
 
-    /// Custody follows the carrier (#936): a drain pass that finds no carrier for this node, as
-    /// after its mail expired untaken or on a node with no relay store, restricts custody to
-    /// nothing, so a delivery in custody no longer outlives the mail it kept.
+    /// Custody leaves only by evidence of removal (#1059), in the issue's four steps: relay mail
+    /// is admitted and queued; a drain pass reads no carrier, as from a holder the membership
+    /// just moved to before its hand-off landed; the process restarts before the take; the
+    /// hand-off lands and the mail is offered again. The pass is no evidence that the mail was
+    /// removed, so the delivery is still in custody and is queued again, not retired as a
+    /// replay (durable-records, Prop. at least once).
     #[tokio::test]
-    async fn test_a_pass_without_a_carrier_empties_custody() {
+    async fn test_a_pass_without_a_carrier_keeps_custody_across_a_restart() {
         use crate::dht::InboxDelivery;
 
-        let (swarm, inbox) = claimed_swarm(None);
-        let delivery = LocalDelivery::new(swarm.transport.clone());
-        let payload = payload(swarm.did(), 0).expect("payload");
+        let local = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("local session");
+        let replay = std::sync::Arc::new(MemStorage::<crate::message::ReplayRecord>::new());
+        let run = || {
+            let swarm = SwarmBuilder::new(
+                TEST_NETWORK_ID,
+                "",
+                Box::new(MemStorage::new()),
+                local.clone(),
+            )
+            .replay_storage(Box::new(std::sync::Arc::clone(&replay)))
+            .build();
+            let inbox = swarm.application_inbox().expect("unclaimed inbox");
+            (swarm, inbox)
+        };
+        let payload = {
+            let (swarm, _untaken) = run();
+            let payload = payload(swarm.did(), 0).expect("payload");
+            // 1. e is admitted: (q, h) ∈ K_s, and its message is queued, not taken.
+            assert!(matches!(
+                LocalDelivery::new(swarm.transport.clone())
+                    .deliver(&payload)
+                    .await
+                    .expect("admitted"),
+                LocalDelivered::Queued(_)
+            ));
+            // 2. A drain pass reads no carrier for this node.
+            crate::swarm::inbox::SwarmInboxDelivery::new(swarm.transport.clone())
+                .deliver_inbox()
+                .await
+                .expect("a pass with no carrier");
+            payload
+        };
+
+        // 3. The process restarts before the take; 4. the hand-off lands and e is offered.
+        let (swarm, inbox) = run();
         assert!(matches!(
-            delivery.deliver(&payload).await.expect("in custody"),
+            LocalDelivery::new(swarm.transport.clone())
+                .deliver(&payload)
+                .await
+                .expect("still in custody"),
             LocalDelivered::Queued(_)
         ));
-        assert!(inbox.try_next().is_some());
-
-        crate::swarm::inbox::SwarmInboxDelivery::new(swarm.transport.clone())
-            .deliver_inbox()
-            .await
-            .expect("a pass with no carrier");
         assert!(matches!(
-            delivery.deliver(&payload).await,
-            Err(Error::TransactionReplay { .. })
+            inbox.try_next(),
+            Some(crate::swarm::application::ApplicationDelivery::Message(_))
         ));
     }
 

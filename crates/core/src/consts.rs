@@ -75,10 +75,11 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 907;
 /// Derivation: every envelope field at its widest, both delegation slots with the widest
 /// delegation, `reply_via` and the relay aim present (a relayed payload may carry both), the
 /// widest signaling path an honest carrier records (connect signaling, #947: a return
-/// retracing a full hop budget of relays, which `Law (Bound)` of the path caps), and the
-/// length prefix of a message of up to `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum,
-/// witnessed with equality by `test_payload_envelope_reserve_is_the_widest_envelope`.
-pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 3692;
+/// retracing a full hop budget of relays, which `Law (Bound)` of the path caps, each hop its
+/// DID's 20 canonical bytes, #952), and the length prefix of a message of up to
+/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
+/// `test_payload_envelope_reserve_is_the_widest_envelope`.
+pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2220;
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
 /// fit per chunk is rejected outright (`WireReserves::plan` returns `None`) rather than fragmenting a

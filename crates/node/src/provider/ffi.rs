@@ -39,11 +39,13 @@
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::future::IntoFuture;
 use std::ptr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
@@ -217,15 +219,14 @@ impl ProviderHandle {
     }
 
     /// Serve the swarm's application inbox with the extension [`Backend`], whose observer
-    /// retains E2E events for the caller, on the provider runtime until the handle stops.
+    /// retains E2E events for the caller, as a node task on the provider runtime until the
+    /// provider is closed.
     ///
     /// [`Backend`]: crate::extension::Backend
     fn spawn_application(&self) -> Result<()> {
-        let service = self
-            .provider
-            .application_service(Some(self.e2e_events.clone()), self.stop.token())?;
-        self.runtime.spawn(service);
-        Ok(())
+        let _entered = self.runtime.enter();
+        self.provider
+            .serve_application(Some(self.e2e_events.clone()))
     }
 
     fn take_e2e_events(&self) -> Result<TakeFfiE2eEventsResponse> {
@@ -250,9 +251,8 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
-        close_provider_before_runtime_shutdown(&provider, &runtime);
-        drop(provider);
-        // Invariant: joined listeners, the completed close thread, and the dropped provider have
+        close_provider_before_runtime_shutdown(provider, &runtime);
+        // Invariant: joined listeners, the completed close thread, and the closed provider have
         // released every intentional runtime clone. If an unexpected in-flight owner remains,
         // leaking the final Arc avoids dropping a Tokio runtime from an asynchronous/C-ABI path.
         match Arc::try_unwrap(runtime) {
@@ -267,15 +267,19 @@ impl ProviderHandle {
     }
 }
 
-/// Close `provider`'s network on `runtime` from a thread of its own, before the runtime shuts
-/// down: every connection is closed and the measurements are flushed ([`Provider::close`]), so
-/// a provider created again in this process finds none of this one's sockets bound (#1098).
-fn close_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
-    let provider = provider.clone();
+/// How long a destroy waits for the stores of a provider that is still shared to be released
+/// ([`close_provider`]).
+const FFI_STORE_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Close `provider` on `runtime` from a thread of its own, before the runtime shuts down
+/// ([`Provider::close`]): its tasks end, every connection is closed, the measurements are
+/// flushed, and its stores are released. A provider created again in this process finds none
+/// of this one's sockets bound (#1098) and none of its stores locked (#1085).
+fn close_provider_before_runtime_shutdown(provider: Arc<Provider>, runtime: &Arc<Runtime>) {
     let runtime = runtime.clone();
     let close_thread = std::thread::Builder::new()
         .name("rings-ffi-provider-close".to_owned())
-        .spawn(move || runtime.block_on(provider.close()));
+        .spawn(move || runtime.block_on(close_provider(provider)));
     match close_thread {
         Ok(close_thread) => match close_thread.join() {
             Ok(Ok(())) => {}
@@ -289,6 +293,27 @@ fn close_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Ar
         Err(error) => {
             tracing::warn!(%error, "failed to start the FFI provider close thread during shutdown");
         }
+    }
+}
+
+/// Close `provider` and await the release of its stores.
+///
+/// After the handle's listeners are joined, nothing but the handle holds the provider, so its
+/// close releases the stores. A clone held beyond that is a fault: its release is awaited for at
+/// most [`FFI_STORE_RELEASE_TIMEOUT`], and then `ProviderStillShared` is returned, its stores
+/// left to the clone's drop.
+async fn close_provider(provider: Arc<Provider>) -> Result<()> {
+    match Arc::unwrap_or_clone(provider).close().await {
+        Err(Error::ProviderStillShared { released }) => {
+            tracing::error!("the FFI provider is still shared at destroy; awaiting its stores");
+            match tokio::time::timeout(FFI_STORE_RELEASE_TIMEOUT, released.clone().into_future())
+                .await
+            {
+                Ok(()) => Ok(()),
+                Err(_) => Err(Error::ProviderStillShared { released }),
+            }
+        }
+        closed => closed,
     }
 }
 
@@ -388,9 +413,11 @@ pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
 ///
 /// Passing null is a no-op. The function requests cooperative listener
 /// shutdown, joins listener threads started through [`rings_node_listen`],
-/// closes every connection of the node and flushes its measurement state, even
-/// when listening never started ([`Provider::close`]), and then releases the
-/// handle. The pointer is invalid after this call.
+/// and closes the node ([`Provider::close`]), even when listening never
+/// started: its tasks end, every connection is closed, its measurement state
+/// is flushed, and every store under its `storage_path` is released, so a
+/// provider created again on that path in this process opens them (#1085).
+/// Then it releases the handle. The pointer is invalid after this call.
 ///
 /// # Safety
 ///
@@ -492,6 +519,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                             evidence: Some(stores.evidence),
                             guards: Some(stores.guards),
                             replay: Some(stores.replay),
+                            released: stores.released,
                         },
                     )
                     .await
@@ -643,7 +671,7 @@ mod tests {
     }
 
     /// Create, use and destroy a provider three times over one storage root: each run reopens
-    /// the stores the previous one left there (#1022).
+    /// the stores the previous one left there (#1022), which its destroy released (#1085).
     #[test]
     fn test_ffi_provider_handle_create_listen_request_destroy_cycles() {
         let (root, storage_path) = storage_root();
