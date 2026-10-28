@@ -41,7 +41,11 @@ wasm-bindgen = "0.2.121"
 wasm-bindgen-futures = "0.4.71"
 wasm-bindgen-macro-support = "0.2.121"
 wasm-bindgen-test = "0.3.71"
-webrtc = { version = "0.17.1" }
+# Pinned with `webrtc-sctp` (`crates/transport`, #1146): webrtc 0.17.2 sets
+# `association::Config::mtu`, which only webrtc-sctp 0.17.2 has, so with webrtc-sctp held at
+# 0.17.1 a fresh resolve that picks webrtc 0.17.2 fails to compile. Drop both pins with the
+# vendored webrtc-sctp patch, at #1071.
+webrtc = { version = "=0.17.1" }
 zeroize = "1.8.1"
 
 [workspace.lints.rust]
