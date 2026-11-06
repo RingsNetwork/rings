@@ -1,5 +1,5 @@
 // SDP parsing (including section semantics) is tested in `crate::core::sdp`; these cover the
-// policy `effective_*` layers on top of it (default / no-limit / cap).
+// policy `effective_*` layers on top of it (default / no-limit / floor / cap).
 use super::effective_max_message_size;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use super::ConnectionStateCell;
@@ -7,6 +7,8 @@ use super::ConnectionStateCell;
 use super::ConnectionStateSnapshot;
 use super::WebrtcConnectionState;
 use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use super::MIN_MAX_MESSAGE_SIZE;
+use crate::error::Error;
 
 /// A data-channel SDP advertising `max-message-size:<value>` in the right media section.
 fn sdp_with(value: &str) -> String {
@@ -21,7 +23,7 @@ fn sdp_with(value: &str) -> String {
 fn test_effective_absent_defaults_to_cap() {
     let sdp = "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n";
     assert_eq!(
-        effective_max_message_size(sdp),
+        effective_max_message_size(sdp).unwrap(),
         MAX_DATA_CHANNEL_MESSAGE_SIZE
     );
 }
@@ -29,20 +31,48 @@ fn test_effective_absent_defaults_to_cap() {
 #[test]
 fn test_effective_zero_means_no_limit_uses_cap() {
     assert_eq!(
-        effective_max_message_size(&sdp_with("0")),
+        effective_max_message_size(&sdp_with("0")).unwrap(),
         MAX_DATA_CHANNEL_MESSAGE_SIZE
     );
 }
 
 #[test]
+fn test_effective_below_floor_is_refused() {
+    for advertised in [1_usize, 2048, MIN_MAX_MESSAGE_SIZE - 1] {
+        let result = effective_max_message_size(&sdp_with(&advertised.to_string()));
+        assert!(
+            matches!(
+                result,
+                Err(Error::RemoteMaxMessageSizeTooSmall {
+                    advertised: got,
+                    minimum: MIN_MAX_MESSAGE_SIZE,
+                }) if got == advertised
+            ),
+            "expected RemoteMaxMessageSizeTooSmall for {advertised}, got {result:?}"
+        );
+    }
+}
+
+#[test]
+fn test_effective_at_floor_is_honoured() {
+    assert_eq!(
+        effective_max_message_size(&sdp_with(&MIN_MAX_MESSAGE_SIZE.to_string())).unwrap(),
+        MIN_MAX_MESSAGE_SIZE
+    );
+}
+
+#[test]
 fn test_effective_smaller_value_is_honoured() {
-    assert_eq!(effective_max_message_size(&sdp_with("16384")), 16384);
+    assert_eq!(
+        effective_max_message_size(&sdp_with("16384")).unwrap(),
+        16384
+    );
 }
 
 #[test]
 fn test_effective_larger_value_is_capped() {
     assert_eq!(
-        effective_max_message_size(&sdp_with("1048576")),
+        effective_max_message_size(&sdp_with("1048576")).unwrap(),
         MAX_DATA_CHANNEL_MESSAGE_SIZE
     );
 }
@@ -50,7 +80,7 @@ fn test_effective_larger_value_is_capped() {
 #[test]
 fn test_effective_exactly_cap_is_cap() {
     assert_eq!(
-        effective_max_message_size(&sdp_with("65536")),
+        effective_max_message_size(&sdp_with("65536")).unwrap(),
         MAX_DATA_CHANNEL_MESSAGE_SIZE
     );
 }

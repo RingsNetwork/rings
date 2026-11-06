@@ -264,7 +264,7 @@ impl Error {
             | Self::MessageDecryptionFailed(_) | Self::AeadWrappedKeyBlockCount { .. }
             | Self::InvalidMessage(_) | Self::NestedChunkMessage | Self::InvalidChunkMessage
             | Self::MessageTooLarge(_) | Self::MessageSizeOverflow
-            | Self::PeerMaxMessageSizeTooSmall(_)
+            | Self::PeerMaxMessageSizeTooSmall(_) | Self::SdpAboveMax(_)
             // connection lifecycle
             | Self::AlreadyConnected
             | Self::ConnectionAttemptCancelled { .. }
@@ -339,6 +339,7 @@ const fn transport_send_class(error: &rings_transport::error::Error) -> SendClas
         | TransportError::DataChannelMessage(_)
         | TransportError::SendByteCountOverflow
         | TransportError::WebrtcLocalSdpGenerationError(_)
+        | TransportError::RemoteMaxMessageSizeTooSmall { .. }
         | TransportError::WebrtcUdpPortRange(_)
         | TransportError::ConnectionAlreadyExists(_)
         | TransportError::ConnectionNotFound(_)

@@ -345,7 +345,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         // Read the negotiated limit, but record it only after the *whole* answer path
         // (setRemoteDescription + createAnswer + setLocalDescription + gather) has succeeded, so a
         // failure midway does not leave a partially-updated connection carrying a stale size.
-        let negotiated_max_message_size = effective_max_message_size(&offer);
+        let negotiated_max_message_size = effective_max_message_size(&offer)?;
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Offer);
         set_remote_init.set_sdp(&offer);
@@ -372,7 +372,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
-        let negotiated_max_message_size = effective_max_message_size(&answer);
+        let negotiated_max_message_size = effective_max_message_size(&answer)?;
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
         set_remote_init.set_sdp(&answer);

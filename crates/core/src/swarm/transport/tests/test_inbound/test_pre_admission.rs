@@ -57,10 +57,12 @@ async fn test_retired_frame_queued_on_lane_is_not_delivered() -> Result<()> {
 
 /// A chunked control message keeps its place among later control (load-bounds paper, Prop.
 /// "Order per category", #927). The frames held before admission are released at once,
-/// unpaced: the chunks of a control message, on the control carrier as a small advertised
-/// message size makes them (#1130), then a later control frame. The later frame waits for the
-/// reassembled message, where the old control exemption let it run first: each chunk's
-/// reassembly takes its deterministic service time, during which the later frame is ready.
+/// unpaced: the chunks of a control message on the control carrier (which an honest peer
+/// never emits once `max-message-size` is floored at `MIN_MAX_MESSAGE_SIZE`, #1130, though a
+/// peer may still send control chunked directly), then a later control frame. The later frame
+/// waits for the reassembled message, where the old control exemption let it run first: each
+/// chunk's reassembly takes its deterministic service time, during which the later frame is
+/// ready.
 #[tokio::test(start_paused = true)]
 async fn test_a_released_chunked_control_message_stays_ahead_of_later_control() -> Result<()> {
     let runtime = crate::simulation::SimulationRuntimeGuard::enter(

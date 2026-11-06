@@ -133,6 +133,18 @@ fn test_wire_path_above_the_bound_does_not_decode() -> Result<()> {
     let repeated = wire_hops(&[did(2), did(3), did(2)]);
     let encoded = rings_codec::serialize(&repeated).map_err(Error::CodecSerialize)?;
     assert!(rings_codec::deserialize::<RelayPath>(&encoded).is_err());
+
+    // A ReturnPath whose ahead and crossed each stay within MAX_RELAY_HOPS, but whose sum
+    // exceeds MAX_RELAY_HOPS, is also refused on the wire.
+    let half = u32::from(MAX_RELAY_HOPS) / 2;
+    let ahead = (0..=half).map(did).collect::<Vec<_>>();
+    let crossed = ((half + 1)..=u32::from(MAX_RELAY_HOPS))
+        .map(did)
+        .collect::<Vec<_>>();
+    assert_eq!(ahead.len() + crossed.len(), usize::from(MAX_RELAY_HOPS) + 1);
+    let forged_return = (wire_hops(&ahead), wire_hops(&crossed));
+    let encoded = rings_codec::serialize(&forged_return).map_err(Error::CodecSerialize)?;
+    assert!(rings_codec::deserialize::<ReturnPath>(&encoded).is_err());
     Ok(())
 }
 
