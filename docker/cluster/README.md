@@ -71,6 +71,7 @@ Useful environment variables:
 - `RINGS_PRIVATE_KEYS_FILE`: key file path; default `/run/secrets/rings-private-keys`
 - `RINGS_ALLOW_RANDOM_KEYS`: fill missing keys with random ephemeral keys; default `true`
 - `RINGS_CONNECT_TOPOLOGY`: `ring`, `seed`, or `mesh`; default `ring`
+- `RINGS_BOOTSTRAP_PEERS`: optional comma-separated `<did>=<url>` list written into each node's `bootstrap.peers` (`0x0123...=https://node.rings.rs`); `rings run` dials and supervises those external seeds across drops and seed restarts (#763, #1154); default empty
 - `RINGS_BASE_INTERNAL_PORT`: first loopback JSON-RPC port; default `50000`
 - `RINGS_BASE_EXTERNAL_PORT`: first externally bound JSON-RPC port; default `51000`
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and delegatee key directory; default `/var/lib/rings-cluster`
@@ -101,3 +102,5 @@ Topology modes:
 - `ring`: node `i` connects to node `i+1`, and the final node connects to node `0`
 - `seed`: every non-zero node connects to node `0`
 - `mesh`: every pair is connected once; use carefully for larger N because handshakes grow as `N*(N-1)/2`
+
+`RINGS_CONNECT_TOPOLOGY` wires the nodes inside the container once at startup. To join and stay attached to an external seed across connection drops or seed restarts, set `RINGS_BOOTSTRAP_PEERS`: the launcher writes those `<did>=<url>` targets into each node's `bootstrap.peers`, and `rings run`'s `BootstrapSupervisor` (#763) performs the initial dial and every redial without restarting the container.
