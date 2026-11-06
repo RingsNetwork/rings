@@ -11,6 +11,7 @@
 //! `https`). Route selection places a pipeline on a guard-closed loop (`loop_shape`) whose every
 //! position is a node registering that position's symbol at its current process epoch.
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -523,7 +524,7 @@ impl OnionExitDescriptor {
     /// Create and sign an onion-exit descriptor.
     pub fn new_signed(
         body: OnionExitDescriptorBody,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> CoreResult<Self> {
         sign_descriptor_body(
             body,

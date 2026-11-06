@@ -304,7 +304,7 @@ async fn test_a_mail_not_fetched_within_its_lifetime_is_gone() -> Result<()> {
     let key = recipient_node.delegatee_key();
     let opened_at = |now_ms: u128| {
         let elements = entry.clone().retired_at(now_ms).data;
-        open_mail(&elements, target.did, key, |_| true)
+        open_mail(&elements, target.did, &key, |_| true)
     };
     let last_instant = issued_at + u128::from(MAX_TTL_MS) - 1;
     assert!(matches!(
@@ -312,5 +312,108 @@ async fn test_a_mail_not_fetched_within_its_lifetime_is_gone() -> Result<()> {
         [Opening::Opened(mail)] if mail.message == MESSAGE
     ));
     assert_eq!(opened_at(last_instant + 1), vec![]);
+    Ok(())
+}
+
+/// Across an in-process delegation renewal (#1153), `MailRegistration` re-issues its lease with
+/// the new `delegatee_public_key`, and `Recipient::poll` opens both mail sealed to the previous
+/// key before the gateway observed the new descriptor and mail sealed to the new key.
+#[tokio::test]
+async fn test_a_recipient_opens_mail_sealed_to_its_previous_and_renewed_keys_after_in_process_rotation(
+) -> Result<()> {
+    let network = network_test_guard().await;
+    let gateway_key = SecretKey::random();
+    let recipient_key = SecretKey::random();
+    let gateway_node = Arc::new(
+        prepare_processor_with_identity_key_network_and_virtual_nodes(gateway_key, 0, 0).await,
+    );
+    let recipient_node = Arc::new(
+        prepare_processor_with_identity_key_network_and_virtual_nodes(recipient_key.clone(), 0, 0)
+            .await,
+    );
+    connect_processors(&gateway_node, &recipient_node).await;
+    wait_for_mutual_dht_topology(&gateway_node, &recipient_node).await?;
+    let nodes = [gateway_node.as_ref(), recipient_node.as_ref()];
+
+    let gateway = MailGateway::new(Arc::clone(&gateway_node));
+    let registration = MailRegistration::new(recipient_node.did(), MailOffer::default());
+    registration
+        .register_once(&RegistrationContext::new(&recipient_node))
+        .await?;
+    await_owners_holding(nodes, &descriptor_topic(recipient_node.did()), |entry| {
+        !entry.data.is_empty()
+    })
+    .await?;
+    let target_before = gateway
+        .recipient(recipient_node.did())
+        .await
+        .unwrap()
+        .expect("gateway finds initial mail descriptor");
+    let old_pubkey = recipient_node.delegatee_key().delegatee_public_key();
+    assert_eq!(target_before.encryption_key, old_pubkey);
+
+    // Gateway seals and delivers a first message to the old key before rotation.
+    const FIRST_MAIL: &[u8] =
+        b"Message-ID: <before-renewal@example.org>\r\n\r\nSealed to old key.\r\n";
+    gateway.deliver(&target_before, FIRST_MAIL).await.unwrap();
+    await_owners_holding(nodes, &mail_topic(target_before.did), |entry| {
+        entry.data.len() == 2
+    })
+    .await?;
+
+    // Recipient rotates its delegatee key in process and republishes its mail descriptor.
+    let now_ms = get_epoch_ms();
+    let ttl_ms = recipient_node.delegatee_key().delegation().ttl_ms();
+    let renewed_key = rings_core::delegation::DelegateeKey::new_with_seckey_at(
+        &recipient_key,
+        ttl_ms,
+        now_ms + 1,
+    )
+    .expect("mint renewed delegatee key");
+    let new_pubkey = renewed_key.delegatee_public_key();
+    assert_ne!(new_pubkey, old_pubkey);
+    recipient_node.renew_delegatee_key(renewed_key, now_ms)?;
+    registration
+        .register_once(&RegistrationContext::new(&recipient_node))
+        .await?;
+    await_owners_holding(nodes, &descriptor_topic(recipient_node.did()), |entry| {
+        entry.data.len() >= 2
+    })
+    .await?;
+
+    let target_after = gateway
+        .recipient(recipient_node.did())
+        .await
+        .unwrap()
+        .expect("gateway finds republished mail descriptor");
+    assert_eq!(target_after.encryption_key, new_pubkey);
+
+    // Gateway delivers a second message sealed to the new key.
+    const SECOND_MAIL: &[u8] =
+        b"Message-ID: <after-renewal@example.org>\r\n\r\nSealed to new key.\r\n";
+    gateway.deliver(&target_after, SECOND_MAIL).await.unwrap();
+    await_owners_holding(nodes, &mail_topic(target_after.did), |entry| {
+        entry.data.len() == 4
+    })
+    .await?;
+
+    // Recipient polls once after rotation and opens both messages.
+    let recipient = mem_recipient(&recipient_node);
+    assert_eq!(recipient.poll().await.unwrap(), PollReport {
+        filed: 2,
+        ..PollReport::default()
+    });
+    let mut opened = inbox_messages(&recipient).await;
+    opened.sort();
+    let mut expected = vec![FIRST_MAIL.to_vec(), SECOND_MAIL.to_vec()];
+    expected.sort();
+    assert_eq!(opened, expected);
+    assert_eq!(
+        recipient.poll().await.unwrap(),
+        PollReport::default(),
+        "neither old-key nor new-key mail is opened a second time"
+    );
+
+    drop(network);
     Ok(())
 }

@@ -131,9 +131,8 @@ const fn within_margin(end_ms: u128, now_ms: u128) -> bool {
 ///
 /// Law (horizon): `now ≥ signing_horizon_ms(e) ⇔ within_margin(e, now)` at every instant. A
 /// node's own delegation fills the hop slot of every frame it sends, so from its horizon on the
-/// node is mute: no origin send, relay or stabilization leaves it, and it stays so, since its
-/// delegation is fixed for the life of the process. The process shell acts on this instant
-/// (#1063); this module only states it.
+/// node is mute unless the process shell renews its delegation before then (#1063, #1153); this
+/// module only states the instant.
 pub const fn signing_horizon_ms(expires_at_ms: u128) -> u128 {
     expires_at_ms.saturating_sub(LEASE_MARGIN_MS)
 }

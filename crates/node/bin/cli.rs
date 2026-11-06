@@ -1,8 +1,6 @@
 //! The command line of the native node: the top-level parser, its subcommands, and the
 //! arguments each takes.
 
-use std::str::FromStr;
-
 use anyhow::Context;
 use clap::ArgAction;
 use clap::Args;
@@ -454,17 +452,7 @@ impl DelegationArgs {
 }
 
 fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
-    let path = expand_home(path)?;
-    let raw = std::fs::read_to_string(path)?;
-    let Some(key) = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-    else {
-        anyhow::bail!("ECDSA key file contains no key entries");
-    };
-    let key = key.strip_prefix("0x").unwrap_or(key);
-    SecretKey::from_str(key).map_err(|_| anyhow::anyhow!("ECDSA key file contains an invalid key"))
+    rings_node::native::horizon::read_delegator_secret_key(path).map_err(Into::into)
 }
 
 #[derive(Subcommand, Debug)]

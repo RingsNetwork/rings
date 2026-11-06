@@ -359,7 +359,7 @@ impl ProcessorBuilder {
 
         Ok(Processor {
             swarm,
-            delegatee_key,
+            session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
             onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
             stabilize_interval: self.stabilize_interval,

@@ -112,7 +112,7 @@ impl Core {
     }
 
     /// This node's delegatee key.
-    pub(crate) fn delegatee_key(&self) -> &rings_core::delegation::DelegateeKey {
+    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
         self.processor.delegatee_key()
     }
 
@@ -292,6 +292,11 @@ impl Scope {
     /// reserves nothing.
     pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
         self.core.application_credit(peer)
+    }
+
+    /// This node's current delegatee key.
+    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
+        self.core.delegatee_key()
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).

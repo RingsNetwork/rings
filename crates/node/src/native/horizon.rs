@@ -1,16 +1,36 @@
-//! The native daemon's deadline at its signing horizon (#1063).
+//! The native daemon's signing horizon and in-process delegation renewal (#1063, #1153).
 //!
-//! A node whose own delegation reaches its signing horizon `h = e − Δ` can send nothing, and
-//! only a restart with a fresh delegation lets it send again (`processor::horizon`). Left
-//! running, it would keep serving its local API while every peer dropped it, and a supervisor
-//! would never notice. So the daemon ends at `h` with
-//! [`Error::DelegationHorizonReached`], a non-zero exit that `Restart=always` or
-//! `--restart unless-stopped` turns into a restart.
+//! A node whose own delegation reaches its signing horizon `h = e − Δ` can send nothing. Without a
+//! delegator key configured, only a restart with a fresh delegation lets it send again
+//! (`processor::horizon`); left running, it would keep serving its local API while every peer
+//! dropped it, so the daemon ends at `h` with [`Error::DelegationHorizonReached`] (#1063).
+//!
+//! When `Config::delegator_key` is configured, entering `SigningState::Expiring` at `h − R`
+//! (`SIGNING_HORIZON_LEAD_MS`) renews the delegation in process (#1153):
+//! 1. Read the ECDSA delegator secret key file and verify `Did::from(delegator_key.address()) ==
+//!    processor.did()`.
+//! 2. Mint a fresh [`DelegateeKey`] for the current delegation's `ttl_ms()` stamped at `now_ms`.
+//! 3. Verify `h' > h` (**Monotone horizon**) and `new_key.delegator_did() == processor.did()`
+//!    (**No unsigned gap**).
+//! 4. Persist `new_key.dump()` atomically to `delegatee_key` (`0600` sibling temporary file +
+//!    `sync_all()` + `fs::rename`).
+//! 5. Swap `new_key` into the running [`Processor`] and `SwarmTransport` (retaining the previous
+//!    key until its expiry `e` so mail sealed to it before republication settles still opens) and
+//!    immediately republish the node's descriptors.
+//!
+//! Laws (#1153):
+//! - **Monotone horizon**: After a successful renewal, `h' > h`. A renewal never shortens the
+//!   horizon.
+//! - **No unsigned gap**: At every instant in `[renewal, e)`, the node holds some key whose
+//!   delegation verifies.
+//! - **Fallback**: No delegator key, or a failed mint/persistence, logs a warning, keeps the old
+//!   key, and gives the #1063 behaviour (warn at `h − R` and exit at `h`).
 //!
 //! ```text
 //!   loop:  t ← now()
 //!          Signing(r)       ─▶ sleep min(r − lead, P)
-//!          Expiring(r)      ─▶ warn once;  sleep min(r, P)
+//!          Expiring(r)      ─▶ if delegator_key: renew(h' > h) ─▶ continue (Signing)
+//!                              else: warn once;  sleep min(r, P)
 //!          Mute             ─▶ return DelegationHorizonReached
 //! ```
 //!
@@ -20,16 +40,255 @@
 //! horizon, or an epoch clock that stepped forward, ends the wait within `P` of resuming; one that
 //! stepped back only sleeps again.
 
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::delegation::DelegateeKey;
+use rings_core::dht::Did;
+use rings_core::ecc::SecretKey;
+
+use super::config::Config;
 use crate::error::Error;
+use crate::error::Result;
 use crate::processor::DelegationHorizon;
+use crate::processor::Processor;
 use crate::processor::SigningState;
 use crate::processor::SIGNING_HORIZON_LEAD_MS;
+use crate::util::ensure_parent_dir;
+use crate::util::expand_home;
 
-/// `P`: the longest single sleep of [`signing_horizon`], so a daemon whose host was suspended
-/// across its horizon ends within one period of resuming (module documentation).
+/// `P`: the longest single sleep of [`signing_horizon`] and [`run_signing_horizon`], so a daemon
+/// whose host was suspended across its horizon ends within one period of resuming (module
+/// documentation).
 pub const HORIZON_POLL: Duration = Duration::from_secs(60);
+
+/// Key-file paths used by [`run_signing_horizon`] to renew a node's delegation in process before
+/// its signing horizon (#1153).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationRenewalPaths {
+    /// Destination path where the renewed `DelegateeKey::dump()` is persisted atomically.
+    pub delegatee_key_path: PathBuf,
+    /// Path to the ECDSA delegator secret key file (`Config::delegator_key`).
+    pub delegator_key_path: PathBuf,
+}
+
+impl DelegationRenewalPaths {
+    /// Build renewal paths from `config` when `config.delegator_key` is present.
+    pub fn from_config(config: &Config) -> Result<Option<Self>> {
+        let Some(delegator_key) = config.delegator_key.as_deref() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            delegatee_key_path: expand_home(&config.delegatee_key)?,
+            delegator_key_path: expand_home(delegator_key)?,
+        }))
+    }
+}
+
+/// Read an ECDSA secret key file in the `rings init` format: the first non-empty, non-`#`
+/// trimmed line, with an optional `0x` prefix stripped.
+pub fn read_delegator_secret_key(path: impl AsRef<Path>) -> Result<SecretKey> {
+    let path = expand_home(path.as_ref())?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| Error::OpenFileError(format!("{}: {error}", path.display())))?;
+    let Some(line) = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+    else {
+        return Err(Error::InvalidConfig(format!(
+            "{}: ECDSA key file contains no key entries",
+            path.display()
+        )));
+    };
+    let key = line.strip_prefix("0x").unwrap_or(line);
+    SecretKey::from_str(key).map_err(|_| {
+        Error::InvalidConfig(format!(
+            "{}: ECDSA key file contains an invalid key",
+            path.display()
+        ))
+    })
+}
+
+/// Atomically write `delegatee_key.dump()` to `path` via a mode-`0600` sibling temporary file,
+/// `sync_all()`, `fs::rename`, and parent directory `sync_all()` on Unix.
+pub fn write_delegatee_key_atomically(
+    path: impl AsRef<Path>,
+    delegatee_key: &DelegateeKey,
+) -> Result<PathBuf> {
+    let target = expand_home(path.as_ref())?;
+    ensure_parent_dir(&target)?;
+    let parent = target.parent().ok_or_else(|| {
+        Error::CreateFileError(format!(
+            "{}: path has no parent directory",
+            target.display()
+        ))
+    })?;
+    let file_name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("delegatee_key");
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp.{}.{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let dumped = delegatee_key.dump().map_err(Error::CoreError)?;
+    let write_result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp_path)?;
+        file.write_all(dumped.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp_path, &target)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(Error::CreateFileError(format!(
+            "{}: {error}",
+            target.display()
+        )));
+    }
+    Ok(target)
+}
+
+/// Attempt one in-process delegation renewal for `processor` at `now_ms`.
+async fn try_renew_delegation(
+    processor: &Processor,
+    paths: &DelegationRenewalPaths,
+    current_horizon: DelegationHorizon,
+    now_ms: u128,
+) -> Result<DelegationHorizon> {
+    let delegator_key = match read_delegator_secret_key(&paths.delegator_key_path) {
+        Ok(key) => key,
+        Err(error) => {
+            processor.record_failed_delegation_renewal();
+            return Err(error);
+        }
+    };
+    if Did::from(delegator_key.address()) != processor.did() {
+        processor.record_failed_delegation_renewal();
+        return Err(Error::VerifyError(
+            "delegator key DID does not match node DID".to_string(),
+        ));
+    }
+    let ttl_ms = processor.delegatee_key().delegation().ttl_ms();
+    let next_key = match DelegateeKey::new_with_seckey_at(&delegator_key, ttl_ms, now_ms) {
+        Ok(key) => key,
+        Err(error) => {
+            processor.record_failed_delegation_renewal();
+            return Err(Error::CoreError(error));
+        }
+    };
+    let candidate_horizon = DelegationHorizon::of(&next_key.delegation());
+    if let Err(error) = candidate_horizon.admitted_at(now_ms) {
+        processor.record_failed_delegation_renewal();
+        return Err(error);
+    }
+    if candidate_horizon.horizon_ms() <= current_horizon.horizon_ms() {
+        processor.record_failed_delegation_renewal();
+        return Err(current_horizon.reached());
+    }
+    if let Err(error) = write_delegatee_key_atomically(&paths.delegatee_key_path, &next_key) {
+        processor.record_failed_delegation_renewal();
+        return Err(error);
+    }
+    let next_horizon = processor.renew_delegatee_key(next_key, now_ms)?;
+    processor.republish_registrations().await;
+    Ok(next_horizon)
+}
+
+/// Supervise `processor`'s signing horizon on the epoch clock `now_ms`, renewing the delegation
+/// in process at `h − R` (or at the half-life `c + (h − c) / 2` when the delegation's lifetime to
+/// `h` is shorter than `2R`) when `renewal` is configured, and falling back to the #1063 exit at
+/// `h` otherwise (#1153).
+pub async fn run_signing_horizon(
+    processor: Arc<Processor>,
+    renewal: Option<DelegationRenewalPaths>,
+    now_ms: impl Fn() -> u128,
+) -> Error {
+    let mut warned_horizon_ms: Option<u128> = None;
+    let mut attempted_horizon_ms: Option<u128> = None;
+    loop {
+        let now = now_ms();
+        let delegation = processor.delegatee_key().delegation();
+        let created_at_ms = delegation.created_at_ms();
+        let horizon = DelegationHorizon::of(&delegation);
+        let h = horizon.horizon_ms();
+        let wait_ms = match horizon.state_at(now) {
+            SigningState::Mute => {
+                tracing::error!(
+                    expires_at_ms = %horizon.expires_at_ms(),
+                    horizon_ms = %h,
+                    "the node's delegation reached its signing horizon: no frame can leave, so \
+                     the node exits for its supervisor to restart it with a fresh delegatee key"
+                );
+                return horizon.reached();
+            }
+            SigningState::Expiring { remaining_ms } => {
+                let renew_at_ms = h
+                    .saturating_sub(SIGNING_HORIZON_LEAD_MS)
+                    .max(created_at_ms.saturating_add(h.saturating_sub(created_at_ms) / 2));
+                if renewal.is_some() && now < renew_at_ms {
+                    renew_at_ms - now
+                } else {
+                    if let Some(paths) =
+                        renewal.as_ref().filter(|_| attempted_horizon_ms != Some(h))
+                    {
+                        attempted_horizon_ms = Some(h);
+                        match try_renew_delegation(&processor, paths, horizon, now).await {
+                            Ok(next_horizon) => {
+                                tracing::info!(
+                                    previous_horizon_ms = %h,
+                                    next_horizon_ms = %next_horizon.horizon_ms(),
+                                    expires_at_ms = %next_horizon.expires_at_ms(),
+                                    "renewed the node's delegation in process before its signing horizon"
+                                );
+                                continue;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    remaining_ms = %remaining_ms,
+                                    horizon_ms = %h,
+                                    "failed to renew the node's delegation in process; falling \
+                                     back to exiting at the signing horizon"
+                                );
+                            }
+                        }
+                    }
+                    if warned_horizon_ms != Some(h) {
+                        warned_horizon_ms = Some(h);
+                        tracing::warn!(
+                            remaining_ms = %remaining_ms,
+                            horizon_ms = %h,
+                            "the node's delegation nears its signing horizon: the node exits then; \
+                             rotate its delegatee key and restart it before"
+                        );
+                    }
+                    remaining_ms
+                }
+            }
+            SigningState::Signing { remaining_ms } => remaining_ms - SIGNING_HORIZON_LEAD_MS,
+        };
+        let wait = Duration::from_millis(u64::try_from(wait_ms).unwrap_or(u64::MAX));
+        tokio::time::sleep(wait.min(HORIZON_POLL)).await;
+    }
+}
 
 /// Wait until `horizon` on the epoch clock `now_ms` (module diagram), warning once inside the
 /// lead, and return the error that ends the daemon there. It never returns before the horizon.
@@ -68,15 +327,38 @@ pub async fn signing_horizon(horizon: DelegationHorizon, now_ms: impl Fn() -> u1
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::str::FromStr;
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use rand::rngs::OsRng;
+    use rings_core::delegation::DelegateeKey;
+    use rings_core::ecc::SecretKey;
+    use rings_core::utils::get_epoch_ms;
     use tokio::time::Instant;
 
+    use super::read_delegator_secret_key;
+    use super::run_signing_horizon;
     use super::signing_horizon;
+    use super::write_delegatee_key_atomically;
+    use super::DelegationRenewalPaths;
     use super::HORIZON_POLL;
     use crate::error::Error;
+    use crate::mail::descriptor::MailRecipient;
+    use crate::mail::envelope::seal;
+    use crate::mail::open::open_mail_with_keys;
+    use crate::mail::open::Opening;
     use crate::processor::DelegationHorizon;
+    use crate::processor::Processor;
+    use crate::processor::ProcessorConfig;
     use crate::processor::SIGNING_HORIZON_LEAD_MS;
+    use crate::test_support::TestTask;
+    use crate::tests::test_processor_builder;
+    use crate::tests::TEST_ICE_SERVERS;
+    use crate::tests::TEST_NETWORK_ID;
 
     /// The epoch reading at the paused runtime's start.
     const EPOCH_MS: u128 = 1_800_000_000_000;
@@ -91,6 +373,25 @@ mod tests {
             let jumped = if elapsed >= after { jump_ms } else { 0 };
             EPOCH_MS + elapsed.as_millis() + jumped
         }
+    }
+
+    /// Build a test processor whose initial delegation is stamped at `ts_ms` with `ttl_ms`.
+    fn processor_at(delegator: &SecretKey, ttl_ms: u64, ts_ms: u128) -> Arc<Processor> {
+        let delegatee_key = match DelegateeKey::new_with_seckey_at(delegator, ttl_ms, ts_ms) {
+            Ok(key) => key,
+            Err(error) => panic!("test delegatee key mint must succeed: {error}"),
+        };
+        let config = ProcessorConfig::new(
+            TEST_NETWORK_ID,
+            TEST_ICE_SERVERS.to_string(),
+            delegatee_key,
+            3,
+        );
+        let processor = match test_processor_builder(&config).build() {
+            Ok(processor) => processor,
+            Err(error) => panic!("test processor build must succeed: {error}"),
+        };
+        Arc::new(processor)
     }
 
     /// `signing → mute` (#1063): a delegation two leads past the start is waited out on the
@@ -140,5 +441,370 @@ mod tests {
 
         assert!(matches!(error, Error::DelegationHorizonReached { .. }));
         assert_eq!(now_ms(), EPOCH_MS);
+    }
+
+    /// In-process delegation renewal (#1153): a node with `delegator_key` configured renews at
+    /// `h − R` across multiple horizons (`h0 < h1 < h2`), atomically persists each new
+    /// `DelegateeKey` (`0600`, no leftover temp files), updates both `Processor` and `Swarm`,
+    /// immediately republishes its online descriptor with the new `delegatee_public_key`, opens
+    /// mail sealed to the prior key before `e0`, and falls back to exiting at `h2` if the
+    /// delegator key is removed before the next renewal.
+    #[tokio::test(start_paused = true)]
+    async fn test_run_signing_horizon_renews_in_process_across_multiple_horizons_and_republishes() {
+        let base_ms = get_epoch_ms().max(EPOCH_MS);
+        let start = Instant::now();
+        let now_ms = move || base_ms + start.elapsed().as_millis();
+
+        let delegator = SecretKey::random();
+        let ttl_ms = u64::try_from(3 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+        let processor = processor_at(&delegator, ttl_ms, base_ms);
+        let initial_key = processor.delegatee_key();
+        let initial_pubkey = initial_key.delegatee_public_key();
+        let h0 = processor.signing_horizon().horizon_ms();
+        let e0 = processor.signing_horizon().expires_at_ms();
+
+        let root = std::env::temp_dir().join(format!("rings-horizon-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp horizon dir");
+        let delegator_key_path = root.join("ecdsa_key");
+        let delegatee_key_path = root.join("delegatee_key");
+        fs::write(
+            &delegator_key_path,
+            format!("# rings init secret key\n0x{}\n", delegator.to_string()),
+        )
+        .expect("write delegator key");
+        assert_eq!(
+            read_delegator_secret_key(&delegator_key_path).expect("read delegator key"),
+            delegator
+        );
+        write_delegatee_key_atomically(&delegatee_key_path, &initial_key)
+            .expect("write initial delegatee key");
+
+        // Publish initial online-node descriptor before renewal.
+        processor.republish_registrations().await;
+        let initial_online = processor
+            .lookup_online_nodes(false)
+            .await
+            .expect("list initial online nodes");
+        assert_eq!(
+            initial_online
+                .iter()
+                .find(|node| node.did == processor.did())
+                .map(|node| node.delegatee_public_key),
+            Some(initial_pubkey)
+        );
+
+        // Seal mail to the initial key before renewal so we can verify decryption after rotation.
+        let recipient_before_renewal = MailRecipient {
+            did: processor.did(),
+            encryption_key: initial_pubkey,
+        };
+        let mail_bytes = b"Message-ID: <across-renewal@example.org>\r\n\r\nStill readable.\r\n";
+        let sealed_to_initial = seal(mail_bytes, &recipient_before_renewal, &mut OsRng)
+            .expect("seal mail to initial key");
+
+        let paths = DelegationRenewalPaths {
+            delegatee_key_path: delegatee_key_path.clone(),
+            delegator_key_path: delegator_key_path.clone(),
+        };
+        let task_processor = Arc::clone(&processor);
+        let mut horizon_task = TestTask::spawn(async move {
+            run_signing_horizon(task_processor, Some(paths), now_ms).await
+        });
+
+        // Advance to `h0 - R + 1 ms`: first renewal must have completed.
+        let to_first_renewal =
+            u64::try_from((h0 - SIGNING_HORIZON_LEAD_MS) - base_ms + 1).unwrap_or(u64::MAX);
+        tokio::time::sleep(Duration::from_millis(to_first_renewal)).await;
+        tokio::task::yield_now().await;
+
+        let h1 = processor.signing_horizon().horizon_ms();
+        let k1 = processor.delegatee_key();
+        assert!(
+            h1 > h0,
+            "Monotone horizon law: h1 ({h1}) must exceed h0 ({h0})"
+        );
+        assert_ne!(k1.delegatee_public_key(), initial_pubkey);
+        assert_eq!(k1.delegator_did(), processor.did());
+        assert_eq!(
+            processor.swarm.delegatee_key().delegatee_public_key(),
+            k1.delegatee_public_key()
+        );
+
+        // On-disk delegatee_key was atomically updated with mode 0600 and no leftover temp files.
+        let disk_raw_1 = fs::read_to_string(&delegatee_key_path).expect("read renewed key 1");
+        let disk_key_1 = DelegateeKey::from_str(&disk_raw_1).expect("parse renewed key 1");
+        assert_eq!(disk_key_1.delegatee_public_key(), k1.delegatee_public_key());
+        #[cfg(unix)]
+        {
+            let mode = fs::metadata(&delegatee_key_path)
+                .expect("stat delegatee_key")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let leftover_temps = fs::read_dir(&root)
+            .expect("read temp dir")
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .count();
+        assert_eq!(leftover_temps, 0);
+
+        // Online-node descriptor was republished immediately with k1's delegatee_public_key.
+        let online_after_1 = processor
+            .lookup_online_nodes(false)
+            .await
+            .expect("list online nodes after first renewal");
+        assert_eq!(
+            online_after_1
+                .iter()
+                .find(|node| node.did == processor.did())
+                .map(|node| node.delegatee_public_key),
+            Some(k1.delegatee_public_key())
+        );
+
+        // Advance past the original horizon `h0`: the node is still signing, holds a valid
+        // delegation, and opens mail sealed to `k0` before `e0`.
+        let past_h0 = u64::try_from(h0 + 1 - now_ms()).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(past_h0)).await;
+        assert!(
+            !horizon_task.is_finished(),
+            "node must keep running past h0"
+        );
+        assert!(processor.signing_horizon().signs_at(now_ms()));
+        let sig = processor
+            .swarm
+            .delegatee_key()
+            .sign(b"frame-past-h0")
+            .expect("sign past h0");
+        assert!(processor
+            .delegatee_key()
+            .delegation()
+            .verify_at(b"frame-past-h0", sig, now_ms())
+            .is_ok());
+        assert!(now_ms() < e0);
+        let opened = open_mail_with_keys(
+            &sealed_to_initial.elements,
+            processor.did(),
+            &processor.decryption_keys_at(now_ms()),
+            |_| true,
+        );
+        assert!(matches!(
+            opened.as_slice(),
+            [(Opening::Opened(ref mail), Some(by_key))]
+                if mail.message.as_slice() == mail_bytes && *by_key == initial_pubkey
+        ));
+
+        // Advance to `h1 - R + 1 ms`: second renewal must complete (`h2 > h1 > h0`).
+        let to_second_renewal =
+            u64::try_from((h1 - SIGNING_HORIZON_LEAD_MS) - now_ms() + 1).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(to_second_renewal)).await;
+        tokio::task::yield_now().await;
+
+        let h2 = processor.signing_horizon().horizon_ms();
+        let k2 = processor.delegatee_key();
+        assert!(
+            h2 > h1,
+            "Monotone horizon law: h2 ({h2}) must exceed h1 ({h1})"
+        );
+        assert_ne!(k2.delegatee_public_key(), k1.delegatee_public_key());
+        let snapshot = processor
+            .operator_snapshot()
+            .await
+            .expect("operator snapshot");
+        assert_eq!(snapshot.session_key.rotation_succeeded_total, 2);
+        assert_eq!(snapshot.session_key.rotation_failed_total, 0);
+
+        let online_after_2 = processor
+            .lookup_online_nodes(false)
+            .await
+            .expect("list online nodes after second renewal");
+        assert_eq!(
+            online_after_2
+                .iter()
+                .find(|node| node.did == processor.did())
+                .map(|node| node.delegatee_public_key),
+            Some(k2.delegatee_public_key())
+        );
+
+        // Remove the delegator key file before `h2 - R`: the third renewal fails and falls back
+        // to exiting at `h2` with `Error::DelegationHorizonReached`.
+        fs::remove_file(&delegator_key_path).expect("remove delegator key for fallback test");
+        let exit_error = (&mut horizon_task)
+            .await
+            .expect("horizon task joins cleanly");
+        assert!(matches!(
+            exit_error,
+            Error::DelegationHorizonReached { horizon_ms, .. } if horizon_ms == h2
+        ));
+        assert_eq!(now_ms(), h2);
+        let snapshot_end = processor
+            .operator_snapshot()
+            .await
+            .expect("operator snapshot at exit");
+        assert_eq!(snapshot_end.session_key.rotation_succeeded_total, 2);
+        assert_eq!(snapshot_end.session_key.rotation_failed_total, 1);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Fallback law (#1153): without `delegator_key` configured, or when `delegator_key` has a
+    /// DID different from the node's DID, `run_signing_horizon` keeps the old key and exits at
+    /// `h` with `Error::DelegationHorizonReached` (#1063 behaviour).
+    #[tokio::test(start_paused = true)]
+    async fn test_run_signing_horizon_falls_back_when_delegator_key_is_absent_or_mismatched() {
+        let ttl_ms = u64::try_from(2 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+
+        // 1. No `delegator_key` configured (`renewal = None`).
+        {
+            let now_ms = injected_clock(Duration::MAX, 0);
+            let delegator = SecretKey::random();
+            let processor = processor_at(&delegator, ttl_ms, EPOCH_MS);
+            let h0 = processor.signing_horizon().horizon_ms();
+
+            let error = run_signing_horizon(Arc::clone(&processor), None, &now_ms).await;
+            assert!(matches!(
+                error,
+                Error::DelegationHorizonReached { horizon_ms, .. } if horizon_ms == h0
+            ));
+            assert_eq!(now_ms(), h0);
+        }
+
+        // 2. Mismatched `delegator_key` (different account DID).
+        {
+            let now_ms = injected_clock(Duration::MAX, 0);
+            let delegator = SecretKey::random();
+            let wrong_delegator = SecretKey::random();
+            let processor = processor_at(&delegator, ttl_ms, EPOCH_MS);
+            let initial_pubkey = processor.delegatee_key().delegatee_public_key();
+            let h0 = processor.signing_horizon().horizon_ms();
+
+            let root = std::env::temp_dir()
+                .join(format!("rings-horizon-fallback-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).expect("create temp fallback dir");
+            let delegator_key_path = root.join("wrong_ecdsa_key");
+            let delegatee_key_path = root.join("delegatee_key");
+            fs::write(&delegator_key_path, wrong_delegator.to_string())
+                .expect("write wrong delegator key");
+            write_delegatee_key_atomically(&delegatee_key_path, &processor.delegatee_key())
+                .expect("write initial delegatee key");
+
+            let paths = DelegationRenewalPaths {
+                delegatee_key_path: delegatee_key_path.clone(),
+                delegator_key_path,
+            };
+            let error = run_signing_horizon(Arc::clone(&processor), Some(paths), &now_ms).await;
+            assert!(matches!(
+                error,
+                Error::DelegationHorizonReached { horizon_ms, .. } if horizon_ms == h0
+            ));
+            assert_eq!(now_ms(), h0);
+            assert_eq!(
+                processor.delegatee_key().delegatee_public_key(),
+                initial_pubkey
+            );
+            let snapshot = processor
+                .operator_snapshot()
+                .await
+                .expect("operator snapshot");
+            assert_eq!(snapshot.session_key.rotation_succeeded_total, 0);
+            assert_eq!(snapshot.session_key.rotation_failed_total, 1);
+
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Short-TTL delegation renewal (#1153): a delegation whose lifetime is shorter than
+    /// `SIGNING_HORIZON_LEAD_MS` starts in `SigningState::Expiring` at `t = c0`, waits until its
+    /// half-life `c0 + (h0 − c0) / 2` before renewing to `h1 > h0` with zero failed attempts, and
+    /// does not churn keys before `c1 + (h1 − c1) / 2`.
+    #[tokio::test(start_paused = true)]
+    async fn test_run_signing_horizon_renews_short_ttl_delegation_at_half_life_without_churn() {
+        let base_ms = get_epoch_ms().max(EPOCH_MS);
+        let start = Instant::now();
+        let now_ms = move || base_ms + start.elapsed().as_millis();
+
+        let delegator = SecretKey::random();
+        let short_ttl_ms: u64 = 600_000;
+        let processor = processor_at(&delegator, short_ttl_ms, base_ms);
+        let initial_key = processor.delegatee_key();
+        let initial_pubkey = initial_key.delegatee_public_key();
+        let h0 = processor.signing_horizon().horizon_ms();
+        let first_renew_at_ms = base_ms + (h0 - base_ms) / 2;
+
+        let root =
+            std::env::temp_dir().join(format!("rings-horizon-short-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp short-ttl dir");
+        let delegator_key_path = root.join("ecdsa_key");
+        let delegatee_key_path = root.join("delegatee_key");
+        fs::write(&delegator_key_path, delegator.to_string()).expect("write delegator key");
+        write_delegatee_key_atomically(&delegatee_key_path, &initial_key)
+            .expect("write initial delegatee key");
+
+        let paths = DelegationRenewalPaths {
+            delegatee_key_path,
+            delegator_key_path: delegator_key_path.clone(),
+        };
+        let task_processor = Arc::clone(&processor);
+        let mut horizon_task = TestTask::spawn(async move {
+            run_signing_horizon(task_processor, Some(paths), now_ms).await
+        });
+
+        // One millisecond before the half-life `first_renew_at_ms`, the node has neither renewed
+        // nor recorded a failed attempt at `t = c0`.
+        let before_first = u64::try_from(first_renew_at_ms - 1 - base_ms).unwrap_or(0);
+        tokio::time::sleep(Duration::from_millis(before_first)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            processor.delegatee_key().delegatee_public_key(),
+            initial_pubkey
+        );
+        let snap_before = processor
+            .operator_snapshot()
+            .await
+            .expect("snapshot before first renewal");
+        assert_eq!(snap_before.session_key.rotation_succeeded_total, 0);
+        assert_eq!(snap_before.session_key.rotation_failed_total, 0);
+
+        // Advance 2 ms across `first_renew_at_ms`: exactly one renewal occurs (`h1 > h0`).
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::task::yield_now().await;
+        let k1 = processor.delegatee_key();
+        let h1 = processor.signing_horizon().horizon_ms();
+        assert!(h1 > h0);
+        assert_ne!(k1.delegatee_public_key(), initial_pubkey);
+        let snap_after_1 = processor
+            .operator_snapshot()
+            .await
+            .expect("snapshot after first renewal");
+        assert_eq!(snap_after_1.session_key.rotation_succeeded_total, 1);
+        assert_eq!(snap_after_1.session_key.rotation_failed_total, 0);
+
+        // One poll period later (still before `c1 + (h1 - c1) / 2`), the key has not churned.
+        tokio::time::sleep(HORIZON_POLL).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            processor.delegatee_key().delegatee_public_key(),
+            k1.delegatee_public_key()
+        );
+        let snap_mid = processor
+            .operator_snapshot()
+            .await
+            .expect("snapshot mid-window");
+        assert_eq!(snap_mid.session_key.rotation_succeeded_total, 1);
+        assert_eq!(snap_mid.session_key.rotation_failed_total, 0);
+
+        // Remove the delegator key before the second renewal and verify clean fallback exit at `h1`.
+        fs::remove_file(&delegator_key_path).expect("remove delegator key");
+        let exit_error = (&mut horizon_task)
+            .await
+            .expect("horizon task joins cleanly");
+        assert!(matches!(
+            exit_error,
+            Error::DelegationHorizonReached { horizon_ms, .. } if horizon_ms == h1
+        ));
+        assert_eq!(now_ms(), h1);
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

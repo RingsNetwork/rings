@@ -54,7 +54,7 @@ use thiserror::Error;
 
 use super::envelope::MailDigest;
 use super::mail_topic;
-use super::open::open_mail;
+use super::open::open_mail_with_keys;
 use super::open::OpenedMail;
 use super::open::Opening;
 use super::write_lowercase_hex;
@@ -290,35 +290,57 @@ where
         };
         let delegatee_key = self.processor.delegatee_key();
         let delegatee_public_key = delegatee_key.delegatee_public_key();
+        let decryption_keys = self.processor.decryption_keys_at(now_ms);
         let fresh = |mail_id: &MailDigest| {
             !records.contains_key(&Self::opened_record_name(delegatee_public_key, *mail_id))
         };
-        let openings = open_mail(&entry.data, did, delegatee_key, fresh);
+        let openings = open_mail_with_keys(&entry.data, did, &decryption_keys, fresh);
         let mut report = PollReport::default();
-        for opening in openings {
+        for (opening, opened_by) in openings {
             let mail_id = opening.mail_id();
+            let already_handled_by_retained_key = match opened_by {
+                Some(pk) => {
+                    pk != delegatee_public_key
+                        && records.contains_key(&Self::opened_record_name(pk, mail_id))
+                }
+                None => decryption_keys.iter().skip(1).any(|key| {
+                    records.contains_key(&Self::opened_record_name(
+                        key.delegatee_public_key(),
+                        mail_id,
+                    ))
+                }),
+            };
             match opening {
                 Opening::Incomplete { .. } => {
                     report.incomplete = report.incomplete.saturating_add(1);
                     continue;
                 }
                 Opening::Unreadable { .. } => {
-                    report.unreadable = report.unreadable.saturating_add(1);
-                }
-                Opening::Opened(mail) => {
-                    let filed = RecordName::Filed(dedup_key(&mail)).to_string();
-                    if records.contains_key(&filed) {
-                        report.duplicates = report.duplicates.saturating_add(1);
-                    } else {
-                        self.inbox
-                            .file(&mail)
-                            .await
-                            .map_err(RecipientError::Inbox)?;
-                        let record = RecipientRecord::Filed { at_ms: now_ms };
-                        self.remember(&mut records, filed, record).await?;
-                        report.filed = report.filed.saturating_add(1);
+                    if !already_handled_by_retained_key {
+                        report.unreadable = report.unreadable.saturating_add(1);
                     }
                 }
+                Opening::Opened(mail) => {
+                    if !already_handled_by_retained_key {
+                        let filed = RecordName::Filed(dedup_key(&mail)).to_string();
+                        if records.contains_key(&filed) {
+                            report.duplicates = report.duplicates.saturating_add(1);
+                        } else {
+                            self.inbox
+                                .file(&mail)
+                                .await
+                                .map_err(RecipientError::Inbox)?;
+                            let record = RecipientRecord::Filed { at_ms: now_ms };
+                            self.remember(&mut records, filed, record).await?;
+                            report.filed = report.filed.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            if let Some(pk) = opened_by.filter(|pk| *pk != delegatee_public_key) {
+                let opened_retained = Self::opened_record_name(pk, mail_id);
+                let record = RecipientRecord::Opened { at_ms: now_ms };
+                self.remember(&mut records, opened_retained, record).await?;
             }
             let opened = Self::opened_record_name(delegatee_public_key, mail_id);
             let record = RecipientRecord::Opened { at_ms: now_ms };

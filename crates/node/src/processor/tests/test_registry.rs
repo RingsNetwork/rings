@@ -456,6 +456,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
     let expired_processor = prepare_processor().await;
     let now_ms = get_epoch_ms();
     let live = processor.online_node_descriptor_at(now_ms)?;
+    let expired_key = expired_processor.delegatee_key();
     let expired = OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: expired_processor.did(),
@@ -463,7 +464,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
                 .swarm
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            delegatee_public_key: expired_processor.delegatee_key.delegatee_public_key(),
+            delegatee_public_key: expired_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: expired_processor.swarm.network_id(),
             storage_redundancy: expired_processor.swarm.storage_redundancy(),
@@ -475,10 +476,7 @@ async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Res
             expires_at_ms: now_ms.saturating_sub(30_000),
             version: crate::util::build_version(),
         },
-        MessageSigner::new(
-            &expired_processor.delegatee_key,
-            expired_processor.swarm.network_id(),
-        ),
+        MessageSigner::new(&expired_key, expired_processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)?;
 
@@ -550,6 +548,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
     let foreign = prepare_processor_with_network(0).await;
     let now_ms = get_epoch_ms();
     let local_descriptor = processor.online_node_descriptor_at(now_ms)?;
+    let foreign_key = foreign.delegatee_key();
     let foreign_descriptor = OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: foreign.did(),
@@ -557,7 +556,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
                 .swarm
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            delegatee_public_key: foreign.delegatee_key.delegatee_public_key(),
+            delegatee_public_key: foreign_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: foreign.swarm.network_id(),
             storage_redundancy: mismatched_storage_redundancy(foreign.swarm.storage_redundancy()),
@@ -569,7 +568,7 @@ async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Res
             expires_at_ms: now_ms.saturating_add(60_000),
             version: crate::util::build_version(),
         },
-        MessageSigner::new(&foreign.delegatee_key, foreign.swarm.network_id()),
+        MessageSigner::new(&foreign_key, foreign.swarm.network_id()),
     )
     .map_err(Error::CoreError)?;
 

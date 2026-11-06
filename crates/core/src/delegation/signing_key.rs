@@ -84,6 +84,19 @@ impl DelegateeKey {
         builder.set_delegator_signature(sig.to_vec()).build()
     }
 
+    /// Mint a fresh [`DelegateeKey`] authorized by `key` for `ttl_ms` starting at `ts_ms`.
+    pub fn new_with_seckey_at(key: &SecretKey, ttl_ms: u64, ts_ms: u128) -> Result<Self> {
+        let account_entity = Did::from(key.address()).to_string();
+        let account_type = "secp256k1".to_string();
+        let builder = DelegationBuilder::new(account_entity, account_type)
+            .set_ttl(ttl_ms)
+            .set_ts(ts_ms);
+        let sig = key.sign(&builder.unsigned_proof())?;
+        builder
+            .set_delegator_signature(sig.to_vec())
+            .build_at(ts_ms)
+    }
+
     /// Clone the public delegation proof.
     pub fn delegation(&self) -> Delegation {
         self.delegation.clone()

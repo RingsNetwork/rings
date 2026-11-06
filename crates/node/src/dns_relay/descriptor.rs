@@ -14,6 +14,8 @@
 //!   announcement(σ) = Announcement(ports, txt)       validated, or rejected
 //! ```
 
+use std::borrow::Borrow;
+
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
@@ -163,7 +165,7 @@ impl ServiceDescriptor {
     /// Create and sign a descriptor.
     pub fn new_signed(
         body: ServiceDescriptorBody,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> Result<Self> {
         sign_descriptor_body(
             body,
