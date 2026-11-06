@@ -29,7 +29,12 @@ const BODY: &str = r#"{"jsonrpc":"2.0","result":{"did":"fixture"},"id":1}"#;
 
 /// Create a locally trusted certificate without disabling certificate verification.
 fn tls_fixture() -> TestResult<(TlsAcceptor, reqwest::Certificate)> {
-    let certificate = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])?;
+    tls_fixture_for("localhost")
+}
+
+/// Create a locally trusted certificate for `domain` without disabling certificate verification.
+fn tls_fixture_for(domain: &str) -> TestResult<(TlsAcceptor, reqwest::Certificate)> {
+    let certificate = rcgen::generate_simple_self_signed(vec![domain.to_owned()])?;
     let root = reqwest::Certificate::from_der(certificate.cert.der())?;
     let key = rustls::pki_types::PrivatePkcs8KeyDer::from(certificate.key_pair.serialize_der());
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -41,11 +46,8 @@ fn tls_fixture() -> TestResult<(TlsAcceptor, reqwest::Certificate)> {
     Ok((TlsAcceptor::from(Arc::new(config)), root))
 }
 
-/// Read the complete request headers and return a configured HTTP response.
-async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
-    mut stream: S,
-    reply: String,
-) -> std::io::Result<String> {
+/// Read an HTTP request header block bounded by `\r\n\r\n`.
+async fn read_headers<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<String> {
     let mut request = Vec::new();
     let mut byte = [0_u8; 1];
     while !request.ends_with(b"\r\n\r\n") {
@@ -55,9 +57,18 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
             return Err(std::io::Error::other("fixture headers exceed bound"));
         }
     }
+    String::from_utf8(request).map_err(std::io::Error::other)
+}
+
+/// Read the complete request headers and return a configured HTTP response.
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
+    reply: String,
+) -> std::io::Result<String> {
+    let request = read_headers(&mut stream).await?;
     stream.write_all(reply.as_bytes()).await?;
     stream.shutdown().await?;
-    String::from_utf8(request).map_err(std::io::Error::other)
+    Ok(request)
 }
 
 /// Serve exactly one request, timing out if the client does not reach the intended listener.
@@ -235,5 +246,68 @@ async fn unauthenticated_http_retains_dns_pin() -> TestResult {
         .await??
         .to_ascii_lowercase()
         .contains("authorization:"));
+    Ok(())
+}
+
+/// An explicit HTTP CONNECT proxy tunnels HTTPS and delivers credentials over verified TLS
+/// without local DNS resolution of the destination host.
+#[tokio::test]
+async fn https_connect_proxy_delivers_credentials_over_tls_without_local_dns() -> TestResult {
+    let (tls, root) = tls_fixture_for("seed.example.test")?;
+    let target_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let target_addr = target_listener.local_addr()?;
+    let server = serve(target_listener, Some(tls), success_reply());
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_addr = proxy_listener.local_addr()?;
+    let proxy_task: ServerTask = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            let (mut client_stream, _) = proxy_listener.accept().await?;
+            let connect_headers = read_headers(&mut client_stream).await?;
+            let mut upstream = tokio::net::TcpStream::connect(target_addr).await?;
+            client_stream
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await?;
+            let _ = tokio::io::copy_bidirectional(&mut client_stream, &mut upstream).await?;
+            Ok(connect_headers)
+        })
+        .await?
+    });
+
+    let builder = reqwest::Client::builder().add_root_certificate(root);
+    let proxy = reqwest::Proxy::all(format!("http://{proxy_addr}"))?;
+    let endpoint = format!("https://seed.example.test:{}", target_addr.port());
+    let client = Client::with_http_client_builder_and_proxy(&endpoint, builder, proxy)?
+        .with_bearer_token(TOKEN)?;
+    assert_eq!(client.node_did(&NodeDidRequest {}).await?.did, "fixture");
+
+    let connect_request = proxy_task.await??;
+    assert!(connect_request.starts_with(&format!(
+        "CONNECT seed.example.test:{} HTTP/1.1\r\n",
+        target_addr.port()
+    )));
+    assert!(!connect_request
+        .to_ascii_lowercase()
+        .contains(&TOKEN.to_ascii_lowercase()));
+    assert!(server
+        .await??
+        .to_ascii_lowercase()
+        .contains(&format!("authorization: bearer {TOKEN}")));
+    Ok(())
+}
+
+/// A proxied client cannot use the direct-loopback `http://` credential exception.
+#[tokio::test]
+async fn proxied_client_rejects_loopback_http_credentials() -> TestResult {
+    let proxy = reqwest::Proxy::all("http://127.0.0.1:8888")?;
+    let client = Client::with_http_client_builder_and_proxy(
+        "http://127.0.0.1:50000",
+        reqwest::Client::builder(),
+        proxy,
+    )?;
+    assert!(matches!(
+        client.with_bearer_token(TOKEN),
+        Err(RpcError::InsecureAuthenticatedEndpoint)
+    ));
     Ok(())
 }

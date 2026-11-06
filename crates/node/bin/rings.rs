@@ -213,6 +213,9 @@ async fn apply_run_overrides(
             .with_context(|| format!("loading bootstrap seed {source}"))?;
         c.bootstrap.peers.extend(seed.peers);
     }
+    if let Some(proxy_url) = args.remote_rpc_proxy_url.take() {
+        c.remote_rpc_proxy_url = Some(proxy_url);
+    }
     if let Some(external_api_addr) = args.external_api_addr.take() {
         c.external_api_addr = external_api_addr;
     }
@@ -859,5 +862,33 @@ mod tests {
             result,
             Err(error) if error.to_string().contains("activation failed before startup")
         ));
+    }
+
+    #[tokio::test]
+    async fn test_run_remote_rpc_proxy_url_override_applies_to_config() {
+        let parsed = parse_without_log_level_env([
+            "rings",
+            "run",
+            "--remote-rpc-proxy-url",
+            "http://127.0.0.1:18080",
+        ]);
+        let mut cfg = super::config::Config::new("delegatee_key");
+        assert_eq!(cfg.remote_rpc_proxy_url, None);
+
+        if let Ok(Cli {
+            command: super::Command::Run(mut run_args),
+            ..
+        }) = parsed
+        {
+            assert!(
+                super::apply_run_overrides(&mut cfg, &mut run_args, "config.yaml")
+                    .await
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            cfg.remote_rpc_proxy_url.as_deref(),
+            Some("http://127.0.0.1:18080")
+        );
     }
 }
