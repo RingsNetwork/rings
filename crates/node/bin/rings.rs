@@ -933,4 +933,27 @@ mod tests {
             );
         }
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_script_and_contrib_service_definitions() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir.parent().and_then(std::path::Path::parent);
+        assert!(repo_root.is_some());
+        if let Some(repo_root) = repo_root {
+            let script = repo_root.join("scripts/test-install.sh");
+            let output = std::process::Command::new("sh")
+                .arg(script.as_os_str())
+                .output();
+            assert!(output.is_ok());
+            if let Ok(output) = output {
+                assert!(
+                    output.status.success(),
+                    "scripts/test-install.sh failed:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(output.stdout.as_slice()),
+                    String::from_utf8_lossy(output.stderr.as_slice())
+                );
+            }
+        }
+    }
 }

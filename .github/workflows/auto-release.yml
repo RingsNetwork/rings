@@ -92,6 +92,12 @@ jobs:
           files: |
             LICENSE
             rings-${{ needs.gen_version.outputs.version }}-x86_64-unknown-linux-musl/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-x86_64-unknown-linux-musl/*.sha256
+            rings-${{ needs.gen_version.outputs.version }}-aarch64-unknown-linux-gnu/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-aarch64-unknown-linux-gnu/*.sha256
             rings-${{ needs.gen_version.outputs.version }}-x86_64-apple-darwin/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-x86_64-apple-darwin/*.sha256
             rings-${{ needs.gen_version.outputs.version }}-aarch64-apple-darwin/*.zip
+            rings-${{ needs.gen_version.outputs.version }}-aarch64-apple-darwin/*.sha256
             rings-${{ needs.gen_version.outputs.version }}-wasm32-unknown-unknown/*.tgz
+            rings-${{ needs.gen_version.outputs.version }}-wasm32-unknown-unknown/*.sha256

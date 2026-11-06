@@ -35,7 +35,7 @@ datachannels, with no application server in the data path.
 ## Try it
 
 - **Browser:** open [rings.rs/#node](https://rings.rs/#node). Nothing to install.
-- **Native:** download `rings` from [Releases](https://github.com/RingsNetwork/rings/releases),
+- **Native:** `curl -fsSL https://rings.rs/install.sh | sh`,
   then `rings init && rings run`. See [Installation](#installation).
 - **Web app:** `npm install @ringsnetwork/rings-node`, then follow the
   [guide](https://rings.rs/#guide).
@@ -142,8 +142,17 @@ envelopes, and the protocol's shell runs the prover.
 
 ## Installation
 
-- **Prebuilt:** [Releases](https://github.com/RingsNetwork/rings/releases) ship `rings` for
-  macOS (aarch64, x86_64), Linux (x86_64, static musl), and the Wasm package.
+```sh
+curl -fsSL https://rings.rs/install.sh | sh
+```
+
+The installer detects macOS (`aarch64`, `x86_64`) or Linux (`x86_64` static musl, `aarch64`
+gnu), downloads the matching [release](https://github.com/RingsNetwork/rings/releases)
+archive, verifies its SHA-256 checksum, and installs `rings` to `/usr/local/bin` (when
+writable) or `~/.local/bin`. Re-run the same command to upgrade in place, or pass
+`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.38.1`)
+to pin a release.
+
 - **Cargo:** the workspace denies warnings, so use the toolchain pinned in
   [`rust-toolchain.toml`](./rust-toolchain.toml):
 
@@ -153,6 +162,11 @@ envelopes, and the protocol's shell runs the prover.
 
 - **Source:** `git clone https://github.com/RingsNetwork/rings && cd rings && cargo install --path crates/node`
 - **Wasm:** see [Build for Wasm](./docs/src/build-for-wasm.md).
+
+### Running persistently
+
+Static `systemd` (Linux user unit) and `launchd` (macOS LaunchAgent) service definitions
+live under [`contrib/`](./contrib/README.md).
 
 ## Documentation
 
