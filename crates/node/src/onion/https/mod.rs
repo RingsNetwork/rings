@@ -83,7 +83,7 @@ pub struct OnionHttpsResponse {
 
 /// What a fetch session's world-to-client stream encodes: the response, or why there is none.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-enum OnionHttpsOutcome {
+pub(crate) enum OnionHttpsOutcome {
     /// The exit fetched a response.
     Response(OnionHttpsResponse),
     /// The exit could not fetch one.
@@ -91,17 +91,17 @@ enum OnionHttpsOutcome {
 }
 
 /// Encode a request, the client-to-world stream of a fetch.
-fn encode_request(request: &OnionHttpsRequest) -> Result<Vec<u8>> {
+pub(crate) fn encode_request(request: &OnionHttpsRequest) -> Result<Vec<u8>> {
     rings_codec::serialize(request).map_err(|_| Error::EncodeError)
 }
 
 /// Encode an outcome, the world-to-client stream of a fetch.
-fn encode_outcome(outcome: &OnionHttpsOutcome) -> Result<Vec<u8>> {
+pub(crate) fn encode_outcome(outcome: &OnionHttpsOutcome) -> Result<Vec<u8>> {
     rings_codec::serialize(outcome).map_err(|_| Error::EncodeError)
 }
 
 /// Decode the world-to-client stream of a fetch.
-fn decode_outcome(bytes: &[u8]) -> Result<OnionHttpsOutcome> {
+pub(crate) fn decode_outcome(bytes: &[u8]) -> Result<OnionHttpsOutcome> {
     rings_codec::deserialize(bytes).map_err(|_| Error::DecodeError)
 }
 

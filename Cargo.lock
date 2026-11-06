@@ -4139,6 +4139,7 @@ dependencies = [
  "rings-test-support",
  "rings-transport",
  "serde",
+ "serde-reflection",
  "serde-saphyr",
  "serde-wasm-bindgen",
  "serde_json",
