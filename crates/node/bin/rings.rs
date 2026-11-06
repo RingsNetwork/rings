@@ -891,4 +891,38 @@ mod tests {
             Some("http://127.0.0.1:18080")
         );
     }
+
+    #[test]
+    fn test_connect_answer_and_accept_help_describes_counter_offer_flow() {
+        let mut cmd = Cli::command();
+        let connect = cmd.find_subcommand_mut("connect");
+        assert!(connect.is_some());
+        if let Some(connect) = connect {
+            let answer_help = connect
+                .find_subcommand_mut("answer")
+                .map(|sub| sub.render_long_help().to_string())
+                .unwrap_or_default();
+            assert!(
+                answer_help.contains("counter-offer"),
+                "connect answer help should explain counter-offer: {answer_help}"
+            );
+            assert!(
+                answer_help.contains("connect accept"),
+                "connect answer help should mention connect accept: {answer_help}"
+            );
+
+            let accept_help = connect
+                .find_subcommand_mut("accept")
+                .map(|sub| sub.render_long_help().to_string())
+                .unwrap_or_default();
+            assert!(
+                accept_help.contains("counter-offer"),
+                "connect accept help should explain counter-offer: {accept_help}"
+            );
+            assert!(
+                accept_help.contains("connect answer"),
+                "connect accept help should point to connect answer: {accept_help}"
+            );
+        }
+    }
 }

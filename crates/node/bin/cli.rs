@@ -477,14 +477,35 @@ pub(crate) enum ConnectCommand {
     #[command(about = "Connects to a node using its seed from a URL or file.")]
     Seed(ConnectWithSeedCommand),
     #[command(
-        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer."
+        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer.",
+        long_about = "Creates a manual-handshake offer targeting a peer DID and prints the encoded offer.\n\n\
+                      Manual handshakes take three steps: `connect offer <peer-did>` -> peer runs \
+                      `connect answer <offer>` -> offerer finishes with `connect accept <answer>`."
     )]
     Offer(ConnectOfferCommand),
     #[command(
-        about = "Answers a peer's offer; prints the encoded answer to return to the offerer."
+        about = "Answers a peer's offer; prints the encoded answer (or counter-offer on a simultaneous-offer tie-break).",
+        long_about = "Answers a peer's offer in the three-step manual handshake (`connect offer` -> \
+                      `connect answer` -> `connect accept`) and prints the encoded reply payload to stdout \
+                      with a status notice on stderr.\n\n\
+                      Normally the reply is an answer (`ConnectNodeReport`), which the offerer completes \
+                      with `rings connect accept <answer>`.\n\n\
+                      When both sides offer simultaneously and this node's pending offer prevails on the \
+                      DID tie-break (glare), the printed payload is a counter-offer (`ConnectNodeSend`) \
+                      instead of an answer: pass it to the peer so the peer runs \
+                      `rings connect answer <counter-offer>`, then finish on this node with \
+                      `rings connect accept <answer>`."
     )]
     Answer(ConnectAnswerCommand),
-    #[command(about = "Accepts a peer's answer, completing the manual handshake.")]
+    #[command(
+        about = "Accepts a peer's answer, completing the manual handshake (if given a counter-offer, run `connect answer` instead).",
+        long_about = "Accepts a peer's answer (`ConnectNodeReport`), completing the three-step manual \
+                      handshake (`connect offer` -> `connect answer` -> `connect accept`).\n\n\
+                      If `connect answer` on the peer returned a counter-offer (`ConnectNodeSend`) \
+                      because both nodes offered simultaneously and the peer won the DID tie-break, \
+                      do not pass it to `connect accept`: run `rings connect answer <counter-offer>` \
+                      on this node and return that answer to the peer's `rings connect accept`."
+    )]
     Accept(ConnectAcceptCommand),
 }
 
