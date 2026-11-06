@@ -363,6 +363,11 @@ enum AeadErrorSide {
     Decrypt,
 }
 
+/// Derive the 32-byte AEAD key from `key_material` with `HKDF-SHA256(AEAD_HKDF_SALT, key_material)`.
+///
+/// The `Hkdf`'s HMAC state (the PRK's `K ⊕ ipad` and `K ⊕ opad` chaining values) is wiped on drop
+/// by `sha2`'s `zeroize`. `hkdf` 0.13's previous output block `T(1)`, HMAC's padded key block and
+/// SHA-256's message schedule are the transient stack copies `SECURITY.md` lists (#852, #1122).
 fn derive_aead_key(
     key_material: &[u8],
     side: AeadErrorSide,

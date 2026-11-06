@@ -291,6 +291,54 @@ fn test_aead_encrypt_decrypt_binary_bytes() {
 }
 
 #[test]
+fn test_aead_fixed_vector_ciphertext_and_round_trip() {
+    let key =
+        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+            .unwrap();
+    let pubkey = key.pubkey();
+    let mut rng = Hc128Rng::seed_from_u64(1122);
+    let plaintext = b"rings-core elgamal aead known-answer vector";
+    let aad = b"rings-core elgamal aead aad";
+    let expected = AeadCiphertext {
+        version: 1,
+        encrypted_key: vec![
+            (
+                PublicKey::from_hex_string(
+                    "022019e57afd931a2b549bd8d38249c5d957d48d56a5bf50b5cda9f51e9404aeaf",
+                )
+                .unwrap(),
+                PublicKey::from_hex_string(
+                    "03012c14952ce9d38dc321b0274622118503dfed39bc2b916d3528fbaf1a0db124",
+                )
+                .unwrap(),
+            ),
+            (
+                PublicKey::from_hex_string(
+                    "021fb0f3450402ed417606d54a32e2c71c8eea9ee340491fce6cd56e69735bbd3c",
+                )
+                .unwrap(),
+                PublicKey::from_hex_string(
+                    "0359b26196d2de5faaa1eede8c82d9cb7758cd8706400050ab7108aa571380d03c",
+                )
+                .unwrap(),
+            ),
+        ],
+        nonce: hex::decode("9213d0f01c91c791eb6f0d21")
+            .unwrap()
+            .try_into()
+            .unwrap(),
+        ciphertext: hex::decode(
+            "8321782dda3c3539e5e15a858378c202c2d601449176682d6ee48742548f586aeec913c5494845681b98b5bebd68586d75a17a8a576332c0546e21",
+        )
+        .unwrap(),
+    };
+
+    let sealed = encrypt_aead_with_rng(plaintext, aad, pubkey, &mut rng).unwrap();
+    assert_eq!(sealed, expected);
+    assert_eq!(decrypt_aead(&expected, aad, &key).unwrap(), plaintext);
+}
+
+#[test]
 fn test_aead_rejects_ciphertext_tampering() {
     let key =
         SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")

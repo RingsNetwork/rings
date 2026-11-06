@@ -81,6 +81,34 @@ fn test_the_key_keeps_its_bytes() {
 }
 
 #[test]
+fn test_address_of_known_vector_for_fixed_key() {
+    let plan_64 = AddressPlan::new(prefix("2001:db8:1::/64"), key(1));
+    let plan_96 = AddressPlan::new(prefix("2001:db8:2::/96"), key(1));
+    let plan_120 = AddressPlan::new(prefix("fd00::/120"), key(1));
+
+    assert_eq!(
+        plan_64.address_of(&TestOwner(0)),
+        "2001:db8:1:0:fb79:1160:e1c6:7934"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+    );
+    assert_eq!(
+        plan_64.address_of(&TestOwner(1)),
+        "2001:db8:1:0:ee35:620c:1355:6be1"
+            .parse::<Ipv6Addr>()
+            .unwrap()
+    );
+    assert_eq!(
+        plan_96.address_of(&TestOwner(1)),
+        "2001:db8:2::1355:6be1".parse::<Ipv6Addr>().unwrap()
+    );
+    assert_eq!(
+        plan_120.address_of(&TestOwner(1)),
+        "fd00::e1".parse::<Ipv6Addr>().unwrap()
+    );
+}
+
+#[test]
 fn test_bind_persists_a_fresh_binding_and_renewals_past_the_refresh_only() {
     // Retention 800: a renewal is persisted once it moved more than 100.
     let mut book = AddressBook::new(800, 8);
