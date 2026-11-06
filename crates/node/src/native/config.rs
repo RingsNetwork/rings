@@ -923,4 +923,149 @@ gateway:
         assert!(detail.contains("quoted scalar"), "detail: {detail}");
         assert!(detail.contains("line 2"), "detail: {detail}");
     }
+
+    /// Run `docker/cluster/rings-cluster-entrypoint.sh` against a stub `RINGS_BIN` that writes a
+    /// valid delegatee key on `new-delegation` and exits immediately on `run`, so the entrypoint
+    /// writes `config/node-$i.yaml` for each node and stops at the first readiness check.
+    #[cfg(unix)]
+    fn run_cluster_entrypoint_config_pass(
+        bootstrap_peers: Option<&str>,
+    ) -> (std::process::Output, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let root =
+            std::env::temp_dir().join(format!("rings-cluster-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp cluster root");
+        let dumped_key_path = root.join("dumped.delegatee_key");
+        fs::write(&dumped_key_path, dumped_delegatee_key()).expect("write dumped delegatee key");
+        let stub_bin = root.join("rings-stub.sh");
+        let stub_script = format!(
+            "#!/usr/bin/env bash\n\
+             set -euo pipefail\n\
+             prev=\"\"\n\
+             for arg in \"$@\"; do\n\
+                 if [[ \"$prev\" == \"--delegatee-key\" ]]; then\n\
+                     cp {} \"$arg\"\n\
+                     exit 0\n\
+                 fi\n\
+                 prev=\"$arg\"\n\
+             done\n\
+             exit 0\n",
+            dumped_key_path.display()
+        );
+        fs::write(&stub_bin, stub_script).expect("write stub rings bin");
+        fs::set_permissions(&stub_bin, fs::Permissions::from_mode(0o755))
+            .expect("chmod stub rings bin");
+
+        let entrypoint = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docker/cluster/rings-cluster-entrypoint.sh");
+        let cluster_dir = root.join("cluster");
+        let mut command = Command::new("bash");
+        command
+            .arg(&entrypoint)
+            .env("RINGS_BIN", &stub_bin)
+            .env("RINGS_CLUSTER_DIR", &cluster_dir)
+            .env("RINGS_NODE_COUNT", "2")
+            .env("RINGS_READY_RETRIES", "1")
+            .env("RINGS_READY_SLEEP_SECONDS", "0");
+        if let Some(peers) = bootstrap_peers {
+            command.env("RINGS_BOOTSTRAP_PEERS", peers);
+        } else {
+            command.env_remove("RINGS_BOOTSTRAP_PEERS");
+        }
+        let output = command.output().expect("execute cluster entrypoint");
+        (output, root)
+    }
+
+    /// `docker/cluster/rings-cluster-entrypoint.sh` writes `bootstrap.peers` into each node's
+    /// generated YAML (`node-$i.yaml`), defaulting to `[]` and populating validated
+    /// `<did>=<url>` targets when `RINGS_BOOTSTRAP_PEERS` is set (#1154).
+    #[cfg(unix)]
+    #[test]
+    fn test_cluster_entrypoint_writes_bootstrap_peers_into_every_node_config() {
+        use rings_core::dht::Did;
+
+        use crate::native::bootstrap::BootstrapTargets;
+
+        let local_did = Did::from(1);
+        let (_, default_root) = run_cluster_entrypoint_config_pass(None);
+        for index in 0..2 {
+            let path = default_root
+                .join("cluster/config")
+                .join(format!("node-{index}.yaml"));
+            let config = Config::read_fs(&path).expect("generated default config parses");
+            assert!(config.bootstrap.peers.is_empty());
+            assert!(
+                BootstrapTargets::from_config(config.bootstrap.clone(), local_did)
+                    .expect("empty bootstrap peers validate")
+                    .is_empty()
+            );
+            ProcessorConfig::try_from(config).expect("generated config builds ProcessorConfig");
+        }
+        let _ = fs::remove_dir_all(default_root);
+
+        let first_did = "0x1111111111111111111111111111111111111111";
+        let second_did = "0x2222222222222222222222222222222222222222";
+        let env_value = format!(
+            " {first_did} = https://node.rings.rs , {second_did}=https://seed.rings.rs:8443/ "
+        );
+        let (_, seeded_root) = run_cluster_entrypoint_config_pass(Some(env_value.as_str()));
+        for index in 0..2 {
+            let path = seeded_root
+                .join("cluster/config")
+                .join(format!("node-{index}.yaml"));
+            let config = Config::read_fs(&path).expect("generated seeded config parses");
+            assert_eq!(config.bootstrap.peers.len(), 2);
+            assert_eq!(
+                config
+                    .bootstrap
+                    .peers
+                    .first()
+                    .map(|peer| (peer.did.as_str(), peer.url.as_str())),
+                Some((first_did, "https://node.rings.rs"))
+            );
+            assert_eq!(
+                config
+                    .bootstrap
+                    .peers
+                    .get(1)
+                    .map(|peer| (peer.did.as_str(), peer.url.as_str())),
+                Some((second_did, "https://seed.rings.rs:8443/"))
+            );
+            let targets = BootstrapTargets::from_config(config.bootstrap.clone(), local_did)
+                .expect("seeded bootstrap peers validate");
+            assert_eq!(targets.len(), 2);
+            ProcessorConfig::try_from(config).expect("seeded config builds ProcessorConfig");
+        }
+        let _ = fs::remove_dir_all(seeded_root);
+    }
+
+    /// Malformed `RINGS_BOOTSTRAP_PEERS` values fail upfront before any node config is written.
+    #[cfg(unix)]
+    #[test]
+    fn test_cluster_entrypoint_rejects_malformed_bootstrap_peers() {
+        for invalid in [
+            "0x1111111111111111111111111111111111111111",
+            "=https://node.rings.rs",
+            "0x1111111111111111111111111111111111111111=",
+            " , ",
+        ] {
+            let (output, root) = run_cluster_entrypoint_config_pass(Some(invalid));
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                !output.status.success(),
+                "invalid RINGS_BOOTSTRAP_PEERS={invalid:?} must fail"
+            );
+            assert!(
+                stdout.contains("ERROR: RINGS_BOOTSTRAP_PEERS"),
+                "stdout must report RINGS_BOOTSTRAP_PEERS error for {invalid:?}, got: {stdout}"
+            );
+            assert!(
+                !root.join("cluster/config/node-0.yaml").exists(),
+                "entrypoint must fail before writing node configs for {invalid:?}"
+            );
+            let _ = fs::remove_dir_all(root);
+        }
+    }
 }

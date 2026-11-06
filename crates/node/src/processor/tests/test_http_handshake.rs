@@ -15,6 +15,7 @@ use rings_core::message::WireVersionMismatch;
 use rings_core::message::WIRE_VERSION;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
 use rings_rpc::protos::rings_node::NodeDidRequest;
+use rings_rpc::protos::rings_node::NodeDidResponse;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use super::common::connect_processors;
@@ -40,6 +41,13 @@ struct PrevailingPeer {
 
 #[async_trait::async_trait]
 impl RemoteHandshake for PrevailingPeer {
+    async fn node_did(&self) -> Result<NodeDidResponse> {
+        self.processor
+            .handle_rpc(NodeDidRequest {})
+            .await
+            .map_err(Error::InternalRpcError)
+    }
+
     async fn answer_offer(&self, _offer: &MessagePayload) -> Result<MessagePayload> {
         self.own_offer
             .lock()
@@ -104,6 +112,13 @@ struct PublicSeed {
 
 #[async_trait::async_trait]
 impl RemoteHandshake for PublicSeed {
+    async fn node_did(&self) -> Result<NodeDidResponse> {
+        self.processor
+            .handle_rpc(NodeDidRequest {})
+            .await
+            .map_err(Error::InternalRpcError)
+    }
+
     async fn answer_offer(&self, offer: &MessagePayload) -> Result<MessagePayload> {
         Ok(self
             .processor
