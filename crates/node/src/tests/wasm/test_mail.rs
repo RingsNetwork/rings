@@ -34,6 +34,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use super::provider_did;
 use super::with_hang_guard;
 use super::TEST_HANG_GUARD;
+use crate::error::Error;
 use crate::mail::descriptor::MailRecipient;
 use crate::mail::gateway::MailDrop;
 use crate::mail::gateway::MailGateway;
@@ -44,6 +45,7 @@ use crate::mail::recipient::RecipientRecord;
 use crate::mail::recipient::StoredMail;
 use crate::mail::recipient::DEFAULT_MAIL_POLL_INTERVAL;
 use crate::processor::ProcessorConfig;
+use crate::provider::browser::provider::mail::BrowserMailError;
 use crate::provider::browser::provider::mail::MAIL_STORAGE_ROWS;
 use crate::provider::browser::BrowserMailOptions;
 use crate::provider::browser::ProviderListener;
@@ -391,7 +393,7 @@ async fn test_mail_two_tabs_scope_unreadable_records_and_share_filed_records() {
             let storage_name = storage_name();
             let mut first_notifications = MailNotifications::new();
             let first = Provider::new_browser_provider_with_mail(
-                first_config,
+                first_config.clone(),
                 storage_name.clone(),
                 BrowserMailOptions::default(),
                 Some(first_notifications.function()),
@@ -414,6 +416,26 @@ async fn test_mail_two_tabs_scope_unreadable_records_and_share_filed_records() {
             assert!(filed_records(&storage_name).await.is_empty());
 
             let mut second_notifications = MailNotifications::new();
+            let locked_attempt = Provider::new_browser_provider_with_mail(
+                second_config.clone(),
+                storage_name.clone(),
+                BrowserMailOptions::default(),
+                Some(second_notifications.function()),
+            )
+            .await;
+            assert!(
+                matches!(
+                    &locked_attempt,
+                    Err(BrowserMailError::Provider(Error::BrowserStorageLocked(locked)))
+                        if locked == &storage_name
+                ),
+                "expected BrowserStorageLocked({storage_name:?}), got {}",
+                locked_attempt
+                    .err()
+                    .map_or_else(|| "Ok(Provider)".to_owned(), |error| error.to_string())
+            );
+            first.close().await.unwrap();
+
             let second = Provider::new_browser_provider_with_mail(
                 second_config,
                 storage_name.clone(),
@@ -424,23 +446,31 @@ async fn test_mail_two_tabs_scope_unreadable_records_and_share_filed_records() {
             .unwrap();
             assert_eq!(second_notifications.next().await, identifier);
             second.poll_mail_for_test().await.unwrap();
-            assert_single_message(&first, &identifier).await;
             assert_single_message(&second, &identifier).await;
             first_notifications.assert_empty();
             second_notifications.assert_empty();
             let filed_before_resend = filed_records(&storage_name).await;
             assert_eq!(filed_before_resend.len(), 1);
-            gateway(&first)
+            gateway(&second)
                 .deliver(&first_recipient, MESSAGE)
                 .await
                 .unwrap();
+            second.close().await.unwrap();
+
+            let first = Provider::new_browser_provider_with_mail(
+                first_config,
+                storage_name.clone(),
+                BrowserMailOptions::default(),
+                Some(first_notifications.function()),
+            )
+            .await
+            .unwrap();
             first.poll_mail_for_test().await.unwrap();
             assert_single_message(&first, &identifier).await;
             first_notifications.assert_empty();
             second_notifications.assert_empty();
             assert_eq!(filed_records(&storage_name).await, filed_before_resend);
             first.close().await.unwrap();
-            second.close().await.unwrap();
         },
     )
     .await;
