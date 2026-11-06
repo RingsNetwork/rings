@@ -29,6 +29,7 @@ use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionLoopClass;
 use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
@@ -268,21 +269,14 @@ impl BrowserOnionProxy {
     /// Send one HTTPS request through this onion proxy.
     ///
     /// `url` is an absolute `https://` URL. `request` is an object with optional `method`,
-    /// `headers`, `body`, and `path` override fields. The returned Promise resolves to
-    /// `{ status, headers, body }`.
+    /// `headers`, `body`, `path` override, and `class` ([`OnionLoopClass`], defaulting to
+    /// [`OnionLoopClass::DEFAULT`], `16 KiB`; every hop on the loop sees `b` and each cell costs
+    /// `b / 16 KiB` admission units) fields. The returned Promise resolves to
+    /// `{ status, headers, body, route }`.
     pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
         let proxy = self.clone();
         future_to_promise(async move {
-            let request = if request.is_null() || request.is_undefined() {
-                OnionHttpsClientRequest {
-                    method: "GET".to_string(),
-                    path: None,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                }
-            } else {
-                js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
-            };
+            let request = parse_browser_https_request(request).map_err(JsError::from)?;
             let response = proxy
                 .request_http(url.as_str(), request)
                 .await
@@ -294,6 +288,21 @@ impl BrowserOnionProxy {
             js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
             Ok(value)
         })
+    }
+}
+
+/// Parse a browser JS request argument into [`OnionHttpsClientRequest`], defaulting `null` and
+/// `undefined` to a `GET` at [`OnionLoopClass::DEFAULT`].
+pub(super) fn parse_browser_https_request(
+    request: JsValue,
+) -> Result<OnionHttpsClientRequest, rings_core::error::Error> {
+    if request.is_null() || request.is_undefined() {
+        Ok(OnionHttpsClientRequest {
+            method: "GET".to_string(),
+            ..OnionHttpsClientRequest::default()
+        })
+    } else {
+        js_value::deserialize::<OnionHttpsClientRequest>(request)
     }
 }
 
@@ -313,8 +322,11 @@ impl BrowserOnionProxy {
         self.build_route(target).await
     }
 
-    /// Send one typed HTTPS request through this proxy.
+    /// Send one typed HTTPS request through this proxy at `request.class` (or
+    /// [`OnionLoopClass::DEFAULT`], `16 KiB`, when `None`).
     ///
+    /// Every hop on the loop sees the selected class `b` (#834 leakage table), and each cell of
+    /// the loop costs `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
     /// Dropping the returned future ends its session immediately. Browser frontends
     /// should use this method when their own request lifecycle can be cancelled.
     pub async fn request_http(
@@ -325,6 +337,23 @@ impl BrowserOnionProxy {
         let (target, call) = OnionHttpsCall::from_url(url, request)?;
         let route = self.build_route(target).await?;
         let response = self.client.request(&route, call).await?;
+        Ok(BrowserOnionProxyResponse { response, route })
+    }
+
+    /// Send one typed HTTPS request through this proxy in a session of loop class `class` (`b`).
+    ///
+    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
+    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
+    /// Dropping the returned future ends its session immediately.
+    pub async fn request_http_with_class(
+        &self,
+        url: &str,
+        request: OnionHttpsClientRequest,
+        class: OnionLoopClass,
+    ) -> NodeResult<BrowserOnionProxyResponse> {
+        let (target, call) = OnionHttpsCall::from_url(url, request)?;
+        let route = self.build_route(target).await?;
+        let response = self.client.request_with_class(&route, call, class).await?;
         Ok(BrowserOnionProxyResponse { response, route })
     }
 }

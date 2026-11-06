@@ -92,6 +92,7 @@ pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use signature::OnionServiceName;
+pub use sphinx::class::OnionLoopClass;
 pub use target::OnionProxyTarget;
 pub use target::OnionProxyTargetError;
 
