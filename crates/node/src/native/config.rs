@@ -213,6 +213,9 @@ pub struct Config {
     pub external_api_addr: String,
     /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
+    /// Optional HTTP(S) proxy URL used for remote JSON-RPC endpoints (seed and HTTP handshakes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_rpc_proxy_url: Option<String>,
     /// Optional API token file path; relative paths are resolved next to this config file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_token_path: Option<String>,
@@ -338,6 +341,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             onion_exit_ttl_secs: config.onion_exit_ttl_secs,
             onion_exit_services: config.onion_exit_services,
             onion_exit_policy: config.onion_exit_policy,
+            remote_rpc_proxy_url: config.remote_rpc_proxy_url,
         })
     }
 }
@@ -360,6 +364,7 @@ impl Config {
             internal_api_port: DEFAULT_INTERNAL_API_PORT,
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
+            remote_rpc_proxy_url: None,
             api_token_path: None,
             api_allowed_origins: Vec::new(),
             allow_remote_external_api: false,
@@ -523,9 +528,37 @@ measure_storage:
             crate::onion::default_onion_exit_services()
         );
         assert!(cfg.gateway.is_none());
+        assert_eq!(cfg.remote_rpc_proxy_url, None);
         assert_eq!(cfg.api_token_path, None);
         assert!(cfg.api_allowed_origins.is_empty());
         assert!(!cfg.allow_remote_external_api);
+    }
+
+    #[test]
+    fn test_config_with_valid_remote_rpc_proxy_url_builds_processor_config() {
+        let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
+        config.remote_rpc_proxy_url = Some("http://127.0.0.1:8080".to_string());
+
+        let processor_config = ProcessorConfig::try_from(config);
+        let _ = fs::remove_file(delegatee_key_path);
+
+        assert!(matches!(
+            processor_config
+                .as_ref()
+                .map(|cfg| cfg.remote_rpc_proxy.as_ref().map(|p| p.as_str())),
+            Ok(Some("http://127.0.0.1:8080/"))
+        ));
+    }
+
+    #[test]
+    fn test_config_with_invalid_remote_rpc_proxy_url_is_rejected() {
+        let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
+        config.remote_rpc_proxy_url = Some("socks5://127.0.0.1:1080".to_string());
+
+        let processor_config = ProcessorConfig::try_from(config);
+        let _ = fs::remove_file(delegatee_key_path);
+
+        assert!(matches!(processor_config, Err(Error::InvalidConfig(_))));
     }
 
     #[test]

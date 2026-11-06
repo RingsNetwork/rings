@@ -21,6 +21,9 @@ pub struct Client {
     endpoint_url: String,
     /// Credential attached only after endpoint policy validation.
     bearer_token: Option<String>,
+    /// Whether this client routes requests through an explicit HTTP proxy, which excludes the
+    /// direct-loopback `http://` credential exception.
+    proxied: bool,
 }
 
 /// The errors returned by the client.
@@ -82,19 +85,46 @@ impl Client {
         endpoint_url: &str,
         builder: reqwest::ClientBuilder,
     ) -> Result<Self> {
+        #[cfg(not(target_family = "wasm"))]
+        let client = transport::build_client(builder, None)?;
+        #[cfg(target_family = "wasm")]
+        let client = transport::build_client(builder)?;
         Ok(Self {
-            client: transport::build_client(builder)?,
+            client,
             endpoint_url: endpoint_url.to_string(),
             bearer_token: None,
+            proxied: false,
         })
     }
 
-    /// Attaches a credential only to HTTPS or literal loopback HTTP endpoints.
+    /// Builds a native RPC transport routed through `proxy`, retaining caller timeouts and TLS
+    /// roots.
+    ///
+    /// Ambient proxy variables and redirects are still disabled before `proxy` is installed.
+    /// Because a proxied transport is not direct loopback, attaching a credential requires
+    /// `https://`: the literal-loopback `http://` exception does not apply when a proxy is
+    /// configured.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_http_client_builder_and_proxy(
+        endpoint_url: &str,
+        builder: reqwest::ClientBuilder,
+        proxy: reqwest::Proxy,
+    ) -> Result<Self> {
+        Ok(Self {
+            client: transport::build_client(builder, Some(proxy))?,
+            endpoint_url: endpoint_url.to_string(),
+            bearer_token: None,
+            proxied: true,
+        })
+    }
+
+    /// Attaches a credential only to HTTPS or, on a direct (`!proxied`) transport, literal
+    /// loopback HTTP endpoints.
     ///
     /// HTTP hostnames, including `localhost`, are rejected rather than trusting
     /// DNS to preserve the loopback exception. URL userinfo is not accepted.
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Result<Self> {
-        transport::authenticated_endpoint(&self.endpoint_url)?;
+        transport::authenticated_endpoint(&self.endpoint_url, self.proxied)?;
         self.bearer_token = Some(token.into());
         Ok(self)
     }
@@ -129,6 +159,7 @@ impl Client {
             &self.client,
             &self.endpoint_url,
             self.bearer_token.as_deref(),
+            self.proxied,
             body,
         )
         .await?;

@@ -197,7 +197,7 @@ impl Processor {
         peer: HandshakePeer,
     ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
         self.refuse_if_unadmitted(peer)?;
-        let client = remote_rpc_client(endpoint, api_token).await?;
+        let client = remote_rpc_client(endpoint, api_token, self.remote_rpc_proxy.as_ref()).await?;
         let attempt = self.connect_peer_over(&client, peer).await;
         if let Err(HandshakeFailure::Failed(Error::HandshakePeerMismatch { expected, actual })) =
             attempt.as_ref()

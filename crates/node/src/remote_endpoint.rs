@@ -50,35 +50,113 @@ impl fmt::Display for RemoteRpcEndpoint {
     }
 }
 
+/// An HTTP(S) proxy URL that passed the remote RPC proxy policy: `http` or `https` scheme, a host
+/// and usable port, root path (`/`), and no credentials, query parameters, or fragment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteRpcProxy(reqwest::Url);
+
+impl RemoteRpcProxy {
+    /// Parse `url` as an HTTP(S) proxy for remote RPC endpoints.
+    pub fn parse(url: &str) -> Result<Self> {
+        let parsed = reqwest::Url::parse(url).map_err(|error| {
+            Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}"))
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::InvalidConfig(
+                "remote_rpc_proxy_url must use http:// or https://".to_string(),
+            ));
+        }
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(Error::InvalidConfig(
+                "credentials, non-root paths, query parameters, and fragments are not permitted \
+                 in remote_rpc_proxy_url"
+                    .to_string(),
+            ));
+        }
+        if parsed.host().is_none() || parsed.port_or_known_default().is_none() {
+            return Err(Error::InvalidConfig(
+                "remote_rpc_proxy_url must include a host and usable port".to_string(),
+            ));
+        }
+        #[cfg(rings_native)]
+        reqwest::Proxy::all(parsed.as_str()).map_err(|error| {
+            Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}"))
+        })?;
+        Ok(Self(parsed))
+    }
+
+    /// The proxy URL as a string.
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Build the `reqwest::Proxy` for this proxy URL.
+    #[cfg(rings_native)]
+    pub(crate) fn to_reqwest_proxy(&self) -> Result<reqwest::Proxy> {
+        reqwest::Proxy::all(self.as_str()).map_err(|error| Error::RemoteRpcError(error.to_string()))
+    }
+}
+
+impl fmt::Display for RemoteRpcProxy {
+    /// Render the proxy as its URL.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Bound on every HTTP request to a remote endpoint, and on the resolution of its host, so an
 /// endpoint that accepts a connection and never answers, or a resolver that never does, cannot
 /// hold a caller indefinitely.
 #[cfg(rings_native)]
 const REMOTE_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// A JSON-RPC client for `endpoint`: no proxy, no redirects, a request timeout, the host pinned
-/// to the addresses the public-target resolver returned, and the bearer token attached when
-/// given.
+/// A JSON-RPC client for `endpoint`: no redirects, a request timeout, and the bearer token
+/// attached when given.
+///
+/// By default (`proxy = None`), ambient proxy variables are ignored and a domain endpoint is
+/// resolved once through the public-target resolver and pinned to the returned addresses. When
+/// `proxy` is `Some`, requests are routed through that explicit HTTP(S) proxy and local DNS
+/// pinning is skipped so the proxy resolves the target (for example on `CONNECT host:port`),
+/// while [`RemoteRpcEndpoint`] still enforces the public-host URL policy before any request is
+/// sent.
 #[cfg(rings_native)]
 pub(crate) async fn remote_rpc_client(
     endpoint: &RemoteRpcEndpoint,
     api_token: Option<&str>,
+    proxy: Option<&RemoteRpcProxy>,
 ) -> Result<rings_rpc::jsonrpc::Client> {
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(REMOTE_RPC_TIMEOUT);
-    if let Some(target) = resolution_target(&endpoint.0)? {
-        let addresses = tokio::time::timeout(
-            REMOTE_RPC_TIMEOUT,
-            crate::onion::target::resolve_public_target(&target.lookup),
-        )
-        .await
-        .map_err(|_| Error::RemoteRpcError("endpoint resolution timed out".to_string()))??;
-        builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
+    let target = resolution_target(&endpoint.0)?;
+    let client = match proxy {
+        Some(proxy) => rings_rpc::jsonrpc::Client::with_http_client_builder_and_proxy(
+            endpoint.as_str(),
+            builder,
+            proxy.to_reqwest_proxy()?,
+        ),
+        None => {
+            if let Some(target) = target {
+                let addresses = tokio::time::timeout(
+                    REMOTE_RPC_TIMEOUT,
+                    crate::onion::target::resolve_public_target(&target.lookup),
+                )
+                .await
+                .map_err(|_| {
+                    Error::RemoteRpcError("endpoint resolution timed out".to_string())
+                })??;
+                builder = builder.resolve_to_addrs(&target.pin_host, &addresses);
+            }
+            rings_rpc::jsonrpc::Client::with_http_client_builder(endpoint.as_str(), builder)
+        }
     }
-    let client = rings_rpc::jsonrpc::Client::with_http_client_builder(endpoint.as_str(), builder)
-        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
     match api_token {
         Some(token) => client
             .with_bearer_token(token.to_owned())
@@ -118,12 +196,18 @@ struct ResolutionTarget {
 }
 
 /// A JSON-RPC client for `endpoint` with the bearer token attached when given; the browser
-/// enforces its own origin policy.
+/// enforces its own origin and proxy policy and rejects an explicit `remote_rpc_proxy_url`.
 #[cfg(rings_browser)]
 pub(crate) async fn remote_rpc_client(
     endpoint: &RemoteRpcEndpoint,
     api_token: Option<&str>,
+    proxy: Option<&RemoteRpcProxy>,
 ) -> Result<rings_rpc::jsonrpc::Client> {
+    if proxy.is_some() {
+        return Err(Error::InvalidConfig(
+            "remote_rpc_proxy_url is supported only on native targets".to_string(),
+        ));
+    }
     let client = rings_rpc::jsonrpc::Client::new(endpoint.as_str())
         .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
     match api_token {
@@ -208,6 +292,142 @@ mod tests {
                     && target.lookup.port() == 8443
                     && target.pin_host == "example.com."
         ));
+        Ok(())
+    }
+
+    /// Non-HTTP(S), credentialed, non-root-path, query-bearing, and fragment-bearing proxy URLs
+    /// are rejected.
+    #[test]
+    fn proxy_rejects_non_http_and_credentialed_urls() {
+        for proxy_url in [
+            "socks5://127.0.0.1:1080",
+            "http://user:pass@127.0.0.1:8080",
+            "http://127.0.0.1:8080/subpath",
+            "http://127.0.0.1:8080?mode=direct",
+            "http://127.0.0.1:8080#section",
+            "not-a-url",
+        ] {
+            assert!(matches!(
+                RemoteRpcProxy::parse(proxy_url),
+                Err(Error::InvalidConfig(_))
+            ));
+        }
+    }
+
+    /// Valid HTTP and HTTPS proxy URLs are accepted.
+    #[test]
+    fn proxy_accepts_http_and_https_urls() {
+        for proxy_url in ["http://127.0.0.1:18080", "https://proxy.example.com:8443"] {
+            assert!(RemoteRpcProxy::parse(proxy_url).is_ok());
+        }
+    }
+
+    /// Without an opt-in proxy, `remote_rpc_client` resolves domain endpoints locally (failing on
+    /// `.test`); with `Some(proxy)`, it skips local DNS pinning and forwards the request through
+    /// the configured HTTP proxy, while local `Client::new` connects directly on loopback.
+    #[cfg(rings_native)]
+    #[tokio::test]
+    async fn remote_rpc_client_uses_proxy_only_when_opted_in() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        use crate::test_support::TestTask;
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        let proxy_addr = proxy_listener
+            .local_addr()
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        let proxy_url = format!("http://{proxy_addr}");
+        let proxy = RemoteRpcProxy::parse(proxy_url.as_str())?;
+
+        let local_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        let local_addr = local_listener
+            .local_addr()
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+
+        let unresolvable = RemoteRpcEndpoint::parse("http://seed.example.test:50001/rpc")?;
+        assert!(remote_rpc_client(&unresolvable, None, None).await.is_err());
+
+        let local_task = TestTask::spawn(async move {
+            let (mut stream, _) = local_listener
+                .accept()
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let mut buf = vec![0_u8; 2048];
+            let read = stream
+                .read(&mut buf)
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let req = String::from_utf8_lossy(buf.get(..read).unwrap_or_default()).to_string();
+            let body = r#"{"jsonrpc":"2.0","result":{"did":"0x01"},"id":0}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            Ok::<String, Error>(req)
+        });
+
+        let local_client =
+            rings_rpc::jsonrpc::Client::new(format!("http://{local_addr}/").as_str())
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        let request = rings_rpc::protos::rings_node::NodeDidRequest {};
+        let local_resp: rings_rpc::protos::rings_node::NodeDidResponse = local_client
+            .call_method(rings_rpc::method::Method::NodeDid, &request)
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        assert_eq!(local_resp.did, "0x01");
+        let local_request_line = local_task
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))??;
+        assert!(local_request_line.starts_with("POST / HTTP/1.1\r\n"));
+
+        let proxy_task = TestTask::spawn(async move {
+            let (mut stream, _) = proxy_listener
+                .accept()
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let mut buf = vec![0_u8; 2048];
+            let read = stream
+                .read(&mut buf)
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let req = String::from_utf8_lossy(buf.get(..read).unwrap_or_default()).to_string();
+            let body = r#"{"jsonrpc":"2.0","result":{"did":"0x02"},"id":0}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            Ok::<String, Error>(req)
+        });
+
+        let proxied_client = remote_rpc_client(&unresolvable, None, Some(&proxy)).await?;
+        let proxied_resp: rings_rpc::protos::rings_node::NodeDidResponse = proxied_client
+            .call_method(rings_rpc::method::Method::NodeDid, &request)
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        assert_eq!(proxied_resp.did, "0x02");
+        let proxy_request_line = proxy_task
+            .await
+            .map_err(|error| Error::RemoteRpcError(error.to_string()))??;
+        assert!(
+            proxy_request_line.starts_with("POST http://seed.example.test:50001/rpc HTTP/1.1\r\n"),
+            "unexpected proxy request: {proxy_request_line}"
+        );
         Ok(())
     }
 }

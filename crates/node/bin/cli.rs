@@ -218,6 +218,13 @@ pub(crate) struct RunCommand {
     )]
     pub bootstrap_seed: Option<String>,
 
+    #[arg(
+        long,
+        help = "HTTP(S) proxy URL for remote JSON-RPC endpoints (seed and HTTP handshakes); local loopback RPC always bypasses proxies",
+        env
+    )]
+    pub remote_rpc_proxy_url: Option<String>,
+
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
 

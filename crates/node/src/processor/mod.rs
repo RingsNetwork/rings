@@ -161,6 +161,8 @@ pub struct Processor {
     registration_readiness: Arc<RegistrationReadiness>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
+    /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
+    remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
 
 /// The node error of a DHT operation run under a registration stop: a rerouting wait ended by

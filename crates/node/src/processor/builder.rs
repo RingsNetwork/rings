@@ -49,6 +49,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
     /// The heartbeat of this node's mail descriptor (#1117), if it takes mail.
     pub(in crate::processor) mail_registration: Option<Arc<dyn RegistrationTask>>,
+    /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
+    pub(in crate::processor) remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
 
 impl ProcessorBuilder {
@@ -92,6 +94,7 @@ impl ProcessorBuilder {
             #[cfg(rings_native)]
             service_registration: None,
             mail_registration: None,
+            remote_rpc_proxy: config.remote_rpc_proxy.clone(),
         })
     }
 
@@ -247,6 +250,13 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Route native remote JSON-RPC requests (`nodeDid`, `answerOffer`, `acceptAnswer`) through
+    /// `proxy` instead of connecting directly.
+    pub fn remote_rpc_proxy(mut self, proxy: crate::remote_endpoint::RemoteRpcProxy) -> Self {
+        self.remote_rpc_proxy = Some(proxy);
+        self
+    }
+
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.validate()?;
@@ -363,6 +373,7 @@ impl ProcessorBuilder {
             registration_readiness: Arc::new(RegistrationReadiness::new(registration_tasks.len())),
             registration_tasks,
             observability,
+            remote_rpc_proxy: self.remote_rpc_proxy,
         })
     }
 
@@ -372,6 +383,12 @@ impl ProcessorBuilder {
     /// native, browser, and programmatic entrance rejects the same illegal role,
     /// schedule, and virtual-node combinations.
     fn validate(&self) -> Result<()> {
+        #[cfg(rings_browser)]
+        if self.remote_rpc_proxy.is_some() {
+            return Err(Error::InvalidConfig(
+                "remote_rpc_proxy_url is supported only on native targets".to_string(),
+            ));
+        }
         validate_dht_virtual_nodes(self.dht_virtual_nodes)?;
         validate_registration_timing(
             "online_node",
