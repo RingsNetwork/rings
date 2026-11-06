@@ -99,11 +99,16 @@ prints an encoded offer. Deliver it to the peer, which answers it:
 rings connect answer <offer>      # or `-` to read the offer from stdin
 ```
 
-and prints an encoded answer. Bring that back to the initiator:
+and prints an encoded answer (plus a status line on `stderr`). Bring that back to the initiator:
 
 ```bash
 rings connect accept <answer>     # or `-`
 ```
+
+If both sides hold a pending offer to each other and the answering node's offer prevails on the DID
+tie-break, `rings connect answer` prints a counter-offer instead and notes this on `stderr`. In that
+case, pass the counter-offer back to the peer for `rings connect answer <counter-offer>`, then
+complete on the counter-offering node with `rings connect accept <answer>`.
 
 [Exchange SDP](advanced-topic/exchange-sdp.md) explains what each message carries.
 
