@@ -43,7 +43,8 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
-use rings_node::native::horizon::signing_horizon;
+use rings_node::native::horizon::run_signing_horizon;
+use rings_node::native::horizon::DelegationRenewalPaths;
 use rings_node::native::stores::NodeStores;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
@@ -124,6 +125,7 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
         .map(NativeGatewayRunner::status_handle);
     // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
     // with the other run-owned tasks below and its evidence is the backend's observer.
+    let renewal = DelegationRenewalPaths::from_config(&c)?;
     let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
     let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     let stop = StopSource::new();
@@ -139,10 +141,16 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
     tasks.spawn(serve_application(application, stop.token()));
-    // The node can send nothing from its delegation's signing horizon on: end there, so the
-    // supervisor restarts it with a fresh delegatee key instead of leaving it mute (#1063).
-    let horizon = processor.signing_horizon();
-    tasks.spawn(async move { Err(signing_horizon(horizon, get_epoch_ms).await.into()) });
+    // Renew the delegation in process before its signing horizon when `delegator_key` is
+    // configured (#1153), and end at the horizon otherwise (#1063).
+    let horizon_processor = processor.clone();
+    tasks.spawn(async move {
+        Err(
+            run_signing_horizon(horizon_processor, renewal, get_epoch_ms)
+                .await
+                .into(),
+        )
+    });
     let processor_task = spawn_processor(processor.clone(), stop.token());
     spawn_apis(
         &mut tasks,

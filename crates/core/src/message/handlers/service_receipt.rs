@@ -3,6 +3,7 @@
 //! Pure planners construct transcript values. [`ProbeEffect`] names external work, and
 //! [`ProbeEffectInterpreter`] is the only adapter that reads clocks or mutates transport state.
 
+use std::borrow::Borrow;
 use std::num::NonZeroU64;
 
 use async_trait::async_trait;
@@ -91,7 +92,7 @@ impl ProbeOfferPlan {
     fn build(
         self,
         completion_sequence: u64,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> Result<ProbeOffer> {
         let completion = Transaction::new(
             self.beneficiary,
@@ -102,7 +103,7 @@ impl ProbeOfferPlan {
                 request_digest: self.request_digest,
                 nonce: self.nonce,
             },
-            signer,
+            signer.by_ref(),
         )?;
         let claim = ProvisionalServiceClaim::probe(
             self.network_id,
@@ -113,7 +114,7 @@ impl ProbeOfferPlan {
             self.request_digest,
             completion.digest()?.into_bytes(),
         );
-        let provider_attestation = claim.sign_provider(signer)?;
+        let provider_attestation = claim.sign_provider(signer.by_ref())?;
         Ok(ProbeOffer {
             request: self.request,
             completion,
@@ -153,7 +154,7 @@ fn plan_probe_offer(
 
 fn build_probe_acknowledgement(
     offer: &ProbeOffer,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<impl Borrow<DelegateeKey>>,
 ) -> Result<ProbeAcknowledgement> {
     let beneficiary_attestation = offer.claim.sign_beneficiary(signer)?;
     let receipt = ProvisionalServiceReceipt::new(
@@ -225,7 +226,8 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             )
             .await?
             .start();
-        let offer = plan.build(completion_sequence, self.handler.transport.message_signer())?;
+        let signer = self.handler.transport.message_signer();
+        let offer = plan.build(completion_sequence, signer.by_ref())?;
         // The answer takes its next hop's answer slot, not the shared capacity, so peers that
         // hold this node's control reserve cannot keep it from answering.
         self.handler
@@ -251,8 +253,8 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .ok_or_else(|| {
                 Error::InvalidMessage("probe offer has no matching outstanding request".to_string())
             })?;
-        let acknowledgement =
-            build_probe_acknowledgement(offer, self.handler.transport.message_signer())?;
+        let signer = self.handler.transport.message_signer();
+        let acknowledgement = build_probe_acknowledgement(offer, signer.by_ref())?;
         self.handler
             .run_effects([CoreEffect::send_report_message(
                 ctx,

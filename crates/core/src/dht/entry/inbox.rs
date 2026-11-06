@@ -51,6 +51,8 @@
 //! names no holder (no node from the owner to the end of its successor list holds relay mail)
 //! refuses the hold itself, with `RelayHolderUnavailable`.
 
+use std::borrow::Borrow;
+
 use bytes::Bytes;
 use serde::Deserialize;
 use serde::Serialize;
@@ -133,7 +135,7 @@ impl HeldMessage {
     /// Hold `payload` under `holder`'s authority at the instant `held_at_ms`.
     pub(crate) fn hold(
         payload: MessagePayload,
-        holder: MessageSigner<&DelegateeKey>,
+        holder: MessageSigner<impl Borrow<DelegateeKey>>,
         held_at_ms: u128,
     ) -> Result<Self> {
         let data = rings_codec::serialize(&payload).map_err(Error::CodecSerialize)?;

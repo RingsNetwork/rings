@@ -84,7 +84,6 @@ impl OnionRuntime {
         let capacity = NonZeroUsize::new(core.connection_registry_capacity()?)
             .ok_or_else(|| Error::InvalidConfig("connection registry of capacity 0".to_string()))?;
         let shell = OnionCircuitShell::new(
-            core.delegatee_key().clone(),
             core.onion_role().registers_relay(),
             core.onion_process_epoch(),
             capacity,

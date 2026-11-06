@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -510,7 +511,7 @@ pub(super) async fn record_measurement(
 /// A chunk crosses exactly the edge it is sent on and is reassembled by `did`, so its carrier
 /// holds no forwards.
 pub(super) fn frame_chunk(
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<impl Borrow<DelegateeKey>>,
     did: Did,
     chunk: Chunk,
     sequence: u64,
@@ -521,10 +522,10 @@ pub(super) fn frame_chunk(
         sequence,
         None,
         Message::Chunk(chunk),
-        signer,
+        signer.by_ref(),
     )?;
     let relay = MessageRelay::new(NextHop::toward(did), did, HopBudget::EXHAUSTED);
-    let payload = MessagePayload::new(transaction, signer, relay)?;
+    let payload = MessagePayload::new(transaction, signer.by_ref(), relay)?;
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     crate::simulation::record_outbound_submission(payload.transaction.tx_id);
     Ok(payload)

@@ -4,6 +4,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
@@ -193,7 +195,7 @@ pub(crate) struct SwarmTransportParts {
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: Transport,
-    delegatee_key: DelegateeKey,
+    delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
@@ -330,7 +332,7 @@ impl SwarmTransport {
                 webrtc.external_address,
                 webrtc.udp_port_range,
             ),
-            delegatee_key,
+            delegatee_key: RwLock::new(delegatee_key),
             dht,
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
@@ -451,9 +453,29 @@ impl SwarmTransport {
         Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
     }
 
+    /// The session key this node currently signs with.
+    pub(crate) fn delegatee_key(&self) -> DelegateeKey {
+        self.delegatee_key
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replace the session key this node signs with, when it authorizes the same account DID.
+    pub(crate) fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
+        if delegatee_key.delegator_did() != self.dht.did {
+            return Err(Error::VerifySignatureFailed);
+        }
+        *self
+            .delegatee_key
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = delegatee_key;
+        Ok(())
+    }
+
     /// The session this node authenticates with: its public half and account authorization.
     pub(crate) fn delegation(&self) -> Delegation {
-        self.delegatee_key.delegation()
+        self.delegatee_key().delegation()
     }
 
     /// Storage virtual-node positions required by this DHT protocol mode.

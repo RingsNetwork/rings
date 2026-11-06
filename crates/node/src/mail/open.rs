@@ -29,6 +29,7 @@ use bytes::Bytes;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
+use rings_core::ecc::PublicKey;
 
 use super::envelope::mail_aad;
 use super::envelope::MailDigest;
@@ -88,15 +89,6 @@ impl Opening {
             Self::Opened(_) => 2,
         }
     }
-
-    /// The join of two outcomes for one mail id: the higher-ranked, `self` on a tie.
-    fn join(self, other: Self) -> Self {
-        if other.rank() > self.rank() {
-            other
-        } else {
-            self
-        }
-    }
 }
 
 /// Open the mail in `elements` for `recipient` with the secret of `key`, skipping every mail id
@@ -108,6 +100,20 @@ pub fn open_mail(
     key: &DelegateeKey,
     fresh: impl Fn(&MailDigest) -> bool,
 ) -> Vec<Opening> {
+    open_mail_with_keys(elements, recipient, std::slice::from_ref(key), fresh)
+        .into_iter()
+        .map(|(opening, _)| opening)
+        .collect()
+}
+
+/// Open the mail in `elements` for `recipient` trying `keys` in order, returning each mail id's
+/// outcome and the delegatee public key of the key that decrypted it when opened (#1153).
+pub(crate) fn open_mail_with_keys(
+    elements: &[Bytes],
+    recipient: Did,
+    keys: &[DelegateeKey],
+    fresh: impl Fn(&MailDigest) -> bool,
+) -> Vec<(Opening, Option<PublicKey<33>>)> {
     let by_digest = elements
         .iter()
         .map(|element| (MailDigest::of(element), element))
@@ -118,19 +124,27 @@ pub fn open_mail(
             Ok(MailElement::Manifest(manifest)) => Some(manifest),
             Ok(MailElement::Chunk(_)) | Err(_) => None,
         });
-    let mut outcomes = BTreeMap::<MailDigest, Opening>::new();
+    let mut outcomes = BTreeMap::<MailDigest, (Opening, Option<PublicKey<33>>)>::new();
     for manifest in manifests {
         if !fresh(&manifest.mail_id) || !manifest.is_well_formed() {
             continue;
         }
-        let Some(outcome) = open_manifest(&manifest, &by_digest, recipient, key) else {
+        let Some((outcome, opened_by)) = open_manifest(&manifest, &by_digest, recipient, keys)
+        else {
             continue;
         };
-        let joined = match outcomes.remove(&outcome.mail_id()) {
-            Some(earlier) => earlier.join(outcome),
-            None => outcome,
+        let mail_id = outcome.mail_id();
+        let joined = match outcomes.remove(&mail_id) {
+            Some((earlier, earlier_by)) => {
+                if outcome.rank() > earlier.rank() {
+                    (outcome, opened_by)
+                } else {
+                    (earlier, earlier_by)
+                }
+            }
+            None => (outcome, opened_by),
         };
-        outcomes.insert(joined.mail_id(), joined);
+        outcomes.insert(mail_id, joined);
     }
     outcomes.into_values().collect()
 }
@@ -141,11 +155,11 @@ fn open_manifest(
     manifest: &MailManifest,
     by_digest: &BTreeMap<MailDigest, &Bytes>,
     recipient: Did,
-    key: &DelegateeKey,
-) -> Option<Opening> {
+    keys: &[DelegateeKey],
+) -> Option<(Opening, Option<PublicKey<33>>)> {
     let mail_id = manifest.mail_id;
     let Some(ciphertext) = assemble(manifest, by_digest) else {
-        return Some(Opening::Incomplete { mail_id });
+        return Some((Opening::Incomplete { mail_id }, None));
     };
     if MailDigest::of(&ciphertext) != mail_id {
         return None;
@@ -153,10 +167,19 @@ fn open_manifest(
     let aad = mail_aad(recipient);
     let message = rings_codec::deserialize::<AeadCiphertext>(&ciphertext)
         .ok()
-        .and_then(|sealed| key.decrypt_elgamal_aead(&sealed, &aad).ok());
+        .and_then(|sealed| {
+            keys.iter().find_map(|key| {
+                key.decrypt_elgamal_aead(&sealed, &aad)
+                    .ok()
+                    .map(|plaintext| (plaintext, key.delegatee_public_key()))
+            })
+        });
     Some(match message {
-        Some(message) => Opening::Opened(OpenedMail { mail_id, message }),
-        None => Opening::Unreadable { mail_id },
+        Some((message, opened_by)) => (
+            Opening::Opened(OpenedMail { mail_id, message }),
+            Some(opened_by),
+        ),
+        None => (Opening::Unreadable { mail_id }, None),
     })
 }
 

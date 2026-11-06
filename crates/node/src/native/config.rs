@@ -207,6 +207,10 @@ pub struct Config {
     pub network_id: u32,
     /// Delegation secret key file path.
     pub delegatee_key: String,
+    /// Optional delegator secret key file path for in-process delegation renewal before the
+    /// signing horizon (#1153); relative paths are resolved next to this config file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegator_key: Option<String>,
     /// Internal JSON-RPC API port.
     pub internal_api_port: u16,
     /// External JSON-RPC listener address.
@@ -361,6 +365,7 @@ impl Config {
         Self {
             network_id: DEFAULT_NETWORK_ID,
             delegatee_key,
+            delegator_key: None,
             internal_api_port: DEFAULT_INTERNAL_API_PORT,
             external_api_addr: DEFAULT_EXTERNAL_API_ADDR.to_string(),
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
@@ -435,10 +440,24 @@ impl Config {
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path.as_path()).map_err(|e| Error::OpenFileError(e.to_string()))?;
         let f_rdr = io::BufReader::new(f);
-        serde_saphyr::from_reader(f_rdr).map_err(|source| Error::ConfigParse {
-            path,
-            source: Box::new(source),
-        })
+        let mut config: Config =
+            serde_saphyr::from_reader(f_rdr).map_err(|source| Error::ConfigParse {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+        if let Some(delegator_key) = config.delegator_key.as_deref() {
+            let expanded = expand_home(delegator_key)?;
+            let resolved = if expanded.is_relative() {
+                match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => parent.join(expanded),
+                    _ => expanded,
+                }
+            } else {
+                expanded
+            };
+            config.delegator_key = Some(resolved.to_string_lossy().into_owned());
+        }
+        Ok(config)
     }
 }
 
@@ -942,6 +961,32 @@ gateway:
         assert!(
             detail.contains("unknown field `not_a_config_key`"),
             "detail: {detail}"
+        );
+    }
+
+    /// `Config::new` omits `delegator_key` when serialized, and `Config::read_fs` resolves a
+    /// relative `delegator_key` against the config file's parent directory (#1153).
+    #[test]
+    fn test_delegator_key_defaults_to_none_and_resolves_relative_to_config_dir() {
+        let document = generated_document();
+        assert!(!document.contains("delegator_key:"));
+        assert_eq!(Config::new("delegatee_key").delegator_key, None);
+
+        let root = std::env::temp_dir().join(format!("rings-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp config dir");
+        let path = root.join("config.yaml");
+        let mut config = Config::new("delegatee_key");
+        config.delegator_key = Some("keys/ecdsa_key".to_string());
+        config
+            .write_fs(&path)
+            .expect("write config with delegator_key");
+
+        let restored = Config::read_fs(&path).expect("read config with delegator_key");
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(
+            restored.delegator_key.as_deref(),
+            Some(root.join("keys/ecdsa_key").to_string_lossy().as_ref())
         );
     }
 

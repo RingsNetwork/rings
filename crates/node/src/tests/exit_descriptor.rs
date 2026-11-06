@@ -4,6 +4,8 @@
 //! varies one field with struct-update syntax over [`ExitDescriptorFixture::offline`] or
 //! [`ExitDescriptorFixture::live`] and then [signs](ExitDescriptorFixture::sign) it.
 
+use std::borrow::Cow;
+
 use rings_core::delegation::DelegateeKey;
 use rings_core::message::MessageSigner;
 
@@ -30,7 +32,7 @@ const LIVE_REGISTRATION_TTL_MS: u128 = 90_000;
 /// An unsigned exit registration and the key that signs it.
 pub(crate) struct ExitDescriptorFixture<'k> {
     /// The signing key; it fixes the DID and both public keys of the body.
-    pub(crate) key: &'k DelegateeKey,
+    pub(crate) key: Cow<'k, DelegateeKey>,
     /// The overlay the descriptor is published for and signed on.
     pub(crate) network_id: u32,
     /// The process epoch the exit registers.
@@ -62,7 +64,7 @@ impl<'k> ExitDescriptorFixture<'k> {
         expires_at_ms: u128,
     ) -> Result<Self> {
         Ok(Self {
-            key,
+            key: Cow::Borrowed(key),
             network_id: TEST_NETWORK_ID,
             process_epoch,
             node_type: OnlineNodeType::Native,
@@ -91,7 +93,7 @@ impl<'k> ExitDescriptorFixture<'k> {
         now_ms: u128,
     ) -> Self {
         Self {
-            key: processor.delegatee_key(),
+            key: Cow::Owned(processor.delegatee_key()),
             network_id: processor.swarm.network_id(),
             process_epoch: processor.onion_process_epoch().get(),
             node_type: default_online_node_type(),
@@ -129,7 +131,7 @@ impl<'k> ExitDescriptorFixture<'k> {
                 expires_at_ms: self.expires_at_ms,
                 version: self.version,
             },
-            MessageSigner::new(self.key, self.network_id),
+            MessageSigner::new(self.key.as_ref(), self.network_id),
         )
         .map(|descriptor| descriptor.heard_at(heartbeat_at_ms))
         .map_err(Error::CoreError)

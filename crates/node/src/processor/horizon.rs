@@ -1,19 +1,34 @@
 //! The signing horizon of a node's own delegation: until when the process can send anything
-//! (#1063).
+//! (#1063, #1153).
 //!
-//! A node signs every frame it sends with its own delegation, whose expiry `e` is fixed for the
-//! life of the process: rotating it needs a restart. From `h = e − Δ` on, the sender refuses
-//! every frame that carries it ([`signing_horizon_ms`]), so the node is mute, and it stays mute:
+//! A node signs every frame it sends with its own delegation, whose expiry is `e`. From
+//! `h = e − Δ` on, the sender refuses every frame that carries it ([`signing_horizon_ms`]), so
+//! without a renewal the node is mute from `h` on:
 //!
 //! ```text
 //!   Signing ──(t ≥ h − lead)──▶ Expiring ──(t ≥ h)──▶ Mute      (Mute is absorbing)
+//!                                  │
+//!                        renew(h' > h)
+//!                                  ▼
+//!                               Signing
 //! ```
 //!
-//! This module only classifies instants; the shell acts on them. A native daemon ends at `h`, so
-//! a supervisor restarts it with a fresh delegation (`native::horizon`), the processor refuses
-//! to start mute ([`super::ProcessorBuilder::build`]), and the operator snapshot reports
-//! `overlay_ready = false` once mute.
+//! Laws (#1153):
+//! - **Monotone horizon**: After a successful renewal, `h' > h`. A renewal never shortens the
+//!   horizon.
+//! - **No unsigned gap**: At every instant in `[renewal, e)`, the node holds some key whose
+//!   delegation verifies, and retains the previous key until `e` so envelopes sealed to it before
+//!   peers observe the republished descriptors still open.
+//! - **Fallback**: No delegator key, or a failed mint, gives the #1063 behaviour (warn at
+//!   `h − lead` and exit at `h`).
+//!
+//! This module classifies instants and guards in-memory key rotation ([`SessionKeyRing`]); the
+//! process shell (`native::horizon`) drives renewal and exit.
 
+use std::sync::PoisonError;
+use std::sync::RwLock;
+
+use rings_core::delegation::DelegateeKey;
 use rings_core::delegation::Delegation;
 use rings_core::swarm::signing_horizon_ms;
 
@@ -117,11 +132,134 @@ impl DelegationHorizon {
     }
 }
 
+/// Mutable state behind [`SessionKeyRing`].
+#[derive(Debug)]
+struct SessionKeyRingState {
+    /// Active key used for all new signatures and descriptor publications.
+    current: DelegateeKey,
+    /// Previous keys retained until their delegation expiry `e` so mail or onion hops sealed to a
+    /// prior key before descriptor republication settles can still be opened.
+    retained: Vec<DelegateeKey>,
+    /// Successful runtime rotations in this process lifetime.
+    rotation_succeeded_total: u64,
+    /// Failed runtime rotation attempts in this process lifetime.
+    rotation_failed_total: u64,
+}
+
+/// Shared live session key and retained unexpired previous keys for a [`super::Processor`].
+///
+/// Enforces the **Monotone horizon** (`h' > h`) and **No unsigned gap** laws across every clone
+/// of the processor.
+#[derive(Debug)]
+pub(crate) struct SessionKeyRing {
+    state: RwLock<SessionKeyRingState>,
+}
+
+impl SessionKeyRing {
+    /// Construct a key ring starting with `current`.
+    pub(crate) const fn new(current: DelegateeKey) -> Self {
+        Self {
+            state: RwLock::new(SessionKeyRingState {
+                current,
+                retained: Vec::new(),
+                rotation_succeeded_total: 0,
+                rotation_failed_total: 0,
+            }),
+        }
+    }
+
+    /// Return the active [`DelegateeKey`].
+    pub(crate) fn current(&self) -> DelegateeKey {
+        self.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .current
+            .clone()
+    }
+
+    /// Return the [`DelegationHorizon`] of the active key.
+    pub(crate) fn horizon(&self) -> DelegationHorizon {
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        DelegationHorizon::of(&state.current.delegation())
+    }
+
+    /// Return the active key followed by any retained previous keys that have not yet expired at
+    /// `now_ms` (`t < e`).
+    pub(crate) fn decryption_keys_at(&self, now_ms: u128) -> Vec<DelegateeKey> {
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        let mut keys = Vec::with_capacity(1 + state.retained.len());
+        keys.push(state.current.clone());
+        for key in state.retained.iter().rev() {
+            if !key.delegation().is_expired_at(now_ms) {
+                keys.push(key.clone());
+            }
+        }
+        keys
+    }
+
+    /// Return `(rotation_succeeded_total, rotation_failed_total)`.
+    pub(crate) fn rotation_counts(&self) -> (u64, u64) {
+        let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
+        (state.rotation_succeeded_total, state.rotation_failed_total)
+    }
+
+    /// Record a failed runtime rotation attempt when minting or persisting fails before key swap.
+    pub(crate) fn record_failed_rotation(&self) {
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+    }
+
+    /// Validate and install `next` at `now_ms`, retaining the previous key if it has not yet
+    /// expired.
+    ///
+    /// Laws:
+    /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
+    /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
+    /// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
+    pub(crate) fn renew_at(&self, next: DelegateeKey, now_ms: u128) -> Result<DelegationHorizon> {
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        if next.delegator_did() != state.current.delegator_did() {
+            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+            return Err(Error::VerifyError(
+                "renewed delegatee key delegator DID does not match node DID".to_string(),
+            ));
+        }
+        if let Err(error) = next.delegation().verify_delegator_authorization_at(now_ms) {
+            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+            return Err(Error::CoreError(error));
+        }
+        let current_horizon = DelegationHorizon::of(&state.current.delegation());
+        let next_horizon = DelegationHorizon::of(&next.delegation());
+        if let Err(error) = next_horizon.admitted_at(now_ms) {
+            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+            return Err(error);
+        }
+        if next_horizon.horizon_ms() <= current_horizon.horizon_ms() {
+            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+            return Err(current_horizon.reached());
+        }
+        state
+            .retained
+            .retain(|key| !key.delegation().is_expired_at(now_ms));
+        let previous = std::mem::replace(&mut state.current, next);
+        if !previous.delegation().is_expired_at(now_ms)
+            && previous.delegatee_public_key() != state.current.delegatee_public_key()
+        {
+            state.retained.push(previous);
+        }
+        state.rotation_succeeded_total = state.rotation_succeeded_total.saturating_add(1);
+        Ok(next_horizon)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use rings_core::delegation::DelegateeKey;
+    use rings_core::ecc::SecretKey;
     use rings_core::swarm::signing_horizon_ms;
 
     use super::DelegationHorizon;
+    use super::SessionKeyRing;
     use super::SigningState;
     use super::SIGNING_HORIZON_LEAD_MS;
     use crate::error::Error;
@@ -172,5 +310,85 @@ mod tests {
                 Err(Error::DelegationHorizonReached { horizon_ms, .. }) if horizon_ms == h
             ));
         }
+    }
+
+    /// Laws (**Monotone horizon** and **No unsigned gap**, #1153): `SessionKeyRing::renew_at`
+    /// refuses any key that shortens or stalls `h`, or changes the delegator DID, while a valid
+    /// renewal advances `h' > h`, keeps a verifying delegation across `[renewal, e)`, and retains
+    /// the previous key for decryption until its expiry `e`.
+    #[test]
+    fn test_session_key_ring_enforces_monotone_horizon_and_no_unsigned_gap() {
+        let delegator = SecretKey::random();
+        let other_delegator = SecretKey::random();
+        let t0: u128 = 1_800_000_000_000;
+        let ttl_ms = u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+        let initial = match DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0) {
+            Ok(key) => key,
+            Err(error) => panic!("initial key mint must succeed: {error}"),
+        };
+        let initial_pubkey = initial.delegatee_public_key();
+        let initial_expires = initial.delegation().expires_at_ms();
+        let ring = SessionKeyRing::new(initial);
+        let h0 = ring.horizon().horizon_ms();
+        let renew_ms = h0 - SIGNING_HORIZON_LEAD_MS;
+
+        // Same or earlier horizon (`h' <= h`) is rejected and leaves the active key untouched.
+        let non_advancing = match DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0) {
+            Ok(key) => key,
+            Err(error) => panic!("non-advancing key mint must succeed: {error}"),
+        };
+        assert!(matches!(
+            ring.renew_at(non_advancing, renew_ms),
+            Err(Error::DelegationHorizonReached { horizon_ms, .. }) if horizon_ms == h0
+        ));
+        assert_eq!(ring.rotation_counts(), (0, 1));
+        assert_eq!(ring.current().delegatee_public_key(), initial_pubkey);
+
+        // Wrong delegator DID is rejected.
+        let wrong_did_key =
+            match DelegateeKey::new_with_seckey_at(&other_delegator, ttl_ms, renew_ms) {
+                Ok(key) => key,
+                Err(error) => panic!("wrong-did key mint must succeed: {error}"),
+            };
+        assert!(matches!(
+            ring.renew_at(wrong_did_key, renew_ms),
+            Err(Error::VerifyError(_))
+        ));
+        assert_eq!(ring.rotation_counts(), (0, 2));
+
+        // Valid renewal at `h0 - R` advances `h1 > h0` and retains the previous key until `e0`.
+        let renewed = match DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms) {
+            Ok(key) => key,
+            Err(error) => panic!("renewed key mint must succeed: {error}"),
+        };
+        let renewed_pubkey = renewed.delegatee_public_key();
+        let h1 = match ring.renew_at(renewed, renew_ms) {
+            Ok(horizon) => horizon.horizon_ms(),
+            Err(error) => panic!("valid renewal must succeed: {error}"),
+        };
+        assert!(h1 > h0);
+        assert_eq!(ring.rotation_counts(), (1, 2));
+
+        for instant in [renew_ms, h0, initial_expires - 1, initial_expires] {
+            assert!(ring
+                .current()
+                .delegation()
+                .verify_delegator_authorization_at(instant)
+                .is_ok());
+            let keys: Vec<_> = ring
+                .decryption_keys_at(instant)
+                .into_iter()
+                .map(|key| key.delegatee_public_key())
+                .collect();
+            assert_eq!(keys, vec![renewed_pubkey, initial_pubkey]);
+        }
+
+        // Once the previous delegation expires (`t > e0`), only the active key remains.
+        let keys_after_expiry: Vec<_> = ring
+            .decryption_keys_at(initial_expires + 1)
+            .into_iter()
+            .map(|key| key.delegatee_public_key())
+            .collect();
+        assert_eq!(keys_after_expiry, vec![renewed_pubkey]);
     }
 }
