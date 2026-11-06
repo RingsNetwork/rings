@@ -45,7 +45,12 @@
 //! admits `RELAY_CUSTODY_CAPACITY − k` others; at `k = RELAY_CUSTODY_CAPACITY` every new relay
 //! delivery to this node, from every origin, is deferred until the earliest is spent. The bound
 //! frees itself at `x`; removing the replay store ends the stall at once, at the cost of the
-//! replay guarantee.
+//! replay guarantee. No read of the chain can free a lost entry before `x` (#1139): even
+//! unanimous absence across the `r` members of an agreed, repaired chain cannot exclude an
+//! unacknowledged writer's resend (`Law (Chain replication)`) or an asynchronous hand-off from a
+//! displaced or suspected keeper (`Law (Chain repair)`), which carries no tombstone before a take
+//! and is admissible until `x`; freeing custody on that absence would retire the later arrival as
+//! a `Replay` (#1059).
 //!
 //! The live path observes `W_s` alone and is unchanged. Mail below the window is refused as the
 //! live path refuses it: no bounded receiver state can tell it from a re-hold of a transaction

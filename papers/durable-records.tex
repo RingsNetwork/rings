@@ -662,10 +662,16 @@ relay delivery to the node, from every origin, until the earliest of them is spe
 at most $\max x-t$, about $\mathit{ttl}+7$\,d.  Flooding an inbox makes the first condition
 cheap, not the second, so no single party forces it.  The bound frees itself at $x$; the
 operator's reset (removing the replay store) ends it at once, at the cost of the replay
-guarantee.  Freeing a lost entry earlier needs evidence of removal stronger than one read:
-unanimous absence at the members of an agreeing chain is a candidate, but a writer resends a
-hold until it is acknowledged, so absence there does not yet exclude a later arrival
-(\issue{1139}).
+guarantee.  No read of the chain frees a lost entry before $x$ (\issue{1139}): even unanimous
+absence across the $r$ members of an agreed view after Law~\ref{law:memberrepair} converged
+among them does not exclude a later arrival, since before $\mathit{ts}+\mathit{ttl}+2\epsilon$
+a writer whose hold was drained before the chain acknowledged it still resends
+(Law~\ref{law:fanout}), and up to $x$ a former member displaced from $\Mem_r(k)$ or suspected
+under Law~\ref{law:chainliveness} still keeps its copy under S1$''$ and hands it off
+asynchronously (Law~\ref{law:memberrepair}), judged at the hold instant, with no tombstone to
+refuse the join (none is issued before a take, and tombstones truncate at
+$\mathtt{RELAY\_INBOX\_MAX\_LEN}$); freeing $\K_s$ on that absence would make the hand-off's
+redelivery observe $\mathsf{Replay}$ and retire untaken mail (\issue{1059}).
 \end{remark}
 
 \begin{proposition}[At least once across restart]\label{prop:atleastonce}
