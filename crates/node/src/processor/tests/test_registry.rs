@@ -180,19 +180,37 @@ async fn test_online_node_concurrent_publish_keeps_one_self_record() -> Result<(
 
 /// A heartbeat removes nothing it observes: an older lease of its own and the descriptors of
 /// other registrants stay, and the reader lists the newest lease per DID.
+///
+/// Even when the fixture `Overwrite` (`storage_store`) and the heartbeat `Extend`
+/// (`publish_online_node_descriptor`) execute in the same millisecond (#1067, #1075), the HLC
+/// counter stamps the `Extend` strictly above the `Overwrite`'s reset floor, so the appended
+/// lease is never dropped below the floor.
 #[tokio::test]
 async fn test_online_node_heartbeat_removes_nothing_and_the_newest_lease_wins() -> Result<()> {
     let processor = prepare_processor().await;
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
-    let stale_self = processor.online_node_descriptor_at(now_ms.saturating_sub(30_000))?;
+    let self_older = OnlineNodeRegistration::new(
+        Duration::from_secs(default_online_node_heartbeat_interval_secs()),
+        Duration::from_secs(default_online_node_ttl_secs()),
+        default_online_node_type(),
+        Some("https://old.example".to_string()),
+        None,
+    )
+    .descriptor_at(&processor.registration_context(), LeaseTerms {
+        fresh_for_ms: 90_000,
+        expires_at_ms: now_ms.saturating_sub(15_000) + 90_000,
+    })?;
+    assert!(self_older.verify_signature(processor.swarm.network_id()));
     let other_descriptor = other.online_node_descriptor_at(now_ms)?;
+    assert!(other_descriptor.verify_signature(processor.swarm.network_id()));
     let expired_other = other.online_node_descriptor_at(now_ms.saturating_sub(120_000))?;
+    assert!(expired_other.verify_signature(processor.swarm.network_id()));
     assert!(expired_other.is_expired_at(now_ms));
 
     processor
         .storage_store(Processor::registry_entry(ONLINE_NODES_TOPIC, vec![
-            stale_self,
+            self_older.clone(),
             other_descriptor.clone(),
             expired_other,
         ])?)
@@ -205,8 +223,10 @@ async fn test_online_node_heartbeat_removes_nothing_and_the_newest_lease_wins() 
         .expect("online node registry fixture should be cached after store")
         .crdt
         .register;
+    let reset_floor = fixture_register.expect("overwrite sets a reset floor");
 
     let published = processor.publish_online_node_descriptor().await?;
+    assert!(published.verify_signature(processor.swarm.network_id()));
     processor.storage_fetch(entry_key).await?;
     let entry = processor
         .storage_check_cache(entry_key)
@@ -219,7 +239,103 @@ async fn test_online_node_heartbeat_removes_nothing_and_the_newest_lease_wins() 
     assert_eq!(stored.len(), 4);
     assert_eq!(entry.crdt.register, fixture_register);
     assert!(entry.crdt.tombstones.is_empty());
+    let published_element = published.to_element().map_err(Error::CoreError)?;
+    let published_dot = entry
+        .data
+        .iter()
+        .zip(entry.crdt.dots.iter())
+        .find_map(|(element, dot)| (element == &published_element).then_some(dot.version))
+        .expect("published lease is stored with a dot");
+    assert!(
+        published_dot > reset_floor,
+        "heartbeat Extend dot {published_dot:?} must strictly follow Overwrite floor {reset_floor:?}"
+    );
     assert_eq!(elements(&nodes)?, elements(&[other_descriptor, published])?);
+    assert_eq!(nodes[1].endpoint_hint, None);
+    Ok(())
+}
+
+/// Deterministic same-millisecond boundary for #1067 / #1075: when `storage_store` (`Overwrite`)
+/// and `publish_online_node_descriptor` (`Extend`) execute within the same millisecond `t0`, the
+/// HLC counter stamps the `Extend` strictly after the `Overwrite`'s reset floor, all 3 carrier
+/// elements (`self_older`, `peer_descriptor`, and the new `self` lease) remain stored
+/// (`stored.len() == 3`), and `lookup_online_nodes(false)` returns the 2 live descriptors with
+/// the newer `self` lease winning over `self_older`.
+#[tokio::test]
+async fn test_online_node_same_millisecond_overwrite_and_heartbeat_keeps_all_elements() -> Result<()>
+{
+    let processor = prepare_processor().await;
+    let peer = prepare_processor().await;
+    let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+    let now_ms = get_epoch_ms();
+    let self_older = OnlineNodeRegistration::new(
+        Duration::from_secs(default_online_node_heartbeat_interval_secs()),
+        Duration::from_secs(default_online_node_ttl_secs()),
+        default_online_node_type(),
+        Some("https://old.example".to_string()),
+        None,
+    )
+    .descriptor_at(&processor.registration_context(), LeaseTerms {
+        fresh_for_ms: 90_000,
+        expires_at_ms: now_ms.saturating_sub(15_000) + 90_000,
+    })?;
+    assert!(self_older.verify_signature(processor.swarm.network_id()));
+    let peer_descriptor = peer.online_node_descriptor_at(now_ms)?;
+    assert!(peer_descriptor.verify_signature(processor.swarm.network_id()));
+
+    // Pre-stamp the Overwrite at `t0 = now_ms + 50` (within clock skew tolerance `σ = 3000 ms`)
+    // so `PeerRing::stamp_operation` raises the node's HLC floor to `(t0, 0)`. When
+    // `publish_online_node_descriptor()` then runs at wall-clock `≤ t0`, `stamp_operation` sees
+    // the floor at `t0` and deterministically stamps the Extend at `(t0, 1)`, reproducing the
+    // exact same-millisecond Overwrite-then-Extend ordering boundary of #1067 / #1075 without
+    // depending on wall-clock speed.
+    let t0 = now_ms + 50;
+    let stamped_overwrite =
+        rings_core::dht::entry::EntryOperation::Overwrite(Processor::registry_entry(
+            ONLINE_NODES_TOPIC,
+            vec![self_older.clone(), peer_descriptor.clone()],
+        )?)
+        .stamped(t0, processor.did())
+        .map_err(Error::EntryError)?;
+    let reset_floor = stamped_overwrite
+        .entry()
+        .crdt
+        .register
+        .expect("stamped overwrite carries a reset floor");
+    assert_eq!((reset_floor.logical_time_ms, reset_floor.counter), (t0, 0));
+
+    processor
+        .storage_store(stamped_overwrite.entry().clone())
+        .await?;
+    let published = processor.publish_online_node_descriptor().await?;
+    assert!(published.verify_signature(processor.swarm.network_id()));
+    processor.storage_fetch(entry_key).await?;
+    let entry = processor
+        .storage_check_cache(entry_key)
+        .await
+        .expect("online node registry entry should be cached after same-ms publish");
+    let published_element = published.to_element().map_err(Error::CoreError)?;
+    let published_dot = entry
+        .data
+        .iter()
+        .zip(entry.crdt.dots.iter())
+        .find_map(|(element, dot)| (element == &published_element).then_some(dot.version))
+        .expect("published lease is stored with a dot");
+    assert_eq!(published_dot.logical_time_ms, reset_floor.logical_time_ms);
+    assert_eq!(published_dot.counter, reset_floor.counter + 1);
+    assert!(published_dot > reset_floor);
+
+    let stored = OnlineNodeRegistration::descriptors_from_entry(&entry);
+    assert_eq!(stored.len(), 3);
+    assert!(elements(&stored)?.contains(&self_older.to_element().map_err(Error::CoreError)?));
+    assert_eq!(entry.crdt.register, Some(reset_floor));
+    assert!(entry.crdt.tombstones.is_empty());
+
+    let mut nodes = processor.lookup_online_nodes(false).await?;
+    nodes.sort_by_key(|descriptor| descriptor.did == processor.did());
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(elements(&nodes)?, elements(&[peer_descriptor, published])?);
+    assert_eq!(nodes[1].endpoint_hint, None);
     Ok(())
 }
 
@@ -294,34 +410,42 @@ async fn test_registry_lease_renews_near_its_end_or_on_a_change() -> Result<()> 
         interval,
         Duration::from_secs(90),
     );
-    let registration = &processor.online_node_registration;
-    let version = std::cell::Cell::new("one");
+    let onion_relay = OnionProcessEpochCell::new(processor.onion_process_epoch.get());
+    let registration = OnlineNodeRegistration::new(
+        interval,
+        Duration::from_secs(90),
+        default_online_node_type(),
+        None,
+        Some(onion_relay.clone()),
+    );
     let sign = |terms: LeaseTerms| {
         registration
             .descriptor_at(&context, terms)
-            .map(|mut descriptor| {
-                descriptor.version = version.get().to_string();
-                [descriptor]
-            })
+            .map(|descriptor| [descriptor])
     };
     let t0 = get_epoch_ms();
     let lease = registry_lease().as_millis();
     let margin = 2 * interval.as_millis();
 
     let [first] = publisher.publish_lease(&context, t0, sign).await?;
+    assert!(first.verify_signature(processor.swarm.network_id()));
     assert_eq!(first.expires_at_ms, t0 + lease);
     let [kept] = publisher
         .publish_lease(&context, t0 + lease - margin - 1, sign)
         .await?;
+    assert!(kept.verify_signature(processor.swarm.network_id()));
     assert_eq!(elements(&[kept])?, elements(std::slice::from_ref(&first))?);
     let [renewed] = publisher
         .publish_lease(&context, t0 + lease - margin, sign)
         .await?;
+    assert!(renewed.verify_signature(processor.swarm.network_id()));
     assert_eq!(renewed.expires_at_ms, t0 + 2 * lease - margin);
 
-    version.set("two");
+    let next_epoch = OnionProcessEpoch::random();
+    onion_relay.renew(next_epoch);
     let [changed] = publisher.publish_lease(&context, t0 + lease, sign).await?;
-    assert_eq!(changed.version, "two");
+    assert!(changed.verify_signature(processor.swarm.network_id()));
+    assert_eq!(changed.capabilities.onion_relay, Some(next_epoch));
     assert_eq!(changed.expires_at_ms, t0 + 2 * lease);
     Ok(())
 }
