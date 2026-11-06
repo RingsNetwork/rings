@@ -1,6 +1,9 @@
+use rings_core::delegation::DelegateeKey;
+use rings_core::ecc::SecretKey;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use wasm_bindgen_futures::JsFuture;
-use wasm_bindgen_test::*;
+use wasm_bindgen_test::console_log;
+use wasm_bindgen_test::wasm_bindgen_test;
 
 use super::create_connection;
 use super::get_peers;
@@ -10,8 +13,12 @@ use super::promise_settled_now;
 use super::provider_did;
 use super::with_hang_guard;
 use super::TEST_HANG_GUARD;
+use crate::error::Error;
 use crate::prelude::rings_core::utils::js_value;
+use crate::processor::ProcessorConfig;
 use crate::provider::browser;
+use crate::provider::Provider;
+use crate::tests::TEST_ICE_SERVERS;
 
 /// Admission and retirement of a provider-level connection, observed through `listPeers`.
 ///
@@ -244,4 +251,94 @@ async fn test_get_address() {
         got_address.eq_ignore_ascii_case(expect_address),
         "got address: {got_address}, expect: {expect_address}"
     )
+}
+
+/// A fresh browser `ProcessorConfig` for storage-lock tests.
+fn storage_lock_config() -> ProcessorConfig {
+    let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+    ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 200).dht_virtual_nodes(0)
+}
+
+/// Law (#1055): one browser `storage_name` has at most one open node in the origin; a second
+/// open on the same `storage_name` fails closed with [`Error::BrowserStorageLocked`], a concurrent
+/// open on a different `storage_name` succeeds, and [`Provider::close`] releases the Web Lock once
+/// the node's stores drop so the same `storage_name` can be reopened.
+#[wasm_bindgen_test]
+async fn test_browser_provider_storage_lock_enforces_one_node_per_storage_name() {
+    with_hang_guard(
+        "test_browser_provider_storage_lock_enforces_one_node_per_storage_name",
+        TEST_HANG_GUARD,
+        async {
+            let storage_name = format!("rings-browser-lock-test-{}", uuid::Uuid::new_v4());
+            let other_storage_name = format!("rings-browser-lock-other-{}", uuid::Uuid::new_v4());
+
+            let first = Provider::new_browser_provider_with_storage(
+                storage_lock_config(),
+                storage_name.clone(),
+            )
+            .await
+            .unwrap();
+
+            // A second open with the same storage_name while `first` is open fails closed.
+            let duplicate = Provider::new_browser_provider_with_storage(
+                storage_lock_config(),
+                storage_name.clone(),
+            )
+            .await;
+            assert!(
+                matches!(
+                    &duplicate,
+                    Err(Error::BrowserStorageLocked(locked)) if locked == &storage_name
+                ),
+                "expected BrowserStorageLocked({storage_name:?}), got {}",
+                duplicate
+                    .err()
+                    .map_or_else(|| "Ok(Provider)".to_string(), |error| error.to_string())
+            );
+
+            // A concurrent open with a different storage_name succeeds while `first` is open.
+            let other = Provider::new_browser_provider_with_storage(
+                storage_lock_config(),
+                other_storage_name,
+            )
+            .await
+            .unwrap();
+            other.close().await.unwrap();
+
+            // When a clone keeps the processor shared, `close()` returns `ProviderStillShared`
+            // and the Web Lock stays held until the clone drops and `released` resolves.
+            let clone_holding_stores = first.clone();
+            let Err(Error::ProviderStillShared { released }) = first.close().await else {
+                panic!("expected ProviderStillShared while a clone is alive");
+            };
+            let still_locked = Provider::new_browser_provider_with_storage(
+                storage_lock_config(),
+                storage_name.clone(),
+            )
+            .await;
+            assert!(matches!(
+                &still_locked,
+                Err(Error::BrowserStorageLocked(locked)) if locked == &storage_name
+            ));
+            drop(clone_holding_stores);
+            released.await;
+
+            // Once `released` resolves, a subsequent open on `storage_name` succeeds, and
+            // `Provider::close` on an unshared provider releases the lock directly.
+            let reopened = Provider::new_browser_provider_with_storage(
+                storage_lock_config(),
+                storage_name.clone(),
+            )
+            .await
+            .unwrap();
+            reopened.close().await.unwrap();
+
+            let reopened_after_close =
+                Provider::new_browser_provider_with_storage(storage_lock_config(), storage_name)
+                    .await
+                    .unwrap();
+            reopened_after_close.close().await.unwrap();
+        },
+    )
+    .await;
 }

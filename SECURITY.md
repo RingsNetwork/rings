@@ -147,7 +147,11 @@ route.
   at most once while the store is retained; a damaged record disables only its stream.
   A completed replay write survives a process or system crash: the native store flushes the
   file and its directory (on unix), and the browser store commits each IndexedDB transaction
-  with `durability: "strict"` (#912). Exactly-once effects are not claimed. In a browser the
+  with `durability: "strict"` (#912). Each native store locks its directory at open (#1039),
+  and each browser node holds the exclusive Web Lock `rings-node/<storage_name>` across its
+  stores (#1055), so a second daemon, FFI provider, or browser tab on the same `storage_name`
+  fails closed before opening any store instead of interleaving writes to the replay and relay
+  stores. Exactly-once effects are not claimed. In a browser the
   replay guarantee lasts as long as the browser keeps the origin's storage: a private window
   or ephemeral partitioned storage discards it when the session ends, which resets every
   stream as an operator's removal of the replay store does, and a page cannot detect such a
@@ -328,7 +332,3 @@ route.
 - #1036: in a browser context with ephemeral storage, the replay windows reset at every
   session end, undetectably: a receiver may admit an unexpired transaction once more per
   session, and a sender's streams restart at sequence 0.
-- #1055: one origin runs one browser node at a time. A native store locks its directory, so a
-  second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
-  open the same IndexedDB stores and would interleave their writes to the replay and relay
-  stores; nothing refuses the second tab yet.

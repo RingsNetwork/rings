@@ -22,6 +22,9 @@ use wasm_bindgen::JsError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
+use super::lock::BrowserStorageLock;
+use super::lock::LockedBrowserStorage;
+use super::open_browser_provider_stores;
 use crate::mail::open::OpenedMail;
 use crate::mail::recipient::KvInbox;
 use crate::mail::recipient::MailInbox;
@@ -97,15 +100,15 @@ pub enum BrowserMailError {
 /// so every inbox API uses the same retained store as its poll task.
 pub(crate) struct BrowserMail {
     /// The retained inbox shared by API reads and the recipient's filing boundary.
-    inbox: Rc<KvInbox<IdbStorage>>,
+    inbox: Rc<KvInbox<LockedBrowserStorage>>,
     /// The recipient shared by the task and test probes; its poll lock serializes their work.
-    recipient: Rc<Recipient<NotifyingInbox, IdbStorage>>,
+    recipient: Rc<Recipient<NotifyingInbox, LockedBrowserStorage>>,
 }
 
 /// The filing boundary: commit to the retained inbox, then notify JavaScript of the mail id.
 struct NotifyingInbox {
     /// The inbox shared with browser reads; sharing never duplicates the stored mail.
-    inbox: Rc<KvInbox<IdbStorage>>,
+    inbox: Rc<KvInbox<LockedBrowserStorage>>,
     /// The synchronous callback installed before the first poll, if requested by the embedder.
     on_mail: Option<Function>,
 }
@@ -153,15 +156,18 @@ impl BrowserStoredMail {
     }
 }
 
-/// Open a retained mail store under the provider's namespace. Law: failure never falls back
-/// to volatile storage, and a successful open permits no capacity-based eviction.
+/// Open a retained mail store under the provider's namespace and bind it to `storage_lock`.
+/// Law: failure never falls back to volatile storage, and a successful open permits no
+/// capacity-based eviction.
 async fn open_mail_storage(
     storage_name: &str,
     suffix: &str,
-) -> Result<IdbStorage, BrowserMailError> {
+    storage_lock: &Rc<BrowserStorageLock>,
+) -> Result<LockedBrowserStorage, BrowserMailError> {
     let name = format!("{storage_name}/{suffix}");
     IdbStorage::new_with_cap_name_and_authority(MAIL_STORAGE_ROWS, &name, RecordAuthority::Retained)
         .await
+        .map(|storage| LockedBrowserStorage::new(storage, Rc::clone(storage_lock)))
         .map_err(|source| crate::error::Error::BrowserStorageOpen { name, source }.into())
 }
 
@@ -188,13 +194,14 @@ impl Provider {
         options: BrowserMailOptions,
         on_mail: Option<Function>,
     ) -> Result<Self, BrowserMailError> {
+        config.validate_onion_role()?;
+        let (stores, storage_lock) = open_browser_provider_stores(&storage_name).await?;
         let inbox = Rc::new(KvInbox::new(
-            open_mail_storage(&storage_name, "mail-inbox").await?,
+            open_mail_storage(&storage_name, "mail-inbox", &storage_lock).await?,
         ));
-        let records = open_mail_storage(&storage_name, "mail-records").await?;
+        let records = open_mail_storage(&storage_name, "mail-records", &storage_lock).await?;
         let mut provider =
-            Self::new_browser_provider_with_mail_offer(config, storage_name, Some(options.offer))
-                .await?;
+            Self::new_browser_provider_from_stores(config, stores, Some(options.offer)).await?;
         let installed = provider.install_browser_mail(inbox, records, on_mail);
         if let Err(error) = installed {
             if let Err(close_error) = provider.close().await {
@@ -209,8 +216,8 @@ impl Provider {
     /// fallible setup step finishes before either the state or the task becomes observable.
     fn install_browser_mail(
         &mut self,
-        inbox: Rc<KvInbox<IdbStorage>>,
-        records: IdbStorage,
+        inbox: Rc<KvInbox<LockedBrowserStorage>>,
+        records: LockedBrowserStorage,
         on_mail: Option<Function>,
     ) -> Result<(), BrowserMailError> {
         let tasks = self.processor.tasks();
@@ -314,7 +321,7 @@ impl Provider {
         let mail = self.enabled_browser_mail();
         future_to_promise(async move {
             let mail = mail.map_err(JsError::from)?;
-            <IdbStorage as KvStorageInterface<StoredMail>>::remove(
+            <LockedBrowserStorage as KvStorageInterface<StoredMail>>::remove(
                 mail.inbox.store(),
                 &format!("mail-{id}"),
             )
