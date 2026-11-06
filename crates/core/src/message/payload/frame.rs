@@ -31,15 +31,15 @@
 //! format of every type the frames reach, every variant of every enum included, one canonical
 //! frame per message and link-control variant, the recorded signaling path, the transcript of
 //! every signing domain tag, and the handshake offer string (`test_wire_goldens`). The
-//! formats rings-node adds on top (onion cells, sealed mail, descriptors) are not pinned there
-//! yet; #1141 adds the sibling test, pinning this same version. Bump procedure, when the test
-//! fails: the change moved the wire.
+//! formats `rings-node` adds on top (onion cells, sealed mail, descriptors, extension envelopes,
+//! and relay frames) are pinned by `rings-node`'s sibling `test_wire_goldens` test against this
+//! same version (#1141). Bump procedure, when either test fails: the change moved the wire.
 //! If the last release already shipped [`WIRE_VERSION`], add one to it; if the version is
-//! already this release's, keep it. Then set the pinned pair to that version and the hash the
-//! failure reports, in the same commit. A change that moves no golden byte never fails it. If
-//! only `format/registry` moved, and only because the tracer or the lockfile changed (the
-//! registry is serde reflection's rendering of the formats, not wire bytes), re-pin the hash
-//! without bumping [`WIRE_VERSION`].
+//! already this release's, keep it. Then set the pinned pair in the affected `test_wire_goldens`
+//! module (or both) to that version and the hash the failure reports, in the same commit. A
+//! change that moves no golden byte never fails it. If only `format/registry` moved, and only
+//! because the tracer or the lockfile changed (the registry is serde reflection's rendering of
+//! the formats, not wire bytes), re-pin the hash without bumping [`WIRE_VERSION`].
 
 use std::fmt;
 
