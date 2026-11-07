@@ -180,6 +180,25 @@ fn serialize_mail(value: &impl Serialize) -> Result<JsValue, BrowserMailError> {
         .map_err(BrowserMailError::from)
 }
 
+/// Pure decoding of one `(record_name, StoredMail)` pair into a [`BrowserStoredMail`] row.
+fn decode_stored_mail_row(
+    (name, stored): (String, StoredMail),
+) -> Result<BrowserStoredMail, BrowserMailError> {
+    name.strip_prefix("mail-")
+        .ok_or_else(|| BrowserMailError::RecordName(name.clone()))
+        .map(|id| BrowserStoredMail::new(id.to_owned(), stored))
+}
+
+/// Monadic boundary combinator lifting a fallible browser-mail effect into a JavaScript `Promise`.
+fn mail_effect_to_promise<Fut>(effect: Fut) -> Promise
+where Fut: std::future::Future<Output = Result<JsValue, BrowserMailError>> + 'static {
+    future_to_promise(async move {
+        effect
+            .await
+            .map_err(|error| JsValue::from(JsError::from(error)))
+    })
+}
+
 impl Provider {
     /// Build a browser recipient over `storage_name/mail-inbox` and `storage_name/mail-records`.
     /// Law: both retained stores open before the descriptor is enabled, and the first poll and
@@ -246,6 +265,17 @@ impl Provider {
             .map(Rc::clone)
             .ok_or(BrowserMailError::Disabled)
     }
+
+    /// Monadic Reader/Effect combinator running `effect` against [`Self::enabled_browser_mail`]
+    /// and lifting the result into a JavaScript `Promise`.
+    fn with_enabled_mail_promise<F, Fut>(&self, effect: F) -> Promise
+    where
+        F: FnOnce(Rc<BrowserMail>) -> Fut + 'static,
+        Fut: std::future::Future<Output = Result<JsValue, BrowserMailError>> + 'static,
+    {
+        let mail = self.enabled_browser_mail();
+        mail_effect_to_promise(async move { effect(mail?).await })
+    }
 }
 
 #[wasm_export]
@@ -265,69 +295,53 @@ impl Provider {
         options: BrowserMailOptions,
         on_mail: Option<Function>,
     ) -> Promise {
-        future_to_promise(async move {
-            let provider =
-                Self::new_browser_provider_with_mail(config, storage_name, options, on_mail)
-                    .await
-                    .map_err(JsError::from)?;
-            Ok(JsValue::from(provider))
+        mail_effect_to_promise(async move {
+            Self::new_browser_provider_with_mail(config, storage_name, options, on_mail)
+                .await
+                .map(JsValue::from)
         })
     }
 
     /// List filed mail as `{ id: string, message: Uint8Array, filed_at_ms: bigint }` objects.
     /// Law: listing does not retire mail or its deduplication records; mail-off providers reject.
     pub fn list_mail(&self) -> Promise {
-        let mail = self.enabled_browser_mail();
-        future_to_promise(async move {
-            let mail = mail.map_err(JsError::from)?;
-            let stored: Vec<(String, StoredMail)> =
-                mail.inbox.store().get_all().await.map_err(JsError::from)?;
-            let rows = stored
+        self.with_enabled_mail_promise(|mail| async move {
+            let rows = mail
+                .inbox
+                .store()
+                .get_all()
+                .await?
                 .into_iter()
-                .map(|(name, stored)| {
-                    let id = name
-                        .strip_prefix("mail-")
-                        .ok_or_else(|| BrowserMailError::RecordName(name.clone()))?;
-                    Ok(BrowserStoredMail::new(id.to_owned(), stored))
-                })
-                .collect::<Result<Vec<_>, BrowserMailError>>()
-                .map_err(JsError::from)?;
-            serialize_mail(&rows).map_err(|error| JsError::from(error).into())
+                .map(decode_stored_mail_row)
+                .collect::<Result<Vec<_>, _>>()?;
+            serialize_mail(&rows)
         })
     }
 
     /// Read one filed mail by its id, returning the same object as `list_mail`, or `null`.
     pub fn read_mail(&self, id: String) -> Promise {
-        let mail = self.enabled_browser_mail();
-        future_to_promise(async move {
-            let mail = mail.map_err(JsError::from)?;
-            let stored: Option<StoredMail> = mail
-                .inbox
+        self.with_enabled_mail_promise(|mail| async move {
+            mail.inbox
                 .store()
                 .get(&format!("mail-{id}"))
-                .await
-                .map_err(JsError::from)?;
-            match stored {
-                Some(stored) => serialize_mail(&BrowserStoredMail::new(id, stored))
-                    .map_err(|error| JsError::from(error).into()),
-                None => Ok(JsValue::NULL),
-            }
+                .await?
+                .map_or(Ok(JsValue::NULL), |stored| {
+                    serialize_mail(&BrowserStoredMail::new(id, stored))
+                })
         })
     }
 
     /// Remove one inbox mail by id; a missing id succeeds. Law: its recipient records remain,
     /// so a resend within retention cannot restore a message the embedder deliberately removed.
     pub fn remove_mail(&self, id: String) -> Promise {
-        let mail = self.enabled_browser_mail();
-        future_to_promise(async move {
-            let mail = mail.map_err(JsError::from)?;
+        self.with_enabled_mail_promise(|mail| async move {
             <LockedBrowserStorage as KvStorageInterface<StoredMail>>::remove(
                 mail.inbox.store(),
                 &format!("mail-{id}"),
             )
             .await
-            .map_err(JsError::from)?;
-            Ok(JsValue::UNDEFINED)
+            .map(|()| JsValue::UNDEFINED)
+            .map_err(BrowserMailError::from)
         })
     }
 }

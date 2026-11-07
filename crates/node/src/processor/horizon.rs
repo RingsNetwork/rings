@@ -149,6 +149,40 @@ impl DelegationHorizon {
     }
 }
 
+/// Pure validation of a candidate [`DelegateeKey`] against `current` at `now_ms`.
+///
+/// Laws:
+/// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
+/// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
+/// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
+fn validate_delegation_renewal(
+    current: &DelegateeKey,
+    next: DelegateeKey,
+    now_ms: u128,
+) -> Result<(DelegateeKey, DelegationHorizon)> {
+    (next.delegator_did() == current.delegator_did())
+        .then_some(())
+        .ok_or_else(|| {
+            Error::VerifyError(
+                "renewed delegatee key delegator DID does not match node DID".to_string(),
+            )
+        })
+        .and_then(|()| {
+            next.delegation()
+                .verify_delegator_authorization_at(now_ms)
+                .map_err(Error::CoreError)
+        })
+        .and_then(|()| {
+            let current_horizon = DelegationHorizon::of(&current.delegation());
+            let next_horizon = DelegationHorizon::of(&next.delegation());
+            next_horizon.admitted_at(now_ms).and_then(|()| {
+                (next_horizon.horizon_ms() > current_horizon.horizon_ms())
+                    .then_some((next, next_horizon))
+                    .ok_or_else(|| current_horizon.reached())
+            })
+        })
+}
+
 /// Mutable state behind [`SessionKeyRing`].
 #[derive(Debug)]
 struct SessionKeyRingState {
@@ -161,6 +195,22 @@ struct SessionKeyRingState {
     rotation_succeeded_total: u64,
     /// Failed runtime rotation attempts in this process lifetime.
     rotation_failed_total: u64,
+}
+
+impl SessionKeyRingState {
+    /// Commit a validated renewal `next` at `now_ms`, pruning expired retained keys and keeping the
+    /// displaced key if still unexpired.
+    fn commit_renewal(&mut self, next: DelegateeKey, now_ms: u128) {
+        self.retained
+            .retain(|key| !key.delegation().is_expired_at(now_ms));
+        let previous = std::mem::replace(&mut self.current, next);
+        if !previous.delegation().is_expired_at(now_ms)
+            && previous.delegatee_public_key() != self.current.delegatee_public_key()
+        {
+            self.retained.push(previous);
+        }
+        self.rotation_succeeded_total = self.rotation_succeeded_total.saturating_add(1);
+    }
 }
 
 /// Shared live session key and retained unexpired previous keys for a [`super::Processor`].
@@ -204,14 +254,16 @@ impl SessionKeyRing {
     /// `now_ms` (`t < e`).
     pub(crate) fn decryption_keys_at(&self, now_ms: u128) -> Vec<DelegateeKey> {
         let state = self.state.read().unwrap_or_else(PoisonError::into_inner);
-        let mut keys = Vec::with_capacity(1 + state.retained.len());
-        keys.push(state.current.clone());
-        for key in state.retained.iter().rev() {
-            if !key.delegation().is_expired_at(now_ms) {
-                keys.push(key.clone());
-            }
-        }
-        keys
+        std::iter::once(state.current.clone())
+            .chain(
+                state
+                    .retained
+                    .iter()
+                    .rev()
+                    .filter(|key| !key.delegation().is_expired_at(now_ms))
+                    .cloned(),
+            )
+            .collect()
     }
 
     /// Return `(rotation_succeeded_total, rotation_failed_total)`.
@@ -239,43 +291,19 @@ impl SessionKeyRing {
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        let validated = (|| -> Result<(DelegateeKey, DelegationHorizon)> {
-            let next = mint(&state.current)?;
-            if next.delegator_did() != state.current.delegator_did() {
-                return Err(Error::VerifyError(
-                    "renewed delegatee key delegator DID does not match node DID".to_string(),
-                ));
+        let outcome = mint(&state.current)
+            .and_then(|next| validate_delegation_renewal(&state.current, next, now_ms))
+            .and_then(|(next, next_horizon)| persist(&next).map(|()| (next, next_horizon)));
+        match outcome {
+            Ok((next, next_horizon)) => {
+                state.commit_renewal(next.clone(), now_ms);
+                Ok((next, next_horizon))
             }
-            next.delegation()
-                .verify_delegator_authorization_at(now_ms)
-                .map_err(Error::CoreError)?;
-            let current_horizon = DelegationHorizon::of(&state.current.delegation());
-            let next_horizon = DelegationHorizon::of(&next.delegation());
-            next_horizon.admitted_at(now_ms)?;
-            if next_horizon.horizon_ms() <= current_horizon.horizon_ms() {
-                return Err(current_horizon.reached());
-            }
-            persist(&next)?;
-            Ok((next, next_horizon))
-        })();
-        let (next, next_horizon) = match validated {
-            Ok(pair) => pair,
             Err(error) => {
                 state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-                return Err(error);
+                Err(error)
             }
-        };
-        state
-            .retained
-            .retain(|key| !key.delegation().is_expired_at(now_ms));
-        let previous = std::mem::replace(&mut state.current, next.clone());
-        if !previous.delegation().is_expired_at(now_ms)
-            && previous.delegatee_public_key() != state.current.delegatee_public_key()
-        {
-            state.retained.push(previous);
         }
-        state.rotation_succeeded_total = state.rotation_succeeded_total.saturating_add(1);
-        Ok((next, next_horizon))
     }
 
     /// Validate and install `next` at `now_ms`, retaining the previous key if it has not yet

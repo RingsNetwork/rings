@@ -27,16 +27,53 @@ pub(super) struct ChurnTraceDriver {
     last_global_event: Option<SimEventId>,
 }
 
+/// Monadic causal-event builder threading `(ChurnTraceDriver, SimNodeId, Option<SimEventId>)`
+/// across a sequence of Kleisli transitions `Option<SimEventId> -> SimAction`.
+struct NodeEventChain<'a> {
+    driver: &'a mut ChurnTraceDriver,
+    node: SimNodeId,
+    causal_parent: Option<SimEventId>,
+}
+
+impl<'a> NodeEventChain<'a> {
+    /// Apply `build(causal_parent)` and advance `causal_parent` to the resulting [`SimEventId`].
+    fn then<F>(mut self, build: F) -> Self
+    where F: FnOnce(Option<SimEventId>) -> SimAction {
+        let event = self.driver.apply(build(self.causal_parent));
+        self.driver.last_node_event.insert(self.node, event);
+        self.causal_parent = Some(event);
+        self
+    }
+
+    /// Conditionally apply `build(causal_parent)` when `cond` holds, otherwise preserve state.
+    fn then_if<F>(self, cond: bool, build: F) -> Self
+    where F: FnOnce(Option<SimEventId>) -> SimAction {
+        if cond {
+            self.then(build)
+        } else {
+            self
+        }
+    }
+
+    /// Return the most recent [`SimEventId`] produced along this chain.
+    fn finish(self) -> SimEventId {
+        self.causal_parent
+            .expect("NodeEventChain::finish requires at least one applied transition")
+    }
+}
+
 impl ChurnTraceDriver {
     pub(super) fn new(nodes: &[Node]) -> Self {
-        let mut did_to_node = BTreeMap::new();
-        let mut node_to_did = BTreeMap::new();
-        for (index, node) in nodes.iter().enumerate() {
-            let sim_node = SimNodeId(u16::try_from(index).expect("node index must fit SimNodeId"));
-            let did = node.did().to_string();
-            did_to_node.insert(did.clone(), sim_node);
-            node_to_did.insert(sim_node, did);
-        }
+        let (did_to_node, node_to_did) = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                let sim_node =
+                    SimNodeId(u16::try_from(index).expect("node index must fit SimNodeId"));
+                let did = node.did().to_string();
+                ((did.clone(), sim_node), (sim_node, did))
+            })
+            .unzip();
         Self {
             state: SimState::default(),
             did_to_node,
@@ -46,6 +83,21 @@ impl ChurnTraceDriver {
             pending_repair_intent: BTreeMap::new(),
             last_node_event: BTreeMap::new(),
             last_global_event: None,
+        }
+    }
+
+    fn begin_node_chain(
+        &mut self,
+        node: SimNodeId,
+        initial_parent: Option<SimEventId>,
+    ) -> NodeEventChain<'_> {
+        let causal_parent = initial_parent
+            .or_else(|| self.last_node_event.get(&node).copied())
+            .or(self.last_global_event);
+        NodeEventChain {
+            driver: self,
+            node,
+            causal_parent,
         }
     }
 
@@ -64,9 +116,9 @@ impl ChurnTraceDriver {
     }
 
     pub(super) fn record_inject_sync(&mut self, node: SimNodeId, entries: u64) -> SimEventId {
-        let event = self.apply(SimAction::InjectSync { node, entries });
-        self.last_node_event.insert(node, event);
-        event
+        self.begin_node_chain(node, None)
+            .then(|_| SimAction::InjectSync { node, entries })
+            .finish()
     }
 
     pub(super) fn advance_virtual(&mut self, delta_ms: u64) {
@@ -77,22 +129,26 @@ impl ChurnTraceDriver {
     }
 
     pub(super) fn record_join(&mut self, node: SimNodeId, via: SimNodeId) -> SimEventId {
-        let event = self.apply(SimAction::Join { node, via });
-        self.last_node_event.insert(node, event);
-        event
+        self.begin_node_chain(node, None)
+            .then(|_| SimAction::Join { node, via })
+            .finish()
     }
 
     pub(super) fn record_leave(&mut self, node: SimNodeId, graceful: bool) -> SimEventId {
-        let event = self.apply(SimAction::Leave { node, graceful });
+        let event = self
+            .begin_node_chain(node, None)
+            .then(|_| SimAction::Leave { node, graceful })
+            .finish();
         self.pending_repair_intent.remove(&node);
-        self.last_node_event.insert(node, event);
         event
     }
 
     pub(super) fn record_crash(&mut self, node: SimNodeId) -> SimEventId {
-        let event = self.apply(SimAction::Crash { node });
+        let event = self
+            .begin_node_chain(node, None)
+            .then(|_| SimAction::Crash { node })
+            .finish();
         self.pending_repair_intent.remove(&node);
-        self.last_node_event.insert(node, event);
         event
     }
 
@@ -112,62 +168,65 @@ impl ChurnTraceDriver {
         }
         let local_did = self.node_did(node).to_owned();
         let peer_did = self.node_did(peer).to_owned();
-        if let Some(existing_gen) = self.state.active_generation(node, peer).map(str::to_owned) {
-            if existing_gen != generation {
-                let parent = self
-                    .active_generations
-                    .get(&edge)
-                    .map(|(_, ev)| *ev)
-                    .or(self.last_node_event.get(&node).copied())
-                    .or(self.last_global_event);
-                let close_event = self.apply(SimAction::ConnectionLifecycle {
+        let stale_gen = self
+            .state
+            .active_generation(node, peer)
+            .filter(|&existing| existing != generation)
+            .map(str::to_owned);
+        let initial_parent = stale_gen
+            .as_ref()
+            .and_then(|_| self.active_generations.get(&edge).map(|(_, ev)| *ev));
+        let active_event = self
+            .begin_node_chain(node, initial_parent)
+            .then_if(stale_gen.is_some(), |causal_parent| {
+                SimAction::ConnectionLifecycle {
                     node,
                     peer,
                     local_did: local_did.clone(),
                     peer_did: peer_did.clone(),
-                    generation: existing_gen,
+                    generation: stale_gen.unwrap_or_default(),
                     state: SimConnectionState::Closed,
-                    causal_parent: parent,
-                });
-                self.last_node_event.insert(node, close_event);
-            }
-        }
-        let parent = self
-            .last_node_event
-            .get(&node)
-            .copied()
-            .or(self.last_global_event);
-        let active_event = self.apply(SimAction::ConnectionLifecycle {
-            node,
-            peer,
-            local_did,
-            peer_did,
-            generation: generation.to_owned(),
-            state: SimConnectionState::Active,
-            causal_parent: parent,
-        });
+                    causal_parent,
+                }
+            })
+            .then(|causal_parent| SimAction::ConnectionLifecycle {
+                node,
+                peer,
+                local_did,
+                peer_did,
+                generation: generation.to_owned(),
+                state: SimConnectionState::Active,
+                causal_parent,
+            })
+            .finish();
         self.active_generations
             .insert(edge, (generation.to_owned(), active_event));
-        self.last_node_event.insert(node, active_event);
         active_event
     }
 
     pub(super) fn sync_node_connections(&mut self, nodes: &[Node]) {
-        for (local_idx, local) in nodes.iter().enumerate() {
-            let local_id = SimNodeId(local_idx as u16);
-            for (peer_idx, peer) in nodes.iter().enumerate() {
-                if local_idx == peer_idx {
-                    continue;
-                }
-                let Some(connection) = local.swarm.transport.get_connection(peer.did()) else {
-                    continue;
-                };
-                let Ok(generation) = connection.dummy_generation_id() else {
-                    continue;
-                };
-                let peer_id = SimNodeId(peer_idx as u16);
-                let _ = self.ensure_active_generation(local_id, peer_id, &generation);
-            }
+        let active_edges: Vec<(SimNodeId, SimNodeId, String)> = nodes
+            .iter()
+            .enumerate()
+            .flat_map(|(local_idx, local)| {
+                nodes
+                    .iter()
+                    .enumerate()
+                    .filter(move |&(peer_idx, _)| local_idx != peer_idx)
+                    .filter_map(move |(peer_idx, peer)| {
+                        local
+                            .swarm
+                            .transport
+                            .get_connection(peer.did())
+                            .and_then(|conn| conn.dummy_generation_id().ok())
+                            .map(|gen| {
+                                (SimNodeId(local_idx as u16), SimNodeId(peer_idx as u16), gen)
+                            })
+                    })
+            })
+            .collect();
+        for (local_id, peer_id, generation) in active_edges {
+            let _ = self.ensure_active_generation(local_id, peer_id, &generation);
         }
     }
 
@@ -177,22 +236,19 @@ impl ChurnTraceDriver {
         };
         let local_did = self.node_did(node).to_owned();
         let peer_did = self.node_did(peer).to_owned();
-        let parent = self
-            .last_node_event
-            .get(&node)
-            .copied()
-            .or(self.last_global_event);
-        let close_event = self.apply(SimAction::ConnectionLifecycle {
-            node,
-            peer,
-            local_did,
-            peer_did,
-            generation,
-            state: SimConnectionState::Closed,
-            causal_parent: parent,
-        });
+        let _ = self
+            .begin_node_chain(node, None)
+            .then(|causal_parent| SimAction::ConnectionLifecycle {
+                node,
+                peer,
+                local_did,
+                peer_did,
+                generation,
+                state: SimConnectionState::Closed,
+                causal_parent,
+            })
+            .finish();
         self.active_generations.remove(&(node, peer));
-        self.last_node_event.insert(node, close_event);
     }
 
     pub(super) fn observe_peer_removal_if_due(&mut self, observer: SimNodeId, departed: SimNodeId) {
@@ -203,14 +259,16 @@ impl ChurnTraceDriver {
         let Some(failure_event) = self.state.failure_event(observer, departed) else {
             return;
         };
-        let disconnect_event = self.apply(SimAction::Disconnect {
-            node: observer,
-            peer: departed,
-            causal_parent: Some(failure_event),
-        });
+        let disconnect_event = self
+            .begin_node_chain(observer, Some(failure_event))
+            .then(|causal_parent| SimAction::Disconnect {
+                node: observer,
+                peer: departed,
+                causal_parent,
+            })
+            .finish();
         self.pending_repair_intent
             .insert(observer, disconnect_event);
-        self.last_node_event.insert(observer, disconnect_event);
         self.close_edge_if_active(observer, departed);
     }
 
@@ -237,54 +295,57 @@ impl ChurnTraceDriver {
         };
         let lifecycle_event =
             self.ensure_active_generation(node, peer, &delivery.connection_generation);
-        let local_did = self.node_did(node).to_owned();
-        let peer_did = self.node_did(peer).to_owned();
         let identity = SimFrameIdentity {
-            local_did,
-            peer_did,
+            local_did: self.node_did(node).to_owned(),
+            peer_did: self.node_did(peer).to_owned(),
             connection_generation: delivery.connection_generation.clone(),
             transaction_id: delivery.transaction_id,
         };
-        let parent = self
+        let initial_parent = self
             .last_node_event
             .get(&node)
             .copied()
-            .unwrap_or(lifecycle_event);
-        let submit_event = self.apply(SimAction::SubmitFrame {
-            transfer_id: delivery.sequence,
-            node,
-            class,
-            identity: identity.clone(),
-            causal_parent: Some(parent),
-        });
-        let admit_event = self.apply(SimAction::AdmitFrame {
-            transfer_id: delivery.sequence,
-            node,
-            class,
-            bytes: u64::try_from(delivery.bytes).expect("frame bytes must fit u64"),
-            enqueued_virtual_ms: delivery.enqueued_virtual_ms,
-            deadline_virtual_ms: delivery.deadline_virtual_ms,
-            identity,
-            causal_parent: Some(submit_event),
-        });
-        let dispatch_event = self.apply(SimAction::DispatchFrame {
-            transfer_id: delivery.sequence,
-            causal_parent: Some(admit_event),
-        });
-        let deliver_parent = if class == SimTransferClass::Reassembly {
-            self.apply(SimAction::AdvanceReassembly {
+            .or(Some(lifecycle_event));
+        let transfer_id = delivery.sequence;
+        let bytes = u64::try_from(delivery.bytes).expect("frame bytes must fit u64");
+        let enqueued_virtual_ms = delivery.enqueued_virtual_ms;
+        let deadline_virtual_ms = delivery.deadline_virtual_ms;
+
+        let _ = self
+            .begin_node_chain(node, initial_parent)
+            .then(|causal_parent| SimAction::SubmitFrame {
+                transfer_id,
                 node,
-                transfer_id: delivery.sequence,
-                causal_parent: Some(dispatch_event),
+                class,
+                identity: identity.clone(),
+                causal_parent,
             })
-        } else {
-            dispatch_event
-        };
-        let deliver_event = self.apply(SimAction::DeliverFrame {
-            transfer_id: delivery.sequence,
-            causal_parent: Some(deliver_parent),
-        });
-        self.last_node_event.insert(node, deliver_event);
+            .then(|causal_parent| SimAction::AdmitFrame {
+                transfer_id,
+                node,
+                class,
+                bytes,
+                enqueued_virtual_ms,
+                deadline_virtual_ms,
+                identity,
+                causal_parent,
+            })
+            .then(|causal_parent| SimAction::DispatchFrame {
+                transfer_id,
+                causal_parent,
+            })
+            .then_if(class == SimTransferClass::Reassembly, |causal_parent| {
+                SimAction::AdvanceReassembly {
+                    node,
+                    transfer_id,
+                    causal_parent,
+                }
+            })
+            .then(|causal_parent| SimAction::DeliverFrame {
+                transfer_id,
+                causal_parent,
+            })
+            .finish();
         self.drain_production_observations(runtime);
     }
 
@@ -296,29 +357,23 @@ impl ChurnTraceDriver {
             match observation {
                 ProductionTraceObservation::PersistOneEntry { node_did } => {
                     let node = self.node_id(&node_did);
-                    let parent = self
-                        .last_node_event
-                        .get(&node)
-                        .copied()
-                        .or(self.last_global_event);
-                    let persist_event = self.apply(SimAction::PersistOneEntry {
-                        node,
-                        causal_parent: parent,
-                    });
-                    self.last_node_event.insert(node, persist_event);
+                    let _ = self
+                        .begin_node_chain(node, None)
+                        .then(|causal_parent| SimAction::PersistOneEntry {
+                            node,
+                            causal_parent,
+                        })
+                        .finish();
                 }
                 ProductionTraceObservation::YieldActor { node_did } => {
                     let node = self.node_id(&node_did);
-                    let parent = self
-                        .last_node_event
-                        .get(&node)
-                        .copied()
-                        .or(self.last_global_event);
-                    let yield_event = self.apply(SimAction::YieldActor {
-                        node,
-                        causal_parent: parent,
-                    });
-                    self.last_node_event.insert(node, yield_event);
+                    let _ = self
+                        .begin_node_chain(node, None)
+                        .then(|causal_parent| SimAction::YieldActor {
+                            node,
+                            causal_parent,
+                        })
+                        .finish();
                 }
             }
         }
@@ -330,26 +385,23 @@ impl ChurnTraceDriver {
         outcome: SimMaintenanceOutcome,
         repair_cursor: Option<String>,
     ) {
-        if let Some(intent_event) = self.pending_repair_intent.remove(&node) {
-            let repair_event = self.apply(SimAction::ScheduleRepair {
+        let repair_intent = self.pending_repair_intent.remove(&node);
+        let _ = self
+            .begin_node_chain(node, repair_intent)
+            .then_if(repair_intent.is_some(), |causal_parent| {
+                SimAction::ScheduleRepair {
+                    node,
+                    entries: 0,
+                    causal_parent,
+                }
+            })
+            .then(|causal_parent| SimAction::RunMaintenance {
                 node,
-                entries: 0,
-                causal_parent: Some(intent_event),
-            });
-            self.last_node_event.insert(node, repair_event);
-        }
-        let parent = self
-            .last_node_event
-            .get(&node)
-            .copied()
-            .or(self.last_global_event);
-        let event = self.apply(SimAction::RunMaintenance {
-            node,
-            outcome,
-            repair_cursor,
-            causal_parent: parent,
-        });
-        self.last_node_event.insert(node, event);
+                outcome,
+                repair_cursor,
+                causal_parent,
+            })
+            .finish();
     }
 
     fn apply(&mut self, action: SimAction) -> SimEventId {

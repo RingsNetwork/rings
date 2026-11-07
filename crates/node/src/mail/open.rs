@@ -106,6 +106,19 @@ pub fn open_mail(
         .collect()
 }
 
+/// Semilattice join over `(Opening, Option<PublicKey<33>>)` ordered by `Incomplete < Unreadable < Opened`
+/// (`Law (Join)`).
+fn join_opening(
+    earlier: (Opening, Option<PublicKey<33>>),
+    candidate: (Opening, Option<PublicKey<33>>),
+) -> (Opening, Option<PublicKey<33>>) {
+    if candidate.0.rank() > earlier.0.rank() {
+        candidate
+    } else {
+        earlier
+    }
+}
+
 /// Open the mail in `elements` for `recipient` trying `keys` in order, returning each mail id's
 /// outcome and the delegatee public key of the key that decrypted it when opened (#1153).
 pub(crate) fn open_mail_with_keys(
@@ -118,35 +131,28 @@ pub(crate) fn open_mail_with_keys(
         .iter()
         .map(|element| (MailDigest::of(element), element))
         .collect::<BTreeMap<_, _>>();
-    let manifests = elements
+    elements
         .iter()
         .filter_map(|element| match MailElement::decode(element) {
             Ok(MailElement::Manifest(manifest)) => Some(manifest),
             Ok(MailElement::Chunk(_)) | Err(_) => None,
-        });
-    let mut outcomes = BTreeMap::<MailDigest, (Opening, Option<PublicKey<33>>)>::new();
-    for manifest in manifests {
-        if !fresh(&manifest.mail_id) || !manifest.is_well_formed() {
-            continue;
-        }
-        let Some((outcome, opened_by)) = open_manifest(&manifest, &by_digest, recipient, keys)
-        else {
-            continue;
-        };
-        let mail_id = outcome.mail_id();
-        let joined = match outcomes.remove(&mail_id) {
-            Some((earlier, earlier_by)) => {
-                if outcome.rank() > earlier.rank() {
-                    (outcome, opened_by)
-                } else {
-                    (earlier, earlier_by)
-                }
-            }
-            None => (outcome, opened_by),
-        };
-        outcomes.insert(mail_id, joined);
-    }
-    outcomes.into_values().collect()
+        })
+        .filter(|manifest| fresh(&manifest.mail_id) && manifest.is_well_formed())
+        .filter_map(|manifest| open_manifest(&manifest, &by_digest, recipient, keys))
+        .fold(
+            BTreeMap::<MailDigest, (Opening, Option<PublicKey<33>>)>::new(),
+            |mut outcomes, candidate| {
+                let mail_id = candidate.0.mail_id();
+                let joined = match outcomes.remove(&mail_id) {
+                    Some(earlier) => join_opening(earlier, candidate),
+                    None => candidate,
+                };
+                outcomes.insert(mail_id, joined);
+                outcomes
+            },
+        )
+        .into_values()
+        .collect()
 }
 
 /// What the well-formed `manifest` opens to over the elements `by_digest`, or `None` when it is
@@ -203,24 +209,29 @@ fn assemble(manifest: &MailManifest, by_digest: &BTreeMap<MailDigest, &Bytes>) -
 /// §2.2.3) and trimmed; the header ends at the first empty line.
 fn header_field(message: &[u8], name: &str) -> Option<String> {
     let text = String::from_utf8_lossy(message);
-    let mut value: Option<String> = None;
-    for line in text.split('\n').map(|line| line.trim_end_matches('\r')) {
-        if line.is_empty() {
-            break;
-        }
-        let folded = line.starts_with([' ', '\t']);
-        match (value.as_mut(), folded) {
-            (Some(value), true) => value.push_str(line),
-            (Some(_), false) => break,
-            (None, true) => {}
-            (None, false) => {
-                value = line
-                    .split_once(':')
-                    .filter(|(field, _)| field.trim().eq_ignore_ascii_case(name))
-                    .map(|(_, rest)| rest.to_owned());
+    let folded = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .take_while(|line| !line.is_empty())
+        .try_fold(None::<String>, |acc, line| {
+            let is_continuation = line.starts_with([' ', '\t']);
+            match (acc, is_continuation) {
+                (Some(mut value), true) => {
+                    value.push_str(line);
+                    std::ops::ControlFlow::Continue(Some(value))
+                }
+                (Some(value), false) => std::ops::ControlFlow::Break(Some(value)),
+                (None, true) => std::ops::ControlFlow::Continue(None),
+                (None, false) => std::ops::ControlFlow::Continue(
+                    line.split_once(':')
+                        .filter(|(field, _)| field.trim().eq_ignore_ascii_case(name))
+                        .map(|(_, rest)| rest.to_owned()),
+                ),
             }
-        }
-    }
+        });
+    let value = match folded {
+        std::ops::ControlFlow::Break(value) | std::ops::ControlFlow::Continue(value) => value,
+    };
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

@@ -17,24 +17,34 @@ impl RemoteRpcEndpoint {
     /// Parse `url` as a public HTTP(S) RPC endpoint: no credentials, no fragment, and a host
     /// the network policy permits.
     pub fn parse(url: &str) -> Result<Self> {
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|error| Error::UnsafeRemoteRpcTarget(error.to_string()))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(Error::UnsafeRemoteRpcTarget(
-                "only HTTP(S) endpoints are supported".to_string(),
-            ));
-        }
-        if !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.fragment().is_some()
-        {
-            return Err(Error::UnsafeRemoteRpcTarget(
-                "credentials and fragments are not permitted in an RPC endpoint URL".to_string(),
-            ));
-        }
-        rings_network_policy::validate_public_url_host(&parsed)
-            .map_err(|error| Error::UnsafeRemoteRpcTarget(error.to_string()))?;
-        Ok(Self(parsed))
+        reqwest::Url::parse(url)
+            .map_err(|error| Error::UnsafeRemoteRpcTarget(error.to_string()))
+            .and_then(|parsed| {
+                matches!(parsed.scheme(), "http" | "https")
+                    .then_some(parsed)
+                    .ok_or_else(|| {
+                        Error::UnsafeRemoteRpcTarget(
+                            "only HTTP(S) endpoints are supported".to_string(),
+                        )
+                    })
+            })
+            .and_then(|parsed| {
+                (parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.fragment().is_none())
+                .then_some(parsed)
+                .ok_or_else(|| {
+                    Error::UnsafeRemoteRpcTarget(
+                        "credentials and fragments are not permitted in an RPC endpoint URL"
+                            .to_string(),
+                    )
+                })
+            })
+            .and_then(|parsed| {
+                rings_network_policy::validate_public_url_host(&parsed)
+                    .map_err(|error| Error::UnsafeRemoteRpcTarget(error.to_string()))
+                    .map(|()| Self(parsed))
+            })
     }
 
     /// The endpoint as a URL string.
@@ -58,36 +68,56 @@ pub struct RemoteRpcProxy(reqwest::Url);
 impl RemoteRpcProxy {
     /// Parse `url` as an HTTP(S) proxy for remote RPC endpoints.
     pub fn parse(url: &str) -> Result<Self> {
-        let parsed = reqwest::Url::parse(url).map_err(|error| {
-            Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}"))
-        })?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(Error::InvalidConfig(
-                "remote_rpc_proxy_url must use http:// or https://".to_string(),
-            ));
-        }
-        if !parsed.username().is_empty()
-            || parsed.password().is_some()
-            || parsed.path() != "/"
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-        {
-            return Err(Error::InvalidConfig(
-                "credentials, non-root paths, query parameters, and fragments are not permitted \
-                 in remote_rpc_proxy_url"
-                    .to_string(),
-            ));
-        }
-        if parsed.host().is_none() || parsed.port_or_known_default().is_none() {
-            return Err(Error::InvalidConfig(
-                "remote_rpc_proxy_url must include a host and usable port".to_string(),
-            ));
-        }
-        #[cfg(rings_native)]
-        reqwest::Proxy::all(parsed.as_str()).map_err(|error| {
-            Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}"))
-        })?;
-        Ok(Self(parsed))
+        reqwest::Url::parse(url)
+            .map_err(|error| Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}")))
+            .and_then(|parsed| {
+                matches!(parsed.scheme(), "http" | "https")
+                    .then_some(parsed)
+                    .ok_or_else(|| {
+                        Error::InvalidConfig(
+                            "remote_rpc_proxy_url must use http:// or https://".to_string(),
+                        )
+                    })
+            })
+            .and_then(|parsed| {
+                (parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.path() == "/"
+                    && parsed.query().is_none()
+                    && parsed.fragment().is_none())
+                .then_some(parsed)
+                .ok_or_else(|| {
+                    Error::InvalidConfig(
+                        "credentials, non-root paths, query parameters, and fragments are not \
+                         permitted in remote_rpc_proxy_url"
+                            .to_string(),
+                    )
+                })
+            })
+            .and_then(|parsed| {
+                (parsed.host().is_some() && parsed.port_or_known_default().is_some())
+                    .then_some(parsed)
+                    .ok_or_else(|| {
+                        Error::InvalidConfig(
+                            "remote_rpc_proxy_url must include a host and usable port".to_string(),
+                        )
+                    })
+            })
+            .and_then(Self::validate_native_proxy)
+            .map(Self)
+    }
+
+    #[cfg(rings_native)]
+    fn validate_native_proxy(parsed: reqwest::Url) -> Result<reqwest::Url> {
+        reqwest::Proxy::all(parsed.as_str())
+            .map(|_| parsed)
+            .map_err(|error| Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}")))
+    }
+
+    #[cfg(not(rings_native))]
+    #[allow(clippy::unnecessary_wraps)]
+    const fn validate_native_proxy(parsed: reqwest::Url) -> Result<reqwest::Url> {
+        Ok(parsed)
     }
 
     /// The proxy URL as a string.
@@ -106,6 +136,19 @@ impl fmt::Display for RemoteRpcProxy {
     /// Render the proxy as its URL.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+/// Attach `api_token` (when present) to `client`.
+fn attach_bearer_token(
+    client: rings_rpc::jsonrpc::Client,
+    api_token: Option<&str>,
+) -> Result<rings_rpc::jsonrpc::Client> {
+    match api_token {
+        Some(token) => client
+            .with_bearer_token(token.to_owned())
+            .map_err(|error| Error::RemoteRpcError(error.to_string())),
+        None => Ok(client),
     }
 }
 
@@ -157,12 +200,7 @@ pub(crate) async fn remote_rpc_client(
         }
     }
     .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    match api_token {
-        Some(token) => client
-            .with_bearer_token(token.to_owned())
-            .map_err(|error| Error::RemoteRpcError(error.to_string())),
-        None => Ok(client),
-    }
+    attach_bearer_token(client, api_token)
 }
 
 /// The DNS resolution to pin for a domain endpoint; `None` for an IP literal, which needs no
@@ -203,19 +241,19 @@ pub(crate) async fn remote_rpc_client(
     api_token: Option<&str>,
     proxy: Option<&RemoteRpcProxy>,
 ) -> Result<rings_rpc::jsonrpc::Client> {
-    if proxy.is_some() {
-        return Err(Error::InvalidConfig(
-            "remote_rpc_proxy_url is supported only on native targets".to_string(),
-        ));
-    }
-    let client = rings_rpc::jsonrpc::Client::new(endpoint.as_str())
-        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    match api_token {
-        Some(token) => client
-            .with_bearer_token(token.to_owned())
-            .map_err(|error| Error::RemoteRpcError(error.to_string())),
-        None => Ok(client),
-    }
+    proxy
+        .is_none()
+        .then_some(())
+        .ok_or_else(|| {
+            Error::InvalidConfig(
+                "remote_rpc_proxy_url is supported only on native targets".to_string(),
+            )
+        })
+        .and_then(|()| {
+            rings_rpc::jsonrpc::Client::new(endpoint.as_str())
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))
+        })
+        .and_then(|client| attach_bearer_token(client, api_token))
 }
 
 #[cfg(test)]

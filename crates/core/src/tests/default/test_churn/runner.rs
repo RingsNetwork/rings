@@ -102,15 +102,15 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
     establish_initial_ring(&runtime, &nodes, config.target_nodes, &mut driver).await;
     seed_initial_storage(&runtime, &nodes, config.target_nodes, &mut driver).await;
 
-    let mut timeline_points = BTreeSet::new();
-    for event in schedule.iter().skip(schedule_index) {
-        timeline_points.insert(event.virtual_ms);
-    }
-    let mut tick_ms = config.stabilize_interval_ms;
-    while tick_ms <= config.duration_ms {
-        timeline_points.insert(tick_ms);
-        tick_ms = tick_ms.saturating_add(config.stabilize_interval_ms);
-    }
+    let timeline_points: BTreeSet<u64> = schedule
+        .iter()
+        .skip(schedule_index)
+        .map(|event| event.virtual_ms)
+        .chain(
+            (1..=config.duration_ms / config.stabilize_interval_ms)
+                .map(|step| step.saturating_mul(config.stabilize_interval_ms)),
+        )
+        .collect();
 
     let mut pending_inbox_targets: BTreeSet<SimNodeId> = BTreeSet::new();
     let mut active_held_messages: BTreeMap<SimNodeId, Vec<u8>> = BTreeMap::new();
@@ -154,7 +154,10 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
         if is_stabilize_tick {
             clean_unavailable_across_live(&runtime, &nodes, &mut driver).await;
 
-            sample_ring_liveness_and_lookups(&nodes, &driver, &mut sample_counters);
+            sample_counters = sample_counters.combine(sample_ring_liveness_and_lookups(
+                &nodes,
+                driver.state.live_nodes(),
+            ));
 
             run_stabilizer_round(&runtime, &nodes, &mut driver).await;
 
@@ -180,57 +183,13 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
         }
     }
 
-    let orphan_samples = sample_counters.orphan_samples;
-    let live_node_samples = sample_counters.live_node_samples;
-    let lookup_successes = sample_counters.lookup_successes;
-    let lookup_attempts = sample_counters.lookup_attempts;
-    let population_sum = sample_counters.population_sum;
-    let population_probes = sample_counters.population_probes;
-
-    let duration_secs = (driver.state.virtual_ms().max(1) as f64) / 1_000.0;
-    let mean_live_nodes = if population_probes > 0 {
-        (population_sum as f64) / (population_probes as f64)
-    } else {
-        config.target_nodes as f64
-    };
-    let maintenance_bytes = driver.state.maintenance_admitted_bytes();
-    let maintenance_bytes_per_node_sec =
-        (maintenance_bytes as f64) / (mean_live_nodes.max(1.0) * duration_secs);
-
-    let orphan_rate = if live_node_samples > 0 {
-        (orphan_samples as f64) / (live_node_samples as f64)
-    } else {
-        0.0
-    };
-    let lookup_success_rate = if lookup_attempts > 0 {
-        (lookup_successes as f64) / (lookup_attempts as f64)
-    } else {
-        1.0
-    };
-    let held_inbox_delivery_rate = if held_messages_injected > 0 {
-        (held_messages_delivered as f64) / (held_messages_injected as f64)
-    } else {
-        1.0
-    };
-
-    let metrics = ChurnMetrics {
-        orphan_samples,
-        live_node_samples,
-        orphan_rate,
-        lookup_successes,
-        lookup_attempts,
-        lookup_success_rate,
+    let metrics = compute_churn_metrics(
+        &config,
+        &driver.state,
+        &sample_counters,
         held_messages_injected,
         held_messages_delivered,
-        held_inbox_delivery_rate,
-        maintenance_bytes,
-        maintenance_bytes_per_node_sec,
-        mean_live_nodes,
-        joins: driver.state.joins(),
-        graceful_leaves: driver.state.graceful_leaves(),
-        ungraceful_leaves: driver.state.ungraceful_leaves(),
-        crashes: driver.state.crashes(),
-    };
+    );
 
     let violations = driver.state.invariant_violations(CHURN_MODEL_LIMITS);
     teardown_all_nodes(&runtime, &nodes).await;
@@ -243,6 +202,53 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
         state: driver.state,
         metrics,
         violations,
+    }
+}
+
+/// Pure ratio helper returning `numerator / denominator` when `denominator > 0`, or `empty_default`.
+fn ratio_or(numerator: u64, denominator: u64, empty_default: f64) -> f64 {
+    if denominator > 0 {
+        (numerator as f64) / (denominator as f64)
+    } else {
+        empty_default
+    }
+}
+
+/// Pure synthesis of [`ChurnMetrics`] from the final [`SimState`] and [`LivenessSampleCounters`].
+fn compute_churn_metrics(
+    config: &ChurnScenarioConfig,
+    state: &crate::simulation::model::SimState,
+    counters: &LivenessSampleCounters,
+    held_messages_injected: u64,
+    held_messages_delivered: u64,
+) -> ChurnMetrics {
+    let duration_secs = (state.virtual_ms().max(1) as f64) / 1_000.0;
+    let mean_live_nodes = ratio_or(
+        counters.population_sum,
+        counters.population_probes,
+        config.target_nodes as f64,
+    );
+    let maintenance_bytes = state.maintenance_admitted_bytes();
+    let maintenance_bytes_per_node_sec =
+        (maintenance_bytes as f64) / (mean_live_nodes.max(1.0) * duration_secs);
+
+    ChurnMetrics {
+        orphan_samples: counters.orphan_samples,
+        live_node_samples: counters.live_node_samples,
+        orphan_rate: ratio_or(counters.orphan_samples, counters.live_node_samples, 0.0),
+        lookup_successes: counters.lookup_successes,
+        lookup_attempts: counters.lookup_attempts,
+        lookup_success_rate: ratio_or(counters.lookup_successes, counters.lookup_attempts, 1.0),
+        held_messages_injected,
+        held_messages_delivered,
+        held_inbox_delivery_rate: ratio_or(held_messages_delivered, held_messages_injected, 1.0),
+        maintenance_bytes,
+        maintenance_bytes_per_node_sec,
+        mean_live_nodes,
+        joins: state.joins(),
+        graceful_leaves: state.graceful_leaves(),
+        ungraceful_leaves: state.ungraceful_leaves(),
+        crashes: state.crashes(),
     }
 }
 
@@ -354,30 +360,34 @@ async fn seed_initial_storage(
 }
 
 fn derive_entry_for_owner(owner: &Node, slot: usize) -> PlacedEntry {
-    for nonce in 0_u64..50_000 {
-        let topic = format!("churn-seed-{slot}-{nonce}");
-        let key = Entry::gen_did(&topic).expect("entry key must derive");
-        if matches!(
-            owner
-                .dht()
-                .find_storage_owner(key)
-                .expect("storage owner lookup must succeed"),
-            PeerRingAction::Some(_)
-        ) {
-            let payload = Bytes::from(vec![
-                u8::try_from((nonce + slot as u64) % 251)
-                    .expect("byte fits");
-                INITIAL_STORAGE_PAYLOAD_BYTES
-            ]);
-            return PlacedEntry::new(key, live_entry(key, vec![payload], EntryKind::Data));
-        }
-    }
-    let fallback_key = owner.did();
-    let payload = Bytes::from(vec![1_u8; INITIAL_STORAGE_PAYLOAD_BYTES]);
-    PlacedEntry::new(
-        fallback_key,
-        live_entry(fallback_key, vec![payload], EntryKind::Data),
-    )
+    (0_u64..50_000)
+        .find_map(|nonce| {
+            let topic = format!("churn-seed-{slot}-{nonce}");
+            let key = Entry::gen_did(&topic).expect("entry key must derive");
+            matches!(
+                owner
+                    .dht()
+                    .find_storage_owner(key)
+                    .expect("storage owner lookup must succeed"),
+                PeerRingAction::Some(_)
+            )
+            .then(|| {
+                let payload = Bytes::from(vec![
+                    u8::try_from((nonce + slot as u64) % 251)
+                        .expect("byte fits");
+                    INITIAL_STORAGE_PAYLOAD_BYTES
+                ]);
+                PlacedEntry::new(key, live_entry(key, vec![payload], EntryKind::Data))
+            })
+        })
+        .unwrap_or_else(|| {
+            let fallback_key = owner.did();
+            let payload = Bytes::from(vec![1_u8; INITIAL_STORAGE_PAYLOAD_BYTES]);
+            PlacedEntry::new(
+                fallback_key,
+                live_entry(fallback_key, vec![payload], EntryKind::Data),
+            )
+        })
 }
 
 fn will_rejoin_at_stabilize_tick(
@@ -387,25 +397,22 @@ fn will_rejoin_at_stabilize_tick(
     stabilize_interval_ms: u64,
     duration_ms: u64,
 ) -> bool {
-    let mut next_join_ms = None;
-    let mut depart_after_join_ms = None;
-    for event in remaining_schedule {
-        match event.action {
-            SimAction::Join { node: joined, .. } if joined == node && next_join_ms.is_none() => {
-                next_join_ms = Some(event.virtual_ms);
-            }
-            SimAction::Leave { node: left, .. } | SimAction::Crash { node: left }
-                if left == node && next_join_ms.is_some() =>
-            {
-                depart_after_join_ms = Some(event.virtual_ms);
-                break;
-            }
-            _ => {}
-        }
-    }
-    let Some(join_ms) = next_join_ms else {
+    let Some(join_pos) = remaining_schedule.iter().position(
+        |event| matches!(event.action, SimAction::Join { node: joined, .. } if joined == node),
+    ) else {
         return false;
     };
+    let join_ms = remaining_schedule[join_pos].virtual_ms;
+    let depart_after_join_ms = remaining_schedule[(join_pos + 1)..]
+        .iter()
+        .find_map(|event| match event.action {
+            SimAction::Leave { node: left, .. } | SimAction::Crash { node: left }
+                if left == node =>
+            {
+                Some(event.virtual_ms)
+            }
+            _ => None,
+        });
     let inject_tick_ms = ((depart_ms / stabilize_interval_ms) + 1) * stabilize_interval_ms;
     if join_ms <= inject_tick_ms {
         return false;
@@ -598,16 +605,17 @@ fn discard_departed_close_callbacks(
     runtime: &SimulationRuntimeGuard,
     remote_generations: &BTreeSet<String>,
 ) {
-    let pending = runtime
+    runtime
         .pending_deliveries()
-        .expect("pending deliveries must classify");
-    for delivery in pending {
-        if delivery.class == ScheduledDeliveryClass::Lifecycle
-            && remote_generations.contains(&delivery.connection_generation)
-        {
+        .expect("pending deliveries must classify")
+        .into_iter()
+        .filter(|delivery| {
+            delivery.class == ScheduledDeliveryClass::Lifecycle
+                && remote_generations.contains(&delivery.connection_generation)
+        })
+        .for_each(|delivery| {
             let _ = runtime.discard(&delivery);
-        }
-    }
+        });
 }
 
 pub(super) async fn close_node_all_connections(
@@ -874,23 +882,17 @@ async fn settle_one_poll() {
 }
 
 async fn teardown_all_nodes(runtime: &SimulationRuntimeGuard, nodes: &[Node]) {
-    let mut generations: Vec<String> = Vec::new();
-    for left in 0..nodes.len() {
-        for right in 0..nodes.len() {
-            if left == right {
-                continue;
-            }
-            if let Some(conn) = nodes[left]
+    let generations: Vec<String> = (0..nodes.len())
+        .flat_map(|left| (0..nodes.len()).map(move |right| (left, right)))
+        .filter(|&(left, right)| left != right)
+        .filter_map(|(left, right)| {
+            nodes[left]
                 .swarm
                 .transport
                 .get_connection(nodes[right].did())
-            {
-                if let Ok(gen_id) = conn.dummy_generation_id() {
-                    generations.push(gen_id);
-                }
-            }
-        }
-    }
+                .and_then(|conn| conn.dummy_generation_id().ok())
+        })
+        .collect();
     for node in nodes {
         let _ = node.swarm.close().await;
     }

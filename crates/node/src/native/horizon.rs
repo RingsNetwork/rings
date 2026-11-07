@@ -83,38 +83,51 @@ pub struct DelegationRenewalPaths {
 impl DelegationRenewalPaths {
     /// Build renewal paths from `config` when `config.delegator_key` is present.
     pub fn from_config(config: &Config) -> Result<Option<Self>> {
-        let Some(delegator_key) = config.delegator_key.as_deref() else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            delegatee_key_path: expand_home(&config.delegatee_key)?,
-            delegator_key_path: expand_home(delegator_key)?,
-        }))
+        config
+            .delegator_key
+            .as_deref()
+            .map(|delegator_key| {
+                expand_home(&config.delegatee_key).and_then(|delegatee_key_path| {
+                    expand_home(delegator_key).map(|delegator_key_path| Self {
+                        delegatee_key_path,
+                        delegator_key_path,
+                    })
+                })
+            })
+            .transpose()
     }
+}
+
+/// Pure parser for the `rings init` ECDSA secret key file format: the first non-empty, non-`#`
+/// trimmed line, with an optional `0x` prefix stripped.
+fn parse_delegator_secret_key(raw: &str, display_path: &Path) -> Result<SecretKey> {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "{}: ECDSA key file contains no key entries",
+                display_path.display()
+            ))
+        })
+        .map(|line| line.strip_prefix("0x").unwrap_or(line))
+        .and_then(|key| {
+            SecretKey::from_str(key).map_err(|_| {
+                Error::InvalidConfig(format!(
+                    "{}: ECDSA key file contains an invalid key",
+                    display_path.display()
+                ))
+            })
+        })
 }
 
 /// Read an ECDSA secret key file in the `rings init` format: the first non-empty, non-`#`
 /// trimmed line, with an optional `0x` prefix stripped.
 pub fn read_delegator_secret_key(path: impl AsRef<Path>) -> Result<SecretKey> {
-    let path = expand_home(path.as_ref())?;
-    let raw = fs::read_to_string(&path)
-        .map_err(|error| Error::OpenFileError(format!("{}: {error}", path.display())))?;
-    let Some(line) = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-    else {
-        return Err(Error::InvalidConfig(format!(
-            "{}: ECDSA key file contains no key entries",
-            path.display()
-        )));
-    };
-    let key = line.strip_prefix("0x").unwrap_or(line);
-    SecretKey::from_str(key).map_err(|_| {
-        Error::InvalidConfig(format!(
-            "{}: ECDSA key file contains an invalid key",
-            path.display()
-        ))
+    expand_home(path.as_ref()).and_then(|path| {
+        fs::read_to_string(&path)
+            .map_err(|error| Error::OpenFileError(format!("{}: {error}", path.display())))
+            .and_then(|raw| parse_delegator_secret_key(&raw, &path))
     })
 }
 
@@ -176,20 +189,139 @@ async fn try_renew_delegation(
     let next_horizon = processor.renew_delegatee_key_with(
         now_ms,
         |current| {
-            let delegator_key = read_delegator_secret_key(&paths.delegator_key_path)?;
-            if Did::from(delegator_key.address()) != expected_did {
-                return Err(Error::VerifyError(
-                    "delegator key DID does not match node DID".to_string(),
-                ));
-            }
-            let ttl_ms = current.delegation().ttl_ms();
-            DelegateeKey::new_with_seckey_at(&delegator_key, ttl_ms, now_ms)
-                .map_err(Error::CoreError)
+            read_delegator_secret_key(&paths.delegator_key_path)
+                .and_then(|delegator_key| {
+                    (Did::from(delegator_key.address()) == expected_did)
+                        .then_some(delegator_key)
+                        .ok_or_else(|| {
+                            Error::VerifyError(
+                                "delegator key DID does not match node DID".to_string(),
+                            )
+                        })
+                })
+                .and_then(|delegator_key| {
+                    DelegateeKey::new_with_seckey_at(
+                        &delegator_key,
+                        current.delegation().ttl_ms(),
+                        now_ms,
+                    )
+                    .map_err(Error::CoreError)
+                })
         },
         |next| write_delegatee_key_atomically(&paths.delegatee_key_path, next).map(|_| ()),
     )?;
     processor.republish_registrations().await;
     Ok(next_horizon)
+}
+
+/// Pure decision produced by one step of [`HorizonSupervisorState`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HorizonAction<R> {
+    /// Horizon reached (`t >= h`): log and terminate with [`DelegationHorizon::reached`].
+    ExitMute,
+    /// Attempt in-process renewal at `now_ms` inside `[renew_at_ms(c), h)` with `renewal`.
+    AttemptRenewal {
+        /// Renewal configuration witness.
+        renewal: R,
+        /// Remaining time until `h`.
+        remaining_ms: u128,
+    },
+    /// Sleep for `wait_ms` (bounded by [`HORIZON_POLL`]), optionally emitting the one-time
+    /// expiring warning for `horizon_ms`.
+    Sleep {
+        /// Unclamped wait duration in milliseconds.
+        wait_ms: u128,
+        /// Remaining time until `h` if a one-time expiring warning should be logged first.
+        warn_remaining_ms: Option<u128>,
+    },
+}
+
+/// Pure state machine tracking per-horizon warning and renewal-attempt idempotency.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HorizonSupervisorState {
+    warned_horizon_ms: Option<u128>,
+    attempted_horizon_ms: Option<u128>,
+}
+
+impl HorizonSupervisorState {
+    fn step<R>(
+        self,
+        horizon: DelegationHorizon,
+        created_at_ms: u128,
+        now_ms: u128,
+        renewal: Option<R>,
+    ) -> (Self, HorizonAction<R>) {
+        let h = horizon.horizon_ms();
+        match horizon.state_at(now_ms) {
+            SigningState::Mute => (self, HorizonAction::ExitMute),
+            SigningState::Signing { remaining_ms } => (self, HorizonAction::Sleep {
+                wait_ms: remaining_ms - SIGNING_HORIZON_LEAD_MS,
+                warn_remaining_ms: None,
+            }),
+            SigningState::Expiring { remaining_ms } => {
+                let renew_at_ms = horizon.renew_at_ms(created_at_ms);
+                match renewal {
+                    Some(_) if now_ms < renew_at_ms => (self, HorizonAction::Sleep {
+                        wait_ms: renew_at_ms - now_ms,
+                        warn_remaining_ms: None,
+                    }),
+                    Some(renewal) if self.attempted_horizon_ms != Some(h) => (
+                        Self {
+                            attempted_horizon_ms: Some(h),
+                            ..self
+                        },
+                        HorizonAction::AttemptRenewal {
+                            renewal,
+                            remaining_ms,
+                        },
+                    ),
+                    _ => self.fallback_sleep(h, remaining_ms),
+                }
+            }
+        }
+    }
+
+    fn fallback_sleep<R>(self, horizon_ms: u128, remaining_ms: u128) -> (Self, HorizonAction<R>) {
+        let warn_remaining_ms = if self.warned_horizon_ms == Some(horizon_ms) {
+            None
+        } else {
+            Some(remaining_ms)
+        };
+        (
+            Self {
+                warned_horizon_ms: Some(horizon_ms),
+                ..self
+            },
+            HorizonAction::Sleep {
+                wait_ms: remaining_ms,
+                warn_remaining_ms,
+            },
+        )
+    }
+}
+
+/// Pure conversion of an unclamped horizon wait in milliseconds into a poll-bounded [`Duration`].
+fn bounded_horizon_sleep(wait_ms: u128) -> Duration {
+    Duration::from_millis(u64::try_from(wait_ms).unwrap_or(u64::MAX)).min(HORIZON_POLL)
+}
+
+fn log_mute_and_reach(horizon: DelegationHorizon) -> Error {
+    tracing::error!(
+        expires_at_ms = %horizon.expires_at_ms(),
+        horizon_ms = %horizon.horizon_ms(),
+        "the node's delegation reached its signing horizon: no frame can leave, so \
+         the node exits for its supervisor to restart it with a fresh delegatee key"
+    );
+    horizon.reached()
+}
+
+fn log_expiring_warning(horizon_ms: u128, remaining_ms: u128) {
+    tracing::warn!(
+        remaining_ms = %remaining_ms,
+        horizon_ms = %horizon_ms,
+        "the node's delegation nears its signing horizon: the node exits then; \
+         rotate its delegatee key and restart it before"
+    );
 }
 
 /// Supervise `processor`'s signing horizon on the epoch clock `now_ms`, renewing the delegation
@@ -200,105 +332,83 @@ pub async fn run_signing_horizon(
     renewal: Option<DelegationRenewalPaths>,
     now_ms: impl Fn() -> u128,
 ) -> Error {
-    let mut warned_horizon_ms: Option<u128> = None;
-    let mut attempted_horizon_ms: Option<u128> = None;
+    let mut supervisor = HorizonSupervisorState::default();
     loop {
         let now = now_ms();
         let delegation = processor.delegatee_key().delegation();
-        let created_at_ms = delegation.created_at_ms();
         let horizon = DelegationHorizon::of(&delegation);
         let h = horizon.horizon_ms();
-        let wait_ms = match horizon.state_at(now) {
-            SigningState::Mute => {
-                tracing::error!(
-                    expires_at_ms = %horizon.expires_at_ms(),
-                    horizon_ms = %h,
-                    "the node's delegation reached its signing horizon: no frame can leave, so \
-                     the node exits for its supervisor to restart it with a fresh delegatee key"
-                );
-                return horizon.reached();
-            }
-            SigningState::Expiring { remaining_ms } => {
-                let renew_at_ms = horizon.renew_at_ms(created_at_ms);
-                if renewal.is_some() && now < renew_at_ms {
-                    renew_at_ms - now
-                } else {
-                    if let Some(paths) =
-                        renewal.as_ref().filter(|_| attempted_horizon_ms != Some(h))
-                    {
-                        attempted_horizon_ms = Some(h);
-                        match try_renew_delegation(&processor, paths, now).await {
-                            Ok(next_horizon) => {
-                                tracing::info!(
-                                    previous_horizon_ms = %h,
-                                    next_horizon_ms = %next_horizon.horizon_ms(),
-                                    expires_at_ms = %next_horizon.expires_at_ms(),
-                                    "renewed the node's delegation in process before its signing horizon"
-                                );
-                                continue;
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    remaining_ms = %remaining_ms,
-                                    horizon_ms = %h,
-                                    "failed to renew the node's delegation in process; falling \
-                                     back to exiting at the signing horizon"
-                                );
-                            }
-                        }
-                    }
-                    if warned_horizon_ms != Some(h) {
-                        warned_horizon_ms = Some(h);
-                        tracing::warn!(
-                            remaining_ms = %remaining_ms,
-                            horizon_ms = %h,
-                            "the node's delegation nears its signing horizon: the node exits then; \
-                             rotate its delegatee key and restart it before"
-                        );
-                    }
-                    remaining_ms
+        let (next_state, action) =
+            supervisor.step(horizon, delegation.created_at_ms(), now, renewal.as_ref());
+        supervisor = next_state;
+
+        let sleep_action = match action {
+            HorizonAction::ExitMute => return log_mute_and_reach(horizon),
+            HorizonAction::AttemptRenewal {
+                renewal: paths,
+                remaining_ms,
+            } => match try_renew_delegation(&processor, paths, now).await {
+                Ok(next_horizon) => {
+                    tracing::info!(
+                        previous_horizon_ms = %h,
+                        next_horizon_ms = %next_horizon.horizon_ms(),
+                        expires_at_ms = %next_horizon.expires_at_ms(),
+                        "renewed the node's delegation in process before its signing horizon"
+                    );
+                    continue;
                 }
-            }
-            SigningState::Signing { remaining_ms } => remaining_ms - SIGNING_HORIZON_LEAD_MS,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        remaining_ms = %remaining_ms,
+                        horizon_ms = %h,
+                        "failed to renew the node's delegation in process; falling \
+                         back to exiting at the signing horizon"
+                    );
+                    let (fallback_state, fallback_action) =
+                        supervisor.fallback_sleep(h, remaining_ms);
+                    supervisor = fallback_state;
+                    fallback_action
+                }
+            },
+            sleep @ HorizonAction::Sleep { .. } => sleep,
         };
-        let wait = Duration::from_millis(u64::try_from(wait_ms).unwrap_or(u64::MAX));
-        tokio::time::sleep(wait.min(HORIZON_POLL)).await;
+
+        if let HorizonAction::Sleep {
+            wait_ms,
+            warn_remaining_ms,
+        } = sleep_action
+        {
+            if let Some(remaining_ms) = warn_remaining_ms {
+                log_expiring_warning(h, remaining_ms);
+            }
+            tokio::time::sleep(bounded_horizon_sleep(wait_ms)).await;
+        }
     }
 }
 
 /// Wait until `horizon` on the epoch clock `now_ms` (module diagram), warning once inside the
 /// lead, and return the error that ends the daemon there. It never returns before the horizon.
 pub async fn signing_horizon(horizon: DelegationHorizon, now_ms: impl Fn() -> u128) -> Error {
-    let mut warned = false;
+    let mut supervisor = HorizonSupervisorState::default();
+    let h = horizon.horizon_ms();
     loop {
-        let now = now_ms();
-        let wait_ms = match horizon.state_at(now) {
-            SigningState::Mute => {
-                tracing::error!(
-                    expires_at_ms = %horizon.expires_at_ms(),
-                    horizon_ms = %horizon.horizon_ms(),
-                    "the node's delegation reached its signing horizon: no frame can leave, so \
-                     the node exits for its supervisor to restart it with a fresh delegatee key"
-                );
-                return horizon.reached();
-            }
-            SigningState::Expiring { remaining_ms } => {
-                if !warned {
-                    warned = true;
-                    tracing::warn!(
-                        remaining_ms = %remaining_ms,
-                        horizon_ms = %horizon.horizon_ms(),
-                        "the node's delegation nears its signing horizon: the node exits then; \
-                         rotate its delegatee key and restart it before"
-                    );
+        let (next_state, action) =
+            supervisor.step(horizon, 0, now_ms(), None::<std::convert::Infallible>);
+        supervisor = next_state;
+        match action {
+            HorizonAction::ExitMute => return log_mute_and_reach(horizon),
+            HorizonAction::Sleep {
+                wait_ms,
+                warn_remaining_ms,
+            } => {
+                if let Some(remaining_ms) = warn_remaining_ms {
+                    log_expiring_warning(h, remaining_ms);
                 }
-                remaining_ms
+                tokio::time::sleep(bounded_horizon_sleep(wait_ms)).await;
             }
-            SigningState::Signing { remaining_ms } => remaining_ms - SIGNING_HORIZON_LEAD_MS,
-        };
-        let wait = Duration::from_millis(u64::try_from(wait_ms).unwrap_or(u64::MAX));
-        tokio::time::sleep(wait.min(HORIZON_POLL)).await;
+            HorizonAction::AttemptRenewal { renewal, .. } => match renewal {},
+        }
     }
 }
 

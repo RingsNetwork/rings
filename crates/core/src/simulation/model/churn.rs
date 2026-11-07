@@ -91,35 +91,42 @@ impl WeibullChurnConfig {
         median_session_ms: u64,
         graceful_leave_fraction: f64,
     ) -> Result<Self, WeibullChurnConfigError> {
-        if target_nodes == 0 {
-            return Err(WeibullChurnConfigError::ZeroTargetPopulation);
-        }
-        if !(MIN_MEDIAN_SESSION_MS..=MAX_MEDIAN_SESSION_MS).contains(&median_session_ms) {
-            return Err(WeibullChurnConfigError::MedianSessionOutOfRange { median_session_ms });
-        }
-        if !(0.0..=1.0).contains(&graceful_leave_fraction) || graceful_leave_fraction.is_nan() {
-            return Err(WeibullChurnConfigError::InvalidGracefulLeaveFraction {
-                fraction: graceful_leave_fraction,
-            });
-        }
-        Ok(Self {
-            target_nodes,
-            median_session_ms,
-            shape_k: DEFAULT_WEIBULL_SHAPE,
-            graceful_leave_fraction,
-            min_session_ms: DEFAULT_MIN_SESSION_MS,
-            max_session_ms: DEFAULT_MAX_SESSION_MS,
-            rejoin_cooldown_ms: DEFAULT_REJOIN_COOLDOWN_MS,
-        })
+        (target_nodes > 0)
+            .then_some(())
+            .ok_or(WeibullChurnConfigError::ZeroTargetPopulation)
+            .and_then(|()| {
+                (MIN_MEDIAN_SESSION_MS..=MAX_MEDIAN_SESSION_MS)
+                    .contains(&median_session_ms)
+                    .then_some(())
+                    .ok_or(WeibullChurnConfigError::MedianSessionOutOfRange { median_session_ms })
+            })
+            .and_then(|()| {
+                ((0.0..=1.0).contains(&graceful_leave_fraction)
+                    && !graceful_leave_fraction.is_nan())
+                .then_some(())
+                .ok_or(WeibullChurnConfigError::InvalidGracefulLeaveFraction {
+                    fraction: graceful_leave_fraction,
+                })
+            })
+            .map(|()| Self {
+                target_nodes,
+                median_session_ms,
+                shape_k: DEFAULT_WEIBULL_SHAPE,
+                graceful_leave_fraction,
+                min_session_ms: DEFAULT_MIN_SESSION_MS,
+                max_session_ms: DEFAULT_MAX_SESSION_MS,
+                rejoin_cooldown_ms: DEFAULT_REJOIN_COOLDOWN_MS,
+            })
     }
 
     /// Override the Weibull shape parameter $k \in [0.34, 0.38]$.
     pub(crate) fn with_shape(mut self, shape_k: f64) -> Result<Self, WeibullChurnConfigError> {
-        if !(MIN_WEIBULL_SHAPE..=MAX_WEIBULL_SHAPE).contains(&shape_k) || shape_k.is_nan() {
-            return Err(WeibullChurnConfigError::InvalidShape { shape_k });
-        }
-        self.shape_k = shape_k;
-        Ok(self)
+        ((MIN_WEIBULL_SHAPE..=MAX_WEIBULL_SHAPE).contains(&shape_k) && !shape_k.is_nan())
+            .then(|| {
+                self.shape_k = shape_k;
+                self
+            })
+            .ok_or(WeibullChurnConfigError::InvalidShape { shape_k })
     }
 
     /// Override the minimum offline duration before a departed node rejoins.
@@ -138,13 +145,11 @@ impl WeibullChurnConfig {
     /// Midpoint-rule approximation of $\int_0^1 2^{-x^k}\,dx$.
     pub(crate) fn median_window_survival_integral(&self) -> f64 {
         let steps = SURVIVAL_INTEGRAL_STEPS as f64;
-        let mut sum = 0.0_f64;
-        for index in 0..SURVIVAL_INTEGRAL_STEPS {
-            let midpoint = (index as f64 + 0.5) / steps;
-            let exponent = -midpoint.powf(self.shape_k) * std::f64::consts::LN_2;
-            sum += exponent.exp();
-        }
-        sum / steps
+        (0..SURVIVAL_INTEGRAL_STEPS)
+            .map(|index| (index as f64 + 0.5) / steps)
+            .map(|midpoint| (-midpoint.powf(self.shape_k) * std::f64::consts::LN_2).exp())
+            .sum::<f64>()
+            / steps
     }
 
     /// Stationary Poisson arrival rate $\Lambda$ (arrivals per millisecond) keeping $E[N(t)] \approx N$.
@@ -153,6 +158,17 @@ impl WeibullChurnConfig {
         let median = self.median_session_ms as f64;
         let survival_integral = self.median_window_survival_integral();
         (0.5 * n) / (median * survival_integral)
+    }
+}
+
+/// Pure clamping and rounding of a raw sampled duration into `[min_ms, max_ms]`.
+fn clamp_sampled_ms(raw_ms: f64, min_ms: u64, max_ms: u64) -> u64 {
+    if !raw_ms.is_finite() || raw_ms <= min_ms as f64 {
+        min_ms
+    } else if raw_ms >= max_ms as f64 {
+        max_ms
+    } else {
+        raw_ms.round() as u64
     }
 }
 
@@ -216,28 +232,19 @@ impl WeibullSessionGenerator {
         let u = self.sample_uniform_open();
         let neg_ln = -(1.0 - u).ln();
         let raw_ms = self.config.scale_lambda_ms() * neg_ln.powf(1.0 / self.config.shape_k);
-        if !raw_ms.is_finite() || raw_ms <= self.config.min_session_ms as f64 {
-            return self.config.min_session_ms;
-        }
-        if raw_ms >= self.config.max_session_ms as f64 {
-            return self.config.max_session_ms;
-        }
-        raw_ms.round() as u64
+        clamp_sampled_ms(
+            raw_ms,
+            self.config.min_session_ms,
+            self.config.max_session_ms,
+        )
     }
 
     /// Draw one exponential inter-arrival interval in milliseconds from the stationary Poisson process.
     pub(crate) fn sample_poisson_interarrival_ms(&mut self) -> u64 {
         let u = self.sample_uniform_open();
         let neg_ln = -(1.0 - u).ln();
-        let rate = self.config.poisson_arrival_rate_per_ms();
-        let raw_ms = neg_ln / rate;
-        if !raw_ms.is_finite() || raw_ms <= 1.0 {
-            return 1;
-        }
-        if raw_ms >= self.config.max_session_ms as f64 {
-            return self.config.max_session_ms;
-        }
-        raw_ms.round() as u64
+        let raw_ms = neg_ln / self.config.poisson_arrival_rate_per_ms();
+        clamp_sampled_ms(raw_ms, 1, self.config.max_session_ms)
     }
 
     /// Draw whether a departing node leaves gracefully according to `graceful_leave_fraction`.
@@ -299,12 +306,13 @@ impl WeibullSessionGenerator {
         }
 
         let mut arrival_ms = 0_u64;
-        loop {
+        let arrival_times: Vec<u64> = std::iter::from_fn(|| {
             let delta_ms = self.sample_poisson_interarrival_ms();
             arrival_ms = arrival_ms.saturating_add(delta_ms);
-            if arrival_ms > duration_ms {
-                break;
-            }
+            (arrival_ms <= duration_ms).then_some(arrival_ms)
+        })
+        .collect();
+        for arrival_ms in arrival_times {
             pending.insert(PendingEvent {
                 virtual_ms: arrival_ms,
                 sequence: next_sequence,
@@ -412,12 +420,15 @@ impl WeibullSessionGenerator {
     }
 
     fn pick_live_peer(&mut self, live_nodes: &BTreeSet<SimNodeId>) -> Option<SimNodeId> {
-        if live_nodes.is_empty() {
-            return None;
-        }
-        self.rng_state = mix_seed(self.rng_state);
-        let index = (self.rng_state as usize) % live_nodes.len();
-        live_nodes.iter().nth(index).copied()
+        (!live_nodes.is_empty()).then(|| {
+            self.rng_state = mix_seed(self.rng_state);
+            let index = (self.rng_state as usize) % live_nodes.len();
+            live_nodes
+                .iter()
+                .nth(index)
+                .copied()
+                .expect("index is within live_nodes")
+        })
     }
 
     fn select_joining_node(
@@ -434,27 +445,31 @@ impl WeibullSessionGenerator {
                     .then_some(node)
             })
             .collect();
-        if !ready.is_empty() {
-            self.rng_state = mix_seed(self.rng_state);
-            let index = (self.rng_state as usize) % ready.len();
-            if let Some(&node) = ready.get(index) {
-                departed_since.remove(&node);
-                return Some(node);
-            }
-        }
-        if *next_node_id < max_pool_nodes {
-            let node = SimNodeId(*next_node_id as u16);
-            *next_node_id = next_node_id.saturating_add(1);
-            return Some(node);
-        }
-        let oldest = departed_since
-            .iter()
-            .min_by_key(|(_, &departed_ms)| departed_ms)
-            .map(|(&node, _)| node);
-        if let Some(node) = oldest {
-            departed_since.remove(&node);
-        }
-        oldest
+        (!ready.is_empty())
+            .then(|| {
+                self.rng_state = mix_seed(self.rng_state);
+                let index = (self.rng_state as usize) % ready.len();
+                ready.get(index).copied().inspect(|node| {
+                    departed_since.remove(node);
+                })
+            })
+            .flatten()
+            .or_else(|| {
+                (*next_node_id < max_pool_nodes).then(|| {
+                    let node = SimNodeId(*next_node_id as u16);
+                    *next_node_id = next_node_id.saturating_add(1);
+                    node
+                })
+            })
+            .or_else(|| {
+                departed_since
+                    .iter()
+                    .min_by_key(|(_, &departed_ms)| departed_ms)
+                    .map(|(&node, _)| node)
+                    .inspect(|node| {
+                        departed_since.remove(node);
+                    })
+            })
     }
 }
 

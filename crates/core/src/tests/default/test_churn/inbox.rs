@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::ops::ControlFlow;
 
 use futures::FutureExt as _;
 
@@ -25,7 +26,8 @@ use crate::tests::default::Node;
 
 const HELD_INBOX_PREFIX: &[u8] = b"churn-held-inbox-";
 
-#[derive(Default)]
+/// Commutative monoid of liveness and multi-hop routing sample counts.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct LivenessSampleCounters {
     pub(super) orphan_samples: u64,
     pub(super) live_node_samples: u64,
@@ -35,19 +37,34 @@ pub(super) struct LivenessSampleCounters {
     pub(super) population_probes: u64,
 }
 
+impl LivenessSampleCounters {
+    /// Monoidal binary operation combining two sample observations.
+    pub(super) const fn combine(self, other: Self) -> Self {
+        Self {
+            orphan_samples: self.orphan_samples.saturating_add(other.orphan_samples),
+            live_node_samples: self
+                .live_node_samples
+                .saturating_add(other.live_node_samples),
+            lookup_successes: self.lookup_successes.saturating_add(other.lookup_successes),
+            lookup_attempts: self.lookup_attempts.saturating_add(other.lookup_attempts),
+            population_sum: self.population_sum.saturating_add(other.population_sum),
+            population_probes: self
+                .population_probes
+                .saturating_add(other.population_probes),
+        }
+    }
+}
+
+/// Pure observation of ring well-formedness, orphan rate, and multi-hop routing convergence
+/// across `live_nodes`.
 pub(super) fn sample_ring_liveness_and_lookups(
     nodes: &[Node],
-    driver: &ChurnTraceDriver,
-    counters: &mut LivenessSampleCounters,
-) {
-    let live_ids: Vec<SimNodeId> = driver.state.live_nodes().iter().copied().collect();
+    live_nodes: &BTreeSet<SimNodeId>,
+) -> LivenessSampleCounters {
+    let live_ids: Vec<SimNodeId> = live_nodes.iter().copied().collect();
     if live_ids.len() <= 1 {
-        return;
+        return LivenessSampleCounters::default();
     }
-    counters.population_sum = counters
-        .population_sum
-        .saturating_add(live_ids.len() as u64);
-    counters.population_probes = counters.population_probes.saturating_add(1);
 
     let live_dids: Vec<Did> = live_ids
         .iter()
@@ -61,67 +78,80 @@ pub(super) fn sample_ring_liveness_and_lookups(
         })
         .collect();
 
-    for &node_id in &live_ids {
-        let idx = usize::from(node_id.0);
-        let state = nodes[idx]
-            .dht()
-            .topology_state()
-            .expect("live node topology state must be readable");
-        assert!(
-            state.is_well_formed(nodes[idx].dht().successors().capacity()),
-            "live node {:?} violated TopologyState::is_well_formed: {state:?}",
-            node_id
-        );
-        let succ_list = nodes[idx]
-            .dht()
-            .successors()
-            .list()
-            .expect("live node successor list must be readable");
-        counters.live_node_samples = counters.live_node_samples.saturating_add(1);
-        if succ_list.is_empty() {
-            counters.orphan_samples = counters.orphan_samples.saturating_add(1);
-        }
-    }
+    let orphan_samples = live_ids
+        .iter()
+        .filter(|&&node_id| {
+            let idx = usize::from(node_id.0);
+            let state = nodes[idx]
+                .dht()
+                .topology_state()
+                .expect("live node topology state must be readable");
+            assert!(
+                state.is_well_formed(nodes[idx].dht().successors().capacity()),
+                "live node {node_id:?} violated TopologyState::is_well_formed: {state:?}",
+            );
+            nodes[idx]
+                .dht()
+                .successors()
+                .list()
+                .expect("live node successor list must be readable")
+                .is_empty()
+        })
+        .count() as u64;
 
-    for &origin_id in &live_ids {
-        let origin_idx = usize::from(origin_id.0);
-        let origin_did = nodes[origin_idx].did();
-        for &target_id in &live_ids {
+    let (lookup_attempts, lookup_successes) = live_ids
+        .iter()
+        .flat_map(|&origin_id| {
+            live_ids
+                .iter()
+                .map(move |&target_id| (origin_id, target_id))
+        })
+        .filter_map(|(origin_id, target_id)| {
+            let origin_idx = usize::from(origin_id.0);
+            let origin_did = nodes[origin_idx].did();
             let target_did = nodes[usize::from(target_id.0)].did();
-            if target_did == origin_did {
-                continue;
-            }
+            (target_did != origin_did).then_some((origin_id, origin_idx, target_did))
+        })
+        .filter_map(|(origin_id, origin_idx, target_did)| {
             let probe_key = StorageKey::inbox_of(target_did).placement();
-            let Some(true_successor) = topology::successors(&live_dids, probe_key, 1)
+            let true_successor = topology::successors(&live_dids, probe_key, 1)
                 .first()
-                .copied()
-            else {
-                continue;
-            };
+                .copied()?;
             let state = nodes[origin_idx]
                 .dht()
                 .topology_state()
                 .expect("origin topology state must be readable");
             assert!(
                 state.routes_clockwise_toward(probe_key),
-                "live node {:?} violated routes_clockwise_toward",
-                origin_id
+                "live node {origin_id:?} violated routes_clockwise_toward",
             );
-            counters.lookup_attempts = counters.lookup_attempts.saturating_add(1);
-            if resolve_multihop_find_successor(
+            let succeeded = resolve_multihop_find_successor(
                 nodes,
                 &live_did_map,
                 origin_idx,
                 probe_key,
                 live_ids.len(),
-            ) == Some(true_successor)
-            {
-                counters.lookup_successes = counters.lookup_successes.saturating_add(1);
-            }
-        }
+            ) == Some(true_successor);
+            Some(succeeded)
+        })
+        .fold((0_u64, 0_u64), |(attempts, successes), succeeded| {
+            (
+                attempts.saturating_add(1),
+                successes.saturating_add(u64::from(succeeded)),
+            )
+        });
+
+    LivenessSampleCounters {
+        orphan_samples,
+        live_node_samples: live_ids.len() as u64,
+        lookup_successes,
+        lookup_attempts,
+        population_sum: live_ids.len() as u64,
+        population_probes: 1,
     }
 }
 
+/// Pure bounded Kleisli unfold of `find_successor(target_key)` across up to `max_hops` live hops.
 fn resolve_multihop_find_successor(
     nodes: &[Node],
     live_did_map: &BTreeMap<Did, usize>,
@@ -129,31 +159,77 @@ fn resolve_multihop_find_successor(
     target_key: Did,
     max_hops: usize,
 ) -> Option<Did> {
-    let mut current_idx = origin_idx;
-    for _ in 0..=max_hops {
-        let succs = nodes[current_idx].dht().successors().list().ok()?;
-        if succs.is_empty() {
-            return None;
-        }
-        match nodes[current_idx].dht().find_successor(target_key).ok()? {
-            PeerRingAction::Some(resolved) => {
-                return live_did_map.contains_key(&resolved).then_some(resolved);
+    let step = (0..=max_hops).try_fold(origin_idx, |current_idx, _| {
+        let succs = nodes[current_idx]
+            .dht()
+            .successors()
+            .list()
+            .ok()
+            .filter(|list| !list.is_empty());
+        let Some(_) = succs else {
+            return ControlFlow::Break(None);
+        };
+        match nodes[current_idx].dht().find_successor(target_key).ok() {
+            Some(PeerRingAction::Some(resolved)) => {
+                ControlFlow::Break(live_did_map.contains_key(&resolved).then_some(resolved))
             }
-            PeerRingAction::RemoteAction(next_did, PeerRingRemoteAction::FindSuccessor(_)) => {
-                let &next_idx = live_did_map.get(&next_did)?;
-                if !nodes[current_idx]
+            Some(PeerRingAction::RemoteAction(
+                next_did,
+                PeerRingRemoteAction::FindSuccessor(_),
+            )) => match live_did_map.get(&next_did).copied().filter(|_| {
+                nodes[current_idx]
                     .swarm
                     .transport
                     .has_active_connection(next_did)
-                {
-                    return None;
-                }
-                current_idx = next_idx;
-            }
-            _ => return None,
+            }) {
+                Some(next_idx) => ControlFlow::Continue(next_idx),
+                None => ControlFlow::Break(None),
+            },
+            _ => ControlFlow::Break(None),
         }
+    });
+    match step {
+        ControlFlow::Break(resolved) => resolved,
+        ControlFlow::Continue(_) => None,
     }
-    None
+}
+
+/// Pure plan for injecting one offline held-inbox message for a departed `target` node.
+struct OfflineInboxInjectionPlan {
+    target: SimNodeId,
+    target_did: Did,
+    owner_did: Did,
+    owner_idx: usize,
+    holder_idx: usize,
+    inbox_key: String,
+    payload: Vec<u8>,
+}
+
+/// Purely compute the owner/holder routing plan for `target` without performing any I/O.
+fn plan_offline_inbox_injection(
+    nodes: &[Node],
+    live_dids: &[Did],
+    target: SimNodeId,
+) -> Option<OfflineInboxInjectionPlan> {
+    let target_did = nodes[usize::from(target.0)].did();
+    let owner_did = topology::predecessor(live_dids, target_did)?;
+    let holder_did = topology::successors(live_dids, target_did, 1)
+        .first()
+        .copied()
+        .filter(|&holder_did| holder_did != owner_did)?;
+    let owner_idx = nodes.iter().position(|n| n.did() == owner_did)?;
+    let holder_idx = nodes.iter().position(|n| n.did() == holder_did)?;
+    let mut payload = HELD_INBOX_PREFIX.to_vec();
+    payload.extend_from_slice(target.0.to_string().as_bytes());
+    Some(OfflineInboxInjectionPlan {
+        target,
+        target_did,
+        owner_did,
+        owner_idx,
+        holder_idx,
+        inbox_key: StorageKey::inbox_of(target_did).to_string(),
+        payload,
+    })
 }
 
 pub(super) async fn inject_offline_inbox_messages(
@@ -178,42 +254,25 @@ pub(super) async fn inject_offline_inbox_messages(
             pending_inbox_targets.remove(&target);
             continue;
         }
-        let target_did = nodes[usize::from(target.0)].did();
-        let Some(owner_did) = topology::predecessor(&live_dids, target_did) else {
+        let Some(plan) = plan_offline_inbox_injection(nodes, &live_dids, target) else {
             continue;
         };
-        let Some(holder_did) = topology::successors(&live_dids, target_did, 1)
-            .first()
-            .copied()
-        else {
-            continue;
-        };
-        if owner_did == holder_did {
-            continue;
-        }
-        let Some(owner_idx) = nodes.iter().position(|n| n.did() == owner_did) else {
-            continue;
-        };
-        let Some(holder_idx) = nodes.iter().position(|n| n.did() == holder_did) else {
-            continue;
-        };
-        ensure_connected_pair(runtime, nodes, owner_idx, holder_idx, driver).await;
-        let _ = nodes[holder_idx].dht().notify(owner_did);
-        let mut payload = HELD_INBOX_PREFIX.to_vec();
-        payload.extend_from_slice(target.0.to_string().as_bytes());
-        if nodes[owner_idx]
+        ensure_connected_pair(runtime, nodes, plan.owner_idx, plan.holder_idx, driver).await;
+        let _ = nodes[plan.holder_idx].dht().notify(plan.owner_did);
+        if nodes[plan.owner_idx]
             .swarm
-            .send_message(ApplicationData::custom(&payload), target_did)
+            .send_message(ApplicationData::custom(&plan.payload), plan.target_did)
             .await
             .is_ok()
         {
             drain_churn_traced(runtime, nodes, driver).await;
-            let inbox_key = StorageKey::inbox_of(target_did).to_string();
-            let stored_at_owner = has_relay_inbox_entry(&nodes[owner_idx], &inbox_key).await;
-            let stored_at_holder = has_relay_inbox_entry(&nodes[holder_idx], &inbox_key).await;
+            let stored_at_owner =
+                has_relay_inbox_entry(&nodes[plan.owner_idx], &plan.inbox_key).await;
+            let stored_at_holder =
+                has_relay_inbox_entry(&nodes[plan.holder_idx], &plan.inbox_key).await;
             if stored_at_owner || stored_at_holder {
-                pending_inbox_targets.remove(&target);
-                active_held_messages.insert(target, payload);
+                pending_inbox_targets.remove(&plan.target);
+                active_held_messages.insert(plan.target, plan.payload);
                 *held_messages_injected = held_messages_injected.saturating_add(1);
             }
         }
@@ -226,6 +285,35 @@ async fn has_relay_inbox_entry(node: &Node, key: &str) -> bool {
         return false;
     };
     store.get(key).await.ok().flatten().is_some()
+}
+
+type BorderNeighbor = (usize, Did);
+
+/// Purely resolve the immediate live predecessor and successor `(index, Did)` bordering `peer_idx`.
+fn rejoined_border_neighbors(
+    nodes: &[Node],
+    live_dids: &[Did],
+    peer_idx: usize,
+) -> (Option<BorderNeighbor>, Option<BorderNeighbor>) {
+    let peer_did = nodes[peer_idx].did();
+    let pred = topology::predecessor(live_dids, peer_did).and_then(|pred_did| {
+        nodes
+            .iter()
+            .position(|n| n.did() == pred_did)
+            .filter(|&idx| idx != peer_idx)
+            .map(|idx| (idx, pred_did))
+    });
+    let succ = topology::successors(live_dids, peer_did, 1)
+        .first()
+        .copied()
+        .and_then(|succ_did| {
+            nodes
+                .iter()
+                .position(|n| n.did() == succ_did)
+                .filter(|&idx| idx != peer_idx)
+                .map(|idx| (idx, succ_did))
+        });
+    (pred, succ)
 }
 
 pub(super) async fn deliver_rejoined_inbox_messages(
@@ -262,32 +350,22 @@ pub(super) async fn deliver_rejoined_inbox_messages(
 
         let peer_did = nodes[peer_idx].did();
         let inbox_key = StorageKey::inbox_of(peer_did).to_string();
+        let (pred_neighbor, succ_neighbor) = rejoined_border_neighbors(nodes, &live_dids, peer_idx);
 
         let mut participants = BTreeSet::from([peer_idx]);
-        if let Some(pred_did) = topology::predecessor(&live_dids, peer_did) {
-            if let Some(pred_idx) = nodes.iter().position(|n| n.did() == pred_did) {
-                if pred_idx != peer_idx {
-                    ensure_connected_pair(runtime, nodes, pred_idx, peer_idx, driver).await;
-                    let _ = nodes[pred_idx].dht().admit_connected(peer_did, None);
-                    let _ = nodes[peer_idx].dht().admit_connected(pred_did, None);
-                    let _ = nodes[pred_idx].dht().notify(peer_did);
-                    participants.insert(pred_idx);
-                }
-            }
+        if let Some((pred_idx, pred_did)) = pred_neighbor {
+            ensure_connected_pair(runtime, nodes, pred_idx, peer_idx, driver).await;
+            let _ = nodes[pred_idx].dht().admit_connected(peer_did, None);
+            let _ = nodes[peer_idx].dht().admit_connected(pred_did, None);
+            let _ = nodes[pred_idx].dht().notify(peer_did);
+            participants.insert(pred_idx);
         }
-        if let Some(succ_did) = topology::successors(&live_dids, peer_did, 1)
-            .first()
-            .copied()
-        {
-            if let Some(succ_idx) = nodes.iter().position(|n| n.did() == succ_did) {
-                if succ_idx != peer_idx {
-                    ensure_connected_pair(runtime, nodes, peer_idx, succ_idx, driver).await;
-                    let _ = nodes[peer_idx].dht().admit_connected(succ_did, None);
-                    let _ = nodes[succ_idx].dht().admit_connected(peer_did, None);
-                    let _ = nodes[peer_idx].dht().notify(succ_did);
-                    participants.insert(succ_idx);
-                }
-            }
+        if let Some((succ_idx, succ_did)) = succ_neighbor {
+            ensure_connected_pair(runtime, nodes, peer_idx, succ_idx, driver).await;
+            let _ = nodes[peer_idx].dht().admit_connected(succ_did, None);
+            let _ = nodes[succ_idx].dht().admit_connected(peer_did, None);
+            let _ = nodes[peer_idx].dht().notify(succ_did);
+            participants.insert(succ_idx);
         }
 
         for &holder_id in &live_ids {
@@ -329,15 +407,8 @@ pub(super) async fn deliver_rejoined_inbox_messages(
 }
 
 async fn poll_held_inbox_delivery(inbox: &ApplicationInbox, expected_payload: &[u8]) -> bool {
-    for _ in 0..16 {
-        let Some(delivery) = inbox.next().now_or_never().flatten() else {
-            break;
-        };
-        if let ApplicationDelivery::Message(message) = delivery {
-            if message.data == ApplicationData::Custom(CustomMessage(expected_payload.to_vec())) {
-                return true;
-            }
-        }
-    }
-    false
+    let expected = ApplicationData::Custom(CustomMessage(expected_payload.to_vec()));
+    std::iter::from_fn(|| inbox.next().now_or_never().flatten())
+        .take(16)
+        .any(|delivery| matches!(delivery, ApplicationDelivery::Message(msg) if msg.data == expected))
 }
