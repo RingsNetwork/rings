@@ -6,8 +6,14 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::transition::checked_add;
 use super::SimAction;
+use super::SimConnectionState;
+use super::SimEventId;
 use super::SimNodeId;
+use super::SimPeerHealth;
+use super::SimState;
+use super::SimTransitionError;
 use crate::simulation::mix_seed;
 
 /// Minimum Bamboo median session time supported by the generator (1 minute).
@@ -448,5 +454,82 @@ impl WeibullSessionGenerator {
             departed_since.remove(&node);
         }
         oldest
+    }
+}
+
+impl SimState {
+    pub(super) fn join(
+        &mut self,
+        node: SimNodeId,
+        via: SimNodeId,
+    ) -> Result<Option<u64>, SimTransitionError> {
+        if self.storm_stopped {
+            return Err(SimTransitionError::ActionAfterStop { action: "Join" });
+        }
+        if self.live_nodes.contains(&node) {
+            return Err(SimTransitionError::NodeAlreadyLive { node });
+        }
+        let bootstrap_valid = if self.live_nodes.is_empty() {
+            via == node
+        } else {
+            self.live_nodes.contains(&via)
+        };
+        if !bootstrap_valid {
+            return Err(SimTransitionError::InactiveBootstrapPeer { node, via });
+        }
+        self.live_nodes.insert(node);
+        self.departed_nodes.remove(&node);
+        self.joins = checked_add(self.joins, 1)?;
+        Ok(None)
+    }
+
+    pub(super) fn leave(
+        &mut self,
+        node: SimNodeId,
+        graceful: bool,
+        event_id: SimEventId,
+    ) -> Result<Option<u64>, SimTransitionError> {
+        if !self.live_nodes.remove(&node) {
+            return Err(SimTransitionError::NodeNotLive { node });
+        }
+        self.departed_nodes.insert(node);
+        if graceful {
+            self.graceful_leaves = checked_add(self.graceful_leaves, 1)?;
+        } else {
+            self.ungraceful_leaves = checked_add(self.ungraceful_leaves, 1)?;
+        }
+        self.mark_node_departed_edges(node, event_id);
+        Ok(None)
+    }
+
+    pub(super) fn crash(
+        &mut self,
+        node: SimNodeId,
+        event_id: SimEventId,
+    ) -> Result<Option<u64>, SimTransitionError> {
+        if !self.live_nodes.remove(&node) {
+            return Err(SimTransitionError::NodeNotLive { node });
+        }
+        self.departed_nodes.insert(node);
+        self.crashes = checked_add(self.crashes, 1)?;
+        self.mark_node_departed_edges(node, event_id);
+        Ok(None)
+    }
+
+    fn mark_node_departed_edges(&mut self, departed: SimNodeId, event_id: SimEventId) {
+        let affected_edges: Vec<(SimNodeId, SimNodeId)> = self
+            .connection_generations
+            .iter()
+            .filter_map(|(&(observer, peer), known)| {
+                ((observer == departed || peer == departed)
+                    && known.state == SimConnectionState::Active)
+                    .then_some((observer, peer))
+            })
+            .collect();
+        for edge in affected_edges {
+            self.injected_failures.insert(edge);
+            self.failure_events.insert(edge, event_id);
+            self.peer_health.insert(edge, SimPeerHealth::Failed);
+        }
     }
 }

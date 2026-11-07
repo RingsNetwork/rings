@@ -3,10 +3,10 @@
 #
 # Usage:
 #   curl -fsSL https://rings.rs/install.sh | sh
-#   curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.38.1
+#   curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.39.0
 #
 # Environment overrides:
-#   RINGS_VERSION            Release tag to install (e.g. v0.38.1); defaults to latest release.
+#   RINGS_VERSION            Release tag to install (e.g. v0.39.0); defaults to latest release.
 #   RINGS_INSTALL_DIR        Destination directory; defaults to /usr/local/bin when writable,
 #                            otherwise ~/.local/bin.
 #   RINGS_RELEASE_BASE_URL   Base URL for release assets
@@ -31,7 +31,7 @@ Usage:
   install.sh [OPTIONS]
 
 Options:
-  -v, --version <TAG>       Install a specific release tag (e.g. v0.38.1)
+  -v, --version <TAG>       Install a specific release tag (e.g. v0.39.0)
   -d, --install-dir <DIR>   Install `rings` into <DIR>
   -h, --help                Print this help message
 EOF

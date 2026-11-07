@@ -38,6 +38,7 @@
 
 mod cases;
 mod driver;
+mod inbox;
 mod runner;
 
 use crate::simulation::model::SimInvariantViolation;

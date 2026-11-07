@@ -805,77 +805,6 @@ impl SimState {
         Ok(None)
     }
 
-    fn join(&mut self, node: SimNodeId, via: SimNodeId) -> Result<Option<u64>, SimTransitionError> {
-        if self.storm_stopped {
-            return Err(SimTransitionError::ActionAfterStop { action: "Join" });
-        }
-        if self.live_nodes.contains(&node) {
-            return Err(SimTransitionError::NodeAlreadyLive { node });
-        }
-        let bootstrap_valid = if self.live_nodes.is_empty() {
-            via == node
-        } else {
-            self.live_nodes.contains(&via)
-        };
-        if !bootstrap_valid {
-            return Err(SimTransitionError::InactiveBootstrapPeer { node, via });
-        }
-        self.live_nodes.insert(node);
-        self.departed_nodes.remove(&node);
-        self.joins = checked_add(self.joins, 1)?;
-        Ok(None)
-    }
-
-    fn leave(
-        &mut self,
-        node: SimNodeId,
-        graceful: bool,
-        event_id: SimEventId,
-    ) -> Result<Option<u64>, SimTransitionError> {
-        if !self.live_nodes.remove(&node) {
-            return Err(SimTransitionError::NodeNotLive { node });
-        }
-        self.departed_nodes.insert(node);
-        if graceful {
-            self.graceful_leaves = checked_add(self.graceful_leaves, 1)?;
-        } else {
-            self.ungraceful_leaves = checked_add(self.ungraceful_leaves, 1)?;
-        }
-        self.mark_node_departed_edges(node, event_id);
-        Ok(None)
-    }
-
-    fn crash(
-        &mut self,
-        node: SimNodeId,
-        event_id: SimEventId,
-    ) -> Result<Option<u64>, SimTransitionError> {
-        if !self.live_nodes.remove(&node) {
-            return Err(SimTransitionError::NodeNotLive { node });
-        }
-        self.departed_nodes.insert(node);
-        self.crashes = checked_add(self.crashes, 1)?;
-        self.mark_node_departed_edges(node, event_id);
-        Ok(None)
-    }
-
-    fn mark_node_departed_edges(&mut self, departed: SimNodeId, event_id: SimEventId) {
-        let affected_edges: Vec<(SimNodeId, SimNodeId)> = self
-            .connection_generations
-            .iter()
-            .filter_map(|(&(observer, peer), known)| {
-                ((observer == departed || peer == departed)
-                    && known.state == SimConnectionState::Active)
-                    .then_some((observer, peer))
-            })
-            .collect();
-        for edge in affected_edges {
-            self.injected_failures.insert(edge);
-            self.failure_events.insert(edge, event_id);
-            self.peer_health.insert(edge, SimPeerHealth::Failed);
-        }
-    }
-
     fn reserve_bytes(
         &mut self,
         node: SimNodeId,
@@ -1008,7 +937,7 @@ fn frame_generation_active(
     })
 }
 
-fn checked_add(left: u64, right: u64) -> Result<u64, SimTransitionError> {
+pub(super) fn checked_add(left: u64, right: u64) -> Result<u64, SimTransitionError> {
     left.checked_add(right)
         .ok_or(SimTransitionError::CounterOverflow)
 }

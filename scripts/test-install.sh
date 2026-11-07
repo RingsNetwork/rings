@@ -55,14 +55,14 @@ for target in \
     aarch64-unknown-linux-gnu
 do
     make_fixture_archive "$releases_dir" "v0.37.0" "$target"
-    make_fixture_archive "$releases_dir" "v0.38.1" "$target"
+    make_fixture_archive "$releases_dir" "v0.39.0" "$target"
 done
 
 latest_json="${tmp_root}/latest.json"
 cat >"$latest_json" <<'EOF'
 {
-  "tag_name": "v0.38.1",
-  "name": "v0.38.1"
+  "tag_name": "v0.39.0",
+  "name": "v0.39.0"
 }
 EOF
 
@@ -133,7 +133,7 @@ do
     installed_bin="${fake_home}/.local/bin/rings"
     [ -x "$installed_bin" ] || fail "expected executable ${installed_bin} for ${pair}"
     version_out="$("$installed_bin")"
-    [ "$version_out" = "rings v0.38.1 (${expected_target})" ] || \
+    [ "$version_out" = "rings v0.39.0 (${expected_target})" ] || \
         fail "unexpected binary output '${version_out}' for ${pair}"
 done
 
@@ -165,8 +165,8 @@ RINGS_OS=Linux \
     RINGS_LATEST_RELEASE_URL="$LATEST_URL" \
     sh "$INSTALL_SH" --install-dir="$custom_dir" >/dev/null
 
-[ "$("${custom_dir}/rings")" = "rings v0.38.1 (x86_64-unknown-linux-musl)" ] || \
-    fail "expected idempotent upgrade in place to v0.38.1"
+[ "$("${custom_dir}/rings")" = "rings v0.39.0 (x86_64-unknown-linux-musl)" ] || \
+    fail "expected idempotent upgrade in place to v0.39.0"
 
 # 6. Checksum mismatch and malformed checksum are rejected without modifying target
 bad_releases="${tmp_root}/bad-releases"
@@ -186,7 +186,7 @@ case "$err_out" in
     *"SHA-256 checksum mismatch"*) ;;
     *) fail "expected checksum mismatch error, got: ${err_out}" ;;
 esac
-[ "$("${custom_dir}/rings")" = "rings v0.38.1 (x86_64-unknown-linux-musl)" ] || \
+[ "$("${custom_dir}/rings")" = "rings v0.39.0 (x86_64-unknown-linux-musl)" ] || \
     fail "failed checksum install must leave existing binary untouched"
 
 printf 'not-a-valid-sha256\n' \
