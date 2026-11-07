@@ -23,6 +23,7 @@
 
 use std::future::Future;
 
+use rings_transport::core::transport::effective_max_message_size;
 use rings_transport::core::transport::ConnectionInterface;
 
 use super::pending::crossing_offer_verdict;
@@ -34,6 +35,7 @@ use super::pending::PendingConnectionAttempt;
 use super::pending::PendingTransportConnection;
 use super::pending::RawConnectionOwner;
 use super::SwarmTransport;
+use crate::consts::MAX_SDP_BYTES;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -340,6 +342,16 @@ impl SwarmTransport {
             }
         };
         match serde_json::to_string(&description) {
+            Ok(serialized) if serialized.len() > MAX_SDP_BYTES => {
+                let operation = format!("serializing connection {side}");
+                Err(self
+                    .classify_step_failure(
+                        attempt,
+                        Error::SdpAboveMax(serialized.len()),
+                        &operation,
+                    )
+                    .await?)
+            }
             Ok(serialized) => Ok(serialized),
             Err(_) => {
                 let operation = format!("serializing connection {side}");
@@ -461,7 +473,11 @@ impl SwarmTransport {
                 "connection offer DHT protocol mismatch".to_string(),
             ));
         }
+        if offer_msg.sdp.len() > MAX_SDP_BYTES {
+            return Err(Error::SdpAboveMax(offer_msg.sdp.len()));
+        }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        effective_max_message_size(&offer).map_err(Error::Transport)?;
         self.dht
             .observe_relay_custody(peer, offer_msg.relay_custody)?;
         let pending = match self.reconcile_incoming_offer_peer(peer, carrier).await? {
@@ -536,10 +552,11 @@ impl SwarmTransport {
                 "connection answer DHT protocol mismatch".to_string(),
             ));
         }
+        if answer_msg.sdp.len() > MAX_SDP_BYTES {
+            return Err(Error::SdpAboveMax(answer_msg.sdp.len()));
+        }
 
         let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
-        self.dht
-            .observe_relay_custody(peer, answer_msg.relay_custody)?;
 
         let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
             (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))
@@ -585,6 +602,8 @@ impl SwarmTransport {
             );
             return Err(Error::Transport(error));
         }
+        self.dht
+            .observe_relay_custody(peer, answer_msg.relay_custody)?;
         if !self.is_current_connection_attempt(attempt)? {
             return Err(Error::ConnectionAttemptSuperseded {
                 peer,

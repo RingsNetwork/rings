@@ -166,6 +166,169 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     Ok(())
 }
 
+/// The control-frame floor [`MIN_MAX_MESSAGE_SIZE`] (#1130): the widest `ConnectNodeSend` and
+/// `ConnectNodeReport` messages (at [`MAX_SDP_BYTES`]) encode to [`CONNECT_NODE_WIRE_MAX`]
+/// bytes, and when wrapped in the widest `MessagePayload` envelope and [`TRANSPORT_CUSTOM_OVERHEAD`]
+/// reach [`MIN_MAX_MESSAGE_SIZE`] with equality, so `WireReserves::PRODUCTION.plan` keeps
+/// `ConnectNodeSend`, `ConnectNodeReport`, and `ProbeOffer` `Framing::Whole` at the floor and
+/// switches the widest connect frame to `Framing::Chunked` one byte below it.
+#[test]
+fn test_min_max_message_size_fits_widest_control_payloads_whole() -> Result<()> {
+    use std::num::NonZeroU64;
+
+    use rings_transport::core::transport::custom_frame_wire;
+
+    use crate::chunk::Framing;
+    use crate::chunk::WireReserves;
+    use crate::consts::CONNECT_NODE_WIRE_MAX;
+    use crate::consts::MAX_RELAY_HOPS;
+    use crate::consts::MAX_SDP_BYTES;
+    use crate::consts::MIN_MAX_MESSAGE_SIZE;
+    use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
+    use crate::delegation::Delegation;
+    use crate::dht::delivery::RouteStage;
+    use crate::dht::RelayCustody;
+    use crate::message::ConnectNodeReport;
+    use crate::message::ConnectNodeSend;
+    use crate::message::DhtProtocolMode;
+    use crate::message::HopBudget;
+    use crate::message::ProbeCompletion;
+    use crate::message::ProbeOffer;
+    use crate::message::ProbeRequest;
+    use crate::message::ProvisionalEpoch;
+    use crate::message::ProvisionalServiceClaim;
+    use crate::message::ServiceKind;
+    use crate::message::SignalingPath;
+
+    let peer: Did = SecretKey::random().address().into();
+    let widest_envelope = |message: Message| -> Result<MessagePayload> {
+        let mut payload = new_payload(message, peer);
+        payload.transaction.sequence = u64::MAX;
+        payload.transaction.reply_via = Some(peer);
+        payload.relay.hop_budget = HopBudget::MAX;
+        payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
+        let mut recorded = SignalingPath::outbound();
+        for hop in 0..u32::from(MAX_RELAY_HOPS) {
+            recorded = recorded.forwarded(Did::from(hop))?;
+        }
+        payload.relay = payload
+            .relay
+            .with_signaling_path(SignalingPath::Return(recorded.reply()));
+        for verification in [
+            &mut payload.transaction.verification,
+            &mut payload.verification,
+        ] {
+            verification.delegation = Delegation::widest_for_test();
+            verification.ttl_ms = u64::MAX;
+            verification.ts_ms = u128::MAX;
+        }
+        Ok(payload)
+    };
+
+    let mode = DhtProtocolMode::new(u32::MAX, u16::MAX, u16::MAX);
+    let max_sdp = "x".repeat(MAX_SDP_BYTES);
+    let send = Message::ConnectNodeSend(ConnectNodeSend {
+        sdp: max_sdp.clone(),
+        dht_protocol_mode: mode,
+        relay_custody: RelayCustody::HoldsNone,
+    });
+    let report = Message::ConnectNodeReport(ConnectNodeReport {
+        sdp: max_sdp,
+        dht_protocol_mode: mode,
+        relay_custody: RelayCustody::HoldsNone,
+    });
+
+    for connect_msg in [send, report] {
+        let msg_wire = rings_codec::serialize(&connect_msg).map_err(Error::CodecSerialize)?;
+        assert_eq!(msg_wire.len(), CONNECT_NODE_WIRE_MAX);
+        let decoded: Message =
+            rings_codec::deserialize(&msg_wire).map_err(Error::CodecDeserialize)?;
+        assert_eq!(decoded.kind(), connect_msg.kind());
+
+        let payload = widest_envelope(connect_msg)?;
+        let wire_size = payload.wire_size()?;
+        assert_eq!(
+            wire_size + TRANSPORT_CUSTOM_OVERHEAD,
+            MIN_MAX_MESSAGE_SIZE,
+            "MIN_MAX_MESSAGE_SIZE is the exact supremum of the widest connect control frame"
+        );
+        assert_eq!(
+            WireReserves::PRODUCTION.plan(wire_size, MIN_MAX_MESSAGE_SIZE),
+            Some(Framing::Whole)
+        );
+        assert!(matches!(
+            WireReserves::PRODUCTION.plan(wire_size, MIN_MAX_MESSAGE_SIZE - 1),
+            Some(Framing::Chunked { .. })
+        ));
+        let framed = custom_frame_wire(payload.to_wire()?).map_err(Error::CodecSerialize)?;
+        assert!(framed.len() <= MIN_MAX_MESSAGE_SIZE);
+    }
+
+    // Widest ProbeOffer (three embedded MessageVerifications with widest BLS12-381 delegations)
+    // also fits comfortably inside MIN_MAX_MESSAGE_SIZE as Framing::Whole.
+    let probe_req = Message::ProbeRequest(ProbeRequest {
+        epoch: ProvisionalEpoch { slot: u64::MAX },
+        nonce: [u8::MAX; 32],
+    });
+    let mut request_tx = new_payload(probe_req, peer).transaction;
+    request_tx.sequence = u64::MAX;
+    request_tx.reply_via = Some(peer);
+    request_tx.verification.delegation = Delegation::widest_for_test();
+    request_tx.verification.ttl_ms = u64::MAX;
+    request_tx.verification.ts_ms = u128::MAX;
+
+    let mut completion_tx = request_tx.clone();
+    completion_tx.data = rings_codec::serialize(&ProbeCompletion {
+        request_digest: [u8::MAX; 32],
+        nonce: [u8::MAX; 32],
+    })
+    .map_err(Error::CodecSerialize)?;
+
+    let mut provider_attestation = request_tx.verification.clone();
+    provider_attestation.delegation = Delegation::widest_for_test();
+    let probe_offer = Message::ProbeOffer(Box::new(ProbeOffer {
+        request: request_tx,
+        completion: completion_tx,
+        claim: ProvisionalServiceClaim {
+            network_id: u32::MAX,
+            service: ServiceKind::Probe,
+            provider_account: peer,
+            beneficiary_account: peer,
+            epoch: ProvisionalEpoch { slot: u64::MAX },
+            nonce: [u8::MAX; 32],
+            units: NonZeroU64::MAX,
+            request_digest: [u8::MAX; 32],
+            completion_digest: [u8::MAX; 32],
+        },
+        provider_attestation,
+    }));
+    let probe_payload = widest_envelope(probe_offer)?;
+    let probe_wire_size = probe_payload.wire_size()?;
+    assert!(probe_wire_size + TRANSPORT_CUSTOM_OVERHEAD < MIN_MAX_MESSAGE_SIZE);
+    assert_eq!(
+        WireReserves::PRODUCTION.plan(probe_wire_size, MIN_MAX_MESSAGE_SIZE),
+        Some(Framing::Whole)
+    );
+
+    // ConnectNodeSend / ConnectNodeReport with an SDP exceeding MAX_SDP_BYTES do not decode.
+    for oversized in [
+        Message::ConnectNodeSend(ConnectNodeSend {
+            sdp: "x".repeat(MAX_SDP_BYTES + 1),
+            dht_protocol_mode: mode,
+            relay_custody: RelayCustody::Holds,
+        }),
+        Message::ConnectNodeReport(ConnectNodeReport {
+            sdp: "x".repeat(MAX_SDP_BYTES + 1),
+            dht_protocol_mode: mode,
+            relay_custody: RelayCustody::Holds,
+        }),
+    ] {
+        let encoded = rings_codec::serialize(&oversized).map_err(Error::CodecSerialize)?;
+        assert!(rings_codec::deserialize::<Message>(&encoded).is_err());
+    }
+    Ok(())
+}
+
 /// The other framing boundary: a payload [`WireReserves::plan`] keeps `Whole`, once wrapped in
 /// the outer custom frame (`custom_frame_wire`), stays within the limit — pinning that
 /// `WireReserves::PRODUCTION.whole` is enough for the whole-message path (not just the chunk
