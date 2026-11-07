@@ -10,9 +10,11 @@ use crate::error::Error;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::OnionExitOffer;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionLoopClass;
 use crate::onion::OnionRole;
 use crate::onion::OnionServiceName;
 use crate::processor::ProcessorConfig;
+use crate::provider::browser::provider::onion_proxy::parse_browser_https_request;
 use crate::provider::Provider;
 use crate::tests::wasm::new_provider;
 use crate::tests::wasm::prepare_processor_with_onion_role;
@@ -101,4 +103,32 @@ async fn test_browser_listen_installs_the_runtime_of_a_relay() {
     listener.stop();
 
     assert!(provider.extensions().contains(ONION_CIRCUIT_NAMESPACE));
+}
+
+/// The browser proxy request parser defaults `null` and `undefined` to `GET` with `class: None`
+/// ([`OnionLoopClass::DEFAULT`]), and deserializes an explicit `class` field when provided.
+#[wasm_bindgen_test]
+fn test_browser_proxy_request_parses_optional_loop_class() {
+    for empty in [JsValue::null(), JsValue::undefined()] {
+        let parsed = parse_browser_https_request(empty).expect("default request");
+        assert_eq!(parsed.method, "GET");
+        assert_eq!(parsed.class, None);
+    }
+
+    let object = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("method"),
+        &JsValue::from_str("POST"),
+    )
+    .expect("set method");
+    js_sys::Reflect::set(
+        &object,
+        &JsValue::from_str("class"),
+        &JsValue::from_str("KiB64"),
+    )
+    .expect("set class");
+    let parsed = parse_browser_https_request(object.into()).expect("parsed request");
+    assert_eq!(parsed.method, "POST");
+    assert_eq!(parsed.class, Some(OnionLoopClass::KiB64));
 }

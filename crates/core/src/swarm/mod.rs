@@ -28,6 +28,7 @@ pub use rings_transport::core::transport::LaneCreditView;
 pub use session_link::signing_horizon_ms;
 
 use self::callback::SwarmTransportCallback;
+use crate::delegation::DelegateeKey;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -121,6 +122,16 @@ impl Swarm {
     /// Get the typed account verification public key.
     pub fn delegator_verification_pubkey(&self) -> Result<VerificationPublicKey> {
         self.transport.delegation().delegator_verification_pubkey()
+    }
+
+    /// Return the session key this swarm currently signs with.
+    pub fn delegatee_key(&self) -> DelegateeKey {
+        self.transport.delegatee_key()
+    }
+
+    /// Replace the session key this swarm signs with, when it authorizes the same account DID.
+    pub fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
+        self.transport.set_delegatee_key(delegatee_key)
     }
 
     /// Get this swarm's network id.

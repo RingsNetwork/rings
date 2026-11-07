@@ -4,6 +4,7 @@ use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 use super::*;
+use crate::remote_endpoint::RemoteRpcProxy;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -43,6 +44,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     /// Onion-exit registry descriptor TTL.
     pub(in crate::processor) onion_exit_ttl: Duration,
+    /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
+    pub(crate) remote_rpc_proxy: Option<RemoteRpcProxy>,
 }
 
 #[wasm_export]
@@ -75,6 +78,7 @@ impl ProcessorConfig {
                 default_onion_exit_heartbeat_interval_secs(),
             ),
             onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
+            remote_rpc_proxy: None,
         }
     }
 
@@ -129,6 +133,13 @@ impl ProcessorConfig {
     /// Sets runtime-local final-destination quotas keyed by verified origin and logical lane.
     pub fn origin_quota(mut self, config: OriginQuotaConfig) -> Self {
         self.origin_quota = config;
+        self
+    }
+
+    /// Route native remote JSON-RPC requests (`nodeDid`, `answerOffer`, `acceptAnswer`) through
+    /// `proxy` instead of connecting directly.
+    pub fn remote_rpc_proxy(mut self, proxy: RemoteRpcProxy) -> Self {
+        self.remote_rpc_proxy = Some(proxy);
         self
     }
 }
@@ -198,6 +209,9 @@ pub struct ProcessorConfigSerialized {
     /// Exit policy advertised by this node.
     #[serde(default = "default_onion_exit_policy")]
     pub(crate) onion_exit_policy: OnionExitPolicy,
+    /// Optional HTTP(S) proxy URL for remote JSON-RPC endpoints on native targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) remote_rpc_proxy_url: Option<String>,
 }
 
 pub(crate) fn parse_webrtc_udp_port_range(
@@ -285,6 +299,10 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
                 .onion_role
                 .exit()
                 .map_or_else(default_onion_exit_policy, |offer| offer.policy().clone()),
+            remote_rpc_proxy_url: ins
+                .remote_rpc_proxy
+                .as_ref()
+                .map(|proxy| proxy.as_str().to_owned()),
         })
     }
 }
@@ -294,6 +312,11 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         let webrtc_udp_port_range =
             parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
+        let remote_rpc_proxy = ins
+            .remote_rpc_proxy_url
+            .as_deref()
+            .map(RemoteRpcProxy::parse)
+            .transpose()?;
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
@@ -322,6 +345,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             )?,
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
+            remote_rpc_proxy,
         })
     }
 }

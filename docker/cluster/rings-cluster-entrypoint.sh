@@ -7,10 +7,11 @@ CLUSTER_DIR="${RINGS_CLUSTER_DIR:-/var/lib/rings-cluster}"
 KEYS_FILE="${RINGS_PRIVATE_KEYS_FILE:-/run/secrets/rings-private-keys}"
 ALLOW_RANDOM_KEYS="${RINGS_ALLOW_RANDOM_KEYS:-true}"
 TOPOLOGY="${RINGS_CONNECT_TOPOLOGY:-ring}"
+BOOTSTRAP_PEERS="${RINGS_BOOTSTRAP_PEERS:-}"
 BASE_INTERNAL_PORT="${RINGS_BASE_INTERNAL_PORT:-50000}"
 BASE_EXTERNAL_PORT="${RINGS_BASE_EXTERNAL_PORT:-51000}"
 NETWORK_ID="${RINGS_NETWORK_ID:-1}"
-if [[ -v RINGS_ICE_SERVERS ]]; then
+if [[ -n "${RINGS_ICE_SERVERS+x}" ]]; then
     ICE_SERVERS="$RINGS_ICE_SERVERS"
 else
     ICE_SERVERS="stun://stun.l.google.com:19302"
@@ -50,8 +51,8 @@ die() {
 }
 
 is_true() {
-    case "${1,,}" in
-        1|true|yes|y|on) return 0 ;;
+    case "$1" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Yy]|[Oo][Nn]) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -59,9 +60,9 @@ is_true() {
 bool_literal() {
     local name="$1"
     local value="$2"
-    case "${value,,}" in
-        1|true|yes|y|on) printf 'true' ;;
-        0|false|no|n|off) printf 'false' ;;
+    case "$value" in
+        1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Yy]|[Oo][Nn]) printf 'true' ;;
+        0|[Ff][Aa][Ll][Ss][Ee]|[Nn][Oo]|[Nn]|[Oo][Ff][Ff]) printf 'false' ;;
         *) die "$name must be a boolean, got '$value'" ;;
     esac
 }
@@ -178,6 +179,58 @@ write_onion_exit_services_yaml() {
     [[ "$any" == true ]] || die "RINGS_ONION_EXIT_SERVICES must include at least one service when RINGS_ADVERTISE_ONION_EXIT is true"
 }
 
+validate_bootstrap_peers() {
+    local csv="$1"
+    local entry=""
+    local did=""
+    local url=""
+    local any=false
+    local entries=()
+
+    [[ -z "$(trim "$csv")" ]] && return 0
+
+    IFS=',' read -r -a entries <<< "$csv"
+    for entry in "${entries[@]}"; do
+        entry="$(trim "$entry")"
+        [[ -z "$entry" ]] && continue
+        [[ "$entry" == *=* ]] \
+            || die "RINGS_BOOTSTRAP_PEERS entry '$entry' must have the form <did>=<url>"
+        did="$(trim "${entry%%=*}")"
+        url="$(trim "${entry#*=}")"
+        [[ -n "$did" && -n "$url" ]] \
+            || die "RINGS_BOOTSTRAP_PEERS entry '$entry' must have a non-empty DID and URL"
+        any=true
+    done
+    [[ "$any" == true ]] || die "RINGS_BOOTSTRAP_PEERS did not contain any valid <did>=<url> entry"
+}
+
+write_bootstrap_peers_yaml() {
+    local csv="$1"
+    local entry=""
+    local did=""
+    local url=""
+    local entries=()
+
+    validate_bootstrap_peers "$csv"
+    if [[ -z "$(trim "$csv")" ]]; then
+        printf 'bootstrap:\n'
+        printf '  peers: []\n'
+        return 0
+    fi
+
+    printf 'bootstrap:\n'
+    printf '  peers:\n'
+    IFS=',' read -r -a entries <<< "$csv"
+    for entry in "${entries[@]}"; do
+        entry="$(trim "$entry")"
+        [[ -z "$entry" ]] && continue
+        did="$(trim "${entry%%=*}")"
+        url="$(trim "${entry#*=}")"
+        printf '    - did: %s\n' "$(yaml_quote "$did")"
+        printf '      url: %s\n' "$(yaml_quote "$url")"
+    done
+}
+
 normalize_private_key() {
     local key="$1"
     key="${key//$'\r'/}"
@@ -227,6 +280,7 @@ case "$TOPOLOGY" in
     seed|ring|mesh) ;;
     *) die "RINGS_CONNECT_TOPOLOGY must be one of: seed, ring, mesh" ;;
 esac
+validate_bootstrap_peers "$BOOTSTRAP_PEERS"
 
 mkdir -p \
     "$CLUSTER_DIR/config" \
@@ -348,6 +402,7 @@ write_config() {
         printf 'endpoint_url: %s\n' "$(yaml_quote "http://127.0.0.1:$internal_port")"
         printf 'ice_servers: %s\n' "$(yaml_quote "$ICE_SERVERS")"
         printf 'stabilize_interval: %s\n' "$STABILIZE_INTERVAL"
+        write_bootstrap_peers_yaml "$BOOTSTRAP_PEERS"
         printf 'advertise_onion_relay: %s\n' "$ADVERTISE_ONION_RELAY"
         printf 'advertise_onion_exit: %s\n' "$ADVERTISE_ONION_EXIT"
         if [[ "$ADVERTISE_ONION_EXIT" == "true" ]]; then

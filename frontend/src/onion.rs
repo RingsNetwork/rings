@@ -191,6 +191,7 @@ impl OnionProxyHttpRequest {
             path: None,
             headers: self.headers.clone(),
             body: self.body.clone(),
+            class: None,
         }
     }
 }

@@ -61,3 +61,4 @@ docs/book/
 !scripts/run-ci-tests.py
 !scripts/ci-native-model-tests.txt
 !scripts/test-ci-tests.py
+!scripts/test-install.sh

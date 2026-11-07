@@ -3,7 +3,8 @@
 use super::transport::authenticated_endpoint;
 use super::RpcError;
 
-/// The exception contains parsed loopback addresses only; hostnames and userinfo cannot widen it.
+/// The exception contains parsed loopback addresses only on direct transports; hostnames,
+/// userinfo, and proxied plain HTTP cannot widen it.
 #[cfg_attr(not(target_family = "wasm"), test)]
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 fn authenticated_endpoint_policy() {
@@ -14,7 +15,26 @@ fn authenticated_endpoint_policy() {
         "http://127.255.255.254/rpc",
         "http://[::1]:50000",
     ] {
-        assert!(authenticated_endpoint(endpoint).is_ok(), "{endpoint}");
+        assert!(
+            authenticated_endpoint(endpoint, false).is_ok(),
+            "{endpoint}"
+        );
+    }
+    for endpoint in ["https://example.com/rpc", "HTTPS://example.com:443/rpc"] {
+        assert!(authenticated_endpoint(endpoint, true).is_ok(), "{endpoint}");
+    }
+    for endpoint in [
+        "http://127.0.0.1:50000",
+        "http://127.255.255.254/rpc",
+        "http://[::1]:50000",
+    ] {
+        assert!(
+            matches!(
+                authenticated_endpoint(endpoint, true),
+                Err(RpcError::InsecureAuthenticatedEndpoint)
+            ),
+            "{endpoint}"
+        );
     }
     for endpoint in [
         "http://example.com",
@@ -32,7 +52,12 @@ fn authenticated_endpoint_policy() {
         "https://example.com/#fragment",
         "not a URL",
     ] {
-        assert!(authenticated_endpoint(endpoint).is_err(), "{endpoint}");
+        for proxied in [false, true] {
+            assert!(
+                authenticated_endpoint(endpoint, proxied).is_err(),
+                "{endpoint}"
+            );
+        }
     }
 }
 
@@ -40,11 +65,16 @@ fn authenticated_endpoint_policy() {
 #[cfg_attr(not(target_family = "wasm"), test)]
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 fn endpoint_errors_do_not_disclose_input() {
-    let result = authenticated_endpoint("http://secret:password@remote.example/?token=private");
-    assert!(matches!(
-        result,
-        Err(RpcError::InvalidAuthenticatedEndpoint)
-    ));
+    for proxied in [false, true] {
+        let result = authenticated_endpoint(
+            "http://secret:password@remote.example/?token=private",
+            proxied,
+        );
+        assert!(matches!(
+            result,
+            Err(RpcError::InvalidAuthenticatedEndpoint)
+        ));
+    }
 }
 
 /// Native listeners witness actual requests, rather than just constructor behavior.

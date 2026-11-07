@@ -41,7 +41,8 @@ pub(crate) async fn hold_for_offline_destination(
     payload: &MessagePayload,
 ) -> Result<()> {
     let now_ms = get_epoch_ms();
-    let held = HeldMessage::hold(payload.clone(), transport.message_signer(), now_ms)?;
+    let signer = transport.message_signer();
+    let held = HeldMessage::hold(payload.clone(), signer.by_ref(), now_ms)?;
     let hold = transport
         .dht
         .stamp_operation(

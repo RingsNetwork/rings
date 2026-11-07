@@ -124,6 +124,18 @@ pub enum Error {
     #[error("WebRTC local SDP generation error: {0}")]
     WebrtcLocalSdpGenerationError(String),
 
+    /// The remote SDP advertised `a=max-message-size:{advertised}`, below the protocol floor
+    /// `{minimum}` needed to carry every DHT control message unchunked.
+    #[error(
+        "Remote SDP max-message-size {advertised} is below the minimum {minimum} required for unchunked DHT control"
+    )]
+    RemoteMaxMessageSizeTooSmall {
+        /// Positive `a=max-message-size` advertised by the remote SDP.
+        advertised: usize,
+        /// Minimum `max_message_size` required (`MIN_MAX_MESSAGE_SIZE`).
+        minimum: usize,
+    },
+
     /// WebRTC UDP port range was rejected by the ICE stack: {0}
     #[error("WebRTC UDP port range was rejected by the ICE stack: {0}")]
     WebrtcUdpPortRange(String),

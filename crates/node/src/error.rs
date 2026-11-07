@@ -263,6 +263,11 @@ pub enum Error {
         /// error's source.
         source: serde_saphyr::ser::Error,
     } = 822,
+    /// Another open browser node holds the exclusive Web Lock for this storage namespace (#1055):
+    /// one storage namespace has one writer in the origin, so this open refuses before opening
+    /// any IndexedDB database instead of interleaving with it.
+    #[error("Browser storage \"{0}\" is held by another open node")]
+    BrowserStorageLocked(String) = 823,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
@@ -511,5 +516,15 @@ mod tests {
     fn test_error_code() {
         let err = Error::RemoteRpcError("Test".to_string());
         assert_eq!(err.code(), 100);
+    }
+
+    #[test]
+    fn test_browser_storage_locked_error_code() {
+        let err = Error::BrowserStorageLocked("rings-node".to_string());
+        assert_eq!(err.code(), 823);
+        assert_eq!(
+            err.to_string(),
+            "Browser storage \"rings-node\" is held by another open node"
+        );
     }
 }

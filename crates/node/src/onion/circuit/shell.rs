@@ -48,7 +48,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use bytes::Bytes;
-use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
@@ -175,8 +174,6 @@ impl OnionAlgebra {
 
 /// The interpreter of the data plane's effects; see the module documentation.
 pub(crate) struct OnionCircuitShell {
-    /// `d_i`, the key every header is peeled under.
-    key: DelegateeKey,
     /// Whether this node registers `relay`.
     relays: bool,
     /// The admission state `A`: ledgers, the link table and the replay store.
@@ -234,11 +231,10 @@ impl OnionLinkWitness {
 }
 
 impl OnionCircuitShell {
-    /// A shell over the node's key and epoch, with a link table of `2·𝓡` for the connection
+    /// A shell over the node's epoch, with a link table of `2·𝓡` for the connection
     /// registry capacity `registry_capacity`, sharing `tags` and `link_sender` with the node's
     /// sessions.
     pub(crate) fn new(
-        key: DelegateeKey,
         relays: bool,
         epoch: OnionProcessEpochCell,
         registry_capacity: NonZeroUsize,
@@ -252,7 +248,6 @@ impl OnionCircuitShell {
             registry_capacity,
         );
         Self {
-            key,
             relays,
             admission: Arc::new(Mutex::new(admission)),
             epoch,
@@ -283,11 +278,12 @@ impl OnionCircuitShell {
     ) -> Result<()> {
         let now_ms = get_epoch_ms();
         self.renew_if_rolled_back(now_ms)?;
+        let key = scope.lifecycle().delegatee_key();
         let outcome = {
             let mut admission = lock(&self.admission)?;
             hop(
                 &mut admission,
-                &self.key,
+                &key,
                 self.relays,
                 |tag| self.tags.expects(from, tag),
                 from,

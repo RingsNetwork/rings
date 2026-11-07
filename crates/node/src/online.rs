@@ -1,5 +1,7 @@
 //! Signed online-node descriptors stored in the DHT.
 
+use std::borrow::Borrow;
+
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::dht::RelayCustody;
@@ -229,7 +231,7 @@ impl OnlineNodeDescriptor {
     /// Create and sign a descriptor.
     pub fn new_signed(
         body: OnlineNodeDescriptorBody,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> Result<Self> {
         sign_descriptor_body(
             body,

@@ -1,0 +1,22 @@
+# systemd user unit for the Rings Network daemon (`rings`).
+#
+# Copy to `~/.config/systemd/user/rings.service` after running `rings init`.
+# If `rings` was installed to `/usr/local/bin/rings` instead of `~/.local/bin/rings`,
+# update `ExecStart` accordingly. See `contrib/README.md` for enable and removal commands.
+
+[Unit]
+Description=Rings Network node daemon
+Documentation=https://rings.rs/docs/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/rings run -c %h/.rings/config.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

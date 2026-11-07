@@ -49,7 +49,12 @@ rings connect node https://node.rings.rs
 
 The remote peer's external API answers the handshake (`nodeDid`, `answerOffer`) without
 authentication, so no token is needed by default. A peer that gates its handshake behind its
-token takes `--remote-api-token-file <FILE>`.
+token takes `--remote-api-token-file <FILE>`. By default the running node dials remote HTTP(S)
+endpoints directly and ignores ambient `HTTP_PROXY` and `HTTPS_PROXY` variables; to route remote
+handshake RPC through an explicit HTTP(S) proxy, start `rings run` with
+`--remote-rpc-proxy-url <URL>` (or set `remote_rpc_proxy_url` in
+[config.yaml](advanced-topic/config.yaml.md#control-api)). Local CLI-to-node RPC always bypasses
+proxies.
 
 ### Through a seed
 
@@ -94,11 +99,16 @@ prints an encoded offer. Deliver it to the peer, which answers it:
 rings connect answer <offer>      # or `-` to read the offer from stdin
 ```
 
-and prints an encoded answer. Bring that back to the initiator:
+and prints an encoded answer (plus a status line on `stderr`). Bring that back to the initiator:
 
 ```bash
 rings connect accept <answer>     # or `-`
 ```
+
+If both sides hold a pending offer to each other and the answering node's offer prevails on the DID
+tie-break, `rings connect answer` prints a counter-offer instead and notes this on `stderr`. In that
+case, pass the counter-offer back to the peer for `rings connect answer <counter-offer>`, then
+complete on the counter-offering node with `rings connect accept <answer>`.
 
 [Exchange SDP](advanced-topic/exchange-sdp.md) explains what each message carries.
 

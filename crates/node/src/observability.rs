@@ -159,9 +159,9 @@ pub struct SessionKeySnapshot {
     pub expires_at_ms: u128,
     /// Saturating time until expiry in milliseconds.
     pub remaining_ms: u128,
-    /// Successful runtime rotations; currently zero because rotation requires restart.
+    /// Successful runtime rotations during this process lifetime.
     pub rotation_succeeded_total: u64,
-    /// Failed runtime rotations; currently zero because rotation requires restart.
+    /// Failed runtime rotations during this process lifetime.
     pub rotation_failed_total: u64,
     /// Whether this process can replace its signing delegation without restart.
     pub runtime_rotation_supported: bool,

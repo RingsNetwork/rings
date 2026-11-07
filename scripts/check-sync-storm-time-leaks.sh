@@ -4,6 +4,7 @@ set -euo pipefail
 readonly strict_paths=(
   crates/core/src/simulation.rs
   crates/core/src/simulation
+  crates/core/src/tests/default/test_churn
   crates/core/src/tests/default/test_sync_storm
 )
 readonly forbidden='chrono::Utc::now|SystemTime::now|std::time::SystemTime|std::time::Instant|web_time::Instant|Uuid::new_v4|uuid::Uuid::new_v4|thread_rng|rand::random|futures_timer::Delay|tokio::time::sleep|tokio::spawn|Handle::spawn|spawn_local'

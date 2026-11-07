@@ -753,10 +753,11 @@ reassembled message.  So on the paced path each carrier has at most one event in
 Frames released from the pre-admission hold are not paced: up to the peer's event share,
 $32$, enter at once, at admission.  Behind such a burst a control frame without the exemption
 would wait for up to $32$ reassembly frames.
-\item \emph{Chunked control.}  A payload is chunked whenever it exceeds the peer's advertised
-\texttt{max-message-size}, which has no floor (\issue{1130}), so control messages carrying an
-SDP can arrive chunked, on the control carrier.  Under the exemption, a control frame released
-after them in the same burst ran before their reassembled message: control reordered.
+\item \emph{Chunked control.}  Before \issue{1130} \texttt{max-message-size} had no floor, so a
+peer advertising a small limit could force control messages carrying an SDP to arrive chunked,
+on the control carrier; even with the floor (\issue{1130}), a peer can still send control frames
+chunked directly on the control carrier.  Under the exemption, a control frame released after
+them in the same burst ran before their reassembled message: control reordered.
 \end{enumerate}
 
 \begin{definition}[Per-category barrier]\label{def:barrier}
@@ -812,8 +813,9 @@ DHT control requests and reports; storage requests and reports & each pair withi
 
 \textbf{Decision.}  Replace the node-wide barrier and its hand-off barrier by
 Def.~\ref{def:barrier}.  The control exemption is gone as a special case: control waits only
-behind chunked control, which a peer causes only by advertising a limit below its control
-messages.  A data category no longer waits behind another category's reassembly.  The ablation
+behind chunked control, which an honest peer never emits once \texttt{max-message-size} is
+floored above the widest control frame (\issue{1130}).  A data category no longer waits behind
+another category's reassembly.  The ablation
 toggle \texttt{ProtectionLayer::BarrierControlExemption} and its legacy feedback-loop witness
 are removed; the storm witnesses that a control probe behind another category's reassembly
 backlog is not blocked, and a regression test that a chunked control message released from

@@ -289,7 +289,11 @@ store, so with 64 such entries every new relay delivery to the node, from every 
 (`RelayCustodyFull`, the pass ends and the mail stays stored) until the earliest of them is spent.
 A relay inbox that stays undelivered while mail is held for the node points to this stall. It ends
 by itself at that instant; removing the `transaction-replay` store ends it at once, at the cost of
-the replay guarantee (see [Bad records](#bad-records) for that reset).
+the replay guarantee (see [Bad records](#bad-records) for that reset). No read of the chain can free
+a lost entry earlier (#1139): even unanimous absence across all `r` members of an agreed, repaired
+chain cannot exclude a writer still resending an unacknowledged hold or a displaced keeper whose
+hand-off has not yet landed, with no tombstone before a take to refuse its join, and freeing custody
+on that absence would retire the later arrival as a replay (#1059).
 Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
 spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
 accounting.

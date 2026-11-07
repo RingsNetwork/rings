@@ -16,41 +16,61 @@
 
 use std::num::NonZeroU32;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 use super::carry::ONION_CARRY_AUTHENTICATOR_BYTES;
 use super::header::ONION_HEADER_BYTES;
 
 /// Cell framing `F` beyond `χ ‖ y`: none, since a cell's class is its length.
 pub(crate) const ONION_CELL_FRAMING_BYTES: usize = 0;
 
-/// The class `b` of one loop, `16 KiB … 12 MiB` (D6): every cell of the loop, replies included,
-/// is exactly `b` bytes.
+/// The class `b` of one loop, `16 KiB … 12 MiB` (#834 D6, L3): every cell of the loop, replies
+/// included, is exactly `b` bytes.
 ///
-/// The class is intentionally visible while everything inside the cell is not. A small class set
-/// bounds padding overhead without exposing a byte-accurate traffic fingerprint. The
-/// discriminant is the one-byte label the header MAC binds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// A session's caller chooses `b`, trading per-cell payload capacity against leakage and
+/// admission cost:
+///
+/// - **Leakage (#834 leakage table).** A cell's class is its byte length on the wire (`F = 0`), so
+///   every hop along the loop sees `b`, while everything inside the cell is hidden. A small class
+///   set bounds padding overhead without exposing a byte-accurate traffic fingerprint.
+/// - **Admission cost (#834 L9).** Every cell of class `b` costs its receiver
+///   `u(b) = b / 16 KiB` admission units ([`Self::units`], `1` unit at `16 KiB` up to `768` units
+///   at `12 MiB`) and occupies `u(b)` emission slots on a constant-rate link.
+///
+/// The `repr(u8)` discriminant is the one-byte label the header MAC binds.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
 #[repr(u8)]
-pub(crate) enum OnionLoopClass {
-    /// Sixteen KiB, the default and least class: one admission unit.
+pub enum OnionLoopClass {
+    /// Sixteen KiB, the default and least class: one admission unit (`u = 1`).
+    #[default]
+    #[serde(alias = "16KiB", alias = "16 KiB", alias = "16kib")]
     KiB16,
-    /// Sixty-four KiB.
+    /// Sixty-four KiB: four admission units (`u = 4`).
+    #[serde(alias = "64KiB", alias = "64 KiB", alias = "64kib")]
     KiB64,
-    /// 256 KiB.
+    /// 256 KiB: sixteen admission units (`u = 16`).
+    #[serde(alias = "256KiB", alias = "256 KiB", alias = "256kib")]
     KiB256,
-    /// One MiB.
+    /// One MiB: 64 admission units (`u = 64`).
+    #[serde(alias = "1MiB", alias = "1 MiB", alias = "1mib")]
     MiB1,
-    /// Four MiB.
+    /// Four MiB: 256 admission units (`u = 256`).
+    #[serde(alias = "4MiB", alias = "4 MiB", alias = "4mib")]
     MiB4,
-    /// Twelve MiB, the largest class: `u_max = 768` units.
+    /// Twelve MiB, the largest class: `u_max = 768` admission units.
+    #[serde(alias = "12MiB", alias = "12 MiB", alias = "12mib")]
     MiB12,
 }
 
 impl OnionLoopClass {
     /// The default class, `b = 16 KiB`.
-    pub(crate) const DEFAULT: Self = Self::KiB16;
+    pub const DEFAULT: Self = Self::KiB16;
 
     /// Every class, in increasing size.
-    pub(crate) const ALL: [Self; 6] = [
+    pub const ALL: [Self; 6] = [
         Self::KiB16,
         Self::KiB64,
         Self::KiB256,
@@ -59,8 +79,8 @@ impl OnionLoopClass {
         Self::MiB12,
     ];
 
-    /// `b`, the cell length.
-    pub(crate) const fn cell_bytes(self) -> usize {
+    /// `b`, the cell length in bytes.
+    pub const fn cell_bytes(self) -> usize {
         match self {
             Self::KiB16 => 16 * 1024,
             Self::KiB64 => 64 * 1024,
@@ -74,7 +94,7 @@ impl OnionLoopClass {
     /// `u(b) = b / 16 KiB`, the admission units one cell of the class costs its receiver (#834
     /// L9): `1 + (u(b) − 1)`, exact since every class is a positive whole number of units that
     /// fits `u32` (asserted below).
-    pub(crate) const fn units(self) -> NonZeroU32 {
+    pub const fn units(self) -> NonZeroU32 {
         let units = self.cell_bytes() / Self::DEFAULT.cell_bytes();
         NonZeroU32::MIN.saturating_add(units.saturating_sub(1) as u32)
     }

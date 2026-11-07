@@ -4,6 +4,7 @@
 //! Their signing domains and versioned canonical encodings cannot be reused by
 //! a finalized-epoch protocol.
 
+use std::borrow::Borrow;
 use std::num::NonZeroU64;
 
 use serde::Deserialize;
@@ -142,18 +143,18 @@ impl ProvisionalServiceClaim {
     /// Sign the provider role domain with the delegated provider session.
     pub fn sign_provider(
         &self,
-        signer: MessageSigner<&crate::delegation::DelegateeKey>,
+        signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
     ) -> Result<MessageVerification> {
-        self.require_signer(signer, self.provider_account)?;
+        self.require_signer(signer.by_ref(), self.provider_account)?;
         signer.sign(PROVIDER_DOMAIN, &self.canonical_bytes()?)
     }
 
     /// Sign the beneficiary role domain with the delegated beneficiary session.
     pub fn sign_beneficiary(
         &self,
-        signer: MessageSigner<&crate::delegation::DelegateeKey>,
+        signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
     ) -> Result<MessageVerification> {
-        self.require_signer(signer, self.beneficiary_account)?;
+        self.require_signer(signer.by_ref(), self.beneficiary_account)?;
         signer.sign(BENEFICIARY_DOMAIN, &self.canonical_bytes()?)
     }
 

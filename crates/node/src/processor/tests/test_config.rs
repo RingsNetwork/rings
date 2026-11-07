@@ -376,3 +376,26 @@ fn test_onion_exit_service_must_be_a_world_facing_symbol() {
         assert!(serde_saphyr::from_str::<Vec<OnionServiceName>>(&format!("[{outside}]")).is_err());
     }
 }
+
+#[test]
+fn test_serialized_remote_rpc_proxy_url_round_trips_and_validates() -> Result<()> {
+    use crate::remote_endpoint::RemoteRpcProxy;
+
+    let proxy = RemoteRpcProxy::parse("http://127.0.0.1:18080")?;
+    let config = onion_test_config().remote_rpc_proxy(proxy.clone());
+    let serialized = ProcessorConfigSerialized::try_from(config)?;
+    assert_eq!(
+        serialized.remote_rpc_proxy_url.as_deref(),
+        Some("http://127.0.0.1:18080/")
+    );
+    let restored = ProcessorConfig::try_from(serialized.clone())?;
+    assert_eq!(restored.remote_rpc_proxy, Some(proxy));
+
+    let mut invalid = serialized;
+    invalid.remote_rpc_proxy_url = Some("socks5://127.0.0.1:1080".to_string());
+    assert!(matches!(
+        ProcessorConfig::try_from(invalid),
+        Err(Error::InvalidConfig(_))
+    ));
+    Ok(())
+}

@@ -1,8 +1,6 @@
 //! The command line of the native node: the top-level parser, its subcommands, and the
 //! arguments each takes.
 
-use std::str::FromStr;
-
 use anyhow::Context;
 use clap::ArgAction;
 use clap::Args;
@@ -13,13 +11,12 @@ use rings_node::logging::LogLevel;
 use rings_node::native::api_auth::load_api_token;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
+use rings_node::native::horizon::write_delegatee_key_atomically;
 use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
-use rings_node::prelude::rings_core::dht::Did;
+use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::DelegationBuilder;
-use rings_node::util::ensure_parent_dir;
-use rings_node::util::expand_home;
+use rings_node::prelude::rings_core::utils::get_epoch_ms;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -218,6 +215,13 @@ pub(crate) struct RunCommand {
     )]
     pub bootstrap_seed: Option<String>,
 
+    #[arg(
+        long,
+        help = "HTTP(S) proxy URL for remote JSON-RPC endpoints (seed and HTTP handshakes); local loopback RPC always bypasses proxies",
+        env
+    )]
+    pub remote_rpc_proxy_url: Option<String>,
+
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
 
@@ -408,21 +412,10 @@ pub(crate) struct DelegationArgs {
 impl DelegationArgs {
     pub(crate) fn new_delegation_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
         let key = self.load_or_create_key()?;
-        let key_did: Did = key.address().into();
-
-        let ssk_builder = DelegationBuilder::new(key_did.to_string(), "secp256k1".to_string())
-            .set_ttl(self.ttl * 1000);
-        let unsigned_proof = ssk_builder.unsigned_proof();
-
-        let sig = key.sign(&unsigned_proof)?.to_vec();
-        let ssk_builder = ssk_builder.set_delegator_signature(sig);
-
-        let ssk = ssk_builder.build()?;
-        let ssk_dump = ssk.dump()?;
-
+        let ssk =
+            DelegateeKey::new_with_seckey_at(&key, self.ttl.saturating_mul(1000), get_epoch_ms())?;
         let ssk_path = std::path::Path::new(&self.delegatee_key);
-        ensure_parent_dir(ssk_path)?;
-        std::fs::write(expand_home(ssk_path)?, ssk_dump)?;
+        write_delegatee_key_atomically(ssk_path, &ssk)?;
         println!(
             "Your delegatee_key file has saved to: {}",
             ssk_path.display()
@@ -447,17 +440,7 @@ impl DelegationArgs {
 }
 
 fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
-    let path = expand_home(path)?;
-    let raw = std::fs::read_to_string(path)?;
-    let Some(key) = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-    else {
-        anyhow::bail!("ECDSA key file contains no key entries");
-    };
-    let key = key.strip_prefix("0x").unwrap_or(key);
-    SecretKey::from_str(key).map_err(|_| anyhow::anyhow!("ECDSA key file contains an invalid key"))
+    rings_node::native::horizon::read_delegator_secret_key(path).map_err(Into::into)
 }
 
 #[derive(Subcommand, Debug)]
@@ -470,14 +453,35 @@ pub(crate) enum ConnectCommand {
     #[command(about = "Connects to a node using its seed from a URL or file.")]
     Seed(ConnectWithSeedCommand),
     #[command(
-        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer."
+        about = "Creates a manual-handshake offer targeting a peer DID; prints the encoded offer.",
+        long_about = "Creates a manual-handshake offer targeting a peer DID and prints the encoded offer.\n\n\
+                      Manual handshakes take three steps: `connect offer <peer-did>` -> peer runs \
+                      `connect answer <offer>` -> offerer finishes with `connect accept <answer>`."
     )]
     Offer(ConnectOfferCommand),
     #[command(
-        about = "Answers a peer's offer; prints the encoded answer to return to the offerer."
+        about = "Answers a peer's offer; prints the encoded answer (or counter-offer on a simultaneous-offer tie-break).",
+        long_about = "Answers a peer's offer in the three-step manual handshake (`connect offer` -> \
+                      `connect answer` -> `connect accept`) and prints the encoded reply payload to stdout \
+                      with a status notice on stderr.\n\n\
+                      Normally the reply is an answer (`ConnectNodeReport`), which the offerer completes \
+                      with `rings connect accept <answer>`.\n\n\
+                      When both sides offer simultaneously and this node's pending offer prevails on the \
+                      DID tie-break (glare), the printed payload is a counter-offer (`ConnectNodeSend`) \
+                      instead of an answer: pass it to the peer so the peer runs \
+                      `rings connect answer <counter-offer>`, then finish on this node with \
+                      `rings connect accept <answer>`."
     )]
     Answer(ConnectAnswerCommand),
-    #[command(about = "Accepts a peer's answer, completing the manual handshake.")]
+    #[command(
+        about = "Accepts a peer's answer, completing the manual handshake (if given a counter-offer, run `connect answer` instead).",
+        long_about = "Accepts a peer's answer (`ConnectNodeReport`), completing the three-step manual \
+                      handshake (`connect offer` -> `connect answer` -> `connect accept`).\n\n\
+                      If `connect answer` on the peer returned a counter-offer (`ConnectNodeSend`) \
+                      because both nodes offered simultaneously and the peer won the DID tie-break, \
+                      do not pass it to `connect accept`: run `rings connect answer <counter-offer>` \
+                      on this node and return that answer to the peer's `rings connect accept`."
+    )]
     Accept(ConnectAcceptCommand),
 }
 

@@ -175,15 +175,15 @@ impl SwarmTransport {
     }
 
     /// The signer of every payload this transport originates; signing sends nothing.
-    pub(crate) fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
-        MessageSigner::new(&self.delegatee_key, self.network_id)
+    pub(crate) fn message_signer(&self) -> MessageSigner<DelegateeKey> {
+        MessageSigner::new(self.delegatee_key(), self.network_id)
     }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl<D: Discipline> PayloadSender for Egress<'_, D> {
-    fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
+    fn message_signer(&self) -> MessageSigner<DelegateeKey> {
         self.transport.message_signer()
     }
 
