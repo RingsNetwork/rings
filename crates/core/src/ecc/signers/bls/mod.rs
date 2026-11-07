@@ -31,6 +31,41 @@ use crate::error::Result;
 /// this is from `<https://docs.rs/bls-signatures/latest/src/bls_signatures/signature.rs.html#24>`
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
 
+/// Adapter over `sha2::Sha256` (0.11) for `ark-ff` 0.6's [`DefaultFieldHasher`], which bounds its
+/// hash by `digest` 0.10's `FixedOutputReset`.
+#[derive(Clone, Default)]
+struct BlsSha256(sha2::Sha256);
+
+impl sha1::digest::OutputSizeUser for BlsSha256 {
+    type OutputSize = sha1::digest::consts::U32;
+}
+
+impl sha1::digest::Update for BlsSha256 {
+    fn update(&mut self, data: &[u8]) {
+        sha2::Digest::update(&mut self.0, data);
+    }
+}
+
+impl sha1::digest::Reset for BlsSha256 {
+    fn reset(&mut self) {
+        sha2::Digest::reset(&mut self.0);
+    }
+}
+
+impl sha1::digest::FixedOutput for BlsSha256 {
+    fn finalize_into(self, out: &mut sha1::digest::Output<Self>) {
+        let digest = sha2::Digest::finalize(self.0);
+        out.copy_from_slice(digest.as_slice());
+    }
+}
+
+impl sha1::digest::FixedOutputReset for BlsSha256 {
+    fn finalize_into_reset(&mut self, out: &mut sha1::digest::Output<Self>) {
+        let digest = sha2::Digest::finalize_reset(&mut self.0);
+        out.copy_from_slice(digest.as_slice());
+    }
+}
+
 /// Represents a BLS signature, stored as a 96-byte array.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature(pub [u8; 96]);
@@ -108,7 +143,7 @@ pub fn hash_to_curve(msg: &[u8]) -> Result<[u8; 96]> {
     // let swu_map: WBMap<G1Config> = WBMap::new().unwrap();
     let hasher = MapToCurveBasedHasher::<
         G2Projective,
-        DefaultFieldHasher<sha2::Sha256, 128>,
+        DefaultFieldHasher<BlsSha256, 128>,
         WBMap<G2Config>,
     >::new(CSUITE)
     .map_err(|_| Error::CurveHasherInitFailed)?;

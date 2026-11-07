@@ -18,6 +18,7 @@
 //! than `Λ`, or a window longer than the lease, is never live, and a registrant that stops is
 //! listed at most `Λ + σ` after its last write against any signer, writer or syncer.
 
+use std::borrow::Borrow;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -64,7 +65,7 @@ pub(crate) const fn registry_lease() -> Duration {
 /// Pre: the body names the signer's account and public key, and states the signer's overlay.
 pub(crate) fn sign_descriptor_body<B>(
     body: B,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<impl Borrow<DelegateeKey>>,
     mismatch_message: &'static str,
 ) -> Result<B::Descriptor>
 where

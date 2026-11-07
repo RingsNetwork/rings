@@ -10,6 +10,10 @@ ignore = [
     # (p256/p384 0.13); the #1051 audit found no affected 0.5.5 operation reachable from a secret
     # there. Removed once dtls leaves elliptic-curve 0.13; tracked in #1051.
     { id = "RUSTSEC-2026-0387", reason = "no 0.5.x fix; only webrtc 0.17 dtls still pulls it; #1051" },
+    # pin-utils 0.1.0 is unmaintained (upstream archived). It has no safe upgrade and reaches the
+    # workspace lock only through webrtc 0.17.1 -> webrtc-util 0.17.1 -> nix 0.26.4 -> pin-utils
+    # 0.1.0. Removed once the transport moves off webrtc 0.17; tracked in #1071.
+    { id = "RUSTSEC-2026-0441", reason = "unmaintained; only webrtc 0.17 webrtc-util/nix still pulls it; #1071" },
 ]
 
 [licenses]

@@ -17,6 +17,8 @@
 //! the lease law of `descriptor`), so a gateway finds it with one fetch, and the newest live
 //! descriptor wins (`latest_valid_by_did`).
 
+use std::borrow::Borrow;
+
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
@@ -128,7 +130,7 @@ impl MailDescriptor {
     /// Create and sign a descriptor.
     pub fn new_signed(
         body: MailDescriptorBody,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> Result<Self> {
         sign_descriptor_body(
             body,

@@ -29,10 +29,12 @@ use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionLoopClass;
 use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
-use crate::provider::RemoteRpcEndpoint;
+use crate::provider::BrowserDirectoryEndpoint;
+use crate::remote_endpoint::attach_bearer_token;
 
 /// Browser-compatible onion proxy handle.
 ///
@@ -43,7 +45,7 @@ use crate::provider::RemoteRpcEndpoint;
 pub struct BrowserOnionProxy {
     pub(super) processor: Arc<Processor>,
     pub(super) client: OnionHttpsClient,
-    pub(super) directory_endpoint: Option<RemoteRpcEndpoint>,
+    pub(super) directory_endpoint: Option<BrowserDirectoryEndpoint>,
 }
 
 /// Typed response from a cancellable browser onion HTTPS request.
@@ -86,7 +88,7 @@ fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<Brow
 #[derive(Clone)]
 enum BrowserOnionDirectorySource {
     Local,
-    Remote(RemoteRpcEndpoint),
+    Remote(BrowserDirectoryEndpoint),
 }
 
 struct BrowserOnionDirectoryReader {
@@ -102,7 +104,7 @@ impl BrowserOnionDirectoryReader {
         }
     }
 
-    fn remote(processor: Arc<Processor>, endpoint: RemoteRpcEndpoint) -> Self {
+    fn remote(processor: Arc<Processor>, endpoint: BrowserDirectoryEndpoint) -> Self {
         Self {
             processor,
             source: BrowserOnionDirectorySource::Remote(endpoint),
@@ -165,15 +167,10 @@ impl BrowserOnionDirectoryReader {
 }
 
 /// Builds a directory RPC client under the shared credential transport policy.
-fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> NodeResult<RpcClient> {
-    let client = RpcClient::new(endpoint.url.as_str())
-        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    match &endpoint.api_token {
-        Some(token) => client
-            .with_bearer_token(token.to_string())
-            .map_err(|error| Error::RemoteRpcError(error.to_string())),
-        None => Ok(client),
-    }
+fn authenticated_rpc_client(endpoint: &BrowserDirectoryEndpoint) -> NodeResult<RpcClient> {
+    RpcClient::new(endpoint.url.as_str())
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))
+        .and_then(|client| attach_bearer_token(client, endpoint.api_token.as_deref()))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -230,7 +227,7 @@ async fn build_browser_route_from_reader(
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     target: OnionProxyTarget,
-    directory_endpoint: Option<RemoteRpcEndpoint>,
+    directory_endpoint: Option<BrowserDirectoryEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
     if let Some(endpoint) = directory_endpoint {
         let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
@@ -268,21 +265,14 @@ impl BrowserOnionProxy {
     /// Send one HTTPS request through this onion proxy.
     ///
     /// `url` is an absolute `https://` URL. `request` is an object with optional `method`,
-    /// `headers`, `body`, and `path` override fields. The returned Promise resolves to
-    /// `{ status, headers, body }`.
+    /// `headers`, `body`, `path` override, and `class` ([`OnionLoopClass`], defaulting to
+    /// [`OnionLoopClass::DEFAULT`], `16 KiB`; every hop on the loop sees `b` and each cell costs
+    /// `b / 16 KiB` admission units) fields. The returned Promise resolves to
+    /// `{ status, headers, body, route }`.
     pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
         let proxy = self.clone();
         future_to_promise(async move {
-            let request = if request.is_null() || request.is_undefined() {
-                OnionHttpsClientRequest {
-                    method: "GET".to_string(),
-                    path: None,
-                    headers: Vec::new(),
-                    body: Vec::new(),
-                }
-            } else {
-                js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
-            };
+            let request = parse_browser_https_request(request).map_err(JsError::from)?;
             let response = proxy
                 .request_http(url.as_str(), request)
                 .await
@@ -294,6 +284,21 @@ impl BrowserOnionProxy {
             js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
             Ok(value)
         })
+    }
+}
+
+/// Parse a browser JS request argument into [`OnionHttpsClientRequest`], defaulting `null` and
+/// `undefined` to a `GET` at [`OnionLoopClass::DEFAULT`].
+pub(super) fn parse_browser_https_request(
+    request: JsValue,
+) -> Result<OnionHttpsClientRequest, rings_core::error::Error> {
+    if request.is_null() || request.is_undefined() {
+        Ok(OnionHttpsClientRequest {
+            method: "GET".to_string(),
+            ..OnionHttpsClientRequest::default()
+        })
+    } else {
+        js_value::deserialize::<OnionHttpsClientRequest>(request)
     }
 }
 
@@ -313,8 +318,11 @@ impl BrowserOnionProxy {
         self.build_route(target).await
     }
 
-    /// Send one typed HTTPS request through this proxy.
+    /// Send one typed HTTPS request through this proxy at `request.class` (or
+    /// [`OnionLoopClass::DEFAULT`], `16 KiB`, when `None`).
     ///
+    /// Every hop on the loop sees the selected class `b` (#834 leakage table), and each cell of
+    /// the loop costs `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
     /// Dropping the returned future ends its session immediately. Browser frontends
     /// should use this method when their own request lifecycle can be cancelled.
     pub async fn request_http(
@@ -326,6 +334,24 @@ impl BrowserOnionProxy {
         let route = self.build_route(target).await?;
         let response = self.client.request(&route, call).await?;
         Ok(BrowserOnionProxyResponse { response, route })
+    }
+
+    /// Send one typed HTTPS request through this proxy in a session of loop class `class` (`b`).
+    ///
+    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
+    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
+    /// Dropping the returned future ends its session immediately.
+    pub async fn request_http_with_class(
+        &self,
+        url: &str,
+        request: OnionHttpsClientRequest,
+        class: OnionLoopClass,
+    ) -> NodeResult<BrowserOnionProxyResponse> {
+        self.request_http(url, OnionHttpsClientRequest {
+            class: Some(class),
+            ..request
+        })
+        .await
     }
 }
 

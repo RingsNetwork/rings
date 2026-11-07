@@ -16,13 +16,15 @@ workspace = true
 async-trait = { workspace = true }
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 hickory-server = { version = "0.26.3", default-features = false }
-hmac = "0.12.1"
+# The secret address key `k` (#852, #1122): with `zeroize`, sha2's block cores wipe their state on
+# drop, so every `Hmac` instance's `k ⊕ ipad` and `k ⊕ opad` chaining values are wiped with it.
+hmac = { version = "0.13.0", features = ["zeroize"] }
 ipnet = { version = "2.11.0", features = ["serde"] }
 ppp = "2.3.0"
 rand = { version = "0.8.5", features = ["getrandom"] }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10.6"
+sha2 = { version = "0.11.1", features = ["zeroize"] }
 socket2 = "0.6.5"
 thiserror = "1"
 tokio = { version = "1.13.0", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }

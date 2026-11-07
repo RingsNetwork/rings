@@ -718,3 +718,150 @@ fn has_violation(
 ) -> bool {
     violations.iter().any(predicate)
 }
+
+#[test]
+fn join_leave_crash_and_rejoin_lifecycle_transitions_are_checked() {
+    let bad_seed = SimState::default().transition(SimAction::Join {
+        node: SimNodeId(0),
+        via: SimNodeId(1),
+    });
+    assert!(matches!(
+        bad_seed,
+        Err(SimTransitionError::InactiveBootstrapPeer {
+            node: SimNodeId(0),
+            via: SimNodeId(1),
+        })
+    ));
+
+    let (state, join_0) = transition(SimState::default(), SimAction::Join {
+        node: SimNodeId(0),
+        via: SimNodeId(0),
+    });
+    assert!(matches!(
+        state.clone().transition(SimAction::Join {
+            node: SimNodeId(0),
+            via: SimNodeId(0),
+        }),
+        Err(SimTransitionError::NodeAlreadyLive { node: SimNodeId(0) })
+    ));
+    assert!(matches!(
+        state.clone().transition(SimAction::Join {
+            node: SimNodeId(1),
+            via: SimNodeId(2),
+        }),
+        Err(SimTransitionError::InactiveBootstrapPeer {
+            node: SimNodeId(1),
+            via: SimNodeId(2),
+        })
+    ));
+
+    let (state, _) = transition(state, SimAction::Join {
+        node: SimNodeId(1),
+        via: SimNodeId(0),
+    });
+    let state = apply(state, active_lifecycle("generation-1", join_0));
+    let (state, leave_1) = transition(state, SimAction::Leave {
+        node: SimNodeId(1),
+        graceful: true,
+    });
+    assert!(matches!(
+        state
+            .clone()
+            .transition(SimAction::Crash { node: SimNodeId(1) }),
+        Err(SimTransitionError::NodeNotLive { node: SimNodeId(1) })
+    ));
+    let (state, disconnect_1) = transition(state, SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(leave_1),
+    });
+    let state = apply(state, closed_lifecycle(disconnect_1));
+    assert!(state.invariant_violations(LIMITS).is_empty());
+
+    let reused_gen = state
+        .clone()
+        .transition(active_lifecycle("generation-1", disconnect_1));
+    assert!(matches!(
+        reused_gen,
+        Err(SimTransitionError::InvalidLifecycle { .. })
+    ));
+
+    let (state, rejoin_1) = transition(state, SimAction::Join {
+        node: SimNodeId(1),
+        via: SimNodeId(0),
+    });
+    let state = apply(state, active_lifecycle("generation-2", rejoin_1));
+    let (state, crash_1) = transition(state, SimAction::Crash { node: SimNodeId(1) });
+    let (state, _) = transition(state, SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(crash_1),
+    });
+    assert!(state.invariant_violations(LIMITS).is_empty());
+    assert!(state.is_population_conserved());
+    assert_eq!(state.joins(), 3);
+    assert_eq!(state.graceful_leaves(), 1);
+    assert_eq!(state.crashes(), 1);
+}
+
+#[test]
+fn weibull_session_generator_matches_median_and_preserves_stationarity() {
+    assert!(matches!(
+        WeibullChurnConfig::new(0, 300_000, 0.5),
+        Err(WeibullChurnConfigError::ZeroTargetPopulation)
+    ));
+    assert!(matches!(
+        WeibullChurnConfig::new(10, 30_000, 0.5),
+        Err(WeibullChurnConfigError::MedianSessionOutOfRange { .. })
+    ));
+    assert!(matches!(
+        WeibullChurnConfig::new(10, 300_000, 0.5).and_then(|cfg| cfg.with_shape(0.25)),
+        Err(WeibullChurnConfigError::InvalidShape { .. })
+    ));
+
+    let median_ms = 300_000_u64;
+    let config = WeibullChurnConfig::new(10, median_ms, 0.5)
+        .expect("5 min median session config must be valid");
+    let mut generator = WeibullSessionGenerator::new(0x7730_0001, config);
+    assert_eq!(*generator.config(), config);
+    let mut samples: Vec<u64> = (0..2_001)
+        .map(|_| generator.sample_weibull_lifetime_ms())
+        .collect();
+    samples.sort_unstable();
+    let empirical_median = samples.get(samples.len() / 2).copied().unwrap_or_default();
+    let relative_error = (empirical_median as f64 - median_ms as f64).abs() / (median_ms as f64);
+    assert!(
+        relative_error < 0.12,
+        "empirical Weibull median {empirical_median} ms drifted too far from {median_ms} ms"
+    );
+
+    let mut schedule_gen_a = WeibullSessionGenerator::new(0x7730_0002, config);
+    let mut schedule_gen_b = WeibullSessionGenerator::new(0x7730_0002, config);
+    let schedule_a = schedule_gen_a.generate_schedule(600_000);
+    let schedule_b = schedule_gen_b.generate_schedule(600_000);
+    assert_eq!(schedule_a, schedule_b);
+
+    let mut state = SimState::default();
+    let mut cursor_ms = 0_u64;
+    let mut population_samples = Vec::new();
+    for event in &schedule_a {
+        if event.virtual_ms > cursor_ms {
+            state = apply(state, SimAction::AdvanceVirtualTime {
+                delta_ms: event.virtual_ms - cursor_ms,
+            });
+            cursor_ms = event.virtual_ms;
+            population_samples.push(state.live_nodes().len());
+        }
+        state = apply(state, event.action.clone());
+        assert!(state.is_population_conserved());
+    }
+    assert!(state.joins() > 10);
+    assert!(state.graceful_leaves() > 0);
+    assert!(state.crashes() + state.ungraceful_leaves() > 0);
+    let mean_population = (population_samples.iter().sum::<usize>() as f64)
+        / (population_samples.len().max(1) as f64);
+    assert!(
+        (7.0..=13.5).contains(&mean_population),
+        "stationary population mean {mean_population:.2} drifted from target N=10"
+    );
+}

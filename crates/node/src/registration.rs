@@ -35,6 +35,7 @@ use futures::lock::Mutex as AsyncMutex;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::dht::RelayCustody;
+use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::ChordStorageInterface;
@@ -300,12 +301,12 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the local session signing key.
-    pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
+    pub(crate) fn delegatee_key(&self) -> DelegateeKey {
         self.processor.delegatee_key()
     }
 
     /// The authority that signs this node's descriptors: its delegatee key inside its overlay.
-    pub(crate) fn message_signer(&self) -> MessageSigner<&DelegateeKey> {
+    pub(crate) fn message_signer(&self) -> MessageSigner<DelegateeKey> {
         MessageSigner::new(self.delegatee_key(), self.network_id())
     }
 
@@ -393,11 +394,13 @@ where D: SignedDescriptor + RegistryElement + Clone
     }
 }
 
-/// The lease a publisher holds: its terms, the signed bodies it was issued over, its descriptors,
-/// and the elements every heartbeat of the lease re-appends.
+/// The lease a publisher holds: its terms, the delegatee public key that signed it, the signed
+/// bodies it was issued over, its descriptors, and the elements every heartbeat of the lease
+/// re-appends.
 #[derive(Clone, Debug)]
 struct HeldLease<S> {
     terms: LeaseTerms,
+    delegatee_public_key: PublicKey<33>,
     bodies: Vec<Vec<u8>>,
     descriptors: S,
     elements: Vec<Bytes>,
@@ -457,9 +460,12 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
     ) -> Result<S> {
         let mut held = self.held.lock().await;
         context.ensure_running()?;
+        let delegatee_public_key = context.delegatee_key().delegatee_public_key();
         let kept = match held.as_ref() {
             Some(lease)
-                if now_ms.saturating_add(self.renewal_margin_ms) < lease.terms.expires_at_ms =>
+                if lease.delegatee_public_key == delegatee_public_key
+                    && now_ms.saturating_add(self.renewal_margin_ms)
+                        < lease.terms.expires_at_ms =>
             {
                 let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
                 (bodies == lease.bodies).then(|| lease.clone())
@@ -469,13 +475,22 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
         let lease = match kept {
             Some(lease) => lease,
             None => {
-                let terms = LeaseTerms {
-                    fresh_for_ms: self.fresh_for_ms,
-                    expires_at_ms: now_ms.saturating_add(registry_lease().as_millis()),
-                };
+                let nominal_expires_at_ms = now_ms.saturating_add(registry_lease().as_millis());
+                let max_admissible_expires_at_ms = nominal_expires_at_ms
+                    .saturating_add(rings_core::consts::TS_OFFSET_TOLERANCE_MS);
+                let terms =
+                    LeaseTerms {
+                        fresh_for_ms: self.fresh_for_ms,
+                        expires_at_ms: nominal_expires_at_ms
+                            .max(held.as_ref().map_or(0, |previous| {
+                                previous.terms.expires_at_ms.saturating_add(1)
+                            }))
+                            .min(max_admissible_expires_at_ms),
+                    };
                 let descriptors = descriptors_for(terms)?;
                 let lease = HeldLease {
                     terms,
+                    delegatee_public_key,
                     bodies: signing_data(descriptors.as_slice())?,
                     elements: descriptors
                         .as_slice()

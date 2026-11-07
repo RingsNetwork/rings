@@ -21,6 +21,7 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
+use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
@@ -203,6 +204,7 @@ pub struct DummyConnection {
     callback: Arc<InnerTransportCallback>,
     event_sender: mpsc::UnboundedSender<Event>,
     remote_rand_id: Arc<Mutex<Option<String>>>,
+    remote_max_message_size: AtomicUsize,
     event_listener: JoinHandle<()>,
     connection_state: Arc<Mutex<DummyConnectionState>>,
     accepting_events: Arc<AtomicBool>,
@@ -257,6 +259,7 @@ impl DummyConnection {
             callback: Arc::new(callback),
             event_sender: tx,
             remote_rand_id: Default::default(),
+            remote_max_message_size: AtomicUsize::new(0),
             event_listener,
             connection_state: Arc::new(Mutex::new(DummyConnectionState {
                 webrtc: WebrtcConnectionState::New,
@@ -363,8 +366,13 @@ impl DummyConnection {
     }
 
     fn set_remote_rand_id(&self, rand_id: String) {
+        let peer_id = rand_id
+            .lines()
+            .next()
+            .unwrap_or(rand_id.as_str())
+            .to_string();
         let mut remote_rand_id = self.remote_rand_id();
-        *remote_rand_id = Some(rand_id);
+        *remote_rand_id = Some(peer_id);
     }
 
     /// Route an event to this connection's listener — or, when the test-only
@@ -644,7 +652,12 @@ impl ConnectionInterface for DummyConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        stored_max_message_size(MAX_MESSAGE_SIZE.with(std::cell::Cell::get))
+        let override_size = MAX_MESSAGE_SIZE.with(std::cell::Cell::get);
+        if override_size == 0 {
+            stored_max_message_size(self.remote_max_message_size.load(Ordering::Acquire))
+        } else {
+            override_size
+        }
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
@@ -654,16 +667,22 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
+        let negotiated_max_message_size = effective_max_message_size(&offer)?;
         // Set remote rand id before setting state so that the remote connection can be found in callback.
         self.set_remote_rand_id(offer);
         self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
             .await;
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::Release);
         Ok(self.rand_id.clone())
     }
 
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
+        let negotiated_max_message_size = effective_max_message_size(&answer)?;
         // Set remote rand id before setting state so that the remote connection can be found in callback.
         self.set_remote_rand_id(answer);
+        self.remote_max_message_size
+            .store(negotiated_max_message_size, Ordering::Release);
         self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
             .await;
 

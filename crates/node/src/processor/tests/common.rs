@@ -238,6 +238,7 @@ pub(super) fn online_relay_descriptor_for_processor(
     now_ms: u128,
 ) -> Result<OnlineNodeDescriptor> {
     let capabilities = OnlineNodeCapabilities::onion_relay(processor.onion_process_epoch.get());
+    let delegatee_key = processor.delegatee_key();
     OnlineNodeDescriptor::new_signed(
         OnlineNodeDescriptorBody {
             did: processor.did(),
@@ -245,7 +246,7 @@ pub(super) fn online_relay_descriptor_for_processor(
                 .swarm
                 .delegator_verification_pubkey()
                 .map_err(Error::CoreError)?,
-            delegatee_public_key: processor.delegatee_key.delegatee_public_key(),
+            delegatee_public_key: delegatee_key.delegatee_public_key(),
             node_type: default_online_node_type(),
             network_id: processor.swarm.network_id(),
             storage_redundancy: processor.swarm.storage_redundancy(),
@@ -257,7 +258,7 @@ pub(super) fn online_relay_descriptor_for_processor(
             expires_at_ms: now_ms + 90_000,
             version: crate::util::build_version(),
         },
-        MessageSigner::new(&processor.delegatee_key, processor.swarm.network_id()),
+        MessageSigner::new(&delegatee_key, processor.swarm.network_id()),
     )
     .map_err(Error::CoreError)
 }

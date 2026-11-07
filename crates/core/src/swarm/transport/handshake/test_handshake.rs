@@ -664,3 +664,168 @@ async fn test_inbound_refuses_a_path_on_the_wrong_message() -> Result<()> {
     }
     Ok(())
 }
+
+/// An offer or answer advertising `a=max-message-size` below `MIN_MAX_MESSAGE_SIZE` is refused
+/// (#1130): an offer below the floor reserves no slot and does not displace an in-flight offer,
+/// an answer below the floor abandons the offering generation, and an SDP at the floor is
+/// admitted with `max_message_size() == MIN_MAX_MESSAGE_SIZE`.
+#[tokio::test]
+async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
+    use rings_transport::core::transport::ConnectionInterface;
+    use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
+    use rings_transport::error::Error as TransportError;
+
+    let [node1, node2] = ring_nodes::<2>()?;
+    let sdp_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
+        let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
+        let annotated = format!(
+            "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
+        );
+        serde_json::to_string(&annotated).map_err(Error::Serialize)
+    };
+
+    // 1. An incoming offer below MIN_MAX_MESSAGE_SIZE is refused before reconciling the slot:
+    // node2's in-flight creating offer is untouched.
+    let (creating, _) = node2
+        .swarm
+        .transport
+        .prepare_connection_offer_with_attempt(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+        )
+        .await?;
+    let (attempt1, offer_payload) = node1.swarm.offer_connection(node2.did()).await?;
+    let Message::ConnectNodeSend(mut small_offer) = offer_payload.transaction.data::<Message>()?
+    else {
+        return Err(Error::InvalidMessage("not an offer".to_string()));
+    };
+    small_offer.sdp = sdp_with_limit(&small_offer.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+    let refused = node2
+        .swarm
+        .transport
+        .answer_remote_connection(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+            &small_offer,
+        )
+        .await;
+    assert!(
+        matches!(
+            refused,
+            Err(Error::Transport(
+                TransportError::RemoteMaxMessageSizeTooSmall {
+                    advertised,
+                    minimum: MIN_MAX_MESSAGE_SIZE,
+                }
+            )) if advertised == MIN_MAX_MESSAGE_SIZE - 1
+        ),
+        "expected RemoteMaxMessageSizeTooSmall, got {refused:?}"
+    );
+    assert!(
+        node2
+            .swarm
+            .transport
+            .is_current_connection_attempt(creating)?,
+        "a refused offer must not displace node2's creating offer"
+    );
+    assert!(
+        node2
+            .swarm
+            .transport
+            .cancel_pending_connection(creating)
+            .await?
+    );
+
+    // 2. An answer below MIN_MAX_MESSAGE_SIZE is refused and abandons the pending offer.
+    let Message::ConnectNodeSend(valid_offer) = offer_payload.transaction.data::<Message>()? else {
+        return Err(Error::InvalidMessage("not an offer".to_string()));
+    };
+    let OfferReply::Answer(mut created_answer) = node2
+        .swarm
+        .transport
+        .answer_remote_connection(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+            &valid_offer,
+        )
+        .await?
+    else {
+        return Err(Error::InvalidMessage("expected an answer".to_string()));
+    };
+    let answering2 = created_answer.attempt;
+    created_answer.report.sdp =
+        sdp_with_limit(&created_answer.report.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+    let refused_answer = node1
+        .swarm
+        .transport
+        .accept_remote_connection(node2.did(), &created_answer.report, Some(attempt1.0), None)
+        .await;
+    assert!(
+        matches!(
+            refused_answer,
+            Err(Error::Transport(
+                TransportError::RemoteMaxMessageSizeTooSmall {
+                    advertised,
+                    minimum: MIN_MAX_MESSAGE_SIZE,
+                }
+            )) if advertised == MIN_MAX_MESSAGE_SIZE - 1
+        ),
+        "expected RemoteMaxMessageSizeTooSmall, got {refused_answer:?}"
+    );
+    assert!(
+        unlinked(&node1, node2.did())?,
+        "refusing the answer abandons node1's pending offer"
+    );
+    assert!(
+        node2
+            .swarm
+            .transport
+            .cancel_pending_connection(answering2)
+            .await?
+    );
+
+    // 3. At exactly MIN_MAX_MESSAGE_SIZE, both offer and answer succeed and record the floor.
+    let (attempt_ok, offer_ok_payload) = node1.swarm.offer_connection(node2.did()).await?;
+    let Message::ConnectNodeSend(mut floor_offer) =
+        offer_ok_payload.transaction.data::<Message>()?
+    else {
+        return Err(Error::InvalidMessage("not an offer".to_string()));
+    };
+    floor_offer.sdp = sdp_with_limit(&floor_offer.sdp, MIN_MAX_MESSAGE_SIZE)?;
+    let OfferReply::Answer(mut floor_answer) = node2
+        .swarm
+        .transport
+        .answer_remote_connection(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+            &floor_offer,
+        )
+        .await?
+    else {
+        return Err(Error::InvalidMessage("expected an answer".to_string()));
+    };
+    floor_answer.report.sdp = sdp_with_limit(&floor_answer.report.sdp, MIN_MAX_MESSAGE_SIZE)?;
+    node1
+        .swarm
+        .transport
+        .accept_remote_connection(node2.did(), &floor_answer.report, Some(attempt_ok.0), None)
+        .await?;
+    wait_until_result("node1 and node2 admit each other at the floor", || {
+        Ok(node1.swarm.is_peer_admitted(node2.did())?
+            && node2.swarm.is_peer_admitted(node1.did())?)
+    })
+    .await?;
+    let conn1 = node1
+        .swarm
+        .transport
+        .get_connection(node2.did())
+        .ok_or(Error::SwarmMissTransport(node2.did()))?;
+    let conn2 = node2
+        .swarm
+        .transport
+        .get_connection(node1.did())
+        .ok_or(Error::SwarmMissTransport(node1.did()))?;
+    assert_eq!(conn1.connection.max_message_size(), MIN_MAX_MESSAGE_SIZE);
+    assert_eq!(conn2.connection.max_message_size(), MIN_MAX_MESSAGE_SIZE);
+    Ok(())
+}

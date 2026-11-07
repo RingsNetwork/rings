@@ -874,6 +874,10 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
+    /// A connect-signaling SDP has {0} bytes, above `MAX_SDP_BYTES`.
+    #[error("Connect signaling SDP has {0} bytes, above the maximum")]
+    SdpAboveMax(usize),
+
     /// Timed out while waiting for the data-channel send queue to accept bytes
     #[error(
         "Timed out after {timeout_ms}ms waiting for data-channel send queue to accept {bytes} bytes for {peer} during {context}"

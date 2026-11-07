@@ -12,8 +12,9 @@
 //! a reproducible build of a cell, not of the wire, so a change there that keeps every other
 //! golden is a refactor of the builder and is re-pinned with it.
 //!
-//! A failing test here is a wire cutover, never a fixture to refresh: there is no protocol
-//! versioning, so a change to any of these bytes is a total cutover of the network.
+//! A failing test here is a wire cutover, never a fixture to refresh: a change to any of these
+//! bytes is a total cutover of the network and also moves `crate::tests::test_wire_goldens`
+//! (#1141), requiring a `WIRE_VERSION` bump under the rule of `rings_core::message::payload::frame`.
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;

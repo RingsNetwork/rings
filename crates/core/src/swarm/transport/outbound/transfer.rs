@@ -47,12 +47,12 @@ pub(in crate::swarm::transport) struct ChunkedFrameSource {
 
 impl ChunkedFrameSource {
     pub(in crate::swarm::transport) fn new(
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<DelegateeKey>,
         chunks: ChunkFrames,
         logical_sequence: u64,
     ) -> Self {
         Self {
-            signer: signer.owned(),
+            signer,
             chunks,
             logical_sequence,
             emitted_last: false,

@@ -15,6 +15,7 @@ use rings_core::swarm::ConnectionAttempt;
 use rings_rpc::protos::rings_node::AcceptAnswerRequest;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
 use rings_rpc::protos::rings_node::NodeDidRequest;
+use rings_rpc::protos::rings_node::NodeDidResponse;
 
 use super::Processor;
 use crate::error::Error;
@@ -30,12 +31,15 @@ pub(crate) enum HandshakePeer {
     Pinned(Did),
 }
 
-/// The remote half of a handshake over HTTP: the peer's public `answerOffer`, and its
-/// `acceptAnswer` for a counter-offer this node answered, which only a peer of 0.34.2 or
+/// The remote half of a handshake over HTTP: the peer's public `nodeDid` and `answerOffer`, and
+/// its `acceptAnswer` for a counter-offer this node answered, which only a peer of 0.34.2 or
 /// earlier sends.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait RemoteHandshake {
+    /// The peer's public identity and wire version.
+    async fn node_did(&self) -> Result<NodeDidResponse>;
+
     /// The peer's reply to `offer`: an answer, or its own prevailing offer (#947).
     async fn answer_offer(&self, offer: &MessagePayload) -> Result<MessagePayload>;
 
@@ -46,6 +50,12 @@ pub(crate) trait RemoteHandshake {
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl RemoteHandshake for rings_rpc::jsonrpc::Client {
+    async fn node_did(&self) -> Result<NodeDidResponse> {
+        rings_rpc::jsonrpc::Client::node_did(self, &NodeDidRequest {})
+            .await
+            .map_err(Error::from)
+    }
+
     async fn answer_offer(&self, offer: &MessagePayload) -> Result<MessagePayload> {
         let offer = offer.encode().map_err(|_| Error::EncodeError)?;
         let reply = rings_rpc::jsonrpc::Client::answer_offer(self, &AnswerOfferRequest {
@@ -65,6 +75,38 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
         .await
         .map_err(Error::from)?;
         Ok(())
+    }
+}
+
+/// Whether the payload returned by `answerOffer` is an answer (`ConnectNodeReport`) or a
+/// counter-offer (`ConnectNodeSend`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfferReplyKind {
+    /// A `ConnectNodeReport` answer for the offerer's `acceptAnswer`.
+    Answer,
+    /// A `ConnectNodeSend` counter-offer: the peer's own offer prevailed on the DID tie-break
+    /// (#947).
+    CounterOffer,
+}
+
+impl OfferReplyKind {
+    /// Classify a decoded handshake reply [`MessagePayload`].
+    pub(crate) fn from_payload(payload: &MessagePayload) -> Result<Self> {
+        match payload
+            .transaction
+            .data::<Message>()
+            .map_err(|_| Error::DecodeError)?
+        {
+            Message::ConnectNodeReport(_) => Ok(Self::Answer),
+            Message::ConnectNodeSend(_) => Ok(Self::CounterOffer),
+            _ => Err(Error::DecodeError),
+        }
+    }
+
+    /// Decode and classify an encoded `answerOffer` reply string.
+    pub fn from_encoded_reply(reply: &str) -> Result<Self> {
+        decode_handshake_payload(&Encoded::from(reply.to_owned()))
+            .and_then(|payload| Self::from_payload(&payload))
     }
 }
 
@@ -186,6 +228,52 @@ impl Processor {
         api_token: Option<&str>,
         peer: HandshakePeer,
     ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
+        self.refuse_if_unadmitted(peer)?;
+        let client = remote_rpc_client(endpoint, api_token, self.remote_rpc_proxy.as_ref()).await?;
+        let attempt = self.connect_peer_over(&client, peer).await;
+        if let Err(HandshakeFailure::Failed(Error::HandshakePeerMismatch { expected, actual })) =
+            attempt.as_ref()
+        {
+            tracing::error!(
+                %endpoint,
+                %expected,
+                %actual,
+                "endpoint answered as another node; handshake refused"
+            );
+        }
+        attempt
+    }
+
+    /// Handshake with `remote`: refuse before any request when `peer` is pinned and the local
+    /// core already holds an unadmitted handshake to it, verify `nodeDid`'s wire version and
+    /// pinned DID before creating an offer, and complete [`Self::exchange_offer`].
+    pub(crate) async fn connect_peer_over(
+        &self,
+        remote: &impl RemoteHandshake,
+        peer: HandshakePeer,
+    ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
+        self.refuse_if_unadmitted(peer)?;
+        let node = remote.node_did().await?;
+        admit_endpoint_wire_version(node.wire_version)?;
+        let answered = node.did;
+        let actual = Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
+        if let HandshakePeer::Pinned(expected) = peer {
+            if actual != expected {
+                return Err(HandshakeFailure::Failed(Error::HandshakePeerMismatch {
+                    expected,
+                    actual,
+                }));
+            }
+        }
+        self.exchange_offer(remote, actual).await
+    }
+
+    /// Refuse with [`HandshakeFailure::InFlight`] when `peer` is pinned and the local core
+    /// already holds an unadmitted handshake to it.
+    fn refuse_if_unadmitted(
+        &self,
+        peer: HandshakePeer,
+    ) -> std::result::Result<(), HandshakeFailure> {
         if let HandshakePeer::Pinned(pinned) = peer {
             if self
                 .swarm
@@ -195,28 +283,7 @@ impl Processor {
                 return Err(HandshakeFailure::InFlight { peer: pinned });
             }
         }
-        let learned = async {
-            let client = remote_rpc_client(endpoint, api_token).await?;
-            let node = client.node_did(&NodeDidRequest {}).await?;
-            admit_endpoint_wire_version(node.wire_version)?;
-            let answered = node.did;
-            let actual =
-                Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
-            if let HandshakePeer::Pinned(expected) = peer {
-                if actual != expected {
-                    tracing::error!(
-                        %endpoint,
-                        %expected,
-                        %actual,
-                        "endpoint answered as another node; handshake refused"
-                    );
-                    return Err(Error::HandshakePeerMismatch { expected, actual });
-                }
-            }
-            Ok((client, actual))
-        };
-        let (client, actual) = learned.await?;
-        self.exchange_offer(&client, actual).await
+        Ok(())
     }
 
     /// Create an offer for `peer`, exchange it with `remote`, and complete the handshake; see
@@ -233,11 +300,7 @@ impl Processor {
             .map_err(|error| HandshakeFailure::from_stage(peer, Error::CreateOffer, error))?;
         let exchange = async {
             let reply = remote.answer_offer(&offer).await?;
-            if let Message::ConnectNodeSend(_) = reply
-                .transaction
-                .data::<Message>()
-                .map_err(|_| Error::DecodeError)?
-            {
+            if OfferReplyKind::from_payload(&reply)? == OfferReplyKind::CounterOffer {
                 self.answer_counter_offer(remote, peer, reply).await?;
                 return Ok(HttpExchange::PeerHandshake);
             }

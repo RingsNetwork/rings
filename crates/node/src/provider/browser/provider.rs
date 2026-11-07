@@ -3,6 +3,7 @@
 use std::convert::TryFrom;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -16,19 +17,19 @@ use rings_core::dht::RemovalStorage;
 use rings_core::ecc::PublicKey;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
-use rings_core::storage::idb::IdbStorage;
 use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
-use rings_rpc::protos::rings_node::*;
-use wasm_bindgen;
-use wasm_bindgen::prelude::*;
+use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use wasm_bindgen::JsError;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
+use crate::mail::registration::MailOffer;
 use crate::measure::EvidenceStorage;
 use crate::measure::MeasureStorage;
 use crate::onion::https::OnionHttpsClient;
@@ -46,11 +47,20 @@ use crate::release::StoresReleased;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
 mod listener;
+/// Exclusive browser storage ownership via the Web Locks API (#1055) and its release witness.
+pub(crate) mod lock;
+/// Browser mail construction, retained inbox access, and filing notifications.
+pub(crate) mod mail;
 /// Browser onion-proxy helpers exposed by the provider API.
 mod onion_proxy;
 pub use listener::ProviderListener;
+pub use mail::BrowserMailError;
+pub use mail::BrowserMailOptions;
 pub use onion_proxy::BrowserOnionProxy;
 pub use onion_proxy::BrowserOnionProxyResponse;
+
+/// Default IndexedDB storage namespace for browser providers when none is supplied.
+const DEFAULT_BROWSER_STORAGE_NAME: &str = "rings-node";
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -104,28 +114,19 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
 
 /// Open the browser DHT entry store. It is disposable, so it retires rows it cannot decode: a
 /// carrier written by an earlier wire format must not fail every storage scan.
-async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
-    IdbStorage::new_with_cap_and_name(50000, storage_name)
-        .await
-        .map(|storage| Box::new(storage) as EntryStorage)
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
-}
-
-async fn open_browser_entry_storage_or_memory(storage_name: &str) -> Option<EntryStorage> {
-    match open_browser_entry_storage(storage_name).await {
-        Ok(storage) => Some(storage),
-        Err(error) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %error,
-                "browser entry IndexedDB unavailable; falling back to in-memory entry storage"
-            );
-            None
-        }
-    }
+async fn open_browser_entry_storage_or_memory(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> Option<EntryStorage> {
+    lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        storage_name,
+        RecordAuthority::Disposable,
+        lock,
+        "browser entry IndexedDB unavailable; falling back to in-memory entry storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage)
 }
 
 /// Row capacity of the browser relay-inbox store: the carriers this node holds or owns. A hold
@@ -137,24 +138,19 @@ const RELAY_STORAGE_ROWS: u32 = 1024;
 /// it holds. An IndexedDB that cannot open leaves the provider with no relay store, never an
 /// in-memory one: the node then takes custody of no relay carrier, so it holds no mail and its
 /// own mail stays with its holder.
-async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> {
-    let opened = IdbStorage::new_with_cap_name_and_authority(
+async fn open_browser_relay_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> Option<EntryStorage> {
+    lock::LockedBrowserStorage::open_or_warn(
         RELAY_STORAGE_ROWS,
         storage_name,
         RecordAuthority::Retained,
+        lock,
+        "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail",
     )
-    .await;
-    match opened {
-        Ok(storage) => Some(Box::new(storage) as EntryStorage),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail"
-            );
-            None
-        }
-    }
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage)
 }
 
 /// Open the browser store of the data namespace's remove sides as a retained store (#920): its
@@ -163,69 +159,62 @@ async fn open_browser_relay_storage(storage_name: &str) -> Option<EntryStorage> 
 /// capacity is the charge index's total, one remove per row at worst. An IndexedDB that cannot
 /// open leaves the remove sides in memory, logged here: each restart then makes this node a
 /// fresh replica.
-async fn open_browser_removal_storage(storage_name: &str) -> Option<RemovalStorage> {
+async fn open_browser_removal_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> Option<RemovalStorage> {
     let rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
-    let opened =
-        IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Retained)
-            .await;
-    match opened {
-        Ok(storage) => Some(Box::new(storage) as RemovalStorage),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser removal IndexedDB unavailable; data-topic removes are kept in memory"
-            );
-            None
-        }
-    }
+    lock::LockedBrowserStorage::open_or_warn(
+        rows,
+        storage_name,
+        RecordAuthority::Retained,
+        lock,
+        "browser removal IndexedDB unavailable; data-topic removes are kept in memory",
+    )
+    .await
+    .map(|storage| Box::new(storage) as RemovalStorage)
 }
 
-async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStorage> {
-    match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
-        Ok(storage) => Some(Box::new(storage) as MeasureStorage),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage"
-            );
-            None
-        }
-    }
+async fn open_browser_measure_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> Option<MeasureStorage> {
+    lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        storage_name,
+        RecordAuthority::Disposable,
+        lock,
+        "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as MeasureStorage)
 }
 
-async fn open_browser_evidence_storage(storage_name: &str) -> NodeResult<EvidenceStorage> {
-    IdbStorage::new_with_cap_and_name(2, storage_name)
+async fn open_browser_evidence_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> NodeResult<EvidenceStorage> {
+    lock::LockedBrowserStorage::open(2, storage_name, RecordAuthority::Disposable, lock)
         .await
         .map(|storage| Box::new(storage) as EvidenceStorage)
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
 }
 
 /// Open the browser entry-guard store as a durable cache (#911): its writes commit with strict
 /// durability, and a guard record that does not decode is retired, logged, and re-selected. An
 /// IndexedDB that cannot open falls back to in-memory guards, re-selected on every start.
-async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEntryGuardStorage> {
-    let opened = IdbStorage::new_with_cap_name_and_authority(
+async fn open_browser_entry_guard_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> Option<OnionEntryGuardStorage> {
+    lock::LockedBrowserStorage::open_or_warn(
         1024,
         storage_name,
         RecordAuthority::DurableCache,
+        lock,
+        "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards",
     )
-    .await;
-    match opened {
-        Ok(storage) => Some(Box::new(storage) as OnionEntryGuardStorage),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards"
-            );
-            None
-        }
-    }
+    .await
+    .map(|storage| Box::new(storage) as OnionEntryGuardStorage)
 }
 
 /// Open the browser replay store under a row capacity of every record of a full store
@@ -233,17 +222,67 @@ async fn open_browser_entry_guard_storage(storage_name: &str) -> Option<OnionEnt
 /// a new record beyond the capacity fails its transition closed (`StorageBudgetExhausted`)
 /// instead of reopening replay for an evicted stream (#923), and a record it cannot decode is
 /// reported and kept, never retired.
-async fn open_browser_replay_storage(storage_name: &str) -> NodeResult<ReplayStorage> {
-    let open_error = |source| Error::BrowserStorageOpen {
-        name: storage_name.to_string(),
-        source,
-    };
-    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS)
-        .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
-    IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Authoritative)
+async fn open_browser_replay_storage(
+    storage_name: &str,
+    lock: &Rc<lock::BrowserStorageLock>,
+) -> NodeResult<ReplayStorage> {
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).map_err(|_| {
+        Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source: rings_core::error::Error::InvalidCapacity,
+        }
+    })?;
+    lock::LockedBrowserStorage::open(rows, storage_name, RecordAuthority::Authoritative, lock)
         .await
         .map(|storage| Box::new(storage) as ReplayStorage)
-        .map_err(open_error)
+}
+
+/// Acquire the exclusive Web Lock `rings-node/<storage_name>` (#1055) and open the seven
+/// IndexedDB stores of `storage_name` under it.
+///
+/// Law: if another tab or node in this origin holds `rings-node/<storage_name>`, this fails
+/// closed with [`Error::BrowserStorageLocked`] before any IndexedDB database is opened.
+pub(super) async fn open_browser_provider_stores(
+    storage_name: &str,
+) -> NodeResult<(ProviderStores, Rc<lock::BrowserStorageLock>)> {
+    let (storage_lock, released) = lock::lock_browser_storage(storage_name).await?;
+    let storage_lock = Rc::new(storage_lock);
+    let entry_storage = open_browser_entry_storage_or_memory(storage_name, &storage_lock).await;
+    let relay_storage =
+        open_browser_relay_storage(&format!("{storage_name}/relay-inbox"), &storage_lock).await;
+    let removal_storage =
+        open_browser_removal_storage(&format!("{storage_name}/dht-removals"), &storage_lock).await;
+    let measure_storage =
+        open_browser_measure_storage(&format!("{storage_name}/measure"), &storage_lock).await;
+    let evidence_storage = Some(
+        open_browser_evidence_storage(
+            &format!("{storage_name}/provisional-evidence"),
+            &storage_lock,
+        )
+        .await?,
+    );
+    let onion_entry_guard_storage = open_browser_entry_guard_storage(
+        &format!("{storage_name}/onion-entry-guards"),
+        &storage_lock,
+    )
+    .await;
+    let replay_storage =
+        open_browser_replay_storage(&format!("{storage_name}/transaction-replay"), &storage_lock)
+            .await?;
+
+    Ok((
+        ProviderStores {
+            entry: entry_storage,
+            relay: relay_storage,
+            removals: removal_storage,
+            measure: measure_storage,
+            evidence: evidence_storage,
+            guards: onion_entry_guard_storage,
+            replay: Some(replay_storage),
+            released: StoresReleased::of([released]),
+        },
+        storage_lock,
+    ))
 }
 
 impl Provider {
@@ -257,32 +296,19 @@ impl Provider {
         storage_name: String,
     ) -> NodeResult<Self> {
         config.validate_onion_role()?;
-        let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
-        let relay_storage =
-            open_browser_relay_storage(&format!("{storage_name}/relay-inbox")).await;
-        let removal_storage =
-            open_browser_removal_storage(&format!("{storage_name}/dht-removals")).await;
-        let measure_storage =
-            open_browser_measure_storage(&format!("{storage_name}/measure")).await;
-        let evidence_storage = Some(
-            open_browser_evidence_storage(&format!("{storage_name}/provisional-evidence")).await?,
-        );
-        let onion_entry_guard_storage =
-            open_browser_entry_guard_storage(&format!("{storage_name}/onion-entry-guards")).await;
-        let replay_storage =
-            open_browser_replay_storage(&format!("{storage_name}/transaction-replay")).await?;
+        let (stores, _storage_lock) = open_browser_provider_stores(&storage_name).await?;
+        Self::new_browser_provider_from_stores(config, stores, None).await
+    }
 
-        let provider = Self::new_provider_with_storage_internal(config, ProviderStores {
-            entry: entry_storage,
-            relay: relay_storage,
-            removals: removal_storage,
-            measure: measure_storage,
-            evidence: evidence_storage,
-            guards: onion_entry_guard_storage,
-            replay: Some(replay_storage),
-            released: StoresReleased::default(),
-        })
-        .await?;
+    /// Build a browser provider from already-opened [`ProviderStores`] and an optional mail
+    /// heartbeat. Law: the offer is installed before build, and existing constructors pass `None`.
+    pub(super) async fn new_browser_provider_from_stores(
+        config: ProcessorConfig,
+        stores: ProviderStores,
+        mail_offer: Option<MailOffer>,
+    ) -> NodeResult<Self> {
+        let provider =
+            Self::new_provider_with_storage_and_mail_internal(config, stores, mail_offer).await?;
         provider.install_relay_onion_runtime()?;
         provider.set_backend()?;
         Ok(provider)
@@ -320,17 +346,8 @@ impl Provider {
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-
-            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
-            let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
-            let removal_storage = open_browser_removal_storage("rings-node/dht-removals").await;
-            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
-            let evidence_storage =
-                Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
-            let onion_entry_guard_storage =
-                open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
-            let replay_storage =
-                open_browser_replay_storage("rings-node/transaction-replay").await?;
+            let (stores, _storage_lock) =
+                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -339,16 +356,7 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                ProviderStores {
-                    entry: entry_storage,
-                    relay: relay_storage,
-                    removals: removal_storage,
-                    measure: measure_storage,
-                    evidence: evidence_storage,
-                    guards: onion_entry_guard_storage,
-                    replay: Some(replay_storage),
-                    released: StoresReleased::default(),
-                },
+                stores,
             )
             .await?;
 
@@ -376,17 +384,8 @@ impl Provider {
                 .map_err(JsError::from)?;
             let offer =
                 OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
-
-            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
-            let relay_storage = open_browser_relay_storage("rings-node/relay-inbox").await;
-            let removal_storage = open_browser_removal_storage("rings-node/dht-removals").await;
-            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
-            let evidence_storage =
-                Some(open_browser_evidence_storage("rings-node/provisional-evidence").await?);
-            let onion_entry_guard_storage =
-                open_browser_entry_guard_storage("rings-node/onion-entry-guards").await;
-            let replay_storage =
-                open_browser_replay_storage("rings-node/transaction-replay").await?;
+            let (stores, _storage_lock) =
+                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
 
             let provider = Provider::new_provider_internal_with_config(
                 network_id,
@@ -395,16 +394,7 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                ProviderStores {
-                    entry: entry_storage,
-                    relay: relay_storage,
-                    removals: removal_storage,
-                    measure: measure_storage,
-                    evidence: evidence_storage,
-                    guards: onion_entry_guard_storage,
-                    replay: Some(replay_storage),
-                    released: StoresReleased::default(),
-                },
+                stores,
                 move |config| config.onion_role(OnionRole::Exit(offer)),
             )
             .await?;
@@ -428,7 +418,7 @@ impl Provider {
 
     /// Create a new provider instance.
     pub fn new_provider_with_config(config: ProcessorConfig) -> js_sys::Promise {
-        Self::new_provider_with_storage(config, "rings-node".to_string())
+        Self::new_provider_with_storage(config, DEFAULT_BROWSER_STORAGE_NAME.to_string())
     }
 
     /// get self web3 address

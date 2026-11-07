@@ -70,6 +70,33 @@ impl Processor {
         published
     }
 
+    /// Immediately publish one heartbeat of every configured registration task with the active
+    /// session key, so peers and registries observe a renewed `delegatee_public_key` without
+    /// waiting for the next periodic tick (#1153).
+    pub async fn republish_registrations(&self) {
+        let stop = self.tasks.stop_token();
+        for (index, task) in self.registration_tasks.iter().enumerate() {
+            if stop.should_stop() {
+                return;
+            }
+            let edges_at_start = self.swarm.admitted_edges();
+            let published = self
+                .run_registration_once(task.as_ref(), index, stop.clone(), edges_at_start)
+                .await;
+            #[cfg(all(test, feature = "node"))]
+            crate::tests::activity::record_activity();
+            if let Err(error) = published {
+                if matches!(error, Error::RegistrationStopped) {
+                    return;
+                }
+                tracing::warn!(
+                    "Failed to republish {} registration after delegation renewal: {error:?}",
+                    task.name()
+                );
+            }
+        }
+    }
+
     pub(super) async fn registration_task_daemon_with(
         &self,
         task: &dyn RegistrationTask,

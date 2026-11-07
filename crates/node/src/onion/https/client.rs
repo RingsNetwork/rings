@@ -7,7 +7,7 @@
 //! ```text
 //! url ──OnionHttpsCall::from_url──▶ (target, call)
 //!     ──route(target)───────────▶ OnionProxyRoute                      [caller]
-//!     ──open(route, https, t)───▶ session                              [exit answers the open]
+//!     ──open(route, https, t, b)▶ session                              [exit answers the open]
 //!     ──data(enc(request)) · fin─▶ h                                    [the exit fetches]
 //!     ◀──data(enc(outcome)) · fin─ h ──▶ response | exit failure       [within the deadline]
 //! ```
@@ -55,8 +55,7 @@ pub(crate) const ONION_HTTPS_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30
 const MAX_HTTPS_OUTCOME_BYTES: usize = 9 * 1024 * 1024;
 
 /// Caller-facing request fields for one HTTPS proxy request.
-#[cfg_attr(test, derive(Default))]
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 pub struct OnionHttpsClientRequest {
     /// HTTP method. Defaults to `GET`.
     #[serde(default = "default_method")]
@@ -70,6 +69,13 @@ pub struct OnionHttpsClientRequest {
     /// Request body bytes.
     #[serde(default)]
     pub body: Vec<u8>,
+    /// Optional loop class `b` for the request's session. Defaults to
+    /// [`OnionLoopClass::DEFAULT`] (`16 KiB`) when `None`.
+    ///
+    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
+    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
+    #[serde(default)]
+    pub class: Option<OnionLoopClass>,
 }
 
 /// Normalized HTTPS request that names no target.
@@ -83,18 +89,34 @@ pub struct OnionHttpsCall {
     path: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    class: OnionLoopClass,
 }
 
 impl OnionHttpsCall {
     /// Split an absolute `https://` URL into the target to route to and the normalized call.
     ///
-    /// The URL path is the default; `request.path` overrides it.
+    /// The URL path is the default; `request.path` overrides it, and `request.class` selects the
+    /// session's loop class `b` (defaulting to [`OnionLoopClass::DEFAULT`], `16 KiB`).
     pub fn from_url(
         url: &str,
         request: OnionHttpsClientRequest,
     ) -> Result<(OnionProxyTarget, Self)> {
         let (target, path) = parse_https_url(url)?;
         Ok((target, Self::with_default_path(request, path)?))
+    }
+
+    /// Set the loop class `b` for the session that sends this call.
+    ///
+    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
+    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
+    pub const fn with_class(mut self, class: OnionLoopClass) -> Self {
+        self.class = class;
+        self
+    }
+
+    /// Return the loop class `b` selected for this call's session.
+    pub const fn class(&self) -> OnionLoopClass {
+        self.class
     }
 
     /// Normalize `request`, using `default_path` when it carries no path override.
@@ -107,10 +129,12 @@ impl OnionHttpsCall {
             path: normalize_path(request.path.as_deref().unwrap_or(default_path))?,
             headers: request.headers,
             body: request.body,
+            class: request.class.unwrap_or(OnionLoopClass::DEFAULT),
         })
     }
 
-    /// The wire request this call becomes; its authority is the session's target.
+    /// The wire request this call becomes; its authority is the session's target, and its loop
+    /// class `b` is a session parameter rather than a wire field of the request.
     pub(super) fn into_request(self) -> OnionHttpsRequest {
         OnionHttpsRequest {
             method: self.method,
@@ -134,7 +158,8 @@ impl OnionHttpsClient {
         Self { runtime }
     }
 
-    /// Send `call` to `route.target` over `route` and wait for the exit's response.
+    /// Send `call` to `route.target` over `route` in a session of [`OnionHttpsCall::class`] and
+    /// wait for the exit's response.
     ///
     /// Dropping the returned future ends the session; an exit that does not answer within
     /// [`ONION_HTTPS_RESPONSE_TIMEOUT`] of the open yields [`Error::OnionProxyRequestTimedOut`].
@@ -147,6 +172,27 @@ impl OnionHttpsClient {
         route: &OnionProxyRoute,
         call: OnionHttpsCall,
     ) -> Result<OnionHttpsResponse> {
+        let class = call.class();
+        self.request_with_class(route, call, class).await
+    }
+
+    /// Send `call` to `route.target` over `route` in a session of loop class `class` (`b`) and
+    /// wait for the exit's response.
+    ///
+    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
+    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
+    /// Dropping the returned future ends the session; an exit that does not answer within
+    /// [`ONION_HTTPS_RESPONSE_TIMEOUT`] of the open yields [`Error::OnionProxyRequestTimedOut`].
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal or failure, the exit's reported failure, or the timeout.
+    pub(crate) async fn request_with_class(
+        &self,
+        route: &OnionProxyRoute,
+        call: OnionHttpsCall,
+        class: OnionLoopClass,
+    ) -> Result<OnionHttpsResponse> {
         let request = encode_request(&call.into_request())?;
         let (mut sender, mut receiver) = self
             .runtime
@@ -154,7 +200,7 @@ impl OnionHttpsClient {
                 route: route.route.clone(),
                 symbol: OnionServiceName::https(),
                 target: route.target.clone(),
-                class: OnionLoopClass::DEFAULT,
+                class,
                 window: OnionCreditWindow::DEFAULT,
             })
             .await?

@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use std::borrow::Borrow;
 use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -191,7 +192,7 @@ impl Transaction {
         sequence: u64,
         reply_via: Option<Did>,
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> Result<Self>
     where
         T: Serialize,
@@ -264,7 +265,7 @@ impl MessagePayload {
     /// Need [Transaction], [MessageSigner] and [MessageRelay].
     pub fn new(
         transaction: Transaction,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
         relay: MessageRelay,
     ) -> Result<Self> {
         let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &transaction.signed_hash())?;
@@ -279,7 +280,7 @@ impl MessagePayload {
     /// the delivery decision `hop`, over a transaction that names `reply_via`.
     pub fn new_send_with_sequence<T>(
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
         hop: NextHop,
         destination: Did,
         sequence: u64,
@@ -289,15 +290,22 @@ impl MessagePayload {
         T: Serialize,
     {
         let tx_id = crate::utils::new_uuid();
-        let transaction = Transaction::new(destination, tx_id, sequence, reply_via, data, signer)?;
+        let transaction = Transaction::new(
+            destination,
+            tx_id,
+            sequence,
+            reply_via,
+            data,
+            signer.by_ref(),
+        )?;
         let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
-        Self::new(transaction, signer, relay)
+        Self::new(transaction, signer.by_ref(), relay)
     }
 
     #[cfg(test)]
     pub(crate) fn new_send<T>(
         data: T,
-        signer: MessageSigner<&DelegateeKey>,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
         next_hop: Did,
         destination: Did,
     ) -> Result<Self>
@@ -430,7 +438,7 @@ impl Decoder for MessagePayload {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait PayloadSender {
     /// The authority that signs every payload this sender emits.
-    fn message_signer(&self) -> MessageSigner<&DelegateeKey>;
+    fn message_signer(&self) -> MessageSigner<DelegateeKey>;
 
     /// Get access to DHT.
     fn dht(&self) -> Arc<PeerRing>;
@@ -511,9 +519,10 @@ pub trait PayloadSender {
         reply_via: Option<Did>,
     ) -> Result<MessagePayload> {
         let sequence = self.next_sequence(destination, &msg).await?;
+        let signer = self.message_signer();
         MessagePayload::new_send_with_sequence(
             msg,
-            self.message_signer(),
+            signer.by_ref(),
             hop,
             destination,
             sequence,
@@ -595,16 +604,16 @@ pub trait PayloadSender {
         let origin = request.transaction.origin();
         let signer = self.message_signer();
         let sequence = self.next_sequence(origin, &msg).await?;
-        let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer)?;
-        let payload = MessagePayload::new(transaction, signer, relay)?;
+        let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer.by_ref())?;
+        let payload = MessagePayload::new(transaction, signer.by_ref(), relay)?;
         self.send_payload(payload).await
     }
 
     /// Forward a payload message by relay.
     /// It just create a new payload, cloned data, resigned with session and send
     async fn forward_by_relay(&self, payload: &MessagePayload, relay: MessageRelay) -> Result<()> {
-        let new_pl =
-            MessagePayload::new(payload.transaction.clone(), self.message_signer(), relay)?;
+        let signer = self.message_signer();
+        let new_pl = MessagePayload::new(payload.transaction.clone(), signer.by_ref(), relay)?;
         self.send_payload(new_pl).await
     }
 

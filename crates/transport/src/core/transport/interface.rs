@@ -15,6 +15,7 @@ use crate::core::pool::ChannelLane;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
+use crate::error::Error;
 
 /// Wrapper for the data that is sent over the data channel.
 ///
@@ -61,6 +62,23 @@ pub fn custom_frame_wire(payload: Bytes) -> rings_codec::Result<Vec<u8>> {
 /// of every backend's SCTP stack - a peer advertising a *larger* limit is still clamped to this.
 pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
 
+/// Smallest negotiated `max_message_size` a connection admits (#1130).
+///
+/// A peer advertising a positive `a=max-message-size` below this floor would force the widest
+/// honest DHT control frame (`ConnectNodeSend` or `ConnectNodeReport`) to be fragmented by the
+/// chunk layer, or rejected by SCTP if sent whole (`RFC 8841`). Connections whose remote SDP
+/// advertises `0 < max-message-size < MIN_MAX_MESSAGE_SIZE` are refused before applying the
+/// remote description.
+///
+/// Derivation: the widest control message is `ConnectNodeSend` / `ConnectNodeReport` carrying a
+/// `MAX_SDP_BYTES` (`4096`-byte) session description (`4111` message bytes), wrapped in the
+/// widest `MessagePayload` envelope (`2219` bytes for a `< 16 KiB` message, whose 2-byte
+/// `transaction.data` length prefix is one byte shorter than `MAX_PAYLOAD_ENVELOPE_OVERHEAD =
+/// 2220`) and the outer transport frame reserve (`TRANSPORT_CUSTOM_OVERHEAD = 4`),
+/// `4111 + 2219 + 4 = 6334`; witnessed with equality in `rings_core` by
+/// `test_min_max_message_size_fits_widest_control_payloads_whole`.
+pub const MIN_MAX_MESSAGE_SIZE: usize = 6334;
+
 /// Decode the internal `0 = not negotiated` sentinel used by connection backends.
 #[cfg(any(
     feature = "dummy",
@@ -78,12 +96,20 @@ pub(crate) const fn stored_max_message_size(stored: usize) -> usize {
 /// The effective per-message send limit for a peer whose SDP is `remote_sdp`. The negotiated value
 /// is parsed from the SDP by [`crate::core::sdp`]; this function is the *policy* layered on top.
 /// Per RFC 8841 an absent attribute defaults to 65536 and a value of `0` means "no limit" (we still
-/// bound it by our own send cap); any explicit value is honoured but capped at
-/// [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for interop. Always returns a positive value.
-pub fn effective_max_message_size(remote_sdp: &str) -> usize {
+/// bound it by our own send cap); any explicit value at or above [`MIN_MAX_MESSAGE_SIZE`] is
+/// honoured and capped at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for interop, while any positive value
+/// below [`MIN_MAX_MESSAGE_SIZE`] is refused with [`Error::RemoteMaxMessageSizeTooSmall`] so DHT
+/// control is never chunked (#1130).
+pub fn effective_max_message_size(remote_sdp: &str) -> crate::error::Result<usize> {
     match parse_sdp_max_message_size(remote_sdp) {
-        None | Some(0) => MAX_DATA_CHANNEL_MESSAGE_SIZE,
-        Some(n) => (n as usize).min(MAX_DATA_CHANNEL_MESSAGE_SIZE),
+        None | Some(0) => Ok(MAX_DATA_CHANNEL_MESSAGE_SIZE),
+        Some(n) if (n as usize) < MIN_MAX_MESSAGE_SIZE => {
+            Err(Error::RemoteMaxMessageSizeTooSmall {
+                advertised: n as usize,
+                minimum: MIN_MAX_MESSAGE_SIZE,
+            })
+        }
+        Some(n) => Ok((n as usize).min(MAX_DATA_CHANNEL_MESSAGE_SIZE)),
     }
 }
 

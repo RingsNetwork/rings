@@ -10,16 +10,34 @@ You can install the `rings` binary from a prebuilt release, from Cargo, or from 
 
 ### Prebuilt binaries
 
-Every [release](https://github.com/RingsNetwork/rings/releases) ships `rings` for macOS
-(`aarch64-apple-darwin`, `x86_64-apple-darwin`) and Linux (`x86_64-unknown-linux-musl`, a
-static binary that runs on any distribution), plus the WebAssembly package for browsers.
-Download the archive for your platform, unpack it, and put `rings` on your `PATH`:
+Install the latest release on macOS (`aarch64-apple-darwin`, `x86_64-apple-darwin`) or Linux
+(`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`) with the one-line installer:
+
+```sh
+curl -fsSL https://rings.rs/install.sh | sh
+```
+
+The script verifies the archive's SHA-256 checksum and installs `rings` to `/usr/local/bin`
+(when writable) or `~/.local/bin`. Re-run the command to upgrade in place, or pass
+`--version vX.Y.Z` to install a specific tag:
+
+```sh
+curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.39.0
+```
+
+You can also download an archive directly from
+[Releases](https://github.com/RingsNetwork/rings/releases), verify its `.sha256` file, and
+place `rings` on your `PATH`:
 
 ```bash
-unzip rings-v0.38.1-aarch64-apple-darwin.zip
+shasum -a 256 -c rings-v0.39.0-aarch64-apple-darwin.zip.sha256
+unzip rings-v0.39.0-aarch64-apple-darwin.zip
 install -m 755 rings /usr/local/bin/rings
 rings --version
 ```
+
+For running `rings` persistently under `systemd` or `launchd`, see
+[`contrib/README.md`](https://github.com/RingsNetwork/rings/blob/master/contrib/README.md).
 
 ### From Cargo
 

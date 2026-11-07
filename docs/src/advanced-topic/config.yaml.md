@@ -128,6 +128,12 @@ where noted.
   `answerOffer` are public; status and registry reads, including the compact observability
   projection, require the token.
 * `endpoint_url`: the internal endpoint the CLI connects to.
+* `remote_rpc_proxy_url`: optional HTTP(S) proxy URL used by the running node for remote JSON-RPC
+  handshakes (`rings connect node`, `rings connect seed`, and managed `bootstrap.peers`); absent
+  means direct connections with ambient `HTTP_PROXY` and `HTTPS_PROXY` ignored. When set, the
+  proxy resolves the remote host and local DNS pinning is skipped, while the public-host URL
+  policy still applies and any Bearer token requires an `https://` endpoint. The local CLI-to-node
+  endpoint (`endpoint_url`) always bypasses proxies.
 * `api_token_path`: optional path of the Bearer token file; by default `api-token` next to the
   config file. Relative paths are resolved next to the config file.
 * `api_allowed_origins`: exact browser origins permitted to call the authenticated API; empty

@@ -71,6 +71,6 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 ## Optional
 
 - [crates.io: rings-node](https://crates.io/crates/rings-node), [docs.rs](https://docs.rs/rings-node), [npm: @ringsnetwork/rings-node](https://www.npmjs.com/package/@ringsnetwork/rings-node).
-- [Releases](https://github.com/RingsNetwork/rings/releases): prebuilt `rings` for macOS (x86_64, aarch64) and Linux (x86_64 musl), and the wasm package.
+- [Releases](https://github.com/RingsNetwork/rings/releases): prebuilt `rings` for macOS (x86_64, aarch64) and Linux (x86_64 musl, aarch64 gnu), and the wasm package; one-line installer at `install.sh` (https://rings.rs/install.sh) and static service templates under `contrib/`.
 - Public seed node: https://node.rings.rs. Its external handshake (`nodeDid`, `answerOffer`) is public; status and control methods need its Bearer token.
 - Official X (Twitter) account: https://x.com/RingsNetworkio.

@@ -89,16 +89,16 @@ pub(crate) const ONION_HEADER_BYTES: usize =
     ONION_GROUP_ELEMENT_BYTES + ONION_HEADER_ROUTING_BYTES + ONION_HEADER_MAC_BYTES;
 
 /// HKDF salt `D` of the per-hop key schedule.
-const HEADER_KDF_SALT: &[u8] = b"rings-node:onion-sphinx-header";
+pub(crate) const HEADER_KDF_SALT: &[u8] = b"rings-node:onion-sphinx-header";
 
 /// HKDF info label of the stream-cipher key.
-const STREAM_INFO: &[u8] = b"prg";
+pub(crate) const STREAM_INFO: &[u8] = b"prg";
 
 /// HKDF info label of the MAC key.
-const MAC_INFO: &[u8] = b"mac";
+pub(crate) const MAC_INFO: &[u8] = b"mac";
 
 /// HKDF info label of the blinding factor.
-const BLIND_INFO: &[u8] = b"blind";
+pub(crate) const BLIND_INFO: &[u8] = b"blind";
 
 /// Width of the stream-cipher key.
 const STREAM_KEY_BYTES: usize = 32;
