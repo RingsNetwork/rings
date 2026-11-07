@@ -170,52 +170,31 @@ pub fn write_delegatee_key_atomically(
 async fn try_renew_delegation(
     processor: &Processor,
     paths: &DelegationRenewalPaths,
-    current_horizon: DelegationHorizon,
     now_ms: u128,
 ) -> Result<DelegationHorizon> {
-    let delegator_key = match read_delegator_secret_key(&paths.delegator_key_path) {
-        Ok(key) => key,
-        Err(error) => {
-            processor.record_failed_delegation_renewal();
-            return Err(error);
-        }
-    };
-    if Did::from(delegator_key.address()) != processor.did() {
-        processor.record_failed_delegation_renewal();
-        return Err(Error::VerifyError(
-            "delegator key DID does not match node DID".to_string(),
-        ));
-    }
-    let ttl_ms = processor.delegatee_key().delegation().ttl_ms();
-    let next_key = match DelegateeKey::new_with_seckey_at(&delegator_key, ttl_ms, now_ms) {
-        Ok(key) => key,
-        Err(error) => {
-            processor.record_failed_delegation_renewal();
-            return Err(Error::CoreError(error));
-        }
-    };
-    let candidate_horizon = DelegationHorizon::of(&next_key.delegation());
-    if let Err(error) = candidate_horizon.admitted_at(now_ms) {
-        processor.record_failed_delegation_renewal();
-        return Err(error);
-    }
-    if candidate_horizon.horizon_ms() <= current_horizon.horizon_ms() {
-        processor.record_failed_delegation_renewal();
-        return Err(current_horizon.reached());
-    }
-    if let Err(error) = write_delegatee_key_atomically(&paths.delegatee_key_path, &next_key) {
-        processor.record_failed_delegation_renewal();
-        return Err(error);
-    }
-    let next_horizon = processor.renew_delegatee_key(next_key, now_ms)?;
+    let expected_did = processor.did();
+    let next_horizon = processor.renew_delegatee_key_with(
+        now_ms,
+        |current| {
+            let delegator_key = read_delegator_secret_key(&paths.delegator_key_path)?;
+            if Did::from(delegator_key.address()) != expected_did {
+                return Err(Error::VerifyError(
+                    "delegator key DID does not match node DID".to_string(),
+                ));
+            }
+            let ttl_ms = current.delegation().ttl_ms();
+            DelegateeKey::new_with_seckey_at(&delegator_key, ttl_ms, now_ms)
+                .map_err(Error::CoreError)
+        },
+        |next| write_delegatee_key_atomically(&paths.delegatee_key_path, next).map(|_| ()),
+    )?;
     processor.republish_registrations().await;
     Ok(next_horizon)
 }
 
 /// Supervise `processor`'s signing horizon on the epoch clock `now_ms`, renewing the delegation
-/// in process at `h − R` (or at the half-life `c + (h − c) / 2` when the delegation's lifetime to
-/// `h` is shorter than `2R`) when `renewal` is configured, and falling back to the #1063 exit at
-/// `h` otherwise (#1153).
+/// in process at `horizon.renew_at_ms(created_at_ms)` when `renewal` is configured, and falling
+/// back to the #1063 exit at `h` otherwise (#1153).
 pub async fn run_signing_horizon(
     processor: Arc<Processor>,
     renewal: Option<DelegationRenewalPaths>,
@@ -240,9 +219,7 @@ pub async fn run_signing_horizon(
                 return horizon.reached();
             }
             SigningState::Expiring { remaining_ms } => {
-                let renew_at_ms = h
-                    .saturating_sub(SIGNING_HORIZON_LEAD_MS)
-                    .max(created_at_ms.saturating_add(h.saturating_sub(created_at_ms) / 2));
+                let renew_at_ms = horizon.renew_at_ms(created_at_ms);
                 if renewal.is_some() && now < renew_at_ms {
                     renew_at_ms - now
                 } else {
@@ -250,7 +227,7 @@ pub async fn run_signing_horizon(
                         renewal.as_ref().filter(|_| attempted_horizon_ms != Some(h))
                     {
                         attempted_horizon_ms = Some(h);
-                        match try_renew_delegation(&processor, paths, horizon, now).await {
+                        match try_renew_delegation(&processor, paths, now).await {
                             Ok(next_horizon) => {
                                 tracing::info!(
                                     previous_horizon_ms = %h,

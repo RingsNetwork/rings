@@ -125,11 +125,11 @@ const PINNED: (u16, &str) = (
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
 const GOLDEN_NETWORK_ID: u32 = 7;
-pub(self) const ALICE_ACCOUNT_SEED: u8 = 0x11;
+const ALICE_ACCOUNT_SEED: u8 = 0x11;
 const ALICE_DELEGATEE_SEED: u8 = 0x12;
-pub(self) const BOB_ACCOUNT_SEED: u8 = 0x21;
+const BOB_ACCOUNT_SEED: u8 = 0x21;
 
-pub(self) fn to_hex(bytes: impl AsRef<[u8]>) -> String {
+fn to_hex(bytes: impl AsRef<[u8]>) -> String {
     bytes
         .as_ref()
         .iter()
@@ -187,7 +187,7 @@ impl GoldenActor {
 /// A derived `Deserialize` passes its `VARIANTS` slice to `deserialize_enum` before reading from
 /// the deserializer, so capturing that slice from a no-op deserializer yields the enum's
 /// compile-time variant list without constructing any variant.
-pub(self) fn declared_variants<E: for<'de> Deserialize<'de>>() -> &'static [&'static str] {
+fn declared_variants<E: for<'de> Deserialize<'de>>() -> &'static [&'static str] {
     struct Capture<'a>(&'a mut &'static [&'static str]);
 
     #[derive(Debug)]

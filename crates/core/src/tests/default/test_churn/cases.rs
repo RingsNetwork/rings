@@ -6,6 +6,7 @@ use super::ChurnScenarioOutcome;
 use super::DEFAULT_CHURN_DURATION_MS;
 use super::DEFAULT_STABILIZE_INTERVAL_MS;
 use super::LARGE_MATRIX_CHURN_DURATION_MS;
+use crate::simulation::model::SimTransferClass;
 use crate::simulation::model::DEFAULT_WEIBULL_SHAPE;
 use crate::simulation::model::MAX_MEDIAN_SESSION_MS;
 use crate::simulation::model::MAX_WEIBULL_SHAPE;
@@ -31,6 +32,30 @@ fn assert_churn_safety_and_liveness(outcome: &ChurnScenarioOutcome) {
         "churn scenario violated safety invariants {:?}: {diag}",
         outcome.violations
     );
+    assert!(
+        outcome.state.is_population_conserved(),
+        "churn scenario violated population conservation law (live={:?}, departed={:?}): {diag}",
+        outcome.state.live_nodes(),
+        outcome.state.departed_nodes()
+    );
+    assert_eq!(
+        outcome.state.maintenance_delivered_bytes(),
+        outcome.state.maintenance_admitted_bytes(),
+        "quiescent churn scenario must conserve maintenance wire bytes: {diag}"
+    );
+    for class in [
+        SimTransferClass::Control,
+        SimTransferClass::Storage,
+        SimTransferClass::Reassembly,
+        SimTransferClass::E2e,
+        SimTransferClass::Application,
+    ] {
+        assert_eq!(
+            outcome.state.class_delivered_bytes(class),
+            outcome.state.class_admitted_bytes(class),
+            "quiescent churn scenario must conserve {class:?} wire bytes: {diag}"
+        );
+    }
     assert!(
         outcome.metrics.live_node_samples > 0,
         "churn scenario must record live node samples: {diag}"
@@ -106,7 +131,7 @@ async fn test_churn_small_matrix_n10() {
                         outcome.metrics.lookup_successes,
                         outcome.metrics.lookup_attempts
                     ),
-                    (198, 528),
+                    (496, 528),
                     "5m crash-only baseline lookup samples changed: {}",
                     outcome.diagnostic()
                 );

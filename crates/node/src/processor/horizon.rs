@@ -130,6 +130,23 @@ impl DelegationHorizon {
             SigningState::Signing { remaining_ms }
         }
     }
+
+    /// The earliest instant at which in-process renewal is due for a delegation stamped at
+    /// `created_at_ms`: `max(h − lead, c + ⌊(h − c) / 2⌋)`.
+    ///
+    /// Law (**Renewal instant**): For every delegation with `c < h`, `renew_at_ms(c) ∈ [c, h)`,
+    /// and when `h − c ≥ 2`, `renew_at_ms(c) > c` so minting a replacement with the same TTL at
+    /// `t ≥ renew_at_ms(c)` strictly advances the horizon (`h' > h`).
+    pub const fn renew_at_ms(self, created_at_ms: u128) -> u128 {
+        let lead_start = self.horizon_ms.saturating_sub(SIGNING_HORIZON_LEAD_MS);
+        let half_life =
+            created_at_ms.saturating_add(self.horizon_ms.saturating_sub(created_at_ms) / 2);
+        if lead_start >= half_life {
+            lead_start
+        } else {
+            half_life
+        }
+    }
 }
 
 /// Mutable state behind [`SessionKeyRing`].
@@ -203,52 +220,69 @@ impl SessionKeyRing {
         (state.rotation_succeeded_total, state.rotation_failed_total)
     }
 
-    /// Record a failed runtime rotation attempt when minting or persisting fails before key swap.
-    pub(crate) fn record_failed_rotation(&self) {
-        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-    }
-
-    /// Validate and install `next` at `now_ms`, retaining the previous key if it has not yet
-    /// expired.
+    /// Run `mint`, validate the resulting [`DelegateeKey`] at `now_ms`, run `persist`, and install
+    /// the key while retaining the previous unexpired key; any error from `mint`, law validation,
+    /// or `persist` increments `rotation_failed_total` and leaves the active key untouched.
     ///
     /// Laws:
     /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
     /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
     /// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
-    pub(crate) fn renew_at(&self, next: DelegateeKey, now_ms: u128) -> Result<DelegationHorizon> {
+    pub(crate) fn renew_with<M, P>(
+        &self,
+        now_ms: u128,
+        mint: M,
+        persist: P,
+    ) -> Result<(DelegateeKey, DelegationHorizon)>
+    where
+        M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
+        P: FnOnce(&DelegateeKey) -> Result<()>,
+    {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
-        if next.delegator_did() != state.current.delegator_did() {
-            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-            return Err(Error::VerifyError(
-                "renewed delegatee key delegator DID does not match node DID".to_string(),
-            ));
-        }
-        if let Err(error) = next.delegation().verify_delegator_authorization_at(now_ms) {
-            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-            return Err(Error::CoreError(error));
-        }
-        let current_horizon = DelegationHorizon::of(&state.current.delegation());
-        let next_horizon = DelegationHorizon::of(&next.delegation());
-        if let Err(error) = next_horizon.admitted_at(now_ms) {
-            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-            return Err(error);
-        }
-        if next_horizon.horizon_ms() <= current_horizon.horizon_ms() {
-            state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
-            return Err(current_horizon.reached());
-        }
+        let validated = (|| -> Result<(DelegateeKey, DelegationHorizon)> {
+            let next = mint(&state.current)?;
+            if next.delegator_did() != state.current.delegator_did() {
+                return Err(Error::VerifyError(
+                    "renewed delegatee key delegator DID does not match node DID".to_string(),
+                ));
+            }
+            next.delegation()
+                .verify_delegator_authorization_at(now_ms)
+                .map_err(Error::CoreError)?;
+            let current_horizon = DelegationHorizon::of(&state.current.delegation());
+            let next_horizon = DelegationHorizon::of(&next.delegation());
+            next_horizon.admitted_at(now_ms)?;
+            if next_horizon.horizon_ms() <= current_horizon.horizon_ms() {
+                return Err(current_horizon.reached());
+            }
+            persist(&next)?;
+            Ok((next, next_horizon))
+        })();
+        let (next, next_horizon) = match validated {
+            Ok(pair) => pair,
+            Err(error) => {
+                state.rotation_failed_total = state.rotation_failed_total.saturating_add(1);
+                return Err(error);
+            }
+        };
         state
             .retained
             .retain(|key| !key.delegation().is_expired_at(now_ms));
-        let previous = std::mem::replace(&mut state.current, next);
+        let previous = std::mem::replace(&mut state.current, next.clone());
         if !previous.delegation().is_expired_at(now_ms)
             && previous.delegatee_public_key() != state.current.delegatee_public_key()
         {
             state.retained.push(previous);
         }
         state.rotation_succeeded_total = state.rotation_succeeded_total.saturating_add(1);
-        Ok(next_horizon)
+        Ok((next, next_horizon))
+    }
+
+    /// Validate and install `next` at `now_ms`, retaining the previous key if it has not yet
+    /// expired.
+    pub(crate) fn renew_at(&self, next: DelegateeKey, now_ms: u128) -> Result<DelegationHorizon> {
+        self.renew_with(now_ms, |_| Ok(next), |_| Ok(()))
+            .map(|(_, horizon)| horizon)
     }
 }
 
@@ -390,5 +424,23 @@ mod tests {
             .map(|key| key.delegatee_public_key())
             .collect();
         assert_eq!(keys_after_expiry, vec![renewed_pubkey]);
+    }
+
+    /// Law (**Renewal instant**, #1153): `renew_at_ms(c) = max(h − lead, c + ⌊(h − c) / 2⌋)`,
+    /// which lies in `(c, h)` whenever `h − c ≥ 2`.
+    #[test]
+    fn test_renew_at_ms_respects_lead_and_half_life_law() {
+        let c: u128 = 1_800_000_000_000;
+        let long_horizon = DelegationHorizon::expiring_at(c + 4 * SIGNING_HORIZON_LEAD_MS);
+        assert_eq!(
+            long_horizon.renew_at_ms(c),
+            long_horizon.horizon_ms() - SIGNING_HORIZON_LEAD_MS
+        );
+
+        let short_horizon = DelegationHorizon::expiring_at(c + SIGNING_HORIZON_LEAD_MS);
+        let h_short = short_horizon.horizon_ms();
+        let r_short = short_horizon.renew_at_ms(c);
+        assert_eq!(r_short, c + (h_short - c) / 2);
+        assert!(r_short > c && r_short < h_short);
     }
 }

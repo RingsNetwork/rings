@@ -192,9 +192,24 @@ impl Processor {
         self.session_keys.decryption_keys_at(now_ms)
     }
 
-    /// Record a failed delegation renewal attempt when minting or persisting fails before key swap.
-    pub fn record_failed_delegation_renewal(&self) {
-        self.session_keys.record_failed_rotation();
+    /// Mint, validate, persist, and install a replacement session key at `now_ms` through
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
+    #[cfg(feature = "node")]
+    pub(crate) fn renew_delegatee_key_with<M, P>(
+        &self,
+        now_ms: u128,
+        mint: M,
+        persist: P,
+    ) -> Result<DelegationHorizon>
+    where
+        M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
+        P: FnOnce(&DelegateeKey) -> Result<()>,
+    {
+        let (next, horizon) = self.session_keys.renew_with(now_ms, mint, persist)?;
+        self.swarm
+            .set_delegatee_key(next)
+            .map_err(Error::CoreError)?;
+        Ok(horizon)
     }
 
     /// Replace this node's active session key in process at `now_ms`, retaining the previous key

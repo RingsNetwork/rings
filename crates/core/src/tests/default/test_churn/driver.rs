@@ -84,12 +84,14 @@ impl ChurnTraceDriver {
 
     pub(super) fn record_leave(&mut self, node: SimNodeId, graceful: bool) -> SimEventId {
         let event = self.apply(SimAction::Leave { node, graceful });
+        self.pending_repair_intent.remove(&node);
         self.last_node_event.insert(node, event);
         event
     }
 
     pub(super) fn record_crash(&mut self, node: SimNodeId) -> SimEventId {
         let event = self.apply(SimAction::Crash { node });
+        self.pending_repair_intent.remove(&node);
         self.last_node_event.insert(node, event);
         event
     }

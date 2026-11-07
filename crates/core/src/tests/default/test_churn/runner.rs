@@ -12,7 +12,6 @@ use super::driver::ChurnTraceDriver;
 use super::inbox::deliver_rejoined_inbox_messages;
 use super::inbox::inject_offline_inbox_messages;
 use super::inbox::sample_ring_liveness_and_lookups;
-use super::inbox::settle_remaining_rejoined_inboxes;
 use super::inbox::LivenessSampleCounters;
 use super::ChurnMetrics;
 use super::ChurnScenarioConfig;
@@ -35,7 +34,6 @@ use crate::simulation::model::ScheduledChurnEvent;
 use crate::simulation::model::SimAction;
 use crate::simulation::model::SimMaintenanceOutcome;
 use crate::simulation::model::SimNodeId;
-use crate::simulation::model::SimTransferClass;
 use crate::simulation::model::WeibullChurnConfig;
 use crate::simulation::model::WeibullSessionGenerator;
 use crate::simulation::DeliveryStrategy;
@@ -72,7 +70,6 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
     .with_rejoin_cooldown_ms(config.stabilize_interval_ms);
 
     let mut generator = WeibullSessionGenerator::new(config.seed, weibull_config);
-    let _ = generator.config();
     let schedule = generator.generate_schedule(config.duration_ms);
 
     let pool_size = schedule
@@ -137,11 +134,14 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
             if event.virtual_ms > target_ms {
                 break;
             }
+            let remaining = &schedule[schedule_index.saturating_add(1)..];
             execute_churn_event(
                 &runtime,
                 &nodes,
                 &mut driver,
                 event,
+                remaining,
+                &config,
                 &mut pending_inbox_targets,
                 &active_held_messages,
             )
@@ -180,18 +180,6 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
         }
     }
 
-    if !active_held_messages.is_empty() {
-        settle_remaining_rejoined_inboxes(
-            &runtime,
-            &nodes,
-            &app_inboxes,
-            &mut driver,
-            &mut active_held_messages,
-            &mut held_messages_delivered,
-        )
-        .await;
-    }
-
     let orphan_samples = sample_counters.orphan_samples;
     let live_node_samples = sample_counters.live_node_samples;
     let lookup_successes = sample_counters.lookup_successes;
@@ -206,12 +194,6 @@ pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScen
         config.target_nodes as f64
     };
     let maintenance_bytes = driver.state.maintenance_admitted_bytes();
-    let _ = driver.state.maintenance_delivered_bytes();
-    let _ = driver.state.class_admitted_bytes(SimTransferClass::Control);
-    let _ = driver
-        .state
-        .class_delivered_bytes(SimTransferClass::Control);
-    let _ = driver.state.departed_nodes();
     let maintenance_bytes_per_node_sec =
         (maintenance_bytes as f64) / (mean_live_nodes.max(1.0) * duration_secs);
 
@@ -398,11 +380,53 @@ fn derive_entry_for_owner(owner: &Node, slot: usize) -> PlacedEntry {
     )
 }
 
+fn will_rejoin_at_stabilize_tick(
+    node: SimNodeId,
+    depart_ms: u64,
+    remaining_schedule: &[ScheduledChurnEvent],
+    stabilize_interval_ms: u64,
+    duration_ms: u64,
+) -> bool {
+    let mut next_join_ms = None;
+    let mut depart_after_join_ms = None;
+    for event in remaining_schedule {
+        match event.action {
+            SimAction::Join { node: joined, .. } if joined == node && next_join_ms.is_none() => {
+                next_join_ms = Some(event.virtual_ms);
+            }
+            SimAction::Leave { node: left, .. } | SimAction::Crash { node: left }
+                if left == node && next_join_ms.is_some() =>
+            {
+                depart_after_join_ms = Some(event.virtual_ms);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(join_ms) = next_join_ms else {
+        return false;
+    };
+    let inject_tick_ms = ((depart_ms / stabilize_interval_ms) + 1) * stabilize_interval_ms;
+    if join_ms <= inject_tick_ms {
+        return false;
+    }
+    let deliver_tick_ms = if join_ms > 0 && join_ms.is_multiple_of(stabilize_interval_ms) {
+        join_ms
+    } else {
+        ((join_ms / stabilize_interval_ms) + 1) * stabilize_interval_ms
+    };
+    deliver_tick_ms <= duration_ms
+        && depart_after_join_ms.is_none_or(|next_depart_ms| next_depart_ms > deliver_tick_ms)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_churn_event(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
     driver: &mut ChurnTraceDriver,
     event: &ScheduledChurnEvent,
+    remaining_schedule: &[ScheduledChurnEvent],
+    config: &ChurnScenarioConfig,
     pending_inbox_targets: &mut BTreeSet<SimNodeId>,
     active_held_messages: &BTreeMap<SimNodeId, Vec<u8>>,
 ) {
@@ -454,7 +478,15 @@ async fn execute_churn_event(
                     driver.observe_peer_removal_if_due(peer_id, node);
                 }
             }
-            if !active_held_messages.contains_key(&node) {
+            if !active_held_messages.contains_key(&node)
+                && will_rejoin_at_stabilize_tick(
+                    node,
+                    event.virtual_ms,
+                    remaining_schedule,
+                    config.stabilize_interval_ms,
+                    config.duration_ms,
+                )
+            {
                 pending_inbox_targets.insert(node);
             }
         }
@@ -499,7 +531,15 @@ async fn execute_churn_event(
             clear_node_local_topology(&nodes[node_idx]);
             discard_departed_close_callbacks(runtime, &remote_generations);
             drain_churn_traced(runtime, nodes, driver).await;
-            if !active_held_messages.contains_key(&node) {
+            if !active_held_messages.contains_key(&node)
+                && will_rejoin_at_stabilize_tick(
+                    node,
+                    event.virtual_ms,
+                    remaining_schedule,
+                    config.stabilize_interval_ms,
+                    config.duration_ms,
+                )
+            {
                 pending_inbox_targets.insert(node);
             }
         }

@@ -798,6 +798,7 @@ fn join_leave_crash_and_rejoin_lifecycle_transitions_are_checked() {
         causal_parent: Some(crash_1),
     });
     assert!(state.invariant_violations(LIMITS).is_empty());
+    assert!(state.is_population_conserved());
     assert_eq!(state.joins(), 3);
     assert_eq!(state.graceful_leaves(), 1);
     assert_eq!(state.crashes(), 1);
@@ -822,6 +823,7 @@ fn weibull_session_generator_matches_median_and_preserves_stationarity() {
     let config = WeibullChurnConfig::new(10, median_ms, 0.5)
         .expect("5 min median session config must be valid");
     let mut generator = WeibullSessionGenerator::new(0x7730_0001, config);
+    assert_eq!(*generator.config(), config);
     let mut samples: Vec<u64> = (0..2_001)
         .map(|_| generator.sample_weibull_lifetime_ms())
         .collect();
@@ -851,6 +853,7 @@ fn weibull_session_generator_matches_median_and_preserves_stationarity() {
             population_samples.push(state.live_nodes().len());
         }
         state = apply(state, event.action.clone());
+        assert!(state.is_population_conserved());
     }
     assert!(state.joins() > 10);
     assert!(state.graceful_leaves() > 0);

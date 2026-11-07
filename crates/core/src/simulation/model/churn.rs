@@ -13,6 +13,7 @@ use super::SimEventId;
 use super::SimNodeId;
 use super::SimPeerHealth;
 use super::SimState;
+use super::SimTransferClass;
 use super::SimTransitionError;
 use crate::simulation::mix_seed;
 
@@ -498,6 +499,7 @@ impl SimState {
         } else {
             self.ungraceful_leaves = checked_add(self.ungraceful_leaves, 1)?;
         }
+        self.clear_departed_session_state(node);
         self.mark_node_departed_edges(node, event_id);
         Ok(None)
     }
@@ -512,8 +514,15 @@ impl SimState {
         }
         self.departed_nodes.insert(node);
         self.crashes = checked_add(self.crashes, 1)?;
+        self.clear_departed_session_state(node);
         self.mark_node_departed_edges(node, event_id);
         Ok(None)
+    }
+
+    fn clear_departed_session_state(&mut self, departed: SimNodeId) {
+        self.unyielded_persistence.remove(&departed);
+        self.repair_intents.remove(&departed);
+        self.repair_cursors.remove(&departed);
     }
 
     fn mark_node_departed_edges(&mut self, departed: SimNodeId, event_id: SimEventId) {
@@ -531,5 +540,89 @@ impl SimState {
             self.failure_events.insert(edge, event_id);
             self.peer_health.insert(edge, SimPeerHealth::Failed);
         }
+    }
+
+    /// Nodes currently live in the modeled overlay population.
+    pub(crate) const fn live_nodes(&self) -> &BTreeSet<SimNodeId> {
+        &self.live_nodes
+    }
+
+    /// Nodes that have departed the overlay and have not yet rejoined.
+    pub(crate) const fn departed_nodes(&self) -> &BTreeSet<SimNodeId> {
+        &self.departed_nodes
+    }
+
+    /// Total join transitions observed.
+    pub(crate) const fn joins(&self) -> u64 {
+        self.joins
+    }
+
+    /// Total graceful leave transitions observed.
+    pub(crate) const fn graceful_leaves(&self) -> u64 {
+        self.graceful_leaves
+    }
+
+    /// Total ungraceful leave transitions observed.
+    pub(crate) const fn ungraceful_leaves(&self) -> u64 {
+        self.ungraceful_leaves
+    }
+
+    /// Total crash transitions observed.
+    pub(crate) const fn crashes(&self) -> u64 {
+        self.crashes
+    }
+
+    /// Law (**Churn population conservation & partition**):
+    /// `live_nodes ∩ departed_nodes = ∅` and
+    /// `|live_nodes| + graceful_leaves + ungraceful_leaves + crashes == joins`.
+    pub(crate) fn is_population_conserved(&self) -> bool {
+        self.live_nodes.is_disjoint(&self.departed_nodes)
+            && (self.live_nodes.len() as u64)
+                .saturating_add(self.graceful_leaves)
+                .saturating_add(self.ungraceful_leaves)
+                .saturating_add(self.crashes)
+                == self.joins
+    }
+
+    /// Total admitted bytes for a given transfer class.
+    pub(crate) const fn class_admitted_bytes(&self, class: SimTransferClass) -> u64 {
+        self.class_admitted_bytes[class.index()]
+    }
+
+    /// Total delivered bytes for a given transfer class.
+    pub(crate) const fn class_delivered_bytes(&self, class: SimTransferClass) -> u64 {
+        self.class_delivered_bytes[class.index()]
+    }
+
+    /// Total admitted maintenance bytes across control, storage, and reassembly classes.
+    pub(crate) const fn maintenance_admitted_bytes(&self) -> u64 {
+        self.class_admitted_bytes[SimTransferClass::Control.index()]
+            .saturating_add(self.class_admitted_bytes[SimTransferClass::Storage.index()])
+            .saturating_add(self.class_admitted_bytes[SimTransferClass::Reassembly.index()])
+    }
+
+    /// Total delivered maintenance bytes across control, storage, and reassembly classes.
+    pub(crate) const fn maintenance_delivered_bytes(&self) -> u64 {
+        self.class_delivered_bytes[SimTransferClass::Control.index()]
+            .saturating_add(self.class_delivered_bytes[SimTransferClass::Storage.index()])
+            .saturating_add(self.class_delivered_bytes[SimTransferClass::Reassembly.index()])
+    }
+
+    /// Causal failure or departure event recorded for a directed peer edge, if any.
+    pub(crate) fn failure_event(&self, node: SimNodeId, peer: SimNodeId) -> Option<SimEventId> {
+        self.failure_events.get(&(node, peer)).copied()
+    }
+
+    /// Whether the current generation on a directed edge has already disconnected.
+    pub(crate) fn has_disconnected(&self, node: SimNodeId, peer: SimNodeId) -> bool {
+        self.disconnects.contains(&(node, peer))
+    }
+
+    /// Active connection generation identifier on a directed edge, if active.
+    pub(crate) fn active_generation(&self, node: SimNodeId, peer: SimNodeId) -> Option<&str> {
+        self.connection_generations
+            .get(&(node, peer))
+            .filter(|known| known.state == SimConnectionState::Active)
+            .map(|known| known.generation.as_str())
     }
 }

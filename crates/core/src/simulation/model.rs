@@ -731,6 +731,22 @@ pub(crate) struct SimSnapshot {
     pub(crate) storm_stopped: bool,
     /// Delivery counts in stable transfer-class order.
     pub(crate) class_deliveries: [u64; 5],
+    /// Admitted wire bytes in stable transfer-class order.
+    pub(crate) class_admitted_bytes: [u64; 5],
+    /// Delivered wire bytes in stable transfer-class order.
+    pub(crate) class_delivered_bytes: [u64; 5],
+    /// Nodes currently live in the modeled overlay population.
+    pub(crate) live_nodes: usize,
+    /// Nodes that departed and have not yet rejoined.
+    pub(crate) departed_nodes: usize,
+    /// Total join transitions observed.
+    pub(crate) joins: u64,
+    /// Total graceful leave transitions observed.
+    pub(crate) graceful_leaves: u64,
+    /// Total ungraceful leave transitions observed.
+    pub(crate) ungraceful_leaves: u64,
+    /// Total crash transitions observed.
+    pub(crate) crashes: u64,
 }
 
 impl SimState {
@@ -828,78 +844,6 @@ impl SimState {
         self.virtual_ms
     }
 
-    /// Nodes currently live in the modeled overlay population.
-    pub(crate) const fn live_nodes(&self) -> &BTreeSet<SimNodeId> {
-        &self.live_nodes
-    }
-
-    /// Nodes that have departed the overlay and have not yet rejoined.
-    pub(crate) const fn departed_nodes(&self) -> &BTreeSet<SimNodeId> {
-        &self.departed_nodes
-    }
-
-    /// Total join transitions observed.
-    pub(crate) const fn joins(&self) -> u64 {
-        self.joins
-    }
-
-    /// Total graceful leave transitions observed.
-    pub(crate) const fn graceful_leaves(&self) -> u64 {
-        self.graceful_leaves
-    }
-
-    /// Total ungraceful leave transitions observed.
-    pub(crate) const fn ungraceful_leaves(&self) -> u64 {
-        self.ungraceful_leaves
-    }
-
-    /// Total crash transitions observed.
-    pub(crate) const fn crashes(&self) -> u64 {
-        self.crashes
-    }
-
-    /// Total admitted bytes for a given transfer class.
-    pub(crate) const fn class_admitted_bytes(&self, class: SimTransferClass) -> u64 {
-        self.class_admitted_bytes[class.index()]
-    }
-
-    /// Total delivered bytes for a given transfer class.
-    pub(crate) const fn class_delivered_bytes(&self, class: SimTransferClass) -> u64 {
-        self.class_delivered_bytes[class.index()]
-    }
-
-    /// Total admitted maintenance bytes across control, storage, and reassembly classes.
-    pub(crate) const fn maintenance_admitted_bytes(&self) -> u64 {
-        self.class_admitted_bytes[SimTransferClass::Control.index()]
-            .saturating_add(self.class_admitted_bytes[SimTransferClass::Storage.index()])
-            .saturating_add(self.class_admitted_bytes[SimTransferClass::Reassembly.index()])
-    }
-
-    /// Total delivered maintenance bytes across control, storage, and reassembly classes.
-    pub(crate) const fn maintenance_delivered_bytes(&self) -> u64 {
-        self.class_delivered_bytes[SimTransferClass::Control.index()]
-            .saturating_add(self.class_delivered_bytes[SimTransferClass::Storage.index()])
-            .saturating_add(self.class_delivered_bytes[SimTransferClass::Reassembly.index()])
-    }
-
-    /// Causal failure or departure event recorded for a directed peer edge, if any.
-    pub(crate) fn failure_event(&self, node: SimNodeId, peer: SimNodeId) -> Option<SimEventId> {
-        self.failure_events.get(&(node, peer)).copied()
-    }
-
-    /// Whether the current generation on a directed edge has already disconnected.
-    pub(crate) fn has_disconnected(&self, node: SimNodeId, peer: SimNodeId) -> bool {
-        self.disconnects.contains(&(node, peer))
-    }
-
-    /// Active connection generation identifier on a directed edge, if active.
-    pub(crate) fn active_generation(&self, node: SimNodeId, peer: SimNodeId) -> Option<&str> {
-        self.connection_generations
-            .get(&(node, peer))
-            .filter(|known| known.state == SimConnectionState::Active)
-            .map(|known| known.generation.as_str())
-    }
-
     /// Compact stable state needed to diagnose and replay a failed scenario.
     pub(crate) fn snapshot(&self) -> SimSnapshot {
         SimSnapshot {
@@ -926,6 +870,14 @@ impl SimState {
             maintenance_runs: self.maintenance_runs,
             storm_stopped: self.storm_stopped,
             class_deliveries: self.class_deliveries,
+            class_admitted_bytes: self.class_admitted_bytes,
+            class_delivered_bytes: self.class_delivered_bytes,
+            live_nodes: self.live_nodes.len(),
+            departed_nodes: self.departed_nodes.len(),
+            joins: self.joins,
+            graceful_leaves: self.graceful_leaves,
+            ungraceful_leaves: self.ungraceful_leaves,
+            crashes: self.crashes,
         }
     }
 
