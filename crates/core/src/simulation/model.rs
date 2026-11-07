@@ -251,6 +251,25 @@ pub(crate) enum SimAction {
         /// Explicit causal parent, normally the disconnect event.
         causal_parent: Option<SimEventId>,
     },
+    /// Admit a node to the active overlay population via a bootstrap peer.
+    Join {
+        /// Node joining or rejoining the overlay.
+        node: SimNodeId,
+        /// Live bootstrap peer, or `node` itself for the initial seed node.
+        via: SimNodeId,
+    },
+    /// Remove a live node from the active overlay population.
+    Leave {
+        /// Node leaving the overlay.
+        node: SimNodeId,
+        /// Whether the node gracefully notifies connected peers before leaving.
+        graceful: bool,
+    },
+    /// Abruptly crash a live node without graceful notification.
+    Crash {
+        /// Node crashing from the overlay.
+        node: SimNodeId,
+    },
 }
 
 impl SimAction {
@@ -272,7 +291,10 @@ impl SimAction {
             | Self::ScheduleRepair { causal_parent, .. } => *causal_parent,
             Self::InjectSync { .. }
             | Self::AdvanceVirtualTime { .. }
-            | Self::InjectPeerFailure { .. } => None,
+            | Self::InjectPeerFailure { .. }
+            | Self::Join { .. }
+            | Self::Leave { .. }
+            | Self::Crash { .. } => None,
         }
     }
 
@@ -291,7 +313,10 @@ impl SimAction {
             | Self::StopStorm { node, .. }
             | Self::InjectPeerFailure { node, .. }
             | Self::Disconnect { node, .. }
-            | Self::ScheduleRepair { node, .. } => Some(*node),
+            | Self::ScheduleRepair { node, .. }
+            | Self::Join { node, .. }
+            | Self::Leave { node, .. }
+            | Self::Crash { node } => Some(*node),
             Self::AdvanceVirtualTime { .. }
             | Self::DispatchFrame { .. }
             | Self::DeliverFrame { .. } => None,
@@ -440,6 +465,26 @@ pub(crate) enum SimTransitionError {
         expected: SimEventId,
         /// Supplied predecessor event.
         observed: Option<SimEventId>,
+    },
+    /// A join action targeted a node that is already live in the overlay.
+    #[error("node {node:?} is already live")]
+    NodeAlreadyLive {
+        /// Node that attempted to join while already live.
+        node: SimNodeId,
+    },
+    /// A leave or crash action targeted a node that is not currently live.
+    #[error("node {node:?} is not live")]
+    NodeNotLive {
+        /// Node that attempted to depart while not live.
+        node: SimNodeId,
+    },
+    /// A join action named a bootstrap peer that is not currently live.
+    #[error("node {node:?} cannot join via inactive bootstrap peer {via:?}")]
+    InactiveBootstrapPeer {
+        /// Joining node.
+        node: SimNodeId,
+        /// Inactive bootstrap peer.
+        via: SimNodeId,
     },
 }
 
@@ -615,6 +660,8 @@ pub(crate) struct SimState {
     max_missed_control_latency_ms: Option<(u64, u64)>,
     injected_failures: BTreeSet<(SimNodeId, SimNodeId)>,
     disconnects: BTreeSet<(SimNodeId, SimNodeId)>,
+    false_disconnects: BTreeSet<(SimNodeId, SimNodeId)>,
+    seen_generations: BTreeSet<String>,
     connection_generations: BTreeMap<(SimNodeId, SimNodeId), SimConnectionGeneration>,
     peer_health: BTreeMap<(SimNodeId, SimNodeId), SimPeerHealth>,
     liveness_verdicts: BTreeMap<(SimNodeId, SimNodeId), (bool, SimEventId)>,
@@ -632,6 +679,14 @@ pub(crate) struct SimState {
     maintenance_runs: u64,
     storm_stopped: bool,
     class_deliveries: [u64; 5],
+    class_admitted_bytes: [u64; 5],
+    class_delivered_bytes: [u64; 5],
+    live_nodes: BTreeSet<SimNodeId>,
+    departed_nodes: BTreeSet<SimNodeId>,
+    joins: u64,
+    graceful_leaves: u64,
+    ungraceful_leaves: u64,
+    crashes: u64,
     trace: SimTrace,
 }
 
@@ -735,18 +790,19 @@ impl SimState {
                 deadline_ms: limits.control_deadline_ms,
             });
         }
+        let mut false_disconnect_edges = self.false_disconnects.clone();
         for &(node, peer) in &self.disconnects {
             if !self.injected_failures.contains(&(node, peer)) {
-                violations.push(SimInvariantViolation::FalseDisconnect { node, peer });
+                false_disconnect_edges.insert((node, peer));
             }
+        }
+        for &(node, peer) in &false_disconnect_edges {
+            violations.push(SimInvariantViolation::FalseDisconnect { node, peer });
         }
         let allowed_repairs = self
             .initial_entries
             .saturating_mul(limits.repair_amplification);
-        let has_false_disconnect = self
-            .disconnects
-            .iter()
-            .any(|edge| !self.injected_failures.contains(edge));
+        let has_false_disconnect = !false_disconnect_edges.is_empty();
         if self.repair_entries > allowed_repairs
             || (has_false_disconnect && self.repair_entries > 0)
         {
@@ -765,6 +821,83 @@ impl SimState {
     /// Stable trace accumulated by this state.
     pub(crate) const fn trace(&self) -> &SimTrace {
         &self.trace
+    }
+
+    /// Current virtual monotonic time in milliseconds.
+    pub(crate) const fn virtual_ms(&self) -> u64 {
+        self.virtual_ms
+    }
+
+    /// Nodes currently live in the modeled overlay population.
+    pub(crate) const fn live_nodes(&self) -> &BTreeSet<SimNodeId> {
+        &self.live_nodes
+    }
+
+    /// Nodes that have departed the overlay and have not yet rejoined.
+    pub(crate) const fn departed_nodes(&self) -> &BTreeSet<SimNodeId> {
+        &self.departed_nodes
+    }
+
+    /// Total join transitions observed.
+    pub(crate) const fn joins(&self) -> u64 {
+        self.joins
+    }
+
+    /// Total graceful leave transitions observed.
+    pub(crate) const fn graceful_leaves(&self) -> u64 {
+        self.graceful_leaves
+    }
+
+    /// Total ungraceful leave transitions observed.
+    pub(crate) const fn ungraceful_leaves(&self) -> u64 {
+        self.ungraceful_leaves
+    }
+
+    /// Total crash transitions observed.
+    pub(crate) const fn crashes(&self) -> u64 {
+        self.crashes
+    }
+
+    /// Total admitted bytes for a given transfer class.
+    pub(crate) const fn class_admitted_bytes(&self, class: SimTransferClass) -> u64 {
+        self.class_admitted_bytes[class.index()]
+    }
+
+    /// Total delivered bytes for a given transfer class.
+    pub(crate) const fn class_delivered_bytes(&self, class: SimTransferClass) -> u64 {
+        self.class_delivered_bytes[class.index()]
+    }
+
+    /// Total admitted maintenance bytes across control, storage, and reassembly classes.
+    pub(crate) const fn maintenance_admitted_bytes(&self) -> u64 {
+        self.class_admitted_bytes[SimTransferClass::Control.index()]
+            .saturating_add(self.class_admitted_bytes[SimTransferClass::Storage.index()])
+            .saturating_add(self.class_admitted_bytes[SimTransferClass::Reassembly.index()])
+    }
+
+    /// Total delivered maintenance bytes across control, storage, and reassembly classes.
+    pub(crate) const fn maintenance_delivered_bytes(&self) -> u64 {
+        self.class_delivered_bytes[SimTransferClass::Control.index()]
+            .saturating_add(self.class_delivered_bytes[SimTransferClass::Storage.index()])
+            .saturating_add(self.class_delivered_bytes[SimTransferClass::Reassembly.index()])
+    }
+
+    /// Causal failure or departure event recorded for a directed peer edge, if any.
+    pub(crate) fn failure_event(&self, node: SimNodeId, peer: SimNodeId) -> Option<SimEventId> {
+        self.failure_events.get(&(node, peer)).copied()
+    }
+
+    /// Whether the current generation on a directed edge has already disconnected.
+    pub(crate) fn has_disconnected(&self, node: SimNodeId, peer: SimNodeId) -> bool {
+        self.disconnects.contains(&(node, peer))
+    }
+
+    /// Active connection generation identifier on a directed edge, if active.
+    pub(crate) fn active_generation(&self, node: SimNodeId, peer: SimNodeId) -> Option<&str> {
+        self.connection_generations
+            .get(&(node, peer))
+            .filter(|known| known.state == SimConnectionState::Active)
+            .map(|known| known.generation.as_str())
     }
 
     /// Compact stable state needed to diagnose and replay a failed scenario.
@@ -802,7 +935,18 @@ impl SimState {
     }
 }
 
+mod churn;
 mod transition;
+
+pub(crate) use churn::ScheduledChurnEvent;
+pub(crate) use churn::WeibullChurnConfig;
+pub(crate) use churn::WeibullChurnConfigError;
+pub(crate) use churn::WeibullSessionGenerator;
+pub(crate) use churn::DEFAULT_WEIBULL_SHAPE;
+pub(crate) use churn::MAX_MEDIAN_SESSION_MS;
+pub(crate) use churn::MAX_WEIBULL_SHAPE;
+pub(crate) use churn::MIN_MEDIAN_SESSION_MS;
+pub(crate) use churn::MIN_WEIBULL_SHAPE;
 
 #[cfg(test)]
 mod tests;

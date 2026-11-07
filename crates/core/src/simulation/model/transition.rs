@@ -154,6 +154,9 @@ impl SimState {
                 entries,
                 causal_parent,
             } => self.schedule_repair(*node, *entries, *causal_parent),
+            SimAction::Join { node, via } => self.join(*node, *via),
+            SimAction::Leave { node, graceful } => self.leave(*node, *graceful, event_id),
+            SimAction::Crash { node } => self.crash(*node, event_id),
         }
     }
 
@@ -557,11 +560,16 @@ impl SimState {
         state: SimConnectionState,
     ) -> Result<Option<u64>, SimTransitionError> {
         let edge = (node, peer);
-        let valid = match (self.connection_generations.get(&edge), state) {
-            (None, SimConnectionState::Active) => !self
+        let generation_is_fresh = !self.seen_generations.contains(generation)
+            && !self
                 .connection_generations
                 .values()
-                .any(|known| known.generation == generation),
+                .any(|known| known.generation == generation);
+        let valid = match (self.connection_generations.get(&edge), state) {
+            (None, SimConnectionState::Active) => generation_is_fresh,
+            (Some(known), SimConnectionState::Active) => {
+                known.state == SimConnectionState::Closed && generation_is_fresh
+            }
             (Some(known), SimConnectionState::Closed) => {
                 matches!(
                     known.state,
@@ -587,6 +595,14 @@ impl SimState {
                 state,
             });
         if state == SimConnectionState::Active {
+            self.seen_generations.insert(generation.to_owned());
+            if self.disconnects.contains(&edge) && !self.injected_failures.contains(&edge) {
+                self.false_disconnects.insert(edge);
+            }
+            self.disconnects.remove(&edge);
+            self.injected_failures.remove(&edge);
+            self.failure_events.remove(&edge);
+            self.liveness_verdicts.remove(&edge);
             self.peer_health.insert(edge, SimPeerHealth::Healthy);
         }
         Ok(None)
@@ -789,12 +805,85 @@ impl SimState {
         Ok(None)
     }
 
+    fn join(&mut self, node: SimNodeId, via: SimNodeId) -> Result<Option<u64>, SimTransitionError> {
+        if self.storm_stopped {
+            return Err(SimTransitionError::ActionAfterStop { action: "Join" });
+        }
+        if self.live_nodes.contains(&node) {
+            return Err(SimTransitionError::NodeAlreadyLive { node });
+        }
+        let bootstrap_valid = if self.live_nodes.is_empty() {
+            via == node
+        } else {
+            self.live_nodes.contains(&via)
+        };
+        if !bootstrap_valid {
+            return Err(SimTransitionError::InactiveBootstrapPeer { node, via });
+        }
+        self.live_nodes.insert(node);
+        self.departed_nodes.remove(&node);
+        self.joins = checked_add(self.joins, 1)?;
+        Ok(None)
+    }
+
+    fn leave(
+        &mut self,
+        node: SimNodeId,
+        graceful: bool,
+        event_id: SimEventId,
+    ) -> Result<Option<u64>, SimTransitionError> {
+        if !self.live_nodes.remove(&node) {
+            return Err(SimTransitionError::NodeNotLive { node });
+        }
+        self.departed_nodes.insert(node);
+        if graceful {
+            self.graceful_leaves = checked_add(self.graceful_leaves, 1)?;
+        } else {
+            self.ungraceful_leaves = checked_add(self.ungraceful_leaves, 1)?;
+        }
+        self.mark_node_departed_edges(node, event_id);
+        Ok(None)
+    }
+
+    fn crash(
+        &mut self,
+        node: SimNodeId,
+        event_id: SimEventId,
+    ) -> Result<Option<u64>, SimTransitionError> {
+        if !self.live_nodes.remove(&node) {
+            return Err(SimTransitionError::NodeNotLive { node });
+        }
+        self.departed_nodes.insert(node);
+        self.crashes = checked_add(self.crashes, 1)?;
+        self.mark_node_departed_edges(node, event_id);
+        Ok(None)
+    }
+
+    fn mark_node_departed_edges(&mut self, departed: SimNodeId, event_id: SimEventId) {
+        let affected_edges: Vec<(SimNodeId, SimNodeId)> = self
+            .connection_generations
+            .iter()
+            .filter_map(|(&(observer, peer), known)| {
+                ((observer == departed || peer == departed)
+                    && known.state == SimConnectionState::Active)
+                    .then_some((observer, peer))
+            })
+            .collect();
+        for edge in affected_edges {
+            self.injected_failures.insert(edge);
+            self.failure_events.insert(edge, event_id);
+            self.peer_health.insert(edge, SimPeerHealth::Failed);
+        }
+    }
+
     fn reserve_bytes(
         &mut self,
         node: SimNodeId,
         class: SimTransferClass,
         bytes: u64,
     ) -> Result<(), SimTransitionError> {
+        let admitted = &mut self.class_admitted_bytes[class.index()];
+        *admitted = checked_add(*admitted, bytes)?;
         let node_bytes = self.current_node_bytes.entry(node).or_default();
         *node_bytes = checked_add(*node_bytes, bytes)?;
         let class_bytes = self.current_class_bytes.entry((node, class)).or_default();
@@ -823,6 +912,8 @@ impl SimState {
     ) -> Result<Option<u64>, SimTransitionError> {
         let delivered = &mut self.class_deliveries[pending.class.index()];
         *delivered = checked_add(*delivered, 1)?;
+        let delivered_bytes = &mut self.class_delivered_bytes[pending.class.index()];
+        *delivered_bytes = checked_add(*delivered_bytes, pending.bytes)?;
         if pending.class != SimTransferClass::Control {
             return Ok(None);
         }
