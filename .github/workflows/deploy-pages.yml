@@ -8,8 +8,9 @@
 # integration owns; the `id-token` grant is the OIDC proof the Pages deployment API requires.
 #
 # The site is one Pages artifact: Trunk owns `frontend/dist` (it clears the directory on every
-# build), so the book is rendered into it afterwards, the repository's `llms.txt` is copied to
-# the site root beside it, and the SPA fallback is added. Last, `finish_site.py` readies it for
+# build), so the book is rendered into it afterwards, the repository's `llms.txt` and
+# `install.sh` are copied to the site root beside it, and the SPA fallback is added. Last,
+# `finish_site.py` readies it for
 # search engines: a canonical address and a description of its own for each chapter, noindex
 # on the 404 pages, and `sitemap.xml`. After the deploy, `indexnow.py` tells Bing and the other
 # IndexNow engines that the sitemap's pages are new.
@@ -29,6 +30,7 @@ on:
       - "crates/**"
       - "docs/**"
       - "llms.txt"
+      - "install.sh"
       - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
 
@@ -88,6 +90,9 @@ jobs:
 
       - name: Publish llms.txt at the site root
         run: cp llms.txt frontend/dist/llms.txt
+
+      - name: Publish install.sh at the site root
+        run: cp install.sh frontend/dist/install.sh
 
       - name: Add the SPA fallback for path-routed WebView URLs
         run: cp frontend/dist/index.html frontend/dist/404.html

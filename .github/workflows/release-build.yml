@@ -74,14 +74,18 @@ jobs:
       - name: Package
         if: ${{ inputs.publish_artifacts }}
         run: |
-          zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
+          archive="rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip"
+          zip -j "$archive" ./target/${{ steps.target.outputs.target }}/release/rings
+          shasum -a 256 "$archive" > "${archive}.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
-          path: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
+          path: |
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip.sha256
           retention-days: 1
 
   build_linux:
@@ -90,10 +94,11 @@ jobs:
     runs-on: "ubuntu-latest"
     strategy:
       matrix:
-        arch:
-          - x86_64
-        platform:
-          - musl
+        include:
+          - arch: x86_64
+            platform: musl
+          - arch: aarch64
+            platform: gnu
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
@@ -109,6 +114,7 @@ jobs:
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
 
       - name: alias compiler
+        if: matrix.platform == 'musl'
         run: |
           sudo ln -s /bin/g++ /bin/musl-g++
 
@@ -128,6 +134,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
+      - name: Install aarch64 cross toolchain
+        if: matrix.arch == 'aarch64'
+        run: |
+          set -ex
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
       - name: Build
         run: |
           rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
@@ -135,14 +149,18 @@ jobs:
       - name: Package
         if: ${{ inputs.publish_artifacts }}
         run: |
-          zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
+          archive="rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip"
+          zip -j "$archive" ./target/${{ steps.target.outputs.target }}/release/rings
+          shasum -a 256 "$archive" > "${archive}.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
-          path: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
+          path: |
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip.sha256
           retention-days: 1
 
   # `npm pack` runs the root `prepare` script (`wasm-pack build … --features browser_default`,
@@ -203,12 +221,16 @@ jobs:
       - name: Package
         if: ${{ inputs.publish_artifacts }}
         run: |
-          mv ringsnetwork-rings-node-*.tgz rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz
+          archive="rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz"
+          mv ringsnetwork-rings-node-*.tgz "$archive"
+          shasum -a 256 "$archive" > "${archive}.sha256"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
           name: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}
-          path: rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz
+          path: |
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz
+            rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz.sha256
           retention-days: 1
