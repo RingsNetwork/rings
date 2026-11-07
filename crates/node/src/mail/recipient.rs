@@ -155,36 +155,23 @@ impl RecipientRecord {
     }
 }
 
-/// The name a record is kept under. Law: opening names bind both public key and mail id,
-/// while filing names bind only the shared deduplication key; copying a name changes neither.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecordName {
-    /// A mail id's [`RecipientRecord::Opened`] under exactly one delegatee public key.
-    Opened {
-        /// The public key whose opening verdict this record remembers.
-        delegatee_public_key: PublicKey<33>,
-        /// The ciphertext whose opening was attempted.
-        mail_id: MailDigest,
-    },
-    /// A deduplication key's [`RecipientRecord::Filed`].
-    Filed(MailDigest),
+/// Format the key-isolated [`RecipientRecord::Opened`] storage key
+/// `opened-<public key hex>-<mail id hex>`.
+///
+/// Law: opening names bind both the delegatee public key and the mail digest, so distinct
+/// delegatee public keys never share an opening verdict.
+fn opened_record_name(delegatee_public_key: PublicKey<33>, mail_id: MailDigest) -> String {
+    let mut name = String::with_capacity(7 + 66 + 1 + 64);
+    name.push_str("opened-");
+    let _ = write_lowercase_hex(&mut name, &delegatee_public_key.0);
+    name.push('-');
+    let _ = std::fmt::Write::write_fmt(&mut name, format_args!("{mail_id}"));
+    name
 }
 
-impl std::fmt::Display for RecordName {
-    /// `opened-<public key hex>-<mail id hex>` or `filed-<deduplication key hex>`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Opened {
-                delegatee_public_key,
-                mail_id,
-            } => {
-                write!(f, "opened-")?;
-                write_lowercase_hex(f, &delegatee_public_key.0)?;
-                write!(f, "-{mail_id}")
-            }
-            Self::Filed(key) => write!(f, "filed-{key}"),
-        }
-    }
+/// Format the shared [`RecipientRecord::Filed`] storage key `filed-<deduplication key hex>`.
+fn filed_record_name(key: MailDigest) -> String {
+    format!("filed-{key}")
 }
 
 /// The key a mail is deduplicated by: `H(Message-ID)`, or its own id without one.
@@ -275,30 +262,14 @@ fn classify_opening(
     records: &BTreeMap<String, RecipientRecord>,
 ) -> OpeningAction {
     let mail_id = opening.mail_id();
-    let active_opened_record = RecordName::Opened {
-        delegatee_public_key,
-        mail_id,
-    }
-    .to_string();
+    let active_opened_record = opened_record_name(delegatee_public_key, mail_id);
     let retained_opened_record = opened_by
         .filter(|&pk| pk != delegatee_public_key)
-        .map(|pk| {
-            RecordName::Opened {
-                delegatee_public_key: pk,
-                mail_id,
-            }
-            .to_string()
-        });
+        .map(|pk| opened_record_name(pk, mail_id));
     let already_handled_by_retained_key = match &retained_opened_record {
         Some(record_name) => records.contains_key(record_name),
         None if opened_by.is_none() => decryption_keys.iter().skip(1).any(|key| {
-            records.contains_key(
-                &RecordName::Opened {
-                    delegatee_public_key: key.delegatee_public_key(),
-                    mail_id,
-                }
-                .to_string(),
-            )
+            records.contains_key(&opened_record_name(key.delegatee_public_key(), mail_id))
         }),
         None => false,
     };
@@ -321,7 +292,7 @@ fn classify_opening(
             }
         }
         Opening::Opened(mail) => {
-            let filed_record = RecordName::Filed(dedup_key(&mail)).to_string();
+            let filed_record = filed_record_name(dedup_key(&mail));
             if records.contains_key(&filed_record) {
                 OpeningAction::Duplicate {
                     retained_opened_record,
@@ -399,7 +370,7 @@ where
         let delegatee_public_key = delegatee_key.delegatee_public_key();
         let decryption_keys = self.processor.decryption_keys_at(now_ms);
         let fresh = |mail_id: &MailDigest| {
-            !records.contains_key(&Self::opened_record_name(delegatee_public_key, *mail_id))
+            !records.contains_key(&opened_record_name(delegatee_public_key, *mail_id))
         };
         let openings = open_mail_with_keys(&entry.data, did, &decryption_keys, fresh);
         let mut report = PollReport::default();
@@ -492,16 +463,6 @@ where
             at_ms: now_ms,
         })
         .await
-    }
-
-    /// The opening verdict for `mail_id` under `delegatee_public_key`. Law: distinct
-    /// delegatee public keys never share an opening verdict.
-    fn opened_record_name(delegatee_public_key: PublicKey<33>, mail_id: MailDigest) -> String {
-        RecordName::Opened {
-            delegatee_public_key,
-            mail_id,
-        }
-        .to_string()
     }
 
     /// Poll now and then every interval until `stop`, logging a failed poll and polling again.

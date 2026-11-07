@@ -195,7 +195,6 @@ impl Processor {
 
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
     /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
-    #[cfg(feature = "node")]
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
         now_ms: u128,
@@ -225,11 +224,7 @@ impl Processor {
         next: DelegateeKey,
         now_ms: u128,
     ) -> Result<DelegationHorizon> {
-        let horizon = self.session_keys.renew_at(next.clone(), now_ms)?;
-        self.swarm
-            .set_delegatee_key(next)
-            .map_err(Error::CoreError)?;
-        Ok(horizon)
+        self.renew_delegatee_key_with(now_ms, |_| Ok(next), |_| Ok(()))
     }
 
     /// The signing horizon of this node's own delegation: from it on, the node can send

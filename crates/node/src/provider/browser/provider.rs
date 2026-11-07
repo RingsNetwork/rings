@@ -112,163 +112,105 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     )
 }
 
-/// Open the browser DHT entry store. It is disposable, so it retires rows it cannot decode: a
-/// carrier written by an earlier wire format must not fail every storage scan.
-async fn open_browser_entry_storage_or_memory(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> Option<EntryStorage> {
-    lock::LockedBrowserStorage::open_or_warn(
-        50000,
-        storage_name,
-        RecordAuthority::Disposable,
-        lock,
-        "browser entry IndexedDB unavailable; falling back to in-memory entry storage",
-    )
-    .await
-    .map(|storage| Box::new(storage) as EntryStorage)
-}
-
 /// Row capacity of the browser relay-inbox store: the carriers this node holds or owns. A hold
 /// beyond it is refused, never evicting held mail (the budget law of a retained store).
 const RELAY_STORAGE_ROWS: u32 = 1024;
-
-/// Open the browser relay-inbox store as a retained store (#1021): its writes commit with
-/// strict durability and it evicts nothing, since a relay carrier is the only copy of the mail
-/// it holds. An IndexedDB that cannot open leaves the provider with no relay store, never an
-/// in-memory one: the node then takes custody of no relay carrier, so it holds no mail and its
-/// own mail stays with its holder.
-async fn open_browser_relay_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> Option<EntryStorage> {
-    lock::LockedBrowserStorage::open_or_warn(
-        RELAY_STORAGE_ROWS,
-        storage_name,
-        RecordAuthority::Retained,
-        lock,
-        "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail",
-    )
-    .await
-    .map(|storage| Box::new(storage) as EntryStorage)
-}
-
-/// Open the browser store of the data namespace's remove sides as a retained store (#920): its
-/// writes commit with strict durability and it evicts nothing, at `(Dur°, Ret)`, admissible
-/// because every data topic is held by its replica set (durable-records, Law 12). Its row
-/// capacity is the charge index's total, one remove per row at worst. An IndexedDB that cannot
-/// open leaves the remove sides in memory, logged here: each restart then makes this node a
-/// fresh replica.
-async fn open_browser_removal_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> Option<RemovalStorage> {
-    let rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
-    lock::LockedBrowserStorage::open_or_warn(
-        rows,
-        storage_name,
-        RecordAuthority::Retained,
-        lock,
-        "browser removal IndexedDB unavailable; data-topic removes are kept in memory",
-    )
-    .await
-    .map(|storage| Box::new(storage) as RemovalStorage)
-}
-
-async fn open_browser_measure_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> Option<MeasureStorage> {
-    lock::LockedBrowserStorage::open_or_warn(
-        50000,
-        storage_name,
-        RecordAuthority::Disposable,
-        lock,
-        "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage",
-    )
-    .await
-    .map(|storage| Box::new(storage) as MeasureStorage)
-}
-
-async fn open_browser_evidence_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> NodeResult<EvidenceStorage> {
-    lock::LockedBrowserStorage::open(2, storage_name, RecordAuthority::Disposable, lock)
-        .await
-        .map(|storage| Box::new(storage) as EvidenceStorage)
-}
-
-/// Open the browser entry-guard store as a durable cache (#911): its writes commit with strict
-/// durability, and a guard record that does not decode is retired, logged, and re-selected. An
-/// IndexedDB that cannot open falls back to in-memory guards, re-selected on every start.
-async fn open_browser_entry_guard_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> Option<OnionEntryGuardStorage> {
-    lock::LockedBrowserStorage::open_or_warn(
-        1024,
-        storage_name,
-        RecordAuthority::DurableCache,
-        lock,
-        "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards",
-    )
-    .await
-    .map(|storage| Box::new(storage) as OnionEntryGuardStorage)
-}
-
-/// Open the browser replay store under a row capacity of every record of a full store
-/// ([`TRANSACTION_REPLAY_STORE_MAX_RECORDS`]). The store is authoritative: it evicts nothing, so
-/// a new record beyond the capacity fails its transition closed (`StorageBudgetExhausted`)
-/// instead of reopening replay for an evicted stream (#923), and a record it cannot decode is
-/// reported and kept, never retired.
-async fn open_browser_replay_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> NodeResult<ReplayStorage> {
-    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).map_err(|_| {
-        Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source: rings_core::error::Error::InvalidCapacity,
-        }
-    })?;
-    lock::LockedBrowserStorage::open(rows, storage_name, RecordAuthority::Authoritative, lock)
-        .await
-        .map(|storage| Box::new(storage) as ReplayStorage)
-}
 
 /// Acquire the exclusive Web Lock `rings-node/<storage_name>` (#1055) and open the seven
 /// IndexedDB stores of `storage_name` under it.
 ///
 /// Law: if another tab or node in this origin holds `rings-node/<storage_name>`, this fails
 /// closed with [`Error::BrowserStorageLocked`] before any IndexedDB database is opened.
+///
+/// Each store's [`RecordAuthority`] and fallback policy follow the durable-records laws:
+/// - **DHT entry store** (`Disposable`, 50,000 rows): retires undecodable rows; falls back to
+///   in-memory storage if IndexedDB cannot open.
+/// - **Relay-inbox store** (`Retained`, [`RELAY_STORAGE_ROWS`], #1021): strict durability, no
+///   eviction; if IndexedDB cannot open, returns `None` so the node holds no relay mail.
+/// - **Data removal store** (`Retained`, `REMOVAL_STORE_MAX_REMOVES`, #920): strict durability,
+///   no eviction; falls back to in-memory removals on open failure.
+/// - **Peer measurement store** (`Disposable`, 50,000 rows): falls back to in-memory storage.
+/// - **Provisional evidence store** (`Disposable`, 2 rows): required; fails closed on open error.
+/// - **Onion entry-guard store** (`DurableCache`, 1,024 rows, #911): retires undecodable guards;
+///   falls back to in-memory guards on open failure.
+/// - **Transaction replay store** (`Authoritative`, `TRANSACTION_REPLAY_STORE_MAX_RECORDS`, #923):
+///   strict durability, no eviction, never retires undecodable records; fails closed on open error.
 pub(super) async fn open_browser_provider_stores(
     storage_name: &str,
 ) -> NodeResult<(ProviderStores, Rc<lock::BrowserStorageLock>)> {
     let (storage_lock, released) = lock::lock_browser_storage(storage_name).await?;
     let storage_lock = Rc::new(storage_lock);
-    let entry_storage = open_browser_entry_storage_or_memory(storage_name, &storage_lock).await;
-    let relay_storage =
-        open_browser_relay_storage(&format!("{storage_name}/relay-inbox"), &storage_lock).await;
-    let removal_storage =
-        open_browser_removal_storage(&format!("{storage_name}/dht-removals"), &storage_lock).await;
-    let measure_storage =
-        open_browser_measure_storage(&format!("{storage_name}/measure"), &storage_lock).await;
+    let entry_storage = lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        storage_name,
+        RecordAuthority::Disposable,
+        &storage_lock,
+        "browser entry IndexedDB unavailable; falling back to in-memory entry storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage);
+    let relay_storage = lock::LockedBrowserStorage::open_or_warn(
+        RELAY_STORAGE_ROWS,
+        &format!("{storage_name}/relay-inbox"),
+        RecordAuthority::Retained,
+        &storage_lock,
+        "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail",
+    )
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage);
+    let removal_rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
+    let removal_storage = lock::LockedBrowserStorage::open_or_warn(
+        removal_rows,
+        &format!("{storage_name}/dht-removals"),
+        RecordAuthority::Retained,
+        &storage_lock,
+        "browser removal IndexedDB unavailable; data-topic removes are kept in memory",
+    )
+    .await
+    .map(|storage| Box::new(storage) as RemovalStorage);
+    let measure_storage = lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        &format!("{storage_name}/measure"),
+        RecordAuthority::Disposable,
+        &storage_lock,
+        "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as MeasureStorage);
     let evidence_storage = Some(
-        open_browser_evidence_storage(
+        lock::LockedBrowserStorage::open(
+            2,
             &format!("{storage_name}/provisional-evidence"),
+            RecordAuthority::Disposable,
             &storage_lock,
         )
-        .await?,
+        .await
+        .map(|storage| Box::new(storage) as EvidenceStorage)?,
     );
-    let onion_entry_guard_storage = open_browser_entry_guard_storage(
+    let onion_entry_guard_storage = lock::LockedBrowserStorage::open_or_warn(
+        1024,
         &format!("{storage_name}/onion-entry-guards"),
+        RecordAuthority::DurableCache,
+        &storage_lock,
+        "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards",
+    )
+    .await
+    .map(|storage| Box::new(storage) as OnionEntryGuardStorage);
+    let replay_name = format!("{storage_name}/transaction-replay");
+    let replay_rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).map_err(|_| {
+        Error::BrowserStorageOpen {
+            name: replay_name.clone(),
+            source: rings_core::error::Error::InvalidCapacity,
+        }
+    })?;
+    let replay_storage = lock::LockedBrowserStorage::open(
+        replay_rows,
+        &replay_name,
+        RecordAuthority::Authoritative,
         &storage_lock,
     )
-    .await;
-    let replay_storage =
-        open_browser_replay_storage(&format!("{storage_name}/transaction-replay"), &storage_lock)
-            .await?;
+    .await
+    .map(|storage| Box::new(storage) as ReplayStorage)?;
 
     Ok((
         ProviderStores {

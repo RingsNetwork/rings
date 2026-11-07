@@ -197,22 +197,6 @@ struct SessionKeyRingState {
     rotation_failed_total: u64,
 }
 
-impl SessionKeyRingState {
-    /// Commit a validated renewal `next` at `now_ms`, pruning expired retained keys and keeping the
-    /// displaced key if still unexpired.
-    fn commit_renewal(&mut self, next: DelegateeKey, now_ms: u128) {
-        self.retained
-            .retain(|key| !key.delegation().is_expired_at(now_ms));
-        let previous = std::mem::replace(&mut self.current, next);
-        if !previous.delegation().is_expired_at(now_ms)
-            && previous.delegatee_public_key() != self.current.delegatee_public_key()
-        {
-            self.retained.push(previous);
-        }
-        self.rotation_succeeded_total = self.rotation_succeeded_total.saturating_add(1);
-    }
-}
-
 /// Shared live session key and retained unexpired previous keys for a [`super::Processor`].
 ///
 /// Enforces the **Monotone horizon** (`h' > h`) and **No unsigned gap** laws across every clone
@@ -298,7 +282,16 @@ impl SessionKeyRing {
             .and_then(|(next, next_horizon)| persist(&next).map(|()| (next, next_horizon)));
         match outcome {
             Ok((next, next_horizon)) => {
-                state.commit_renewal(next.clone(), now_ms);
+                state
+                    .retained
+                    .retain(|key| !key.delegation().is_expired_at(now_ms));
+                let previous = std::mem::replace(&mut state.current, next.clone());
+                if !previous.delegation().is_expired_at(now_ms)
+                    && previous.delegatee_public_key() != state.current.delegatee_public_key()
+                {
+                    state.retained.push(previous);
+                }
+                state.rotation_succeeded_total = state.rotation_succeeded_total.saturating_add(1);
                 Ok((next, next_horizon))
             }
             Err(error) => {
@@ -306,13 +299,6 @@ impl SessionKeyRing {
                 Err(error)
             }
         }
-    }
-
-    /// Validate and install `next` at `now_ms`, retaining the previous key if it has not yet
-    /// expired.
-    pub(crate) fn renew_at(&self, next: DelegateeKey, now_ms: u128) -> Result<DelegationHorizon> {
-        self.renew_with(now_ms, |_| Ok(next), |_| Ok(()))
-            .map(|(_, horizon)| horizon)
     }
 }
 
@@ -376,7 +362,7 @@ mod tests {
         }
     }
 
-    /// Laws (**Monotone horizon** and **No unsigned gap**, #1153): `SessionKeyRing::renew_at`
+    /// Laws (**Monotone horizon** and **No unsigned gap**, #1153): `SessionKeyRing::renew_with`
     /// refuses any key that shortens or stalls `h`, or changes the delegator DID, while a valid
     /// renewal advances `h' > h`, keeps a verifying delegation across `[renewal, e)`, and retains
     /// the previous key for decryption until its expiry `e`.
@@ -402,7 +388,7 @@ mod tests {
             Err(error) => panic!("non-advancing key mint must succeed: {error}"),
         };
         assert!(matches!(
-            ring.renew_at(non_advancing, renew_ms),
+            ring.renew_with(renew_ms, |_| Ok(non_advancing), |_| Ok(())),
             Err(Error::DelegationHorizonReached { horizon_ms, .. }) if horizon_ms == h0
         ));
         assert_eq!(ring.rotation_counts(), (0, 1));
@@ -415,7 +401,7 @@ mod tests {
                 Err(error) => panic!("wrong-did key mint must succeed: {error}"),
             };
         assert!(matches!(
-            ring.renew_at(wrong_did_key, renew_ms),
+            ring.renew_with(renew_ms, |_| Ok(wrong_did_key), |_| Ok(())),
             Err(Error::VerifyError(_))
         ));
         assert_eq!(ring.rotation_counts(), (0, 2));
@@ -426,8 +412,8 @@ mod tests {
             Err(error) => panic!("renewed key mint must succeed: {error}"),
         };
         let renewed_pubkey = renewed.delegatee_public_key();
-        let h1 = match ring.renew_at(renewed, renew_ms) {
-            Ok(horizon) => horizon.horizon_ms(),
+        let h1 = match ring.renew_with(renew_ms, |_| Ok(renewed), |_| Ok(())) {
+            Ok((_, horizon)) => horizon.horizon_ms(),
             Err(error) => panic!("valid renewal must succeed: {error}"),
         };
         assert!(h1 > h0);

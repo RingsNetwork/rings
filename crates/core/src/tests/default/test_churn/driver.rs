@@ -157,9 +157,7 @@ impl ChurnTraceDriver {
 
     /// Record an initial [`SimAction::InjectSync`] seeding `entries` storage items on `node`.
     pub(super) fn record_inject_sync(&mut self, node: SimNodeId, entries: u64) -> SimEventId {
-        self.begin_node_chain(node, None)
-            .then(|_| SimAction::InjectSync { node, entries })
-            .finish()
+        self.apply_for_node(node, SimAction::InjectSync { node, entries })
     }
 
     /// Advance the model's monotonic virtual clock by `delta_ms` when `delta_ms > 0`.
@@ -172,27 +170,19 @@ impl ChurnTraceDriver {
 
     /// Record a [`SimAction::Join`] for `node` bootstrapping via `via`.
     pub(super) fn record_join(&mut self, node: SimNodeId, via: SimNodeId) -> SimEventId {
-        self.begin_node_chain(node, None)
-            .then(|_| SimAction::Join { node, via })
-            .finish()
+        self.apply_for_node(node, SimAction::Join { node, via })
     }
 
     /// Record a [`SimAction::Leave`] for `node` and clear any stale repair intent on the departing node.
     pub(super) fn record_leave(&mut self, node: SimNodeId, graceful: bool) -> SimEventId {
-        let event = self
-            .begin_node_chain(node, None)
-            .then(|_| SimAction::Leave { node, graceful })
-            .finish();
+        let event = self.apply_for_node(node, SimAction::Leave { node, graceful });
         self.pending_repair_intent.remove(&node);
         event
     }
 
     /// Record a [`SimAction::Crash`] for `node` and clear any stale repair intent on the crashed node.
     pub(super) fn record_crash(&mut self, node: SimNodeId) -> SimEventId {
-        let event = self
-            .begin_node_chain(node, None)
-            .then(|_| SimAction::Crash { node })
-            .finish();
+        let event = self.apply_for_node(node, SimAction::Crash { node });
         self.pending_repair_intent.remove(&node);
         event
     }
@@ -461,6 +451,14 @@ impl ChurnTraceDriver {
                 causal_parent,
             })
             .finish();
+    }
+
+    /// Apply a root node `action` (which takes no `causal_parent`) and record its [`SimEventId`]
+    /// as `last_node_event[node]`.
+    fn apply_for_node(&mut self, node: SimNodeId, action: SimAction) -> SimEventId {
+        let event = self.apply(action);
+        self.last_node_event.insert(node, event);
+        event
     }
 
     /// Invoke the pure [`SimState::transition`] kernel with `action` and update `last_global_event`.

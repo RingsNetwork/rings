@@ -44,10 +44,13 @@ use crate::prelude::rings_core::dht::Did;
 
 /// Write bytes in lowercase hexadecimal. Law: each byte contributes exactly two digits in
 /// input order, preserving leading zeroes in every mail digest and record-name key.
-fn write_lowercase_hex(formatter: &mut std::fmt::Formatter<'_>, bytes: &[u8]) -> std::fmt::Result {
+fn write_lowercase_hex(
+    writer: &mut (impl std::fmt::Write + ?Sized),
+    bytes: &[u8],
+) -> std::fmt::Result {
     bytes
         .iter()
-        .try_for_each(|byte| write!(formatter, "{byte:02x}"))
+        .try_for_each(|byte| write!(writer, "{byte:02x}"))
 }
 
 /// The data topic a recipient's mail is written to: `"mail:" ‖ d`.

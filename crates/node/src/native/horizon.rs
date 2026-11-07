@@ -214,20 +214,13 @@ async fn try_renew_delegation(
     Ok(next_horizon)
 }
 
-/// Pure decision ADT produced by one step of the [`HorizonSupervisorState`] Mealy machine,
-/// parameterized by the renewal witness type `R`.
-///
-/// Instantiating `R = std::convert::Infallible` in [`signing_horizon`] makes the
-/// [`Self::AttemptRenewal`] branch uninhabited at compile time, eliminating runtime `.expect()` or
-/// `unreachable!()` panics.
+/// Pure decision ADT produced by one step of the [`HorizonSupervisorState`] Mealy machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HorizonAction<R> {
+enum HorizonAction {
     /// Horizon reached (`t >= h`): log and terminate with [`DelegationHorizon::reached`].
     ExitMute,
-    /// Attempt in-process renewal at `now_ms` inside `[renew_at_ms(c), h)` with `renewal`.
+    /// Attempt in-process renewal at `now_ms` inside `[renew_at_ms(c), h)`.
     AttemptRenewal {
-        /// Renewal configuration witness.
-        renewal: R,
         /// Remaining time until `h`.
         remaining_ms: u128,
     },
@@ -242,7 +235,7 @@ enum HorizonAction<R> {
 }
 
 /// Pure Mealy state machine tracking per-horizon warning and renewal-attempt idempotency:
-/// `HorizonSupervisorState × (DelegationHorizon, u128, u128, Option<R>) -> (HorizonSupervisorState, HorizonAction<R>)`.
+/// `HorizonSupervisorState × (DelegationHorizon, u128, u128, bool) -> (HorizonSupervisorState, HorizonAction)`.
 ///
 /// Laws:
 /// - **At-most-once renewal per horizon**: For a given `h`, [`HorizonAction::AttemptRenewal`] is
@@ -257,13 +250,13 @@ struct HorizonSupervisorState {
 
 impl HorizonSupervisorState {
     /// Pure state transition computing the next supervisor state and [`HorizonAction`] at `now_ms`.
-    fn step<R>(
+    fn step(
         self,
         horizon: DelegationHorizon,
         created_at_ms: u128,
         now_ms: u128,
-        renewal: Option<R>,
-    ) -> (Self, HorizonAction<R>) {
+        can_renew: bool,
+    ) -> (Self, HorizonAction) {
         let h = horizon.horizon_ms();
         match horizon.state_at(now_ms) {
             SigningState::Mute => (self, HorizonAction::ExitMute),
@@ -273,22 +266,25 @@ impl HorizonSupervisorState {
             }),
             SigningState::Expiring { remaining_ms } => {
                 let renew_at_ms = horizon.renew_at_ms(created_at_ms);
-                match renewal {
-                    Some(_) if now_ms < renew_at_ms => (self, HorizonAction::Sleep {
+                if can_renew && now_ms < renew_at_ms {
+                    (self, HorizonAction::Sleep {
                         wait_ms: renew_at_ms - now_ms,
                         warn_remaining_ms: None,
-                    }),
-                    Some(renewal) if self.attempted_horizon_ms != Some(h) => (
+                    })
+                } else if can_renew && self.attempted_horizon_ms != Some(h) {
+                    (
                         Self {
                             attempted_horizon_ms: Some(h),
                             ..self
                         },
-                        HorizonAction::AttemptRenewal {
-                            renewal,
-                            remaining_ms,
-                        },
-                    ),
-                    _ => self.fallback_sleep(h, remaining_ms),
+                        HorizonAction::AttemptRenewal { remaining_ms },
+                    )
+                } else {
+                    let (next, wait_ms, warn_remaining_ms) = self.fallback_sleep(h, remaining_ms);
+                    (next, HorizonAction::Sleep {
+                        wait_ms,
+                        warn_remaining_ms,
+                    })
                 }
             }
         }
@@ -296,21 +292,16 @@ impl HorizonSupervisorState {
 
     /// Pure transition into the fallback expiring sleep for `horizon_ms`, emitting the one-time
     /// warning payload iff `self.warned_horizon_ms != Some(horizon_ms)`.
-    fn fallback_sleep<R>(self, horizon_ms: u128, remaining_ms: u128) -> (Self, HorizonAction<R>) {
-        let warn_remaining_ms = if self.warned_horizon_ms == Some(horizon_ms) {
-            None
-        } else {
-            Some(remaining_ms)
-        };
+    fn fallback_sleep(self, horizon_ms: u128, remaining_ms: u128) -> (Self, u128, Option<u128>) {
+        let warn_remaining_ms =
+            (self.warned_horizon_ms != Some(horizon_ms)).then_some(remaining_ms);
         (
             Self {
                 warned_horizon_ms: Some(horizon_ms),
                 ..self
             },
-            HorizonAction::Sleep {
-                wait_ms: remaining_ms,
-                warn_remaining_ms,
-            },
+            remaining_ms,
+            warn_remaining_ms,
         )
     }
 }
@@ -354,75 +345,79 @@ pub async fn run_signing_horizon(
         let horizon = DelegationHorizon::of(&delegation);
         let h = horizon.horizon_ms();
         let (next_state, action) =
-            supervisor.step(horizon, delegation.created_at_ms(), now, renewal.as_ref());
+            supervisor.step(horizon, delegation.created_at_ms(), now, renewal.is_some());
         supervisor = next_state;
 
-        let sleep_action = match action {
-            HorizonAction::ExitMute => return log_mute_and_reach(horizon),
-            HorizonAction::AttemptRenewal {
-                renewal: paths,
-                remaining_ms,
-            } => match try_renew_delegation(&processor, paths, now).await {
-                Ok(next_horizon) => {
-                    tracing::info!(
-                        previous_horizon_ms = %h,
-                        next_horizon_ms = %next_horizon.horizon_ms(),
-                        expires_at_ms = %next_horizon.expires_at_ms(),
-                        "renewed the node's delegation in process before its signing horizon"
-                    );
-                    continue;
+        let (wait_ms, warn_remaining_ms) = match (action, renewal.as_ref()) {
+            (HorizonAction::ExitMute, _) => return log_mute_and_reach(horizon),
+            (HorizonAction::AttemptRenewal { remaining_ms }, Some(paths)) => {
+                match try_renew_delegation(&processor, paths, now).await {
+                    Ok(next_horizon) => {
+                        tracing::info!(
+                            previous_horizon_ms = %h,
+                            next_horizon_ms = %next_horizon.horizon_ms(),
+                            expires_at_ms = %next_horizon.expires_at_ms(),
+                            "renewed the node's delegation in process before its signing horizon"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            remaining_ms = %remaining_ms,
+                            horizon_ms = %h,
+                            "failed to renew the node's delegation in process; falling \
+                             back to exiting at the signing horizon"
+                        );
+                        let (fallback_state, wait_ms, warn_remaining_ms) =
+                            supervisor.fallback_sleep(h, remaining_ms);
+                        supervisor = fallback_state;
+                        (wait_ms, warn_remaining_ms)
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        remaining_ms = %remaining_ms,
-                        horizon_ms = %h,
-                        "failed to renew the node's delegation in process; falling \
-                         back to exiting at the signing horizon"
-                    );
-                    let (fallback_state, fallback_action) =
-                        supervisor.fallback_sleep(h, remaining_ms);
-                    supervisor = fallback_state;
-                    fallback_action
-                }
-            },
-            sleep @ HorizonAction::Sleep { .. } => sleep,
+            }
+            (HorizonAction::AttemptRenewal { remaining_ms }, None) => {
+                let (fallback_state, wait_ms, warn_remaining_ms) =
+                    supervisor.fallback_sleep(h, remaining_ms);
+                supervisor = fallback_state;
+                (wait_ms, warn_remaining_ms)
+            }
+            (
+                HorizonAction::Sleep {
+                    wait_ms,
+                    warn_remaining_ms,
+                },
+                _,
+            ) => (wait_ms, warn_remaining_ms),
         };
 
-        if let HorizonAction::Sleep {
-            wait_ms,
-            warn_remaining_ms,
-        } = sleep_action
-        {
-            if let Some(remaining_ms) = warn_remaining_ms {
-                log_expiring_warning(h, remaining_ms);
-            }
-            tokio::time::sleep(bounded_horizon_sleep(wait_ms)).await;
+        if let Some(remaining_ms) = warn_remaining_ms {
+            log_expiring_warning(h, remaining_ms);
         }
+        tokio::time::sleep(bounded_horizon_sleep(wait_ms)).await;
     }
 }
 
 /// Wait until `horizon` on the epoch clock `now_ms` (module diagram), warning once inside the
 /// lead, and return the error that ends the daemon there. It never returns before the horizon.
 pub async fn signing_horizon(horizon: DelegationHorizon, now_ms: impl Fn() -> u128) -> Error {
-    let mut supervisor = HorizonSupervisorState::default();
+    let mut warned = false;
     let h = horizon.horizon_ms();
     loop {
-        let (next_state, action) =
-            supervisor.step(horizon, 0, now_ms(), None::<std::convert::Infallible>);
-        supervisor = next_state;
-        match action {
-            HorizonAction::ExitMute => return log_mute_and_reach(horizon),
-            HorizonAction::Sleep {
-                wait_ms,
-                warn_remaining_ms,
-            } => {
-                if let Some(remaining_ms) = warn_remaining_ms {
+        match horizon.state_at(now_ms()) {
+            SigningState::Mute => return log_mute_and_reach(horizon),
+            SigningState::Signing { remaining_ms } => {
+                tokio::time::sleep(bounded_horizon_sleep(
+                    remaining_ms - SIGNING_HORIZON_LEAD_MS,
+                ))
+                .await;
+            }
+            SigningState::Expiring { remaining_ms } => {
+                if !std::mem::replace(&mut warned, true) {
                     log_expiring_warning(h, remaining_ms);
                 }
-                tokio::time::sleep(bounded_horizon_sleep(wait_ms)).await;
+                tokio::time::sleep(bounded_horizon_sleep(remaining_ms)).await;
             }
-            HorizonAction::AttemptRenewal { renewal, .. } => match renewal {},
         }
     }
 }
