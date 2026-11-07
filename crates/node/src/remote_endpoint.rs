@@ -143,7 +143,7 @@ impl fmt::Display for RemoteRpcProxy {
 
 /// Kleisli combinator attaching `api_token` (when `Some`) as a Bearer header on `client`, or
 /// acting as the identity `Ok(client)` when `None`.
-fn attach_bearer_token(
+pub(crate) fn attach_bearer_token(
     client: rings_rpc::jsonrpc::Client,
     api_token: Option<&str>,
 ) -> Result<rings_rpc::jsonrpc::Client> {

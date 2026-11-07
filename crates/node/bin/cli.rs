@@ -11,13 +11,12 @@ use rings_node::logging::LogLevel;
 use rings_node::native::api_auth::load_api_token;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
+use rings_node::native::horizon::write_delegatee_key_atomically;
 use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
-use rings_node::prelude::rings_core::dht::Did;
+use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::DelegationBuilder;
-use rings_node::util::ensure_parent_dir;
-use rings_node::util::expand_home;
+use rings_node::prelude::rings_core::utils::get_epoch_ms;
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -413,21 +412,10 @@ pub(crate) struct DelegationArgs {
 impl DelegationArgs {
     pub(crate) fn new_delegation_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
         let key = self.load_or_create_key()?;
-        let key_did: Did = key.address().into();
-
-        let ssk_builder = DelegationBuilder::new(key_did.to_string(), "secp256k1".to_string())
-            .set_ttl(self.ttl * 1000);
-        let unsigned_proof = ssk_builder.unsigned_proof();
-
-        let sig = key.sign(&unsigned_proof)?.to_vec();
-        let ssk_builder = ssk_builder.set_delegator_signature(sig);
-
-        let ssk = ssk_builder.build()?;
-        let ssk_dump = ssk.dump()?;
-
+        let ssk =
+            DelegateeKey::new_with_seckey_at(&key, self.ttl.saturating_mul(1000), get_epoch_ms())?;
         let ssk_path = std::path::Path::new(&self.delegatee_key);
-        ensure_parent_dir(ssk_path)?;
-        std::fs::write(expand_home(ssk_path)?, ssk_dump)?;
+        write_delegatee_key_atomically(ssk_path, &ssk)?;
         println!(
             "Your delegatee_key file has saved to: {}",
             ssk_path.display()

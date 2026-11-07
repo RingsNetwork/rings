@@ -78,6 +78,38 @@ impl RemoteHandshake for rings_rpc::jsonrpc::Client {
     }
 }
 
+/// Whether the payload returned by `answerOffer` is an answer (`ConnectNodeReport`) or a
+/// counter-offer (`ConnectNodeSend`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OfferReplyKind {
+    /// A `ConnectNodeReport` answer for the offerer's `acceptAnswer`.
+    Answer,
+    /// A `ConnectNodeSend` counter-offer: the peer's own offer prevailed on the DID tie-break
+    /// (#947).
+    CounterOffer,
+}
+
+impl OfferReplyKind {
+    /// Classify a decoded handshake reply [`MessagePayload`].
+    pub(crate) fn from_payload(payload: &MessagePayload) -> Result<Self> {
+        match payload
+            .transaction
+            .data::<Message>()
+            .map_err(|_| Error::DecodeError)?
+        {
+            Message::ConnectNodeReport(_) => Ok(Self::Answer),
+            Message::ConnectNodeSend(_) => Ok(Self::CounterOffer),
+            _ => Err(Error::DecodeError),
+        }
+    }
+
+    /// Decode and classify an encoded `answerOffer` reply string.
+    pub fn from_encoded_reply(reply: &str) -> Result<Self> {
+        decode_handshake_payload(&Encoded::from(reply.to_owned()))
+            .and_then(|payload| Self::from_payload(&payload))
+    }
+}
+
 /// Decode an offer or an answer from its HTTP handshake string. A frame of another wire version
 /// is refused as [`Error::IncompatibleWireVersion`] (#1104); any other failure is
 /// [`Error::DecodeError`].
@@ -268,11 +300,7 @@ impl Processor {
             .map_err(|error| HandshakeFailure::from_stage(peer, Error::CreateOffer, error))?;
         let exchange = async {
             let reply = remote.answer_offer(&offer).await?;
-            if let Message::ConnectNodeSend(_) = reply
-                .transaction
-                .data::<Message>()
-                .map_err(|_| Error::DecodeError)?
-            {
+            if OfferReplyKind::from_payload(&reply)? == OfferReplyKind::CounterOffer {
                 self.answer_counter_offer(remote, peer, reply).await?;
                 return Ok(HttpExchange::PeerHandshake);
             }

@@ -62,7 +62,7 @@ pub struct Provider {
     /// serializes the check-and-install, so the runtime is installed at most once.
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    onion_directory_endpoint: Arc<Mutex<Option<RemoteRpcEndpoint>>>,
+    onion_directory_endpoint: Arc<Mutex<Option<BrowserDirectoryEndpoint>>>,
     /// The retained browser inbox and its recipient, shared by provider clones. Law: only a
     /// constructor that opts in before processor build installs this state.
     #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -71,7 +71,7 @@ pub struct Provider {
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 #[derive(Clone)]
-pub(crate) struct RemoteRpcEndpoint {
+pub(crate) struct BrowserDirectoryEndpoint {
     pub(crate) url: String,
     pub(crate) api_token: Option<Arc<str>>,
 }
@@ -606,7 +606,7 @@ impl Provider {
 fn onion_directory_endpoint_from_rpc(
     method: &str,
     params: &serde_json::Value,
-) -> Option<RemoteRpcEndpoint> {
+) -> Option<BrowserDirectoryEndpoint> {
     if !matches!(method, "connectPeerViaHttp" | "ConnectPeerViaHttp") {
         return None;
     }
@@ -620,14 +620,14 @@ fn onion_directory_endpoint_from_rpc(
         .get("api_token")
         .and_then(serde_json::Value::as_str)
         .map(Arc::<str>::from);
-    Some(RemoteRpcEndpoint { url, api_token })
+    Some(BrowserDirectoryEndpoint { url, api_token })
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 impl Provider {
     pub(crate) fn set_onion_directory_endpoint(
         &self,
-        endpoint: Option<RemoteRpcEndpoint>,
+        endpoint: Option<BrowserDirectoryEndpoint>,
     ) -> Result<()> {
         let mut slot = self
             .onion_directory_endpoint
@@ -637,7 +637,7 @@ impl Provider {
         Ok(())
     }
 
-    pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<RemoteRpcEndpoint>> {
+    pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<BrowserDirectoryEndpoint>> {
         self.onion_directory_endpoint
             .lock()
             .map(|slot| slot.clone())

@@ -57,6 +57,7 @@ use rings_core::error::Result as CoreResult;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::KvStorageScan;
+use rings_core::storage::RecordAuthority;
 use rings_core::storage::ScannedRecord;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -269,6 +270,40 @@ impl LockedBrowserStorage {
     /// Bind `inner` to the shared `lock`.
     pub(crate) fn new(inner: IdbStorage, lock: Rc<BrowserStorageLock>) -> Self {
         Self { inner, _lock: lock }
+    }
+
+    /// Open an [`IdbStorage`] of `(cap, name, authority)` and bind it to `lock`.
+    pub(crate) async fn open(
+        cap: u32,
+        name: &str,
+        authority: RecordAuthority,
+        lock: &Rc<BrowserStorageLock>,
+    ) -> NodeResult<Self> {
+        IdbStorage::new_with_cap_name_and_authority(cap, name, authority)
+            .await
+            .map(|storage| Self::new(storage, Rc::clone(lock)))
+            .map_err(|source| Error::BrowserStorageOpen {
+                name: name.to_owned(),
+                source,
+            })
+    }
+
+    /// Open an [`IdbStorage`] of `(cap, name, authority)` bound to `lock`, logging `fallback_warning`
+    /// and returning `None` if IndexedDB cannot open.
+    pub(crate) async fn open_or_warn(
+        cap: u32,
+        name: &str,
+        authority: RecordAuthority,
+        lock: &Rc<BrowserStorageLock>,
+        fallback_warning: &'static str,
+    ) -> Option<Self> {
+        match Self::open(cap, name, authority, lock).await {
+            Ok(storage) => Some(storage),
+            Err(error) => {
+                tracing::warn!(storage_name = %name, %error, "{fallback_warning}");
+                None
+            }
+        }
     }
 }
 

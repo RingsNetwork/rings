@@ -22,8 +22,6 @@ use futures::pin_mut;
 use futures::select;
 use futures::FutureExt;
 use futures::Stream;
-use rings_core::message::Encoded;
-use rings_core::message::Message;
 use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::AcceptAnswerRequest;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
@@ -40,7 +38,7 @@ use rings_rpc::protos::rings_node::RegisterServiceRequest;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use rings_rpc::protos::rings_node::SwarmInfo;
 
-use crate::processor::handshake::decode_handshake_payload;
+pub use crate::processor::handshake::OfferReplyKind;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -60,28 +58,7 @@ pub struct ClientOutput<T> {
     stderr_notice: Option<String>,
 }
 
-/// Whether the encoded payload returned by `answerOffer` is an answer (`ConnectNodeReport`)
-/// or a counter-offer (`ConnectNodeSend`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OfferReplyKind {
-    /// A `ConnectNodeReport` answer for the offerer's `connect accept`.
-    Answer,
-    /// A `ConnectNodeSend` counter-offer: the offerer answers it with `connect answer` and
-    /// returns that answer to this node's `connect accept`.
-    CounterOffer,
-}
-
 impl OfferReplyKind {
-    /// Classify an encoded `answerOffer` reply payload.
-    pub fn from_encoded_reply(reply: &str) -> anyhow::Result<Self> {
-        let payload = decode_handshake_payload(&Encoded::from(reply.to_owned()))?;
-        match payload.transaction.data::<Message>()? {
-            Message::ConnectNodeReport(_) => Ok(Self::Answer),
-            Message::ConnectNodeSend(_) => Ok(Self::CounterOffer),
-            other => anyhow::bail!("unexpected answerOffer reply message: {other}"),
-        }
-    }
-
     /// Operator notice printed to stderr so stdout stays the raw base58 payload for piping.
     pub const fn stderr_notice(self) -> &'static str {
         match self {

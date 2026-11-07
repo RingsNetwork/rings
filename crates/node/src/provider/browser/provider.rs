@@ -17,7 +17,6 @@ use rings_core::dht::RemovalStorage;
 use rings_core::ecc::PublicKey;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
-use rings_core::storage::idb::IdbStorage;
 use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
@@ -115,36 +114,19 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
 
 /// Open the browser DHT entry store. It is disposable, so it retires rows it cannot decode: a
 /// carrier written by an earlier wire format must not fail every storage scan.
-async fn open_browser_entry_storage(
-    storage_name: &str,
-    lock: &Rc<lock::BrowserStorageLock>,
-) -> NodeResult<EntryStorage> {
-    IdbStorage::new_with_cap_and_name(50000, storage_name)
-        .await
-        .map(|storage| {
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as EntryStorage
-        })
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
-}
-
 async fn open_browser_entry_storage_or_memory(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> Option<EntryStorage> {
-    match open_browser_entry_storage(storage_name, lock).await {
-        Ok(storage) => Some(storage),
-        Err(error) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %error,
-                "browser entry IndexedDB unavailable; falling back to in-memory entry storage"
-            );
-            None
-        }
-    }
+    lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        storage_name,
+        RecordAuthority::Disposable,
+        lock,
+        "browser entry IndexedDB unavailable; falling back to in-memory entry storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage)
 }
 
 /// Row capacity of the browser relay-inbox store: the carriers this node holds or owns. A hold
@@ -160,25 +142,15 @@ async fn open_browser_relay_storage(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> Option<EntryStorage> {
-    let opened = IdbStorage::new_with_cap_name_and_authority(
+    lock::LockedBrowserStorage::open_or_warn(
         RELAY_STORAGE_ROWS,
         storage_name,
         RecordAuthority::Retained,
+        lock,
+        "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail",
     )
-    .await;
-    match opened {
-        Ok(storage) => Some(
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as EntryStorage,
-        ),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser relay-inbox IndexedDB unavailable; this node will hold no relay mail"
-            );
-            None
-        }
-    }
+    .await
+    .map(|storage| Box::new(storage) as EntryStorage)
 }
 
 /// Open the browser store of the data namespace's remove sides as a retained store (#920): its
@@ -192,56 +164,39 @@ async fn open_browser_removal_storage(
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> Option<RemovalStorage> {
     let rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
-    let opened =
-        IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Retained)
-            .await;
-    match opened {
-        Ok(storage) => Some(
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as RemovalStorage,
-        ),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser removal IndexedDB unavailable; data-topic removes are kept in memory"
-            );
-            None
-        }
-    }
+    lock::LockedBrowserStorage::open_or_warn(
+        rows,
+        storage_name,
+        RecordAuthority::Retained,
+        lock,
+        "browser removal IndexedDB unavailable; data-topic removes are kept in memory",
+    )
+    .await
+    .map(|storage| Box::new(storage) as RemovalStorage)
 }
 
 async fn open_browser_measure_storage(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> Option<MeasureStorage> {
-    match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
-        Ok(storage) => Some(
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as MeasureStorage,
-        ),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage"
-            );
-            None
-        }
-    }
+    lock::LockedBrowserStorage::open_or_warn(
+        50000,
+        storage_name,
+        RecordAuthority::Disposable,
+        lock,
+        "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage",
+    )
+    .await
+    .map(|storage| Box::new(storage) as MeasureStorage)
 }
 
 async fn open_browser_evidence_storage(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> NodeResult<EvidenceStorage> {
-    IdbStorage::new_with_cap_and_name(2, storage_name)
+    lock::LockedBrowserStorage::open(2, storage_name, RecordAuthority::Disposable, lock)
         .await
-        .map(|storage| {
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as EvidenceStorage
-        })
-        .map_err(|source| Error::BrowserStorageOpen {
-            name: storage_name.to_string(),
-            source,
-        })
+        .map(|storage| Box::new(storage) as EvidenceStorage)
 }
 
 /// Open the browser entry-guard store as a durable cache (#911): its writes commit with strict
@@ -251,26 +206,15 @@ async fn open_browser_entry_guard_storage(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> Option<OnionEntryGuardStorage> {
-    let opened = IdbStorage::new_with_cap_name_and_authority(
+    lock::LockedBrowserStorage::open_or_warn(
         1024,
         storage_name,
         RecordAuthority::DurableCache,
+        lock,
+        "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards",
     )
-    .await;
-    match opened {
-        Ok(storage) => Some(
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock)))
-                as OnionEntryGuardStorage,
-        ),
-        Err(source) => {
-            tracing::warn!(
-                storage_name = %storage_name,
-                error = %source,
-                "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards"
-            );
-            None
-        }
-    }
+    .await
+    .map(|storage| Box::new(storage) as OnionEntryGuardStorage)
 }
 
 /// Open the browser replay store under a row capacity of every record of a full store
@@ -282,18 +226,15 @@ async fn open_browser_replay_storage(
     storage_name: &str,
     lock: &Rc<lock::BrowserStorageLock>,
 ) -> NodeResult<ReplayStorage> {
-    let open_error = |source| Error::BrowserStorageOpen {
-        name: storage_name.to_string(),
-        source,
-    };
-    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS)
-        .map_err(|_| open_error(rings_core::error::Error::InvalidCapacity))?;
-    IdbStorage::new_with_cap_name_and_authority(rows, storage_name, RecordAuthority::Authoritative)
+    let rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).map_err(|_| {
+        Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source: rings_core::error::Error::InvalidCapacity,
+        }
+    })?;
+    lock::LockedBrowserStorage::open(rows, storage_name, RecordAuthority::Authoritative, lock)
         .await
-        .map(|storage| {
-            Box::new(lock::LockedBrowserStorage::new(storage, Rc::clone(lock))) as ReplayStorage
-        })
-        .map_err(open_error)
+        .map(|storage| Box::new(storage) as ReplayStorage)
 }
 
 /// Acquire the exclusive Web Lock `rings-node/<storage_name>` (#1055) and open the seven

@@ -294,14 +294,7 @@ impl WeibullSessionGenerator {
                 action: SimAction::Join { node, via },
             });
             let lifetime_ms = self.sample_weibull_lifetime_ms();
-            let graceful = self.sample_is_graceful_leave();
-            let use_crash_action = if graceful {
-                false
-            } else {
-                let crash = ungraceful_counter.is_multiple_of(2);
-                ungraceful_counter = ungraceful_counter.saturating_add(1);
-                crash
-            };
+            let (graceful, use_crash_action) = self.sample_departure_mode(&mut ungraceful_counter);
             if lifetime_ms <= duration_ms {
                 pending.insert(PendingEvent {
                     virtual_ms: lifetime_ms,
@@ -404,14 +397,8 @@ impl WeibullSessionGenerator {
                     let lifetime_ms = self.sample_weibull_lifetime_ms();
                     let depart_ms = event.virtual_ms.saturating_add(lifetime_ms);
                     if depart_ms <= duration_ms {
-                        let graceful = self.sample_is_graceful_leave();
-                        let use_crash_action = if graceful {
-                            false
-                        } else {
-                            let crash = ungraceful_counter.is_multiple_of(2);
-                            ungraceful_counter = ungraceful_counter.saturating_add(1);
-                            crash
-                        };
+                        let (graceful, use_crash_action) =
+                            self.sample_departure_mode(&mut ungraceful_counter);
                         pending.insert(PendingEvent {
                             virtual_ms: depart_ms,
                             sequence: next_sequence,
@@ -428,6 +415,20 @@ impl WeibullSessionGenerator {
         }
 
         schedule
+    }
+
+    /// Sample `(graceful, use_crash_action)` for a departing node, alternating ungraceful
+    /// departures deterministically between abrupt `Crash` and silent `Leave { graceful: false }`.
+    fn sample_departure_mode(&mut self, ungraceful_counter: &mut u64) -> (bool, bool) {
+        let graceful = self.sample_is_graceful_leave();
+        let use_crash_action = if graceful {
+            false
+        } else {
+            let crash = ungraceful_counter.is_multiple_of(2);
+            *ungraceful_counter = ungraceful_counter.saturating_add(1);
+            crash
+        };
+        (graceful, use_crash_action)
     }
 
     /// Uniformly sample one live peer from `live_nodes` when non-empty.

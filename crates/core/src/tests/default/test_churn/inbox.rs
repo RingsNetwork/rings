@@ -326,29 +326,24 @@ async fn has_relay_inbox_entry(node: &Node, key: &str) -> bool {
 type BorderNeighbor = (usize, Did);
 
 /// Purely resolve the immediate live predecessor and successor `(index, Did)` bordering `peer_idx`.
-fn rejoined_border_neighbors(
+pub(super) fn rejoined_border_neighbors(
     nodes: &[Node],
     live_dids: &[Did],
     peer_idx: usize,
 ) -> (Option<BorderNeighbor>, Option<BorderNeighbor>) {
     let peer_did = nodes[peer_idx].did();
-    let pred = topology::predecessor(live_dids, peer_did).and_then(|pred_did| {
+    let resolve_neighbor = |neighbor_did: Did| {
         nodes
             .iter()
-            .position(|n| n.did() == pred_did)
+            .position(|n| n.did() == neighbor_did)
             .filter(|&idx| idx != peer_idx)
-            .map(|idx| (idx, pred_did))
-    });
+            .map(|idx| (idx, neighbor_did))
+    };
+    let pred = topology::predecessor(live_dids, peer_did).and_then(resolve_neighbor);
     let succ = topology::successors(live_dids, peer_did, 1)
         .first()
         .copied()
-        .and_then(|succ_did| {
-            nodes
-                .iter()
-                .position(|n| n.did() == succ_did)
-                .filter(|&idx| idx != peer_idx)
-                .map(|idx| (idx, succ_did))
-        });
+        .and_then(resolve_neighbor);
     (pred, succ)
 }
 

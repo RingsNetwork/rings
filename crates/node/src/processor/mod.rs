@@ -113,6 +113,7 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
+pub use handshake::OfferReplyKind;
 pub use horizon::DelegationHorizon;
 pub(crate) use horizon::SessionKeyRing;
 pub use horizon::SigningState;

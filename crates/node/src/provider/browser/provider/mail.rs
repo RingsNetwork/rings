@@ -12,7 +12,6 @@ use async_trait::async_trait;
 use js_sys::Function;
 use js_sys::Promise;
 use js_sys::Uint8Array;
-use rings_core::storage::idb::IdbStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::RecordAuthority;
 use rings_derive::wasm_export;
@@ -165,10 +164,14 @@ async fn open_mail_storage(
     storage_lock: &Rc<BrowserStorageLock>,
 ) -> Result<LockedBrowserStorage, BrowserMailError> {
     let name = format!("{storage_name}/{suffix}");
-    IdbStorage::new_with_cap_name_and_authority(MAIL_STORAGE_ROWS, &name, RecordAuthority::Retained)
-        .await
-        .map(|storage| LockedBrowserStorage::new(storage, Rc::clone(storage_lock)))
-        .map_err(|source| crate::error::Error::BrowserStorageOpen { name, source }.into())
+    LockedBrowserStorage::open(
+        MAIL_STORAGE_ROWS,
+        &name,
+        RecordAuthority::Retained,
+        storage_lock,
+    )
+    .await
+    .map_err(BrowserMailError::from)
 }
 
 /// Serialize the browser API's rows as plain objects with exact large integers.

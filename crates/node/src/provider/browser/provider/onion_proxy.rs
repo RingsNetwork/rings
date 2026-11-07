@@ -33,7 +33,8 @@ use crate::onion::OnionLoopClass;
 use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
-use crate::provider::RemoteRpcEndpoint;
+use crate::provider::BrowserDirectoryEndpoint;
+use crate::remote_endpoint::attach_bearer_token;
 
 /// Browser-compatible onion proxy handle.
 ///
@@ -44,7 +45,7 @@ use crate::provider::RemoteRpcEndpoint;
 pub struct BrowserOnionProxy {
     pub(super) processor: Arc<Processor>,
     pub(super) client: OnionHttpsClient,
-    pub(super) directory_endpoint: Option<RemoteRpcEndpoint>,
+    pub(super) directory_endpoint: Option<BrowserDirectoryEndpoint>,
 }
 
 /// Typed response from a cancellable browser onion HTTPS request.
@@ -87,7 +88,7 @@ fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<Brow
 #[derive(Clone)]
 enum BrowserOnionDirectorySource {
     Local,
-    Remote(RemoteRpcEndpoint),
+    Remote(BrowserDirectoryEndpoint),
 }
 
 struct BrowserOnionDirectoryReader {
@@ -103,7 +104,7 @@ impl BrowserOnionDirectoryReader {
         }
     }
 
-    fn remote(processor: Arc<Processor>, endpoint: RemoteRpcEndpoint) -> Self {
+    fn remote(processor: Arc<Processor>, endpoint: BrowserDirectoryEndpoint) -> Self {
         Self {
             processor,
             source: BrowserOnionDirectorySource::Remote(endpoint),
@@ -166,15 +167,10 @@ impl BrowserOnionDirectoryReader {
 }
 
 /// Builds a directory RPC client under the shared credential transport policy.
-fn authenticated_rpc_client(endpoint: &RemoteRpcEndpoint) -> NodeResult<RpcClient> {
-    let client = RpcClient::new(endpoint.url.as_str())
-        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-    match &endpoint.api_token {
-        Some(token) => client
-            .with_bearer_token(token.to_string())
-            .map_err(|error| Error::RemoteRpcError(error.to_string())),
-        None => Ok(client),
-    }
+fn authenticated_rpc_client(endpoint: &BrowserDirectoryEndpoint) -> NodeResult<RpcClient> {
+    RpcClient::new(endpoint.url.as_str())
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))
+        .and_then(|client| attach_bearer_token(client, endpoint.api_token.as_deref()))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -231,7 +227,7 @@ async fn build_browser_route_from_reader(
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     target: OnionProxyTarget,
-    directory_endpoint: Option<RemoteRpcEndpoint>,
+    directory_endpoint: Option<BrowserDirectoryEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
     if let Some(endpoint) = directory_endpoint {
         let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint);
@@ -351,10 +347,11 @@ impl BrowserOnionProxy {
         request: OnionHttpsClientRequest,
         class: OnionLoopClass,
     ) -> NodeResult<BrowserOnionProxyResponse> {
-        let (target, call) = OnionHttpsCall::from_url(url, request)?;
-        let route = self.build_route(target).await?;
-        let response = self.client.request_with_class(&route, call, class).await?;
-        Ok(BrowserOnionProxyResponse { response, route })
+        self.request_http(url, OnionHttpsClientRequest {
+            class: Some(class),
+            ..request
+        })
+        .await
     }
 }
 

@@ -77,11 +77,11 @@ impl DelegateeKey {
     ///
     /// To protect account private keys in production, use [`DelegationBuilder`] instead.
     pub fn new_with_seckey(key: &SecretKey) -> Result<Self> {
-        let account_entity = Did::from(key.address()).to_string();
-        let account_type = "secp256k1".to_string();
-        let builder = DelegationBuilder::new(account_entity, account_type);
-        let sig = key.sign(&builder.unsigned_proof())?;
-        builder.set_delegator_signature(sig.to_vec()).build()
+        Self::new_with_seckey_at(
+            key,
+            crate::consts::DEFAULT_DELEGATION_TTL_MS,
+            crate::utils::get_epoch_ms(),
+        )
     }
 
     /// Mint a fresh [`DelegateeKey`] authorized by `key` for `ttl_ms` starting at `ts_ms`.

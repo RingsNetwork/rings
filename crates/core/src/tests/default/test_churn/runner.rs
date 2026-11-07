@@ -15,6 +15,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use super::driver::ChurnTraceDriver;
 use super::inbox::deliver_rejoined_inbox_messages;
 use super::inbox::inject_offline_inbox_messages;
+use super::inbox::rejoined_border_neighbors;
 use super::inbox::sample_ring_liveness_and_lookups;
 use super::inbox::LivenessSampleCounters;
 use super::ChurnMetrics;
@@ -577,23 +578,12 @@ async fn execute_churn_event(
                 .iter()
                 .map(|id| nodes[usize::from(id.0)].did())
                 .collect();
-            let node_did = nodes[node_idx].did();
-            if let Some(succ_did) = topology::successors(&live_dids, node_did, 1)
-                .first()
-                .copied()
-            {
-                if let Some(succ_idx) = nodes.iter().position(|n| n.did() == succ_did) {
-                    if succ_idx != node_idx {
-                        ensure_connected_pair(runtime, nodes, node_idx, succ_idx, driver).await;
-                    }
-                }
+            let (pred, succ) = rejoined_border_neighbors(nodes, &live_dids, node_idx);
+            if let Some((succ_idx, _)) = succ {
+                ensure_connected_pair(runtime, nodes, node_idx, succ_idx, driver).await;
             }
-            if let Some(pred_did) = topology::predecessor(&live_dids, node_did) {
-                if let Some(pred_idx) = nodes.iter().position(|n| n.did() == pred_did) {
-                    if pred_idx != node_idx {
-                        ensure_connected_pair(runtime, nodes, pred_idx, node_idx, driver).await;
-                    }
-                }
+            if let Some((pred_idx, _)) = pred {
+                ensure_connected_pair(runtime, nodes, pred_idx, node_idx, driver).await;
             }
         }
         _ => {}
