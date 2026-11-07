@@ -28,13 +28,11 @@ use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::carry;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
-use crate::onion::sphinx::header;
 use crate::onion::sphinx::header::OnionHeaderMac;
 use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::sphinx::layer::OnionLayer;
 use crate::onion::sphinx::layer::OnionLayerApplication;
 use crate::onion::sphinx::layer::OnionLayerHead;
-use crate::onion::sphinx::seed;
 use crate::onion::sphinx::seed::OnionCarrySeed;
 use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::tests::fixture::fixture_secret;
@@ -69,35 +67,23 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
     let mut out = vec![
         (
             "onion/kdf/header_salt".to_string(),
-            header::HEADER_KDF_SALT.to_vec(),
+            b"rings-node:onion-sphinx-header".to_vec(),
+        ),
+        ("onion/kdf/header_stream_info".to_string(), b"prg".to_vec()),
+        ("onion/kdf/header_mac_info".to_string(), b"mac".to_vec()),
+        ("onion/kdf/header_blind_info".to_string(), b"blind".to_vec()),
+        (
+            "onion/kdf/seed_salt".to_string(),
+            b"rings-node:onion-carry-seed".to_vec(),
         ),
         (
-            "onion/kdf/header_stream_info".to_string(),
-            header::STREAM_INFO.to_vec(),
+            "onion/kdf/key_salt".to_string(),
+            b"rings-node:onion-carry-key".to_vec(),
         ),
-        (
-            "onion/kdf/header_mac_info".to_string(),
-            header::MAC_INFO.to_vec(),
-        ),
-        (
-            "onion/kdf/header_blind_info".to_string(),
-            header::BLIND_INFO.to_vec(),
-        ),
-        ("onion/kdf/seed_salt".to_string(), seed::SEED_SALT.to_vec()),
-        ("onion/kdf/key_salt".to_string(), seed::KEY_SALT.to_vec()),
-        (
-            "onion/kdf/relay_info".to_string(),
-            seed::RELAY_INFO.to_vec(),
-        ),
-        (
-            "onion/kdf/relay_indices".to_string(),
-            seed::RELAY_INDICES.to_vec(),
-        ),
-        (
-            "onion/kdf/consumer_info".to_string(),
-            seed::CONSUMER_INFO.to_vec(),
-        ),
-        ("onion/kdf/key_info".to_string(), seed::KEY_INFO.to_vec()),
+        ("onion/kdf/relay_info".to_string(), b"relay".to_vec()),
+        ("onion/kdf/relay_indices".to_string(), vec![1_u8, 2_u8]),
+        ("onion/kdf/consumer_info".to_string(), b"consumer".to_vec()),
+        ("onion/kdf/key_info".to_string(), b"aez".to_vec()),
     ];
 
     // Carry seed schedule and AEZ carry slot.

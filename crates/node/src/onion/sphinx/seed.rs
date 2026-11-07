@@ -46,22 +46,22 @@ pub(crate) const ONION_CARRY_SEED_BYTES: usize = 32;
 pub(super) const SEGMENT_SEED_DRAWS: usize = 4;
 
 /// The relay indices `j = 1 … s`; the array length is checked against `s` at compile time.
-pub(crate) const RELAY_INDICES: [u8; ONION_SEGMENT_RELAYS] = [1, 2];
+const RELAY_INDICES: [u8; ONION_SEGMENT_RELAYS] = [1, 2];
 
 /// HKDF salt `D_seed` of the per-hop seed derivation `KDF₃₂`.
-pub(crate) const SEED_SALT: &[u8] = b"rings-node:onion-carry-seed";
+const SEED_SALT: &[u8] = b"rings-node:onion-carry-seed";
 
 /// HKDF salt `D_key` of the key derivation `KDF₄₈`.
-pub(crate) const KEY_SALT: &[u8] = b"rings-node:onion-carry-key";
+const KEY_SALT: &[u8] = b"rings-node:onion-carry-key";
 
 /// HKDF info label of a relay's seed; followed by the one-byte relay index `j`.
-pub(crate) const RELAY_INFO: &[u8] = b"relay";
+const RELAY_INFO: &[u8] = b"relay";
 
 /// HKDF info label of the consumer's seed.
-pub(crate) const CONSUMER_INFO: &[u8] = b"consumer";
+const CONSUMER_INFO: &[u8] = b"consumer";
 
 /// HKDF info label of the AEZ key.
-pub(crate) const KEY_INFO: &[u8] = b"aez";
+const KEY_INFO: &[u8] = b"aez";
 
 /// Declares a seed newtype over `[u8; 32]`, with the impls every seed shares: the byte wrapper
 /// and view of the layer codec, equality in constant time, and a `Debug` that redacts the bytes.
