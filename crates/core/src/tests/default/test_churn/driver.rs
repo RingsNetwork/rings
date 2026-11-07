@@ -1,4 +1,17 @@
-//! Trace driver bridging production dummy-transport churn into [`SimState`].
+//! Effect interpreter and causal-state monad bridging production dummy-transport churn into
+//! the pure [`SimState`] transition kernel (#773).
+//!
+//! # Functional Architecture
+//!
+//! - **Pure Kernel**: [`SimState::transition`] is a total, side-effect-free state transition
+//!   `SimState × SimAction -> Result<(SimState, SimTransitionOutput), SimTransitionError>`.
+//! - **Causal State Monad ([`NodeEventChain`])**: Sequences per-node Kleisli arrows of type
+//!   `Option<SimEventId> -> SimAction`, automatically threading the [`SimEventId`] emitted by
+//!   step $k$ as the `causal_parent` of step $k + 1$ and updating `last_node_event` /
+//!   `last_global_event`.
+//! - **Effect Interpreter ([`ChurnTraceDriver`])**: Observes imperative dummy-transport state
+//!   (active connection generations, delivered frames, storage persistence/yield callbacks, and
+//!   stabilizer maintenance outcomes) and lifts them into [`NodeEventChain`] pipelines.
 
 use std::collections::BTreeMap;
 
@@ -16,19 +29,39 @@ use crate::simulation::ScheduledDeliveryClass;
 use crate::simulation::SimulationRuntimeGuard;
 use crate::tests::default::Node;
 
+/// Stateful trace bridge mapping production node DIDs, dummy connection generations, and causal
+/// parent pointers into the pure [`SimState`] state machine.
 pub(super) struct ChurnTraceDriver {
+    /// Pure formal simulation state accumulated so far.
     pub(super) state: SimState,
+    /// Bijection from canonical node DID string to [`SimNodeId`].
     did_to_node: BTreeMap<String, SimNodeId>,
+    /// Inverse bijection from [`SimNodeId`] to canonical node DID string.
     node_to_did: BTreeMap<SimNodeId, String>,
+    /// Mapping from dummy WebRTC `connection_generation` ID to directed `(local, peer)` endpoints.
     generation_endpoints: BTreeMap<String, (SimNodeId, SimNodeId)>,
+    /// Currently active `(generation_id, lifecycle_event_id)` indexed by directed edge `(local, peer)`.
     active_generations: BTreeMap<(SimNodeId, SimNodeId), (String, SimEventId)>,
+    /// Unconsumed [`SimAction::Disconnect`] causal parent awaiting [`SimAction::ScheduleRepair`].
     pending_repair_intent: BTreeMap<SimNodeId, SimEventId>,
+    /// Most recent [`SimEventId`] recorded on each [`SimNodeId`].
     last_node_event: BTreeMap<SimNodeId, SimEventId>,
+    /// Most recent [`SimEventId`] recorded across the entire simulation.
     last_global_event: Option<SimEventId>,
 }
 
-/// Monadic causal-event builder threading `(ChurnTraceDriver, SimNodeId, Option<SimEventId>)`
-/// across a sequence of Kleisli transitions `Option<SimEventId> -> SimAction`.
+/// Monadic causal-event builder isomorphic to `State<(&mut ChurnTraceDriver, SimNodeId), Option<SimEventId>>`,
+/// sequencing Kleisli arrows `Option<SimEventId> -> SimAction`.
+///
+/// # Monad Laws
+///
+/// - **Unit (`begin_node_chain`)**: Seeds `causal_parent` from `initial_parent`, falling back to
+///   `last_node_event[node]` and `last_global_event` without mutating [`SimState`].
+/// - **Right Identity of Conditional Lift**: `chain.then_if(false, f)` is the identity morphism on
+///   `NodeEventChain`.
+/// - **Causal Associativity**: Chaining `.then(f).then(g)` feeds the [`SimEventId`] produced by
+///   `f(parent_0)` directly into `g(Some(event_f))`, guaranteeing a strictly monotone causal chain
+///   in [`SimState`].
 struct NodeEventChain<'a> {
     driver: &'a mut ChurnTraceDriver,
     node: SimNodeId,
@@ -36,7 +69,8 @@ struct NodeEventChain<'a> {
 }
 
 impl<'a> NodeEventChain<'a> {
-    /// Apply `build(causal_parent)` and advance `causal_parent` to the resulting [`SimEventId`].
+    /// Kleisli bind (`>>=`): apply `build(self.causal_parent)` to [`SimState`] and advance
+    /// `self.causal_parent` and `last_node_event[self.node]` to the resulting [`SimEventId`].
     fn then<F>(mut self, build: F) -> Self
     where F: FnOnce(Option<SimEventId>) -> SimAction {
         let event = self.driver.apply(build(self.causal_parent));
@@ -45,7 +79,8 @@ impl<'a> NodeEventChain<'a> {
         self
     }
 
-    /// Conditionally apply `build(causal_parent)` when `cond` holds, otherwise preserve state.
+    /// Guarded Kleisli bind: apply `build(self.causal_parent)` when `cond` holds, or act as the
+    /// identity morphism when `cond` is `false`.
     fn then_if<F>(self, cond: bool, build: F) -> Self
     where F: FnOnce(Option<SimEventId>) -> SimAction {
         if cond {
@@ -55,7 +90,7 @@ impl<'a> NodeEventChain<'a> {
         }
     }
 
-    /// Return the most recent [`SimEventId`] produced along this chain.
+    /// Extract the terminal [`SimEventId`] produced by a non-empty causal chain.
     fn finish(self) -> SimEventId {
         self.causal_parent
             .expect("NodeEventChain::finish requires at least one applied transition")
@@ -63,6 +98,7 @@ impl<'a> NodeEventChain<'a> {
 }
 
 impl ChurnTraceDriver {
+    /// Construct a new trace driver with bijective `Did <-> SimNodeId` tables for `nodes`.
     pub(super) fn new(nodes: &[Node]) -> Self {
         let (did_to_node, node_to_did) = nodes
             .iter()
@@ -86,6 +122,8 @@ impl ChurnTraceDriver {
         }
     }
 
+    /// Monadic `pure` / `return`: open a causal event chain on `node` seeded with `initial_parent`
+    /// (or the latest event observed on `node` / globally).
     fn begin_node_chain(
         &mut self,
         node: SimNodeId,
@@ -101,6 +139,7 @@ impl ChurnTraceDriver {
         }
     }
 
+    /// Resolve a canonical DID string to its [`SimNodeId`].
     pub(super) fn node_id(&self, did: &str) -> SimNodeId {
         *self
             .did_to_node
@@ -108,6 +147,7 @@ impl ChurnTraceDriver {
             .unwrap_or_else(|| panic!("unknown DID in churn trace driver: {did}"))
     }
 
+    /// Resolve a [`SimNodeId`] to its canonical DID string.
     pub(super) fn node_did(&self, node: SimNodeId) -> &str {
         self.node_to_did
             .get(&node)
@@ -115,12 +155,14 @@ impl ChurnTraceDriver {
             .unwrap_or_else(|| panic!("unknown SimNodeId in churn trace driver: {node:?}"))
     }
 
+    /// Record an initial [`SimAction::InjectSync`] seeding `entries` storage items on `node`.
     pub(super) fn record_inject_sync(&mut self, node: SimNodeId, entries: u64) -> SimEventId {
         self.begin_node_chain(node, None)
             .then(|_| SimAction::InjectSync { node, entries })
             .finish()
     }
 
+    /// Advance the model's monotonic virtual clock by `delta_ms` when `delta_ms > 0`.
     pub(super) fn advance_virtual(&mut self, delta_ms: u64) {
         if delta_ms == 0 {
             return;
@@ -128,12 +170,14 @@ impl ChurnTraceDriver {
         let _ = self.apply(SimAction::AdvanceVirtualTime { delta_ms });
     }
 
+    /// Record a [`SimAction::Join`] for `node` bootstrapping via `via`.
     pub(super) fn record_join(&mut self, node: SimNodeId, via: SimNodeId) -> SimEventId {
         self.begin_node_chain(node, None)
             .then(|_| SimAction::Join { node, via })
             .finish()
     }
 
+    /// Record a [`SimAction::Leave`] for `node` and clear any stale repair intent on the departing node.
     pub(super) fn record_leave(&mut self, node: SimNodeId, graceful: bool) -> SimEventId {
         let event = self
             .begin_node_chain(node, None)
@@ -143,6 +187,7 @@ impl ChurnTraceDriver {
         event
     }
 
+    /// Record a [`SimAction::Crash`] for `node` and clear any stale repair intent on the crashed node.
     pub(super) fn record_crash(&mut self, node: SimNodeId) -> SimEventId {
         let event = self
             .begin_node_chain(node, None)
@@ -152,6 +197,8 @@ impl ChurnTraceDriver {
         event
     }
 
+    /// Ensure `generation` is recorded as `Active` on `(node, peer)`, causally closing any
+    /// superseded generation first via [`NodeEventChain`].
     pub(super) fn ensure_active_generation(
         &mut self,
         node: SimNodeId,
@@ -204,6 +251,8 @@ impl ChurnTraceDriver {
         active_event
     }
 
+    /// Scan all directed pairs in `nodes` and synchronize their active dummy WebRTC generations
+    /// into [`SimState`].
     pub(super) fn sync_node_connections(&mut self, nodes: &[Node]) {
         let active_edges: Vec<(SimNodeId, SimNodeId, String)> = nodes
             .iter()
@@ -230,6 +279,7 @@ impl ChurnTraceDriver {
         }
     }
 
+    /// Record [`SimConnectionState::Closed`] on `(node, peer)` if an active generation exists.
     pub(super) fn close_edge_if_active(&mut self, node: SimNodeId, peer: SimNodeId) {
         let Some(generation) = self.state.active_generation(node, peer).map(str::to_owned) else {
             return;
@@ -251,6 +301,8 @@ impl ChurnTraceDriver {
         self.active_generations.remove(&(node, peer));
     }
 
+    /// Record [`SimAction::Disconnect`] on `observer` for `departed` (causally parented on the
+    /// departure failure event) and register `pending_repair_intent` for the next maintenance pass.
     pub(super) fn observe_peer_removal_if_due(&mut self, observer: SimNodeId, departed: SimNodeId) {
         if self.state.has_disconnected(observer, departed) {
             self.close_edge_if_active(observer, departed);
@@ -272,6 +324,9 @@ impl ChurnTraceDriver {
         self.close_edge_if_active(observer, departed);
     }
 
+    /// Lift one delivered production frame `delivery` into a monadic causal chain:
+    /// `SubmitFrame -> AdmitFrame -> DispatchFrame -> [AdvanceReassembly] -> DeliverFrame`,
+    /// followed by draining any persistence/yield observations emitted by the handler.
     pub(super) fn record_delivered_frame(
         &mut self,
         runtime: &SimulationRuntimeGuard,
@@ -349,6 +404,8 @@ impl ChurnTraceDriver {
         self.drain_production_observations(runtime);
     }
 
+    /// Drain all queued [`ProductionTraceObservation`] items from `runtime` and append them to
+    /// their respective node's causal chain.
     pub(super) fn drain_production_observations(&mut self, runtime: &SimulationRuntimeGuard) {
         let observations = runtime
             .take_production_trace_observations()
@@ -379,6 +436,8 @@ impl ChurnTraceDriver {
         }
     }
 
+    /// Record one storage maintenance pass on `node`, consuming any pending disconnect repair
+    /// intent via a preceding [`SimAction::ScheduleRepair`] step in the causal chain.
     pub(super) fn observe_maintenance(
         &mut self,
         node: SimNodeId,
@@ -404,6 +463,7 @@ impl ChurnTraceDriver {
             .finish();
     }
 
+    /// Invoke the pure [`SimState::transition`] kernel with `action` and update `last_global_event`.
     fn apply(&mut self, action: SimAction) -> SimEventId {
         let (next, output) = std::mem::take(&mut self.state)
             .transition(action)
@@ -414,6 +474,7 @@ impl ChurnTraceDriver {
     }
 }
 
+/// Pure mapping from transport [`ScheduledDeliveryClass`] to modeled [`SimTransferClass`].
 fn model_class(class: ScheduledDeliveryClass) -> Option<SimTransferClass> {
     match class {
         ScheduledDeliveryClass::Lifecycle | ScheduledDeliveryClass::LinkControl => None,

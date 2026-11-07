@@ -149,9 +149,9 @@ impl DelegationHorizon {
     }
 }
 
-/// Pure validation of a candidate [`DelegateeKey`] against `current` at `now_ms`.
+/// Pure Kleisli validation of a candidate [`DelegateeKey`] against `current` at `now_ms`.
 ///
-/// Laws:
+/// Separates all cryptographic and horizon-order invariants from key-file I/O and lock mutation:
 /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
 /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
 /// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
@@ -272,14 +272,16 @@ impl SessionKeyRing {
         (state.rotation_succeeded_total, state.rotation_failed_total)
     }
 
-    /// Run `mint`, validate the resulting [`DelegateeKey`] at `now_ms`, run `persist`, and install
-    /// the key while retaining the previous unexpired key; any error from `mint`, law validation,
-    /// or `persist` increments `rotation_failed_total` and leaves the active key untouched.
+    /// Monadic `Result` Kleisli pipeline (`mint >=> validate_delegation_renewal >=> persist`) that
+    /// installs `next` while retaining the displaced unexpired key; any error from `mint`, pure
+    /// law validation, or `persist` short-circuits, increments `rotation_failed_total`, and leaves
+    /// the active key and retained list untouched.
     ///
     /// Laws:
     /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
     /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
     /// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
+    /// - **Transactional failure**: `Err(_)` preserves `state.current` and `state.retained`.
     pub(crate) fn renew_with<M, P>(
         &self,
         now_ms: u128,

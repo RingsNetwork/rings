@@ -214,7 +214,12 @@ async fn try_renew_delegation(
     Ok(next_horizon)
 }
 
-/// Pure decision produced by one step of [`HorizonSupervisorState`].
+/// Pure decision ADT produced by one step of the [`HorizonSupervisorState`] Mealy machine,
+/// parameterized by the renewal witness type `R`.
+///
+/// Instantiating `R = std::convert::Infallible` in [`signing_horizon`] makes the
+/// [`Self::AttemptRenewal`] branch uninhabited at compile time, eliminating runtime `.expect()` or
+/// `unreachable!()` panics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HorizonAction<R> {
     /// Horizon reached (`t >= h`): log and terminate with [`DelegationHorizon::reached`].
@@ -236,7 +241,14 @@ enum HorizonAction<R> {
     },
 }
 
-/// Pure state machine tracking per-horizon warning and renewal-attempt idempotency.
+/// Pure Mealy state machine tracking per-horizon warning and renewal-attempt idempotency:
+/// `HorizonSupervisorState × (DelegationHorizon, u128, u128, Option<R>) -> (HorizonSupervisorState, HorizonAction<R>)`.
+///
+/// Laws:
+/// - **At-most-once renewal per horizon**: For a given `h`, [`HorizonAction::AttemptRenewal`] is
+///   emitted at most once (`attempted_horizon_ms != Some(h)`).
+/// - **At-most-once warning per horizon**: For a given `h`, `warn_remaining_ms` is `Some(_)` at
+///   most once (`warned_horizon_ms != Some(h)`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HorizonSupervisorState {
     warned_horizon_ms: Option<u128>,
@@ -244,6 +256,7 @@ struct HorizonSupervisorState {
 }
 
 impl HorizonSupervisorState {
+    /// Pure state transition computing the next supervisor state and [`HorizonAction`] at `now_ms`.
     fn step<R>(
         self,
         horizon: DelegationHorizon,
@@ -281,6 +294,8 @@ impl HorizonSupervisorState {
         }
     }
 
+    /// Pure transition into the fallback expiring sleep for `horizon_ms`, emitting the one-time
+    /// warning payload iff `self.warned_horizon_ms != Some(horizon_ms)`.
     fn fallback_sleep<R>(self, horizon_ms: u128, remaining_ms: u128) -> (Self, HorizonAction<R>) {
         let warn_remaining_ms = if self.warned_horizon_ms == Some(horizon_ms) {
             None

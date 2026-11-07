@@ -1,4 +1,17 @@
-//! Liveness/routing sampling and offline held-inbox delivery helpers for churn scenarios (#773).
+//! Pure ring-liveness / multi-hop routing observers and offline held-inbox delivery helpers
+//! for churn scenarios (#773).
+//!
+//! # Functional Architecture
+//!
+//! - **Commutative Monoid ([`LivenessSampleCounters`])**: Aggregates ring-liveness and routing
+//!   probe observations across stabilize ticks via [`LivenessSampleCounters::combine`].
+//! - **Pure Observation & Planning**: [`sample_ring_liveness_and_lookups`],
+//!   [`resolve_multihop_find_successor`], [`plan_offline_inbox_injection`], and
+//!   [`rejoined_border_neighbors`] inspect topology snapshots without mutating node or transport
+//!   state.
+//! - **Effectful Transport / Storage Shell**: [`inject_offline_inbox_messages`],
+//!   [`deliver_rejoined_inbox_messages`], and [`poll_held_inbox_delivery`] execute the planned
+//!   connections, storage-repair passes, and inbox drains.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -27,13 +40,25 @@ use crate::tests::default::Node;
 const HELD_INBOX_PREFIX: &[u8] = b"churn-held-inbox-";
 
 /// Commutative monoid of liveness and multi-hop routing sample counts.
+///
+/// # Monoid Laws
+///
+/// - **Identity**: `LivenessSampleCounters::default().combine(x) == x == x.combine(LivenessSampleCounters::default())`.
+/// - **Associativity**: `a.combine(b).combine(c) == a.combine(b.combine(c))`.
+/// - **Commutativity**: `a.combine(b) == b.combine(a)` (under `u64::saturating_add`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(super) struct LivenessSampleCounters {
+    /// Live nodes observed with an empty successor list.
     pub(super) orphan_samples: u64,
+    /// Total live-node observations across all stabilize ticks.
     pub(super) live_node_samples: u64,
+    /// Multi-hop `find_successor` probes that resolved the exact true live successor.
     pub(super) lookup_successes: u64,
+    /// Total multi-hop `find_successor` probes attempted.
     pub(super) lookup_attempts: u64,
+    /// Sum of live population counts across all stabilize ticks.
     pub(super) population_sum: u64,
+    /// Number of stabilize ticks sampled.
     pub(super) population_probes: u64,
 }
 
@@ -196,12 +221,19 @@ fn resolve_multihop_find_successor(
 
 /// Pure plan for injecting one offline held-inbox message for a departed `target` node.
 struct OfflineInboxInjectionPlan {
+    /// Departed recipient node ID.
     target: SimNodeId,
+    /// Canonical DID of `target`.
     target_did: Did,
+    /// Live predecessor DID of `target` acting as the message sender/owner.
     owner_did: Did,
+    /// Node pool index of `owner_did`.
     owner_idx: usize,
+    /// Node pool index of the live successor of `target` responsible for holding the relay inbox.
     holder_idx: usize,
+    /// Canonical `StorageKey::inbox_of(target_did)` string.
     inbox_key: String,
+    /// Deterministic custom payload bytes injected for `target`.
     payload: Vec<u8>,
 }
 
@@ -232,6 +264,9 @@ fn plan_offline_inbox_injection(
     })
 }
 
+/// Effectful interpreter executing [`OfflineInboxInjectionPlan`] for each departed target in
+/// `pending_inbox_targets` and recording confirmed relay-carrier persistence in
+/// `active_held_messages`.
 pub(super) async fn inject_offline_inbox_messages(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -279,6 +314,7 @@ pub(super) async fn inject_offline_inbox_messages(
     }
 }
 
+/// Check whether `node`'s [`EntryKind::RelayMessage`] carrier store currently holds `key`.
 async fn has_relay_inbox_entry(node: &Node, key: &str) -> bool {
     let dht = node.dht();
     let Some(store) = dht.carrier_storage(EntryKind::RelayMessage) else {
@@ -316,6 +352,8 @@ fn rejoined_border_neighbors(
     (pred, succ)
 }
 
+/// Drive bounded storage-repair convergence (`Law (Convergence)` of `dht::relay_holder`) for
+/// rejoined nodes with pending held-inbox messages and drain delivered payloads from `app_inboxes`.
 pub(super) async fn deliver_rejoined_inbox_messages(
     runtime: &SimulationRuntimeGuard,
     nodes: &[Node],
@@ -406,6 +444,8 @@ pub(super) async fn deliver_rejoined_inbox_messages(
     }
 }
 
+/// Non-blockingly drain up to 16 ready deliveries from `inbox` and return `true` if one matches
+/// `expected_payload`.
 async fn poll_held_inbox_delivery(inbox: &ApplicationInbox, expected_payload: &[u8]) -> bool {
     let expected = ApplicationData::Custom(CustomMessage(expected_payload.to_vec()));
     std::iter::from_fn(|| inbox.next().now_or_never().flatten())

@@ -106,8 +106,16 @@ pub fn open_mail(
         .collect()
 }
 
-/// Semilattice join over `(Opening, Option<PublicKey<33>>)` ordered by `Incomplete < Unreadable < Opened`
-/// (`Law (Join)`).
+/// Bounded join-semilattice join (`⊔`) over `(Opening, Option<PublicKey<33>>)` ordered by
+/// `Incomplete < Unreadable < Opened` (`Law (Join)`).
+///
+/// # Semilattice Laws
+///
+/// - **Idempotency**: `join_opening(a, a) == a`.
+/// - **Associativity**: `join_opening(join_opening(a, b), c) == join_opening(a, join_opening(b, c))`.
+/// - **Rank Commutativity**: `join_opening(a, b).0.rank() == join_opening(b, a).0.rank()`.
+/// - **Bottom Element**: `(Opening::Incomplete { mail_id }, None)` is the identity element for a
+///   given `mail_id`.
 fn join_opening(
     earlier: (Opening, Option<PublicKey<33>>),
     candidate: (Opening, Option<PublicKey<33>>),

@@ -189,7 +189,9 @@ fn decode_stored_mail_row(
         .map(|id| BrowserStoredMail::new(id.to_owned(), stored))
 }
 
-/// Monadic boundary combinator lifting a fallible browser-mail effect into a JavaScript `Promise`.
+/// Monadic boundary combinator (`ResultT<Promise, BrowserMailError> -> Promise`) lifting a
+/// fallible asynchronous browser-mail effect into a JavaScript `Promise` and mapping any
+/// [`BrowserMailError`] into a `JsError` rejection.
 fn mail_effect_to_promise<Fut>(effect: Fut) -> Promise
 where Fut: std::future::Future<Output = Result<JsValue, BrowserMailError>> + 'static {
     future_to_promise(async move {
@@ -266,8 +268,10 @@ impl Provider {
             .ok_or(BrowserMailError::Disabled)
     }
 
-    /// Monadic Reader/Effect combinator running `effect` against [`Self::enabled_browser_mail`]
-    /// and lifting the result into a JavaScript `Promise`.
+    /// Monadic `ReaderT<Rc<BrowserMail>, ResultT<Promise, BrowserMailError>>` combinator: reads
+    /// [`Self::enabled_browser_mail`] (short-circuiting with [`BrowserMailError::Disabled`] when
+    /// mail is not enabled), runs the Kleisli arrow `effect`, and lifts the result into a
+    /// JavaScript `Promise`.
     fn with_enabled_mail_promise<F, Fut>(&self, effect: F) -> Promise
     where
         F: FnOnce(Rc<BrowserMail>) -> Fut + 'static,

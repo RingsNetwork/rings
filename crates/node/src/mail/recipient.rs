@@ -232,7 +232,8 @@ pub enum RecipientError<E> {
     Inbox(#[source] E),
 }
 
-/// Pure classification of one `(Opening, Option<PublicKey<33>>)` against `records`.
+/// Pure decision ADT classifying one `(Opening, Option<PublicKey<33>>)` against the current
+/// `records` snapshot before any inbox or storage side effect runs.
 enum OpeningAction {
     /// Manifest lists a missing chunk; retry on the next poll without recording `opened`.
     Incomplete,
@@ -261,6 +262,11 @@ enum OpeningAction {
 
 /// Pure decision function mapping an `(Opening, Option<PublicKey<33>>)` and the current
 /// `records` snapshot into an [`OpeningAction`].
+///
+/// Enforces the **Key-isolation law** and **Cross-key retention law** (#1153): if a retained
+/// previous key already recorded `opened-<retained_pk>-<mail_id>`, re-observing the same mail
+/// after key rotation records `opened-<active_pk>-<mail_id>` without double-counting `unreadable`
+/// or `duplicates` in [`PollReport`].
 fn classify_opening(
     opening: Opening,
     opened_by: Option<PublicKey<33>>,

@@ -66,7 +66,9 @@ impl fmt::Display for RemoteRpcEndpoint {
 pub struct RemoteRpcProxy(reqwest::Url);
 
 impl RemoteRpcProxy {
-    /// Parse `url` as an HTTP(S) proxy for remote RPC endpoints.
+    /// Parse `url` as an HTTP(S) proxy for remote RPC endpoints via a pure `Result::and_then`
+    /// Kleisli validation pipeline (scheme -> authority/path/query/fragment -> host/port ->
+    /// native proxy builder).
     pub fn parse(url: &str) -> Result<Self> {
         reqwest::Url::parse(url)
             .map_err(|error| Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}")))
@@ -139,7 +141,8 @@ impl fmt::Display for RemoteRpcProxy {
     }
 }
 
-/// Attach `api_token` (when present) to `client`.
+/// Kleisli combinator attaching `api_token` (when `Some`) as a Bearer header on `client`, or
+/// acting as the identity `Ok(client)` when `None`.
 fn attach_bearer_token(
     client: rings_rpc::jsonrpc::Client,
     api_token: Option<&str>,

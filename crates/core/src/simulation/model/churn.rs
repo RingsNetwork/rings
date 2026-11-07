@@ -1,4 +1,15 @@
 //! Weibull session-length and Poisson arrival generator for churn simulations (#773).
+//!
+//! # Mathematical Model (Stutzbach & Rejaie IMC 2006 / Bamboo USENIX ATC 2004)
+//!
+//! - **Session lifetimes**: Drawn from $\text{Weibull}(k, \lambda)$ with empirical heavy-tailed
+//!   shape $k \in [0.34, 0.38]$ and scale $\lambda = t_{\text{med}} / (\ln 2)^{1/k}$ so the
+//!   survival function satisfies $S(t_{\text{med}}) = \exp(-(t_{\text{med}}/\lambda)^k) = 1/2$.
+//! - **Stationary arrivals**: Inter-arrival intervals are drawn from an exponential (Poisson)
+//!   process with rate $\Lambda = \frac{N}{2\,t_{\text{med}} \int_0^1 2^{-x^k}\,dx}$, keeping the
+//!   expected live population stationary around $N$ across the simulation window.
+//! - **Pure PRNG State Threading**: [`WeibullSessionGenerator`] threads a 64-bit state through
+//!   [`mix_seed`] (`State<u64, A>`), guaranteeing bit-for-bit replay determinism across platforms.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -419,6 +430,7 @@ impl WeibullSessionGenerator {
         schedule
     }
 
+    /// Uniformly sample one live peer from `live_nodes` when non-empty.
     fn pick_live_peer(&mut self, live_nodes: &BTreeSet<SimNodeId>) -> Option<SimNodeId> {
         (!live_nodes.is_empty()).then(|| {
             self.rng_state = mix_seed(self.rng_state);
@@ -431,6 +443,8 @@ impl WeibullSessionGenerator {
         })
     }
 
+    /// Select a joining [`SimNodeId`] at `now_ms`: prefer a departed node whose offline duration
+    /// meets `rejoin_cooldown_ms`, falling back to minting a fresh [`SimNodeId`] below `max_pool_nodes`.
     fn select_joining_node(
         &mut self,
         now_ms: u64,

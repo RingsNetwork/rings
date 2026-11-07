@@ -1,4 +1,8 @@
 //! Production churn scenario runner driving real `Swarm`, `PeerRing`, and `Stabilizer` phases.
+//!
+//! Pure scheduling (`WeibullSessionGenerator`), pure liveness/routing observation
+//! ([`sample_ring_liveness_and_lookups`]), and pure metric synthesis ([`compute_churn_metrics`])
+//! are separated from the effectful transport/stabilizer shell executed at each virtual-time tick.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -54,6 +58,8 @@ const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 512;
 const MAX_FRAME_SERVICE_MS: u64 = 16;
 const INITIAL_STORAGE_PAYLOAD_BYTES: usize = 512;
 
+/// Execute a complete deterministic churn scenario and return its formal [`SimState`],
+/// [`ChurnMetrics`], and any [`SimInvariantViolation`](crate::simulation::model::SimInvariantViolation)s.
 pub(super) async fn run_churn_scenario(config: ChurnScenarioConfig) -> ChurnScenarioOutcome {
     let runtime =
         SimulationRuntimeGuard::enter(config.seed, TEST_EPOCH_MS, ProtectionProfile::ALL_ENABLED)
@@ -359,6 +365,7 @@ async fn seed_initial_storage(
     drain_churn_traced(runtime, nodes, driver).await;
 }
 
+/// Deterministically derive a [`PlacedEntry`] whose key falls into `owner`'s storage range.
 fn derive_entry_for_owner(owner: &Node, slot: usize) -> PlacedEntry {
     (0_u64..50_000)
         .find_map(|nonce| {
@@ -390,6 +397,9 @@ fn derive_entry_for_owner(owner: &Node, slot: usize) -> PlacedEntry {
         })
 }
 
+/// Pure predicate deciding whether a departed `node` at `depart_ms` will rejoin after the next
+/// stabilize tick (when its offline inbox message is injected) and remain live across at least one
+/// delivery stabilize tick within `duration_ms`.
 fn will_rejoin_at_stabilize_tick(
     node: SimNodeId,
     depart_ms: u64,
