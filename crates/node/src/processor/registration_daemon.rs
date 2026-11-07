@@ -73,7 +73,7 @@ impl Processor {
     /// Immediately publish one heartbeat of every configured registration task with the active
     /// session key, so peers and registries observe a renewed `delegatee_public_key` without
     /// waiting for the next periodic tick (#1153).
-    pub(crate) async fn republish_registrations(&self) {
+    pub async fn republish_registrations(&self) {
         let stop = self.tasks.stop_token();
         for (index, task) in self.registration_tasks.iter().enumerate() {
             if stop.should_stop() {

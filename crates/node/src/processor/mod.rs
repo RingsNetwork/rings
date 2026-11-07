@@ -193,7 +193,7 @@ impl Processor {
     }
 
     /// Record a failed delegation renewal attempt when minting or persisting fails before key swap.
-    pub(crate) fn record_failed_delegation_renewal(&self) {
+    pub fn record_failed_delegation_renewal(&self) {
         self.session_keys.record_failed_rotation();
     }
 
