@@ -109,8 +109,9 @@ edges (#843).
   emitted only while the link's Application transport lane has credit (#913), read through a
   read-only view, so the rate is `min(r_phase, the receiver's release rate)`,
   `r_phase ∈ {r, r_idle}`: the floor and the dwell hold while the receiver releases, and a
-  credit wait delays real and cover cells alike. Cells use fixed size classes from 16 KiB to
-  12 MiB, preserved across every edge.
+  credit wait delays real and cover cells alike. Cells use fixed size classes `b` from 16 KiB
+  (the default) to 12 MiB, chosen per session by the caller (`OnionLoopClass`) and preserved
+  across every edge (`u(b) = b / 16 KiB` admission units per cell).
 - **Session fate.** A session direction ends with `fin(n)` only when its bytes really ended,
   and with `abort(n)`, carrying no reason, on any failure. A receiver reorders within a
   bounded window; a sequence gap that persists past it, a frame that finds the session's queue
