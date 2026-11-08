@@ -67,6 +67,9 @@ pub struct Provider {
     /// constructor that opts in before processor build installs this state.
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     browser_mail: Option<std::rc::Rc<browser::provider::mail::BrowserMail>>,
+    /// Best-effort `pagehide` departure listener for browser providers (#1057).
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    pagehide: Option<std::rc::Rc<browser::provider::listener::PagehideListener>>,
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -120,6 +123,9 @@ impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
+        let pagehide = browser::provider::listener::PagehideListener::register(&processor)
+            .map(std::rc::Rc::new);
         Self {
             processor,
             handler: InternalRpcHandler,
@@ -130,6 +136,8 @@ impl Provider {
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             browser_mail: None,
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            pagehide,
         }
     }
 
@@ -255,6 +263,18 @@ impl Provider {
         self.processor.registrations_published().await
     }
 
+    pub(crate) async fn leave_internal(&self) -> Result<()> {
+        self.processor.leave().await
+    }
+
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
+    /// members and send `Leave { successor_list }` to this node's predecessor and successor head
+    /// before transports close.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub async fn leave(&self) -> Result<()> {
+        self.leave_internal().await
+    }
+
     /// Close this node and release every store it holds, so that the stores can be opened
     /// again in this process: an in-process re-init (#1085).
     ///
@@ -311,10 +331,12 @@ impl Provider {
             onion_directory_endpoint,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             browser_mail,
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            pagehide,
         } = self;
         drop((handler, extensions, dispatch_drops, onion_runtime));
         #[cfg(all(feature = "browser", target_family = "wasm"))]
-        drop((onion_directory_endpoint, browser_mail));
+        drop((onion_directory_endpoint, browser_mail, pagehide));
         // Atomic: `Some` only for the last strong clone, which a `Weak` upgrade cannot race.
         match Arc::into_inner(processor) {
             Some(processor) => {
@@ -399,6 +421,9 @@ impl Provider {
         let processor = Arc::new(processor_builder.build()?);
 
         let extensions = crate::extension::ext::Extensions::new(processor.clone());
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
+        let pagehide = browser::provider::listener::PagehideListener::register(&processor)
+            .map(std::rc::Rc::new);
 
         Ok(Provider {
             processor,
@@ -410,6 +435,8 @@ impl Provider {
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             browser_mail: None,
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
+            pagehide,
         })
     }
 

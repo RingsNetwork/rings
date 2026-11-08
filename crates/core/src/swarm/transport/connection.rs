@@ -28,6 +28,10 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Leave;
+use crate::message::Message;
+use crate::message::PayloadSender;
+use crate::message::SyncEntriesWithSuccessor;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
@@ -345,6 +349,68 @@ impl SwarmTransport {
     /// disconnect cleanup.
     pub(crate) fn notify_admitted_predecessor(&self, peer: Did) -> Result<Option<Did>> {
         self.notify_admitted_predecessor_with_observer(peer, || {})
+    }
+
+    /// Apply a voluntary `Leave` from `sender` iff this node holds `sender` as its predecessor
+    /// or successor (#1057).
+    pub(crate) fn handle_peer_leave(
+        &self,
+        sender: Did,
+        successor_list: &[Did],
+    ) -> Result<Option<TopologyRemoval>> {
+        self.with_connection_lifecycle(|| {
+            let active = self.active_connections()?;
+            self.dht.handle_leave(sender, successor_list, |peer| {
+                self.is_routable_active_candidate(peer, &active)
+            })
+        })
+    }
+
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
+    /// members through the ack-gated hand-off and send `Leave { successor_list }` to this node's
+    /// predecessor and successor head before transports close.
+    pub(crate) async fn leave(&self) -> Result<()> {
+        if let Ok(action) = self.dht.hand_off_relay_carriers_for_leave().await {
+            if let Ok(deliveries) = action.coalesced_storage_sync_deliveries() {
+                join_all(deliveries.into_iter().map(|delivery| async move {
+                    let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
+                    let _ = self.send_storage_sync_tracked(msg).await;
+                }))
+                .await;
+            }
+        }
+
+        let state = self.dht.topology_state()?;
+        let mut targets = Vec::with_capacity(2);
+        for candidate in state
+            .predecessor
+            .into_iter()
+            .chain(state.successors.first().copied())
+        {
+            if candidate != self.dht.did && !targets.contains(&candidate) {
+                targets.push(candidate);
+            }
+        }
+        let leave_msg = Message::Leave(Leave {
+            successor_list: state.successors,
+        });
+        join_all(targets.into_iter().map(|target| {
+            let leave_msg = leave_msg.clone();
+            async move {
+                if self.get_connection(target).is_none() {
+                    return;
+                }
+                if let Ok(payload) = self
+                    .protocol_egress()
+                    .originate(leave_msg, target, Some(target))
+                    .await
+                {
+                    let _ = self.send_payload_tracked(payload).await;
+                }
+            }
+        }))
+        .await;
+        Ok(())
     }
 
     fn notify_admitted_predecessor_with_observer(

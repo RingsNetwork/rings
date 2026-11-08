@@ -262,8 +262,13 @@ impl<'data> StorageSyncBatch<'data> {
         // again, and it holds back no other entry of the batch. Such an entry may be honest:
         // live on the sender's clock and not on this one, up to the skew tolerance apart, or
         // stored before the storage cutover in a shape the witness law refuses.
-        if should_persist_synced_entry(transport, self.destination, placed)?
-            && self.relay_relocation_permits(transport, placed)?
+        if should_persist_synced_entry(
+            transport,
+            self.destination,
+            self.purpose,
+            self.sender,
+            placed,
+        )? && self.relay_relocation_permits(transport, placed)?
         {
             placed.validate_placement(transport.storage_redundancy())?;
             match placed
@@ -389,14 +394,23 @@ fn test_per_entry_yield_ablation_reaches_real_storage_batch_policy() {
 fn should_persist_synced_entry(
     transport: &SwarmTransport,
     destination: StorageSyncDestination,
+    purpose: StorageSyncPurpose,
+    sender: Did,
     placed: &PlacedEntry,
 ) -> Result<bool> {
     if !storage_sync_destination_accepts_placement(destination, placed.key) {
         return Ok(false);
     }
-    // A relay carrier is persisted by the members of its key alone (`Law (Members)`).
+    // A relay carrier is persisted by the members of its key alone (`Law (Members)`), or by a
+    // member that replaces `sender` under an ownership hand-off (#1057).
     if placed.entry.kind.is_relay_inbox() {
-        return transport.dht.is_relay_member(placed.key);
+        return if purpose.permits_source_cleanup() {
+            transport
+                .dht
+                .is_relay_member_for_handoff(placed.key, sender)
+        } else {
+            transport.dht.is_relay_member(placed.key)
+        };
     }
 
     match transport.dht.find_storage_owner(placed.key)? {

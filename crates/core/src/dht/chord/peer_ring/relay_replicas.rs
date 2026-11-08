@@ -109,6 +109,21 @@ impl PeerRing {
         Ok(self.relay_members(key)?.contains(self.did))
     }
 
+    /// Whether this node is a member of the relay key `key` under a hand-off from `sender`:
+    /// either under its current view, or under its view with `sender` holding no relay mail
+    /// (#1057).
+    pub(crate) fn is_relay_member_for_handoff(&self, key: Did, sender: Did) -> Result<bool> {
+        if self.is_relay_member(key)? {
+            return Ok(true);
+        }
+        Ok(relay_members(
+            &self.relay_segment_without(sender)?,
+            key,
+            self.relay_replicas(),
+        )
+        .contains(self.did))
+    }
+
     /// This node's place in the chain of `key`, `None` when it is no member.
     pub(crate) fn relay_chain_position(&self, key: Did) -> Result<Option<ChainPosition>> {
         Ok(chain_position(
