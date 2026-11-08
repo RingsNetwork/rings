@@ -610,6 +610,70 @@ impl PeerRing {
             removal
         })
     }
+
+    /// Apply a voluntary `Leave` from `sender` iff this node holds `sender` as its predecessor
+    /// or successor (#1057).
+    ///
+    /// Removes only `sender` from this node's topology view and promotes any routable replacement
+    /// from `successor_list` while successor capacity remains, without removing any other peer.
+    pub(crate) fn handle_leave(
+        &self,
+        sender: Did,
+        successor_list: &[Did],
+        is_routable: impl Fn(Did) -> bool,
+    ) -> Result<Option<TopologyRemoval>> {
+        if sender == self.did {
+            return Ok(None);
+        }
+        let (previous, next) = self.relay_chain_neighbours()?;
+        let chain_neighbour = previous == Some(sender) || next == Some(sender);
+        let capacity = self.successor_seq.capacity();
+        let (_, acted) = self.transition(|state, _| {
+            let held_as_predecessor = state.predecessor == Some(sender);
+            let held_as_successor = state.successors.contains(&sender);
+            if !held_as_predecessor && !held_as_successor {
+                return (
+                    TopologyStep {
+                        state: state.clone(),
+                        actions: Vec::new(),
+                    },
+                    false,
+                );
+            }
+            let mut step = self.step(state, TopologyEvent::Remove {
+                peer: sender,
+                successor: SuccessorRemoval::Preserve,
+            });
+            if held_as_successor {
+                for &candidate in successor_list {
+                    if step.state.successors.len() >= capacity {
+                        break;
+                    }
+                    if candidate != state.local
+                        && candidate != sender
+                        && !step.state.successors.contains(&candidate)
+                        && is_routable(candidate)
+                    {
+                        step.state.successors = topology::update_successors(
+                            state.local,
+                            &step.state.successors,
+                            candidate,
+                            capacity,
+                        );
+                    }
+                }
+            }
+            (step, true)
+        })?;
+        if !acted {
+            return Ok(None);
+        }
+        self.forget_relay_custody(sender)?;
+        if chain_neighbour {
+            self.relay_chain_changed();
+        }
+        Ok(Some(TopologyRemoval::Referenced))
+    }
 }
 
 /// Finger convergence.

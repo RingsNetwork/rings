@@ -39,13 +39,57 @@
 //!            release processor lifecycle lock and resolve task promise
 //! ```
 
+use std::sync::Arc;
+
 use futures::channel::oneshot;
 use rings_core::lifecycle::StopSource;
 use rings_derive::wasm_export;
+use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
+use crate::processor::Processor;
 use crate::provider::Provider;
+
+/// Best-effort `pagehide` listener on `window` (#1057).
+///
+/// When the browser fires `pagehide`, spawns a detached local task that calls
+/// [`Processor::leave`] so the node hands off its relay carriers and sends `Leave` before the
+/// tab closes. Holds the [`Processor`] weakly so it never blocks [`Provider::close`] from
+/// releasing the node's stores, and removes the DOM listener on drop.
+pub(crate) struct PagehideListener {
+    window: web_sys::Window,
+    callback: Closure<dyn FnMut(web_sys::Event)>,
+}
+
+impl PagehideListener {
+    /// Register a `pagehide` listener on the global `window`, if one exists in this JS realm.
+    pub(crate) fn register(processor: &Arc<Processor>) -> Option<Self> {
+        let window = web_sys::window()?;
+        let weak = Arc::downgrade(processor);
+        let callback = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            if let Some(processor) = weak.upgrade() {
+                wasm_bindgen_futures::spawn_local(async move {
+                    let _ = processor.leave().await;
+                });
+            }
+        }) as Box<dyn FnMut(web_sys::Event)>);
+        window
+            .add_event_listener_with_callback("pagehide", callback.as_ref().unchecked_ref())
+            .ok()?;
+        Some(Self { window, callback })
+    }
+}
+
+impl Drop for PagehideListener {
+    fn drop(&mut self) {
+        let _ = self.window.remove_event_listener_with_callback(
+            "pagehide",
+            self.callback.as_ref().unchecked_ref(),
+        );
+    }
+}
 
 /// Browser listener lifecycle handle returned by [`Provider::listen`].
 #[derive(Clone)]

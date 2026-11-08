@@ -152,6 +152,20 @@ impl PeerRing {
         self.with_relay_view(|state, neighborhood| neighborhood.segment(state, holds))
     }
 
+    /// The segment of the ring when this node is leaving and handing off its relay carriers
+    /// (`local_holds = false`, #1057).
+    pub(crate) fn relay_segment_for_leave(&self) -> Result<RelaySegment> {
+        self.with_relay_view(|state, neighborhood| neighborhood.segment(state, false))
+    }
+
+    /// The segment of the ring when `leaving` is handing off its relay carriers (#1057).
+    pub(crate) fn relay_segment_without(&self, leaving: Did) -> Result<RelaySegment> {
+        let holds = self.holds_relay_mail();
+        self.with_relay_view(|state, neighborhood| {
+            neighborhood.segment_without(state, holds, leaving)
+        })
+    }
+
     /// The holder this view names for the relay key `key` (`Law (Holder)`).
     pub(crate) fn relay_holder(&self, key: Did) -> Result<RelayHolder> {
         Ok(relay_holder(&self.relay_segment()?, key))

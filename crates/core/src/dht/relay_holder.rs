@@ -699,6 +699,35 @@ impl RelayNeighborhood {
         segment
     }
 
+    /// The segment `state` covers when `leaving` is handing off its relay carriers (`leaving`
+    /// holds no relay mail, #1057). When `state` has no predecessor (e.g. after `Leave` from
+    /// `leaving` removed it) and `leaving` is neither `local` nor in `state.successors`,
+    /// `leaving` is placed behind `local` as a storage-less node so the arc `(leaving, local]`
+    /// stays placed.
+    pub(crate) fn segment_without(
+        &self,
+        state: &TopologyState,
+        local_holds: bool,
+        leaving: Did,
+    ) -> RelaySegment {
+        let mut segment = self.segment(state, local_holds);
+        if state.predecessor.is_none()
+            && leaving != state.local
+            && !segment.nodes.iter().any(|node| node.did == leaving)
+        {
+            segment.nodes.insert(0, RelayNode {
+                did: leaving,
+                holds: false,
+            });
+        }
+        for node in &mut segment.nodes {
+            if node.did == leaving {
+                node.holds = false;
+            }
+        }
+        segment
+    }
+
     /// `peer` with its declaration, read as a candidate chain member (not suspected, #1070).
     fn node(&self, peer: Did) -> RelayNode {
         RelayNode {

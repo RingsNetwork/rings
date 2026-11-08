@@ -110,6 +110,9 @@ sample_message_body!(FindSuccessorReport, |fixture| FindSuccessorReport {
 sample_message_body!(NotifyPredecessorSend, |fixture| NotifyPredecessorSend {
     did: fixture.did,
 });
+sample_message_body!(Leave, |fixture| Leave {
+    successor_list: vec![fixture.did],
+});
 sample_message_body!(ProbeRequest, |fixture| ProbeRequest {
     epoch: ProvisionalEpoch { slot: 1 },
     nonce: [u8::from(fixture.did != Did::from(0_u32)); 32],

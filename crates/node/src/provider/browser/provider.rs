@@ -503,6 +503,16 @@ impl Provider {
         })
     }
 
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers and send `Leave`
+    /// to this node's predecessor and successor head.
+    pub fn leave(&self) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            p.leave().await.map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
+
     /// Send a namespaced message to a peer: `provider.send_message(did, namespace, payload)`.
     ///
     /// The payload reaches the peer's protocol registered under `namespace` (see
