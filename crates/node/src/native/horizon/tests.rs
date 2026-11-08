@@ -191,10 +191,7 @@ async fn test_run_signing_horizon_renews_in_process_across_multiple_horizons_and
 
     let h1 = processor.signing_horizon().horizon_ms();
     let k1 = processor.delegatee_key();
-    assert!(
-        h1 > h0,
-        "Monotone horizon law: h1 ({h1}) must exceed h0 ({h0})"
-    );
+    assert!(h1 > h0, "Monotone horizon law: h1 must exceed h0");
     assert_ne!(k1.delegatee_public_key(), initial_pubkey);
     assert_eq!(k1.delegator_did(), processor.did());
     assert_eq!(
@@ -275,10 +272,7 @@ async fn test_run_signing_horizon_renews_in_process_across_multiple_horizons_and
 
     let h2 = processor.signing_horizon().horizon_ms();
     let k2 = processor.delegatee_key();
-    assert!(
-        h2 > h1,
-        "Monotone horizon law: h2 ({h2}) must exceed h1 ({h1})"
-    );
+    assert!(h2 > h1, "Monotone horizon law: h2 must exceed h1");
     assert_ne!(k2.delegatee_public_key(), k1.delegatee_public_key());
     let snapshot = processor
         .operator_snapshot()
