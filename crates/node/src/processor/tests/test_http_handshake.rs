@@ -15,6 +15,7 @@ use rings_core::message::WireVersionMismatch;
 use rings_core::message::WIRE_VERSION;
 use rings_rpc::protos::rings_node::AnswerOfferRequest;
 use rings_rpc::protos::rings_node::NodeDidRequest;
+use rings_rpc::protos::rings_node::NodeDidResponse;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
 use super::common::connect_processors;
@@ -40,6 +41,13 @@ struct PrevailingPeer {
 
 #[async_trait::async_trait]
 impl RemoteHandshake for PrevailingPeer {
+    async fn node_did(&self) -> Result<NodeDidResponse> {
+        self.processor
+            .handle_rpc(NodeDidRequest {})
+            .await
+            .map_err(Error::InternalRpcError)
+    }
+
     async fn answer_offer(&self, _offer: &MessagePayload) -> Result<MessagePayload> {
         self.own_offer
             .lock()
@@ -104,6 +112,13 @@ struct PublicSeed {
 
 #[async_trait::async_trait]
 impl RemoteHandshake for PublicSeed {
+    async fn node_did(&self) -> Result<NodeDidResponse> {
+        self.processor
+            .handle_rpc(NodeDidRequest {})
+            .await
+            .map_err(Error::InternalRpcError)
+    }
+
     async fn answer_offer(&self, offer: &MessagePayload) -> Result<MessagePayload> {
         Ok(self
             .processor
@@ -268,4 +283,164 @@ fn test_a_remote_refusal_reaches_the_offerer_as_its_own_mismatch() {
             theirs: PeerWireVersion::Versioned(version),
         }) if version == answerers
     ));
+}
+
+/// When `remote_rpc_proxy` is configured on a processor, `connect_peer_via_http` dials a public
+/// domain endpoint (`http://seed.example.test:<port>/`) through the HTTP proxy without local DNS
+/// resolution and completes `nodeDid` + `answerOffer` end to end (#1162).
+#[tokio::test]
+async fn test_connect_peer_via_http_uses_configured_remote_rpc_proxy() -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    use crate::remote_endpoint::RemoteRpcEndpoint;
+    use crate::remote_endpoint::RemoteRpcProxy;
+    use crate::test_support::TestTask;
+    use crate::tests::test_processor_builder;
+    use crate::tests::test_processor_config;
+
+    let _network_guard = network_test_guard().await;
+    let (seed_key, dialer_key) = ordered_keys();
+    let seed = Arc::new(prepare_processor_with_identity_key(seed_key).await);
+
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+    let proxy_addr = proxy_listener
+        .local_addr()
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+    let proxy = RemoteRpcProxy::parse(format!("http://{proxy_addr}").as_str())?;
+
+    let dialer_config = test_processor_config(&dialer_key, 0).remote_rpc_proxy(proxy);
+    let dialer = test_processor_builder(&dialer_config).build()?;
+
+    let seed_for_proxy = Arc::clone(&seed);
+    let proxy_task = TestTask::spawn(async move {
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = proxy_listener
+                .accept()
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let mut buf = vec![0_u8; 16384];
+            let mut total = 0_usize;
+            let header_end = loop {
+                let n = stream
+                    .read(buf.get_mut(total..).unwrap_or_default())
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                if n == 0 {
+                    return Err(Error::RemoteRpcError("unexpected EOF".to_string()));
+                }
+                total += n;
+                if let Some(pos) = buf
+                    .get(..total)
+                    .unwrap_or_default()
+                    .windows(4)
+                    .position(|w| w == b"\r\n\r\n")
+                {
+                    break pos + 4;
+                }
+            };
+            let headers =
+                String::from_utf8_lossy(buf.get(..header_end).unwrap_or_default()).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.trim()
+                        .eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            while total < header_end + content_length {
+                let n = stream
+                    .read(buf.get_mut(total..).unwrap_or_default())
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+                total += n;
+            }
+            requests.push(headers.lines().next().unwrap_or_default().to_string());
+            let body_bytes = buf
+                .get(header_end..header_end + content_length)
+                .unwrap_or_default();
+            let rpc_call: serde_json::Value = serde_json::from_slice(body_bytes)
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            let id = rpc_call
+                .get("id")
+                .cloned()
+                .unwrap_or(serde_json::Value::Number(0.into()));
+            let method = rpc_call
+                .get("method")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let result_value = match method {
+                "nodeDid" => {
+                    let resp = seed_for_proxy
+                        .handle_rpc(NodeDidRequest {})
+                        .await
+                        .map_err(Error::InternalRpcError)?;
+                    serde_json::to_value(resp)
+                        .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+                }
+                "answerOffer" => {
+                    let req: AnswerOfferRequest =
+                        serde_json::from_value(rpc_call.get("params").cloned().unwrap_or_default())
+                            .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                    let resp = seed_for_proxy
+                        .handle_rpc(req)
+                        .await
+                        .map_err(Error::InternalRpcError)?;
+                    serde_json::to_value(resp)
+                        .map_err(|error| Error::RemoteRpcError(error.to_string()))?
+                }
+                other => {
+                    return Err(Error::RemoteRpcError(format!(
+                        "unexpected RPC method: {other}"
+                    )))
+                }
+            };
+            let response_body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "result": result_value,
+                "id": id,
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+        }
+        Ok::<Vec<String>, Error>(requests)
+    });
+
+    let endpoint = RemoteRpcEndpoint::parse("http://seed.example.test:50001/")?;
+    let attempt = dialer
+        .connect_peer_via_http(
+            &endpoint,
+            None,
+            crate::processor::HandshakePeer::Pinned(seed.did()),
+        )
+        .await
+        .map_err(Error::from)?;
+    assert_eq!(attempt.peer(), seed.did());
+    let requests = proxy_task
+        .await
+        .map_err(|error| Error::RemoteRpcError(error.to_string()))??;
+    assert_eq!(requests, vec![
+        "POST http://seed.example.test:50001/ HTTP/1.1".to_string(),
+        "POST http://seed.example.test:50001/ HTTP/1.1".to_string(),
+    ]);
+    wait_processors_connected(&dialer, &seed).await;
+    Ok(())
 }

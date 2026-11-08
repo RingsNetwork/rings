@@ -109,8 +109,9 @@ edges (#843).
   emitted only while the link's Application transport lane has credit (#913), read through a
   read-only view, so the rate is `min(r_phase, the receiver's release rate)`,
   `r_phase ∈ {r, r_idle}`: the floor and the dwell hold while the receiver releases, and a
-  credit wait delays real and cover cells alike. Cells use fixed size classes from 16 KiB to
-  12 MiB, preserved across every edge.
+  credit wait delays real and cover cells alike. Cells use fixed size classes `b` from 16 KiB
+  (the default) to 12 MiB, chosen per session by the caller (`OnionLoopClass`) and preserved
+  across every edge (`u(b) = b / 16 KiB` admission units per cell).
 - **Session fate.** A session direction ends with `fin(n)` only when its bytes really ended,
   and with `abort(n)`, carrying no reason, on any failure. A receiver reorders within a
   bounded window; a sequence gap that persists past it, a frame that finds the session's queue
@@ -147,7 +148,11 @@ route.
   at most once while the store is retained; a damaged record disables only its stream.
   A completed replay write survives a process or system crash: the native store flushes the
   file and its directory (on unix), and the browser store commits each IndexedDB transaction
-  with `durability: "strict"` (#912). Exactly-once effects are not claimed. In a browser the
+  with `durability: "strict"` (#912). Each native store locks its directory at open (#1039),
+  and each browser node holds the exclusive Web Lock `rings-node/<storage_name>` across its
+  stores (#1055), so a second daemon, FFI provider, or browser tab on the same `storage_name`
+  fails closed before opening any store instead of interleaving writes to the replay and relay
+  stores. Exactly-once effects are not claimed. In a browser the
   replay guarantee lasts as long as the browser keeps the origin's storage: a private window
   or ephemeral partitioned storage discards it when the session ends, which resets every
   stream as an operator's removal of the replay store does, and a page cannot detect such a
@@ -284,14 +289,16 @@ route.
 
 ## Known Limitations
 
-- #852: the onion Sphinx key schedule (HKDF-SHA256, HMAC-SHA256) wipes its HMAC states on drop,
-  the PRK's in every `Hkdf` and the MAC key's in every `Hmac`, and the keys it returns. Three
-  transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not wiped,
-  and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key setup
-  leaves, equivalent to `K` (the PRK, or the MAC key); (b) HKDF-Expand's previous output block
-  `T(i)`, which is a derived key or its first half; (c) SHA-256's message schedule, whose first
-  16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c) survives any HMAC above an unmodified
-  SHA-256, so an in-tree HMAC/HKDF would remove only (a) and (b).
+- #852, #1122: the onion Sphinx key schedule, `rings-core`'s ElGamal AEAD key derivation and
+  `rings-dns-relay`'s address map (HKDF-SHA256, HMAC-SHA256) wipe their HMAC states on drop,
+  the PRK's in every `Hkdf` and the key's in every `Hmac`, and the keys they hold or return.
+  Three transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not
+  wiped, and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key
+  setup leaves, equivalent to `K` (the PRK, the MAC key, or the relay's address key); (b)
+  HKDF-Expand's previous output block `T(i)`, which is a derived key or its first half; (c)
+  SHA-256's message schedule, whose first 16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c)
+  survives any HMAC above an unmodified SHA-256, so an in-tree HMAC/HKDF would remove only (a)
+  and (b).
 - #918: a registry descriptor that another node re-appends after its registrant stopped stays
   listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
   registrant leaves the listing within its TTL.
@@ -326,7 +333,3 @@ route.
 - #1036: in a browser context with ephemeral storage, the replay windows reset at every
   session end, undetectably: a receiver may admit an unexpired transaction once more per
   session, and a sender's streams restart at sequence 0.
-- #1055: one origin runs one browser node at a time. A native store locks its directory, so a
-  second daemon or FFI provider over it fails to open (#1039), but two browser tabs of one origin
-  open the same IndexedDB stores and would interleave their writes to the replay and relay
-  stores; nothing refuses the second tab yet.

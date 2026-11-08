@@ -98,7 +98,7 @@ impl core::fmt::Debug for OnionCarryValue {
 /// # Errors
 ///
 /// [`OnionValueTooWide`] if `|v| ≥ C₀`; the slot is then untouched.
-pub(super) fn seal(
+pub(crate) fn seal(
     class: OnionLoopClass,
     keys: &OnionSegmentKeys,
     value: &[u8],

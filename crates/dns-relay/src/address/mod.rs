@@ -34,8 +34,8 @@ use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 
 use hmac::digest::Key;
-use hmac::digest::KeyInit;
 use hmac::Hmac;
+use hmac::KeyInit;
 use hmac::Mac;
 use ipnet::Ipv6Net;
 use sha2::Sha256;
@@ -95,6 +95,10 @@ impl AddressPlan {
     }
 
     /// `owner`'s address: `addr(owner)` in the module doc.
+    ///
+    /// The `Hmac` state (`k ⊕ ipad` and `k ⊕ opad` chaining values) is wiped on drop by `sha2`'s
+    /// `zeroize`. HMAC's padded key block `k ⊕ opad` and SHA-256's message schedule are the
+    /// transient stack copies `SECURITY.md` lists (#852, #1122).
     ///
     /// Post: the address lies in [`Self::prefix`].
     pub fn address_of<O>(&self, owner: &O) -> Ipv6Addr

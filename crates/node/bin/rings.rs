@@ -43,7 +43,8 @@ use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
-use rings_node::native::horizon::signing_horizon;
+use rings_node::native::horizon::run_signing_horizon;
+use rings_node::native::horizon::DelegationRenewalPaths;
 use rings_node::native::stores::NodeStores;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
 use rings_node::onion::proxy::http::OnionHttpProxyOptions;
@@ -124,6 +125,7 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
         .map(NativeGatewayRunner::status_handle);
     // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
     // with the other run-owned tasks below and its evidence is the backend's observer.
+    let renewal = DelegationRenewalPaths::from_config(&c)?;
     let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
     let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
     let stop = StopSource::new();
@@ -139,10 +141,16 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
 
     let mut tasks = JoinSet::new();
     tasks.spawn(serve_application(application, stop.token()));
-    // The node can send nothing from its delegation's signing horizon on: end there, so the
-    // supervisor restarts it with a fresh delegatee key instead of leaving it mute (#1063).
-    let horizon = processor.signing_horizon();
-    tasks.spawn(async move { Err(signing_horizon(horizon, get_epoch_ms).await.into()) });
+    // Renew the delegation in process before its signing horizon when `delegator_key` is
+    // configured (#1153), and end at the horizon otherwise (#1063).
+    let horizon_processor = processor.clone();
+    tasks.spawn(async move {
+        Err(
+            run_signing_horizon(horizon_processor, renewal, get_epoch_ms)
+                .await
+                .into(),
+        )
+    });
     let processor_task = spawn_processor(processor.clone(), stop.token());
     spawn_apis(
         &mut tasks,
@@ -212,6 +220,9 @@ async fn apply_run_overrides(
             .await
             .with_context(|| format!("loading bootstrap seed {source}"))?;
         c.bootstrap.peers.extend(seed.peers);
+    }
+    if let Some(proxy_url) = args.remote_rpc_proxy_url.take() {
+        c.remote_rpc_proxy_url = Some(proxy_url);
     }
     if let Some(external_api_addr) = args.external_api_addr.take() {
         c.external_api_addr = external_api_addr;
@@ -859,5 +870,90 @@ mod tests {
             result,
             Err(error) if error.to_string().contains("activation failed before startup")
         ));
+    }
+
+    #[tokio::test]
+    async fn test_run_remote_rpc_proxy_url_override_applies_to_config() {
+        let parsed = parse_without_log_level_env([
+            "rings",
+            "run",
+            "--remote-rpc-proxy-url",
+            "http://127.0.0.1:18080",
+        ]);
+        let mut cfg = super::config::Config::new("delegatee_key");
+        assert_eq!(cfg.remote_rpc_proxy_url, None);
+
+        if let Ok(Cli {
+            command: super::Command::Run(mut run_args),
+            ..
+        }) = parsed
+        {
+            assert!(
+                super::apply_run_overrides(&mut cfg, &mut run_args, "config.yaml")
+                    .await
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            cfg.remote_rpc_proxy_url.as_deref(),
+            Some("http://127.0.0.1:18080")
+        );
+    }
+
+    #[test]
+    fn test_connect_answer_and_accept_help_describes_counter_offer_flow() {
+        let mut cmd = Cli::command();
+        let connect = cmd.find_subcommand_mut("connect");
+        assert!(connect.is_some());
+        if let Some(connect) = connect {
+            let answer_help = connect
+                .find_subcommand_mut("answer")
+                .map(|sub| sub.render_long_help().to_string())
+                .unwrap_or_default();
+            assert!(
+                answer_help.contains("counter-offer"),
+                "connect answer help should explain counter-offer: {answer_help}"
+            );
+            assert!(
+                answer_help.contains("connect accept"),
+                "connect answer help should mention connect accept: {answer_help}"
+            );
+
+            let accept_help = connect
+                .find_subcommand_mut("accept")
+                .map(|sub| sub.render_long_help().to_string())
+                .unwrap_or_default();
+            assert!(
+                accept_help.contains("counter-offer"),
+                "connect accept help should explain counter-offer: {accept_help}"
+            );
+            assert!(
+                accept_help.contains("connect answer"),
+                "connect accept help should point to connect answer: {accept_help}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_install_script_and_contrib_service_definitions() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir.parent().and_then(std::path::Path::parent);
+        assert!(repo_root.is_some());
+        if let Some(repo_root) = repo_root {
+            let script = repo_root.join("scripts/test-install.sh");
+            let output = std::process::Command::new("sh")
+                .arg(script.as_os_str())
+                .output();
+            assert!(output.is_ok());
+            if let Ok(output) = output {
+                assert!(
+                    output.status.success(),
+                    "scripts/test-install.sh failed:\nstdout: {}\nstderr: {}",
+                    String::from_utf8_lossy(output.stdout.as_slice()),
+                    String::from_utf8_lossy(output.stderr.as_slice())
+                );
+            }
+        }
     }
 }

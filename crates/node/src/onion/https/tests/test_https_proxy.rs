@@ -6,6 +6,7 @@ use tokio::net::TcpListener;
 
 use super::super::*;
 use crate::onion::exit_accounting::OnionExitAccounting;
+use crate::onion::OnionLoopClass;
 use crate::test_support::TestTask;
 
 /// The request a normalized call becomes.
@@ -20,17 +21,66 @@ fn test_normalizes_empty_request_defaults() {
         path: Some(String::new()),
         headers: Vec::new(),
         body: Vec::new(),
+        class: None,
     };
+    let call = OnionHttpsCall::with_default_path(request, default_path().as_str()).unwrap();
+    assert_eq!(call.class(), OnionLoopClass::DEFAULT);
 
-    assert_eq!(
-        wire(OnionHttpsCall::with_default_path(request, default_path().as_str()).unwrap()),
-        OnionHttpsRequest {
-            method: "GET".to_string(),
-            path: "/".to_string(),
-            headers: Vec::new(),
-            body: Vec::new(),
-        }
-    );
+    assert_eq!(wire(call), OnionHttpsRequest {
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    });
+}
+
+#[test]
+fn test_call_preserves_and_overrides_loop_class_without_changing_wire_request() -> Result<()> {
+    let request = OnionHttpsClientRequest {
+        method: "POST".to_string(),
+        body: b"payload".to_vec(),
+        class: Some(OnionLoopClass::KiB64),
+        ..OnionHttpsClientRequest::default()
+    };
+    let (_, call) = OnionHttpsCall::from_url("https://example.com/upload", request)?;
+    assert_eq!(call.class(), OnionLoopClass::KiB64);
+
+    let call = call.with_class(OnionLoopClass::KiB256);
+    assert_eq!(call.class(), OnionLoopClass::KiB256);
+    assert_eq!(wire(call), OnionHttpsRequest {
+        method: "POST".to_string(),
+        path: "/upload".to_string(),
+        headers: Vec::new(),
+        body: b"payload".to_vec(),
+    });
+    Ok(())
+}
+
+#[test]
+fn test_client_request_deserializes_optional_loop_class_and_aliases() {
+    let default_req: OnionHttpsClientRequest = serde_json::from_str("{}").expect("empty object");
+    assert_eq!(default_req.class, None);
+
+    for (raw, expected) in [
+        ("KiB16", OnionLoopClass::KiB16),
+        ("16KiB", OnionLoopClass::KiB16),
+        ("16 KiB", OnionLoopClass::KiB16),
+        ("KiB64", OnionLoopClass::KiB64),
+        ("64KiB", OnionLoopClass::KiB64),
+        ("64 KiB", OnionLoopClass::KiB64),
+        ("KiB256", OnionLoopClass::KiB256),
+        ("256KiB", OnionLoopClass::KiB256),
+        ("MiB1", OnionLoopClass::MiB1),
+        ("1MiB", OnionLoopClass::MiB1),
+        ("MiB4", OnionLoopClass::MiB4),
+        ("4MiB", OnionLoopClass::MiB4),
+        ("MiB12", OnionLoopClass::MiB12),
+        ("12MiB", OnionLoopClass::MiB12),
+    ] {
+        let json = format!(r#"{{"method":"GET","class":"{raw}"}}"#);
+        let parsed: OnionHttpsClientRequest = serde_json::from_str(&json).expect("valid class");
+        assert_eq!(parsed.class, Some(expected), "failed for {raw}");
+    }
 }
 
 #[test]

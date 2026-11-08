@@ -61,6 +61,20 @@ impl DelegationBuilder {
 
     /// Verify the authorization and build the delegatee key.
     pub fn build(self) -> Result<DelegateeKey> {
+        let now_ms = utils::get_epoch_ms();
+        self.build_at(now_ms)
+    }
+}
+
+impl DelegationBuilder {
+    /// Set the delegation creation timestamp in milliseconds since the Unix epoch.
+    pub fn set_ts(mut self, ts_ms: u128) -> Self {
+        self.ts_ms = ts_ms;
+        self
+    }
+
+    /// Verify the authorization at `at_ms` and build the delegatee key.
+    pub fn build_at(self, at_ms: u128) -> Result<DelegateeKey> {
         let delegator = Account::try_from((self.delegator_entity, self.delegator_type))?;
         let delegation = Delegation {
             delegatee_did: self.delegatee_secret_key.address().into(),
@@ -70,7 +84,7 @@ impl DelegationBuilder {
             delegator_signature: self.delegator_signature,
         };
 
-        delegation.verify_delegator_authorization()?;
+        delegation.verify_delegator_authorization_at(at_ms)?;
         Ok(DelegateeKey::from_parts(
             delegation,
             self.delegatee_secret_key,

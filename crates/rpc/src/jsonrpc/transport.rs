@@ -10,9 +10,10 @@ use super::RpcError;
 
 /// Parse a credential destination without including its potentially sensitive URL in errors.
 ///
-/// Post: the URL is HTTPS, or HTTP with a parsed IPv4/IPv6 loopback literal.
-/// Userinfo and fragments are rejected so credentials have one explicit source.
-pub(super) fn authenticated_endpoint(endpoint: &str) -> Result<Url> {
+/// Post: the URL is HTTPS, or — when the transport is direct (`!proxied`) — HTTP with a parsed
+/// IPv4/IPv6 loopback literal. Userinfo and fragments are rejected so credentials have one
+/// explicit source.
+pub(super) fn authenticated_endpoint(endpoint: &str, proxied: bool) -> Result<Url> {
     // Parsed authority is the only input to the credential destination decision.
     let url = Url::parse(endpoint).map_err(|_| RpcError::InvalidAuthenticatedEndpoint)?;
     if url.host().is_none()
@@ -22,7 +23,8 @@ pub(super) fn authenticated_endpoint(endpoint: &str) -> Result<Url> {
     {
         return Err(RpcError::InvalidAuthenticatedEndpoint);
     }
-    if url.scheme() == "https" || (url.scheme() == "http" && is_literal_loopback(&url)) {
+    if url.scheme() == "https" || (!proxied && url.scheme() == "http" && is_literal_loopback(&url))
+    {
         Ok(url)
     } else {
         Err(RpcError::InsecureAuthenticatedEndpoint)
@@ -38,13 +40,27 @@ fn is_literal_loopback(url: &Url) -> bool {
     }
 }
 
-/// Preserve caller transport configuration except proxies and redirects, which could
-/// invalidate the credential destination proof. TLS validation remains enabled by default.
-pub(super) fn build_client(builder: ClientBuilder) -> Result<Client> {
-    #[cfg(not(target_family = "wasm"))]
+/// Preserve caller transport configuration except ambient proxies and redirects, which could
+/// invalidate the credential destination proof; when `proxy` is given, install that explicit
+/// proxy after clearing ambient proxy discovery. TLS validation remains enabled by default.
+#[cfg(not(target_family = "wasm"))]
+pub(super) fn build_client(
+    builder: ClientBuilder,
+    proxy: Option<reqwest::Proxy>,
+) -> Result<Client> {
     let builder = builder
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none());
+    let builder = match proxy {
+        Some(proxy) => builder.proxy(proxy),
+        None => builder,
+    };
+    builder.build().map_err(RpcError::TransportBuild)
+}
+
+/// Build the browser HTTP client; authenticated browser requests use Fetch directly.
+#[cfg(target_family = "wasm")]
+pub(super) fn build_client(builder: ClientBuilder) -> Result<Client> {
     builder.build().map_err(RpcError::TransportBuild)
 }
 
@@ -56,11 +72,12 @@ pub(super) async fn send(
     client: &Client,
     endpoint: &str,
     token: Option<&str>,
+    proxied: bool,
     body: String,
 ) -> Result<Vec<u8>> {
     // Preserve the parsed proof through the send boundary, including URL canonicalization.
     let authenticated_url = token
-        .map(|_| authenticated_endpoint(endpoint))
+        .map(|_| authenticated_endpoint(endpoint, proxied))
         .transpose()?;
     // Both platform adapters receive exactly the canonical URL validated above.
     let endpoint = authenticated_url

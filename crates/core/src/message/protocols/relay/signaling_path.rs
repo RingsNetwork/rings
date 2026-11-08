@@ -26,9 +26,11 @@
 //! hop that takes it; a hop that lost the link drops the reply, which the initiator's pending
 //! timeout covers.
 //!
-//! Law (Bound): `|ahead| ≤ MAX_RELAY_HOPS` and `|crossed| ≤ MAX_RELAY_HOPS`, established by
-//! every constructor and by decoding. A forward spends one unit of the hop budget and pushes one
-//! DID, so an honest carrier never reaches the bound; a carrier that does is dropped.
+//! Law (Bound): `|crossed| ≤ MAX_RELAY_HOPS` on an outbound path and
+//! `|ahead| + |crossed| ≤ MAX_RELAY_HOPS` on a return path, established by every constructor
+//! and by decoding. A forward spends one unit of the hop budget and pushes one DID (popping one
+//! from `ahead` on a return), so an honest carrier never reaches the bound; a carrier that does
+//! is dropped.
 //!
 //! Law (Distinct): the hops of `ahead ∪ crossed` are pairwise distinct and exclude both the
 //! node holding the carrier and its destination. An honest route never revisits a node (the
@@ -162,6 +164,7 @@ impl OutboundPath {
 
 /// A return path: retracing recorded relays toward the destination, recording those it crosses.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[serde(remote = "Self")]
 pub struct ReturnPath {
     /// The relays still to take before the destination, the next one last.
     ahead: RelayPath,
@@ -169,7 +172,31 @@ pub struct ReturnPath {
     crossed: RelayPath,
 }
 
+impl Serialize for ReturnPath {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        Self::serialize(self, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ReturnPath {
+    /// Decode `ahead` and `crossed` and admit them only when `|ahead| + |crossed| ≤ MAX_RELAY_HOPS`
+    /// (`Law (Bound)`).
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let path = Self::deserialize(deserializer)?;
+        Self::try_new(path.ahead, path.crossed).map_err(serde::de::Error::custom)
+    }
+}
+
 impl ReturnPath {
+    /// Admit a return path only when `|ahead| + |crossed| ≤ MAX_RELAY_HOPS` (`Law (Bound)`).
+    fn try_new(ahead: RelayPath, crossed: RelayPath) -> Result<Self> {
+        let total = ahead.hops().len().saturating_add(crossed.hops().len());
+        if total > usize::from(MAX_RELAY_HOPS) {
+            return Err(Error::RelayPathAboveMax(total));
+        }
+        Ok(Self { ahead, crossed })
+    }
+
     /// The relays crossed so far.
     pub(crate) fn crossed(&self) -> &RelayPath {
         &self.crossed
@@ -191,10 +218,7 @@ impl ReturnPath {
 
     /// The path after the forwarding hop `current` recorded itself and the carrier departed.
     fn forwarded(&self, current: Did) -> Result<Self> {
-        Ok(Self {
-            ahead: self.ahead.popped(),
-            crossed: self.crossed.pushed(current)?,
-        })
+        Self::try_new(self.ahead.popped(), self.crossed.pushed(current)?)
     }
 }
 

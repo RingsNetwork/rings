@@ -2,6 +2,8 @@
 
 use std::num::NonZeroU32;
 
+pub use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
+
 /// Default time-to-live in milliseconds, shared by message signatures and DHT entries.
 ///
 /// A message proof is live for this long after its timestamp; a DHT entry stamped at the
@@ -80,6 +82,29 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 907;
 /// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
 /// `test_payload_envelope_reserve_is_the_widest_envelope`.
 pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2220;
+/// Maximum bytes of the serialized session description (`ConnectNodeSend.sdp` and
+/// `ConnectNodeReport.sdp`), enforced at creation, deserialization, and handshake admission
+/// (#1130).
+///
+/// A data-channel-only WebRTC SDP is 500–2,000 bytes in practice; 4 KiB accommodates ~30 ICE
+/// candidates while bounding the widest DHT control message below [`MIN_MAX_MESSAGE_SIZE`].
+pub const MAX_SDP_BYTES: usize = 4096;
+/// Encoded bytes of a `Message::ConnectNodeSend` or `Message::ConnectNodeReport`, at most
+/// (#1130): the `Message` variant tag (1), the varint length prefix of [`MAX_SDP_BYTES`] (2),
+/// [`MAX_SDP_BYTES`] (4096), `DhtProtocolMode` at its widest (`u32::MAX` network ID, 5; two
+/// `u16::MAX` counts, 3 each), and `RelayCustody` (1), `1 + 2 + 4096 + 5 + 3 + 3 + 1 = 4111`;
+/// witnessed with equality by `test_min_max_message_size_fits_widest_control_payloads_whole`.
+pub const CONNECT_NODE_WIRE_MAX: usize = MAX_SDP_BYTES + 15;
+/// Control-frame law (#1130): the transport's [`MIN_MAX_MESSAGE_SIZE`] floor equals the widest
+/// `ConnectNodeSend` / `ConnectNodeReport` payload (`CONNECT_NODE_WIRE_MAX` plus the 2219-byte
+/// envelope around a `< 16 KiB` message, whose 2-byte `transaction.data` length prefix is one
+/// byte shorter than [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`]) wrapped in [`TRANSPORT_CUSTOM_OVERHEAD`],
+/// so `WireReserves::PRODUCTION.plan` keeps every DHT control frame `Framing::Whole`.
+const _: () = assert!(
+    MIN_MAX_MESSAGE_SIZE
+        == CONNECT_NODE_WIRE_MAX + (MAX_PAYLOAD_ENVELOPE_OVERHEAD - 1) + TRANSPORT_CUSTOM_OVERHEAD,
+    "MIN_MAX_MESSAGE_SIZE must match the widest ConnectNodeSend / ConnectNodeReport frame"
+);
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes
 /// fit per chunk is rejected outright (`WireReserves::plan` returns `None`) rather than fragmenting a

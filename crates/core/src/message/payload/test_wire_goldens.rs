@@ -31,8 +31,9 @@
 //!   with `domain_tag!` in `src`, and `DomainTag::new` is kept for labels known only at
 //!   runtime, of which there are none on the wire.
 //!
-//! Scope: the core wire. The formats rings-node adds (onion cells, sealed mail, descriptors)
-//! are pinned by a sibling test against the same version (#1141).
+//! Scope: the core wire. The formats `rings-node` adds (onion cells, sealed mail, descriptors,
+//! extension envelopes, and relay frames) are pinned by `rings-node`'s sibling
+//! `tests::test_wire_goldens` module against the same version (#1141).
 //!
 //! Law (pin): `PINNED = (WIRE_VERSION, hash(goldens))`. A change that moves a byte fails here
 //! until the same commit updates `PINNED`, and with it [`WIRE_VERSION`] by the bump rule; a

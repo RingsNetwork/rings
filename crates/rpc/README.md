@@ -23,14 +23,18 @@ IPv6 loopback (`::1`). HTTP hostnames, including `localhost`, are rejected; use
 `http://127.0.0.1:50000` or `http://[::1]:50000` for a local node. URL userinfo and
 fragments are also rejected for authenticated endpoints.
 
-Native RPC clients disable redirects and proxies. This prevents redirect downgrade
-and keeps the loopback HTTP exception from sending credentials through a proxy.
-Custom native DNS pins, TLS roots and timeouts are retained through
-`with_http_client_builder`; it replaces `with_http_client`, since an already-built
-transport cannot have its redirect policy secured. Normal TLS certificate
-validation remains enabled by default. Authenticated browser RPC uses Fetch with
-`redirect: "error"`; its transport settings are controlled by the browser rather
-than the supplied reqwest builder. Unauthenticated HTTP endpoints remain supported.
+Native RPC clients disable redirects and ambient proxies by default. This prevents
+redirect downgrade and keeps the loopback HTTP exception from sending credentials
+through an ambient proxy. Custom native DNS pins, TLS roots and timeouts are retained
+through `with_http_client_builder`; it replaces `with_http_client`, since an
+already-built transport cannot have its redirect policy secured. Callers that need to
+reach a remote endpoint through an explicit HTTP(S) proxy on native targets can opt in
+with `with_http_client_builder_and_proxy`, which clears ambient proxy variables before
+installing the proxy and requires `https://` whenever a credential is attached. Normal
+TLS certificate validation remains enabled by default. Authenticated browser RPC uses
+Fetch with `redirect: "error"`; its transport settings are controlled by the browser
+rather than the supplied reqwest builder. Unauthenticated HTTP endpoints remain
+supported.
 
 ## JSON-RPC methods
 
