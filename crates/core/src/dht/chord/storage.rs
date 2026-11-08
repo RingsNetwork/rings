@@ -233,7 +233,15 @@ async fn join_live_entry(
         admitted.validate_data_sync_on_local(live.as_ref())?;
     }
     let joined = match live {
-        Some(live) => live.join(admitted)?,
+        Some(live) => {
+            let live = match matches!(store, CarrierStore::Factored { .. })
+                && admitted.kind == EntryKind::Data
+            {
+                true => live.without_cross_actor_tombstones_for(&admitted, Did::default()),
+                false => live,
+            };
+            live.join(admitted)?
+        }
         None => admitted,
     }
     .retired_at(now_ms);
@@ -264,7 +272,12 @@ async fn operate_live_entry(
         op.validate_data_write_on_local(live.as_ref(), actor)?;
     }
     let local = match live {
-        Some(local) => local,
+        Some(local) => {
+            match matches!(store, CarrierStore::Factored { .. }) && op.kind() == EntryKind::Data {
+                true => local.without_cross_actor_tombstones_for(op.entry(), actor),
+                false => local,
+            }
+        }
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
@@ -412,7 +425,13 @@ impl PeerRing {
             incoming.validate_data_sync_on_local(local.as_ref())?;
         }
         let stored = match local {
-            Some(local) => local.join(incoming)?,
+            Some(local) => {
+                let local = match incoming.kind == EntryKind::Data {
+                    true => local.without_cross_actor_tombstones_for(&incoming, Did::default()),
+                    false => local,
+                };
+                local.join(incoming)?
+            }
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);

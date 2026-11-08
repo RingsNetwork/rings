@@ -761,6 +761,51 @@ impl Entry {
         Ok(())
     }
 
+    /// Return `self` with any pre-planted remove in `self.crdt.tombstones` evicted when it
+    /// targets an element in `incoming` authored by a different non-default writer (#1179).
+    pub(crate) fn without_cross_actor_tombstones_for(
+        mut self,
+        incoming: &Entry,
+        fallback_actor: Did,
+    ) -> Self {
+        let actor_at = |index: usize| {
+            incoming
+                .crdt
+                .dots
+                .get(index)
+                .map(|dot| dot.version.actor)
+                .filter(|actor| *actor != Did::default())
+                .unwrap_or(fallback_actor)
+        };
+        let has_cross_actor_remove = self.crdt.tombstones.iter().any(|tombstone| {
+            tombstone.dot.version.actor != Did::default()
+                && (0..incoming.data.len()).any(|index| {
+                    let incoming_actor = actor_at(index);
+                    incoming_actor != Did::default()
+                        && incoming_actor != tombstone.dot.version.actor
+                })
+        });
+        if !has_cross_actor_remove {
+            return self;
+        }
+        let incoming_actors = incoming
+            .data
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let actor = actor_at(index);
+                (actor != Did::default()).then(|| (ElementDigest::of(value), actor))
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.crdt.tombstones.retain(|tombstone| {
+            tombstone.dot.version.actor == Did::default()
+                || incoming_actors
+                    .get(&tombstone.element)
+                    .is_none_or(|actor| *actor == tombstone.dot.version.actor)
+        });
+        self
+    }
+
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
     /// removes in dot order, truncated only under a truncating tombstone bound.
     ///

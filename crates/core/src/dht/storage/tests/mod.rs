@@ -1112,6 +1112,87 @@ async fn test_operate_storage_entry_rejects_cross_origin_data_tombstone() -> Res
         .await?
         .ok_or_else(|| Error::InvalidMessage("carrier vanished".to_string()))?;
     assert!(after_self_tombstone.data.is_empty());
+
+    // 5. Out-of-order pre-planted tombstone on an empty topic (`local == None`) cannot cover a
+    //    subsequent honest write or sync with an earlier logical timestamp.
+    let fresh_topic = Did::from(101u32);
+    let mut preplanted_sync = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(fresh_topic, "attacker-seed")),
+            now_ms + 100,
+            attacker,
+            Some(fresh_topic),
+        )
+        .await?
+        .entry()
+        .clone();
+    let preplanted_dot = preplanted_sync.crdt.dots[0];
+    preplanted_sync
+        .crdt
+        .tombstones
+        .push(crate::dht::entry::EntryTombstone::of(
+            &Bytes::from("honest-late-write"),
+            preplanted_dot,
+        ));
+    preplanted_sync
+        .crdt
+        .tombstones
+        .push(crate::dht::entry::EntryTombstone::of(
+            &Bytes::from("honest-late-sync"),
+            preplanted_dot,
+        ));
+    owner
+        .join_storage_entry(
+            now_ms + 100,
+            fresh_topic,
+            preplanted_sync,
+            Principal::Unbound,
+        )
+        .await?;
+
+    let mut honest_earlier_write = data_entry_with_data(fresh_topic, "honest-late-write");
+    honest_earlier_write.crdt.dots = vec![crate::dht::entry::EntryDot {
+        version: EntryVersion::new(now_ms + 50, honest, honest),
+        index: 0,
+    }];
+    owner
+        .operate_storage_entry(
+            now_ms + 101,
+            fresh_topic,
+            EntryOperation::Extend(honest_earlier_write),
+            honest,
+            Principal::Unbound,
+        )
+        .await?;
+
+    let mut honest_earlier_sync = data_entry_with_data(fresh_topic, "honest-late-sync");
+    honest_earlier_sync.crdt.dots = vec![crate::dht::entry::EntryDot {
+        version: EntryVersion::new(now_ms + 50, honest, honest),
+        index: 0,
+    }];
+    owner
+        .join_storage_entry(
+            now_ms + 102,
+            fresh_topic,
+            honest_earlier_sync,
+            Principal::Unbound,
+        )
+        .await?;
+
+    let fresh_stored = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, fresh_topic), now_ms + 103)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("fresh topic vanished".to_string()))?;
+    assert!(
+        fresh_stored
+            .data
+            .contains(&Bytes::from("honest-late-write")),
+        "pre-planted attacker tombstone must not cover honest writer's operate_storage_entry"
+    );
+    assert!(
+        fresh_stored.data.contains(&Bytes::from("honest-late-sync")),
+        "pre-planted attacker tombstone must not cover honest writer's join_storage_entry"
+    );
     Ok(())
 }
 

@@ -827,4 +827,48 @@ fn test_fair_per_actor_truncation_preserves_other_writers_and_lattice_laws() -> 
     Ok(())
 }
 
+/// Cross-actor tombstone eviction law (#1179): a pre-planted tombstone authored by `attacker`
+/// for `ElementDigest::of(honest_value)` at a higher logical timestamp (`ts = 100`) is evicted
+/// by `without_cross_actor_tombstones_for` when `honest`'s element (`ts = 50`) arrives, while
+/// refused outright by `validate_data_sync_on_local` if `honest`'s element is already held.
+#[test]
+fn test_cross_actor_tombstone_evicted_on_late_honest_arrival_and_rejected_when_held() -> Result<()>
+{
+    let topic_did = Entry::gen_did("shared-topic-out-of-order")?;
+    let honest = Did::from(10u32);
+    let attacker = Did::from(99u32);
+    let honest_value = Bytes::from("honest-record");
+
+    let honest_entry = Entry::new(topic_did, vec![honest_value.clone()], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(50, honest, honest))?;
+
+    let mut attacker_entry = Entry::new(
+        topic_did,
+        vec![Bytes::from("attacker-record")],
+        EntryKind::Data,
+    )
+    .stamp_delta(EntryVersion::new(100, attacker, attacker))?;
+    let attacker_dot = attacker_entry.crdt.dots[0];
+    attacker_entry
+        .crdt
+        .tombstones
+        .push(EntryTombstone::of(&honest_value, attacker_dot));
+
+    // Order 1: honest_entry is held first; attacker_entry sync is rejected.
+    assert!(matches!(
+        attacker_entry.validate_data_sync_on_local(Some(&honest_entry)),
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // Order 2: attacker_entry is held first; honest_entry arrives later and evicts the
+    // cross-actor tombstone before join so honest_value survives.
+    honest_entry.validate_data_sync_on_local(Some(&attacker_entry))?;
+    let joined = attacker_entry
+        .without_cross_actor_tombstones_for(&honest_entry, honest)
+        .join(honest_entry)?;
+    assert_entry_data_set(&joined, &["honest-record", "attacker-record"])?;
+    assert!(joined.crdt.tombstones.is_empty());
+    Ok(())
+}
+
 mod test_horizon;
