@@ -111,6 +111,11 @@ impl Core {
             .map_err(Error::InternalError)
     }
 
+    /// The node's shared connection-slot roster (`PeerRing::edges`, #1183).
+    pub(crate) fn slot_roster(&self) -> Arc<rings_core::message::SlotRoster> {
+        Arc::clone(self.processor.swarm.dht().edges())
+    }
+
     /// This node's delegatee key.
     pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
         self.processor.delegatee_key()

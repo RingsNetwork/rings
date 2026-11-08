@@ -49,6 +49,7 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::message::SlotRoster;
 use rings_core::utils::get_epoch_ms;
 use rings_runtime::MaybeSendSync;
 
@@ -232,12 +233,13 @@ impl OnionLinkWitness {
 
 impl OnionCircuitShell {
     /// A shell over the node's epoch, with a link table of `2·𝓡` for the connection
-    /// registry capacity `registry_capacity`, sharing `tags` and `link_sender` with the node's
-    /// sessions.
+    /// registry capacity `registry_capacity`, sharing `slot_roster` with the node's `PeerRing`
+    /// and `tags` and `link_sender` with the node's sessions.
     pub(crate) fn new(
         relays: bool,
         epoch: OnionProcessEpochCell,
         registry_capacity: NonZeroUsize,
+        slot_roster: Arc<SlotRoster>,
         tags: OnionClientTags,
         link_sender: OnionLinkSender,
         algebra: OnionAlgebra,
@@ -246,7 +248,8 @@ impl OnionCircuitShell {
             epoch.get(),
             OnionReplayFilterKey::new(rand::random()),
             registry_capacity,
-        );
+        )
+        .with_slot_roster(slot_roster);
         Self {
             relays,
             admission: Arc::new(Mutex::new(admission)),

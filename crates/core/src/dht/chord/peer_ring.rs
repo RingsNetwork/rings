@@ -302,7 +302,7 @@ impl PeerRing {
     }
 
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
-    pub(crate) fn edges(&self) -> &SlotRoster {
+    pub fn edges(&self) -> &Arc<SlotRoster> {
         &self.edges
     }
 

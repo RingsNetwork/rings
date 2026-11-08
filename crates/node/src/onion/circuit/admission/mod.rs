@@ -407,6 +407,10 @@ pub(crate) struct OnionAdmissionState {
     pool_load: u32,
     /// Connection-slot roster assigning arriving peers cleanest-first.
     slot_roster: Arc<SlotRoster>,
+    /// Whether `slot_roster` is owned locally (`true` in standalone states) or shared with
+    /// `PeerRing::edges()` (`false` when attached via [`Self::with_slot_roster`], where the
+    /// transport owns `arrive`/`depart`).
+    owns_slot_roster: bool,
     /// Active or draining slot ledgers, keyed by connection slot `0..capacity`.
     slots: BTreeMap<OnionSlotId, SlotLedger>,
     /// The connection slot of every DID that has a live link or retained load in `slots`.
@@ -435,15 +439,16 @@ impl OnionAdmissionState {
             pool_units,
             pool_load: 0,
             slot_roster: Arc::new(SlotRoster::new(capacity)),
+            owns_slot_roster: true,
             slots: BTreeMap::new(),
             peer_slots: BTreeMap::new(),
         }
     }
 
-    /// Attach a shared [`SlotRoster`] to this admission state.
-    #[cfg(all(test, rings_native))]
+    /// Attach a shared [`SlotRoster`] (such as `PeerRing::edges()`) to this admission state.
     pub(crate) fn with_slot_roster(mut self, slot_roster: Arc<SlotRoster>) -> Self {
         self.slot_roster = slot_roster;
+        self.owns_slot_roster = false;
         self
     }
 
@@ -517,6 +522,7 @@ impl OnionAdmissionState {
             pool_units: self.pool_units,
             pool_load: 0,
             slot_roster: Arc::clone(&self.slot_roster),
+            owns_slot_roster: self.owns_slot_roster,
             slots,
             peer_slots,
         };
@@ -630,8 +636,9 @@ impl OnionAdmissionState {
             return;
         }
         slot.live.remove(&did);
-        if self.slot_roster.principal_of(Some(did))
-            == u16::try_from(slot_id.index()).map_or(Principal::Unbound, Principal::Slot)
+        if self.owns_slot_roster
+            && self.slot_roster.principal_of(Some(did))
+                == u16::try_from(slot_id.index()).map_or(Principal::Unbound, Principal::Slot)
         {
             self.slot_roster.depart(did);
             if let Some((&remaining_did, _)) = slot.live.first_key_value() {
@@ -814,17 +821,19 @@ impl OnionAdmissionState {
         quantum: u128,
     ) -> Result<OnionSlotId, OnionLinkTableFull> {
         if let Some(&existing_slot) = self.peer_slots.get(&did) {
-            let slot_was_free = self
-                .slots
-                .get(&existing_slot)
-                .is_none_or(SlotLedger::is_free);
-            if slot_was_free && !self.slot_roster.holds(did) {
-                let floor_use = self.floor_use_at(quantum);
-                self.slot_roster.arrive_preferring(
-                    did,
-                    u16::try_from(existing_slot.index()).ok(),
-                    &floor_use,
-                );
+            if self.owns_slot_roster {
+                let slot_was_free = self
+                    .slots
+                    .get(&existing_slot)
+                    .is_none_or(SlotLedger::is_free);
+                if slot_was_free && !self.slot_roster.holds(did) {
+                    let floor_use = self.floor_use_at(quantum);
+                    self.slot_roster.arrive_preferring(
+                        did,
+                        u16::try_from(existing_slot.index()).ok(),
+                        &floor_use,
+                    );
+                }
             }
             return Ok(existing_slot);
         }
@@ -835,16 +844,18 @@ impl OnionAdmissionState {
             }
         }
         let floor_use = self.floor_use_at(quantum);
-        self.slot_roster.arrive(did, &floor_use);
-        if let Principal::Slot(slot) = self.slot_roster.principal_of(Some(did)) {
-            let index = usize::from(slot);
-            if index < self.capacity
-                && self
-                    .slots
-                    .get(&OnionSlotId::new(index))
-                    .is_none_or(SlotLedger::is_free)
-            {
-                return Ok(OnionSlotId::new(index));
+        if self.owns_slot_roster {
+            self.slot_roster.arrive(did, &floor_use);
+            if let Principal::Slot(slot) = self.slot_roster.principal_of(Some(did)) {
+                let index = usize::from(slot);
+                if index < self.capacity
+                    && self
+                        .slots
+                        .get(&OnionSlotId::new(index))
+                        .is_none_or(SlotLedger::is_free)
+                {
+                    return Ok(OnionSlotId::new(index));
+                }
             }
         }
         self.cleanest_free_slot(&floor_use)

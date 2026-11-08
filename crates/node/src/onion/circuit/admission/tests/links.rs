@@ -457,6 +457,7 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
             .with_slot_roster(Arc::clone(&roster));
     for attacker in 0..15_u32 {
         let did = 1_000 + attacker;
+        roster.arrive(Did::from(did), &clean_first.floor_use_at(ORIGIN_MS / Q));
         open(&mut clean_first, ORIGIN_MS, link(did));
         assert_eq!(
             send(
@@ -469,7 +470,9 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
             Verdict::Admitted
         );
         clean_first.link_closed(ORIGIN_MS, link(did));
+        roster.depart(Did::from(did));
     }
+    roster.arrive(Did::from(50_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
     open(&mut clean_first, ORIGIN_MS, link(50));
     assert_eq!(
         clean_first.slot_of(Did::from(50_u32)),
@@ -479,6 +482,7 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
 
     // The next arriving peer (51) takes slot 0 (which already carries `f` units from attacker
     // 1_000) and shares slot 0's `ONION_ADMISSION_SENDER_UNITS` budget with it.
+    roster.arrive(Did::from(51_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
     open(&mut clean_first, ORIGIN_MS, link(51));
     assert_eq!(
         clean_first.slot_of(Did::from(51_u32)),

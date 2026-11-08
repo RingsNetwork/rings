@@ -87,6 +87,7 @@ impl OnionRuntime {
             core.onion_role().registers_relay(),
             core.onion_process_epoch(),
             capacity,
+            core.slot_roster(),
             tags.clone(),
             link_sender.clone(),
             algebra(&accounting, &link_sender),
