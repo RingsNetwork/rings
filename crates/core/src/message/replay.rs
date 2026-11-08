@@ -122,7 +122,6 @@ use crate::message::quota::quota_admission_error;
 use crate::message::quota::OriginQuotaCounterState;
 use crate::message::quota::OriginQuotaTable;
 use crate::message::types::MessageCategory;
-use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaConfig;
 use crate::message::OriginQuotaCounters;
 use crate::message::OriginQuotaKey;
@@ -806,10 +805,13 @@ impl TransactionReplay {
             key.destination,
             charge.lane,
         );
-        let reservation =
-            ledger
-                .quota
-                .reserve(quota_key, charge.message_limit, byte_cost, now.quota);
+        let reservation = ledger.quota.reserve(
+            quota_key,
+            introducer,
+            charge.message_limit,
+            byte_cost,
+            now.quota,
+        );
         match reservation {
             Ok(reservation) => ledger.charged(reservation),
             Err(error) => {
@@ -886,12 +888,17 @@ impl TransactionReplay {
     pub(crate) async fn admit_on_link(
         &self,
         window: &mut Option<SequenceState>,
-        key: StreamKey,
-        sequence: u64,
-        digest: TransactionDigest,
-        charge: OriginQuotaCharge,
-        byte_cost: usize,
+        admission: Admission,
     ) -> Result<SequenceVerdict> {
+        let Admission {
+            key,
+            sequence,
+            digest,
+            charge,
+            byte_cost,
+            introducer,
+            ..
+        } = admission;
         let clock = replay_clock(self.started_at);
         let mut state = self.state.lock().await;
         let TransactionAdmissionState { quota, journal, .. } = &mut *state;
@@ -904,7 +911,13 @@ impl TransactionReplay {
             charge.lane,
         );
         let reservation = quota
-            .reserve(quota_key, charge.message_limit, byte_cost, clock().quota)
+            .reserve(
+                quota_key,
+                introducer,
+                charge.message_limit,
+                byte_cost,
+                clock().quota,
+            )
             .map_err(|error| {
                 self.quota_counters.record(charge.lane, &error);
                 quota_admission_error(quota_key, byte_cost, error)

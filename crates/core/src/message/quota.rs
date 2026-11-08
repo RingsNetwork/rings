@@ -1,9 +1,12 @@
 //! Runtime-local origin quotas for final-destination transactions.
 //!
 //! A quota key is `(network_id, origin account DID, destination DID, logical lane)`. Each key
-//! owns independent fixed-point message and byte token buckets. [`OriginQuota::admit`] is the
-//! pure transition; the destination replay runtime owns the bounded table and supplies monotonic
-//! time. Quota records are intentionally absent from the durable replay store.
+//! owns independent fixed-point message and byte token buckets, and quota records in each lane's
+//! bounded table are charged to their introducing [`Principal`] under [`SlotAccounting`]
+//! ([`ORIGIN_QUOTA_SHARES`]), preserving each connection slot's floor, [`Principal::Local`], and
+//! [`Principal::Inbox`] (#1178). [`OriginQuota::admit`] is the pure transition; the destination
+//! replay runtime owns the bounded table and supplies monotonic time. Quota records are
+//! intentionally absent from the durable replay store.
 //!
 //! An admission either enforces the message limit or, for traffic whose namespace delegated its
 //! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply. A
@@ -18,6 +21,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::dht::Did;
+use crate::fair_admission::Principal;
+use crate::fair_admission::Shares;
+use crate::fair_admission::SlotAccounting;
 use crate::message::admission_delegation::MessageLimit;
 use crate::message::types::MessageCategory;
 
@@ -46,6 +52,52 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
 pub const DELEGATED_MIN_CHARGE: usize = 16 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
+
+/// The shares of one logical lane's origin-quota record table under
+/// [`DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE`] (load-bounds paper, Law 1, #1178): `f = 1` record
+/// per connection slot, a shared pool of `128`, a local share of `288` and an inbox share of
+/// `256`, so `B(s) = R(s)·1 + 672`: `1000` at `s = 3` and `1024` at `s = 15`.
+pub(crate) const ORIGIN_QUOTA_SHARES: Shares = Shares {
+    floor: 1,
+    pool: 128,
+    local: 288,
+    inbox: 256,
+    custody: 0,
+};
+
+const ORIGIN_QUOTA_SUCCESSORS_MAX: usize = 15;
+const _: () = assert!(
+    ORIGIN_QUOTA_SHARES.bound(crate::dht::topology::edge_slots(
+        ORIGIN_QUOTA_SUCCESSORS_MAX
+    )) <= DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE
+);
+const _: () = assert!(
+    ORIGIN_QUOTA_SHARES.bound(crate::dht::topology::edge_slots(
+        ORIGIN_QUOTA_SUCCESSORS_MAX + 1
+    )) > DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE
+);
+
+const fn shares_for_capacity(max_records: usize) -> Shares {
+    if max_records >= DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE {
+        Shares {
+            floor: ORIGIN_QUOTA_SHARES.floor,
+            pool: ORIGIN_QUOTA_SHARES
+                .pool
+                .saturating_add(max_records - DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE),
+            local: ORIGIN_QUOTA_SHARES.local,
+            inbox: ORIGIN_QUOTA_SHARES.inbox,
+            custody: ORIGIN_QUOTA_SHARES.custody,
+        }
+    } else {
+        Shares {
+            floor: 1,
+            pool: max_records.saturating_sub(2),
+            local: max_records,
+            inbox: max_records,
+            custody: 0,
+        }
+    }
+}
 
 /// Validated token-bucket and record-table limits for one logical lane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -511,11 +563,18 @@ pub(super) enum OriginQuotaRejection {
     Capacity { capacity: usize },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct OriginQuotaRecord {
+    quota: OriginQuota,
+    introducer: Principal,
+}
+
 #[derive(Debug)]
 pub(super) struct OriginQuotaReservation {
     key: OriginQuotaKey,
-    previous: Option<OriginQuota>,
-    evicted: Option<(OriginQuotaKey, OriginQuota)>,
+    introducer: Principal,
+    previous: Option<OriginQuotaRecord>,
+    evicted: Option<(OriginQuotaKey, OriginQuotaRecord)>,
 }
 
 impl OriginQuotaReservation {
@@ -526,83 +585,188 @@ impl OriginQuotaReservation {
             }
             None => {
                 table.records.remove(&self.key);
+                table
+                    .lane_accounting_mut(self.key.lane)
+                    .release(self.introducer, 1);
             }
         }
-        if let Some((key, quota)) = self.evicted {
-            table.records.insert(key, quota);
+        if let Some((victim_key, victim_record)) = self.evicted {
+            table
+                .lane_accounting_mut(victim_key.lane)
+                .hold(victim_record.introducer, 1);
+            table.records.insert(victim_key, victim_record);
         }
     }
 }
 
 pub(super) struct OriginQuotaTable {
     config: OriginQuotaConfig,
-    records: BTreeMap<OriginQuotaKey, OriginQuota>,
+    records: BTreeMap<OriginQuotaKey, OriginQuotaRecord>,
+    accounting: [SlotAccounting; MessageCategory::COUNT],
 }
 
 impl OriginQuotaTable {
     pub(super) fn new(config: OriginQuotaConfig) -> Self {
+        let accounting = [
+            MessageCategory::DhtControl,
+            MessageCategory::Storage,
+            MessageCategory::E2e,
+            MessageCategory::Application,
+        ]
+        .map(|lane| SlotAccounting::new(shares_for_capacity(config.lane(lane).max_records)));
         Self {
             config,
             records: BTreeMap::new(),
+            accounting,
+        }
+    }
+
+    fn lane_accounting(&self, lane: MessageCategory) -> &SlotAccounting {
+        let [dht_control, storage, e2e, application] = &self.accounting;
+        match lane {
+            MessageCategory::DhtControl => dht_control,
+            MessageCategory::Storage => storage,
+            MessageCategory::E2e => e2e,
+            MessageCategory::Application => application,
+        }
+    }
+
+    fn lane_accounting_mut(&mut self, lane: MessageCategory) -> &mut SlotAccounting {
+        let [dht_control, storage, e2e, application] = &mut self.accounting;
+        match lane {
+            MessageCategory::DhtControl => dht_control,
+            MessageCategory::Storage => storage,
+            MessageCategory::E2e => e2e,
+            MessageCategory::Application => application,
         }
     }
 
     pub(super) fn reserve(
         &mut self,
         key: OriginQuotaKey,
+        introducer: Principal,
         message_limit: MessageLimit,
         byte_cost: usize,
         now: OriginQuotaInstant,
     ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
         let lane_config = self.config.lane(key.lane);
         if let Some(previous) = self.records.get(&key).copied() {
-            let (next, verdict) = previous
+            let (next_quota, origin_verdict) = previous
+                .quota
                 .admit(lane_config, message_limit, byte_cost, now)
                 .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-            self.records.insert(key, next);
-            if let Some(rejection) = verdict.rejection() {
+            self.records.insert(key, OriginQuotaRecord {
+                quota: next_quota,
+                introducer: previous.introducer,
+            });
+            if let Some(rejection) = origin_verdict.rejection() {
                 return Err(OriginQuotaAdmissionError::Verdict(rejection));
             }
             return Ok(OriginQuotaReservation {
                 key,
+                introducer: previous.introducer,
                 previous: Some(previous),
                 evicted: None,
             });
         }
 
-        let (next, verdict) = OriginQuota::full(lane_config, now)
+        let (next_quota, origin_verdict) = OriginQuota::full(lane_config, now)
             .admit(lane_config, message_limit, byte_cost, now)
             .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-        if let Some(rejection) = verdict.rejection() {
+        if let Some(rejection) = origin_verdict.rejection() {
             return Err(OriginQuotaAdmissionError::Verdict(rejection));
+        }
+
+        let evicted = self.allocate_record(key.lane, introducer, lane_config, now)?;
+        self.records.insert(key, OriginQuotaRecord {
+            quota: next_quota,
+            introducer,
+        });
+        Ok(OriginQuotaReservation {
+            key,
+            introducer,
+            previous: None,
+            evicted,
+        })
+    }
+
+    fn allocate_record(
+        &mut self,
+        lane: MessageCategory,
+        introducer: Principal,
+        config: OriginQuotaLaneConfig,
+        now: OriginQuotaInstant,
+    ) -> Result<Option<(OriginQuotaKey, OriginQuotaRecord)>, OriginQuotaAdmissionError> {
+        let floor = shares_for_capacity(config.max_records).floor;
+        let held = self.lane_accounting(lane).held(introducer);
+        if matches!(introducer, Principal::Slot(_) | Principal::Unbound) && held >= floor {
+            if let Some(victim_key) =
+                self.safe_victim(lane, config, now, |record| record.introducer == introducer)?
+            {
+                let evicted = self
+                    .records
+                    .remove(&victim_key)
+                    .map(|record| (victim_key, record));
+                if let Some((_, ref victim_record)) = evicted {
+                    self.lane_accounting_mut(lane)
+                        .release(victim_record.introducer, 1);
+                }
+                self.lane_accounting_mut(lane).hold(introducer, 1);
+                return Ok(evicted);
+            }
         }
 
         let lane_records = self
             .records
             .keys()
-            .filter(|candidate| candidate.lane == key.lane)
+            .filter(|candidate| candidate.lane == lane)
             .count();
-        let evicted = if lane_records >= lane_config.max_records {
-            let victim = self.safe_victim(key.lane, lane_config, now)?;
-            let Some(victim_key) = victim else {
-                return Err(OriginQuotaAdmissionError::Verdict(
-                    OriginQuotaRejection::Capacity {
-                        capacity: lane_config.max_records,
-                    },
-                ));
-            };
-            self.records
-                .remove(&victim_key)
-                .map(|quota| (victim_key, quota))
-        } else {
-            None
-        };
-        self.records.insert(key, next);
-        Ok(OriginQuotaReservation {
-            key,
-            previous: None,
-            evicted,
-        })
+        if lane_records < config.max_records && self.lane_accounting(lane).admit(introducer).is_ok()
+        {
+            self.lane_accounting_mut(lane).hold(introducer, 1);
+            return Ok(None);
+        }
+
+        if held > 0 {
+            if let Some(victim_key) =
+                self.safe_victim(lane, config, now, |record| record.introducer == introducer)?
+            {
+                let evicted = self
+                    .records
+                    .remove(&victim_key)
+                    .map(|record| (victim_key, record));
+                if let Some((_, ref victim_record)) = evicted {
+                    self.lane_accounting_mut(lane)
+                        .release(victim_record.introducer, 1);
+                }
+                self.lane_accounting_mut(lane).hold(introducer, 1);
+                return Ok(evicted);
+            }
+        }
+
+        let accounting = self.lane_accounting(lane);
+        let pool_victim = self.safe_victim(lane, config, now, |record| {
+            accounting.pool_items(record.introducer) > 0
+        })?;
+        if let Some(victim_key) = pool_victim {
+            if let Some(victim_record) = self.records.remove(&victim_key) {
+                self.lane_accounting_mut(lane)
+                    .release(victim_record.introducer, 1);
+                if self.lane_accounting(lane).admit(introducer).is_ok() {
+                    self.lane_accounting_mut(lane).hold(introducer, 1);
+                    return Ok(Some((victim_key, victim_record)));
+                }
+                self.lane_accounting_mut(lane)
+                    .hold(victim_record.introducer, 1);
+                self.records.insert(victim_key, victim_record);
+            }
+        }
+
+        Err(OriginQuotaAdmissionError::Verdict(
+            OriginQuotaRejection::Capacity {
+                capacity: config.max_records,
+            },
+        ))
     }
 
     fn safe_victim(
@@ -610,16 +774,22 @@ impl OriginQuotaTable {
         lane: MessageCategory,
         config: OriginQuotaLaneConfig,
         now: OriginQuotaInstant,
+        eligible: impl Fn(&OriginQuotaRecord) -> bool,
     ) -> Result<Option<OriginQuotaKey>, OriginQuotaAdmissionError> {
         let mut victim = None;
-        for (key, quota) in self.records.iter().filter(|(key, _)| key.lane == lane) {
-            if !quota
+        for (key, record) in self
+            .records
+            .iter()
+            .filter(|(key, record)| key.lane == lane && eligible(record))
+        {
+            if !record
+                .quota
                 .fully_replenished_at(config, now)
                 .map_err(OriginQuotaAdmissionError::Arithmetic)?
             {
                 continue;
             }
-            let candidate = (quota.last_refill, *key);
+            let candidate = (record.quota.last_refill, *key);
             if victim.is_none_or(|current| candidate < current) {
                 victim = Some(candidate);
             }
@@ -632,17 +802,25 @@ impl OriginQuotaTable {
         self.records.len()
     }
 
+    #[cfg(test)]
+    pub(super) fn held(&self, lane: MessageCategory, principal: Principal) -> usize {
+        self.lane_accounting(lane).held(principal)
+    }
+
     /// The whole `(message, byte)` tokens `key`'s record held after its last admission.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn whole_tokens(&self, key: OriginQuotaKey) -> Option<(u128, u128)> {
-        self.records
-            .get(&key)
-            .map(|quota| (quota.whole_message_tokens(), quota.whole_byte_tokens()))
+        self.records.get(&key).map(|record| {
+            (
+                record.quota.whole_message_tokens(),
+                record.quota.whole_byte_tokens(),
+            )
+        })
     }
 
     #[cfg(test)]
     pub(super) fn get(&self, key: OriginQuotaKey) -> Option<OriginQuota> {
-        self.records.get(&key).copied()
+        self.records.get(&key).map(|record| record.quota)
     }
 }
 
