@@ -93,6 +93,40 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
     }
 }
 
+/// Whether `candidate` may be adopted as `state.local`'s predecessor in `state`.
+///
+/// No peer strictly inside `(local, head)` can be `local`'s predecessor, and
+/// `head` itself may only be adopted as predecessor on a two-node wrapping ring
+/// where `state` references no peer other than `head` and holds no distinct
+/// predecessor.
+pub fn can_rectify_predecessor(state: &TopologyState, candidate: Did) -> bool {
+    if candidate == state.local {
+        return false;
+    }
+    if let Some(head) = successor_head(state) {
+        let candidate_dist = dist(state.local, candidate);
+        let head_dist = dist(state.local, head);
+        if candidate_dist < head_dist {
+            return false;
+        }
+        if candidate == head
+            && (state.predecessor.is_some_and(|pred| pred != head)
+                || state.referenced_slots().any(|peer| peer != head))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Correct predecessor value after one topology-aware rectify transition.
+pub fn rectify_predecessor_in(state: &TopologyState, candidate: Did) -> Option<Did> {
+    if !can_rectify_predecessor(state, candidate) {
+        return state.predecessor;
+    }
+    rectify_predecessor(state.local, state.predecessor, candidate)
+}
+
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
 /// The candidate set is the HMCC merge `known = {local} ∪ current ∪ {pred} ∪
