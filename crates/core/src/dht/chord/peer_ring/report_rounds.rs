@@ -312,7 +312,7 @@ impl PeerRing {
     ///
     /// Replaces any unanswered token for `peer`; when the table is at the
     /// [`topology::edge_slots`] bound for a new `peer`, the oldest entry is
-    /// evicted so the map stays bounded.
+    /// evicted in FIFO order so the queue stays bounded.
     ///
     /// # Errors
     ///
@@ -320,10 +320,11 @@ impl PeerRing {
     pub(crate) fn begin_connect_lookup(&self, peer: Did, request_id: uuid::Uuid) -> Result<()> {
         let limit = topology::edge_slots(self.successor_seq.capacity());
         let mut pending = self.lock_pending_connect_lookup()?;
-        if !pending.contains_key(&peer) && pending.len() >= limit {
-            pending.pop_first();
+        pending.retain(|(existing_peer, _)| *existing_peer != peer);
+        while pending.len() >= limit {
+            pending.pop_front();
         }
-        pending.insert(peer, request_id);
+        pending.push_back((peer, request_id));
         Ok(())
     }
 
@@ -335,13 +336,10 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn claim_connect_lookup(&self, request_id: uuid::Uuid) -> Result<bool> {
         let mut pending = self.lock_pending_connect_lookup()?;
-        let Some(peer) = pending
-            .iter()
-            .find_map(|(peer, token)| (*token == request_id).then_some(*peer))
-        else {
+        let Some(index) = pending.iter().position(|(_, token)| *token == request_id) else {
             return Ok(false);
         };
-        pending.remove(&peer);
+        pending.remove(index);
         Ok(true)
     }
 
@@ -352,9 +350,7 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn cancel_connect_lookup(&self, peer: Did, request_id: uuid::Uuid) -> Result<()> {
         let mut pending = self.lock_pending_connect_lookup()?;
-        if pending.get(&peer) == Some(&request_id) {
-            pending.remove(&peer);
-        }
+        pending.retain(|entry| *entry != (peer, request_id));
         Ok(())
     }
 
@@ -365,7 +361,8 @@ impl PeerRing {
     ///
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn cancel_connect_lookup_for_peer(&self, peer: Did) -> Result<()> {
-        self.lock_pending_connect_lookup()?.remove(&peer);
+        self.lock_pending_connect_lookup()?
+            .retain(|(existing_peer, _)| *existing_peer != peer);
         Ok(())
     }
 }

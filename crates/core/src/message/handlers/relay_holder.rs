@@ -429,15 +429,15 @@ mod tests {
             .await?;
         assert!(node1.dht().relay_holder_hints()?.is_empty());
 
-        // 3. Inconsistent origin (`node2` holds relay mail so it cannot claim `node3 != node2`)
-        // is rejected without retiring `token`.
+        // 3. Inconsistent origin (`queried_key = node2 + 1` is outside `(node3, node2]` and
+        // `node2 != node3`) is rejected without retiring `token`.
         let forged_origin = RelayHolderFound {
             key: queried_key,
             request_id: token,
-            holder: Some(node3.did()),
+            holder: Some(node2.did()),
             horizon: None,
         };
-        let payload = node2
+        let payload = node3
             .swarm
             .transport
             .protocol_egress()
@@ -455,11 +455,12 @@ mod tests {
             .await?;
         assert!(node1.dht().relay_holder_hints()?.is_empty());
 
-        // 4. Matching token from consistent origin `node2` records `node2` and consumes `token`.
+        // 4. Matching token from relay-holding owner `node2` naming `node3` for
+        // `queried_key = node2 + 1 ∈ (node2, node3]` records `node3` and consumes `token`.
         let matching = RelayHolderFound {
             key: queried_key,
             request_id: token,
-            holder: Some(node2.did()),
+            holder: Some(node3.did()),
             horizon: None,
         };
         let payload = node2
@@ -477,17 +478,17 @@ mod tests {
             .await?;
         assert_eq!(
             node1.dht().relay_holder_hints()?.get(&queried_key),
-            Some(&node2.did())
+            Some(&node3.did())
         );
 
         // 5. Replaying `token` cannot overwrite the hint.
         let replay = RelayHolderFound {
             key: queried_key,
             request_id: token,
-            holder: Some(node3.did()),
+            holder: Some(node2.did()),
             horizon: None,
         };
-        let payload = node3
+        let payload = node2
             .swarm
             .transport
             .protocol_egress()
@@ -502,7 +503,7 @@ mod tests {
             .await?;
         assert_eq!(
             node1.dht().relay_holder_hints()?.get(&queried_key),
-            Some(&node2.did())
+            Some(&node3.did())
         );
         Ok(())
     }

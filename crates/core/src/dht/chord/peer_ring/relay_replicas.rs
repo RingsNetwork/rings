@@ -299,7 +299,7 @@ impl PeerRing {
         holder: Option<Did>,
         horizon: Option<Did>,
     ) -> Result<Option<(Did, uuid::Uuid)>> {
-        if !self.responder_answers_relay_key(origin, key, holder, horizon)? {
+        if !self.responder_answers_relay_key(origin, key, holder, horizon) {
             return Ok(None);
         }
         let named = match holder {

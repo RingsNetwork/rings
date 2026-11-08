@@ -157,6 +157,32 @@ fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn test_connect_lookup_tokens_evict_oldest_fifo_at_capacity() -> Result<()> {
+    let dht = gen_pure_dht(SecretKey::random().address().into());
+    let limit = crate::dht::topology::edge_slots(dht.successors().capacity());
+
+    // Insert the oldest entry with a large DID so numerical ordering would keep it, whereas
+    // FIFO eviction must evict it first when capacity is exceeded.
+    let oldest_peer = crate::dht::Did::from(u32::MAX);
+    let oldest_token = uuid::Uuid::from_u128(1);
+    dht.begin_connect_lookup(oldest_peer, oldest_token)?;
+
+    let mut later_tokens = Vec::with_capacity(limit);
+    for idx in 1..=limit {
+        let peer = crate::dht::Did::from(idx as u32);
+        let token = uuid::Uuid::from_u128((idx + 1) as u128);
+        dht.begin_connect_lookup(peer, token)?;
+        later_tokens.push(token);
+    }
+
+    assert!(!dht.claim_connect_lookup(oldest_token)?);
+    for token in later_tokens {
+        assert!(dht.claim_connect_lookup(token)?);
+    }
+    Ok(())
+}
+
 /// A refused offer is the slot's answer, not a failure (#1152): an offer from a peer this node
 /// is already admitted to is refused with `AlreadyConnected` before its description is read,
 /// and the handler logs it once, at debug, and returns `Ok`, so no WARN reports it and no

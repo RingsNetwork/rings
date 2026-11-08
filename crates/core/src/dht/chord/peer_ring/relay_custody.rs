@@ -303,30 +303,26 @@ impl PeerRing {
     }
 
     /// Whether `origin`'s answer `(holder, horizon)` for `key` is consistent with `origin`
-    /// owning `key` (`owner_answer`, `Law (Owner places)`): an owner that holds relay mail
-    /// names itself (`holder == Some(origin)`), a storage-less owner (`!holds(origin)`) may
-    /// name a successor holder with `key ∈ (origin, holder]`, and an answer with no holder
-    /// and a horizon satisfies `key ∈ (origin, horizon]`.
+    /// owning `key` (`owner_answer`, `Law (Owner places)`): an owner answers itself
+    /// (`holder == Some(origin)`), or names the first holder at or after `key` in its segment
+    /// (`key ∈ (origin, holder]`), or answers `None` with a horizon covering
+    /// `key ∈ (origin, horizon]`.
     pub(super) fn responder_answers_relay_key(
         &self,
         origin: Did,
         key: Did,
         holder: Option<Did>,
         horizon: Option<Did>,
-    ) -> Result<bool> {
+    ) -> bool {
         if origin == self.did {
-            return Ok(false);
+            return false;
         }
-        Ok(match (holder, horizon) {
-            (Some(holder), None) => {
-                holder == origin
-                    || (!self.lock_relay_neighborhood()?.holds(origin)
-                        && in_arc(origin, key, holder))
-            }
+        match (holder, horizon) {
+            (Some(holder), None) => holder == origin || in_arc(origin, key, holder),
             (None, Some(horizon)) => in_arc(origin, key, horizon),
             (None, None) => origin != key,
             (Some(_), Some(_)) => false,
-        })
+        }
     }
 
     /// Take `holder`, `origin`'s answer to the outstanding query `(key, request_id)`
@@ -342,7 +338,7 @@ impl PeerRing {
         holder: Option<Did>,
         horizon: Option<Did>,
     ) -> Result<bool> {
-        if !self.responder_answers_relay_key(origin, key, holder, horizon)? {
+        if !self.responder_answers_relay_key(origin, key, holder, horizon) {
             return Ok(false);
         }
         let holds = |holder: Did| -> Result<bool> {

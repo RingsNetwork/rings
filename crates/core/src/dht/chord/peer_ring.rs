@@ -38,6 +38,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -161,8 +162,9 @@ pub struct PeerRing {
     /// reporter is still a successor; the transition core prunes departed
     /// reporters' tokens when a commit changes the successor list.
     pending_successor_sync: Mutex<topology::SuccessorSyncState>,
-    /// Per-peer ownership of outstanding `FindSuccessorReportHandler::Connect` lookups.
-    pending_connect_lookup: Mutex<BTreeMap<Did, uuid::Uuid>>,
+    /// Per-peer ownership of outstanding `FindSuccessorReportHandler::Connect` lookups, in
+    /// insertion order so capacity eviction is FIFO.
+    pending_connect_lookup: Mutex<VecDeque<(Did, uuid::Uuid)>>,
     /// Origin of the monotonic clock behind every finger deadline and retry
     /// floor.
     ///
@@ -261,7 +263,7 @@ impl PeerRing {
             topology_transition: Mutex::new(()),
             pending_stabilization: Mutex::new(None),
             pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
-            pending_connect_lookup: Mutex::new(BTreeMap::new()),
+            pending_connect_lookup: Mutex::new(VecDeque::new()),
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
@@ -384,7 +386,7 @@ impl PeerRing {
             .map_err(|_| Error::LockPoisoned)
     }
 
-    fn lock_pending_connect_lookup(&self) -> Result<MutexGuard<'_, BTreeMap<Did, uuid::Uuid>>> {
+    fn lock_pending_connect_lookup(&self) -> Result<MutexGuard<'_, VecDeque<(Did, uuid::Uuid)>>> {
         self.pending_connect_lookup
             .lock()
             .map_err(|_| Error::LockPoisoned)

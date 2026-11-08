@@ -249,8 +249,8 @@ fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result
     // outstanding query, while the matching token from a consistent origin is taken once.
     let token = ring.ask_relay_holder(key)?;
     assert!(!ring.name_relay_holder(key, wrong_token, named, Some(named), None)?);
-    // `other` holds relay mail by default, so it cannot claim `named != other` as the holder.
-    assert!(!ring.name_relay_holder(key, token, other, Some(named), None)?);
+    // `key` (51) is outside `(60, 70]` and `70 != 60`, so `origin = 60` cannot claim `70`.
+    assert!(!ring.name_relay_holder(key, token, Did::from(60u32), Some(Did::from(70u32)), None,)?);
     assert!(ring.name_relay_holder(key, token, named, Some(named), None)?);
     assert!(!ring.name_relay_holder(key, token, other, Some(other), None)?);
     assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&named));
@@ -316,7 +316,8 @@ fn test_next_relay_holder_requires_matching_token_and_consistent_origin() -> Res
 
     let wrong_token = uuid::Uuid::from_u128(999);
     let resolved_holder = successor + Did::from(200u32);
-    let inconsistent_origin = successor + Did::from(300u32);
+    // `key = successor + 1` lies outside `(inconsistent_origin, resolved_holder]`.
+    let inconsistent_origin = successor + Did::from(50u32);
 
     // 1. Mismatched token is ignored and leaves the query outstanding.
     assert!(!ring.asks_next_relay_holder(key, wrong_token)?);
@@ -371,12 +372,15 @@ fn test_next_relay_holder_requires_matching_token_and_consistent_origin() -> Res
     assert!(!ring.asks_next_relay_holder(key, request_id)?);
     assert!(ring.asks_next_relay_holder(next_key, next_request_id)?);
 
-    // 4. Valid holder response resolves the next holder and consumes `next_request_id` once.
+    // 4. Valid holder response from `horizon` (which holds relay mail, `holds(horizon) == true`)
+    // for `next_key = horizon + 1` naming `resolved_holder != horizon` with
+    // `next_key ∈ (horizon, resolved_holder]` resolves the next holder and consumes
+    // `next_request_id` once.
     assert_eq!(
         ring.take_next_relay_holder(
             next_key,
             next_request_id,
-            resolved_holder,
+            horizon,
             Some(resolved_holder),
             None,
         )?,
