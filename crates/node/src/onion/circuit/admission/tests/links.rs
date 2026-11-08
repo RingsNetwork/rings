@@ -2,14 +2,18 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rand::SeedableRng;
 use rings_core::dht::Did;
+use rings_core::message::SlotFloorUse;
+use rings_core::message::SlotRoster;
 
 use super::super::OnionAdmissionLink;
+use super::super::OnionSlotId;
 use super::generation;
 use super::latest_expiry;
 use super::layer;
@@ -36,6 +40,7 @@ use crate::onion::circuit::admission::OnionLinkTableFull;
 use crate::onion::circuit::admission::OnionReplayFilterKey;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
+use crate::onion::circuit::admission::ONION_ADMISSION_SLOT_FLOOR_UNITS;
 use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 use crate::onion::OnionProcessEpoch;
 
@@ -58,14 +63,16 @@ fn test_more_than_64_live_links_are_all_admitted() {
             Verdict::Admitted
         );
     }
-    assert_eq!(admission.senders.len(), 150);
+    assert_eq!(admission.slots.len(), 150);
 }
 
-/// Law: closing a link does not reset its ledger while it carries load, even under table pressure.
-/// A DID spends `B` and closes its link. 38 churning DIDs then open, send and close, filling the
-/// table: a refused churner never becomes live. When the DID reconnects within the window, as a new
-/// generation, it finds its old ledger and is still over budget. Once the window passes, the sweep
-/// releases every drained churner.
+/// Law: closing a link does not reset its ledger while it carries load, even under heavy Sybil
+/// churn. A DID spends `B` and closes its link. 38 churning DIDs (`> 2·R` for `R = 8`) then open,
+/// send and close within `V`: because ledgers are keyed by connection slot via [`SlotRoster`],
+/// none of the churners triggers [`OnionLinkTableFull`], and cleanest-first slot assignment keeps
+/// them on the cleaner slots `1..16`. When the original DID reconnects within the window as a new
+/// generation, it resumes its retained slot ledger and is still over budget. Once the window
+/// passes, the sweep releases every drained churner slot.
 #[test]
 fn test_closed_link_keeps_its_ledger_until_it_drains() {
     const R: usize = 8;
@@ -73,6 +80,7 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
     let mut admission = state_with(&mut rng, EPOCH, R, 1..2);
     let x = latest_expiry(ORIGIN_MS);
     let spender = Did::from(1_u32);
+    let spender_slot = admission.slot_of(spender).expect("spender holds a slot");
     assert_eq!(
         send(
             &mut admission,
@@ -84,29 +92,24 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
         Verdict::Admitted
     );
     admission.link_closed(ORIGIN_MS, link(1));
-    let mut refused = 0;
     for churner in 2..40_u32 {
-        match admission.link_opened(ORIGIN_MS + 1, link(churner)) {
-            Ok(()) => {
-                assert_eq!(
-                    send(
-                        &mut admission,
-                        ORIGIN_MS + 1,
-                        churner,
-                        1,
-                        layer(x, u128::from(churner))
-                    ),
-                    Verdict::Admitted
-                );
-                admission.link_closed(ORIGIN_MS + 1, link(churner));
-            }
-            Err(OnionLinkTableFull) => refused += 1,
-        }
-        assert!(admission.senders.len() <= 2 * R);
+        open(&mut admission, ORIGIN_MS + 1, link(churner));
+        assert_eq!(
+            send(
+                &mut admission,
+                ORIGIN_MS + 1,
+                churner,
+                1,
+                layer(x, u128::from(churner))
+            ),
+            Verdict::Admitted
+        );
+        admission.link_closed(ORIGIN_MS + 1, link(churner));
+        assert!(admission.slots.len() <= 2 * R);
     }
-    assert!(refused > 0);
-    assert!(admission.senders.contains_key(&spender));
+    assert_eq!(admission.slot_of(spender), Some(spender_slot));
     open(&mut admission, ORIGIN_MS + 2, generation(1, 1));
+    assert_eq!(admission.slot_of(spender), Some(spender_slot));
     assert_eq!(
         send_on(
             &mut admission,
@@ -128,12 +131,18 @@ fn test_closed_link_keeps_its_ledger_until_it_drains() {
         ),
         Verdict::Admitted
     );
-    assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![&spender]);
+    assert_eq!(admission.slots.keys().collect::<Vec<_>>(), vec![
+        &spender_slot
+    ]);
+    assert_eq!(admission.peer_slots.keys().collect::<Vec<_>>(), vec![
+        &spender
+    ]);
 }
 
-/// Law: a full table refuses the link, and the link's cells are never charged or decrypted. The
-/// shell's close of that refused link is a no-op. The peer's redial, a new generation, succeeds
-/// once a closed ledger has drained and been swept.
+/// Law: when `2·R` links are already live, the table refuses a new link, and the refused link's
+/// cells are never charged or decrypted. The shell's close of that refused link is a no-op. Once a
+/// live link closes, its connection slot is freed in [`SlotRoster`], so the peer's redial (a new
+/// generation) succeeds immediately and inherits the slot's residual load.
 #[test]
 fn test_full_table_refuses_the_link_and_the_peer_redials() {
     let mut rng = StdRng::seed_from_u64(0x0841_000c);
@@ -147,38 +156,40 @@ fn test_full_table_refuses_the_link_and_the_peer_redials() {
         admission.link_opened(ORIGIN_MS, link(3)),
         Err(OnionLinkTableFull)
     );
-    let before = admission.senders.clone();
+    let before = admission.slots.clone();
     admission.link_closed(ORIGIN_MS, link(3));
-    assert_eq!(admission.senders, before);
+    assert_eq!(admission.slots, before);
     assert_eq!(
         send(&mut admission, ORIGIN_MS, 3, 1, layer(x, 3)),
         Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
 
     admission.link_closed(ORIGIN_MS, link(1));
+    open(&mut admission, ORIGIN_MS + 1, generation(3, 1));
+    assert_eq!(sender_load(&admission, 3, ORIGIN_MS + 1), Some(1));
     assert_eq!(
-        admission.link_opened(ORIGIN_MS + 1, generation(3, 1)),
+        admission.link_opened(ORIGIN_MS + 1, link(4)),
         Err(OnionLinkTableFull)
     );
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
-    open(&mut admission, drained, generation(3, 2));
-    assert!(!admission.senders.contains_key(&Did::from(1_u32)));
-    assert!(admission.senders.contains_key(&Did::from(2_u32)));
     assert_eq!(
         send_on(
             &mut admission,
             drained,
-            generation(3, 2),
+            generation(3, 1),
             1,
             layer(latest_expiry(drained), 3)
         ),
         Verdict::Admitted
     );
+    assert!(!admission.peer_slots.contains_key(&Did::from(1_u32)));
+    assert!(admission.peer_slots.contains_key(&Did::from(2_u32)));
+    assert!(admission.peer_slots.contains_key(&Did::from(3_u32)));
 }
 
 /// Law: liveness is per generation, so interleaved generations of one DID
 /// (`open(g₀) open(g₁) close(g₀)`) leave `g₁` live and `g₀` not. Only the last close, together with
-/// a drained load, releases the DID's ledger.
+/// a drained load, releases the DID's slot ledger.
 #[test]
 fn test_ledger_counts_interleaved_link_generations() {
     let mut rng = StdRng::seed_from_u64(0x0841_0010);
@@ -197,7 +208,7 @@ fn test_ledger_counts_interleaved_link_generations() {
         Verdict::Admitted
     );
     admission.link_closed(ORIGIN_MS, generation(1, 1));
-    assert!(admission.senders.contains_key(&peer));
+    assert!(admission.peer_slots.contains_key(&peer));
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
     assert_eq!(
         send_on(
@@ -209,7 +220,8 @@ fn test_ledger_counts_interleaved_link_generations() {
         ),
         Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
-    assert!(admission.senders.is_empty());
+    assert!(admission.slots.is_empty());
+    assert!(admission.peer_slots.is_empty());
 }
 
 /// Law: a close is idempotent and specific to its generation. A late close of a refused `g₀`, a
@@ -283,7 +295,7 @@ fn test_renewal_keeps_the_live_links_and_clears_the_rest() {
     );
     assert_eq!(admission.clock_ms, 0);
     assert_eq!(live_filters(&admission), Vec::new());
-    assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
+    assert_eq!(admission.peer_slots.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32),
         &Did::from(2_u32)
     ]);
@@ -357,7 +369,7 @@ fn test_reconcile_recovers_lost_link_events() {
     );
     let refused = admission.reconcile(ORIGIN_MS, [link(1), generation(6, 3)]);
     assert!(refused.links().is_empty());
-    assert_eq!(admission.senders.keys().collect::<Vec<_>>(), vec![
+    assert_eq!(admission.peer_slots.keys().collect::<Vec<_>>(), vec![
         &Did::from(1_u32),
         &Did::from(6_u32)
     ]);
@@ -383,17 +395,152 @@ fn test_reconcile_recovers_lost_link_events() {
         Verdict::Unpaid(OnionChargeRejection::LinkNotLive)
     );
 
-    // DIDs 1 and 5 are absent and unloaded, so they are released. DID 6 is absent but still
-    // loaded, so its closed ledger keeps a slot until it drains. Three of the ten new links fit,
-    // and reconcile opens in DID order, so DIDs 10 to 12 win and 13 to 19 are refused.
+    // DIDs 1, 5, and 6 are absent from `crowded`, so `reconcile` closes all three and frees their
+    // connection slots (`0..4`), while DID 6's slot retains its 1 unit of residual load. All four
+    // slots can therefore admit new live links (`10..14`), and `14..20` are refused.
     let crowded = (10..20).map(link).collect::<Vec<_>>();
     let refused = admission.reconcile(ORIGIN_MS, crowded);
     assert_eq!(
         refused.links(),
-        (13..20).map(link).collect::<Vec<_>>().as_slice()
+        (14..20).map(link).collect::<Vec<_>>().as_slice()
     );
-    assert_eq!(admission.senders.len(), 4);
-    assert!(admission.senders.contains_key(&Did::from(6_u32)));
+    assert_eq!(admission.slots.len(), 4);
+    assert_eq!(
+        admission.slot_of(Did::from(6_u32)),
+        Some(OnionSlotId::new(1))
+    );
+    assert_eq!(sender_load(&admission, 13, ORIGIN_MS), Some(1));
+}
+
+/// Law (#1183): rotating `> 2·R` Sybil connections within a single window `V` never triggers
+/// [`OnionLinkTableFull`] for an admitted connection slot, [`SlotRoster`]'s cleanest-first slot
+/// assignment gives an arriving honest peer an uncharged slot whenever one is free, and peers
+/// mapped to the same slot share one [`SlotLedger`] and its `B` budget.
+#[test]
+fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest_first() {
+    const R: usize = 8;
+    let mut rng = StdRng::seed_from_u64(0x0841_0021);
+    let mut admission = state_with(&mut rng, EPOCH, R, 1..2);
+    let x = latest_expiry(ORIGIN_MS);
+
+    // Rotate 100 > 2·R Sybil connections within V, each sending 1 unit and disconnecting.
+    for sybil in 100..200_u32 {
+        assert_eq!(admission.link_opened(ORIGIN_MS + 1, link(sybil)), Ok(()));
+        assert_eq!(
+            send(
+                &mut admission,
+                ORIGIN_MS + 1,
+                sybil,
+                1,
+                layer(x, u128::from(sybil))
+            ),
+            Verdict::Admitted
+        );
+        admission.link_closed(ORIGIN_MS + 1, link(sybil));
+    }
+    // Honest peer 1 on slot 0 is untouched (0 units spent), and a new honest peer 2 is admitted
+    // without `OnionLinkTableFull` into the cleanest free slot.
+    assert_eq!(sender_load(&admission, 1, ORIGIN_MS + 1), Some(0));
+    assert_eq!(admission.link_opened(ORIGIN_MS + 2, link(2)), Ok(()));
+    assert_eq!(
+        send(&mut admission, ORIGIN_MS + 2, 2, 1, layer(x, 500)),
+        Verdict::Admitted
+    );
+
+    // Cleanest-first rotation residual (Prop. 1(3)): on a fresh table with `2·R = 16` slots, 15
+    // rotating attackers each fill their slot's floor `f` and depart. Because slot 15 is still
+    // clean, an arriving honest peer takes slot 15 with zero inherited load; a second peer that
+    // later takes one of the charged slots shares that slot's ledger and `B` budget.
+    let roster = Arc::new(SlotRoster::new(2 * R));
+    let mut clean_first =
+        OnionAdmissionState::new(EPOCH, OnionReplayFilterKey::new(rng.gen()), registry(R))
+            .with_slot_roster(Arc::clone(&roster));
+    for attacker in 0..15_u32 {
+        let did = 1_000 + attacker;
+        roster.arrive(Did::from(did), &clean_first.floor_use_at(ORIGIN_MS / Q));
+        open(&mut clean_first, ORIGIN_MS, link(did));
+        assert_eq!(
+            send(
+                &mut clean_first,
+                ORIGIN_MS,
+                did,
+                ONION_ADMISSION_SLOT_FLOOR_UNITS,
+                layer(x, u128::from(did))
+            ),
+            Verdict::Admitted
+        );
+        clean_first.link_closed(ORIGIN_MS, link(did));
+        roster.depart(Did::from(did));
+    }
+    roster.arrive(Did::from(50_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
+    open(&mut clean_first, ORIGIN_MS, link(50));
+    assert_eq!(
+        clean_first.slot_of(Did::from(50_u32)),
+        Some(OnionSlotId::new(15))
+    );
+    assert_eq!(sender_load(&clean_first, 50, ORIGIN_MS), Some(0));
+
+    // The next arriving peer (51) takes slot 0 (which already carries `f` units from attacker
+    // 1_000) and shares slot 0's `ONION_ADMISSION_SENDER_UNITS` budget with it.
+    roster.arrive(Did::from(51_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
+    open(&mut clean_first, ORIGIN_MS, link(51));
+    assert_eq!(
+        clean_first.slot_of(Did::from(51_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    assert_eq!(
+        sender_load(&clean_first, 51, ORIGIN_MS),
+        Some(ONION_ADMISSION_SLOT_FLOOR_UNITS)
+    );
+    let remaining_slot_budget = ONION_ADMISSION_SENDER_UNITS - ONION_ADMISSION_SLOT_FLOOR_UNITS;
+    assert_eq!(
+        send(
+            &mut clean_first,
+            ORIGIN_MS,
+            51,
+            remaining_slot_budget,
+            layer(x, 2_000)
+        ),
+        Verdict::Admitted
+    );
+    assert_eq!(
+        send(&mut clean_first, ORIGIN_MS, 51, 1, layer(x, 2_001)),
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
+    );
+    let _ = SlotFloorUse::default();
+}
+
+/// Law (#1183): `reconcile` allocates connection slots without depending on `Did` ordering, so an
+/// attacker who grinds small `Did`s gains no advantage over honest peers with larger `Did`s.
+#[test]
+fn test_reconcile_does_not_depend_on_did_ordering() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0022);
+    let mut admission = state_with(&mut rng, EPOCH, 2, 0..0);
+
+    // 4 honest peers with large DIDs were admitted at earlier generations `0..4`, while 4 Sybil
+    // peers with ground small DIDs (`1..=4`) were admitted at later generations `4..8`.
+    let honest = [
+        generation(10_000, 0),
+        generation(20_000, 1),
+        generation(30_000, 2),
+        generation(40_000, 3),
+    ];
+    let sybils = [
+        generation(1, 4),
+        generation(2, 5),
+        generation(3, 6),
+        generation(4, 7),
+    ];
+    let snapshot = sybils
+        .iter()
+        .chain(honest.iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let refused = admission.reconcile(ORIGIN_MS, snapshot);
+    assert_eq!(refused.links(), &sybils);
+    let mut expected_live = honest.to_vec();
+    expected_live.sort();
+    assert_eq!(admission.live_links(), expected_live);
 }
 
 /// Law (memory bound): the live-link set is capped at `2·R` even for one DID. That can only be
@@ -436,7 +583,7 @@ fn test_drained_closed_ledgers_are_swept_on_the_next_quantum() {
         ),
         Verdict::Admitted
     );
-    assert!(admission.senders.contains_key(&Did::from(1_u32)));
+    assert!(admission.peer_slots.contains_key(&Did::from(1_u32)));
     let drained = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
     assert_eq!(
         send(
@@ -448,11 +595,11 @@ fn test_drained_closed_ledgers_are_swept_on_the_next_quantum() {
         ),
         Verdict::Admitted
     );
-    assert!(!admission.senders.contains_key(&Did::from(1_u32)));
+    assert!(!admission.peer_slots.contains_key(&Did::from(1_u32)));
     assert!(admission
-        .senders
+        .slots
         .values()
-        .all(|sender| !sender.is_releasable_at(drained / Q)));
+        .all(|slot| !slot.is_releasable_at(drained / Q)));
 }
 
 /// Property, seeded: under random link churn (48 DIDs, `R = 16`, two of them heavy), no DID is
@@ -534,15 +681,15 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
                 }
             }
         }
-        assert!(admission.senders.len() <= 2 * R);
+        assert!(admission.slots.len() <= 2 * R);
         assert_eq!(
             admission.live_link_count(),
             live_generations.values().map(Vec::len).sum::<usize>()
         );
         assert!(admission
-            .senders
+            .slots
             .values()
-            .all(|sender| !sender.is_releasable_at(now_ms / Q)));
+            .all(|slot| !slot.is_releasable_at(now_ms / Q)));
     }
     assert!(outcomes.iter().all(|count| *count > 0), "{outcomes:?}");
     for (sender, quantum) in charged.keys() {
@@ -559,25 +706,22 @@ fn test_rotation_through_many_dids_never_exceeds_the_sender_budget() {
     }
 }
 
-/// Whether the table has no room for `link`, given the modelled number of live links: the live-link
-/// set is full, or `link`'s DID has no ledger and the ledger table is full. This is the only
-/// justification for a refusal.
+/// Whether the table has no room for `link`, given the modelled number of live links: the
+/// live-link set is at its `2·R` capacity. This is the only justification for a refusal.
 fn is_full_for(
     admission: &OnionAdmissionState,
     live_links: usize,
-    link: &OnionAdmissionLink,
+    _link: &OnionAdmissionLink,
 ) -> bool {
     live_links >= admission.capacity
-        || (!admission.senders.contains_key(&link.peer())
-            && admission.senders.len() >= admission.capacity)
 }
 
 /// The live links of `admission`, as `(did, generation)` pairs.
 fn live_links(admission: &OnionAdmissionState) -> BTreeSet<(Did, u64)> {
     admission
-        .senders
-        .iter()
-        .flat_map(|(&did, sender)| sender.live.iter().map(move |&generation| (did, generation)))
+        .live_links()
+        .into_iter()
+        .map(|link| (link.peer(), link.generation()))
         .collect()
 }
 
@@ -705,7 +849,7 @@ impl Lockstep {
             .iter()
             .all(|link| is_full_for(&self.sorted, expected.len(), link)));
         self.occurred[3] += u32::from(!refused.links().is_empty());
-        let ledgers = self.sorted.senders.clone();
+        let ledgers = self.sorted.slots.clone();
         assert_eq!(
             self.sorted.reconcile(now_ms, snapshot.iter().copied()),
             refused
@@ -714,7 +858,7 @@ impl Lockstep {
             self.shuffled.reconcile(now_ms, permuted.iter().copied()),
             refused
         );
-        assert_eq!(self.sorted.senders, ledgers);
+        assert_eq!(self.sorted.slots, ledgers);
         self.truth = expected;
         self.modelled = self.truth.clone();
     }
@@ -770,7 +914,7 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
             _ => model.charge(now_ms, did, tag),
         }
         assert_eq!(live_links(&model.sorted), model.modelled);
-        assert_eq!(model.sorted.senders, model.shuffled.senders);
+        assert_eq!(model.sorted.slots, model.shuffled.slots);
     }
     assert!(
         model.reconciliations > 100 && model.lost > 50,

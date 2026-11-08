@@ -75,7 +75,7 @@ pub enum Principal {
 /// The order is exact (cross-multiplied), so two uses are equal iff their fractions are; a
 /// table with no floor has nothing to inherit, and its use is [`FloorUse::CLEAN`].
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct FloorUse {
+pub struct FloorUse {
     /// `min(u, f)`.
     used: usize,
     /// `f`, at least 1.
@@ -84,10 +84,10 @@ pub(crate) struct FloorUse {
 
 impl FloorUse {
     /// `0`: a slot whose floor is untouched.
-    pub(crate) const CLEAN: Self = Self { used: 0, floor: 1 };
+    pub const CLEAN: Self = Self { used: 0, floor: 1 };
 
     /// `min(used, floor) / floor`, or [`Self::CLEAN`] for a table with no floor.
-    const fn of(used: usize, floor: usize) -> Self {
+    pub const fn of(used: usize, floor: usize) -> Self {
         match floor {
             0 => Self::CLEAN,
             _ => Self {
@@ -126,11 +126,16 @@ impl Eq for FloorUse {}
 /// with the empty map ([`Self::default`]) as its identity: the tables combine in any order into
 /// each slot's worst table (paper, Def. 1).
 #[derive(Clone, Debug, Default)]
-pub(crate) struct SlotFloorUse(BTreeMap<u16, FloorUse>);
+pub struct SlotFloorUse(BTreeMap<u16, FloorUse>);
 
 impl SlotFloorUse {
+    /// Build a floor-use map from `(slot, floor_use)` pairs.
+    pub fn from_slots(slots: impl IntoIterator<Item = (u16, FloorUse)>) -> Self {
+        Self(slots.into_iter().collect())
+    }
+
     /// The worst of `self` and `other`, slot by slot.
-    pub(crate) fn join(mut self, other: Self) -> Self {
+    pub fn join(mut self, other: Self) -> Self {
         for (slot, floor_use) in other.0 {
             self.0
                 .entry(slot)
@@ -141,7 +146,7 @@ impl SlotFloorUse {
     }
 
     /// The floor use of `slot`: [`FloorUse::CLEAN`] if no table charges it.
-    pub(crate) fn of(&self, slot: u16) -> FloorUse {
+    pub fn of(&self, slot: u16) -> FloorUse {
         self.0.get(&slot).copied().unwrap_or(FloorUse::CLEAN)
     }
 }
