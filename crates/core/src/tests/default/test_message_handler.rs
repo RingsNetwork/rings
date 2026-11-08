@@ -444,12 +444,18 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
+    let connect_token = crate::utils::new_uuid();
+    node2
+        .dht()
+        .begin_connect_lookup(node1.did(), connect_token)?;
     node2
         .swarm
         .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
-                then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
+                then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+                    request_id: connect_token,
+                }),
                 strict: true,
             }),
             node1.did(),
@@ -491,12 +497,18 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     wait_for_predecessor(&node2, node1.did()).await?;
     assert!(node1.dht().successors().list()?.contains(&node2.did()));
     println!("node1: {:?}, node2: {:?}", node1.did(), node2.did());
+    let connect_token = crate::utils::new_uuid();
+    node2
+        .dht()
+        .begin_connect_lookup(node1.did(), connect_token)?;
     node2
         .swarm
         .send_core_message_for_test(
             Message::FindSuccessorSend(message::FindSuccessorSend {
                 did: node2.did(),
-                then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
+                then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+                    request_id: connect_token,
+                }),
                 strict: true,
             }),
             node1.did(),

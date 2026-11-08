@@ -241,27 +241,155 @@ fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result
     ring.observe_relay_custody(storage_less, RelayCustody::HoldsNone)?;
 
     // Unasked: nothing is taken.
-    assert!(!ring.name_relay_holder(key, Some(named))?);
+    let wrong_token = uuid::Uuid::from_u128(404);
+    assert!(!ring.name_relay_holder(key, wrong_token, named, Some(named), None)?);
     assert!(ring.relay_holder_hints()?.is_empty());
 
-    // Asked: the first answer is taken, and a second answer to the same query is not.
-    ring.ask_relay_holder(key)?;
-    assert!(ring.name_relay_holder(key, Some(named))?);
-    assert!(!ring.name_relay_holder(key, Some(other))?);
+    // Asked: a mismatched token or an inconsistent origin is rejected without consuming the
+    // outstanding query, while the matching token from a consistent origin is taken once.
+    let token = ring.ask_relay_holder(key)?;
+    assert!(!ring.name_relay_holder(key, wrong_token, named, Some(named), None)?);
+    // `key` (51) is outside `(60, 70]` and `70 != 60`, so `origin = 60` cannot claim `70`.
+    assert!(!ring.name_relay_holder(key, token, Did::from(60u32), Some(Did::from(70u32)), None,)?);
+    assert!(ring.name_relay_holder(key, token, named, Some(named), None)?);
+    assert!(!ring.name_relay_holder(key, token, other, Some(other), None)?);
     assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&named));
 
     // Asked again: the same answer changes nothing and costs no pass.
-    ring.ask_relay_holder(key)?;
-    assert!(!ring.name_relay_holder(key, Some(named))?);
+    let token = ring.ask_relay_holder(key)?;
+    assert!(!ring.name_relay_holder(key, token, named, Some(named), None)?);
     assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&named));
 
-    // An answer naming this node or a node that holds no relay mail names no holder.
-    for unfit in [ring.did, storage_less] {
-        ring.ask_relay_holder(key)?;
-        assert!(ring.name_relay_holder(key, Some(unfit))?);
-        assert!(ring.relay_holder_hints()?.is_empty());
-        ring.ask_relay_holder(key)?;
-        assert!(ring.name_relay_holder(key, Some(named))?);
-    }
+    // A storage-less owner `storage_less` (9) may name a successor holder `other` (60) when
+    // `key` (51) lies in `(storage_less, other]`.
+    let other_holder = Did::from(60u32);
+    let token = ring.ask_relay_holder(key)?;
+    assert!(ring.name_relay_holder(key, token, storage_less, Some(other_holder), None)?);
+    assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&other_holder));
+
+    // An answer naming a node that holds no relay mail names no holder.
+    let token = ring.ask_relay_holder(key)?;
+    assert!(ring.name_relay_holder(key, token, storage_less, Some(storage_less), None)?);
+    assert!(ring.relay_holder_hints()?.is_empty());
+    let token = ring.ask_relay_holder(key)?;
+    assert!(ring.name_relay_holder(key, token, named, Some(named), None)?);
+    Ok(())
+}
+
+/// `Law (Asked)` on `NextHolder` (#1181): `take_next_relay_holder` rejects unsolicited,
+/// mismatched-token, replayed, and inconsistent-origin `RelayHolderFound` responses without
+/// retiring the in-flight query token.
+#[test]
+fn test_next_relay_holder_requires_matching_token_and_consistent_origin() -> Result<()> {
+    let holder = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let destination = Did::from(15u32);
+    let held_key = inbox_key(destination);
+    let predecessor = held_key - Did::from(10u32);
+    let local = held_key + Did::from(10u32);
+    let successor = held_key + Did::from(100u32);
+    let ring = PeerRing::new_with_storage(local, 3, Box::new(crate::storage::MemStorage::new()))
+        .with_relay_replication(crate::tests::ungated_relay_replication())
+        .with_relay_storage(Box::new(crate::storage::MemStorage::new()));
+    ring.admit_connected(successor, None)?;
+    ring.observe_relay_custody(successor, RelayCustody::HoldsNone)?;
+    let _ = crate::dht::Chord::notify(&ring, predecessor)?;
+    assert!(ring.accept_previous_relay_holder(predecessor, vec![
+        crate::dht::relay_holder::PreviousHolder {
+            holder: predecessor,
+            run_start: local,
+        }
+    ],)?);
+
+    let (digest, hold) = stamped_hold(&ring, &holder, destination)?;
+    let crate::dht::ReplicationStep::Ask { key, request_id } =
+        ring.replicate_relay_hold(digest, hold, ring.did)?
+    else {
+        return Err(Error::InvalidMessage(
+            "expected ReplicationStep::Ask beyond successor view".to_string(),
+        ));
+    };
+    assert_eq!(key, successor + Did::from(1u32));
+    assert_eq!(
+        ring.outstanding_next_relay_holder_query()?,
+        Some((key, request_id))
+    );
+
+    let wrong_token = uuid::Uuid::from_u128(999);
+    let resolved_holder = successor + Did::from(200u32);
+    // `key = successor + 1` lies outside `(inconsistent_origin, resolved_holder]`.
+    let inconsistent_origin = successor + Did::from(50u32);
+
+    // 1. Mismatched token is ignored and leaves the query outstanding.
+    assert!(!ring.asks_next_relay_holder(key, wrong_token)?);
+    assert_eq!(
+        ring.take_next_relay_holder(
+            key,
+            wrong_token,
+            resolved_holder,
+            Some(resolved_holder),
+            None
+        )?,
+        None
+    );
+    assert!(ring.asks_next_relay_holder(key, request_id)?);
+
+    // 2. Inconsistent origin (a storage-holding node naming a different holder, or a horizon
+    // that does not cover `key ∈ (origin, horizon]`) is rejected without retiring `request_id`.
+    assert_eq!(
+        ring.take_next_relay_holder(
+            key,
+            request_id,
+            inconsistent_origin,
+            Some(resolved_holder),
+            None,
+        )?,
+        None
+    );
+    assert_eq!(
+        ring.take_next_relay_holder(
+            key,
+            request_id,
+            successor + Did::from(100u32),
+            None,
+            Some(successor + Did::from(150u32)),
+        )?,
+        None
+    );
+    assert!(ring.asks_next_relay_holder(key, request_id)?);
+
+    // 3. Valid horizon response with `key ∈ (origin, horizon]` advances the query to
+    // `horizon + 1` with a fresh single-use token.
+    let horizon = successor + Did::from(100u32);
+    let Some((next_key, next_request_id)) =
+        ring.take_next_relay_holder(key, request_id, successor, None, Some(horizon))?
+    else {
+        return Err(Error::InvalidMessage(
+            "expected horizon response to advance next-holder query".to_string(),
+        ));
+    };
+    assert_eq!(next_key, horizon + Did::from(1u32));
+    assert_ne!(next_request_id, request_id);
+    assert!(!ring.asks_next_relay_holder(key, request_id)?);
+    assert!(ring.asks_next_relay_holder(next_key, next_request_id)?);
+
+    // 4. Valid holder response from `horizon` (which holds relay mail, `holds(horizon) == true`)
+    // for `next_key = horizon + 1` naming `resolved_holder != horizon` with
+    // `next_key ∈ (horizon, resolved_holder]` resolves the next holder and consumes
+    // `next_request_id` once.
+    assert_eq!(
+        ring.take_next_relay_holder(
+            next_key,
+            next_request_id,
+            horizon,
+            Some(resolved_holder),
+            None,
+        )?,
+        None
+    );
+    assert_eq!(ring.outstanding_next_relay_holder_query()?, None);
+    assert_eq!(
+        ring.relay_chain_neighbours()?,
+        (Some(predecessor), Some(resolved_holder))
+    );
     Ok(())
 }

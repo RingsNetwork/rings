@@ -11,9 +11,11 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::handlers::HandlerContext;
 use crate::message::types::ConnectNodeSend;
+use crate::message::types::FindSuccessorReport;
 use crate::message::types::Message;
 use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
+use crate::message::FindSuccessorReportHandler;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::PayloadSender;
@@ -152,6 +154,32 @@ fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
 
     assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
     assert_eq!(connect_successor_hint(&dht, requester, requester)?, next);
+    Ok(())
+}
+
+#[test]
+fn test_connect_lookup_tokens_evict_oldest_fifo_at_capacity() -> Result<()> {
+    let dht = gen_pure_dht(SecretKey::random().address().into());
+    let limit = crate::dht::topology::edge_slots(dht.successors().capacity());
+
+    // Insert the oldest entry with a large DID so numerical ordering would keep it, whereas
+    // FIFO eviction must evict it first when capacity is exceeded.
+    let oldest_peer = crate::dht::Did::from(u32::MAX);
+    let oldest_token = uuid::Uuid::from_u128(1);
+    dht.begin_connect_lookup(oldest_peer, oldest_token)?;
+
+    let mut later_tokens = Vec::with_capacity(limit);
+    for idx in 1..=limit {
+        let peer = crate::dht::Did::from(idx as u32);
+        let token = uuid::Uuid::from_u128((idx + 1) as u128);
+        dht.begin_connect_lookup(peer, token)?;
+        later_tokens.push(token);
+    }
+
+    assert!(!dht.claim_connect_lookup(oldest_token)?);
+    for token in later_tokens {
+        assert!(dht.claim_connect_lookup(token)?);
+    }
     Ok(())
 }
 
@@ -307,6 +335,82 @@ async fn test_stale_stabilization_report_does_not_start_advertised_connections()
     wait_for_msgs([&node1, &node2, &node3]).await;
     assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
     assert!(!node1.dht().successors().contains(&node3.did())?);
+    assert_no_more_msg([&node1, &node2, &node3]).await;
+    Ok(())
+}
+
+/// Proves that `FindSuccessorReportHandler::Connect` requires an exact single-use
+/// correlation token before initiating a DHT connection (#1181).
+///
+/// Unsolicited and mismatched tokens leave the target disconnected without
+/// retiring an outstanding lookup token; the matching token connects once and
+/// cannot be replayed.
+#[tokio::test]
+async fn test_connect_successor_report_requires_single_use_token_before_connecting() -> Result<()> {
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    let node3 = prepare_node(key3).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    manually_establish_connection(&node2.swarm, &node3.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+
+    if node1.swarm.transport.get_connection(node3.did()).is_some() {
+        node1.swarm.disconnect(node3.did()).await?;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+    }
+    assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+
+    // 1. Unsolicited report with no outstanding connect lookup.
+    node2
+        .swarm
+        .send_direct_core_message_for_test(
+            Message::FindSuccessorReport(FindSuccessorReport {
+                did: node3.did(),
+                handler: FindSuccessorReportHandler::Connect {
+                    request_id: uuid::Uuid::from_u128(504),
+                },
+            }),
+            node1.did(),
+        )
+        .await?;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+
+    // 2. Mismatched token while a legitimate token is outstanding.
+    let request_id = uuid::Uuid::from_u128(506);
+    node1.dht().begin_connect_lookup(node2.did(), request_id)?;
+    node2
+        .swarm
+        .send_direct_core_message_for_test(
+            Message::FindSuccessorReport(FindSuccessorReport {
+                did: node3.did(),
+                handler: FindSuccessorReportHandler::Connect {
+                    request_id: uuid::Uuid::from_u128(505),
+                },
+            }),
+            node1.did(),
+        )
+        .await?;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+
+    // 3. Matching token is consumed once and connects to the reported successor.
+    node2
+        .swarm
+        .send_direct_core_message_for_test(
+            Message::FindSuccessorReport(FindSuccessorReport {
+                did: node3.did(),
+                handler: FindSuccessorReportHandler::Connect { request_id },
+            }),
+            node1.did(),
+        )
+        .await?;
+    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert!(!node1.dht().claim_connect_lookup(request_id)?);
     assert_no_more_msg([&node1, &node2, &node3]).await;
     Ok(())
 }

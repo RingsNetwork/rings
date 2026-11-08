@@ -455,8 +455,8 @@ impl Stabilizer {
             let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
                 continue;
             };
-            self.dht.ask_relay_holder(key)?;
-            let query = Message::FindRelayHolder(FindRelayHolder { key });
+            let request_id = self.dht.ask_relay_holder(key)?;
+            let query = Message::FindRelayHolder(FindRelayHolder { key, request_id });
             if let Err(error) = self
                 .transport
                 .protocol_egress()
