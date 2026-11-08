@@ -725,8 +725,10 @@ fn test_pass_rejects_unverified_predecessor_phantom_holders_and_false_closure() 
         })
         .collect::<Vec<_>>();
 
-    // 1. An unverified predecessor that has not declared its relay custody cannot inject
-    // phantom `PreviousHolder` entries or force `knows_every_holder = true`.
+    // 1. An unverified predecessor that has not declared `HoldsNone` is presumed to hold
+    // relay mail (`Holds`), so it may announce itself (`holder == from && run_start == local`),
+    // but cannot inject 8 phantom `PreviousHolder` entries (`nearest.holder != from`) or force
+    // `knows_every_holder = true`.
     let mut unverified = RelayNeighborhood::default();
     assert!(!unverified.pass(&state, did(100), phantoms.clone()));
     assert!(!unverified.pass(&state, did(100), vec![PreviousHolder {
@@ -734,6 +736,10 @@ fn test_pass_rejects_unverified_predecessor_phantom_holders_and_false_closure() 
         run_start: did(300),
     }]));
     assert!(!unverified.segment(&state, true).knows_every_holder);
+    assert!(unverified.pass(&state, did(100), vec![PreviousHolder {
+        holder: did(100),
+        run_start: did(200),
+    }]));
 
     // 2. Even after observing `from = 100` as a holder, `from` cannot inject 8 phantom
     // `PreviousHolder` DIDs whose nearest entry does not match `(from, local)`, nor can it

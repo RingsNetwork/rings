@@ -320,10 +320,19 @@ async fn test_notify_predecessor_rejects_connected_peer_inside_forward_interval(
     let node2 = prepare_node(keys[1].clone()).await;
     let node3 = prepare_node(keys[2].clone()).await;
 
-    manually_establish_connection(&node1.swarm, &node3.swarm).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2, &node3]).await;
+    assert_no_more_msg([&node1, &node2, &node3]).await;
 
+    manually_establish_connection(&node3.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+    assert_no_more_msg([&node1, &node2, &node3]).await;
+
+    assert!(node1
+        .swarm
+        .transport
+        .admitted_send_connection(node2.did())?
+        .is_some());
     assert_eq!(node1.dht().successors().list()?, vec![
         node2.did(),
         node3.did()

@@ -358,7 +358,9 @@ impl SwarmTransport {
                 return Ok(None);
             }
             observe_admission();
-            self.dht.notify_within_topology(peer)
+            self.dht
+                .notify_within_topology(peer)
+                .map(|predecessor| Some(predecessor.unwrap_or(peer)))
         })
     }
 
