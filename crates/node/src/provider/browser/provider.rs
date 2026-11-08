@@ -46,7 +46,7 @@ use crate::provider::Signer;
 use crate::release::StoresReleased;
 
 /// Browser listener lifecycle handle and serialized `listen` entrypoint.
-mod listener;
+pub(crate) mod listener;
 /// Exclusive browser storage ownership via the Web Locks API (#1055) and its release witness.
 pub(crate) mod lock;
 /// Browser mail construction, retained inbox access, and filing notifications.
@@ -506,9 +506,9 @@ impl Provider {
     /// Best-effort voluntary departure (#1057): hand off live relay carriers and send `Leave`
     /// to this node's predecessor and successor head.
     pub fn leave(&self) -> js_sys::Promise {
-        let p = self.processor.clone();
+        let provider = self.clone();
         future_to_promise(async move {
-            p.leave().await.map_err(JsError::from)?;
+            provider.leave_internal().await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }

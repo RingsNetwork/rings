@@ -70,7 +70,8 @@ impl PagehideListener {
         let weak = Arc::downgrade(processor);
         let callback = Closure::wrap(Box::new(move |_event: web_sys::Event| {
             if let Some(processor) = weak.upgrade() {
-                wasm_bindgen_futures::spawn_local(async move {
+                let tasks = processor.tasks().clone();
+                let _ = tasks.spawn(async move {
                     let _ = processor.leave().await;
                 });
             }

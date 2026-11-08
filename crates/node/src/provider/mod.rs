@@ -263,11 +263,16 @@ impl Provider {
         self.processor.registrations_published().await
     }
 
+    pub(crate) async fn leave_internal(&self) -> Result<()> {
+        self.processor.leave().await
+    }
+
     /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
     /// members and send `Leave { successor_list }` to this node's predecessor and successor head
     /// before transports close.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     pub async fn leave(&self) -> Result<()> {
-        self.processor.leave().await
+        self.leave_internal().await
     }
 
     /// Close this node and release every store it holds, so that the stores can be opened

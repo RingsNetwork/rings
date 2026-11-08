@@ -372,10 +372,11 @@ impl SwarmTransport {
     pub(crate) async fn leave(&self) -> Result<()> {
         if let Ok(action) = self.dht.hand_off_relay_carriers_for_leave().await {
             if let Ok(deliveries) = action.coalesced_storage_sync_deliveries() {
-                for delivery in deliveries {
+                join_all(deliveries.into_iter().map(|delivery| async move {
                     let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
                     let _ = self.send_storage_sync_tracked(msg).await;
-                }
+                }))
+                .await;
             }
         }
 
@@ -393,18 +394,22 @@ impl SwarmTransport {
         let leave_msg = Message::Leave(Leave {
             successor_list: state.successors,
         });
-        for target in targets {
-            if self.get_connection(target).is_none() {
-                continue;
+        join_all(targets.into_iter().map(|target| {
+            let leave_msg = leave_msg.clone();
+            async move {
+                if self.get_connection(target).is_none() {
+                    return;
+                }
+                if let Ok(payload) = self
+                    .protocol_egress()
+                    .originate(leave_msg, target, Some(target))
+                    .await
+                {
+                    let _ = self.send_payload_tracked(payload).await;
+                }
             }
-            if let Ok(payload) = self
-                .protocol_egress()
-                .originate(leave_msg.clone(), target, Some(target))
-                .await
-            {
-                let _ = self.send_payload_tracked(payload).await;
-            }
-        }
+        }))
+        .await;
         Ok(())
     }
 
