@@ -310,3 +310,40 @@ async fn run_stabilization_once(swarm: Arc<Swarm>) -> Result<()> {
     let stab = swarm.stabilizer();
     stab.correct_stabilize().await
 }
+
+#[tokio::test]
+async fn test_notify_predecessor_rejects_connected_peer_inside_forward_interval() -> Result<()> {
+    let keys = gen_ordered_keys::<3>();
+    // Clockwise order: node1 < node2 < node3.
+    // Relative to `node1`, `node2` lies inside `(node1, node3]` on a 3-node non-wrapping ring.
+    let node1 = prepare_node(keys[0].clone()).await;
+    let node2 = prepare_node(keys[1].clone()).await;
+    let node3 = prepare_node(keys[2].clone()).await;
+
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+
+    assert_eq!(node1.dht().successors().list()?, vec![
+        node2.did(),
+        node3.did()
+    ]);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+
+    let context = notify_context(&keys[1], node1.did())?;
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
+    handler
+        .handle(
+            &HandlerContext::unbound_for_test(&context),
+            &NotifyPredecessorSend { did: node2.did() },
+        )
+        .await?;
+
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    let topo = node1.dht().topology_state()?;
+    assert!(!crate::dht::topology::is_responsible_for(
+        &topo,
+        node3.did()
+    ));
+    Ok(())
+}

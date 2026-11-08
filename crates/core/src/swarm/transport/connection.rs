@@ -23,7 +23,6 @@ use super::SwarmConnection;
 use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::dht::topology::TopologyRemoval;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
@@ -359,7 +358,7 @@ impl SwarmTransport {
                 return Ok(None);
             }
             observe_admission();
-            self.dht.notify(peer).map(Some)
+            self.dht.notify_within_topology(peer)
         })
     }
 

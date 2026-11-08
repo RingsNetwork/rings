@@ -353,6 +353,8 @@ impl HoldAuthority {
 /// the declaration existed, so a node not yet heard from is never skipped.
 #[derive(Clone, Debug)]
 pub(crate) struct RelayNeighborhood {
+    /// Peers whose [`RelayCustody`] declaration has been observed.
+    observed: BTreeSet<Did>,
     /// Peers that declared [`RelayCustody::HoldsNone`].
     storage_less: BTreeSet<Did>,
     /// The previous holders the predecessor last passed.
@@ -377,6 +379,7 @@ impl RelayNeighborhood {
     /// No declaration and no list yet, replicating to `replicas` members (at least one).
     pub(crate) fn with_replicas(replicas: usize) -> Self {
         Self {
+            observed: BTreeSet::new(),
             storage_less: BTreeSet::new(),
             passed: None,
             replicas: replicas.max(1),
@@ -439,6 +442,7 @@ impl RelayNeighborhood {
     /// Record the declaration `peer` made when it connected. A previous holder that now declares
     /// it holds no relay mail is no previous holder.
     pub(crate) fn observe(&mut self, peer: Did, custody: RelayCustody) {
+        self.observed.insert(peer);
         if custody.holds() {
             self.storage_less.remove(&peer);
         } else {
@@ -449,6 +453,7 @@ impl RelayNeighborhood {
 
     /// Forget `peer`, which left this node's topology, with any record it passed or names.
     pub(crate) fn forget(&mut self, peer: Did) {
+        self.observed.remove(&peer);
         self.storage_less.remove(&peer);
         self.suspected.remove(&peer);
         self.passed = self.passed.take().filter(|passed| passed.from != peer);
@@ -481,15 +486,16 @@ impl RelayNeighborhood {
 
     /// Keep only the declarations of the peers `keep` names, bounding the record by them.
     pub(crate) fn retain(&mut self, keep: impl Fn(Did) -> bool) {
+        self.observed.retain(|peer| keep(*peer));
         self.storage_less.retain(|peer| keep(*peer));
     }
 
     /// Take the previous holders `previous` that `from` passed to `local`, nearest first, iff
-    /// `from` is the predecessor of `state`, the nearest names a node that may hold relay mail,
-    /// and its run starts after it and ends at `local` (`Law (Previous holders)`). A record
-    /// naming `local` itself has come round the whole ring: `local` is the only holder, and the
-    /// run is every other node. Of the farther holders, the longest prefix that is a chain is
-    /// kept ([`Self::chain`]).
+    /// `from` is the observed predecessor of `state`, the nearest names a node that may hold
+    /// relay mail and agrees with `from`'s declaration, and its run starts after it and ends at
+    /// `local` (`Law (Previous holders)`). A record naming `local` itself has come round the
+    /// whole ring: `local` is the only holder, and the run is every other node. Of the farther
+    /// holders, the longest prefix that is a chain is kept ([`Self::chain`]).
     ///
     /// Post: the result says whether the record was taken; it replaces the one taken before.
     pub(crate) fn pass(
@@ -498,24 +504,66 @@ impl RelayNeighborhood {
         from: Did,
         previous: Vec<PreviousHolder>,
     ) -> bool {
+        if state.predecessor != Some(from) || !self.observed.contains(&from) {
+            return false;
+        }
         let Some(nearest) = previous.first().copied() else {
             return false;
         };
-        let run_ends_here = if nearest.holder == state.local {
-            nearest.run_start != state.local
+        if !self.holds(nearest.holder) {
+            return false;
+        }
+        let valid_nearest = if nearest.holder == state.local {
+            !self.holds(from)
+                && topology::successor_head(state) == Some(nearest.run_start)
+                && state
+                    .successors
+                    .iter()
+                    .all(|&succ| succ == state.local || !self.holds(succ))
+                && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
+        } else if self.holds(from) {
+            nearest.holder == from && nearest.run_start == state.local
         } else {
             in_arc(nearest.holder, nearest.run_start, state.local)
+                && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
+                && in_arc(state.local, nearest.holder, from)
+                && nearest.holder != from
+                && self.consistent_with_forward_view(state, nearest)
         };
-        let taken = state.predecessor == Some(from) && self.holds(nearest.holder) && run_ends_here;
-        if taken {
-            let (previous, closed) = self.chain(state.local, previous);
-            self.passed = Some(Passed {
-                from,
-                previous,
-                closed,
-            });
+        if !valid_nearest {
+            return false;
         }
-        taken
+        let (previous, closed) = self.chain(state, previous);
+        if previous.is_empty() {
+            return false;
+        }
+        self.passed = Some(Passed {
+            from,
+            previous,
+            closed,
+        });
+        true
+    }
+
+    /// Whether `link` is consistent with `state`'s known forward successor interval.
+    fn consistent_with_forward_view(&self, state: &TopologyState, link: PreviousHolder) -> bool {
+        if let Some(&last_succ) = state.successors.last().filter(|&&succ| succ != state.local) {
+            if in_arc(state.local, link.holder, last_succ) {
+                let Some(pos) = state
+                    .successors
+                    .iter()
+                    .position(|&succ| succ == link.holder)
+                else {
+                    return false;
+                };
+                if let Some(&next_succ) = state.successors.get(pos + 1) {
+                    if link.run_start != next_succ {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// The longest prefix of `previous` that is a chain of previous holders behind `local`: at
@@ -525,14 +573,41 @@ impl RelayNeighborhood {
     /// did close, naming every holder of the ring but `local`.
     ///
     /// Pre: `previous[0]` was checked by [`Self::pass`].
-    fn chain(&self, local: Did, previous: Vec<PreviousHolder>) -> (Vec<PreviousHolder>, bool) {
+    fn chain(
+        &self,
+        state: &TopologyState,
+        previous: Vec<PreviousHolder>,
+    ) -> (Vec<PreviousHolder>, bool) {
+        let local = state.local;
         let mut chain: Vec<PreviousHolder> = Vec::with_capacity(self.replicas);
         let mut closed = false;
         for link in previous.into_iter().take(self.replicas) {
             if link.holder == local {
-                closed = true;
                 if chain.is_empty() {
+                    closed = true;
                     chain.push(link);
+                } else if let Some(&farthest) = chain.last() {
+                    let first_holding_succ = state
+                        .successors
+                        .iter()
+                        .copied()
+                        .find(|&succ| succ != local && self.holds(succ));
+                    let matches_forward_holders = state
+                        .successors
+                        .iter()
+                        .copied()
+                        .filter(|&succ| succ != local && self.holds(succ))
+                        .all(|succ| chain.iter().any(|known| known.holder == succ));
+                    let matches_farthest = match first_holding_succ {
+                        Some(first) => farthest.holder == first,
+                        None => state.successors.last().is_none_or(|&last_succ| {
+                            in_arc(last_succ, farthest.holder, local) && farthest.holder != local
+                        }),
+                    };
+                    closed = topology::successor_head(state) == Some(link.run_start)
+                        && in_arc(local, link.run_start, farthest.holder)
+                        && matches_forward_holders
+                        && matches_farthest;
                 }
                 break;
             }
@@ -540,7 +615,13 @@ impl RelayNeighborhood {
                 None => true,
                 Some(nearer) => {
                     self.holds(link.holder)
+                        && in_arc(local, link.holder, nearer.holder)
+                        && link.holder != nearer.holder
                         && in_arc(link.holder, link.run_start, nearer.holder)
+                        && (link.run_start == nearer.holder
+                            || !self.observed.contains(&link.run_start)
+                            || !self.holds(link.run_start))
+                        && self.consistent_with_forward_view(state, link)
                         && chain.iter().all(|known| known.holder != link.holder)
                 }
             };

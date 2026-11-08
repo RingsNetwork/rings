@@ -64,8 +64,10 @@ use finger::begin_revalidation as begin_finger_revalidation;
 use finger::cancel as cancel_finger_result;
 pub(crate) use finger::defer as defer_finger;
 pub(crate) use finger::retire_candidate as retire_finger_candidate;
+pub use stabilization::can_rectify_predecessor;
 use stabilization::local_successor_range_end;
 pub use stabilization::rectify_predecessor;
+pub use stabilization::rectify_predecessor_in;
 pub use stabilization::stabilize_notify;
 pub use stabilization::stabilize_query;
 pub use stabilization::stabilize_successors;
@@ -297,7 +299,7 @@ impl TopologyState {
     ///
     /// This is the single definition of `Referenced(n, p)`; the predicate and
     /// the set below are both projections of it.
-    fn referenced_slots(&self) -> impl Iterator<Item = Did> + '_ {
+    pub(super) fn referenced_slots(&self) -> impl Iterator<Item = Did> + '_ {
         self.successors
             .iter()
             .copied()

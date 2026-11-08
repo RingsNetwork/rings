@@ -93,6 +93,44 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
     }
 }
 
+/// Whether `candidate` may be adopted as `state.local`'s predecessor in `state`.
+///
+/// On a non-wrapping ring (where `state` references at least one peer other than
+/// `candidate`), no peer inside the forward successor interval `(local, head]` or
+/// clockwise before a known successor in `state.successors` can wrap directly to
+/// `local`, so adopting it as predecessor would falsely expand `(pred, local]`
+/// across the forward ring. On a two-node ring where `head` is the only known
+/// peer, `head` is both successor and predecessor.
+pub fn can_rectify_predecessor(state: &TopologyState, candidate: Did) -> bool {
+    if candidate == state.local {
+        return false;
+    }
+    let candidate_dist = dist(state.local, candidate);
+    if let Some(head) = successor_head(state) {
+        if candidate_dist <= dist(state.local, head)
+            && state.referenced_slots().any(|peer| peer != candidate)
+        {
+            return false;
+        }
+    }
+    if state
+        .successors
+        .iter()
+        .any(|&succ| succ != state.local && candidate_dist < dist(state.local, succ))
+    {
+        return false;
+    }
+    true
+}
+
+/// Correct predecessor value after one topology-aware rectify transition.
+pub fn rectify_predecessor_in(state: &TopologyState, candidate: Did) -> Option<Did> {
+    if !can_rectify_predecessor(state, candidate) {
+        return state.predecessor;
+    }
+    rectify_predecessor(state.local, state.predecessor, candidate)
+}
+
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
 /// The candidate set is the HMCC merge `known = {local} ∪ current ∪ {pred} ∪

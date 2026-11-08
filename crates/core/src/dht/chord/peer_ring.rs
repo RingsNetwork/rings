@@ -835,6 +835,24 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 }
 
+impl PeerRing {
+    /// Apply a predecessor candidate only when it is consistent with the current topology.
+    pub(crate) fn notify_within_topology(&self, did: Did) -> Result<Option<Did>> {
+        let (next, ()) = self.transition(|state, _| {
+            let mut next_state = state.clone();
+            next_state.predecessor = topology::rectify_predecessor_in(state, did);
+            (
+                TopologyStep {
+                    state: next_state,
+                    actions: Vec::new(),
+                },
+                (),
+            )
+        })?;
+        Ok(next.state.predecessor)
+    }
+}
+
 /// The first half of the HMCC/Zave stabilize operation.
 ///
 /// The second half, applying the successor's report, enters only through the
