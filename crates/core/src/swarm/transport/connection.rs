@@ -744,9 +744,12 @@ impl SwarmTransport {
     ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
         let outcome = self.retire_active_connection_if(attempt, |_| {
+            let (remote_prev, remote_next) = self.dht.remote_relay_chain_neighbours()?;
             if self
                 .dht
                 .with_topology_state(|topology| topology.references(attempt.peer))?
+                || remote_prev == Some(attempt.peer)
+                || remote_next == Some(attempt.peer)
             {
                 return Ok(None);
             }

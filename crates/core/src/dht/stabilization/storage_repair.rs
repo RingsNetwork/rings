@@ -383,8 +383,9 @@ impl Stabilizer {
         }
     }
 
-    /// The chain exchange: resume the holds whose next member is to be resolved again, and offer
-    /// one digest set to each chain neighbour (`Law (Chain repair)`).
+    /// The chain exchange: resume the holds whose next member is to be resolved again, ensure
+    /// direct links to the current chain neighbours (#1182), and offer one digest set to each
+    /// chain neighbour (`Law (Chain repair)`).
     pub(crate) async fn repair_relay_chain(&self) -> Result<()> {
         resume_relay_replications(&self.transport).await?;
         offer_relay_repair(&self.transport).await

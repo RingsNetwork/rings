@@ -278,20 +278,29 @@ pub(crate) fn relay_holder(segment: &RelaySegment, key: Did) -> RelayHolder {
 }
 
 /// The holder the owner of `key` names to a keeper that asks (`FindRelayHolder`): the holder its
-/// own `segment` names. The owner places every key of its own arc, so its answer is a holder or
-/// `None` for a key without one, and `None` too when this node does not own `key`.
+/// own `segment` names, or, when `key` is the owner's successor head itself (asked past a
+/// suspected holder at the end of its arc), the first holder after that head. The owner places
+/// every key of its own arc, so its answer is a holder or `None` for a key without one, and
+/// `None` too when this node does not own `key`.
 ///
 /// Law (Owner places): a node that owns `key` (`key ∈ (n, succ(n)]`, its segment's own arc)
 /// never finds its owner `Unknown`: `owner_answer` is the holder the owner's view names.
 pub(crate) fn owner_answer(segment: &RelaySegment, owner: Did, key: Did) -> Option<Did> {
-    let owns = segment
-        .owner_index(key)
-        .and_then(|index| segment.nodes.get(index))
-        .is_some_and(|node| node.did == owner);
-    match relay_holder(segment, key) {
-        RelayHolder::Holder(holder) if owns => Some(holder),
-        _ => None,
-    }
+    let owner_index = segment.owner_index(key).filter(|&index| {
+        segment
+            .nodes
+            .get(index)
+            .is_some_and(|node| node.did == owner)
+    })?;
+    let skip_head = segment
+        .nodes
+        .get(owner_index + 1)
+        .is_some_and(|head| head.did == key);
+    segment
+        .clockwise_from(owner_index)
+        .filter(|node| !skip_head || node.did != key)
+        .find(|node| node.holds)
+        .map(|node| node.did)
 }
 
 /// The nearest node behind this one that holds relay mail, and the head of its successor list:

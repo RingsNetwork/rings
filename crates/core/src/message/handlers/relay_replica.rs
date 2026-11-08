@@ -18,6 +18,8 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::ReplicationStep;
 use crate::error::Result;
+use crate::message::effects::CoreEffect;
+use crate::message::effects::CoreEffectInterpreter;
 use crate::message::FindRelayHolder;
 use crate::message::Message;
 use crate::message::PayloadSender;
@@ -63,8 +65,28 @@ pub(crate) async fn replicate_own_hold(
         .map(drop)
 }
 
+/// Ensure an active or pending direct connection to each remote relay chain neighbour (`p₁` and
+/// `n₁`, #1182) separated from this node by a storage-less run, so the chain liveness clock probes
+/// them even when neither is in the other's `state.predecessor` or `state.successors`.
+pub(crate) async fn connect_relay_chain_neighbours(transport: &Arc<SwarmTransport>) -> Result<()> {
+    let (previous, next) = transport.dht.remote_relay_chain_neighbours()?;
+    let interpreter = CoreEffectInterpreter::new(transport);
+    for peer in previous.into_iter().chain(next) {
+        if let Err(error) = interpreter.run(CoreEffect::connect_dht_peer(peer)).await {
+            tracing::debug!(
+                local = %transport.dht.did,
+                %peer,
+                ?error,
+                "relay chain neighbour connection not started; retried next pass"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Resume every hold whose next member was unresolved, now that an answer may have resolved it,
-/// and ask again for a next holder whose query is outstanding: one query per pass at most.
+/// ask again for a next holder whose query is outstanding (one query per pass at most), and
+/// ensure direct links to the current chain neighbours (#1182).
 pub(crate) async fn resume_relay_replications(transport: &Arc<SwarmTransport>) -> Result<()> {
     for (hold, upstream) in transport.dht.unforwarded_relay_holds()? {
         replicate_taken_hold(transport, &hold, upstream).await?;
@@ -72,7 +94,7 @@ pub(crate) async fn resume_relay_replications(transport: &Arc<SwarmTransport>) -
     if let Some((key, request_id)) = transport.dht.outstanding_next_relay_holder_query()? {
         ask_owner(transport, key, request_id).await?;
     }
-    Ok(())
+    connect_relay_chain_neighbours(transport).await
 }
 
 /// Send the hold `digest`, with its bytes `hold` or alone, to `member`, best effort: a send that
