@@ -276,10 +276,7 @@ async fn test_quota_clock_is_read_under_the_admission_lock() -> Result<()> {
 async fn slot_quota_bounds_sybil_origins_on_one_slot_and_isolates_other_principals() -> Result<()> {
     let runtime = Arc::new(TransactionReplay::with_quota_for_test(
         Some(Box::new(MemStorage::<ReplayRecord>::new())),
-        quota_config_with_capacity(
-            2,
-            crate::message::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE,
-        ),
+        quota_config_with_capacity(1, crate::message::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE),
     ));
     let admit_with_principal = |origin: u32, introducer: Principal, now: u128| {
         let mut admission = costing_one(stream(origin), 0, digest(1));
@@ -289,30 +286,36 @@ async fn slot_quota_bounds_sybil_origins_on_one_slot_and_isolates_other_principa
         })
     };
 
-    assert_eq!(
-        admit_with_principal(1, Principal::Slot(0), 0).await?,
-        SequenceVerdict::First
-    );
-    assert_eq!(
-        admit_with_principal(2, Principal::Slot(0), 0).await?,
-        SequenceVerdict::First
-    );
+    let max_slot_records = crate::message::quota::ORIGIN_QUOTA_SHARES.floor
+        + crate::message::quota::ORIGIN_QUOTA_SHARES.pool;
+    for index in 0..max_slot_records {
+        let origin = u32::try_from(1 + index).expect("origin fits u32");
+        assert_eq!(
+            admit_with_principal(origin, Principal::Slot(0), 0).await?,
+            SequenceVerdict::First
+        );
+    }
+    let overflow_origin = u32::try_from(1 + max_slot_records).expect("origin fits u32");
     assert!(matches!(
-        admit_with_principal(3, Principal::Slot(0), 0).await,
+        admit_with_principal(overflow_origin, Principal::Slot(0), 0).await,
         Err(Error::OriginQuota(
-            crate::message::OriginQuotaError::MessageRateExhausted { .. }
+            crate::message::OriginQuotaError::TableCapacityExhausted { .. }
         ))
     ));
     assert_eq!(
-        admit_with_principal(4, Principal::Slot(1), 0).await?,
+        admit_with_principal(10_001, Principal::Slot(1), 0).await?,
         SequenceVerdict::First
     );
     assert_eq!(
-        admit_with_principal(5, Principal::Local, 0).await?,
+        admit_with_principal(10_002, Principal::Slot(2), 0).await?,
         SequenceVerdict::First
     );
     assert_eq!(
-        admit_with_principal(6, Principal::Inbox, 0).await?,
+        admit_with_principal(10_003, Principal::Local, 0).await?,
+        SequenceVerdict::First
+    );
+    assert_eq!(
+        admit_with_principal(10_004, Principal::Inbox, 0).await?,
         SequenceVerdict::First
     );
     Ok(())

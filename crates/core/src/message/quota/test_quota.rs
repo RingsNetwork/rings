@@ -398,10 +398,11 @@ fn counters_are_bounded_by_lane_and_reason() {
     );
 }
 
-/// Multiple `origin_account`s arriving on the same connection slot in [`SlotRoster`] share that
-/// slot's aggregate per-lane token bucket and cannot multiply its burst or sustained rate (#1178).
+/// Multiple `origin_account`s arriving on the same connection slot in [`SlotRoster`] have
+/// isolated per-origin token buckets within [`SlotAccounting`] (`floor + pool`), while a single
+/// slot rotating unreplenished `origin_account`s cannot exceed `floor + pool` records (#1178).
 #[test]
-fn multiple_origins_on_same_slot_share_slot_quota_bucket_and_cannot_exceed_burst() {
+fn multiple_origins_on_same_slot_are_isolated_within_slot_accounting_bound() {
     let roster = SlotRoster::new(4);
     let clean = SlotFloorUse::default();
     let (attacker_edge, honest_edge) = (Did::from(10_u32), Did::from(20_u32));
@@ -412,57 +413,55 @@ fn multiple_origins_on_same_slot_share_slot_quota_bucket_and_cannot_exceed_burst
     assert_eq!(attacker_slot, Principal::Slot(0));
     assert_eq!(honest_slot, Principal::Slot(1));
 
-    let lane = config(1, 2, 100, 100, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
+    let lane = config(1, 1, 100, 100, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
     let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
     let now = OriginQuotaInstant::ZERO;
+    let max_slot_records = ORIGIN_QUOTA_SHARES.floor + ORIGIN_QUOTA_SHARES.pool;
 
-    table
-        .reserve(
-            key(100, MessageCategory::DhtControl),
-            attacker_slot,
-            MessageLimit::Enforced,
-            10,
-            now,
-        )
-        .expect("first origin on slot 0 consumes 1 of 2 slot burst tokens");
-    table
-        .reserve(
-            key(101, MessageCategory::DhtControl),
-            attacker_slot,
-            MessageLimit::Enforced,
-            10,
-            now,
-        )
-        .expect("second origin on slot 0 consumes the second slot burst token");
+    for index in 0..max_slot_records {
+        let origin = u32::try_from(100 + index).expect("origin fits u32");
+        table
+            .reserve(
+                key(origin, MessageCategory::DhtControl),
+                attacker_slot,
+                MessageLimit::Enforced,
+                10,
+                now,
+            )
+            .expect("distinct origin within slot's floor + pool share is admitted");
+    }
+    let overflow_origin = u32::try_from(100 + max_slot_records).expect("origin fits u32");
     assert!(matches!(
         table.reserve(
-            key(102, MessageCategory::DhtControl),
+            key(overflow_origin, MessageCategory::DhtControl),
             attacker_slot,
             MessageLimit::Enforced,
             10,
             now,
         ),
         Err(OriginQuotaAdmissionError::Verdict(
-            OriginQuotaRejection::MessageRate
+            OriginQuotaRejection::Capacity {
+                capacity: DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE
+            }
         ))
     ));
-    assert_eq!(table.slot_len(), 1);
-    assert!(table.get(key(102, MessageCategory::DhtControl)).is_none());
+    assert!(table
+        .get(key(overflow_origin, MessageCategory::DhtControl))
+        .is_none());
 
     table
         .reserve(
-            key(200, MessageCategory::DhtControl),
+            key(2_000, MessageCategory::DhtControl),
             honest_slot,
             MessageLimit::Enforced,
             10,
             now,
         )
-        .expect("honest peer on slot 1 has an independent slot bucket");
+        .expect("honest peer on slot 1 still admits its reserved floor record");
 }
 
-/// Rotating >1024 `origin_account`s on a single connection slot occupies only 1 slot record
-/// (and 1 origin record as its bucket refills) and never evicts an honest peer's record on
-/// another slot (#1178).
+/// Rotating >1024 `origin_account`s on a single connection slot occupies only 1 record as its
+/// bucket refills and never evicts an honest peer's record on another slot (#1178).
 #[test]
 fn rotating_over_1024_origins_on_one_slot_occupies_one_record_and_never_evicts_honest_slot() {
     let roster = SlotRoster::new(4);
@@ -503,7 +502,6 @@ fn rotating_over_1024_origins_on_one_slot_occupies_one_record_and_never_evicts_h
     assert_eq!(table.held(MessageCategory::DhtControl, attacker_slot), 1);
     assert_eq!(table.held(MessageCategory::DhtControl, honest_slot), 1);
     assert_eq!(table.len(), 2);
-    assert_eq!(table.slot_len(), 2);
     assert!(
         table.get(honest_key).is_some(),
         "honest peer's idle record on slot 1 must never be evicted by slot 0"
@@ -516,13 +514,7 @@ fn rotating_over_1024_origins_on_one_slot_occupies_one_record_and_never_evicts_h
 /// within its floor, [`Principal::Local`], or [`Principal::Inbox`] (#1178).
 #[test]
 fn unreplenished_sybil_rotation_on_one_slot_preserves_other_slots_local_and_inbox() {
-    let lane = config(
-        1,
-        2_048,
-        1,
-        2_048,
-        DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE,
-    );
+    let lane = config(1, 2_048, 1, 2_048, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
     let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
     let now = OriginQuotaInstant::ZERO;
     let attacker_slot = Principal::Slot(0);
@@ -594,7 +586,7 @@ fn unreplenished_sybil_rotation_on_one_slot_preserves_other_slots_local_and_inbo
 }
 
 #[test]
-fn reservation_rollback_restores_slot_bucket_and_principal_accounting() {
+fn reservation_rollback_restores_record_and_principal_accounting() {
     let lane = config(1, 1, 10, 10, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
     let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
     let slot = Principal::Slot(0);
@@ -610,21 +602,19 @@ fn reservation_rollback_restores_slot_bucket_and_principal_accounting() {
         )
         .expect("initial slot reservation succeeds");
     assert_eq!(table.len(), 1);
-    assert_eq!(table.slot_len(), 1);
     assert_eq!(table.held(MessageCategory::Application, slot), 1);
 
     reservation.rollback(&mut table);
     assert_eq!(table.len(), 0);
-    assert_eq!(table.slot_len(), 0);
     assert_eq!(table.held(MessageCategory::Application, slot), 0);
 
     table
         .reserve(
-            key(2, MessageCategory::Application),
+            first_key,
             slot,
             MessageLimit::Enforced,
             1,
             OriginQuotaInstant::ZERO,
         )
-        .expect("after rollback, slot 0 has its full burst allowance again");
+        .expect("after rollback, origin 1 has its full burst allowance again");
 }

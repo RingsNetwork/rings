@@ -1,14 +1,12 @@
 //! Runtime-local origin quotas for final-destination transactions.
 //!
 //! A quota key is `(network_id, origin account DID, destination DID, logical lane)`. Each key
-//! owns independent fixed-point message and byte token buckets, and each connection slot
-//! ([`Principal::Slot`]) owns an aggregate per-lane token bucket so rotating free
-//! `origin_account` identities on a single link cannot multiply its burst or sustained rate
-//! (#1178). Quota records in each lane's bounded table are charged to their introducing
-//! [`Principal`] under [`SlotAccounting`] ([`ORIGIN_QUOTA_SHARES`]), preserving each connection
-//! slot's floor, [`Principal::Local`], and [`Principal::Inbox`]. [`OriginQuota::admit`] is the
-//! pure transition; the destination replay runtime owns the bounded table and supplies monotonic
-//! time. Quota records are intentionally absent from the durable replay store.
+//! owns independent fixed-point message and byte token buckets, and quota records in each lane's
+//! bounded table are charged to their introducing [`Principal`] under [`SlotAccounting`]
+//! ([`ORIGIN_QUOTA_SHARES`]), preserving each connection slot's floor, [`Principal::Local`], and
+//! [`Principal::Inbox`] (#1178). [`OriginQuota::admit`] is the pure transition; the destination
+//! replay runtime owns the bounded table and supplies monotonic time. Quota records are
+//! intentionally absent from the durable replay store.
 //!
 //! An admission either enforces the message limit or, for traffic whose namespace delegated its
 //! admission, skips it ([`MessageLimit`]); the byte limit and the record bound always apply. A
@@ -577,21 +575,10 @@ pub(super) struct OriginQuotaReservation {
     introducer: Principal,
     previous: Option<OriginQuotaRecord>,
     evicted: Option<(OriginQuotaKey, OriginQuotaRecord)>,
-    previous_slot: Option<((u16, MessageCategory), Option<OriginQuota>)>,
 }
 
 impl OriginQuotaReservation {
     pub(super) fn rollback(self, table: &mut OriginQuotaTable) {
-        if let Some((slot_key, previous_slot)) = self.previous_slot {
-            match previous_slot {
-                Some(quota) => {
-                    table.slot_records.insert(slot_key, quota);
-                }
-                None => {
-                    table.slot_records.remove(&slot_key);
-                }
-            }
-        }
         match self.previous {
             Some(previous) => {
                 table.records.insert(self.key, previous);
@@ -615,7 +602,6 @@ impl OriginQuotaReservation {
 pub(super) struct OriginQuotaTable {
     config: OriginQuotaConfig,
     records: BTreeMap<OriginQuotaKey, OriginQuotaRecord>,
-    slot_records: BTreeMap<(u16, MessageCategory), OriginQuota>,
     accounting: [SlotAccounting; MessageCategory::COUNT],
 }
 
@@ -631,7 +617,6 @@ impl OriginQuotaTable {
         Self {
             config,
             records: BTreeMap::new(),
-            slot_records: BTreeMap::new(),
             accounting,
         }
     }
@@ -665,58 +650,24 @@ impl OriginQuotaTable {
         now: OriginQuotaInstant,
     ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
         let lane_config = self.config.lane(key.lane);
-        let slot_transition = match introducer {
-            Principal::Slot(slot) => {
-                let slot_key = (slot, key.lane);
-                let previous_slot = self.slot_records.get(&slot_key).copied();
-                let current_slot =
-                    previous_slot.unwrap_or_else(|| OriginQuota::full(lane_config, now));
-                let (next_slot, slot_verdict) = current_slot
-                    .admit(lane_config, message_limit, byte_cost, now)
-                    .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-                Some((slot_key, previous_slot, next_slot, slot_verdict))
-            }
-            Principal::Local | Principal::Inbox | Principal::Custody | Principal::Unbound => None,
-        };
-
         if let Some(previous) = self.records.get(&key).copied() {
             let (next_quota, origin_verdict) = previous
                 .quota
                 .admit(lane_config, message_limit, byte_cost, now)
                 .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-            if let Some(rejection) = origin_verdict.rejection() {
-                self.records.insert(key, OriginQuotaRecord {
-                    quota: next_quota,
-                    introducer: previous.introducer,
-                });
-                return Err(OriginQuotaAdmissionError::Verdict(rejection));
-            }
-            if let Some((slot_key, _, next_slot, slot_verdict)) = slot_transition {
-                if let Some(rejection) = slot_verdict.rejection() {
-                    self.slot_records.insert(slot_key, next_slot);
-                    return Err(OriginQuotaAdmissionError::Verdict(rejection));
-                }
-                self.slot_records.insert(slot_key, next_slot);
-            }
             self.records.insert(key, OriginQuotaRecord {
                 quota: next_quota,
                 introducer: previous.introducer,
             });
+            if let Some(rejection) = origin_verdict.rejection() {
+                return Err(OriginQuotaAdmissionError::Verdict(rejection));
+            }
             return Ok(OriginQuotaReservation {
                 key,
                 introducer: previous.introducer,
                 previous: Some(previous),
                 evicted: None,
-                previous_slot: slot_transition
-                    .map(|(slot_key, previous_slot, _, _)| (slot_key, previous_slot)),
             });
-        }
-
-        if let Some((slot_key, _, next_slot, slot_verdict)) = slot_transition {
-            if let Some(rejection) = slot_verdict.rejection() {
-                self.slot_records.insert(slot_key, next_slot);
-                return Err(OriginQuotaAdmissionError::Verdict(rejection));
-            }
         }
 
         let (next_quota, origin_verdict) = OriginQuota::full(lane_config, now)
@@ -727,9 +678,6 @@ impl OriginQuotaTable {
         }
 
         let evicted = self.allocate_record(key.lane, introducer, lane_config, now)?;
-        if let Some((slot_key, _, next_slot, _)) = slot_transition {
-            self.slot_records.insert(slot_key, next_slot);
-        }
         self.records.insert(key, OriginQuotaRecord {
             quota: next_quota,
             introducer,
@@ -739,8 +687,6 @@ impl OriginQuotaTable {
             introducer,
             previous: None,
             evicted,
-            previous_slot: slot_transition
-                .map(|(slot_key, previous_slot, _, _)| (slot_key, previous_slot)),
         })
     }
 
@@ -854,11 +800,6 @@ impl OriginQuotaTable {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.records.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn slot_len(&self) -> usize {
-        self.slot_records.len()
     }
 
     #[cfg(test)]
