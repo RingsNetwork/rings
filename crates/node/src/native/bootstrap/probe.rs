@@ -117,6 +117,32 @@ impl BootstrapPort for ProcessorPort {
                 HandshakePeer::Pinned(peer),
             )
             .await?;
+        self.finish_dial(peer, attempt).await
+    }
+}
+
+impl ProcessorPort {
+    /// Complete [`Self::dial`] over `remote` rather than opening an HTTP client to a remote URL.
+    #[cfg(all(test, feature = "dummy"))]
+    pub(crate) async fn dial_over(
+        &self,
+        peer: Did,
+        remote: &impl crate::processor::handshake::RemoteHandshake,
+    ) -> std::result::Result<(), DialFailure> {
+        let attempt = self
+            .processor
+            .connect_peer_over(remote, HandshakePeer::Pinned(peer))
+            .await?;
+        self.finish_dial(peer, attempt).await
+    }
+
+    /// Wait for `peer`'s admission after `attempt`'s answer was accepted, abandoning `attempt`
+    /// on every exit short of an admission.
+    async fn finish_dial(
+        &self,
+        peer: Did,
+        attempt: rings_core::swarm::ConnectionAttempt,
+    ) -> std::result::Result<(), DialFailure> {
         let admitted = self.await_admission(peer).await;
         if !matches!(admitted, Ok(true)) {
             // Only the generation this dial reserved is cancelled, and only while it is still
@@ -130,9 +156,7 @@ impl BootstrapPort for ProcessorPort {
             Err(error) => Err(DialFailure::Failed(error)),
         }
     }
-}
 
-impl ProcessorPort {
     /// Whether `peer` is admitted within [`DIAL_ADMISSION_TIMEOUT`]. The waiter is registered
     /// before the record is checked, which closes the window: an admission committed before the
     /// check is seen by it, one committed after is announced and resolves the waiter. A closed

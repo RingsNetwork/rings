@@ -167,6 +167,8 @@ wasm-bindgen-test = { workspace = true }
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 ppp = "2.3.0"
 rings-gateway = { workspace = true, features = ["test-support"] }
+# Format reflection for the wire golden vectors (#1141).
+serde-reflection = "0.6.0"
 tempfile = "3"
 tokio = { version = "1.50.0", features = ["test-util"] }
 

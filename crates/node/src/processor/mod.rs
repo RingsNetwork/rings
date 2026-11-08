@@ -113,7 +113,9 @@ pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
+pub use handshake::OfferReplyKind;
 pub use horizon::DelegationHorizon;
+pub(crate) use horizon::SessionKeyRing;
 pub use horizon::SigningState;
 pub use horizon::SIGNING_HORIZON_LEAD_MS;
 pub(crate) use registration_daemon::sleep_unless_stopped;
@@ -136,8 +138,8 @@ const fn is_final_lookup_poll(attempt: u32) -> bool {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
-    /// Same delegatee key held by the swarm transport; kept here for node-layer descriptor signing.
-    delegatee_key: DelegateeKey,
+    /// Live delegatee key and retained unexpired previous keys, shared across clones (#1153).
+    session_keys: Arc<SessionKeyRing>,
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
@@ -161,6 +163,8 @@ pub struct Processor {
     registration_readiness: Arc<RegistrationReadiness>,
     /// Process-local bounded recorder backing the authenticated operator surface.
     observability: Arc<Observability>,
+    /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
+    remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
 
 /// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
@@ -178,15 +182,58 @@ impl Processor {
         self.swarm.did()
     }
 
-    pub(crate) fn delegatee_key(&self) -> &DelegateeKey {
-        &self.delegatee_key
+    pub(crate) fn delegatee_key(&self) -> DelegateeKey {
+        self.session_keys.current()
+    }
+
+    /// Return the active session key followed by any retained previous keys that have not yet
+    /// expired at `now_ms`, so envelopes sealed to a prior key before descriptor republication
+    /// settles can still be opened (#1153).
+    pub(crate) fn decryption_keys_at(&self, now_ms: u128) -> Vec<DelegateeKey> {
+        self.session_keys.decryption_keys_at(now_ms)
+    }
+
+    /// Mint, validate, persist, and install a replacement session key at `now_ms` through
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
+    pub(crate) fn renew_delegatee_key_with<M, P>(
+        &self,
+        now_ms: u128,
+        mint: M,
+        persist: P,
+    ) -> Result<DelegationHorizon>
+    where
+        M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
+        P: FnOnce(&DelegateeKey) -> Result<()>,
+    {
+        let (next, horizon) = self.session_keys.renew_with(now_ms, mint, persist)?;
+        self.swarm
+            .set_delegatee_key(next)
+            .map_err(Error::CoreError)?;
+        Ok(horizon)
+    }
+
+    /// Replace this node's active session key in process at `now_ms`, retaining the previous key
+    /// until its delegation expires and updating the swarm transport (#1153).
+    ///
+    /// Laws:
+    /// - **Monotone horizon**: `h' > h`. A renewal never shortens the signing horizon.
+    /// - **No unsigned gap**: `next` authorizes `self.did()`, verifies at `now_ms`, and is before
+    ///   `h'`.
+    pub fn renew_delegatee_key(
+        &self,
+        next: DelegateeKey,
+        now_ms: u128,
+    ) -> Result<DelegationHorizon> {
+        self.renew_delegatee_key_with(now_ms, |_| Ok(next), |_| Ok(()))
     }
 
     /// The signing horizon of this node's own delegation: from it on, the node can send
-    /// nothing until it restarts with a fresh delegation (#1063). A native daemon ends there; a
-    /// browser or FFI embedder reads it here, or as `overlay_ready = false`, and acts itself.
+    /// nothing unless it renews or restarts with a fresh delegation (#1063, #1153). A native
+    /// daemon renews at `h - lead` when configured with a delegator key and ends at `h`
+    /// otherwise; a browser or FFI embedder reads it here, or as `overlay_ready = false`, and
+    /// acts itself.
     pub fn signing_horizon(&self) -> DelegationHorizon {
-        DelegationHorizon::of(&self.delegatee_key.delegation())
+        self.session_keys.horizon()
     }
 
     /// The stop and the task set of this node (`crate::tasks`).
@@ -745,8 +792,9 @@ impl Processor {
     pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
         let generated_at_ms = get_epoch_ms();
         let runtime = self.observability.runtime_snapshot(generated_at_ms);
-        let delegation = self.delegatee_key.delegation();
+        let delegation = self.delegatee_key().delegation();
         let expires_at_ms = delegation.expires_at_ms();
+        let (rotation_succeeded_total, rotation_failed_total) = self.session_keys.rotation_counts();
         let mailbox = self
             .swarm
             .mailbox_storage_inspect()
@@ -785,9 +833,9 @@ impl Processor {
                 created_at_ms: delegation.created_at_ms(),
                 expires_at_ms,
                 remaining_ms: expires_at_ms.saturating_sub(generated_at_ms),
-                rotation_succeeded_total: 0,
-                rotation_failed_total: 0,
-                runtime_rotation_supported: false,
+                rotation_succeeded_total,
+                rotation_failed_total,
+                runtime_rotation_supported: true,
             },
             mailboxes: MailboxSnapshot {
                 registered: mailbox.registered,

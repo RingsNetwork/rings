@@ -4,11 +4,11 @@
 //! ```text
 //!   poll(t):  E = fetch(mail_topic(d))                      the elements live at t
 //!             R = records ∖ { r | outlived(r, t) }           retention
-//!             for o ∈ open(E, d, k, fresh = ¬opened_R):     k = the node's delegatee key
+//!             for o ∈ open(E, d, k, fresh = ¬opened_R(k)):  k = the node's delegatee key
 //!               Incomplete             ─▶ nothing           tried again on the next poll
-//!               Unreadable             ─▶ opened(id)
-//!               Opened(m) ∧ filed_R(k) ─▶ opened(id)        k = H(Message-ID), or id without one
-//!               Opened(m)              ─▶ inbox.file(m); filed(k); opened(id)
+//!               Unreadable             ─▶ opened(k, id)
+//!               Opened(m) ∧ filed_R(h) ─▶ opened(k, id)      h = H(Message-ID), or id without one
+//!               Opened(m)              ─▶ inbox.file(m); filed(h); opened(k, id)
 //! ```
 //!
 //! Laws:
@@ -20,7 +20,13 @@
 //! - **At least once.** A mail is filed before it is remembered, so a crash between the two
 //!   files it again after a restart: a crash never loses a mail, at worst it is filed twice.
 //! - **Deduplication.** Encryption is randomized, so a resent mail is a new ciphertext: mail
-//!   with a `Message-ID` already filed is not filed again.
+//!   with a `Message-ID` already filed is not filed again, even under another delegatee key.
+//!   Polls of one recipient are serialized, so their record snapshots cannot race each other.
+//! - **Key isolation.** An opened or unreadable verdict belongs to the delegatee public key
+//!   that produced it. Recipients sharing records under different keys cannot hide mail from
+//!   each other. Filed records stay shared because filing does not depend on the opening key.
+//!   Separate recipients do not share a poll lock: concurrent polls can both file before
+//!   either observes the other's filing record, preserving at-least-once delivery.
 //! - **Retention.** An opened id is kept `H + σ` ([`OPENED_RETENTION_MS`]), after which no copy
 //!   of its mail is served; a `Message-ID` is kept [`MESSAGE_ID_RETENTION_MS`].
 //! - **One key.** Mail opens only under the node's current delegatee key. Mail sealed to a key
@@ -33,9 +39,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::lock::Mutex;
 use rings_core::consts::MAX_TTL_MS;
 use rings_core::consts::TS_OFFSET_TOLERANCE_MS;
 use rings_core::dht::entry::Entry;
+use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::storage::KvStorageInterface;
 use rings_core::utils::get_epoch_ms;
@@ -46,9 +54,10 @@ use thiserror::Error;
 
 use super::envelope::MailDigest;
 use super::mail_topic;
-use super::open::open_mail;
+use super::open::open_mail_with_keys;
 use super::open::OpenedMail;
 use super::open::Opening;
+use super::write_lowercase_hex;
 use crate::processor::sleep_unless_stopped;
 use crate::processor::Processor;
 
@@ -122,7 +131,8 @@ where K: KvStorageInterface<StoredMail> + MaybeSendSync
 /// A record the recipient keeps.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum RecipientRecord {
-    /// A mail id opened, or found unreadable, at `at_ms`: it is not opened again.
+    /// A mail id opened, or found unreadable, at `at_ms`: it is not opened again under the
+    /// delegatee public key in its record name (the key-isolation law).
     Opened {
         /// When.
         at_ms: u128,
@@ -145,23 +155,23 @@ impl RecipientRecord {
     }
 }
 
-/// The name a record is kept under.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecordName {
-    /// A mail id's [`RecipientRecord::Opened`].
-    Opened(MailDigest),
-    /// A deduplication key's [`RecipientRecord::Filed`].
-    Filed(MailDigest),
+/// Format the key-isolated [`RecipientRecord::Opened`] storage key
+/// `opened-<public key hex>-<mail id hex>`.
+///
+/// Law: opening names bind both the delegatee public key and the mail digest, so distinct
+/// delegatee public keys never share an opening verdict.
+fn opened_record_name(delegatee_public_key: PublicKey<33>, mail_id: MailDigest) -> String {
+    let mut name = String::with_capacity(7 + 66 + 1 + 64);
+    name.push_str("opened-");
+    let _ = write_lowercase_hex(&mut name, &delegatee_public_key.0);
+    name.push('-');
+    let _ = std::fmt::Write::write_fmt(&mut name, format_args!("{mail_id}"));
+    name
 }
 
-impl std::fmt::Display for RecordName {
-    /// `opened-<hex>` or `filed-<hex>`.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Opened(mail_id) => write!(f, "opened-{mail_id}"),
-            Self::Filed(key) => write!(f, "filed-{key}"),
-        }
-    }
+/// Format the shared [`RecipientRecord::Filed`] storage key `filed-<deduplication key hex>`.
+fn filed_record_name(key: MailDigest) -> String {
+    format!("filed-{key}")
 }
 
 /// The key a mail is deduplicated by: `H(Message-ID)`, or its own id without one.
@@ -209,6 +219,97 @@ pub enum RecipientError<E> {
     Inbox(#[source] E),
 }
 
+/// Pure decision ADT classifying one `(Opening, Option<PublicKey<33>>)` against the current
+/// `records` snapshot before any inbox or storage side effect runs.
+enum OpeningAction {
+    /// Manifest lists a missing chunk; retry on the next poll without recording `opened`.
+    Incomplete,
+    /// Already processed under a retained previous key; record `opened` under the active key (and
+    /// the retained key when `opened_by` is present) without incrementing `PollReport`.
+    AlreadyHandledByRetained {
+        retained_opened_record: Option<String>,
+        active_opened_record: String,
+    },
+    /// Unreadable by all held keys and not previously handled; increment `unreadable` and record
+    /// `opened` under the active key.
+    Unreadable { active_opened_record: String },
+    /// Decrypted, but `Message-ID` was already filed; increment `duplicates` and record `opened`.
+    Duplicate {
+        retained_opened_record: Option<String>,
+        active_opened_record: String,
+    },
+    /// Decrypted and fresh; file into `inbox`, record `filed`, and record `opened`.
+    FileNew {
+        mail: OpenedMail,
+        filed_record: String,
+        retained_opened_record: Option<String>,
+        active_opened_record: String,
+    },
+}
+
+/// Pure decision function mapping an `(Opening, Option<PublicKey<33>>)` and the current
+/// `records` snapshot into an [`OpeningAction`].
+///
+/// Enforces the **Key-isolation law** and **Cross-key retention law** (#1153): if a retained
+/// previous key already recorded `opened-<retained_pk>-<mail_id>`, re-observing the same mail
+/// after key rotation records `opened-<active_pk>-<mail_id>` without double-counting `unreadable`
+/// or `duplicates` in [`PollReport`].
+fn classify_opening(
+    opening: Opening,
+    opened_by: Option<PublicKey<33>>,
+    delegatee_public_key: PublicKey<33>,
+    decryption_keys: &[rings_core::delegation::DelegateeKey],
+    records: &BTreeMap<String, RecipientRecord>,
+) -> OpeningAction {
+    let mail_id = opening.mail_id();
+    let active_opened_record = opened_record_name(delegatee_public_key, mail_id);
+    let retained_opened_record = opened_by
+        .filter(|&pk| pk != delegatee_public_key)
+        .map(|pk| opened_record_name(pk, mail_id));
+    let already_handled_by_retained_key = match &retained_opened_record {
+        Some(record_name) => records.contains_key(record_name),
+        None if opened_by.is_none() => decryption_keys.iter().skip(1).any(|key| {
+            records.contains_key(&opened_record_name(key.delegatee_public_key(), mail_id))
+        }),
+        None => false,
+    };
+
+    match opening {
+        Opening::Incomplete { .. } => OpeningAction::Incomplete,
+        Opening::Unreadable { .. } if already_handled_by_retained_key => {
+            OpeningAction::AlreadyHandledByRetained {
+                retained_opened_record,
+                active_opened_record,
+            }
+        }
+        Opening::Unreadable { .. } => OpeningAction::Unreadable {
+            active_opened_record,
+        },
+        Opening::Opened(_) if already_handled_by_retained_key => {
+            OpeningAction::AlreadyHandledByRetained {
+                retained_opened_record,
+                active_opened_record,
+            }
+        }
+        Opening::Opened(mail) => {
+            let filed_record = filed_record_name(dedup_key(&mail));
+            if records.contains_key(&filed_record) {
+                OpeningAction::Duplicate {
+                    retained_opened_record,
+                    active_opened_record,
+                }
+            } else {
+                OpeningAction::FileNew {
+                    mail,
+                    filed_record,
+                    retained_opened_record,
+                    active_opened_record,
+                }
+            }
+        }
+    }
+}
+
 /// A recipient: a node reading its own mail topic into `inbox`, keeping its records in
 /// `records`.
 pub struct Recipient<I, K> {
@@ -216,6 +317,8 @@ pub struct Recipient<I, K> {
     inbox: I,
     records: K,
     interval: Duration,
+    /// Serializes this recipient's polls so each observes the previous poll's filing records.
+    poll_lock: Mutex<()>,
 }
 
 impl<I, K> Recipient<I, K>
@@ -239,6 +342,7 @@ where
             inbox,
             records,
             interval,
+            poll_lock: Mutex::new(()),
         })
     }
 
@@ -249,6 +353,7 @@ where
 
     /// Read the mail topic once, file what opens, and remember it (the poll of this module).
     pub async fn poll(&self) -> Result<PollReport, RecipientError<I::Error>> {
+        let _poll_guard = self.poll_lock.lock().await;
         let did = self.processor.did();
         let key = Entry::gen_did(&mail_topic(did)).map_err(RecipientError::Key)?;
         let entry = self
@@ -261,40 +366,103 @@ where
         let Some(entry) = entry else {
             return Ok(PollReport::default());
         };
-        let fresh =
-            |mail_id: &MailDigest| !records.contains_key(&RecordName::Opened(*mail_id).to_string());
-        let openings = open_mail(&entry.data, did, self.processor.delegatee_key(), fresh);
+        let delegatee_key = self.processor.delegatee_key();
+        let delegatee_public_key = delegatee_key.delegatee_public_key();
+        let decryption_keys = self.processor.decryption_keys_at(now_ms);
+        let fresh = |mail_id: &MailDigest| {
+            !records.contains_key(&opened_record_name(delegatee_public_key, *mail_id))
+        };
+        let openings = open_mail_with_keys(&entry.data, did, &decryption_keys, fresh);
         let mut report = PollReport::default();
-        for opening in openings {
-            let mail_id = opening.mail_id();
-            match opening {
-                Opening::Incomplete { .. } => {
+        for (opening, opened_by) in openings {
+            match classify_opening(
+                opening,
+                opened_by,
+                delegatee_public_key,
+                &decryption_keys,
+                &records,
+            ) {
+                OpeningAction::Incomplete => {
                     report.incomplete = report.incomplete.saturating_add(1);
-                    continue;
                 }
-                Opening::Unreadable { .. } => {
+                OpeningAction::AlreadyHandledByRetained {
+                    retained_opened_record,
+                    active_opened_record,
+                } => {
+                    self.remember_opened_pair(
+                        &mut records,
+                        retained_opened_record,
+                        active_opened_record,
+                        now_ms,
+                    )
+                    .await?;
+                }
+                OpeningAction::Unreadable {
+                    active_opened_record,
+                } => {
                     report.unreadable = report.unreadable.saturating_add(1);
+                    self.remember_opened_pair(&mut records, None, active_opened_record, now_ms)
+                        .await?;
                 }
-                Opening::Opened(mail) => {
-                    let filed = RecordName::Filed(dedup_key(&mail)).to_string();
-                    if records.contains_key(&filed) {
-                        report.duplicates = report.duplicates.saturating_add(1);
-                    } else {
-                        self.inbox
-                            .file(&mail)
-                            .await
-                            .map_err(RecipientError::Inbox)?;
-                        let record = RecipientRecord::Filed { at_ms: now_ms };
-                        self.remember(&mut records, filed, record).await?;
-                        report.filed = report.filed.saturating_add(1);
-                    }
+                OpeningAction::Duplicate {
+                    retained_opened_record,
+                    active_opened_record,
+                } => {
+                    report.duplicates = report.duplicates.saturating_add(1);
+                    self.remember_opened_pair(
+                        &mut records,
+                        retained_opened_record,
+                        active_opened_record,
+                        now_ms,
+                    )
+                    .await?;
+                }
+                OpeningAction::FileNew {
+                    mail,
+                    filed_record,
+                    retained_opened_record,
+                    active_opened_record,
+                } => {
+                    self.inbox
+                        .file(&mail)
+                        .await
+                        .map_err(RecipientError::Inbox)?;
+                    self.remember(&mut records, filed_record, RecipientRecord::Filed {
+                        at_ms: now_ms,
+                    })
+                    .await?;
+                    report.filed = report.filed.saturating_add(1);
+                    self.remember_opened_pair(
+                        &mut records,
+                        retained_opened_record,
+                        active_opened_record,
+                        now_ms,
+                    )
+                    .await?;
                 }
             }
-            let opened = RecordName::Opened(mail_id).to_string();
-            let record = RecipientRecord::Opened { at_ms: now_ms };
-            self.remember(&mut records, opened, record).await?;
         }
         Ok(report)
+    }
+
+    /// Record [`RecipientRecord::Opened`] for the retained key (if any) and the active key.
+    async fn remember_opened_pair(
+        &self,
+        records: &mut BTreeMap<String, RecipientRecord>,
+        retained_opened_record: Option<String>,
+        active_opened_record: String,
+        now_ms: u128,
+    ) -> Result<(), RecipientError<I::Error>> {
+        if let Some(retained_name) = retained_opened_record {
+            self.remember(records, retained_name, RecipientRecord::Opened {
+                at_ms: now_ms,
+            })
+            .await?;
+        }
+        self.remember(records, active_opened_record, RecipientRecord::Opened {
+            at_ms: now_ms,
+        })
+        .await
     }
 
     /// Poll now and then every interval until `stop`, logging a failed poll and polling again.
@@ -323,23 +491,20 @@ where
         &self,
         now_ms: u128,
     ) -> Result<BTreeMap<String, RecipientRecord>, RecipientError<I::Error>> {
-        let mut records = BTreeMap::new();
-        for (name, record) in self
+        let (expired, retained): (Vec<_>, Vec<_>) = self
             .records
             .get_all()
             .await
             .map_err(RecipientError::Records)?
-        {
-            if record.outlived_at(now_ms) {
-                self.records
-                    .remove(&name)
-                    .await
-                    .map_err(RecipientError::Records)?;
-            } else {
-                records.insert(name, record);
-            }
+            .into_iter()
+            .partition(|(_, record)| record.outlived_at(now_ms));
+        for (name, _) in expired {
+            self.records
+                .remove(&name)
+                .await
+                .map_err(RecipientError::Records)?;
         }
-        Ok(records)
+        Ok(retained.into_iter().collect())
     }
 
     /// Keep `record` under `name`, in the store and in `records`, this poll's view of it: two
@@ -358,3 +523,7 @@ where
         Ok(())
     }
 }
+
+/// Native witnesses of key-isolated opening records and shared filing records.
+#[cfg(all(test, rings_native))]
+mod tests;

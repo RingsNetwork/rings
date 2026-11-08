@@ -61,6 +61,8 @@ pub(crate) fn test_processor_builder(config: &ProcessorConfig) -> ProcessorBuild
 
 pub(crate) mod activity;
 pub(crate) mod exit_descriptor;
+#[cfg(rings_native)]
+mod test_wire_goldens;
 
 #[cfg(feature = "node")]
 pub mod native;

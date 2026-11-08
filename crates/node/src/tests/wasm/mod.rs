@@ -1,5 +1,7 @@
 pub mod test_browser;
 pub mod test_evidence;
+/// Browser mail descriptors, durable reception, notifications, and shared-tab records.
+pub mod test_mail;
 pub mod test_processor;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +14,14 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::swarm::application::SwarmEvent;
-use rings_rpc::protos::rings_node::*;
+use rings_rpc::protos::rings_node::AcceptAnswerRequest;
+use rings_rpc::protos::rings_node::AnswerOfferRequest;
+use rings_rpc::protos::rings_node::AnswerOfferResponse;
+use rings_rpc::protos::rings_node::CreateOfferRequest;
+use rings_rpc::protos::rings_node::CreateOfferResponse;
+use rings_rpc::protos::rings_node::ListPeersRequest;
+use rings_rpc::protos::rings_node::ListPeersResponse;
+use rings_rpc::protos::rings_node::PeerInfo;
 use rings_transport::core::transport::WebrtcConnectionState;
 use uuid;
 use wasm_bindgen_futures::JsFuture;

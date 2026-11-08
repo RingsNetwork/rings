@@ -23,8 +23,22 @@ use futures::select;
 use futures::FutureExt;
 use futures::Stream;
 use rings_rpc::jsonrpc::Client as RpcClient;
-use rings_rpc::protos::rings_node::*;
+use rings_rpc::protos::rings_node::AcceptAnswerRequest;
+use rings_rpc::protos::rings_node::AnswerOfferRequest;
+use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use rings_rpc::protos::rings_node::ConnectWithDidRequest;
+use rings_rpc::protos::rings_node::CreateOfferRequest;
+use rings_rpc::protos::rings_node::DisconnectRequest;
+use rings_rpc::protos::rings_node::FetchTopicMessagesRequest;
+use rings_rpc::protos::rings_node::ListPeersRequest;
+use rings_rpc::protos::rings_node::LookupServiceRequest;
+use rings_rpc::protos::rings_node::NodeInfoRequest;
+use rings_rpc::protos::rings_node::PublishMessageToTopicRequest;
+use rings_rpc::protos::rings_node::RegisterServiceRequest;
+use rings_rpc::protos::rings_node::SendBackendMessageRequest;
+use rings_rpc::protos::rings_node::SwarmInfo;
 
+pub use crate::processor::handshake::OfferReplyKind;
 use crate::seed::Seed;
 use crate::util::loader::ResourceLoader;
 
@@ -41,6 +55,47 @@ pub struct ClientOutput<T> {
     /// Output data.
     pub result: T,
     display: String,
+    stderr_notice: Option<String>,
+}
+
+impl OfferReplyKind {
+    /// Operator notice printed to stderr so stdout stays the raw base58 payload for piping.
+    pub const fn stderr_notice(self) -> &'static str {
+        match self {
+            Self::Answer => {
+                "Answered peer's offer (answer); return this payload to the offerer for `rings connect accept`."
+            }
+            Self::CounterOffer => {
+                "Counter-offer (offer, answered: false): this node's pending offer prevailed on the DID tie-break. \
+                 Pass this counter-offer to the peer for `rings connect answer`, then complete on this node with `rings connect accept`."
+            }
+        }
+    }
+}
+
+/// Build the `ClientOutput` for an encoded `answerOffer` reply.
+pub fn format_answer_offer_output(reply: String) -> Output<String> {
+    let notice = match OfferReplyKind::from_encoded_reply(reply.as_str()) {
+        Ok(kind) => kind.stderr_notice().to_owned(),
+        Err(_) => OfferReplyKind::Answer.stderr_notice().to_owned(),
+    };
+    ClientOutput::ok_with_stderr(reply.clone(), reply, notice)
+}
+
+/// Reject an encoded `ConnectNodeSend` counter-offer passed to `connect accept` with a clear
+/// operator message pointing to `rings connect answer`.
+pub fn ensure_accept_answer_is_not_counter_offer(answer: &str) -> anyhow::Result<()> {
+    if matches!(
+        OfferReplyKind::from_encoded_reply(answer),
+        Ok(OfferReplyKind::CounterOffer)
+    ) {
+        anyhow::bail!(
+            "payload is a counter-offer (`ConnectNodeSend`), not an answer (`ConnectNodeReport`); \
+             answer it with `rings connect answer <counter_offer>` and pass the resulting answer \
+             to the peer's `rings connect accept`"
+        );
+    }
+    Ok(())
 }
 
 impl Client {
@@ -133,11 +188,14 @@ impl Client {
         ClientOutput::ok(offer.clone(), offer)
     }
 
-    /// Answers a peer's offer, producing the encoded answer to return to the offerer.
+    /// Answers a peer's offer, producing the encoded answer (or counter-offer) to return to the
+    /// offerer.
     ///
     /// Consumes the encoded offer emitted by [`create_offer`](Self::create_offer) and returns the
-    /// base58-check encoded answer payload, which the offerer feeds to
-    /// [`accept_answer`](Self::accept_answer).
+    /// base58-check encoded reply payload. When the reply is an answer (`ConnectNodeReport`), the
+    /// offerer feeds it to [`accept_answer`](Self::accept_answer). When the reply is a
+    /// counter-offer (`ConnectNodeSend`), the peer answers it with `answer_offer` and returns
+    /// that answer to this node's [`accept_answer`](Self::accept_answer).
     pub async fn answer_offer(&mut self, offer: &str) -> Output<String> {
         let answer = self
             .client
@@ -148,12 +206,16 @@ impl Client {
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .answer;
 
-        ClientOutput::ok(answer.clone(), answer)
+        format_answer_offer_output(answer)
     }
 
     /// Accepts a peer's answer, completing the manual handshake initiated by
     /// [`create_offer`](Self::create_offer).
+    ///
+    /// Refuses a counter-offer (`ConnectNodeSend`) before sending the RPC request, pointing the
+    /// operator to `rings connect answer` instead.
     pub async fn accept_answer(&mut self, answer: &str) -> Output<()> {
+        ensure_accept_answer_is_not_counter_offer(answer)?;
         self.client
             .accept_answer(&AcceptAnswerRequest {
                 answer: answer.to_string(),
@@ -315,11 +377,42 @@ impl Client {
 impl<T> ClientOutput<T> {
     /// Put display ahead to avoid moved value error.
     pub fn ok(display: String, result: T) -> anyhow::Result<Self> {
-        Ok(Self { result, display })
+        Ok(Self {
+            result,
+            display,
+            stderr_notice: None,
+        })
     }
 
-    /// Prints the display value of this ClientOutput instance to the console.
+    /// Construct a `ClientOutput` with an additional operator notice printed to stderr.
+    pub fn ok_with_stderr(
+        display: String,
+        result: T,
+        stderr_notice: String,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            result,
+            display,
+            stderr_notice: Some(stderr_notice),
+        })
+    }
+
+    /// Human-readable stdout string.
+    pub fn display_text(&self) -> &str {
+        self.display.as_str()
+    }
+
+    /// Optional operator notice printed to stderr.
+    pub fn stderr_notice(&self) -> Option<&str> {
+        self.stderr_notice.as_deref()
+    }
+
+    /// Prints the display value of this ClientOutput instance to the console, and any operator
+    /// notice to stderr.
     pub fn display(&self) {
+        if let Some(notice) = &self.stderr_notice {
+            eprintln!("{notice}");
+        }
         println!("{}", self.display);
     }
 }
@@ -327,7 +420,56 @@ impl<T> ClientOutput<T> {
 /// CLI constructors must preserve the shared RPC credential transport boundary.
 #[cfg(test)]
 mod credential_transport_tests {
+    use rings_core::delegation::DelegateeKey;
+    use rings_core::dht::delivery::NextHop;
+    use rings_core::dht::Did;
+    use rings_core::dht::RelayCustody;
+    use rings_core::ecc::SecretKey;
+    use rings_core::message::ConnectNodeReport;
+    use rings_core::message::ConnectNodeSend;
+    use rings_core::message::DhtProtocolMode;
+    use rings_core::message::Encoder;
+    use rings_core::message::Message;
+    use rings_core::message::MessagePayload;
+    use rings_core::message::MessageSigner;
+
+    use super::ensure_accept_answer_is_not_counter_offer;
+    use super::format_answer_offer_output;
     use super::Client;
+    use super::OfferReplyKind;
+
+    fn encoded_handshake_payload(message: Message) -> String {
+        let key = SecretKey::random();
+        let delegatee_key = DelegateeKey::new_with_seckey(&key).expect("test delegatee key");
+        let signer = MessageSigner::new(&delegatee_key, 1);
+        let destination: Did = SecretKey::random().address().into();
+        let payload = MessagePayload::new_send_with_sequence(
+            message,
+            signer,
+            NextHop::toward(destination),
+            destination,
+            0,
+            None,
+        )
+        .expect("signed handshake payload");
+        payload.encode().expect("encoded payload").to_string()
+    }
+
+    fn encoded_answer_fixture() -> String {
+        encoded_handshake_payload(Message::ConnectNodeReport(ConnectNodeReport {
+            sdp: "{\"type\":\"answer\"}".to_owned(),
+            dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
+            relay_custody: RelayCustody::Holds,
+        }))
+    }
+
+    fn encoded_counter_offer_fixture() -> String {
+        encoded_handshake_payload(Message::ConnectNodeSend(ConnectNodeSend {
+            sdp: "{\"type\":\"offer\"}".to_owned(),
+            dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
+            relay_custody: RelayCustody::Holds,
+        }))
+    }
 
     /// An endpoint override cannot carry the API credential over remote cleartext HTTP.
     #[test]
@@ -351,5 +493,85 @@ mod credential_transport_tests {
         ] {
             assert!(Client::with_api_token(endpoint, "fixture-token".to_owned()).is_ok());
         }
+    }
+
+    /// `answer_offer` output for an answer (`ConnectNodeReport`, `answered: true`) keeps the
+    /// raw payload on stdout and labels the reply as an answer for `connect accept` on stderr.
+    #[test]
+    fn answer_offer_formats_answer_reply() {
+        let answer = encoded_answer_fixture();
+        assert_eq!(
+            OfferReplyKind::from_encoded_reply(answer.as_str()).expect("classify answer"),
+            OfferReplyKind::Answer
+        );
+
+        let output = format_answer_offer_output(answer.clone()).expect("format answer output");
+        assert_eq!(output.result, answer);
+        assert_eq!(output.display_text(), answer);
+        let notice = output.stderr_notice().expect("stderr notice for answer");
+        assert!(notice.contains("answer"), "unexpected notice: {notice}");
+        assert!(
+            notice.contains("rings connect accept"),
+            "unexpected notice: {notice}"
+        );
+    }
+
+    /// `answer_offer` output for a counter-offer (`ConnectNodeSend`, `answered: false`) keeps
+    /// the raw payload on stdout and explains on stderr that the peer must run `connect answer`
+    /// and return that answer to this node's `connect accept`.
+    #[test]
+    fn answer_offer_formats_counter_offer_reply() {
+        let counter_offer = encoded_counter_offer_fixture();
+        assert_eq!(
+            OfferReplyKind::from_encoded_reply(counter_offer.as_str())
+                .expect("classify counter-offer"),
+            OfferReplyKind::CounterOffer
+        );
+
+        let output =
+            format_answer_offer_output(counter_offer.clone()).expect("format counter-offer output");
+        assert_eq!(output.result, counter_offer);
+        assert_eq!(output.display_text(), counter_offer);
+        let notice = output
+            .stderr_notice()
+            .expect("stderr notice for counter-offer");
+        assert!(
+            notice.contains("Counter-offer"),
+            "unexpected notice: {notice}"
+        );
+        assert!(
+            notice.contains("answered: false"),
+            "unexpected notice: {notice}"
+        );
+        assert!(
+            notice.contains("rings connect answer"),
+            "unexpected notice: {notice}"
+        );
+        assert!(
+            notice.contains("rings connect accept"),
+            "unexpected notice: {notice}"
+        );
+    }
+
+    /// `connect accept` refuses a counter-offer (`ConnectNodeSend`) with an explanation pointing
+    /// to `rings connect answer`, while allowing an answer (`ConnectNodeReport`).
+    #[test]
+    fn accept_answer_refuses_counter_offer_with_clear_instruction() {
+        let answer = encoded_answer_fixture();
+        assert!(ensure_accept_answer_is_not_counter_offer(answer.as_str()).is_ok());
+
+        let counter_offer = encoded_counter_offer_fixture();
+        let err = ensure_accept_answer_is_not_counter_offer(counter_offer.as_str())
+            .expect_err("counter-offer must be refused by connect accept");
+        let msg = err.to_string();
+        assert!(msg.contains("counter-offer"), "unexpected error: {msg}");
+        assert!(
+            msg.contains("rings connect answer"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("rings connect accept"),
+            "unexpected error: {msg}"
+        );
     }
 }

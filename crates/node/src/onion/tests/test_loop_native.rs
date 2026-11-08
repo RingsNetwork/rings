@@ -41,6 +41,7 @@ use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsResponse;
 use crate::onion::https::OnionHttpsWorld;
 use crate::onion::https::ONION_HTTPS_RESPONSE_TIMEOUT;
+use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::session::client::OnionCreditWindow;
 use crate::onion::session::client::ONION_SESSION_DEADLINE_MS;
@@ -48,10 +49,11 @@ use crate::onion::session::dial::OnionSessionRequest;
 use crate::onion::session::dial::OnionStreamEvent;
 use crate::onion::session::dial::OnionStreamReceiver;
 use crate::onion::session::dial::ONION_SESSION_OPEN_TIMEOUT;
+use crate::onion::session::frame::OnionFrame;
 use crate::onion::session::serve::OnionExitSessions;
 use crate::onion::session::serve::OnionWorld;
-use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionLoopClass;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
@@ -260,6 +262,104 @@ async fn test_https_loop_fetches_through_the_session_target() -> Result<()> {
             [0x42; 20_000].as_slice()
         ]
         .concat()
+    );
+    Ok(())
+}
+
+/// Caller-selected loop class `b = 64 KiB` on the native handle: a `tcp` stream opened via
+/// [`NativeOnionCircuitHandle::open_tcp_stream_with_class`] and an `https` fetch sent via
+/// [`NativeOnionCircuitHandle::request_https`] (with [`OnionHttpsClientRequest::class`]) carry a
+/// 20 KiB payload (> `OnionFrame::data_capacity(KiB16) = 13,442`, ≤
+/// `OnionFrame::data_capacity(KiB64) = 62,594`) end to end over a `KiB64` loop.
+#[tokio::test]
+async fn test_caller_apis_open_tcp_and_https_sessions_at_chosen_loop_class() -> Result<()> {
+    let class = OnionLoopClass::KiB64;
+    let payload_len = 20_000;
+    assert!(payload_len > OnionFrame::data_capacity(OnionLoopClass::DEFAULT));
+    assert!(payload_len <= OnionFrame::data_capacity(class));
+
+    let network = LoopNetwork::new(|accounting, link_sender| {
+        OnionAlgebra::default()
+            .register(
+                OnionServiceName::tcp(),
+                OnionExitSessions::new(
+                    EchoWorld,
+                    open_policy(),
+                    accounting.clone(),
+                    link_sender.clone(),
+                ),
+            )
+            .register(
+                OnionServiceName::https(),
+                OnionExitSessions::new(
+                    OnionHttpsWorld::with_egress(
+                        open_policy(),
+                        accounting.clone(),
+                        OnionHttpsEgress::Test(respond),
+                    ),
+                    open_policy(),
+                    accounting.clone(),
+                    link_sender.clone(),
+                ),
+            )
+    })
+    .await?;
+    let handle = NativeOnionCircuitHandle::new(network.client.runtime.clone());
+
+    // 1. Native TCP stream opened with `OnionLoopClass::KiB64`.
+    let opened = with_hang_guard(
+        "open_tcp_stream_with_class(KiB64)",
+        ONION_SESSION_OPEN_TIMEOUT.saturating_add(EVENT_BOUND),
+        handle.open_tcp_stream_with_class(network.route(OnionServiceName::tcp())?, target(), class),
+    )
+    .await?;
+    let (local, mut peer) = tokio::io::duplex(64 * 1024);
+    let local: rings_gateway::BoxGatewayDuplex = Box::new(local);
+    opened.relay(local);
+    let sent = (0..payload_len)
+        .map(|index| u8::try_from(index % 251).expect("small"))
+        .collect::<Vec<_>>();
+    tokio::io::AsyncWriteExt::write_all(&mut peer, &sent)
+        .await
+        .expect("write local stream");
+    tokio::io::AsyncWriteExt::shutdown(&mut peer)
+        .await
+        .expect("shutdown local write half");
+    let mut echoed = Vec::new();
+    with_hang_guard(
+        "tcp KiB64 echo read_to_end",
+        stream_event_bound(),
+        tokio::io::AsyncReadExt::read_to_end(&mut peer, &mut echoed),
+    )
+    .await
+    .expect("read echoed stream");
+    assert_eq!(echoed, sent);
+
+    // 2. HTTPS request with `class: Some(OnionLoopClass::KiB64)` through `NativeOnionCircuitHandle`.
+    let (https_target, call) = OnionHttpsCall::from_url(
+        "https://example.com/class?b=64kib",
+        crate::onion::https::OnionHttpsClientRequest {
+            method: "POST".to_string(),
+            body: sent.clone(),
+            class: Some(class),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(call.class(), class);
+    let https_route = OnionProxyRoute {
+        target: https_target,
+        route: network.route(OnionServiceName::https())?,
+    };
+    let response = with_hang_guard(
+        "request_https with KiB64",
+        https_request_bound(),
+        handle.request_https(&https_route, call),
+    )
+    .await?;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        [b"POST /class?b=64kib ".as_slice(), sent.as_slice()].concat()
     );
     Ok(())
 }

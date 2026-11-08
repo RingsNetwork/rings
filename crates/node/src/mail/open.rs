@@ -29,6 +29,7 @@ use bytes::Bytes;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
+use rings_core::ecc::PublicKey;
 
 use super::envelope::mail_aad;
 use super::envelope::MailDigest;
@@ -88,15 +89,6 @@ impl Opening {
             Self::Opened(_) => 2,
         }
     }
-
-    /// The join of two outcomes for one mail id: the higher-ranked, `self` on a tie.
-    fn join(self, other: Self) -> Self {
-        if other.rank() > self.rank() {
-            other
-        } else {
-            self
-        }
-    }
 }
 
 /// Open the mail in `elements` for `recipient` with the secret of `key`, skipping every mail id
@@ -108,31 +100,67 @@ pub fn open_mail(
     key: &DelegateeKey,
     fresh: impl Fn(&MailDigest) -> bool,
 ) -> Vec<Opening> {
+    open_mail_with_keys(elements, recipient, std::slice::from_ref(key), fresh)
+        .into_iter()
+        .map(|(opening, _)| opening)
+        .collect()
+}
+
+/// Bounded join-semilattice join (`⊔`) over `(Opening, Option<PublicKey<33>>)` ordered by
+/// `Incomplete < Unreadable < Opened` (`Law (Join)`).
+///
+/// # Semilattice Laws
+///
+/// - **Idempotency**: `join_opening(a, a) == a`.
+/// - **Associativity**: `join_opening(join_opening(a, b), c) == join_opening(a, join_opening(b, c))`.
+/// - **Rank Commutativity**: `join_opening(a, b).0.rank() == join_opening(b, a).0.rank()`.
+/// - **Bottom Element**: `(Opening::Incomplete { mail_id }, None)` is the identity element for a
+///   given `mail_id`.
+fn join_opening(
+    earlier: (Opening, Option<PublicKey<33>>),
+    candidate: (Opening, Option<PublicKey<33>>),
+) -> (Opening, Option<PublicKey<33>>) {
+    if candidate.0.rank() > earlier.0.rank() {
+        candidate
+    } else {
+        earlier
+    }
+}
+
+/// Open the mail in `elements` for `recipient` trying `keys` in order, returning each mail id's
+/// outcome and the delegatee public key of the key that decrypted it when opened (#1153).
+pub(crate) fn open_mail_with_keys(
+    elements: &[Bytes],
+    recipient: Did,
+    keys: &[DelegateeKey],
+    fresh: impl Fn(&MailDigest) -> bool,
+) -> Vec<(Opening, Option<PublicKey<33>>)> {
     let by_digest = elements
         .iter()
         .map(|element| (MailDigest::of(element), element))
         .collect::<BTreeMap<_, _>>();
-    let manifests = elements
+    elements
         .iter()
         .filter_map(|element| match MailElement::decode(element) {
             Ok(MailElement::Manifest(manifest)) => Some(manifest),
             Ok(MailElement::Chunk(_)) | Err(_) => None,
-        });
-    let mut outcomes = BTreeMap::<MailDigest, Opening>::new();
-    for manifest in manifests {
-        if !fresh(&manifest.mail_id) || !manifest.is_well_formed() {
-            continue;
-        }
-        let Some(outcome) = open_manifest(&manifest, &by_digest, recipient, key) else {
-            continue;
-        };
-        let joined = match outcomes.remove(&outcome.mail_id()) {
-            Some(earlier) => earlier.join(outcome),
-            None => outcome,
-        };
-        outcomes.insert(joined.mail_id(), joined);
-    }
-    outcomes.into_values().collect()
+        })
+        .filter(|manifest| fresh(&manifest.mail_id) && manifest.is_well_formed())
+        .filter_map(|manifest| open_manifest(&manifest, &by_digest, recipient, keys))
+        .fold(
+            BTreeMap::<MailDigest, (Opening, Option<PublicKey<33>>)>::new(),
+            |mut outcomes, candidate| {
+                let mail_id = candidate.0.mail_id();
+                let joined = match outcomes.remove(&mail_id) {
+                    Some(earlier) => join_opening(earlier, candidate),
+                    None => candidate,
+                };
+                outcomes.insert(mail_id, joined);
+                outcomes
+            },
+        )
+        .into_values()
+        .collect()
 }
 
 /// What the well-formed `manifest` opens to over the elements `by_digest`, or `None` when it is
@@ -141,11 +169,11 @@ fn open_manifest(
     manifest: &MailManifest,
     by_digest: &BTreeMap<MailDigest, &Bytes>,
     recipient: Did,
-    key: &DelegateeKey,
-) -> Option<Opening> {
+    keys: &[DelegateeKey],
+) -> Option<(Opening, Option<PublicKey<33>>)> {
     let mail_id = manifest.mail_id;
     let Some(ciphertext) = assemble(manifest, by_digest) else {
-        return Some(Opening::Incomplete { mail_id });
+        return Some((Opening::Incomplete { mail_id }, None));
     };
     if MailDigest::of(&ciphertext) != mail_id {
         return None;
@@ -153,10 +181,19 @@ fn open_manifest(
     let aad = mail_aad(recipient);
     let message = rings_codec::deserialize::<AeadCiphertext>(&ciphertext)
         .ok()
-        .and_then(|sealed| key.decrypt_elgamal_aead(&sealed, &aad).ok());
+        .and_then(|sealed| {
+            keys.iter().find_map(|key| {
+                key.decrypt_elgamal_aead(&sealed, &aad)
+                    .ok()
+                    .map(|plaintext| (plaintext, key.delegatee_public_key()))
+            })
+        });
     Some(match message {
-        Some(message) => Opening::Opened(OpenedMail { mail_id, message }),
-        None => Opening::Unreadable { mail_id },
+        Some((message, opened_by)) => (
+            Opening::Opened(OpenedMail { mail_id, message }),
+            Some(opened_by),
+        ),
+        None => (Opening::Unreadable { mail_id }, None),
     })
 }
 
@@ -180,24 +217,29 @@ fn assemble(manifest: &MailManifest, by_digest: &BTreeMap<MailDigest, &Bytes>) -
 /// §2.2.3) and trimmed; the header ends at the first empty line.
 fn header_field(message: &[u8], name: &str) -> Option<String> {
     let text = String::from_utf8_lossy(message);
-    let mut value: Option<String> = None;
-    for line in text.split('\n').map(|line| line.trim_end_matches('\r')) {
-        if line.is_empty() {
-            break;
-        }
-        let folded = line.starts_with([' ', '\t']);
-        match (value.as_mut(), folded) {
-            (Some(value), true) => value.push_str(line),
-            (Some(_), false) => break,
-            (None, true) => {}
-            (None, false) => {
-                value = line
-                    .split_once(':')
-                    .filter(|(field, _)| field.trim().eq_ignore_ascii_case(name))
-                    .map(|(_, rest)| rest.to_owned());
+    let folded = text
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r'))
+        .take_while(|line| !line.is_empty())
+        .try_fold(None::<String>, |acc, line| {
+            let is_continuation = line.starts_with([' ', '\t']);
+            match (acc, is_continuation) {
+                (Some(mut value), true) => {
+                    value.push_str(line);
+                    std::ops::ControlFlow::Continue(Some(value))
+                }
+                (Some(value), false) => std::ops::ControlFlow::Break(Some(value)),
+                (None, true) => std::ops::ControlFlow::Continue(None),
+                (None, false) => std::ops::ControlFlow::Continue(
+                    line.split_once(':')
+                        .filter(|(field, _)| field.trim().eq_ignore_ascii_case(name))
+                        .map(|(_, rest)| rest.to_owned()),
+                ),
             }
-        }
-    }
+        });
+    let value = match folded {
+        std::ops::ControlFlow::Break(value) | std::ops::ControlFlow::Continue(value) => value,
+    };
     value
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

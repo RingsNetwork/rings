@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd LaunchAgent for the Rings Network daemon (`rings`).
+
+  Copy to `~/Library/LaunchAgents/rs.rings.node.plist` after running `rings init`.
+  If `rings` was installed to `~/.local/bin/rings` instead of `/usr/local/bin/rings`,
+  replace `/usr/local/bin/rings` in ProgramArguments with the full path to the binary.
+  See `contrib/README.md` for bootstrap and removal commands.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>rs.rings.node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/rings</string>
+        <string>run</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/rs.rings.node.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/rs.rings.node.err.log</string>
+</dict>
+</plist>

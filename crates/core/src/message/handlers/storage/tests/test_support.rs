@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 use std::panic::AssertUnwindSafe;
 
 use bytes::Bytes;
@@ -232,7 +233,7 @@ pub(super) fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> 
 pub(super) fn storage_sync_report_payload(
     request: &MessagePayload,
     report: SyncEntriesWithSuccessorReport,
-    signer: MessageSigner<&DelegateeKey>,
+    signer: MessageSigner<impl Borrow<DelegateeKey>>,
     next_hop: Did,
     destination: Did,
 ) -> Result<MessagePayload> {
@@ -242,10 +243,10 @@ pub(super) fn storage_sync_report_payload(
         request.transaction.sequence,
         None,
         Message::SyncEntriesWithSuccessorReport(report),
-        signer,
+        signer.by_ref(),
     )?;
     let relay = MessageRelay::new(NextHop::toward(next_hop), destination, HopBudget::MAX);
-    MessagePayload::new(transaction, signer, relay)
+    MessagePayload::new(transaction, signer.by_ref(), relay)
 }
 
 pub(super) fn prepare_node_with_storage_redundancy(

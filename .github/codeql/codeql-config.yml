@@ -1,0 +1,8 @@
+name: "Rings CodeQL config"
+
+paths-ignore:
+  - "**/tests/**"
+  - "**/test_*.rs"
+  - "**/tests.rs"
+  - "**/*_tests.rs"
+  - "crates/*/vendor/**"
