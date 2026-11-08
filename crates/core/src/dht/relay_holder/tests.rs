@@ -169,8 +169,15 @@ fn test_hand_off_targets_are_the_holder_or_the_holding_ends_of_the_view() {
 
 #[test]
 fn test_the_owner_answers_with_the_holder_of_its_own_arc_alone() {
-    let owner = RelaySegment::new(vec![node(10, false), node(20, false), node(30, true)]);
+    let owner = RelaySegment::new(vec![
+        node(10, false),
+        node(20, false),
+        node(30, true),
+        node(40, true),
+    ]);
     assert_eq!(owner_answer(&owner, did(20), did(25)), Some(did(30)));
+    // Asking at the successor head itself skips that suspected holder and names the next (#1182).
+    assert_eq!(owner_answer(&owner, did(20), did(30)), Some(did(40)));
     // A key of another node's arc is not this node's to answer for.
     assert_eq!(owner_answer(&owner, did(20), did(15)), None);
     let without_holder = RelaySegment::new(vec![node(10, false), node(20, false)]);

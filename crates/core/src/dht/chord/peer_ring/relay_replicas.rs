@@ -140,7 +140,11 @@ impl PeerRing {
         Ok(match position.next {
             ChainNext::End => None,
             ChainNext::Member(next) => Some(next),
-            ChainNext::BeyondView => self.lock_relay_next_holder()?.holder,
+            ChainNext::BeyondView => {
+                let candidate = self.lock_relay_next_holder()?.holder;
+                let neighborhood = self.lock_relay_neighborhood()?;
+                candidate.filter(|holder| neighborhood.chains(*holder))
+            }
         })
     }
 
@@ -214,9 +218,48 @@ impl PeerRing {
         })?;
         let next = match next {
             Some(next) => Some(next),
-            None => self.lock_relay_next_holder()?.holder,
+            None => {
+                let candidate = self.lock_relay_next_holder()?.holder;
+                let neighborhood = self.lock_relay_neighborhood()?;
+                candidate.filter(|holder| *holder != self.did && neighborhood.chains(*holder))
+            }
         };
         Ok((previous, next))
+    }
+
+    /// The chain neighbours of this node that lie beyond its immediate predecessor and successor
+    /// list across a storage-less run (#1182): a previous holder separated by a storage-less
+    /// predecessor, or a next holder resolved past a storage-less successor list. Immediate
+    /// neighbours (`state.predecessor` and `state.successors`) are already managed by Chord
+    /// stabilization.
+    pub(crate) fn remote_relay_chain_neighbours(&self) -> Result<(Option<Did>, Option<Did>)> {
+        if !self.holds_relay_mail() {
+            return Ok((None, None));
+        }
+        let candidate = self.lock_relay_next_holder()?.holder;
+        self.with_relay_view(|state, neighborhood| {
+            let previous = state
+                .predecessor
+                .is_some_and(|predecessor| !neighborhood.holds(predecessor))
+                .then(|| neighborhood.nearest_previous_holder(state))
+                .flatten()
+                .filter(|peer| *peer != state.local && !state.successors.contains(peer));
+            let all_successors_storage_less = !state.successors.is_empty()
+                && state
+                    .successors
+                    .iter()
+                    .all(|successor| !neighborhood.holds(*successor));
+            let next = all_successors_storage_less
+                .then(|| {
+                    candidate.filter(|holder| {
+                        *holder != state.local
+                            && !state.successors.contains(holder)
+                            && neighborhood.chains(*holder)
+                    })
+                })
+                .flatten();
+            (previous, next)
+        })
     }
 
     /// Lock the replications, a leaf of `Law (Lock order)`.
@@ -300,12 +343,14 @@ impl PeerRing {
     }
 
     /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
-    /// next holder (`Law (Asked)`): the holder it names, which is cached, or, when it names
-    /// none, the last node it places, past which the query is asked again with a fresh token.
+    /// next holder (`Law (Asked)`): the holder it names, which is cached, or, when it names none
+    /// (or one this node cannot chain through), the position past which the query is asked again
+    /// with a fresh token.
     ///
     /// Post: `None` for an answer nobody asked for, a mismatched `request_id`, or an `origin`
     /// inconsistent with `key`; `Some((key′, request_id′))` iff the query is to be asked again
-    /// for `key′`; a named holder this node knows to hold no relay mail is not taken.
+    /// for `key′`; a named holder this node knows to hold no relay mail or suspects is not taken,
+    /// and the query advances past it.
     pub(crate) fn take_next_relay_holder(
         &self,
         key: Did,
@@ -318,7 +363,9 @@ impl PeerRing {
             return Ok(None);
         }
         let named = match holder {
-            Some(holder) if holder != self.did && self.lock_relay_neighborhood()?.holds(holder) => {
+            Some(holder)
+                if holder != self.did && self.lock_relay_neighborhood()?.chains(holder) =>
+            {
                 Some(holder)
             }
             _ => None,
@@ -332,16 +379,54 @@ impl PeerRing {
             next.holder = named;
             return Ok(None);
         }
-        next.asked = horizon
-            .filter(|horizon| *horizon != self.did)
-            .map(|horizon| (horizon + Did::from(1u32), crate::utils::new_uuid()));
+        next.asked = match holder {
+            Some(skipped) if skipped != self.did && skipped != key => {
+                Some((skipped, crate::utils::new_uuid()))
+            }
+            _ => horizon
+                .filter(|horizon| *horizon != self.did)
+                .map(|horizon| (horizon + Did::from(1u32), crate::utils::new_uuid())),
+        };
         Ok(next.asked)
     }
 
+    /// Whether a next holder past the successor list is currently resolved.
+    pub(crate) fn has_resolved_next_relay_holder(&self) -> Result<bool> {
+        Ok(self.lock_relay_next_holder()?.holder.is_some())
+    }
+
     /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
-    /// again each pass until it is answered.
+    /// again each pass until it is answered; starts the query when this node holds relay mail and
+    /// its entire successor list is storage-less with no holder resolved past it (#1182).
     pub(crate) fn outstanding_next_relay_holder_query(&self) -> Result<Option<(Did, uuid::Uuid)>> {
-        Ok(self.lock_relay_next_holder()?.asked)
+        if let Some(asked) = self.lock_relay_next_holder()?.asked {
+            return Ok(Some(asked));
+        }
+        if !self.holds_relay_mail() {
+            return Ok(None);
+        }
+        let last = self.with_relay_view(|state, neighborhood| {
+            let covers_ring = state
+                .predecessor
+                .is_some_and(|predecessor| state.successors.contains(&predecessor));
+            let all_successors_storage_less = !covers_ring
+                && !state.successors.is_empty()
+                && state
+                    .successors
+                    .iter()
+                    .all(|successor| !neighborhood.holds(*successor));
+            all_successors_storage_less
+                .then(|| state.successors.last().copied())
+                .flatten()
+        })?;
+        let Some(last) = last else {
+            return Ok(None);
+        };
+        let mut next = self.lock_relay_next_holder()?;
+        if next.holder.is_none() && next.asked.is_none() {
+            next.asked = Some((last + Did::from(1u32), crate::utils::new_uuid()));
+        }
+        Ok(next.asked)
     }
 
     /// Whether this node asks the owner of `key` with `request_id` for its next holder: an
@@ -350,12 +435,28 @@ impl PeerRing {
         Ok(self.lock_relay_next_holder()?.asked == Some((key, request_id)))
     }
 
-    /// Forget the resolved next holder when it is `peer`, which left, or whatever it is with
-    /// `None`, the successor list having changed.
+    /// Forget the resolved next holder when it is `peer`, which left or was suspected, or
+    /// whatever it is with `None`, the successor list having changed; any replication waiting on
+    /// that forgotten downstream member is marked unforwarded so it resumes to the replacement.
     pub(crate) fn forget_next_relay_holder(&self, peer: Option<Did>) -> Result<()> {
-        let mut next = self.lock_relay_next_holder()?;
-        if peer.is_none() || next.holder == peer {
-            next.holder = None;
+        let mut forgotten_holder = None;
+        {
+            let mut next = self.lock_relay_next_holder()?;
+            let matches_holder = peer.is_none() || next.holder == peer;
+            if matches_holder {
+                forgotten_holder = next.holder.take();
+                if peer.is_some() || forgotten_holder.is_some() {
+                    next.asked = None;
+                }
+            }
+        }
+        if let Some(target) = peer.or(forgotten_holder) {
+            let mut replications = self.lock_relay_replications()?;
+            for pending in replications.values_mut() {
+                if pending.downstream == Some(target) {
+                    pending.downstream = None;
+                }
+            }
         }
         Ok(())
     }

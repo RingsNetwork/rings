@@ -150,7 +150,9 @@ impl SwarmTransport {
     /// concurrent admission or retirement cannot interleave with the plan.
     fn unreferenced_eviction_order(&self, now_ms: i64) -> Result<Vec<PendingConnectionAttempt>> {
         self.with_connection_lifecycle(|| {
-            let referenced = self.dht.topology_state()?.referenced_peers();
+            let mut referenced = self.dht.topology_state()?.referenced_peers();
+            let (remote_prev, remote_next) = self.dht.remote_relay_chain_neighbours()?;
+            referenced.extend(remote_prev.into_iter().chain(remote_next));
             let lifecycles = self.peer_lifecycles()?;
             let liveness = self.peer_liveness()?;
             let candidates = lifecycles

@@ -19,6 +19,7 @@ use crate::error::Result;
 use crate::message::effects::CoreEffect;
 use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::handlers::relay_replica::ask_owner;
+use crate::message::handlers::relay_replica::connect_relay_chain_neighbours;
 use crate::message::handlers::relay_replica::forward;
 use crate::message::handlers::relay_replica::replicate_taken_hold;
 use crate::message::handlers::relay_replica::resume_relay_replications;
@@ -69,8 +70,9 @@ impl HandleMsg<AnnounceRelayHolder> for MessageHandler {
                 previous = ?msg.previous,
                 "previous relay holders not taken"
             );
+            return Ok(());
         }
-        Ok(())
+        connect_relay_chain_neighbours(&self.transport).await
     }
 }
 
@@ -321,7 +323,10 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
                 msg.horizon,
             )? {
                 Some((again, request_id)) => ask_owner(&self.transport, again, request_id).await,
-                None => resume_relay_replications(&self.transport).await,
+                None if self.dht.has_resolved_next_relay_holder()? => {
+                    resume_relay_replications(&self.transport).await
+                }
+                None => Ok(()),
             };
         }
         if self
