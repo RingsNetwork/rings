@@ -44,8 +44,8 @@ pub(crate) async fn replicate_taken_hold(
             forward(transport, digest, bytes.then(|| hold.clone()), to).await;
             Ok(false)
         }
-        ReplicationStep::Ask { key } => {
-            ask_owner(transport, key).await?;
+        ReplicationStep::Ask { key, request_id } => {
+            ask_owner(transport, key, request_id).await?;
             Ok(false)
         }
         ReplicationStep::Wait => Ok(false),
@@ -69,8 +69,8 @@ pub(crate) async fn resume_relay_replications(transport: &Arc<SwarmTransport>) -
     for (hold, upstream) in transport.dht.unforwarded_relay_holds()? {
         replicate_taken_hold(transport, &hold, upstream).await?;
     }
-    if let Some(key) = transport.dht.outstanding_next_relay_holder_query()? {
-        ask_owner(transport, key).await?;
+    if let Some((key, request_id)) = transport.dht.outstanding_next_relay_holder_query()? {
+        ask_owner(transport, key, request_id).await?;
     }
     Ok(())
 }
@@ -101,11 +101,15 @@ pub(crate) async fn forward(
 /// Ask the owner of `key` for its holder, the first holder past this node's successor list
 /// (`FindRelayHolder`, routed toward the owner as a lookup is), best effort: an unanswered query
 /// is asked again on the next pass.
-pub(crate) async fn ask_owner(transport: &Arc<SwarmTransport>, key: Did) -> Result<()> {
+pub(crate) async fn ask_owner(
+    transport: &Arc<SwarmTransport>,
+    key: Did,
+    request_id: uuid::Uuid,
+) -> Result<()> {
     let PeerRingAction::RemoteAction(next, _) = transport.dht.find_successor(key)? else {
         return Ok(());
     };
-    let query = Message::FindRelayHolder(FindRelayHolder { key });
+    let query = Message::FindRelayHolder(FindRelayHolder { key, request_id });
     if let Err(error) = transport.protocol_egress().send_message(query, next).await {
         tracing::debug!(
             local = %transport.dht.did,

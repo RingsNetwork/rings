@@ -369,7 +369,10 @@ pub enum FindSuccessorReportHandler {
     /// None: do nothing but return.
     None,
     /// - Connect: connect origin node.
-    Connect,
+    Connect {
+        /// One-shot identity that binds the report to the lookup that asked for it.
+        request_id: uuid::Uuid,
+    },
     /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
         /// Slot/range request that identifies the lookup this report may satisfy.

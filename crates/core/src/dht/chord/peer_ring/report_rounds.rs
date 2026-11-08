@@ -297,3 +297,75 @@ impl PeerRing {
         Ok(())
     }
 }
+
+/// Admission connect-lookup rounds (`FindSuccessorForConnect`).
+///
+/// Admitting `peer` asks it for this node's successor (`FindSuccessorSend` with
+/// [`crate::message::FindSuccessorReportHandler::Connect`]). The query may be
+/// answered directly by `peer` or forwarded clockwise until the owner answers,
+/// so the report's origin is not fixed to `peer`, while the single-use
+/// `request_id` correlates the answer to the exact admission lookup that asked
+/// it (`Law (Asked)`). At most one token is kept per admitted `peer`, bounded
+/// by [`topology::edge_slots`].
+impl PeerRing {
+    /// Record `request_id` as the live connect-lookup token for `peer`.
+    ///
+    /// Replaces any unanswered token for `peer`; when the table is at the
+    /// [`topology::edge_slots`] bound for a new `peer`, the oldest entry is
+    /// evicted so the map stays bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn begin_connect_lookup(&self, peer: Did, request_id: uuid::Uuid) -> Result<()> {
+        let limit = topology::edge_slots(self.successor_seq.capacity());
+        let mut pending = self.lock_pending_connect_lookup()?;
+        if !pending.contains_key(&peer) && pending.len() >= limit {
+            pending.pop_first();
+        }
+        pending.insert(peer, request_id);
+        Ok(())
+    }
+
+    /// Consume `request_id` once and return whether it matched an outstanding
+    /// connect lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn claim_connect_lookup(&self, request_id: uuid::Uuid) -> Result<bool> {
+        let mut pending = self.lock_pending_connect_lookup()?;
+        let Some(peer) = pending
+            .iter()
+            .find_map(|(peer, token)| (*token == request_id).then_some(*peer))
+        else {
+            return Ok(false);
+        };
+        pending.remove(&peer);
+        Ok(true)
+    }
+
+    /// Release `(peer, request_id)` when sending the connect lookup failed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn cancel_connect_lookup(&self, peer: Did, request_id: uuid::Uuid) -> Result<()> {
+        let mut pending = self.lock_pending_connect_lookup()?;
+        if pending.get(&peer) == Some(&request_id) {
+            pending.remove(&peer);
+        }
+        Ok(())
+    }
+
+    /// Release any connect-lookup token recorded against `peer` when `peer` is
+    /// removed from the ring.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a backing lock is poisoned.
+    pub(crate) fn cancel_connect_lookup_for_peer(&self, peer: Did) -> Result<()> {
+        self.lock_pending_connect_lookup()?.remove(&peer);
+        Ok(())
+    }
+}

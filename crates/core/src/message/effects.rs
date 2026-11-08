@@ -352,7 +352,9 @@ pub(crate) fn lower_dht_action<'payload>(
             Ok(find_successor_effect(
                 *next,
                 *did,
-                FindSuccessorReportHandler::Connect,
+                FindSuccessorReportHandler::Connect {
+                    request_id: crate::utils::new_uuid(),
+                },
             ))
         }
         PeerRingAction::RemoteAction(
@@ -450,7 +452,29 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 Ok(())
             }
             CoreEffect::SendDirectMessage { msg, destination } => {
-                egress.send_direct_message(*msg, destination).await?;
+                let connect_request = match msg.as_ref() {
+                    Message::FindSuccessorSend(FindSuccessorSend {
+                        then:
+                            FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+                                request_id,
+                            }),
+                        ..
+                    }) => Some(*request_id),
+                    _ => None,
+                };
+                if let Some(request_id) = connect_request {
+                    self.transport
+                        .dht
+                        .begin_connect_lookup(destination, request_id)?;
+                }
+                if let Err(error) = egress.send_direct_message(*msg, destination).await {
+                    if let Some(request_id) = connect_request {
+                        self.transport
+                            .dht
+                            .cancel_connect_lookup(destination, request_id)?;
+                    }
+                    return Err(error);
+                }
                 Ok(())
             }
             CoreEffect::SendSuccessorQuery { query, destination } => {

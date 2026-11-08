@@ -18,6 +18,7 @@ use std::sync::MutexGuard;
 use super::PeerRing;
 use crate::consts::UNACKNOWLEDGED_RELAY_HOLDS_MAX;
 use crate::dht::entry::EntryOperation;
+use crate::dht::relay_holder::in_arc;
 use crate::dht::relay_holder::relay_holder;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayCustody;
@@ -49,8 +50,8 @@ pub(crate) struct KeptRelayHold {
 /// the keys still unplaced, so they are bounded by the carriers kept here.
 #[derive(Debug, Default)]
 pub(crate) struct RelayHolderHints {
-    /// The keys whose owner was asked and has not answered yet.
-    asked: BTreeSet<Did>,
+    /// The keys whose owner was asked and has not answered yet, with their correlation tokens.
+    asked: BTreeMap<Did, uuid::Uuid>,
     /// The holder each owner named, by key.
     named: BTreeMap<Did, Did>,
 }
@@ -286,21 +287,64 @@ impl PeerRing {
             .filter(|key| relay_holder(&segment, *key) == RelayHolder::Unknown)
             .collect::<Vec<_>>();
         let mut hints = self.lock_relay_holder_hints()?;
-        hints.asked.retain(|key| unplaced.contains(key));
+        hints.asked.retain(|key, _| unplaced.contains(key));
         hints.named.retain(|key, _| unplaced.contains(key));
         Ok(unplaced)
     }
 
-    /// Record that the owner of `key` is asked for its holder (`Law (Asked)`).
-    pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<()> {
-        self.lock_relay_holder_hints()?.asked.insert(key);
-        Ok(())
+    /// Record that the owner of `key` is asked for its holder (`Law (Asked)`), returning the
+    /// single-use correlation token the answer must echo.
+    pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<uuid::Uuid> {
+        let request_id = crate::utils::new_uuid();
+        self.lock_relay_holder_hints()?
+            .asked
+            .insert(key, request_id);
+        Ok(request_id)
     }
 
-    /// Take `holder`, the answer to the outstanding query for `key` (`Law (Asked)`): end the
-    /// query, and record `holder` iff it is another node that holds relay mail as far as this
-    /// node knows. The result says whether the hint changed, so only a new holder costs a pass.
-    pub(crate) fn name_relay_holder(&self, key: Did, holder: Option<Did>) -> Result<bool> {
+    /// Whether `origin`'s answer `(holder, horizon)` for `key` is consistent with `origin`
+    /// owning `key` (`owner_answer`, `Law (Owner places)`): an owner that holds relay mail
+    /// names itself (`holder == Some(origin)`), a storage-less owner (`!holds(origin)`) may
+    /// name a successor holder with `key ∈ (origin, holder]`, and an answer with no holder
+    /// and a horizon satisfies `key ∈ (origin, horizon]`.
+    pub(super) fn responder_answers_relay_key(
+        &self,
+        origin: Did,
+        key: Did,
+        holder: Option<Did>,
+        horizon: Option<Did>,
+    ) -> Result<bool> {
+        if origin == self.did {
+            return Ok(false);
+        }
+        Ok(match (holder, horizon) {
+            (Some(holder), None) => {
+                holder == origin
+                    || (!self.lock_relay_neighborhood()?.holds(origin)
+                        && in_arc(origin, key, holder))
+            }
+            (None, Some(horizon)) => in_arc(origin, key, horizon),
+            (None, None) => origin != key,
+            (Some(_), Some(_)) => false,
+        })
+    }
+
+    /// Take `holder`, `origin`'s answer to the outstanding query `(key, request_id)`
+    /// (`Law (Asked)`): end the query iff `(key, request_id)` matches and `origin` is
+    /// consistent with `key`, and record `holder` iff it is another node that holds relay
+    /// mail as far as this node knows. The result says whether the hint changed, so only a
+    /// new holder costs a pass.
+    pub(crate) fn name_relay_holder(
+        &self,
+        key: Did,
+        request_id: uuid::Uuid,
+        origin: Did,
+        holder: Option<Did>,
+        horizon: Option<Did>,
+    ) -> Result<bool> {
+        if !self.responder_answers_relay_key(origin, key, holder, horizon)? {
+            return Ok(false);
+        }
         let holds = |holder: Did| -> Result<bool> {
             Ok(holder != self.did && self.lock_relay_neighborhood()?.holds(holder))
         };
@@ -309,9 +353,10 @@ impl PeerRing {
             _ => None,
         };
         let mut hints = self.lock_relay_holder_hints()?;
-        if !hints.asked.remove(&key) {
+        if hints.asked.get(&key) != Some(&request_id) {
             return Ok(false);
         }
+        hints.asked.remove(&key);
         let changed = match holder {
             Some(holder) => hints.named.insert(key, holder) != Some(holder),
             None => hints.named.remove(&key).is_some(),

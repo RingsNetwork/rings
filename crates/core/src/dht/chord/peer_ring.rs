@@ -161,6 +161,8 @@ pub struct PeerRing {
     /// reporter is still a successor; the transition core prunes departed
     /// reporters' tokens when a commit changes the successor list.
     pending_successor_sync: Mutex<topology::SuccessorSyncState>,
+    /// Per-peer ownership of outstanding `FindSuccessorReportHandler::Connect` lookups.
+    pending_connect_lookup: Mutex<BTreeMap<Did, uuid::Uuid>>,
     /// Origin of the monotonic clock behind every finger deadline and retry
     /// floor.
     ///
@@ -259,6 +261,7 @@ impl PeerRing {
             topology_transition: Mutex::new(()),
             pending_stabilization: Mutex::new(None),
             pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
+            pending_connect_lookup: Mutex::new(BTreeMap::new()),
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
@@ -377,6 +380,12 @@ impl PeerRing {
 
     fn lock_pending_successor_sync(&self) -> Result<MutexGuard<'_, topology::SuccessorSyncState>> {
         self.pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
+    }
+
+    fn lock_pending_connect_lookup(&self) -> Result<MutexGuard<'_, BTreeMap<Did, uuid::Uuid>>> {
+        self.pending_connect_lookup
             .lock()
             .map_err(|_| Error::LockPoisoned)
     }
@@ -589,6 +598,7 @@ impl PeerRing {
             (self.step(state, event), removal)
         })?;
         self.forget_relay_custody(did)?;
+        self.cancel_connect_lookup_for_peer(did)?;
         if chain_neighbour {
             self.relay_chain_changed();
         }
