@@ -263,7 +263,7 @@ impl SlotAccounting {
 
     /// `o(π)`, the pool items of `principal` (pure); none for a principal with a share of its
     /// own.
-    fn pool_items(&self, principal: Principal) -> usize {
+    pub(crate) fn pool_items(&self, principal: Principal) -> usize {
         self.pool_items_at(principal, self.held(principal))
     }
 

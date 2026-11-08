@@ -87,8 +87,8 @@ enum Undo {
     Custody(StreamKey, Option<RelayCustody>),
     /// Restore a receiver stream's charge (`None`: it had none), with its accounting.
     Charge(StreamKey, Option<StreamCharge>),
-    /// Roll back an origin-quota reservation.
-    Quota(OriginQuotaReservation),
+    /// Roll back an origin-quota reservation, boxed so the other entries stay small.
+    Quota(Box<OriginQuotaReservation>),
 }
 
 /// The state an undo acts on: the speculative tables, the quotas and the receiver accounting.
@@ -234,7 +234,7 @@ impl<'a> Ledger<'a> {
 
     /// Log the quota `reservation` already applied to `quota`.
     pub(super) fn charged(&mut self, reservation: OriginQuotaReservation) {
-        self.undo.push(Undo::Quota(reservation));
+        self.undo.push(Undo::Quota(Box::new(reservation)));
     }
 
     /// Stage the write of `record` under `storage_key`.
@@ -323,7 +323,7 @@ impl Journal {
     /// no durable state, and only its charge is refunded.
     pub(super) fn log_released_charge(&mut self, reservation: OriginQuotaReservation) {
         if self.in_flight.is_some() || !self.open.waiters.is_empty() {
-            self.open.undo.push(Undo::Quota(reservation));
+            self.open.undo.push(Undo::Quota(Box::new(reservation)));
         }
     }
 

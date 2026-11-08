@@ -88,20 +88,14 @@ impl SwarmTransport {
         windows: &mut LinkWindows,
         transaction: &Transaction,
         charge: OriginQuotaCharge,
+        introducer: Principal,
     ) -> Result<()> {
-        let key = transaction.stream_key(self.network_id)?;
-        let digest = transaction.digest()?;
+        let admission = self.admission(transaction, charge, introducer)?;
+        let key = admission.key;
         let mut window = windows.remove(&key);
         let admitted = self
             .transaction_replay
-            .admit_on_link(
-                &mut window,
-                key,
-                transaction.sequence,
-                digest,
-                charge,
-                logical_message_byte_cost(transaction),
-            )
+            .admit_on_link(&mut window, admission)
             .await;
         if let Some(window) = window {
             windows.insert(key, window);

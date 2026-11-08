@@ -50,8 +50,22 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
     ));
 
     let origin_b = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    relay_a
-        .receive(&relayed(b"origin-b-relay-a", &origin_b, &relay_a, 0)?)
+    let slot_exhausted = relay_a
+        .callback
+        .on_admitted_message_for_test(
+            &relay_a.peer.to_string(),
+            &relayed(b"origin-b-relay-a", &origin_b, &relay_a, 0)?,
+        )
+        .await
+        .expect_err("a fresh origin on the same relay slot must share that slot's exhausted bucket");
+    assert!(matches!(
+        slot_exhausted.downcast_ref::<Error>(),
+        Some(Error::OriginQuota(
+            OriginQuotaError::MessageRateExhausted { .. }
+        ))
+    ));
+    relay_b
+        .receive(&relayed(b"origin-b-relay-b", &origin_b, &relay_b, 0)?)
         .await?;
 
     assert_eq!(application.observed(), 2);
@@ -63,7 +77,7 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
             .origin_quota_counters()
             .lane(MessageCategory::Application)
             .message_rate_exhausted,
-        1
+        2
     );
     Ok(())
 }

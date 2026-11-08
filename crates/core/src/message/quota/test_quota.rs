@@ -17,9 +17,14 @@ use super::OriginQuotaVerdict;
 use super::TokenBucket;
 use super::DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND;
 use super::DEFAULT_ORIGIN_QUOTA_BYTE_BURST;
+use super::DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE;
 use super::DELEGATED_MIN_CHARGE;
 use super::NANOS_PER_SECOND;
+use super::ORIGIN_QUOTA_SHARES;
 use crate::dht::Did;
+use crate::fair_admission::Principal;
+use crate::fair_admission::SlotFloorUse;
+use crate::fair_admission::SlotRoster;
 use crate::message::admission_delegation::MessageLimit;
 use crate::message::types::MessageCategory;
 
@@ -151,6 +156,7 @@ fn two_origins_and_two_lanes_have_independent_allowances() {
     table
         .reserve(
             key(1, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             now,
@@ -159,6 +165,7 @@ fn two_origins_and_two_lanes_have_independent_allowances() {
     assert!(matches!(
         table.reserve(
             key(1, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             now
@@ -170,6 +177,7 @@ fn two_origins_and_two_lanes_have_independent_allowances() {
     table
         .reserve(
             key(2, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             now,
@@ -178,6 +186,7 @@ fn two_origins_and_two_lanes_have_independent_allowances() {
     table
         .reserve(
             key(1, MessageCategory::Storage),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             now,
@@ -192,6 +201,7 @@ fn table_reuses_only_a_fully_replenished_oldest_record() {
     table
         .reserve(
             key(2, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             OriginQuotaInstant::ZERO,
@@ -200,6 +210,7 @@ fn table_reuses_only_a_fully_replenished_oldest_record() {
     table
         .reserve(
             key(1, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             OriginQuotaInstant::from_nanos(1),
@@ -208,6 +219,7 @@ fn table_reuses_only_a_fully_replenished_oldest_record() {
     assert!(matches!(
         table.reserve(
             key(3, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             OriginQuotaInstant::from_nanos(2)
@@ -220,6 +232,7 @@ fn table_reuses_only_a_fully_replenished_oldest_record() {
     table
         .reserve(
             key(3, MessageCategory::Application),
+            Principal::Local,
             MessageLimit::Enforced,
             1,
             OriginQuotaInstant::from_nanos(NANOS_PER_SECOND + 1),
@@ -383,4 +396,235 @@ fn counters_are_bounded_by_lane_and_reason() {
             .arithmetic_failure,
         1
     );
+}
+
+/// Multiple `origin_account`s arriving on the same connection slot in [`SlotRoster`] share that
+/// slot's aggregate per-lane token bucket and cannot multiply its burst or sustained rate (#1178).
+#[test]
+fn multiple_origins_on_same_slot_share_slot_quota_bucket_and_cannot_exceed_burst() {
+    let roster = SlotRoster::new(4);
+    let clean = SlotFloorUse::default();
+    let (attacker_edge, honest_edge) = (Did::from(10_u32), Did::from(20_u32));
+    roster.arrive(attacker_edge, &clean);
+    roster.arrive(honest_edge, &clean);
+    let attacker_slot = roster.principal_of(Some(attacker_edge));
+    let honest_slot = roster.principal_of(Some(honest_edge));
+    assert_eq!(attacker_slot, Principal::Slot(0));
+    assert_eq!(honest_slot, Principal::Slot(1));
+
+    let lane = config(1, 2, 100, 100, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
+    let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
+    let now = OriginQuotaInstant::ZERO;
+
+    table
+        .reserve(
+            key(100, MessageCategory::DhtControl),
+            attacker_slot,
+            MessageLimit::Enforced,
+            10,
+            now,
+        )
+        .expect("first origin on slot 0 consumes 1 of 2 slot burst tokens");
+    table
+        .reserve(
+            key(101, MessageCategory::DhtControl),
+            attacker_slot,
+            MessageLimit::Enforced,
+            10,
+            now,
+        )
+        .expect("second origin on slot 0 consumes the second slot burst token");
+    assert!(matches!(
+        table.reserve(
+            key(102, MessageCategory::DhtControl),
+            attacker_slot,
+            MessageLimit::Enforced,
+            10,
+            now,
+        ),
+        Err(OriginQuotaAdmissionError::Verdict(
+            OriginQuotaRejection::MessageRate
+        ))
+    ));
+    assert_eq!(table.slot_len(), 1);
+    assert!(table.get(key(102, MessageCategory::DhtControl)).is_none());
+
+    table
+        .reserve(
+            key(200, MessageCategory::DhtControl),
+            honest_slot,
+            MessageLimit::Enforced,
+            10,
+            now,
+        )
+        .expect("honest peer on slot 1 has an independent slot bucket");
+}
+
+/// Rotating >1024 `origin_account`s on a single connection slot occupies only 1 slot record
+/// (and 1 origin record as its bucket refills) and never evicts an honest peer's record on
+/// another slot (#1178).
+#[test]
+fn rotating_over_1024_origins_on_one_slot_occupies_one_record_and_never_evicts_honest_slot() {
+    let roster = SlotRoster::new(4);
+    let clean = SlotFloorUse::default();
+    let (attacker_edge, honest_edge) = (Did::from(10_u32), Did::from(20_u32));
+    roster.arrive(attacker_edge, &clean);
+    roster.arrive(honest_edge, &clean);
+    let attacker_slot = roster.principal_of(Some(attacker_edge));
+    let honest_slot = roster.principal_of(Some(honest_edge));
+
+    let lane = config(1, 1, 1, 1, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
+    let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
+    let honest_key = key(9_999, MessageCategory::DhtControl);
+
+    table
+        .reserve(
+            honest_key,
+            honest_slot,
+            MessageLimit::Enforced,
+            1,
+            OriginQuotaInstant::ZERO,
+        )
+        .expect("honest slot admits its record at t = 0");
+
+    for step in 1..=1_050_u32 {
+        let now = OriginQuotaInstant::from_nanos(u128::from(step) * NANOS_PER_SECOND);
+        table
+            .reserve(
+                key(step, MessageCategory::DhtControl),
+                attacker_slot,
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
+            .expect("each refilled step on slot 0 reuses slot 0's own replenished record");
+    }
+
+    assert_eq!(table.held(MessageCategory::DhtControl, attacker_slot), 1);
+    assert_eq!(table.held(MessageCategory::DhtControl, honest_slot), 1);
+    assert_eq!(table.len(), 2);
+    assert_eq!(table.slot_len(), 2);
+    assert!(
+        table.get(honest_key).is_some(),
+        "honest peer's idle record on slot 1 must never be evicted by slot 0"
+    );
+}
+
+/// Simultaneous unreplenished rotation of >1024 `origin_account`s on a single connection slot
+/// across all four lanes (`DhtControl`, `Storage`, `E2e`, `Application`) is bounded by
+/// [`ORIGIN_QUOTA_SHARES`] and cannot cause `Capacity` exhaustion for any other connection slot
+/// within its floor, [`Principal::Local`], or [`Principal::Inbox`] (#1178).
+#[test]
+fn unreplenished_sybil_rotation_on_one_slot_preserves_other_slots_local_and_inbox() {
+    let lane = config(
+        1,
+        2_048,
+        1,
+        2_048,
+        DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE,
+    );
+    let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
+    let now = OriginQuotaInstant::ZERO;
+    let attacker_slot = Principal::Slot(0);
+    let honest_slot = Principal::Slot(1);
+    let max_attacker_records = ORIGIN_QUOTA_SHARES.floor + ORIGIN_QUOTA_SHARES.pool;
+
+    for category in [
+        MessageCategory::DhtControl,
+        MessageCategory::Storage,
+        MessageCategory::E2e,
+        MessageCategory::Application,
+    ] {
+        let honest_existing = key(50_000, category);
+        table
+            .reserve(honest_existing, honest_slot, MessageLimit::Enforced, 1, now)
+            .expect("honest slot admits its first floor record");
+
+        let mut admitted_by_attacker = 0_usize;
+        for origin in 1..=1_050_u32 {
+            match table.reserve(
+                key(origin, category),
+                attacker_slot,
+                MessageLimit::Enforced,
+                1,
+                now,
+            ) {
+                Ok(_) => admitted_by_attacker += 1,
+                Err(OriginQuotaAdmissionError::Verdict(OriginQuotaRejection::Capacity {
+                    capacity: DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE,
+                })) => {}
+                Err(other) => panic!("unexpected error on {category:?}: {other:?}"),
+            }
+        }
+        assert_eq!(admitted_by_attacker, max_attacker_records);
+        assert_eq!(table.held(category, attacker_slot), max_attacker_records);
+        assert!(
+            table.get(honest_existing).is_some(),
+            "existing honest record on {category:?} must remain intact"
+        );
+
+        table
+            .reserve(
+                key(50_002, category),
+                Principal::Slot(2),
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
+            .expect("fresh honest slot 2 admits within its floor");
+        table
+            .reserve(
+                key(50_003, category),
+                Principal::Local,
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
+            .expect("Principal::Local admits within its reserved share");
+        table
+            .reserve(
+                key(50_004, category),
+                Principal::Inbox,
+                MessageLimit::Enforced,
+                1,
+                now,
+            )
+            .expect("Principal::Inbox admits within its reserved share");
+    }
+}
+
+#[test]
+fn reservation_rollback_restores_slot_bucket_and_principal_accounting() {
+    let lane = config(1, 1, 10, 10, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
+    let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
+    let slot = Principal::Slot(0);
+    let first_key = key(1, MessageCategory::Application);
+
+    let reservation = table
+        .reserve(
+            first_key,
+            slot,
+            MessageLimit::Enforced,
+            1,
+            OriginQuotaInstant::ZERO,
+        )
+        .expect("initial slot reservation succeeds");
+    assert_eq!(table.len(), 1);
+    assert_eq!(table.slot_len(), 1);
+    assert_eq!(table.held(MessageCategory::Application, slot), 1);
+
+    reservation.rollback(&mut table);
+    assert_eq!(table.len(), 0);
+    assert_eq!(table.slot_len(), 0);
+    assert_eq!(table.held(MessageCategory::Application, slot), 0);
+
+    table
+        .reserve(
+            key(2, MessageCategory::Application),
+            slot,
+            MessageLimit::Enforced,
+            1,
+            OriginQuotaInstant::ZERO,
+        )
+        .expect("after rollback, slot 0 has its full burst allowance again");
 }
