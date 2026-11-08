@@ -212,7 +212,10 @@ pub struct EntryCrdt {
 
 impl EntryCrdt {
     pub(super) fn has_write_witness(&self) -> bool {
-        self.register.is_some() || !self.dots.is_empty()
+        self.register.is_some()
+            || self.dots.iter().any(|dot| {
+                dot.version.actor != Did::default() || dot.version.operation != Did::default()
+            })
     }
 
     /// Return the bottom floor used only to lift legacy payloads without dots.

@@ -228,8 +228,20 @@ async fn join_live_entry(
     now_ms: u128,
 ) -> Result<Entry> {
     let admitted = admitted.into_entry();
-    let joined = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
-        Some(live) => live.join(admitted)?,
+    let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
+    if matches!(store, CarrierStore::Factored { .. }) && admitted.kind == EntryKind::Data {
+        admitted.validate_data_sync_on_local(live.as_ref())?;
+    }
+    let joined = match live {
+        Some(live) => {
+            let live = match matches!(store, CarrierStore::Factored { .. })
+                && admitted.kind == EntryKind::Data
+            {
+                true => live.without_cross_actor_tombstones_for(&admitted, Did::default()),
+                false => live,
+            };
+            live.join(admitted)?
+        }
         None => admitted,
     }
     .retired_at(now_ms);
@@ -255,8 +267,17 @@ async fn operate_live_entry(
     introducer: Principal,
     now_ms: u128,
 ) -> Result<()> {
-    let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
-        Some(local) => local,
+    let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
+    if matches!(store, CarrierStore::Factored { .. }) && op.kind() == EntryKind::Data {
+        op.validate_data_write_on_local(live.as_ref(), actor)?;
+    }
+    let local = match live {
+        Some(local) => {
+            match matches!(store, CarrierStore::Factored { .. }) && op.kind() == EntryKind::Data {
+                true => local.without_cross_actor_tombstones_for(op.entry(), actor),
+                false => local,
+            }
+        }
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
@@ -400,8 +421,17 @@ impl PeerRing {
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
         let local = live_entry(&store, &key, now_ms, Projection::ReturnedOnly).await?;
+        if incoming.kind == EntryKind::Data {
+            incoming.validate_data_sync_on_local(local.as_ref())?;
+        }
         let stored = match local {
-            Some(local) => local.join(incoming)?,
+            Some(local) => {
+                let local = match incoming.kind == EntryKind::Data {
+                    true => local.without_cross_actor_tombstones_for(&incoming, Did::default()),
+                    false => local,
+                };
+                local.join(incoming)?
+            }
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);
@@ -455,7 +485,9 @@ impl PeerRing {
         introducer: Principal,
     ) -> Result<()> {
         match op.entry().kind {
-            EntryKind::Data => op.validate_admissible_at(now_ms, self.network_id())?,
+            EntryKind::Data => {
+                op.validate_data_write(now_ms, self.network_id(), writer, introducer)?
+            }
             EntryKind::RelayMessage => {
                 op.entry().validate_bounds_at(now_ms)?;
                 // Only a hold needs to know who is responsible for the recipient.
@@ -471,7 +503,7 @@ impl PeerRing {
         let store = self.carrier_store_for_write(op.kind())?;
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&store, &key, op, self.did, introducer, now_ms).await
+        operate_live_entry(&store, &key, op, writer, introducer, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -669,6 +701,18 @@ impl PeerRing {
         now_ms: u128,
         placement: Option<Did>,
     ) -> Result<EntryOperation> {
+        self.stamp_operation_by(op, now_ms, self.did, placement)
+            .await
+    }
+
+    /// [`Self::stamp_operation`] attributing any newly issued write witness to `actor` (#1179).
+    pub(crate) async fn stamp_operation_by(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+        actor: Did,
+        placement: Option<Did>,
+    ) -> Result<EntryOperation> {
         let observed = self.observed_version(&op, now_ms, placement).await?;
         let ceiling = now_ms
             .saturating_add(TS_OFFSET_TOLERANCE_MS)
@@ -679,7 +723,7 @@ impl PeerRing {
         };
         let mut last = self.last_stamped.lock().map_err(|_| Error::LockPoisoned)?;
         let floor = (*last).max(observed).map(cap);
-        let stamped = op.stamped_after(now_ms, self.did, floor)?;
+        let stamped = op.stamped_after(now_ms, actor, floor)?;
         // The last value is kept capped, so a version passed through above the cap leaves this
         // node's own stamps free to ascend by the counter below it.
         *last = floor.max(stamped.entry().max_observed_version().map(cap));
@@ -822,6 +866,22 @@ impl PeerRing {
         )
         .await
     }
+
+    /// Whether this node's own data write `op` is authorized against any live entry already held
+    /// in its local fetch cache (#1179).
+    pub(crate) async fn local_cache_can_observe(
+        &self,
+        op: &EntryOperation,
+        now_ms: u128,
+    ) -> Result<bool> {
+        if op.kind().is_relay_inbox() {
+            return Ok(false);
+        }
+        let held = self.local_cache_held(op.entry().did, now_ms).await?;
+        Ok(op
+            .validate_data_write_on_local(held.as_ref(), self.did)
+            .is_ok())
+    }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -871,7 +931,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         let now_ms = get_epoch_ms();
         if op.kind().is_relay_inbox()
             || op
-                .validate_admissible_at(now_ms, self.network_id())
+                .validate_data_write(now_ms, self.network_id(), self.did, Principal::Local)
                 .is_err()
         {
             return Ok(());
