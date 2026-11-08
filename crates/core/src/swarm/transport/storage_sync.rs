@@ -332,7 +332,8 @@ impl<'data> StorageSyncBatch<'data> {
             // are collected; the rest of the batch persists.
             Err(
                 error @ (Error::EntryTombstonesExceedMax { .. }
-                | Error::RemovalCapacityExhausted { .. }),
+                | Error::RemovalCapacityExhausted { .. }
+                | Error::DataEntryWriteUnauthorized),
             ) => {
                 tracing::debug!(
                     %key,

@@ -243,6 +243,12 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be overwritten")]
     EntryNotOverwritable,
 
+    /// A data carrier write or sync violated per-writer authority: an overwrite or removal
+    /// targeted another writer's state, or carried versions not authored by the transaction
+    /// signer (#1179).
+    #[error("Data carrier write or sync is not authorized for this writer")]
+    DataEntryWriteUnauthorized,
+
     /// Entry dot index {index} is out of bounds
     #[error("Entry dot index {index} is out of bounds")]
     EntryDotIndexOutOfBounds {

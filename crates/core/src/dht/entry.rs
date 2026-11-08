@@ -464,6 +464,99 @@ impl EntryOperation {
     pub fn gen_default_entry(&self) -> Result<Entry> {
         Ok(Entry::new(self.did()?, vec![], self.kind()))
     }
+
+    /// Validate a data-topic write operation `self` issued by `writer` and introduced by
+    /// `introducer` at `now_ms` inside `network_id` (#1179).
+    ///
+    /// Enforces:
+    /// - Bounds and liveness (`validate_admissible_at`).
+    /// - Every non-default version carried by the operation (`register`, `dots`, `tombstones`)
+    ///   was authored by `writer`.
+    /// - `Overwrite` carries no raw tombstones and, when delivered from a remote peer, carries
+    ///   at least one replacement element.
+    /// - `Extend` and `Tombstone` carry neither a reset register nor raw tombstones.
+    pub(crate) fn validate_data_write(
+        &self,
+        now_ms: u128,
+        network_id: u32,
+        writer: Did,
+        introducer: crate::message::Principal,
+    ) -> Result<()> {
+        self.validate_admissible_at(now_ms, network_id)?;
+        let entry = self.entry();
+        if entry
+            .versions()
+            .any(|version| version.actor != writer && version.actor != Did::default())
+        {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        match self {
+            EntryOperation::Overwrite(entry) => {
+                if !entry.crdt.tombstones.is_empty() {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+                if entry.data.is_empty() && introducer != crate::message::Principal::Local {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+            }
+            EntryOperation::Extend(entry) | EntryOperation::Tombstone(entry) => {
+                if entry.crdt.register.is_some() || !entry.crdt.tombstones.is_empty() {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate a data-topic operation `self` issued by `writer` against the live carrier
+    /// `local` currently held at the storage slot (#1179).
+    ///
+    /// - `Overwrite`: rejected when `entry.data` is empty against a live carrier, or when `local`
+    ///   holds any live element, remove, or reset floor authored by another writer (`actor !=
+    ///   writer`).
+    /// - `Tombstone`: rejected when any matched element in `local` (by dot witness or value
+    ///   witness) was authored by another writer (`held_dot.version.actor != writer`).
+    pub(crate) fn validate_data_write_on_local(
+        &self,
+        local: Option<&Entry>,
+        writer: Did,
+    ) -> Result<()> {
+        let Some(live) = local else {
+            return Ok(());
+        };
+        match self {
+            EntryOperation::Overwrite(entry) => {
+                if entry.data.is_empty()
+                    || live
+                        .versions()
+                        .any(|version| version.actor != writer && version.actor != Did::default())
+                {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+            }
+            EntryOperation::Tombstone(entry) => {
+                let buffer = live.topic_buffer()?;
+                let has_dot_witness = entry.crdt.has_write_witness() && !entry.crdt.dots.is_empty();
+                let target_dots = entry.crdt.dots.iter().copied().collect::<BTreeSet<_>>();
+                let target_values = entry.data.iter().collect::<BTreeSet<_>>();
+                for (value, held_dot) in buffer.values {
+                    let matched = if has_dot_witness {
+                        target_dots.contains(&held_dot)
+                    } else {
+                        target_values.contains(&value)
+                    };
+                    if matched
+                        && held_dot.version.actor != writer
+                        && held_dot.version.actor != Did::default()
+                    {
+                        return Err(Error::DataEntryWriteUnauthorized);
+                    }
+                }
+            }
+            EntryOperation::Extend(_) => {}
+        }
+        Ok(())
+    }
 }
 
 impl TryFrom<(String, Bytes)> for Entry {
@@ -609,6 +702,65 @@ impl Entry {
         Ok(DataTopicBuffer::new(raw.register, raw.values, raw.removes))
     }
 
+    /// Validate a synced data carrier `self` against the live carrier `local` currently held at
+    /// the storage slot (#1179).
+    ///
+    /// Rejects:
+    /// - A synced reset floor `register` with empty `data`, or whose versions span another writer,
+    ///   or that would overwrite a live carrier holding versions from another writer (`actor !=
+    ///   floor.actor`).
+    /// - A synced remove covering a live element in `local` authored by a different writer
+    ///   (`held_dot.version.actor != remove_dot.version.actor`).
+    pub(crate) fn validate_data_sync_on_local(&self, local: Option<&Entry>) -> Result<()> {
+        if let Some(floor) = self.crdt.register {
+            if self.data.is_empty()
+                || self
+                    .versions()
+                    .any(|version| version.actor != floor.actor && version.actor != Did::default())
+            {
+                return Err(Error::DataEntryWriteUnauthorized);
+            }
+            if let Some(live) = local {
+                if live
+                    .versions()
+                    .any(|version| version.actor != floor.actor && version.actor != Did::default())
+                {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+            }
+        }
+        if let Some(live) = local {
+            let has_cross_actor_remove = self.crdt.tombstones.iter().any(|tombstone| {
+                live.crdt.dots.iter().any(|held_dot| {
+                    held_dot.version.actor != Did::default()
+                        && held_dot <= &tombstone.dot
+                        && tombstone.dot.version.actor != held_dot.version.actor
+                })
+            });
+            if has_cross_actor_remove {
+                let incoming_removes = self
+                    .crdt
+                    .tombstones
+                    .iter()
+                    .map(|tombstone| (tombstone.element, tombstone.dot))
+                    .collect::<BTreeMap<_, _>>();
+                for (value, held_dot) in live.data.iter().zip(live.crdt.dots.iter()) {
+                    if held_dot.version.actor == Did::default() {
+                        continue;
+                    }
+                    if let Some(remove_dot) = incoming_removes.get(&ElementDigest::of(value)) {
+                        if held_dot <= remove_dot
+                            && remove_dot.version.actor != held_dot.version.actor
+                        {
+                            return Err(Error::DataEntryWriteUnauthorized);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
     /// removes in dot order, truncated only under a truncating tombstone bound.
     ///
@@ -631,8 +783,15 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = visible.len().saturating_sub(kind.max_data_len());
-        let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
+        if visible.len() > kind.max_data_len() {
+            visible = match kind {
+                EntryKind::Data => retain_fair_data_elements(visible, kind.max_data_len()),
+                EntryKind::RelayMessage => {
+                    let skip_count = visible.len().saturating_sub(kind.max_data_len());
+                    visible.into_iter().skip(skip_count).collect()
+                }
+            };
+        }
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
         let mut tombstones = removes
             .into_iter()
@@ -757,9 +916,9 @@ impl Entry {
         self.validate_same_carrier(&other)?;
 
         let expires_at_ms = self.expires_at_ms;
+        let has_dot_witness = other.crdt.has_write_witness() && !other.crdt.dots.is_empty();
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
-        let has_dot_witness = !target_dots.is_empty();
 
         let mut buffer = self.topic_buffer()?;
         let removed = buffer
@@ -776,6 +935,58 @@ impl Entry {
         }
         Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
     }
+}
+
+/// Retain `max_len` elements from `visible` (already sorted ascending by `(dot, value)`),
+/// bounding each authenticated writer (`dot.version.actor != Did::default()`) by water-filling
+/// recency rank so a single writer flooding elements cannot evict other writers' newest
+/// elements (#1179).
+///
+/// For each element `(v, d)`, its per-actor recency rank `r` is the count of elements in
+/// `visible` with the same `d.version.actor` that are strictly newer in `(dot, value)` order
+/// (`r = 0` for each actor's newest element, `r = 1` for its second-newest, and `usize::MAX`
+/// for unattributed legacy elements with `d.version.actor == Did::default()`). Keeping the top
+/// `max_len` elements under `(Reverse(r), dot, value)` and restoring canonical `(dot, value)`
+/// order is a join-semilattice homomorphism: adding elements can only tighten the rank
+/// threshold `r`, and reduces to standard newest-`max_len` truncation when all elements share
+/// one actor or when each actor has one element.
+fn retain_fair_data_elements(
+    visible: Vec<(Bytes, EntryDot)>,
+    max_len: usize,
+) -> Vec<(Bytes, EntryDot)> {
+    let mut seen_per_actor = BTreeMap::<Did, usize>::new();
+    let mut ranked = Vec::with_capacity(visible.len());
+    for (value, dot) in visible.into_iter().rev() {
+        let rank = if dot.version.actor == Did::default() {
+            usize::MAX
+        } else {
+            let count = seen_per_actor.entry(dot.version.actor).or_insert(0);
+            let current = *count;
+            *count = current.saturating_add(1);
+            current
+        };
+        ranked.push((rank, value, dot));
+    }
+    ranked.sort_by(
+        |(left_rank, left_value, left_dot), (right_rank, right_value, right_dot)| {
+            std::cmp::Reverse(*left_rank)
+                .cmp(&std::cmp::Reverse(*right_rank))
+                .then_with(|| left_dot.cmp(right_dot))
+                .then_with(|| left_value.cmp(right_value))
+        },
+    );
+    let skip_count = ranked.len().saturating_sub(max_len);
+    let mut kept = ranked
+        .into_iter()
+        .skip(skip_count)
+        .map(|(_, value, dot)| (value, dot))
+        .collect::<Vec<_>>();
+    kept.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+        left_dot
+            .cmp(right_dot)
+            .then_with(|| left_value.cmp(right_value))
+    });
+    kept
 }
 
 #[cfg(test)]

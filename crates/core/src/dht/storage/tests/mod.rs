@@ -877,3 +877,301 @@ async fn test_join_storage_entry_keeps_the_later_retention_bound() -> Result<()>
     assert_eq!(stored.expires_at_ms, Some(now_ms + 2_000));
     Ok(())
 }
+
+/// Data topic authorization (#1179): an unprivileged peer cannot wipe an existing data topic
+/// written by another peer via `EntryOperation::Overwrite` (either `vec![]` or a single item)
+/// or via a synced `register` floor, while a single writer can still overwrite its own entry.
+#[tokio::test]
+async fn test_operate_storage_entry_rejects_cross_origin_data_overwrite() -> Result<()> {
+    let owner = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let topic = Did::from(100u32);
+    let honest = Did::from(10u32);
+    let attacker = Did::from(99u32);
+    let now_ms = get_epoch_ms();
+
+    let honest_op = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(topic, "honest-record")),
+            now_ms,
+            honest,
+            Some(topic),
+        )
+        .await?;
+    owner
+        .operate_storage_entry(now_ms, topic, honest_op, honest, Principal::Unbound)
+        .await?;
+
+    // 1. Remote empty Overwrite (`vec![]`) is rejected.
+    let empty_wipe = owner
+        .stamp_operation_by(
+            EntryOperation::Overwrite(live_entry(topic, vec![], EntryKind::Data)),
+            now_ms + 1,
+            attacker,
+            Some(topic),
+        )
+        .await?;
+    assert!(matches!(
+        owner
+            .operate_storage_entry(now_ms + 1, topic, empty_wipe, attacker, Principal::Unbound)
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 2. Single-item Overwrite from another peer against honest writer's live entry is rejected.
+    let hijack_overwrite = owner
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "attacker-record")),
+            now_ms + 2,
+            attacker,
+            Some(topic),
+        )
+        .await?;
+    assert!(matches!(
+        owner
+            .operate_storage_entry(
+                now_ms + 2,
+                topic,
+                hijack_overwrite,
+                attacker,
+                Principal::Unbound,
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 3. Synced entry carrying an attacker register floor against honest writer's live entry is rejected.
+    let forged_sync = owner
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "attacker-sync")),
+            now_ms + 3,
+            attacker,
+            Some(topic),
+        )
+        .await?
+        .entry()
+        .clone();
+    assert!(matches!(
+        owner
+            .join_storage_entry(now_ms + 3, topic, forged_sync, Principal::Unbound)
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    let stored = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 4)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("honest topic vanished".to_string()))?;
+    assert_eq!(stored.data, vec![Bytes::from("honest-record")]);
+
+    // 4. The original single writer can still overwrite its own entry.
+    let self_overwrite = owner
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "honest-updated")),
+            now_ms + 5,
+            honest,
+            Some(topic),
+        )
+        .await?;
+    owner
+        .operate_storage_entry(
+            now_ms + 5,
+            topic,
+            self_overwrite,
+            honest,
+            Principal::Unbound,
+        )
+        .await?;
+    let updated = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 6)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("updated topic vanished".to_string()))?;
+    assert_eq!(updated.data, vec![Bytes::from("honest-updated")]);
+    Ok(())
+}
+
+/// Data topic authorization (#1179): a peer cannot tombstone another peer's data entry (either
+/// by value witness or dot witness, or via forged synced tombstones), while the original writer
+/// can tombstone its own entry.
+#[tokio::test]
+async fn test_operate_storage_entry_rejects_cross_origin_data_tombstone() -> Result<()> {
+    let owner = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let topic = Did::from(100u32);
+    let honest = Did::from(10u32);
+    let attacker = Did::from(99u32);
+    let now_ms = get_epoch_ms();
+
+    let honest_op = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(topic, "honest-record")),
+            now_ms,
+            honest,
+            Some(topic),
+        )
+        .await?;
+    owner
+        .operate_storage_entry(now_ms, topic, honest_op, honest, Principal::Unbound)
+        .await?;
+    let stored = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("honest topic missing".to_string()))?;
+    let honest_dot = stored.crdt.dots[0];
+
+    // 1. Cross-origin Tombstone by value witness is rejected.
+    let value_tombstone = owner
+        .stamp_operation_by(
+            EntryOperation::Tombstone(data_entry_with_data(topic, "honest-record")),
+            now_ms + 1,
+            attacker,
+            Some(topic),
+        )
+        .await?;
+    assert!(matches!(
+        owner
+            .operate_storage_entry(
+                now_ms + 1,
+                topic,
+                value_tombstone,
+                attacker,
+                Principal::Unbound,
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 2. Cross-origin Tombstone by dot witness is rejected.
+    let mut dot_removal = Entry::new(topic, vec![], EntryKind::Data);
+    dot_removal.crdt.dots = vec![honest_dot];
+    dot_removal.expires_at_ms = stored.expires_at_ms;
+    let dot_tombstone = EntryOperation::Tombstone(dot_removal);
+    assert!(matches!(
+        owner
+            .operate_storage_entry(
+                now_ms + 2,
+                topic,
+                dot_tombstone,
+                attacker,
+                Principal::Unbound,
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 3. Forged synced tombstone covering honest writer's live dot is rejected.
+    let mut forged_sync = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(topic, "attacker-item")),
+            now_ms + 3,
+            attacker,
+            Some(topic),
+        )
+        .await?
+        .entry()
+        .clone();
+    let attacker_dot = forged_sync.crdt.dots[0];
+    forged_sync
+        .crdt
+        .tombstones
+        .push(crate::dht::entry::EntryTombstone::of(
+            &Bytes::from("honest-record"),
+            attacker_dot,
+        ));
+    assert!(matches!(
+        owner
+            .join_storage_entry(now_ms + 3, topic, forged_sync, Principal::Unbound)
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    let still_live = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 4)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("honest topic vanished".to_string()))?;
+    assert_eq!(still_live.data, vec![Bytes::from("honest-record")]);
+
+    // 4. The original writer can tombstone its own entry.
+    let self_tombstone = owner
+        .stamp_operation_by(
+            EntryOperation::Tombstone(data_entry_with_data(topic, "honest-record")),
+            now_ms + 5,
+            honest,
+            Some(topic),
+        )
+        .await?;
+    owner
+        .operate_storage_entry(
+            now_ms + 5,
+            topic,
+            self_tombstone,
+            honest,
+            Principal::Unbound,
+        )
+        .await?;
+    let after_self_tombstone = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 6)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("carrier vanished".to_string()))?;
+    assert!(after_self_tombstone.data.is_empty());
+    Ok(())
+}
+
+/// Bounded per-origin Extend on shared topics (#1179): one writer flooding `ENTRY_DATA_MAX_LEN`
+/// items into a shared topic via `Extend` cannot evict other writers' entries.
+#[tokio::test]
+async fn test_operate_storage_entry_bounded_per_origin_extend_preserves_other_writers() -> Result<()>
+{
+    let owner = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let topic = Did::from(100u32);
+    let honest_a = Did::from(10u32);
+    let honest_b = Did::from(20u32);
+    let flooder = Did::from(99u32);
+    let now_ms = get_epoch_ms();
+
+    for (idx, (writer, label)) in [(honest_a, "honest-a"), (honest_b, "honest-b")]
+        .into_iter()
+        .enumerate()
+    {
+        let op = owner
+            .stamp_operation_by(
+                EntryOperation::Extend(data_entry_with_data(topic, label)),
+                now_ms + idx as u128,
+                writer,
+                Some(topic),
+            )
+            .await?;
+        owner
+            .operate_storage_entry(now_ms + idx as u128, topic, op, writer, Principal::Unbound)
+            .await?;
+    }
+
+    let flood_items = (0..crate::consts::ENTRY_DATA_MAX_LEN)
+        .map(|i| Bytes::from(format!("flood-{i}")))
+        .collect::<Vec<_>>();
+    let flood_entry = live_entry(topic, flood_items, EntryKind::Data);
+    let flood_op = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(flood_entry),
+            now_ms + 10,
+            flooder,
+            Some(topic),
+        )
+        .await?;
+    owner
+        .operate_storage_entry(now_ms + 10, topic, flood_op, flooder, Principal::Unbound)
+        .await?;
+
+    let stored = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 11)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("shared topic vanished".to_string()))?;
+    assert_eq!(stored.data.len(), crate::consts::ENTRY_DATA_MAX_LEN);
+    assert!(
+        stored.data.contains(&Bytes::from("honest-a")),
+        "honest_a must survive the flood"
+    );
+    assert!(
+        stored.data.contains(&Bytes::from("honest-b")),
+        "honest_b must survive the flood"
+    );
+    Ok(())
+}

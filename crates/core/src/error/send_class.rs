@@ -236,6 +236,7 @@ impl Error {
             | Self::DetachedRuntimeUnavailable(_)
             // entries, inboxes and storage
             | Self::EntryKindNotEqual | Self::EntryDidNotEqual | Self::EntryNotOverwritable
+            | Self::DataEntryWriteUnauthorized
             | Self::EntryDotIndexOutOfBounds { .. } | Self::EntryNotLive
             | Self::EntryLifetimeExceedsMax | Self::EntryVersionAheadOfClock
             | Self::EntryPayloadExceedsMax | Self::EntryTombstonesExceedMax { .. }

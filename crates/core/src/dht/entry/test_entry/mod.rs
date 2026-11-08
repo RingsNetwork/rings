@@ -758,4 +758,73 @@ fn test_legacy_value_without_bound_is_not_live() -> Result<()> {
     Ok(())
 }
 
+/// Fair per-actor truncation law (#1179): one actor flooding `ENTRY_DATA_MAX_LEN` elements
+/// into a shared topic cannot evict other authenticated actors' newest elements, and the
+/// truncated join remains a commutative, associative, idempotent join-semilattice.
+#[test]
+fn test_fair_per_actor_truncation_preserves_other_writers_and_lattice_laws() -> Result<()> {
+    let topic_did = Entry::gen_did("shared-topic")?;
+    let honest_a = Did::from(10u32);
+    let honest_b = Did::from(20u32);
+    let flooder = Did::from(99u32);
+
+    let entry_a = Entry::new(
+        topic_did,
+        vec![Bytes::from("honest-a-old"), Bytes::from("honest-a-new")],
+        EntryKind::Data,
+    )
+    .stamp_delta(EntryVersion::new(100, honest_a, honest_a))?;
+
+    let entry_b = Entry::new(topic_did, vec![Bytes::from("honest-b")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(200, honest_b, honest_b))?;
+
+    let flood_payloads = (0..ENTRY_DATA_MAX_LEN)
+        .map(|i| Bytes::from(format!("flood-{i}")))
+        .collect::<Vec<_>>();
+    let entry_flood = Entry::new(topic_did, flood_payloads, EntryKind::Data)
+        .stamp_delta(EntryVersion::new(300, flooder, flooder))?;
+
+    let combined = entry_a
+        .clone()
+        .join(entry_b.clone())?
+        .join(entry_flood.clone())?;
+    assert_eq!(combined.data.len(), ENTRY_DATA_MAX_LEN);
+    let decoded = decode_entry_data(&combined)?;
+    assert!(
+        decoded.contains(&"honest-a-old".to_string()),
+        "honest writer A's older item survives the flood"
+    );
+    assert!(
+        decoded.contains(&"honest-a-new".to_string()),
+        "honest writer A's newest item survives the flood"
+    );
+    assert!(
+        decoded.contains(&"honest-b".to_string()),
+        "honest writer B's item survives the flood"
+    );
+    assert!(
+        !decoded.contains(&"flood-0".to_string())
+            && !decoded.contains(&"flood-1".to_string())
+            && !decoded.contains(&"flood-2".to_string()),
+        "the flooder's oldest 3 items are evicted first to make room for honest writers"
+    );
+    assert!(
+        decoded.contains(&format!("flood-{}", ENTRY_DATA_MAX_LEN - 1)),
+        "the flooder's newest items are retained"
+    );
+
+    let reverse = entry_flood
+        .clone()
+        .join(entry_b.clone())?
+        .join(entry_a.clone())?;
+    let idempotent = combined
+        .clone()
+        .join(entry_a)?
+        .join(entry_b)?
+        .join(entry_flood)?;
+    assert_eq!(combined, reverse);
+    assert_eq!(combined, idempotent);
+    Ok(())
+}
+
 mod test_horizon;
