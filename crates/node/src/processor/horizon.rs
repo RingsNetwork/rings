@@ -167,11 +167,7 @@ fn validate_delegation_renewal(
                 "renewed delegatee key delegator DID does not match node DID".to_string(),
             )
         })
-        .and_then(|()| {
-            next.delegation()
-                .verify_delegator_authorization_at(now_ms)
-                .map_err(Error::CoreError)
-        })
+        .and_then(|()| next.verify_at(now_ms).map_err(Error::CoreError))
         .and_then(|()| {
             let current_horizon = DelegationHorizon::of(&current.delegation());
             let next_horizon = DelegationHorizon::of(&next.delegation());

@@ -15,6 +15,13 @@ before enabling the service:
 rings init
 ```
 
+A delegatee key expires after `--ttl` (30 days by default), and a daemon without renewal stops 25 s
+before expiry (`DelegationHorizonReached`) because a service supervisor restart alone cannot mint a
+new delegation. For unattended persistent daemons, either configure `delegator_key` (mode `0600`)
+in `~/.rings/config.yaml` so `rings run` renews its delegation in process before the horizon, or
+refresh `~/.rings/delegatee_key` offline with `rings new-delegation` before the horizon; see
+[Delegations and keys](../docs/src/cli.md#delegations-and-keys).
+
 ## Linux (`systemd` user unit)
 
 [`contrib/systemd/rings.service`](./systemd/rings.service) runs `rings run -c %h/.rings/config.yaml`

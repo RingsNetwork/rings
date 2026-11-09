@@ -547,6 +547,34 @@ impl Extensions {
         self.insert(protocol, interpret, true)
     }
 
+    /// Prepare one `(namespace, delegation, runner)` tuple before acquiring the registry write
+    /// lock so `protocol.init()` runs outside the lock and both single and batch registration
+    /// construct `Runner` identically (#1217).
+    fn prepare_runner<P, I>(protocol: P, interpret: I) -> (String, Delegation, Arc<DynHandler>)
+    where
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
+    {
+        let namespace = protocol.namespace().to_string();
+        let delegates = Delegation::of(&protocol);
+        let state = Mutex::new(protocol.init());
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol,
+            interpret,
+            state,
+            transition_gate: AsyncMutex::new(()),
+            #[cfg(all(test, rings_native))]
+            after_decode_for_test: None,
+            #[cfg(all(test, rings_native))]
+            after_commit_for_test: None,
+            #[cfg(all(test, rings_native))]
+            before_gate_wait_for_test: None,
+        });
+        (namespace, delegates, runner)
+    }
+
     /// Register several protocols **atomically**: build every runner, then under a single write
     /// lock verify that none of their namespaces is taken (by an existing registration or by a
     /// duplicate within the batch) and insert them all — or change nothing and return `Err`. The
@@ -562,24 +590,7 @@ impl Extensions {
         // Build (namespace, runner) outside the lock.
         let prepared: Vec<(String, Delegation, Arc<DynHandler>)> = items
             .into_iter()
-            .map(|(protocol, interpret)| {
-                let namespace = protocol.namespace().to_string();
-                let delegates = Delegation::of(&protocol);
-                let state = Mutex::new(protocol.init());
-                let runner: Arc<DynHandler> = Arc::new(Runner {
-                    protocol,
-                    interpret,
-                    state,
-                    transition_gate: AsyncMutex::new(()),
-                    #[cfg(all(test, rings_native))]
-                    after_decode_for_test: None,
-                    #[cfg(all(test, rings_native))]
-                    after_commit_for_test: None,
-                    #[cfg(all(test, rings_native))]
-                    before_gate_wait_for_test: None,
-                });
-                (namespace, delegates, runner)
-            })
+            .map(|(protocol, interpret)| Self::prepare_runner(protocol, interpret))
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
@@ -615,21 +626,7 @@ impl Extensions {
         P::Effect: MaybeSendSync,
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
-        let namespace = protocol.namespace().to_string();
-        let delegates = Delegation::of(&protocol);
-        let state = Mutex::new(protocol.init());
-        let runner: Arc<DynHandler> = Arc::new(Runner {
-            protocol,
-            interpret,
-            state,
-            transition_gate: AsyncMutex::new(()),
-            #[cfg(all(test, rings_native))]
-            after_decode_for_test: None,
-            #[cfg(all(test, rings_native))]
-            after_commit_for_test: None,
-            #[cfg(all(test, rings_native))]
-            before_gate_wait_for_test: None,
-        });
+        let (namespace, delegates, runner) = Self::prepare_runner(protocol, interpret);
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
             return Err(Error::ExtensionError(format!(

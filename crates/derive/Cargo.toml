@@ -17,12 +17,9 @@ proc-macro = true
 [features]
 default = [
 ]
-wasm = [
-    "wasm-bindgen-macro-support",
-]
+wasm = []
 
 [dependencies]
 proc-macro2 = "1.0.66"
 quote = "1.0.32"
 syn = "2.0.27"
-wasm-bindgen-macro-support = { workspace = true, optional = true }

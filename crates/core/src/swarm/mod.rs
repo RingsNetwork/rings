@@ -524,8 +524,8 @@ impl Swarm {
 }
 
 impl Swarm {
-    /// Create new connection and its answer. This function will wrap the offer inside a payload
-    /// with verification.
+    /// Create an outbound WebRTC connection offer for `peer`, wrapped in a signed
+    /// [`MessagePayload`].
     pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
         self.offer_connection(peer)
             .await
@@ -638,8 +638,8 @@ impl Swarm {
         }
     }
 
-    /// Accept the answer of remote connection. This function will verify the answer payload and
-    /// will return its did with the connection.
+    /// Verify a remote connection answer payload and apply it to the pending handshake, returning
+    /// `Ok(())` once the session description is accepted.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
         self.accept_answer_with(None, answer_payload).await
     }

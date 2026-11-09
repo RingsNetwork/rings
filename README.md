@@ -30,8 +30,8 @@ communicate over direct WebRTC datachannels with no application server in the da
   that stays isolated within that namespace.
 - **Hardened by design.** Messages are signed, delivered at most once, and governed by
   slot-isolated admission and per-origin rate quotas; connection, storage, and queue state is
-  strictly bounded. CI model-checks Chord rejoin, runs Miri and ASan/LSan, and fuzzes wire
-  decode boundaries.
+  strictly bounded. CI model-checks Chord rejoin, runs Miri and ASan/LSan, and runs
+  seed-replayable randomized decode-boundary tests.
 
 ## Try it
 
@@ -43,11 +43,13 @@ communicate over direct WebRTC datachannels with no application server in the da
 
 ## Status
 
-Active public overlay at the seed `node.rings.rs`, with wire-versioned framing on every
-connection. 1.0 stabilizes the core overlay and churn-resilience suite; 2.0 extends the
-overlay with epoch-randomized ring placement
-([#780](https://github.com/RingsNetwork/rings/issues/780)) and decentralized trust ranking
-(DRanking). See [ROADMAP.md](./ROADMAP.md) and [SECURITY.md](./SECURITY.md).
+Active public overlay at the seed `node.rings.rs`, with wire-versioned framing
+(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 3`) on every frame and handshake. Nodes accept only
+their own `WIRE_VERSION` without cross-version negotiation; 1.0 freezes `WIRE_VERSION = 3` and
+the public runtime contracts across `1.0.x`, while 2.0 extends the overlay with epoch-randomized
+ring placement ([#780](https://github.com/RingsNetwork/rings/issues/780)) and decentralized trust
+ranking (DRanking). See [UPGRADING.md](./UPGRADING.md), [ROADMAP.md](./ROADMAP.md), and
+[SECURITY.md](./SECURITY.md).
 
 ## Where Rings fits
 
@@ -123,8 +125,8 @@ provider.set_backend()?;
 
 // Built-in relay: tunnel a local socket to a peer's service, no server.
 let relay = RelayHandle::install(&provider.extensions())?;
-relay.register_tcp_service("web".into(), "example.com:80".parse()?).await?; // server side
-relay.open_tcp_tunnel(local_addr, peer_did, "web".into()).await?;          // client side
+relay.register_tcp_service("web".into(), "127.0.0.1:8080".parse()?).await?; // server side
+relay.open_tcp_tunnel(local_addr, peer_did, "web".into()).await?;            // client side
 ```
 
 In the browser, a protocol can be a JS handler: `provider.on(namespace, initialState,
@@ -135,6 +137,7 @@ envelopes, and the protocol's shell runs the prover.
 |---|---|
 | [`native`](./examples/native) | A native node with a custom protocol |
 | [`relay`](./examples/relay) | TCP and UDP tunnels to a peer's service |
+| [`mailbox`](./examples/mailbox) | SMTP/IMAP mailbox and mail gateway over Rings |
 | [`dweb`](./examples/dweb) | A decentralized web app (Yew) |
 | [`ffi`](./examples/ffi) | Driving a node over the C FFI |
 
@@ -170,6 +173,7 @@ live under [`contrib/`](./contrib/README.md).
 | | |
 |---|---|
 | [rings.rs/docs](https://rings.rs/docs/) | The book: operating nodes, browser and FFI runtimes, protocol internals |
+| [UPGRADING.md](./UPGRADING.md) | 1.0 frozen contracts and upgrade checklist |
 | [SECURITY.md](./SECURITY.md) | Security architecture, layer contracts, and vulnerability reporting |
 | [ROADMAP.md](./ROADMAP.md) | Milestones and tracks |
 | [llms.txt](./llms.txt) | Project map for AI agents |

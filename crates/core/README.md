@@ -24,7 +24,7 @@ The design goal of Rings Network is to enable nodes to run in any environment, i
 
 The transport layer of Rings Network is based on WebRTC protocol, which provides browsers and mobile apps with real-time communication capabilities through simple interface.
 
-The WebRTC protocol obtains the optimal connection path between nodes by exchanging SDP (Delegation Description Protocol), which can be either TCP or UDP. In the Rings Network, we use WebRTC's data channel to implement data communication. For a typical ICE (Interactive Connectivity Establishment) process, it can be described as follows:
+The WebRTC protocol obtains the optimal connection path between nodes by exchanging SDP (Session Description Protocol), which can be either TCP or UDP. In the Rings Network, we use WebRTC's data channel to implement data communication. For a typical ICE (Interactive Connectivity Establishment) process, it can be described as follows:
 
 Assuming Node A and Node B want to create a WebRTC connection, they would need to exchange a minimum of three messages with each other:
 
@@ -47,15 +47,13 @@ The Chord algorithm forms a structured circular topology among participating nod
 
 #### Protocol Layer
 
-In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a 160-bit identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field.
+In the protocol layer, nodes address one another by 160-bit Decentralized Identifiers (DIDs) placed around the modular ring `Z / 2^160 Z` — a finite commutative ring and cyclic additive group of order `2^160` (not a field, since `2^160` is composite), whose modular subtraction `(b - a) mod 2^160` defines clockwise Chord distance and whose power-of-two offsets `(n + 2^k) mod 2^160` define finger-table slots.
 
-It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
-
-At the protocol layer, we have implemented the concept of a Delegated Session Key, which supports multiple cryptographic verification schemes associated with a DID, including ECDSA-secp256k1, ECDSA-secp256r1, EdDSA-ed25519, and BLS12-381; see the [deployment models](../../SECURITY.md#deployment-models) in the security architecture.
+At the protocol layer, we have implemented the concept of a Delegated Session Key (`DelegateeKey`), which supports multiple cryptographic verification schemes associated with a DID, including ECDSA-secp256k1, EIP-191, BIP-137, ECDSA-secp256r1, EdDSA-ed25519, and BLS12-381; see the [deployment models](../../SECURITY.md#deployment-models) in the security architecture.
 
 #### Application Layer
 
-The nucleus of Rings Network is similar to the Actor Model, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
+Core authenticates, replay-checks, and delivers application payloads through its single-claim application inbox; `rings-node` layers pure `Protocol::step` state machines and namespace-scoped `Interpret` effect shells on top.
 
 # Migration Notes
 
@@ -65,12 +63,12 @@ The nucleus of Rings Network is similar to the Actor Model, and it requires that
 
 #### Build for native
 
-```
-cargo build
+```sh
+cargo build -p rings-core
 ```
 
 #### Build for wasm
 
-```
-cargo build --features wasm --no-default-features
+```sh
+cargo build -p rings-core --target wasm32-unknown-unknown --features wasm --no-default-features
 ```

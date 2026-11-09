@@ -420,24 +420,7 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let extensions = crate::extension::ext::Extensions::new(processor.clone());
-        #[cfg(all(feature = "browser", target_family = "wasm"))]
-        let pagehide = browser::provider::listener::PagehideListener::register(&processor)
-            .map(std::rc::Rc::new);
-
-        Ok(Provider {
-            processor,
-            handler: InternalRpcHandler,
-            extensions,
-            dispatch_drops: Arc::default(),
-            onion_runtime: Arc::new(Mutex::new(None)),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_directory_endpoint: Arc::new(Mutex::new(None)),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            browser_mail: None,
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            pagehide,
-        })
+        Ok(Self::from_processor(processor))
     }
 
     /// Create a new provider instanice with everything in detail

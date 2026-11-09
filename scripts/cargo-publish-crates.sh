@@ -2,16 +2,19 @@
 set -euo pipefail
 
 # Publish order is a topological sort of the internal dependency graph: every crate
-# appears after all internal crates it depends on. `rings-codec` (a hard dep of
-# transport/core/node) and `rings-gateway` (an optional dep of node) must ship before
-# their dependents; `rings-webview` is an independent leaf crate with no dependents.
-CRATES="rings-derive rings-codec rings-measure rings-gateway rings-webview rings-transport rings-core rings-rpc rings-node"
+# appears after all internal crates it depends on. `rings-codec`, `rings-runtime`,
+# `rings-aez`, `rings-network-policy`, `rings-dns-relay`, and `rings-gateway` must ship
+# before their dependents; `rings-webview` depends on `rings-network-policy` and has no
+# workspace dependents.
+DEFAULT_CRATES="rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-rpc rings-node"
+CRATES="${RINGS_PUBLISH_CRATES:-$DEFAULT_CRATES}"
 
 # Internal crates that appear as `{ workspace = true }` dependencies of a publishable
 # crate; used to validate workspace dependency metadata and to gate publishing on
 # crates.io indexing. `rings-webview` is omitted: it is published but never depended on,
 # so it has no `[workspace.dependencies]` entry to validate.
-INTERNAL_CRATES="rings-core rings-codec rings-derive rings-gateway rings-measure rings-node rings-rpc rings-transport"
+DEFAULT_INTERNAL_CRATES="rings-aez rings-codec rings-core rings-derive rings-dns-relay rings-gateway rings-measure rings-network-policy rings-node rings-rpc rings-runtime rings-transport"
+INTERNAL_CRATES="${RINGS_INTERNAL_CRATES:-$DEFAULT_INTERNAL_CRATES}"
 ROOT_MANIFEST="Cargo.toml"
 
 usage() {
@@ -26,13 +29,17 @@ USAGE
 
 manifest_for() {
   case "$1" in
+    rings-aez) echo "crates/aez/Cargo.toml" ;;
     rings-codec) echo "crates/codec/Cargo.toml" ;;
     rings-core) echo "crates/core/Cargo.toml" ;;
     rings-derive) echo "crates/derive/Cargo.toml" ;;
+    rings-dns-relay) echo "crates/dns-relay/Cargo.toml" ;;
     rings-gateway) echo "crates/gateway/Cargo.toml" ;;
     rings-measure) echo "crates/measure/Cargo.toml" ;;
+    rings-network-policy) echo "crates/network-policy/Cargo.toml" ;;
     rings-node) echo "crates/node/Cargo.toml" ;;
     rings-rpc) echo "crates/rpc/Cargo.toml" ;;
+    rings-runtime) echo "crates/runtime/Cargo.toml" ;;
     rings-transport) echo "crates/transport/Cargo.toml" ;;
     rings-webview) echo "crates/webview/Cargo.toml" ;;
     *) echo "unknown crate: $1" >&2; return 1 ;;
@@ -133,11 +140,30 @@ package_version() {
   line_string_field "$line" "version"
 }
 
-dependency_line() {
+dependency_lines() {
   local manifest="$1"
   local dep="$2"
 
-  line_for_key "$manifest" "dependencies" "$dep" || true
+  awk '
+    function trim(value) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+      return value
+    }
+    /^\[/ {
+      section = $0
+      gsub(/^\[|\]$/, "", section)
+      in_section = (section == "dependencies" || section == "build-dependencies" || section ~ /^target\..*\.(dependencies|build-dependencies)$/)
+      next
+    }
+    in_section {
+      line = $0
+      sub(/[[:space:]]+#.*$/, "", line)
+      split(line, parts, "=")
+      if (trim(parts[1]) == key) {
+        print $0
+      }
+    }
+  ' key="$dep" "$manifest"
 }
 
 workspace_dependency_line() {
@@ -201,24 +227,82 @@ check_manifest() {
 
   for dep in $INTERNAL_CRATES; do
     local line
-    line="$(dependency_line "$manifest" "$dep")"
-    if [ -z "$line" ]; then
-      continue
-    fi
-    if ! line_has_bool_true "$line" "workspace"; then
-      echo "internal dependency must inherit workspace dependency metadata: $manifest: $line" >&2
-      return 1
-    fi
-    if line_has_field "$line" "path" || line_has_field "$line" "version"; then
-      echo "internal dependency must not duplicate path or version: $manifest: $line" >&2
-      return 1
-    fi
+    while IFS= read -r line; do
+      if [ -z "$line" ]; then
+        continue
+      fi
+      if ! line_has_bool_true "$line" "workspace"; then
+        echo "internal dependency must inherit workspace dependency metadata: $manifest: $line" >&2
+        return 1
+      fi
+      if line_has_field "$line" "path" || line_has_field "$line" "version"; then
+        echo "internal dependency must not duplicate path or version: $manifest: $line" >&2
+        return 1
+      fi
+    done < <(dependency_lines "$manifest" "$dep")
   done
 
   echo "ok $crate $version"
 }
 
+check_publish_graph() {
+  cargo metadata --no-deps --format-version 1 | python3 -c '
+import json, sys
+
+crates = sys.argv[1].split()
+internal_crates = set(sys.argv[2].split())
+metadata = json.load(sys.stdin)
+
+if len(crates) != len(set(crates)):
+    print("duplicate entries in CRATES publish list", file=sys.stderr)
+    sys.exit(1)
+
+packages = {pkg["name"]: pkg for pkg in metadata["packages"]}
+publishable = {
+    name
+    for name, pkg in packages.items()
+    if pkg["publish"] is None or len(pkg["publish"]) > 0
+}
+
+missing_publishable = sorted(publishable - set(crates))
+if missing_publishable:
+    print(f"publishable workspace crates missing from CRATES: {missing_publishable}", file=sys.stderr)
+    sys.exit(1)
+
+unexpected_crates = [name for name in crates if name not in publishable]
+if unexpected_crates:
+    print(f"non-publishable or unknown crates in CRATES: {unexpected_crates}", file=sys.stderr)
+    sys.exit(1)
+
+order = {name: idx for idx, name in enumerate(crates)}
+for name in crates:
+    pkg = packages[name]
+    for dep in pkg["dependencies"]:
+        if dep["kind"] == "dev":
+            continue
+        dep_name = dep["name"]
+        if dep_name not in packages:
+            continue
+        if dep_name not in order:
+            print(f"{name} depends on unpublishable workspace crate {dep_name}", file=sys.stderr)
+            sys.exit(1)
+        if dep_name not in internal_crates:
+            print(f"internal workspace dependency {dep_name} (used by {name}) missing from INTERNAL_CRATES", file=sys.stderr)
+            sys.exit(1)
+        if dep["req"] == "*":
+            print(f"{name} -> {dep_name} lacks an explicit version requirement for crates.io publishing", file=sys.stderr)
+            sys.exit(1)
+        if order[dep_name] >= order[name]:
+            print(f"publish order violation: {name} appears before its dependency {dep_name}", file=sys.stderr)
+            sys.exit(1)
+
+print(f"ok publish graph ({len(crates)} crates in topological order)")
+' "$CRATES" "$INTERNAL_CRATES"
+}
+
 run_check() {
+  check_publish_graph
+
   for crate in $INTERNAL_CRATES; do
     check_workspace_dependency "$crate"
   done
@@ -258,15 +342,16 @@ internal_dependencies_indexed() {
   for dep in $INTERNAL_CRATES; do
     local line
     local version
-    line="$(dependency_line "$manifest" "$dep")"
-    if [ -z "$line" ]; then
-      continue
-    fi
-    version="$(dependency_version "$dep" "$line")"
-    if ! crate_version_indexed "$dep" "$version"; then
-      echo "skipping package $crate until crates.io indexes $dep $version"
-      return 1
-    fi
+    while IFS= read -r line; do
+      if [ -z "$line" ]; then
+        continue
+      fi
+      version="$(dependency_version "$dep" "$line")"
+      if ! crate_version_indexed "$dep" "$version"; then
+        echo "skipping package $crate until crates.io indexes $dep $version"
+        return 1
+      fi
+    done < <(dependency_lines "$manifest" "$dep")
   done
 
   return 0

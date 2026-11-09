@@ -7,6 +7,16 @@ import Glibc
 #endif
 
 public let ringsSignatureLength = 65
+public let ringsMaxSignatureLength = 96
+
+public func expectedSignatureLength(for accountType: String) -> Int? {
+    switch accountType {
+    case "eip191", "secp256k1", "bip137": return 65
+    case "ed25519", "secp256r1": return 64
+    case "bls12-381", "bls12381": return 96
+    default: return nil
+    }
+}
 
 public enum RingsLogLevel: Int32 {
     case debug = 0
@@ -46,8 +56,9 @@ public typealias RingsSigner = @Sendable (Data) throws -> Data
 
 private typealias CSigner = @convention(c) (
     UnsafePointer<CChar>?,
-    UnsafeMutablePointer<CChar>?
-) -> Void
+    UnsafeMutablePointer<CChar>?,
+    Int
+) -> Int
 private typealias InitLogging = @convention(c) (Int32) -> Void
 private typealias Listen = @convention(c) (UnsafeRawPointer?) -> Void
 private typealias Request = @convention(c) (
@@ -155,7 +166,8 @@ public final class RingsProvider {
         stabilizeInterval: UInt64 = 10,
         signer: @escaping RingsSigner
     ) throws {
-        let slot = try signerRegistry.allocate(signer)
+        let expectedLength = expectedSignatureLength(for: accountType) ?? ringsSignatureLength
+        let slot = try signerRegistry.allocate(signer, expectedLength: expectedLength)
         let callback = callbackForSlot(slot)
         let provider = iceServer.withCString { ice in
             account.withCString { account in
@@ -407,14 +419,14 @@ private func loadSymbol<T>(
 
 private final class SignerRegistry: @unchecked Sendable {
     private let lock = NSLock()
-    private var signers: [Int: RingsSigner] = [:]
+    private var signers: [Int: (signer: RingsSigner, expectedLength: Int)] = [:]
     private var failures: [Int: Error] = [:]
 
-    func allocate(_ signer: @escaping RingsSigner) throws -> Int {
+    func allocate(_ signer: @escaping RingsSigner, expectedLength: Int) throws -> Int {
         lock.lock()
         defer { lock.unlock() }
         for slot in 0..<8 where signers[slot] == nil {
-            signers[slot] = signer
+            signers[slot] = (signer, expectedLength)
             return slot
         }
         throw RingsFfiError.signerCapacity
@@ -427,14 +439,14 @@ private final class SignerRegistry: @unchecked Sendable {
         lock.unlock()
     }
 
-    func sign(_ slot: Int, message: Data) -> Result<Data, Error> {
+    func sign(_ slot: Int, message: Data, capacity: Int) -> Result<Data, Error> {
         lock.lock()
-        let signer = signers[slot]
+        let entry = signers[slot]
         lock.unlock()
-        guard let signer else { return .failure(RingsFfiError.signerCapacity) }
+        guard let entry else { return .failure(RingsFfiError.signerCapacity) }
         do {
-            let signature = try signer(message)
-            guard signature.count == ringsSignatureLength else {
+            let signature = try entry.signer(message)
+            guard signature.count == entry.expectedLength, signature.count <= capacity else {
                 return .failure(RingsFfiError.signerLength(signature.count))
             }
             return .success(signature)
@@ -461,31 +473,34 @@ private let signerRegistry = SignerRegistry()
 private func dispatchSigner(
     slot: Int,
     message: UnsafePointer<CChar>?,
-    output: UnsafeMutablePointer<CChar>?
-) {
-    guard let message, let output else { return }
+    output: UnsafeMutablePointer<CChar>?,
+    capacity: Int
+) -> Int {
+    guard let message, let output, capacity > 0 else { return 0 }
     let input = Data(bytes: message, count: strlen(message))
-    switch signerRegistry.sign(slot, message: input) {
+    switch signerRegistry.sign(slot, message: input, capacity: capacity) {
     case .success(let signature):
         signature.withUnsafeBytes { bytes in
             if let source = bytes.baseAddress {
-                memcpy(output, source, ringsSignatureLength)
+                memcpy(output, source, signature.count)
             }
         }
+        return signature.count
     case .failure(let error):
-        memset(output, 0, ringsSignatureLength)
+        memset(output, 0, min(capacity, ringsMaxSignatureLength))
         signerRegistry.recordFailure(slot, error)
+        return 0
     }
 }
 
-private let signerCallback0: CSigner = { dispatchSigner(slot: 0, message: $0, output: $1) }
-private let signerCallback1: CSigner = { dispatchSigner(slot: 1, message: $0, output: $1) }
-private let signerCallback2: CSigner = { dispatchSigner(slot: 2, message: $0, output: $1) }
-private let signerCallback3: CSigner = { dispatchSigner(slot: 3, message: $0, output: $1) }
-private let signerCallback4: CSigner = { dispatchSigner(slot: 4, message: $0, output: $1) }
-private let signerCallback5: CSigner = { dispatchSigner(slot: 5, message: $0, output: $1) }
-private let signerCallback6: CSigner = { dispatchSigner(slot: 6, message: $0, output: $1) }
-private let signerCallback7: CSigner = { dispatchSigner(slot: 7, message: $0, output: $1) }
+private let signerCallback0: CSigner = { dispatchSigner(slot: 0, message: $0, output: $1, capacity: $2) }
+private let signerCallback1: CSigner = { dispatchSigner(slot: 1, message: $0, output: $1, capacity: $2) }
+private let signerCallback2: CSigner = { dispatchSigner(slot: 2, message: $0, output: $1, capacity: $2) }
+private let signerCallback3: CSigner = { dispatchSigner(slot: 3, message: $0, output: $1, capacity: $2) }
+private let signerCallback4: CSigner = { dispatchSigner(slot: 4, message: $0, output: $1, capacity: $2) }
+private let signerCallback5: CSigner = { dispatchSigner(slot: 5, message: $0, output: $1, capacity: $2) }
+private let signerCallback6: CSigner = { dispatchSigner(slot: 6, message: $0, output: $1, capacity: $2) }
+private let signerCallback7: CSigner = { dispatchSigner(slot: 7, message: $0, output: $1, capacity: $2) }
 
 private func callbackForSlot(_ slot: Int) -> CSigner {
     switch slot {

@@ -39,18 +39,18 @@ packaging steps.
 
 ### Custom Build
 
-To build Rings Network for WebAssembly, run the following commands:
+To build `rings-node` for WebAssembly from the repository root, select the package explicitly so
+workspace examples do not re-enable native features:
 
-```
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
+```sh
+cargo build -p rings-node --lib --release --target wasm32-unknown-unknown --no-default-features --features browser
 wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
-
 ```
 
-Or build with `wasm-pack`
+Or build with `wasm-pack` by passing the `crates/node` package directory:
 
-```
-wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
+```sh
+wasm-pack build crates/node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
 ```
 
 For core-only development, `cargo wasm` and `cargo test-wasm` select `rings-core`

@@ -1,5 +1,6 @@
 [package]
 name = "rings-mailbox-example"
+default-run = "rings-mailbox"
 description = "A Rings mailbox (SMTP in, IMAP out) served through a DNS relay or a mail gateway, and the mail gateway."
 version.workspace = true
 edition.workspace = true
