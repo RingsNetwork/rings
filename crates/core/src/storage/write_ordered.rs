@@ -83,6 +83,18 @@ impl<V> WriteOrderedMap<V> {
         self.order.first_key_value().map(|(_, key)| key.as_str())
     }
 
+    /// The least recently written key outside `excluded`, without removing it.
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    pub(crate) fn oldest_excluding(
+        &self,
+        excluded: &std::collections::BTreeSet<&str>,
+    ) -> Option<&str> {
+        self.order
+            .values()
+            .map(String::as_str)
+            .find(|key| !excluded.contains(key))
+    }
+
     /// Remove and return the least recently written key and its value.
     pub(crate) fn pop_oldest(&mut self) -> Option<(String, V)> {
         let (_, key) = self.order.pop_first()?;

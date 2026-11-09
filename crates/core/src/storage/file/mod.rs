@@ -214,6 +214,11 @@ impl FileIndex {
     fn oldest(&self) -> Option<String> {
         self.files.oldest().map(str::to_owned)
     }
+
+    /// The least recently written file outside `excluded`, the next one a batch retires.
+    fn oldest_excluding(&self, excluded: &BTreeSet<&str>) -> Option<String> {
+        self.files.oldest_excluding(excluded).map(str::to_owned)
+    }
 }
 
 /// One file per key under a byte budget (see the module documentation for its laws).

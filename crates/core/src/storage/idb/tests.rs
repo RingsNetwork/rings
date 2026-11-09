@@ -830,3 +830,108 @@ async fn test_an_authoritative_batch_is_one_commit_and_refused_whole_over_the_bu
     rows.sort();
     assert_eq!(rows, [pair("a", "last"), pair("b", "v")]);
 }
+
+/// Regression (#1225): `put_batch` on an evicting store updates existing keys before evicting
+/// for new keys, preserves caller last-write order for `access_stamp`s, and enforces `cap` when
+/// the batch itself exceeds `cap`.
+#[wasm_bindgen_test]
+async fn test_put_batch_updates_existing_keys_preserves_caller_order_and_bounds_capacity() {
+    let instance = create_db_instance(2).await;
+    let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
+
+    instance.put("a", &"v0".to_owned()).await.unwrap();
+    instance.put("b", &"v0".to_owned()).await.unwrap();
+    assert_eq!(stamp_of(&instance, "a").await, 0);
+    assert_eq!(stamp_of(&instance, "b").await, 1);
+
+    // Updating "a" alongside inserting "c" must evict "b", not "a", and keep count <= 2.
+    crate::storage::KvStorageScan::put_batch(&instance, &[pair("a", "v1"), pair("c", "v2")])
+        .await
+        .unwrap();
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
+    assert_eq!(
+        get_string(&instance, "b").await.unwrap(),
+        None,
+        "b should be evicted"
+    );
+    assert_eq!(stamp_of(&instance, "a").await, 2);
+    assert_eq!(stamp_of(&instance, "c").await, 3);
+
+    // Caller last-write order determines stamps, not alphabetical key order.
+    crate::storage::KvStorageScan::put_batch(&instance, &[
+        pair("a", "early"),
+        pair("z", "middle"),
+        pair("a", "late"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
+    assert!(stamp_of(&instance, "z").await < stamp_of(&instance, "a").await);
+
+    // Oversized batch on an evicting store keeps only the latest `cap` entries in batch order.
+    crate::storage::KvStorageScan::put_batch(&instance, &[
+        pair("z", "1"),
+        pair("y", "2"),
+        pair("x", "3"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(count_rows(&instance).await.unwrap(), 2);
+    assert_eq!(get_string(&instance, "z").await.unwrap(), None);
+    assert!(stamp_of(&instance, "y").await < stamp_of(&instance, "x").await);
+}
+
+/// Regression (#1210): cancelling a write or recency-updating read future mid-scope aborts its
+/// transaction (and `put_stamped` queues row and clock writes together), so the access clock
+/// never lags behind any stored row stamp across disposable and durable-cache stores.
+#[wasm_bindgen_test]
+async fn test_cancelled_write_or_touch_preserves_access_clock_invariant() {
+    use futures::FutureExt;
+
+    for authority in [RecordAuthority::Disposable, RecordAuthority::DurableCache] {
+        let name = format!("rings-idb-cancel-{authority:?}-{}", uuid::Uuid::new_v4());
+        let instance = IdbStorage::new_with_cap_name_and_authority(4, &name, authority)
+            .await
+            .unwrap();
+        instance.put("seed", &"v0".to_owned()).await.unwrap();
+        assert_eq!(stamp_of(&instance, "seed").await, 0);
+        assert_eq!(clock_of(&instance).await, 1);
+
+        // Cancel a scope right after `put_stamped` queues its requests, before `done()` settles.
+        {
+            let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
+            let data = js_value::serialize(&"cancelled".to_owned()).unwrap();
+            let mut fut = Box::pin(scope.put_stamped("k1".to_owned(), data));
+            let _ = fut.as_mut().now_or_never();
+            next_task().await;
+            let _ = fut.as_mut().now_or_never();
+        }
+        next_task().await;
+        assert_eq!(get_string(&instance, "k1").await.unwrap(), None);
+        assert_eq!(clock_of(&instance).await, 1);
+
+        // Cancel top-level `put`, `get`, and `put_batch` futures mid-flight.
+        {
+            let value = "v1".to_owned();
+            let mut put_fut = instance.put("k2", &value);
+            assert!(put_fut.as_mut().now_or_never().is_none());
+        }
+        {
+            let mut get_fut = <IdbStorage as KvStorageInterface<String>>::get(&instance, "seed");
+            assert!(get_fut.as_mut().now_or_never().is_none());
+        }
+        {
+            let batch = [("k3".to_owned(), "v3".to_owned())];
+            let mut batch_fut = crate::storage::KvStorageScan::put_batch(&instance, &batch);
+            assert!(batch_fut.as_mut().now_or_never().is_none());
+        }
+        next_task().await;
+
+        instance.put("after", &"ok".to_owned()).await.unwrap();
+        let clock = clock_of(&instance).await;
+        let seed_stamp = stamp_of(&instance, "seed").await;
+        let after_stamp = stamp_of(&instance, "after").await;
+        assert!(seed_stamp < after_stamp);
+        assert!(after_stamp < clock);
+    }
+}

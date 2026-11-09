@@ -185,10 +185,9 @@ impl Scope {
         .await
     }
 
-    /// Write `row`, keyed by its inline `key`.
-    async fn put_row(&self, row: &JsValue) -> Result<()> {
-        request::request(&self.rows.put(row).map_err(request::js_error)?).await?;
-        Ok(())
+    /// Queue the write of `row`, keyed by its inline `key`.
+    fn queue_put_row(&self, row: &JsValue) -> Result<web_sys::IdbRequest> {
+        self.rows.put(row).map_err(request::js_error)
     }
 
     /// Delete the row stored under `key`.
@@ -238,21 +237,36 @@ impl Scope {
     }
 
     /// Queue the write of an encoded clock value.
+    fn queue_write_clock(&self, encoded: &JsValue) -> Result<web_sys::IdbRequest> {
+        self.clock
+            .put_with_key(encoded, &JsValue::from(CLOCK_KEY))
+            .map_err(request::js_error)
+    }
+
+    /// Write an encoded clock value.
     async fn write_clock(&self, encoded: &JsValue) -> Result<()> {
-        request::request(
-            &self
-                .clock
-                .put_with_key(encoded, &JsValue::from(CLOCK_KEY))
-                .map_err(request::js_error)?,
-        )
-        .await?;
+        request::request(&self.queue_write_clock(encoded)?).await?;
         Ok(())
     }
 
-    /// Write `data` under `key` with the next stamp and advance the clock, both in this scope.
+    /// Queue the writes of `rows` and, when `clock` is `Some`, the clock record, and await all
+    /// of them in one batch.
+    async fn put_rows_with_clock(&self, rows: &[JsValue], clock: Option<&JsValue>) -> Result<()> {
+        let mut requests = Vec::with_capacity(rows.len() + usize::from(clock.is_some()));
+        for row in rows {
+            requests.push(self.queue_put_row(row)?);
+        }
+        if let Some(encoded) = clock {
+            requests.push(self.queue_write_clock(encoded)?);
+        }
+        request::requests(&requests).await
+    }
+
+    /// Write `data` under `key` with the next stamp and advance the clock, both queued and
+    /// watched in the same synchronous turn before awaiting either request.
     ///
     /// The row and the successor clock are both encoded before either write is queued, so an
-    /// encoding failure changes neither; a failed request aborts both.
+    /// encoding failure changes neither; a failed request or a dropped scope aborts both.
     async fn put_stamped(&self, key: String, data: JsValue) -> Result<()> {
         let clock = self
             .clock_record()
@@ -265,8 +279,7 @@ impl Scope {
             data,
         })?;
         let successor = js_value::serialize(&successor)?;
-        self.put_row(&row).await?;
-        self.write_clock(&successor).await
+        self.put_rows_with_clock(&[row], Some(&successor)).await
     }
 
     /// Retire the `count` rows with the smallest stamps.
@@ -583,29 +596,84 @@ where V: DeserializeOwned + Serialize + Sized
     /// budget is checked for all the new keys before any row is queued, so a refusal queues no
     /// write.
     async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
-        let mut rows = std::collections::BTreeMap::new();
+        let mut deduplicated = super::write_ordered::WriteOrderedMap::default();
         for (key, value) in records {
-            rows.insert(key.to_owned(), js_value::serialize(value)?);
+            deduplicated.insert(key.to_owned(), js_value::serialize(value)?);
         }
-        if rows.is_empty() {
+        if deduplicated.len() == 0 {
             return Ok(());
         }
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let mut rows = Vec::with_capacity(deduplicated.len());
         let mut incoming = 0_u32;
-        for key in rows.keys() {
-            let existing = scope.row(key).await?;
-            if existing.is_undefined() || existing.is_null() {
+        while let Some((key, data)) = deduplicated.pop_oldest() {
+            let existing = scope.row(&key).await?;
+            let is_existing = !(existing.is_undefined() || existing.is_null());
+            if !is_existing {
                 incoming = incoming.saturating_add(1);
             }
+            rows.push((key, is_existing, data));
         }
-        if incoming > 0 {
+        let count = if incoming > 0 {
             let count = scope.count().await?;
-            if count.saturating_add(incoming) > self.cap {
-                self.make_room(&scope, count, incoming).await?;
+            if count.saturating_add(incoming) > self.cap && !self.authority.evicts() {
+                return Err(Error::StorageBudgetExhausted {
+                    used: u64::from(count),
+                    required: u64::from(incoming),
+                    capacity: u64::from(self.cap),
+                });
+            }
+            count
+        } else {
+            0
+        };
+        let mut clock = scope
+            .clock_record()
+            .await?
+            .ok_or(Error::IdbAccessClockMissing)?;
+        let mut existing_rows = Vec::new();
+        let mut new_rows = Vec::new();
+        for (key, is_existing, data) in rows {
+            let (access_stamp, successor) = clock.tick()?;
+            clock = successor;
+            let row = js_value::serialize(&StoredRow {
+                key,
+                access_stamp,
+                data,
+            })?;
+            if is_existing {
+                existing_rows.push(row);
+            } else {
+                new_rows.push(row);
             }
         }
-        for (key, data) in rows {
-            scope.put_stamped(key, data).await?;
+        let successor = js_value::serialize(&clock)?;
+        let mut clock_pending = Some(&successor);
+        if !existing_rows.is_empty() {
+            scope
+                .put_rows_with_clock(&existing_rows, clock_pending.take())
+                .await?;
+        }
+        if incoming > 0 && count.saturating_add(incoming) > self.cap {
+            let existing_in_batch =
+                u32::try_from(existing_rows.len()).map_err(|_| Error::StorageCountOverflow)?;
+            let excess = count.saturating_add(incoming).saturating_sub(self.cap);
+            let non_batch = count.saturating_sub(existing_in_batch);
+            let evict_before = excess.min(non_batch);
+            if evict_before > 0 {
+                scope.evict_least_recent(evict_before).await?;
+            }
+            scope
+                .put_rows_with_clock(&new_rows, clock_pending.take())
+                .await?;
+            let evict_after = excess.saturating_sub(evict_before);
+            if evict_after > 0 {
+                scope.evict_least_recent(evict_after).await?;
+            }
+        } else if !new_rows.is_empty() {
+            scope
+                .put_rows_with_clock(&new_rows, clock_pending.take())
+                .await?;
         }
         scope.done().await
     }

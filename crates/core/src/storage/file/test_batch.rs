@@ -142,3 +142,152 @@ async fn test_a_batch_removal_removes_every_record_and_its_marker() {
         .iter()
         .all(|record| matches!(record, ScannedRecord::Filed { .. })));
 }
+
+/// Regression (#1209): a replacement batch that grows some records and shrinks others while
+/// fitting in the aggregate budget succeeds regardless of key/filename order across all
+/// non-evicting authorities, and an oversized replacement batch changes nothing.
+#[tokio::test]
+async fn test_fitting_replacement_batch_with_mixed_growth_and_shrinkage_succeeds() {
+    let encoded_bytes = |rows: &[(String, String)]| -> u32 {
+        rows.iter()
+            .map(|row| rings_codec::serialize(row).expect("record encodes").len() as u32)
+            .sum()
+    };
+    let initial = vec![
+        ("c".to_owned(), "x".repeat(10)),
+        ("a".to_owned(), "x".repeat(10)),
+        ("b".to_owned(), "x".repeat(150)),
+    ];
+    let replacement = vec![
+        ("c".to_owned(), "y".repeat(15)),
+        ("a".to_owned(), "y".repeat(100)),
+        ("b".to_owned(), "y".repeat(10)),
+    ];
+    let capacity = encoded_bytes(&initial) + 10;
+    assert!(encoded_bytes(&replacement) <= capacity);
+
+    for authority in [RecordAuthority::Authoritative, RecordAuthority::Retained] {
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [
+            2, 1, 0,
+        ]] {
+            let root = TempRoot::new("batch-grow-shrink");
+            let storage = FileStorage::new_with_cap_path_and_authority(capacity, &root, authority)
+                .await
+                .expect("store opens");
+            storage
+                .put_batch(&initial)
+                .await
+                .expect("initial batch fits");
+            let ordered = order
+                .into_iter()
+                .map(|index| replacement[index].clone())
+                .collect::<Vec<_>>();
+            storage
+                .put_batch(&ordered)
+                .await
+                .expect("fitting replacement batch must not fail intermediate checks");
+            let mut expected = replacement.clone();
+            expected.sort();
+            assert_eq!(stored(&storage).await, expected);
+
+            let oversized = vec![
+                ("c".to_owned(), "z".repeat(10)),
+                ("a".to_owned(), "z".repeat(100)),
+                ("b".to_owned(), "z".repeat(100)),
+            ];
+            assert!(matches!(
+                storage.put_batch(&oversized).await,
+                Err(Error::StorageBudgetExhausted { .. })
+            ));
+            assert_eq!(stored(&storage).await, expected);
+        }
+    }
+}
+
+/// Regression (#1209): a two-record grow/shrink exchange under an exact full budget succeeds.
+#[tokio::test]
+async fn test_two_record_grow_shrink_exchange_at_exact_budget() {
+    let initial = [
+        ("k0".to_owned(), "x".repeat(10)),
+        ("k1".to_owned(), "x".repeat(80)),
+    ];
+    let swapped = [
+        ("k0".to_owned(), "y".repeat(80)),
+        ("k1".to_owned(), "y".repeat(10)),
+    ];
+    let capacity = initial
+        .iter()
+        .map(|row| rings_codec::serialize(row).expect("record encodes").len() as u32)
+        .sum::<u32>();
+
+    for authority in [
+        RecordAuthority::Disposable,
+        RecordAuthority::DurableCache,
+        RecordAuthority::Retained,
+        RecordAuthority::Authoritative,
+    ] {
+        let root = TempRoot::new("batch-two-swap");
+        let storage = FileStorage::new_with_cap_path_and_authority(capacity, &root, authority)
+            .await
+            .expect("store opens");
+        storage.put_batch(&initial).await.expect("initial stores");
+        storage.put_batch(&swapped).await.expect("swap stores");
+        assert_eq!(stored(&storage).await, swapped);
+    }
+}
+
+/// Regression (#1225): a disposable batch preserves caller last-write recency rather than SHA-1
+/// filename order, never evicts an earlier record of the same batch, and rejects a deduplicated
+/// batch whose total byte size exceeds the capacity without mutating existing records.
+#[tokio::test]
+async fn test_disposable_batch_preserves_caller_order_and_never_evicts_same_batch() {
+    let one = u32::try_from(
+        rings_codec::serialize(&("k0", "v"))
+            .expect("record encodes")
+            .len(),
+    )
+    .expect("small record");
+
+    for (first, second) in [("k0", "k1"), ("k1", "k0")] {
+        let root = TempRoot::new("batch-disposable-order");
+        let storage = FileStorage::new_with_cap_and_path(2 * one, &root)
+            .await
+            .expect("store opens");
+        storage
+            .put("old", &"v".to_owned())
+            .await
+            .expect("seed record stores");
+        storage
+            .put_batch(&[
+                (second.to_owned(), "stale".to_owned()),
+                (first.to_owned(), "v".to_owned()),
+                (second.to_owned(), "v".to_owned()),
+            ])
+            .await
+            .expect("batch stores both records after retiring seed");
+
+        let mut expected = vec![
+            (first.to_owned(), "v".to_owned()),
+            (second.to_owned(), "v".to_owned()),
+        ];
+        expected.sort();
+        assert_eq!(stored(&storage).await, expected);
+
+        assert!(matches!(
+            storage.put_batch(&records(3, "v")).await,
+            Err(Error::StorageValueExceedsCapacity { .. })
+        ));
+        assert_eq!(stored(&storage).await, expected);
+
+        storage
+            .put("k2", &"v".to_owned())
+            .await
+            .expect("next single put retires the earliest key of the batch");
+        let mut after_evict = vec![
+            (second.to_owned(), "v".to_owned()),
+            ("k2".to_owned(), "v".to_owned()),
+        ];
+        after_evict.sort();
+        assert_eq!(stored(&storage).await, after_evict);
+    }
+}
