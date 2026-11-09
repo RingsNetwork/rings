@@ -16,11 +16,12 @@
 //!   the remove side. Under the removal store's durability, every crash leaves an element side
 //!   no newer than the remove side it is glued to, which the recovery pass normalizes.
 //! - Glue: at runtime an element side is always written from the same normalized carrier as its
-//!   remove side, after it, so it holds no add that remove side covers or floors, and a read
-//!   glues the two without hashing. Only a crash that rolls a cached element side back can break
-//!   that; the first operation on the store after it is opened normalizes every element side that
-//!   has a remove side (the recovery pass), and a whole carrier written before the factoring,
-//!   whose element side still holds removes, is joined in full.
+//!   remove side, after it, so once both sides commit it holds no add that remove side covers or
+//!   floors, and a read glues the two without hashing. A crash that rolls a cached element side
+//!   back is normalized by the recovery pass on first use; a cross-store write that is still in
+//!   flight or failed/cancelled before its element-side write completed leaves the key marked
+//!   dirty so reads join in full (and repair the element side when idle); and a whole carrier
+//!   written before the factoring, whose element side still holds removes, is joined in full.
 //! - Shares (load-bounds paper, Sec. V, re-keying Law 6 of the removal-stability paper): each
 //!   unstable remove, and the register, is an item charged to the principal that delivered the
 //!   transition raising it: the connection slot of the edge an operation or a sync arrived on,
@@ -40,8 +41,12 @@
 //!   callers hold, which is what keeps `R` before `E` per key.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
 
 use futures::lock::Mutex as FuturesMutex;
 use serde::Deserialize;
@@ -198,26 +203,34 @@ impl RemovalRecord {
 /// `E(x)`: the carrier `value` without its remove side.
 fn element_side(value: &Entry) -> Entry {
     Entry {
+        did: value.did,
+        data: value.data.clone(),
+        kind: value.kind,
         crdt: EntryCrdt {
             register: None,
             dots: value.crdt.dots.clone(),
             co_dots: value.crdt.co_dots.clone(),
             tombstones: Vec::new(),
         },
-        ..value.clone()
+        expires_at_ms: value.expires_at_ms,
     }
 }
 
-/// `E ⊔ R` by the glue law: concatenation when the element side holds no remove side of its own,
-/// and the full join for a whole carrier written before the factoring.
-fn glue(elements: Option<Entry>, removals: Option<&RemovalRecord>) -> Result<Option<Entry>> {
+/// `E ⊔ R` by the glue law: concatenation when the element side is known to come from the same
+/// normalized generation as `removals` and holds no remove side of its own, and the full join
+/// otherwise.
+fn glue(
+    elements: Option<Entry>,
+    removals: Option<&RemovalRecord>,
+    dirty: bool,
+) -> Result<Option<Entry>> {
     let Some(removals) = removals else {
         return Ok(elements);
     };
     let Some(elements) = elements else {
         return Ok(Some(removals.as_entry()));
     };
-    if !elements.crdt.tombstones.is_empty() || elements.crdt.register.is_some() {
+    if dirty || !elements.crdt.tombstones.is_empty() || elements.crdt.register.is_some() {
         return elements.join(removals.as_entry()).map(Some);
     }
     let remove_side = removals.as_entry();
@@ -317,6 +330,16 @@ impl ItemChanges {
     }
 }
 
+/// Tracks keys whose remove side may be newer than their element side because a two-stage write
+/// touched `removals` and its matching `elements` write has not yet finished.
+#[derive(Debug, Default)]
+struct DirtyElements {
+    /// Keys whose stored element side is not known to match the stored remove side's generation.
+    dirty: BTreeSet<String>,
+    /// Active `CarrierStore::put` calls per key.
+    in_flight: BTreeMap<String, usize>,
+}
+
 /// The accounting of a removal store, filled by the recovery pass on first use (the lock law of
 /// the module documentation).
 #[derive(Debug)]
@@ -327,6 +350,8 @@ pub(crate) struct RemovalIndex {
     writes: FuturesMutex<()>,
     /// The items, under edge accounting with [`REMOVAL_SHARES`].
     accounting: TableAccounting,
+    /// Keys with an in-flight or incomplete cross-store (`R` then `E`) write.
+    dirty_elements: Mutex<DirtyElements>,
 }
 
 impl RemovalIndex {
@@ -335,12 +360,259 @@ impl RemovalIndex {
         self.accounting.floor_use_at(now_ms)
     }
 
+    /// The number of items held by `principal`.
+    #[cfg(test)]
+    pub(crate) fn held(&self, principal: Principal) -> usize {
+        self.accounting.lock().held(principal)
+    }
+
     /// An index not yet recovered, accounting in `accounting`.
     pub(crate) fn new(accounting: TableAccounting) -> Self {
         Self {
             recovered: AtomicBool::new(false),
             writes: FuturesMutex::new(()),
             accounting,
+            dirty_elements: Mutex::new(DirtyElements::default()),
+        }
+    }
+
+    /// Lock `dirty_elements` for one pure step.
+    fn dirty_guard(&self) -> MutexGuard<'_, DirtyElements> {
+        self.dirty_elements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Return `(dirty, in_flight)` for `key`.
+    fn dirty_state(&self, key: &str) -> (bool, bool) {
+        let state = self.dirty_guard();
+        (state.dirty.contains(key), state.in_flight.contains_key(key))
+    }
+
+    /// Whether an active `put` is currently in flight on `key`.
+    fn is_in_flight(&self, key: &str) -> bool {
+        self.dirty_guard().in_flight.contains_key(key)
+    }
+
+    /// Snapshot `(dirty_keys, in_flight_keys)` across all keys.
+    fn dirty_snapshot(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let state = self.dirty_guard();
+        (
+            state.dirty.clone(),
+            state.in_flight.keys().cloned().collect(),
+        )
+    }
+
+    /// Clear `key` from `dirty` if no `put` is currently in flight on `key`.
+    fn clear_dirty_if_idle(&self, key: &str) {
+        let mut state = self.dirty_guard();
+        if !state.in_flight.contains_key(key) {
+            state.dirty.remove(key);
+        }
+    }
+}
+
+/// Tracks a `CarrierStore::put` across its remove-side and element-side writes so a failure or
+/// cancellation after `removals` changes leaves `key` marked dirty until normalized.
+struct ElementSyncGuard<'a> {
+    /// The index tracking dirty keys.
+    index: &'a RemovalIndex,
+    /// The carrier key being written.
+    key: String,
+    /// Whether `key` was already dirty before this `put` began.
+    was_dirty: bool,
+    /// Whether `key` must remain dirty if this guard drops before [`Self::complete`].
+    dirty_on_drop: bool,
+    /// Whether the element-side write completed.
+    completed: bool,
+}
+
+impl<'a> ElementSyncGuard<'a> {
+    /// Register an in-flight `put` on `key`.
+    fn new(index: &'a RemovalIndex, key: &str) -> Self {
+        let mut state = index.dirty_guard();
+        let was_dirty = state.dirty.contains(key);
+        *state.in_flight.entry(key.to_owned()).or_default() += 1;
+        Self {
+            index,
+            key: key.to_owned(),
+            was_dirty,
+            dirty_on_drop: was_dirty,
+            completed: false,
+        }
+    }
+
+    /// Mark `key` dirty immediately before mutating `removals`.
+    fn mark_removal_write(&mut self) {
+        self.index.dirty_guard().dirty.insert(self.key.clone());
+        self.dirty_on_drop = true;
+    }
+
+    /// Restore the prior dirty state when a failed removal-store write left `removals` unchanged.
+    fn restore_if_unchanged(&mut self) {
+        self.dirty_on_drop = self.was_dirty;
+    }
+
+    /// Mark the element-side write complete and clear `dirty` when no other `put` on `key` is
+    /// active.
+    fn complete(mut self) {
+        self.completed = true;
+        let mut state = self.index.dirty_guard();
+        let still_in_flight = match state.in_flight.get_mut(&self.key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                true
+            }
+            Some(_) => {
+                state.in_flight.remove(&self.key);
+                false
+            }
+            None => false,
+        };
+        if !still_in_flight {
+            state.dirty.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for ElementSyncGuard<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = self.index.dirty_guard();
+        let still_in_flight = match state.in_flight.get_mut(&self.key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                true
+            }
+            Some(_) => {
+                state.in_flight.remove(&self.key);
+                false
+            }
+            None => false,
+        };
+        if self.dirty_on_drop {
+            state.dirty.insert(self.key.clone());
+        } else if !still_in_flight {
+            state.dirty.remove(&self.key);
+        }
+    }
+}
+
+/// Guard for an admitted removal-store write whose backend outcome is not yet reconciled.
+///
+/// Dropping this guard before [`Self::complete`] or [`Self::reconcile`] means the caller was
+/// cancelled mid-write (or read-back reconciliation itself failed), so the optimistic accounting
+/// delta is reverted and `recovered` is cleared to force a full scan on the next operation.
+struct UnfinishedRemovalWrite<'a> {
+    /// The index whose accounting was optimistically updated.
+    index: &'a RemovalIndex,
+    /// The applied delta from `previous` to `next`.
+    changes: &'a ItemChanges,
+    /// Whether the backend outcome was confirmed or reconciled.
+    completed: bool,
+}
+
+impl<'a> UnfinishedRemovalWrite<'a> {
+    /// Arm a guard for `changes` applied to `index`.
+    const fn new(index: &'a RemovalIndex, changes: &'a ItemChanges) -> Self {
+        Self {
+            index,
+            changes,
+            completed: false,
+        }
+    }
+
+    /// Disarm after `removals` confirmed `next` was stored.
+    fn complete(mut self) {
+        self.completed = true;
+    }
+
+    /// Reconcile `index.accounting` against the `actual` record read back from `removals` after a
+    /// write error (such as a post-commit directory-sync failure).
+    fn reconcile(
+        mut self,
+        previous: Option<&RemovalRecord>,
+        next: Option<&RemovalRecord>,
+        actual: Option<&RemovalRecord>,
+        now_ms: u128,
+    ) {
+        self.completed = true;
+        if actual == next {
+            return;
+        }
+        let mut accounting = self.index.accounting.lock();
+        self.changes.revert(&mut accounting);
+        if actual != previous {
+            let actual_changes = ItemChanges::of(previous, actual, now_ms);
+            for (principal, at) in actual_changes.left {
+                accounting.discharge(principal, at);
+            }
+            for (principal, at) in actual_changes.raised {
+                accounting.charge(principal, at);
+            }
+        }
+    }
+}
+
+impl Drop for UnfinishedRemovalWrite<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.changes.revert(&mut self.index.accounting.lock());
+            self.index.recovered.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Guard for an in-flight removal-store delete whose backend outcome is not yet reconciled.
+struct UnfinishedRemovalDelete<'a> {
+    /// The index whose accounting must match `removals`.
+    index: &'a RemovalIndex,
+    /// Whether the delete outcome was confirmed or reconciled.
+    completed: bool,
+}
+
+impl<'a> UnfinishedRemovalDelete<'a> {
+    /// Arm a guard before calling `removals.remove`.
+    const fn new(index: &'a RemovalIndex) -> Self {
+        Self {
+            index,
+            completed: false,
+        }
+    }
+
+    /// Disarm after `removals.remove` succeeded and discharge `previous`.
+    fn complete(mut self, previous: &RemovalRecord) {
+        self.completed = true;
+        let mut accounting = self.index.accounting.lock();
+        for (principal, at) in previous.items() {
+            accounting.discharge(principal, at);
+        }
+    }
+
+    /// Reconcile `index.accounting` against `actual` read back after `removals.remove` errored.
+    fn reconcile(mut self, previous: &RemovalRecord, actual: Option<&RemovalRecord>) {
+        self.completed = true;
+        if actual == Some(previous) {
+            return;
+        }
+        let mut accounting = self.index.accounting.lock();
+        for (principal, at) in previous.items() {
+            accounting.discharge(principal, at);
+        }
+        if let Some(actual) = actual {
+            for (principal, at) in actual.items() {
+                accounting.charge(principal, at);
+            }
+        }
+    }
+}
+
+impl Drop for UnfinishedRemovalDelete<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.index.recovered.store(false, Ordering::Release);
         }
     }
 }
@@ -393,17 +665,28 @@ impl CarrierStore<'_> {
             return Ok(());
         }
         let _writes = index.writes.lock().await;
+        Self::recover_locked(elements, removals, index).await
+    }
+
+    /// Rebuild `index.accounting` in a staging table and normalize every element side against its
+    /// remove side while holding `index.writes`, publishing the accounting and `recovered = true`
+    /// together only after the full scan succeeds.
+    async fn recover_locked(
+        elements: &EntryStorage,
+        removals: &RemovalStorage,
+        index: &RemovalIndex,
+    ) -> Result<()> {
         if index.recovered.load(Ordering::Acquire) {
             return Ok(());
         }
+        let shares = index.accounting.lock().shares();
+        let mut rebuilt = SlotAccounting::new(shares);
         for (key, record) in removals.get_all().await? {
-            {
-                let mut accounting = index.accounting.lock();
-                for (principal, at) in record.items() {
-                    accounting.charge(principal, at);
-                }
+            for (principal, at) in record.items() {
+                rebuilt.charge(principal, at);
             }
             let Some(held) = elements.get(&key).await? else {
+                index.clear_dirty_if_idle(&key);
                 continue;
             };
             let whole = !held.crdt.tombstones.is_empty() || held.crdt.register.is_some();
@@ -414,9 +697,59 @@ impl CarrierStore<'_> {
             {
                 elements.put(&key, &element_side(&normalized)).await?;
             }
+            index.clear_dirty_if_idle(&key);
         }
+        *index.accounting.lock() = rebuilt;
         index.recovered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Glue `elements_entry` and `removals_record` at `key`, forcing a full normalizing join (and
+    /// best-effort element-side repair when idle) whenever `dirty` indicates a cross-store write
+    /// may have left `elements` older than `removals`.
+    async fn resolve_read(
+        elements: &EntryStorage,
+        index: &RemovalIndex,
+        key: &str,
+        elements_entry: Option<Entry>,
+        removals_record: Option<&RemovalRecord>,
+        dirty: bool,
+        can_repair: bool,
+    ) -> Result<Option<Entry>> {
+        if !dirty {
+            return glue(elements_entry, removals_record, false);
+        }
+        let Some(removals_record) = removals_record else {
+            if can_repair {
+                index.clear_dirty_if_idle(key);
+            }
+            return Ok(elements_entry);
+        };
+        let Some(held) = elements_entry else {
+            if can_repair {
+                index.clear_dirty_if_idle(key);
+            }
+            return Ok(Some(removals_record.as_entry()));
+        };
+        let whole = !held.crdt.tombstones.is_empty() || held.crdt.register.is_some();
+        let held_data_len = held.data.len();
+        let held_co_dots_len = held.crdt.co_dots.len();
+        let normalized = held.join(removals_record.as_entry())?;
+        if can_repair {
+            let needs_write = whole
+                || normalized.data.len() != held_data_len
+                || normalized.crdt.co_dots.len() != held_co_dots_len;
+            if !needs_write {
+                index.clear_dirty_if_idle(key);
+            } else if let Some(_writes) = index.writes.try_lock() {
+                if !index.is_in_flight(key)
+                    && elements.put(key, &element_side(&normalized)).await.is_ok()
+                {
+                    index.clear_dirty_if_idle(key);
+                }
+            }
+        }
+        Ok(Some(normalized))
     }
 
     /// The carrier stored at `key`. Takes no lock once recovered.
@@ -429,8 +762,22 @@ impl CarrierStore<'_> {
                 index,
             } => {
                 Self::ensure_recovered(elements, removals, index).await?;
+                let (dirty_before, in_flight_before) = index.dirty_state(key);
                 let record = removals.get(key).await?;
-                glue(elements.get(key).await?, record.as_ref())
+                let held = elements.get(key).await?;
+                let (dirty_after, in_flight_after) = index.dirty_state(key);
+                let dirty = dirty_before || dirty_after;
+                let can_repair = dirty && !in_flight_before && !in_flight_after;
+                Self::resolve_read(
+                    elements,
+                    index,
+                    key,
+                    held,
+                    record.as_ref(),
+                    dirty,
+                    can_repair,
+                )
+                .await
             }
         }
     }
@@ -457,24 +804,45 @@ impl CarrierStore<'_> {
             } => (elements, removals, index),
         };
         Self::ensure_recovered(elements, removals, index).await?;
-        let previous = removals.get(key).await?;
-        let next = RemovalRecord::of(value, previous.as_ref(), introducer);
+        let mut previous = removals.get(key).await?;
+        let mut next = RemovalRecord::of(value, previous.as_ref(), introducer);
+        let mut element_sync = ElementSyncGuard::new(index, key);
         if next != previous {
             let _writes = index.writes.lock().await;
-            let changes = ItemChanges::of(previous.as_ref(), next.as_ref(), now_ms);
-            changes.apply(&mut index.accounting.lock(), now_ms)?;
-            let written = match &next {
-                Some(record) => removals.put(key, record).await,
-                None => removals.remove(key).await,
-            };
-            if written.is_err() {
-                // The store still holds `previous`, or a value the next start's recovery pass
-                // counts afresh.
-                changes.revert(&mut index.accounting.lock());
+            if !index.recovered.load(Ordering::Acquire) {
+                Self::recover_locked(elements, removals, index).await?;
+                previous = removals.get(key).await?;
+                next = RemovalRecord::of(value, previous.as_ref(), introducer);
             }
-            written?;
+            if next != previous {
+                let changes = ItemChanges::of(previous.as_ref(), next.as_ref(), now_ms);
+                changes.apply(&mut index.accounting.lock(), now_ms)?;
+                element_sync.mark_removal_write();
+                let write_guard = UnfinishedRemovalWrite::new(index, &changes);
+                let written = match &next {
+                    Some(record) => removals.put(key, record).await,
+                    None => removals.remove(key).await,
+                };
+                if let Err(error) = written {
+                    if let Ok(actual) = removals.get(key).await {
+                        write_guard.reconcile(
+                            previous.as_ref(),
+                            next.as_ref(),
+                            actual.as_ref(),
+                            now_ms,
+                        );
+                        if actual == previous {
+                            element_sync.restore_if_unchanged();
+                        }
+                    }
+                    return Err(error);
+                }
+                write_guard.complete();
+            }
         }
-        elements.put(key, &element_side(value)).await
+        elements.put(key, &element_side(value)).await?;
+        element_sync.complete();
+        Ok(())
     }
 
     /// Remove the carrier stored at `key`: its element side, then its remove side.
@@ -490,13 +858,24 @@ impl CarrierStore<'_> {
             } => {
                 Self::ensure_recovered(elements, removals, index).await?;
                 elements.remove(key).await?;
-                if let Some(record) = removals.get(key).await? {
+                index.clear_dirty_if_idle(key);
+                if let Some(mut record) = removals.get(key).await? {
                     let _writes = index.writes.lock().await;
-                    removals.remove(key).await?;
-                    let mut accounting = index.accounting.lock();
-                    for (principal, at) in record.items() {
-                        accounting.discharge(principal, at);
+                    if !index.recovered.load(Ordering::Acquire) {
+                        Self::recover_locked(elements, removals, index).await?;
+                        let Some(refreshed) = removals.get(key).await? else {
+                            return Ok(());
+                        };
+                        record = refreshed;
                     }
+                    let delete_guard = UnfinishedRemovalDelete::new(index);
+                    if let Err(error) = removals.remove(key).await {
+                        if let Ok(actual) = removals.get(key).await {
+                            delete_guard.reconcile(&record, actual.as_ref());
+                        }
+                        return Err(error);
+                    }
+                    delete_guard.complete(&record);
                 }
                 Ok(())
             }
@@ -515,19 +894,41 @@ impl CarrierStore<'_> {
             } => (elements, removals, index),
         };
         Self::ensure_recovered(elements, removals, index).await?;
+        let (dirty_before, in_flight_before) = index.dirty_snapshot();
         let mut records = removals
             .get_all()
             .await?
             .into_iter()
             .collect::<BTreeMap<_, _>>();
+        let held_entries = elements.get_all().await?;
+        let (dirty_after, in_flight_after) = index.dirty_snapshot();
         let mut carriers = Vec::new();
-        for (key, held) in elements.get_all().await? {
+        for (key, held) in held_entries {
             let record = records.remove(&key);
-            if let Some(carrier) = glue(Some(held), record.as_ref())? {
+            let dirty = dirty_before.contains(&key) || dirty_after.contains(&key);
+            let can_repair =
+                dirty && !in_flight_before.contains(&key) && !in_flight_after.contains(&key);
+            if let Some(carrier) = Self::resolve_read(
+                elements,
+                index,
+                &key,
+                Some(held),
+                record.as_ref(),
+                dirty,
+                can_repair,
+            )
+            .await?
+            {
                 carriers.push((key, carrier));
             }
         }
         for (key, record) in records {
+            if (dirty_before.contains(&key) || dirty_after.contains(&key))
+                && !in_flight_before.contains(&key)
+                && !in_flight_after.contains(&key)
+            {
+                index.clear_dirty_if_idle(&key);
+            }
             carriers.push((key, record.as_entry()));
         }
         Ok(carriers)

@@ -324,6 +324,12 @@ impl PeerRing {
         self.removal_index.floor_use_at(now_ms)
     }
 
+    /// The number of items held by `principal` in the removal store's accounting.
+    #[cfg(test)]
+    pub(crate) fn removal_held(&self, principal: crate::fair_admission::Principal) -> usize {
+        self.removal_index.held(principal)
+    }
+
     /// This ring replicating relay custody as `replication` says (#777).
     pub fn with_relay_replication(mut self, replication: RelayReplication) -> Self {
         let replication = RelayReplication {
