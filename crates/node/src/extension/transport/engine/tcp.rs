@@ -1,6 +1,7 @@
 //! TCP instance of the relay: the listener (client side) and the bidirectional
 //! byte-stream relay loop (server side), with true half-close and abrupt-close handling.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,14 +9,18 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::message::REORDER_DEADLINE;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::inject_accepted;
+use super::reorder::Ready;
 use super::reorder::StreamFault;
 use super::reorder::StreamReorder;
 use super::send_frame;
@@ -87,6 +92,63 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream, preamble: Byte
     relay_tcp_with_timeouts(task, stream, preamble, RELAY_IDLE_TIMEOUT, REORDER_DEADLINE).await;
 }
 
+/// Ordered peer-to-local segments awaiting socket write capacity, with explicit partial-write
+/// cursor state so cancellation, idle/write deadlines, and the opposite read direction stay
+/// continuously polled while `local_write` is backpressured (#1201).
+#[derive(Default)]
+struct OutboundWrites {
+    segments: VecDeque<Bytes>,
+    shutting_down: bool,
+}
+
+impl OutboundWrites {
+    fn is_idle(&self) -> bool {
+        self.segments.is_empty() && !self.shutting_down
+    }
+
+    fn enqueue(&mut self, ready: Ready) {
+        for bytes in ready.segments {
+            if !bytes.is_empty() {
+                self.segments.push_back(bytes);
+            }
+        }
+        if ready.finished {
+            self.shutting_down = true;
+        }
+    }
+
+    fn advance(&mut self, written: usize) {
+        if let Some(front) = self.segments.front_mut() {
+            if written >= front.len() {
+                self.segments.pop_front();
+            } else {
+                *front = front.slice(written..);
+            }
+        }
+    }
+}
+
+enum WriteStep {
+    Wrote(usize),
+    ShutDown,
+    Failed,
+}
+
+async fn step_outbound_write<W: AsyncWrite + Unpin>(
+    local_write: &mut W,
+    outbound_writes: &OutboundWrites,
+) -> WriteStep {
+    if let Some(chunk) = outbound_writes.segments.front().map(Bytes::as_ref) {
+        match local_write.write(chunk).await {
+            Ok(0) | Err(_) => WriteStep::Failed,
+            Ok(n) => WriteStep::Wrote(n),
+        }
+    } else {
+        let _ = local_write.shutdown().await;
+        WriteStep::ShutDown
+    }
+}
+
 /// [`relay_tcp`] with its idle timeout and its gap deadline given: the law of
 /// [`Frame::Data`] in both directions, peer segments reaching the socket through a
 /// [`StreamReorder`]. A gap's deadline runs from when its missing segment became the one
@@ -110,98 +172,27 @@ async fn relay_tcp_with_timeouts(
     let session = key.session;
     let from_opener = super::opened_by_us(&key);
     let (mut local_read, mut local_write) = stream.into_split();
-    let mut local_read_open = true;
-    let mut local_write_open = true;
-    let preamble = send_preamble(&scope, &key, from_opener, &preamble).await;
-    let mut sent = preamble.unwrap_or_else(|| {
+    let preamble = tokio::select! {
+        _ = cancel.cancelled() => None,
+        sent = send_preamble(&scope, &key, from_opener, &preamble) => sent,
+    };
+    let sent = preamble.unwrap_or_else(|| {
         cancel.cancel();
         0
     });
-    let mut inbound = StreamReorder::default();
-    let mut gap: Option<u64> = None;
-    let mut buf = vec![0u8; TCP_BUF];
-    let idle = tokio::time::sleep(idle_timeout);
-    tokio::pin!(idle);
-    let gap_deadline = tokio::time::sleep(reorder_deadline);
-    tokio::pin!(gap_deadline);
-    // A cancelled session never starts, so no local byte goes out after a lost preamble.
-    'relay: while !cancel.is_cancelled() && (local_read_open || local_write_open) {
-        tokio::select! {
-            _ = cancel.cancelled() => break,
-            read = local_read.read(buf.as_mut_slice()), if local_read_open => {
-                idle.as_mut().reset(Instant::now() + idle_timeout);
-                match read {
-                    Ok(0) => {
-                        let _ = send_frame(&scope, peer, Frame::Shutdown {
-                            session,
-                            from_opener,
-                            sent,
-                        }).await;
-                        local_read_open = false;
-                    }
-                    Ok(n) => {
-                        let Some(chunk) = buf.get(..n) else {
-                            cancel.cancel();
-                            break;
-                        };
-                        let bytes = Bytes::copy_from_slice(chunk);
-                        if send_frame(&scope, peer, Frame::Data {
-                            session,
-                            from_opener,
-                            seq: sent,
-                            bytes,
-                        }).await.is_err() {
-                            cancel.cancel();
-                            break;
-                        }
-                        sent += 1;
-                    }
-                    Err(_) => {
-                        cancel.cancel();
-                        break;
-                    }
-                }
-            }
-            outbound = outbound_rx.recv(), if local_write_open => {
-                idle.as_mut().reset(Instant::now() + idle_timeout);
-                let arrival = match outbound {
-                    Some(Outbound::Segment { seq, bytes }) => inbound.data(seq, bytes),
-                    Some(Outbound::Shutdown { sent }) => inbound.fin(sent),
-                    Some(Outbound::Datagram(_)) | None => break,
-                };
-                let ready = match arrival {
-                    Ok(ready) => ready,
-                    Err(fault) => {
-                        reset(&key, fault, &cancel);
-                        break;
-                    }
-                };
-                for bytes in ready.segments {
-                    if local_write.write_all(bytes.as_ref()).await.is_err() {
-                        cancel.cancel();
-                        break 'relay;
-                    }
-                }
-                if ready.finished {
-                    let _ = local_write.shutdown().await;
-                    local_write_open = false;
-                }
-                // The deadline runs from when the missing segment became the one awaited.
-                let missing = inbound.gap();
-                if missing.is_some() && missing != gap {
-                    gap_deadline.as_mut().reset(Instant::now() + reorder_deadline);
-                }
-                gap = missing;
-            }
-            _ = &mut gap_deadline, if gap.is_some() => {
-                if let Some(next) = gap {
-                    reset(&key, StreamFault::Unfilled { next }, &cancel);
-                }
-                break;
-            }
-            _ = &mut idle => break,
-        }
-    }
+    let (local_read_open, local_write_open) = pump_tcp_halves(
+        &key,
+        from_opener,
+        sent,
+        &mut local_read,
+        &mut local_write,
+        &mut outbound_rx,
+        &cancel,
+        idle_timeout,
+        reorder_deadline,
+        |frame| send_frame(&scope, peer, frame),
+    )
+    .await;
 
     // Only both directions finishing is a clean end; any other end aborts the local socket.
     if local_read_open || local_write_open {
@@ -220,6 +211,154 @@ async fn relay_tcp_with_timeouts(
         })
         .await;
     }
+}
+
+/// Pump both directions of a relayed stream without ever awaiting a nested `write_all` inside a
+/// `select!` branch: partial writes are tracked in [`OutboundWrites`], so cancellation, idle and
+/// blocked-write deadlines, and `local_read` remain responsive when `local_write` stalls.
+#[allow(clippy::too_many_arguments)]
+async fn pump_tcp_halves<R, W, F, Fut>(
+    key: &SessionKey,
+    from_opener: bool,
+    mut sent: u64,
+    local_read: &mut R,
+    local_write: &mut W,
+    outbound_rx: &mut mpsc::Receiver<Outbound>,
+    cancel: &CancellationToken,
+    idle_timeout: Duration,
+    reorder_deadline: Duration,
+    mut emit_frame: F,
+) -> (bool, bool)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+    F: FnMut(Frame) -> Fut,
+    Fut: std::future::Future<Output = crate::error::Result<()>>,
+{
+    let session = key.session;
+    let mut local_read_open = true;
+    let mut local_write_open = true;
+    let mut inbound = StreamReorder::default();
+    let mut outbound_writes = OutboundWrites::default();
+    let mut gap: Option<u64> = None;
+    let mut buf = vec![0u8; TCP_BUF];
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
+    let write_deadline = tokio::time::sleep(idle_timeout);
+    tokio::pin!(write_deadline);
+    let gap_deadline = tokio::time::sleep(reorder_deadline);
+    tokio::pin!(gap_deadline);
+    // A cancelled session never starts, so no local byte goes out after a lost preamble.
+    while !cancel.is_cancelled() && (local_read_open || local_write_open) {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            read = local_read.read(buf.as_mut_slice()), if local_read_open => {
+                idle.as_mut().reset(Instant::now() + idle_timeout);
+                match read {
+                    Ok(0) => {
+                        let sent_shutdown = tokio::select! {
+                            _ = cancel.cancelled() => Err(()),
+                            res = emit_frame(Frame::Shutdown {
+                                session,
+                                from_opener,
+                                sent,
+                            }) => res.map_err(|_| ()),
+                        };
+                        if sent_shutdown.is_err() && cancel.is_cancelled() {
+                            break;
+                        }
+                        local_read_open = false;
+                    }
+                    Ok(n) => {
+                        let Some(chunk) = buf.get(..n) else {
+                            cancel.cancel();
+                            break;
+                        };
+                        let bytes = Bytes::copy_from_slice(chunk);
+                        let sent_data = tokio::select! {
+                            _ = cancel.cancelled() => Err(()),
+                            res = emit_frame(Frame::Data {
+                                session,
+                                from_opener,
+                                seq: sent,
+                                bytes,
+                            }) => res.map_err(|_| ()),
+                        };
+                        if sent_data.is_err() {
+                            cancel.cancel();
+                            break;
+                        }
+                        sent += 1;
+                    }
+                    Err(_) => {
+                        cancel.cancel();
+                        break;
+                    }
+                }
+            }
+            step = step_outbound_write(local_write, &outbound_writes), if local_write_open && !outbound_writes.is_idle() => {
+                match step {
+                    WriteStep::Failed => {
+                        cancel.cancel();
+                        break;
+                    }
+                    WriteStep::Wrote(n) => {
+                        let next_deadline = Instant::now() + idle_timeout;
+                        idle.as_mut().reset(next_deadline);
+                        write_deadline.as_mut().reset(next_deadline);
+                        outbound_writes.advance(n);
+                        if outbound_writes.is_idle() {
+                            let missing = inbound.gap();
+                            if missing.is_some() && missing != gap {
+                                gap_deadline.as_mut().reset(Instant::now() + reorder_deadline);
+                            }
+                            gap = missing;
+                        }
+                    }
+                    WriteStep::ShutDown => {
+                        idle.as_mut().reset(Instant::now() + idle_timeout);
+                        outbound_writes.shutting_down = false;
+                        local_write_open = false;
+                    }
+                }
+            }
+            outbound = outbound_rx.recv(), if local_write_open && outbound_writes.is_idle() => {
+                idle.as_mut().reset(Instant::now() + idle_timeout);
+                let arrival = match outbound {
+                    Some(Outbound::Segment { seq, bytes }) => inbound.data(seq, bytes),
+                    Some(Outbound::Shutdown { sent }) => inbound.fin(sent),
+                    Some(Outbound::Datagram(_)) | None => break,
+                };
+                let ready = match arrival {
+                    Ok(ready) => ready,
+                    Err(fault) => {
+                        reset(key, fault, cancel);
+                        break;
+                    }
+                };
+                outbound_writes.enqueue(ready);
+                if outbound_writes.is_idle() {
+                    // The deadline runs from when the missing segment became the one awaited.
+                    let missing = inbound.gap();
+                    if missing.is_some() && missing != gap {
+                        gap_deadline.as_mut().reset(Instant::now() + reorder_deadline);
+                    }
+                    gap = missing;
+                } else {
+                    write_deadline.as_mut().reset(Instant::now() + idle_timeout);
+                }
+            }
+            _ = &mut gap_deadline, if gap.is_some() && outbound_writes.is_idle() => {
+                if let Some(next) = gap {
+                    reset(key, StreamFault::Unfilled { next }, cancel);
+                }
+                break;
+            }
+            _ = &mut write_deadline, if local_write_open && !outbound_writes.is_idle() => break,
+            _ = &mut idle => break,
+        }
+    }
+    (local_read_open, local_write_open)
 }
 
 /// Send `preamble` to `key`'s peer as the session's first segments, so the peer reads it before
@@ -416,6 +555,219 @@ mod tests {
         deliver(&sessions, &key, &[beyond], None);
         assert_eq!(read_to_end(&mut client).await?, (Vec::new(), Ending::Reset));
         joined(relay).await?;
+        Ok(())
+    }
+
+    /// Regression (#1201): when the local client stops reading and the TCP send buffer fills,
+    /// cancelling the relay (as `Provider::close` / `wound_down` or `close_for_effect` does)
+    /// terminates `relay_tcp_with_timeouts` promptly rather than hanging in `write_all`.
+    #[tokio::test]
+    async fn test_blocked_tcp_write_does_not_block_cancellation() -> Result<()> {
+        let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
+        let address = listener.local_addr().map_err(io_error)?;
+        let client = TcpStream::connect(address).await.map_err(io_error)?;
+        let (server, _) = listener.accept().await.map_err(io_error)?;
+        let (task, sessions, key) = relay_task_for_test("tcp")?;
+        let cancel = task.cancel.clone();
+        let relay = crate::test_support::TestTask::spawn(relay_tcp_with_timeouts(
+            task,
+            server,
+            Bytes::new(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+        ));
+
+        // Enqueue enough data (~16 MiB across 512 segments) to saturate loopback socket buffers
+        // while `client` never reads.
+        let chunk = Bytes::from(vec![0xAB; 32 * 1024]);
+        for seq in 0..512 {
+            assert_eq!(
+                sessions.deliver(&key, Outbound::Segment {
+                    seq,
+                    bytes: chunk.clone(),
+                }),
+                EffectEnqueue::Enqueued
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !relay.is_finished(),
+            "relay should be blocked on a full socket buffer"
+        );
+
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), joined(relay))
+            .await
+            .map_err(|_| Error::ExtensionError("cancelled blocked TCP relay hung".to_string()))??;
+        assert!(!sessions.is_live(&key));
+        drop(client);
+        Ok(())
+    }
+
+    /// Regression (#1201, #1205 item 2): a blocked write on a 1-byte buffer does not starve the
+    /// idle/write timeout when the peer stops reading, even after the opposite half closes.
+    #[tokio::test]
+    async fn test_blocked_write_respects_timeout_on_close_or_idle() -> Result<()> {
+        let (client_io, relay_io) = tokio::io::duplex(1);
+        let (mut client_read, mut client_write) = tokio::io::split(client_io);
+        let (mut local_read, mut local_write) = tokio::io::split(relay_io);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        let key = SessionKey::new(
+            Did::from(99_u32),
+            "tcp",
+            crate::extension::transport::RelaySessionId(7),
+            crate::extension::transport::Initiator::Remote,
+        );
+
+        outbound_tx
+            .send(Outbound::Segment {
+                seq: 0,
+                bytes: Bytes::from_static(b"blocked-payload"),
+            })
+            .await
+            .expect("send outbound segment");
+        // Half-close the client's upload side while leaving `client_read` unread so `local_write`
+        // blocks mid-segment after writing 1 byte into `duplex(1)`.
+        client_write.shutdown().await.map_err(io_error)?;
+
+        let (read_open, write_open) = tokio::time::timeout(
+            Duration::from_millis(500),
+            pump_tcp_halves(
+                &key,
+                false,
+                0,
+                &mut local_read,
+                &mut local_write,
+                &mut outbound_rx,
+                &cancel,
+                Duration::from_millis(30),
+                Duration::from_secs(60),
+                |_frame| async { Ok(()) },
+            ),
+        )
+        .await
+        .map_err(|_| Error::ExtensionError("blocked TCP write starved timeout".to_string()))?;
+
+        assert!(!read_open, "upload half-close was observed");
+        assert!(
+            write_open,
+            "stalled download remained incomplete so caller resets socket"
+        );
+        let mut first_byte = [0u8; 1];
+        assert_eq!(
+            client_read.read(&mut first_byte).await.map_err(io_error)?,
+            1
+        );
+        assert_eq!(&first_byte, b"b");
+        Ok(())
+    }
+
+    /// Regression (#1201, #1205 item 2b): while `local_write` is blocked mid-segment on a
+    /// backpressured stream, `local_read` continues forwarding frames and half-close independently,
+    /// and once the client drains `local_write`, partial-write progress completes without losing or
+    /// duplicating any byte.
+    #[tokio::test]
+    async fn test_blocked_write_allows_opposite_direction_progress_and_preserves_partial_bytes(
+    ) -> Result<()> {
+        let (client_io, relay_io) = tokio::io::duplex(4);
+        let (mut client_read, mut client_write) = tokio::io::split(client_io);
+        let (mut local_read, mut local_write) = tokio::io::split(relay_io);
+        let (outbound_tx, mut outbound_rx) = mpsc::channel(8);
+        let (emitted_tx, mut emitted_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let key = SessionKey::new(
+            Did::from(99_u32),
+            "tcp",
+            crate::extension::transport::RelaySessionId(8),
+            crate::extension::transport::Initiator::Remote,
+        );
+
+        let pump = crate::test_support::TestTask::spawn(async move {
+            pump_tcp_halves(
+                &key,
+                false,
+                0,
+                &mut local_read,
+                &mut local_write,
+                &mut outbound_rx,
+                &cancel,
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+                |frame| {
+                    let _ = emitted_tx.send(frame);
+                    async { Ok(()) }
+                },
+            )
+            .await
+        });
+
+        // Outbound segment 0 (11 bytes) + segment 1 (9 bytes) + FIN: only 4 bytes fit in duplex(4),
+        // so `local_write` writes 4 bytes of segment 0 and blocks with 7 bytes remaining.
+        outbound_tx
+            .send(Outbound::Segment {
+                seq: 0,
+                bytes: Bytes::from_static(b"0123456789A"),
+            })
+            .await
+            .expect("send seg 0");
+        outbound_tx
+            .send(Outbound::Segment {
+                seq: 1,
+                bytes: Bytes::from_static(b"BCDEFGHIJ"),
+            })
+            .await
+            .expect("send seg 1");
+        outbound_tx
+            .send(Outbound::Shutdown { sent: 2 })
+            .await
+            .expect("send fin");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // While `local_write` is completely blocked (`client_read` has read 0 bytes), `client_write`
+        // uploads data and half-closes; `local_read` must still make full progress!
+        client_write
+            .write_all(b"upload-while-download-blocked")
+            .await
+            .map_err(io_error)?;
+        client_write.shutdown().await.map_err(io_error)?;
+
+        let mut uploaded = Vec::new();
+        let mut saw_shutdown = false;
+        while !saw_shutdown {
+            let frame = tokio::time::timeout(Duration::from_secs(1), emitted_rx.recv())
+                .await
+                .map_err(|_| {
+                    Error::ExtensionError(
+                        "upload direction blocked behind stalled download".to_string(),
+                    )
+                })?
+                .ok_or_else(|| Error::ExtensionError("frame channel closed".to_string()))?;
+            match frame {
+                Frame::Data { bytes, .. } => uploaded.extend_from_slice(&bytes),
+                Frame::Shutdown { .. } => saw_shutdown = true,
+                other => {
+                    return Err(Error::ExtensionError(format!(
+                        "unexpected frame on upload path: {other:?}"
+                    )));
+                }
+            }
+        }
+        assert_eq!(uploaded, b"upload-while-download-blocked");
+
+        // Now drain `client_read`: every byte of segment 0 and segment 1 must arrive intact,
+        // followed by clean EOF.
+        let mut downloaded = Vec::new();
+        client_read
+            .read_to_end(&mut downloaded)
+            .await
+            .map_err(io_error)?;
+        assert_eq!(downloaded, b"0123456789ABCDEFGHIJ");
+
+        let (read_open, write_open) = pump
+            .await
+            .map_err(|e| Error::ExtensionError(format!("pump join failed: {e}")))?;
+        assert!(!read_open && !write_open);
         Ok(())
     }
 

@@ -13,6 +13,7 @@ use super::Outbound;
 use super::Pending;
 use super::StreamHold;
 use super::TransportSessions;
+use super::UdpFlowKey;
 use super::MAX_PENDING_ACCEPTS;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Initiator;
@@ -125,12 +126,13 @@ async fn test_pending_accept_table_rejects_above_its_hard_bound() {
             .await
             .expect("bind test UDP socket"),
     );
+    let listener = socket.local_addr().expect("listener addr");
     for index in 0..MAX_PENDING_ACCEPTS {
         let src = SocketAddr::from(([127, 0, 0, 1], 10_000 + index as u16));
         assert!(sessions
             .stash_pending(Pending::Udp {
                 socket: Arc::clone(&socket),
-                src,
+                flow: UdpFlowKey::new(listener, src),
                 first: Bytes::new(),
             })
             .is_some());
@@ -139,7 +141,7 @@ async fn test_pending_accept_table_rejects_above_its_hard_bound() {
     assert!(sessions
         .stash_pending(Pending::Udp {
             socket,
-            src: SocketAddr::from(([127, 0, 0, 1], 20_000)),
+            flow: UdpFlowKey::new(listener, SocketAddr::from(([127, 0, 0, 1], 20_000))),
             first: Bytes::new(),
         })
         .is_none());
@@ -163,16 +165,18 @@ async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
             .await
             .expect("bind test UDP socket"),
     );
+    let listener = socket.local_addr().expect("listener addr");
     let src = SocketAddr::from(([127, 0, 0, 1], 12_345));
+    let flow = UdpFlowKey::new(listener, src);
     let token = sessions
-        .reserve_pending_udp(Arc::clone(&socket), src, Bytes::from_static(b"first"))
+        .reserve_pending_udp(Arc::clone(&socket), flow, Bytes::from_static(b"first"))
         .expect("reserve first UDP source");
 
     assert!(sessions
-        .reserve_pending_udp(socket, src, Bytes::from_static(b"overtaking"))
+        .reserve_pending_udp(socket, flow, Bytes::from_static(b"overtaking"))
         .is_none());
     assert_eq!(sessions.pending.lock().expect("pending table").len(), 1);
-    assert_eq!(sessions.udp_flow(&src), None);
+    assert_eq!(sessions.udp_flow(&flow), None);
 
     let pending = sessions
         .pending
@@ -186,15 +190,15 @@ async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
         RelaySessionId(12),
         Initiator::Local,
     );
-    assert!(sessions.promote_udp_flow(src, token, &key));
+    assert!(sessions.promote_udp_flow(flow, token, &key));
     assert!(matches!(
-        sessions.register(key.clone(), Some(src)),
+        sessions.register(key.clone(), Some(flow)),
         SlotRegistration::Registered(_)
     ));
-    assert_eq!(sessions.udp_flow(&src), None);
+    assert_eq!(sessions.udp_flow(&flow), None);
 
-    assert!(sessions.activate_udp_flow(src, &key));
-    assert_eq!(sessions.udp_flow(&src), Some(key));
+    assert!(sessions.activate_udp_flow(flow, &key));
+    assert_eq!(sessions.udp_flow(&flow), Some(key));
 }
 
 /// An accept that fails releases its source, which can then be accepted again.
@@ -206,16 +210,144 @@ async fn test_failed_udp_accept_releases_its_source_reservation() {
             .await
             .expect("bind test UDP socket"),
     );
-    let src = SocketAddr::from(([127, 0, 0, 1], 12_346));
+    let flow = UdpFlowKey::new(
+        socket.local_addr().expect("listener addr"),
+        SocketAddr::from(([127, 0, 0, 1], 12_346)),
+    );
     let token = sessions
-        .reserve_pending_udp(Arc::clone(&socket), src, Bytes::new())
+        .reserve_pending_udp(Arc::clone(&socket), flow, Bytes::new())
         .expect("reserve first UDP source");
 
     sessions.evict_pending(token);
 
     assert!(sessions
-        .reserve_pending_udp(socket, src, Bytes::new())
+        .reserve_pending_udp(socket, flow, Bytes::new())
         .is_some());
+}
+
+/// Regression (#1213): two local UDP listeners sharing one `TransportSessions` engine isolate
+/// datagrams received from the same bound client socket across pending, opening, active, and
+/// close transitions, while retaining duplicate suppression within each listener.
+#[tokio::test]
+async fn test_distinct_udp_listeners_isolate_flows_from_shared_client_socket() {
+    let sessions = TransportSessions::new();
+    let listener_a = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind UDP listener A"),
+    );
+    let listener_b = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind UDP listener B"),
+    );
+    let addr_a = listener_a.local_addr().expect("listener A addr");
+    let addr_b = listener_b.local_addr().expect("listener B addr");
+    assert_ne!(addr_a, addr_b);
+
+    let client = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("bind shared UDP client");
+    client
+        .send_to(b"hello-a", addr_a)
+        .await
+        .expect("client send to A");
+    client
+        .send_to(b"hello-b", addr_b)
+        .await
+        .expect("client send to B");
+
+    let mut buf_a = [0u8; 32];
+    let (len_a, src_seen_by_a) = listener_a
+        .recv_from(&mut buf_a)
+        .await
+        .expect("listener A recv");
+    let mut buf_b = [0u8; 32];
+    let (len_b, src_seen_by_b) = listener_b
+        .recv_from(&mut buf_b)
+        .await
+        .expect("listener B recv");
+    assert_eq!(src_seen_by_a, src_seen_by_b, "one shared client source");
+
+    let flow_a = UdpFlowKey::new(addr_a, src_seen_by_a);
+    let flow_b = UdpFlowKey::new(addr_b, src_seen_by_b);
+
+    // 1. Pending schedule: listener A reserves `flow_a`; same-listener duplicate is suppressed,
+    //    while listener B still reserves `flow_b` for the same client source.
+    let token_a = sessions
+        .reserve_pending_udp(
+            Arc::clone(&listener_a),
+            flow_a,
+            Bytes::copy_from_slice(&buf_a[..len_a]),
+        )
+        .expect("listener A reserves pending flow");
+    assert!(
+        sessions
+            .reserve_pending_udp(
+                Arc::clone(&listener_a),
+                flow_a,
+                Bytes::from_static(b"dup-a"),
+            )
+            .is_none(),
+        "same listener suppresses duplicate pending datagrams"
+    );
+    let token_b = sessions
+        .reserve_pending_udp(
+            Arc::clone(&listener_b),
+            flow_b,
+            Bytes::copy_from_slice(&buf_b[..len_b]),
+        )
+        .expect("listener B must not be suppressed by listener A's pending reservation");
+
+    // 2. Active schedule with distinct peer/session destinations: B resolves to B, never A.
+    sessions
+        .pending
+        .lock()
+        .expect("pending table")
+        .remove(&token_a);
+    let key_a = SessionKey::new(
+        Did::from(101_u32),
+        "udp",
+        RelaySessionId(1),
+        Initiator::Local,
+    );
+    assert!(sessions.promote_udp_flow(flow_a, token_a, &key_a));
+    assert!(matches!(
+        sessions.register(key_a.clone(), Some(flow_a)),
+        SlotRegistration::Registered(_)
+    ));
+    assert!(sessions.activate_udp_flow(flow_a, &key_a));
+    assert_eq!(sessions.udp_flow(&flow_a), Some(key_a.clone()));
+    assert_eq!(
+        sessions.udp_flow(&flow_b),
+        None,
+        "listener B is still pending and must not reuse listener A's active session"
+    );
+
+    sessions
+        .pending
+        .lock()
+        .expect("pending table")
+        .remove(&token_b);
+    let key_b = SessionKey::new(
+        Did::from(202_u32),
+        "udp",
+        RelaySessionId(2),
+        Initiator::Local,
+    );
+    assert!(sessions.promote_udp_flow(flow_b, token_b, &key_b));
+    assert!(matches!(
+        sessions.register(key_b.clone(), Some(flow_b)),
+        SlotRegistration::Registered(_)
+    ));
+    assert!(sessions.activate_udp_flow(flow_b, &key_b));
+    assert_eq!(sessions.udp_flow(&flow_a), Some(key_a.clone()));
+    assert_eq!(sessions.udp_flow(&flow_b), Some(key_b.clone()));
+
+    // 3. Closing listener A's flow must not evict listener B's flow.
+    sessions.close_for_effect(&key_a);
+    assert_eq!(sessions.udp_flow(&flow_a), None);
+    assert_eq!(sessions.udp_flow(&flow_b), Some(key_b));
 }
 
 /// An accepted loopback TCP stream, and its client end, which must outlive the test's use of it.
