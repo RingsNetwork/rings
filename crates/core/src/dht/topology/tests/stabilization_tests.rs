@@ -135,3 +135,56 @@ fn test_record_bridged_peers_and_gap_aware_find_successor_preserve_routes_clockw
         assert!(with_bridges.routes_clockwise_toward(did(target)));
     }
 }
+
+/// Law (Capacity Bound): `TopoInfo::unconfirmed_peers` and `TopologyEvent::RecordBridgedPeers`
+/// bound per-reporter entries to `2 * capacity` and total `bridged` entries across all
+/// reporters to `2 * capacity^2`, even when an untrusted report advertises 1,000 peers.
+#[test]
+fn test_record_bridged_peers_enforces_per_reporter_and_total_capacity_bounds() {
+    let local = did(10);
+    let r1 = did(20);
+    let r2 = did(30);
+    let r3 = did(40);
+    let capacity = DEFAULT_SUCCESSOR_CAPACITY;
+
+    let oversized_report = crate::dht::TopoInfo {
+        successors: (100u32..600).map(did).collect(),
+        predecessor: Some(did(600)),
+        predecessors: (601u32..1100).map(did).collect(),
+    };
+    let unconfirmed = oversized_report.unconfirmed_peers(local, capacity, |_| false);
+    assert_eq!(unconfirmed.len(), 2 * capacity);
+
+    let initial = state(local, vec![r1, r2, r3], None, vec![None; 8], 0);
+    let after_r1 = step(
+        &initial,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: r1,
+            unconfirmed: (100u32..1100).map(did).collect(),
+        },
+        capacity,
+    )
+    .state;
+    assert_eq!(after_r1.bridged.len(), 2 * capacity);
+
+    // Seed an oversized initial bridged map and verify `RecordBridgedPeers` truncates to `2K^2`.
+    let mut artificially_oversized = after_r1.clone();
+    for id in 2000u32..2050 {
+        artificially_oversized.bridged.insert(did(id), r2);
+    }
+    let after_r2 = step(
+        &artificially_oversized,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: r3,
+            unconfirmed: (3000u32..3020).map(did).collect(),
+        },
+        capacity,
+    )
+    .state;
+    assert!(
+        after_r2.bridged.len() <= 2 * capacity * capacity,
+        "expected at most {}, got {}",
+        2 * capacity * capacity,
+        after_r2.bridged.len()
+    );
+}

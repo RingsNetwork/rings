@@ -123,7 +123,7 @@ impl TopoInfo {
                 predecessors.insert(0, pred);
             }
         }
-        let predecessor = predecessors.first().copied();
+        let predecessor = self.predecessor.filter(|peer| is_routable(*peer));
         Self {
             successors,
             predecessor,
@@ -131,22 +131,33 @@ impl TopoInfo {
         }
     }
 
-    /// Return advertised peers that are neither `local` nor confirmed by `is_routable`,
-    /// preserving declaration order without duplicates.
+    /// Return at most `2 * capacity` advertised peers (at most `capacity` from the predecessor
+    /// sequence and at most `capacity` from the successor sequence) that are neither `local`
+    /// nor confirmed by `is_routable`, preserving declaration order without duplicates.
     pub(crate) fn unconfirmed_peers(
         &self,
         local: Did,
+        capacity: usize,
         mut is_routable: impl FnMut(Did) -> bool,
     ) -> Vec<Did> {
-        let mut seen = Vec::new();
-        let mut unconfirmed = Vec::new();
-        let candidates = self
-            .predecessor
-            .into_iter()
-            .chain(self.predecessors.iter().copied())
-            .chain(self.successors.iter().copied());
-        for peer in candidates {
-            if peer == local || seen.contains(&peer) {
+        let per_role = crate::dht::topology::bounded_connection_candidates(
+            local,
+            capacity,
+            self.predecessor
+                .into_iter()
+                .chain(self.predecessors.iter().copied()),
+        )
+        .into_iter()
+        .chain(crate::dht::topology::bounded_connection_candidates(
+            local,
+            capacity,
+            self.successors.iter().copied(),
+        ));
+        let budget = capacity.saturating_mul(2);
+        let mut seen = Vec::with_capacity(budget);
+        let mut unconfirmed = Vec::with_capacity(budget);
+        for peer in per_role {
+            if seen.contains(&peer) {
                 continue;
             }
             seen.push(peer);

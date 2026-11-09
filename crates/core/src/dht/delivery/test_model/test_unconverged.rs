@@ -426,3 +426,96 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
         (vec![b, c, d], Outcome::Delivered)
     );
 }
+
+/// Stale bridge hint fallback (`#1195` P1 regression): in two cliques `{A10, B20, C30}` and
+/// `{C30, D40, E50}`, `A10` holds `bridged[E50] = C30` from non-head successor sync. If only
+/// the direct `C30–E50` link subsequently fails while `E50` remains reachable through
+/// `C30–D40–E50`, `A10` routes to `C30` without pinning `via = Some(C30)`, so `C30` continues
+/// along `C30 -> D40 -> E50` instead of dropping the payload.
+#[test]
+fn test_stale_bridge_hint_falls_back_through_remaining_subclique_links() {
+    let [a, b, c, d, e] = [10u32, 20, 30, 40, 50].map(Did::from);
+    let clique_v1 = [a, b, c];
+    let clique_v2 = [c, d, e];
+
+    let mut view_a = converged_view(&clique_v1, a);
+    view_a.bridged.insert(d, c);
+    view_a.bridged.insert(e, c);
+
+    let view_b = converged_view(&clique_v1, b);
+    let view_c = TopologyState::new(
+        c,
+        vec![d, a, b],
+        Some(b),
+        crate::dht::topology::finger_table(&[a, b, c, d], c),
+    );
+    let view_d = converged_view(&clique_v2, d);
+    let view_e = converged_view(&clique_v2, e);
+
+    let views = BTreeMap::from([
+        (a, view_a),
+        (b, view_b),
+        (c, view_c),
+        (d, view_d),
+        (e, view_e),
+    ]);
+    // Link `C–E` is down, while `C–D` and `D–E` remain up.
+    let links = [(a, b), (b, c), (a, c), (c, d), (d, e)];
+    let overlay = Overlay::with_links(views, links);
+
+    let a_to_e = overlay.check_route_law(a, e, RouteStage::TOWARD);
+    assert_eq!(
+        (a_to_e.path(), a_to_e.outcome),
+        (vec![a, c, d, e], Outcome::Delivered)
+    );
+}
+
+/// Gap-bridge handoff destination guard (`#1195` P2 regression): an unrelated bridged peer
+/// closer than the destination (`dist(local, bridged) < dist(local, aim)`) must not hijack a
+/// viable normal handoff.
+#[test]
+fn test_gap_bridge_handoff_ignores_unrelated_bridges_before_destination() {
+    let scale = |id: u32| prefixed(id << 8);
+    let [n10, n30, n60, n100, n160, n180, n190, n210, n230] =
+        [10u32, 30, 60, 100, 160, 180, 190, 210, 230].map(scale);
+
+    let mut view_10 = TopologyState::new(n10, vec![n160, n210], None, vec![None; 160]);
+    view_10.bridged.insert(n30, n210);
+    view_10.bridged.insert(n100, n160);
+    view_10.bridged.insert(n180, n160);
+    view_10.bridged.insert(n190, n160);
+    view_10.bridged.insert(n230, n160);
+
+    let clique = [n60, n100, n160, n180, n190, n230];
+    let mut view_160 = converged_view(&clique, n160);
+    view_160.predecessors = vec![n100, n10];
+
+    let view_210 = TopologyState::new(n210, vec![n30, n10], Some(n10), vec![None; 160]);
+    let view_30 = TopologyState::new(n30, vec![n210], Some(n210), vec![None; 160]);
+    let view_60 = converged_view(&clique, n60);
+
+    let views = BTreeMap::from([
+        (n10, view_10),
+        (n30, view_30),
+        (n60, view_60),
+        (n160, view_160),
+        (n210, view_210),
+    ]);
+    let links = [
+        (n10, n160),
+        (n10, n210),
+        (n30, n210),
+        (n160, n60),
+        (n160, n100),
+        (n160, n180),
+        (n160, n190),
+        (n160, n230),
+    ];
+    let overlay = Overlay::with_links(views, links);
+
+    let route = overlay.check_route_law(n10, n60, RouteStage::TOWARD);
+    assert_eq!(
+        (route.path(), route.outcome),
+        (vec![n10, n160, n60], Outcome::Delivered)
+    );
+}

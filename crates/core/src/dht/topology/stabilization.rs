@@ -413,47 +413,92 @@ pub(super) fn step_stabilize(
         pending_stabilization: None,
         ..state.clone()
     };
-    let mut bridged = state.bridged.clone();
-    bridged.retain(|&target, &mut via| {
-        target != next_state.local && !next_state.references(target) && next_state.references(via)
-    });
-    next_state.bridged = bridged;
+    prune_bridged(&mut next_state, None, capacity);
     TopologyStep {
         state: next_state,
         actions,
     }
 }
 
+/// Maximum number of passive bridge hints retained for a single reporter (`2 * capacity`),
+/// and across all `capacity` successors (`2 * capacity^2`).
+pub(super) const fn bridged_reporter_budget(capacity: usize) -> usize {
+    capacity.saturating_mul(2)
+}
+
+/// Maximum total passive bridge hints retained in `TopologyState::bridged` (`2 * capacity^2`).
+pub(super) const fn bridged_total_capacity(capacity: usize) -> usize {
+    capacity.saturating_mul(capacity).saturating_mul(2)
+}
+
+/// Prune `state.bridged` so every target is a non-local unreferenced peer, every `via` bridge
+/// is a current successor in `state.successors` (not equal to `excluded_peer`), and the total
+/// map size is bounded by `2 * capacity^2`.
+pub(super) fn prune_bridged(
+    state: &mut TopologyState,
+    excluded_peer: Option<Did>,
+    capacity: usize,
+) {
+    let local = state.local;
+    let referenced = state.referenced_peers();
+    let successors = state.successors.clone();
+    state.bridged.retain(|&target, &mut via| {
+        target != local
+            && excluded_peer != Some(target)
+            && excluded_peer != Some(via)
+            && !referenced.contains(&target)
+            && successors.contains(&via)
+    });
+    let max_total = bridged_total_capacity(capacity);
+    while state.bridged.len() > max_total {
+        let Some((&farthest, _)) = state
+            .bridged
+            .iter()
+            .max_by_key(|(&target, _)| dist(local, target))
+        else {
+            break;
+        };
+        state.bridged.remove(&farthest);
+    }
+}
+
 /// Record passive 1-hop bridge reachability hints for unconfirmed peers advertised by an
-/// admitted topology reporter (`reporter`).
+/// admitted successor reporter (`reporter`), enforcing per-reporter (`2K`) and total (`2K^2`)
+/// capacity bounds.
 pub(super) fn step_record_bridged_peers(
     state: &TopologyState,
     reporter: Did,
     unconfirmed: &[Did],
+    capacity: usize,
 ) -> TopologyStep {
-    if reporter == state.local || !state.references(reporter) {
+    if capacity == 0 || reporter == state.local || !state.successors.contains(&reporter) {
+        let mut next_state = state.clone();
+        prune_bridged(&mut next_state, None, capacity);
         return TopologyStep {
-            state: state.clone(),
+            state: next_state,
             actions: Vec::new(),
         };
     }
-    let mut bridged = state.bridged.clone();
-    bridged.retain(|&target, &mut via| {
-        target != state.local
-            && !state.references(target)
-            && state.references(via)
-            && (via != reporter || unconfirmed.contains(&target))
-    });
+    let reporter_budget = bridged_reporter_budget(capacity);
+    let mut bounded_unconfirmed = Vec::with_capacity(reporter_budget);
     for &peer in unconfirmed {
-        if peer != state.local && !state.references(peer) {
-            bridged.insert(peer, reporter);
+        if bounded_unconfirmed.len() == reporter_budget {
+            break;
+        }
+        if peer != state.local && peer != reporter && !state.references(peer) {
+            push_unique(&mut bounded_unconfirmed, peer);
         }
     }
+    let mut next_state = state.clone();
+    next_state
+        .bridged
+        .retain(|&target, &mut via| via != reporter || bounded_unconfirmed.contains(&target));
+    for peer in bounded_unconfirmed {
+        next_state.bridged.insert(peer, reporter);
+    }
+    prune_bridged(&mut next_state, None, capacity);
     TopologyStep {
-        state: TopologyState {
-            bridged,
-            ..state.clone()
-        },
+        state: next_state,
         actions: Vec::new(),
     }
 }

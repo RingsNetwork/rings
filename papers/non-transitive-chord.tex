@@ -533,14 +533,20 @@ bridge rules while keeping the wire format of $\RouteStage$ unchanged:
 \begin{enumerate}
   \item \textbf{Direct destination links:} If $\Linked_n(T)$, return
   $\operatorname{Some}\bigl((T, \sigma)\bigr)$.
-  \item \textbf{Rule B1 (1-Hop Bridge Target Delegation):} If
+  \item \textbf{Rule B1 (Non-Pinning 1-Hop Bridge Target Forwarding):} If
   $\sigma.\texttt{via} = \operatorname{None}$ and $\texttt{bridged}_n(T) =
   \operatorname{Some}(b)$ with $b \neq n \land \Linked_n(b)$, return
   \begin{equation}
-    \operatorname{Some}\Bigl(\bigl(b,\;
-    (\operatorname{Some}(b), \sigma.\texttt{handed\_off})\bigr)\Bigr).
+    \left\{\begin{aligned}
+      &\operatorname{Some}\bigl((b, \sigma)\bigr), \\
+      &\quad\text{if } \dist(n, b) < \dist(n, T), \\
+      &\operatorname{Some}\bigl((b, \sigma.\operatorname{handed\_off}())\bigr), \\
+      &\quad\text{if } \dist(n, b) > \dist(n, T) \land \neg\sigma.\texttt{handed\_off}.
+    \end{aligned}\right.
     \label{eq:rule-b1}
   \end{equation}
+  Keeping $\sigma.\texttt{via} = \operatorname{None}$ ensures that if $b$ later
+  loses its direct link to $T$, $b$ continues normal delivery toward $T$.
   \item \textbf{Explicit aim resolution:} Let $a = \Aim(\sigma, T)$. If $a \neq T$:
   if $a = n$ return $\operatorname{None}$ (the bridge lost its link to $T$); if
   $\Linked_n(a)$ return $\operatorname{Some}\bigl((a, \sigma)\bigr)$.
@@ -552,9 +558,10 @@ bridge rules while keeping the wire format of $\RouteStage$ unchanged:
     \item On $\operatorname{Handoff}(h)$ when $\neg\sigma.\texttt{handed\_off}$:
     if $\sigma.\texttt{via} = \operatorname{None}$ and there exists
     $(p \mapsto b) \in \texttt{bridged}_n$ such that $b \neq n$, $\Linked_n(b)$,
-    and $\dist(n, p) < \dist(n, h)$ (i.e., $b$ bridges into the local gap
-    $(n, h)$ in which $a$ fell), select $b^* = b$ (minimizing $\dist(n, p)$) and
-    return $\operatorname{Some}\bigl((b^*, (\operatorname{None}, \top))\bigr)$;
+    $\neg\Linked_n(p)$, and $\dist(n, a) \le \dist(n, p) < \dist(n, h)$ (i.e., $b$
+    bridges to a peer $p \in [a, h)$ preceding the normal handoff $h$), select
+    $b^* = b$ (minimizing $\dist(n, p)$) and return
+    $\operatorname{Some}\bigl((b^*, (\operatorname{None}, \top))\bigr)$;
     otherwise return $\operatorname{Some}\bigl((h, (\sigma.\texttt{via}, \top))\bigr)$.
     \item Otherwise return $\operatorname{None}$.
   \end{itemize}
@@ -581,20 +588,19 @@ $\operatorname{delivery\_step}$ satisfies:
 \begin{proof}
 (1) Every branch returning $\operatorname{Some}((p, \cdot))$ checks $\Linked_{n_k}(p)$
 directly.
-(2) Under Rule~B1~\eqref{eq:rule-b1}, $n_{k+1} = b = \Aim(\sigma_{k+1}, T)$, so
-the precondition $n_{k+1} \neq \Aim(\sigma_{k+1}, T)$ is false. Under Rule~B2,
-$\sigma_k.\texttt{handed\_off} = \bot$ and $\sigma_{k+1}.\texttt{handed\_off} =
-\top$, so the crossing guard holds. Under $\operatorname{Forward}(p)$,
-$p \in (n_k, a]$ with $p \neq a \implies \dist(n_k, p) < \dist(n_k, a)$.
-(3) Within each fixed stage $\sigma$, $\dist(n_k, \Aim(\sigma, T))$ strictly
-decreases in $\mathbb{N}$ on every $\operatorname{Forward}$ step, visiting at
-most $|V|-1$ nodes. The boolean $\texttt{handed\_off}$ transitions $\bot \to
-\top$ at most once. Rule~B1 transitions $\texttt{via}$ from $\operatorname{None}$
-to $\operatorname{Some}(b)$ and jumps directly to $n_{k+1} = b$; at $b$, either
-$\Linked_b(T)$ delivers in one final hop ($n_{k+2} = T$) or $a = b = \text{local}$
-terminates immediately with $\operatorname{None}$. Hence Rule~B1 cannot
-introduce any cycle and adds at most one intermediate node $b$ (which was not the
-destination). Thus the route visits at most $2|V|$ hops.
+(2) Under Rule~B1~\eqref{eq:rule-b1}, either $\dist(n_k, b) < \dist(n_k, T)$ with
+$\sigma_{k+1} = \sigma_k$, or $\sigma_k.\texttt{handed\_off} = \bot$ and
+$\sigma_{k+1}.\texttt{handed\_off} = \top$ (satisfying the crossing guard). Under
+Rule~B2, $\sigma_k.\texttt{handed\_off} = \bot$ and
+$\sigma_{k+1}.\texttt{handed\_off} = \top$, so the crossing guard holds. Under
+$\operatorname{Forward}(p)$, $p \in (n_k, a]$ with $p \neq a \implies
+\dist(n_k, p) < \dist(n_k, a)$.
+(3) Within each fixed stage $\sigma$, every non-crossing hop (including the first
+branch of Rule~B1 and $\operatorname{Forward}(p)$) satisfies
+$\dist(n_k, n_{k+1}) < \dist(n_k, \Aim(\sigma, T))$, so $\dist(n_k, \Aim(\sigma, T))$
+strictly decreases in $\mathbb{N}$ and visits at most $|V|-1$ nodes per stage.
+The boolean $\texttt{handed\_off}$ transitions $\bot \to \top$ at most once.
+Thus no state $(n_k, \sigma_k)$ repeats and the route visits at most $2|V|$ hops.
 (4) Clause~1 checks $\Linked_{n_k}(T)$ before any other rule, so no node linked
 to $T$ can fail to deliver to $T$.
 \end{proof}
@@ -619,9 +625,9 @@ Lemma~\ref{lem:articulation-retention}, $\Referenced(S_C) = (V_1 \cup V_2)
 $C$'s \texttt{TopoInfo} (via stabilization if $\Head(u) = C$, or via successor
 sync since $C \in \texttt{succ}_u$ when $|V_i \setminus \{C\}| \le K$),
 $\texttt{bridged}_u(v) = \operatorname{Some}(C)$. Since $\{u, C\} \in L$ and
-$\{C, v\} \in L$, Rule~B1 at $u$ forwards to $C$ with stage
-$(\operatorname{Some}(C), \bot)$, and Clause~1 at $C$ delivers to $v$, yielding
-the 2-hop path $u \to C \to v$. Even before a non-head node $u \in V_i$
+$\{C, v\} \in L$, Rule~B1 at $u$ forwards to $C$ (preserving
+$\texttt{via} = \operatorname{None}$), and Clause~1 at $C$ delivers to $v$,
+yielding the 2-hop path $u \to C \to v$. Even before a non-head node $u \in V_i$
 completes successor sync with $C$, one greedy or handoff hop inside $V_i$
 reaches the sub-clique predecessor $p_i = \Pred_{V_i}(C)$ whose head is $C$;
 $p_i$ holds $\texttt{bridged}_{p_i}(v) = \operatorname{Some}(C)$ from

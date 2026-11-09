@@ -68,6 +68,7 @@ pub(crate) use finger::retire_candidate as retire_finger_candidate;
 pub use stabilization::can_rectify_predecessor;
 pub use stabilization::leave_targets;
 use stabilization::local_successor_range_end;
+use stabilization::prune_bridged;
 pub use stabilization::rectify_predecessor;
 pub use stabilization::rectify_predecessor_in;
 pub use stabilization::rectify_predecessors_in;
@@ -878,14 +879,7 @@ fn step_admit(
         finger_convergence,
         ..verified
     };
-    let mut bridged = next_state.bridged.clone();
-    bridged.retain(|&target, &mut via| {
-        target != next_state.local
-            && target != peer
-            && !next_state.references(target)
-            && next_state.references(via)
-    });
-    next_state.bridged = bridged;
+    prune_bridged(&mut next_state, Some(peer), capacity);
     TopologyStep {
         state: next_state,
         actions,
@@ -947,15 +941,7 @@ fn step_remove(
         finger_convergence,
         ..state.clone()
     };
-    let mut bridged = state.bridged.clone();
-    bridged.retain(|&target, &mut via| {
-        target != peer
-            && via != peer
-            && target != next_state.local
-            && !next_state.references(target)
-            && next_state.references(via)
-    });
-    next_state.bridged = bridged;
+    prune_bridged(&mut next_state, Some(peer), capacity);
     TopologyStep {
         state: next_state,
         actions: Vec::new(),
@@ -1012,13 +998,7 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
                 predecessors,
                 ..state.clone()
             };
-            let mut bridged = state.bridged.clone();
-            bridged.retain(|&target, &mut via| {
-                target != next_state.local
-                    && !next_state.references(target)
-                    && next_state.references(via)
-            });
-            next_state.bridged = bridged;
+            prune_bridged(&mut next_state, None, capacity);
             TopologyStep {
                 state: next_state,
                 actions: Vec::new(),
@@ -1027,7 +1007,7 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
         TopologyEvent::RecordBridgedPeers {
             reporter,
             unconfirmed,
-        } => step_record_bridged_peers(state, reporter, &unconfirmed),
+        } => step_record_bridged_peers(state, reporter, &unconfirmed, capacity),
         TopologyEvent::BeginStabilize { request_id } => step_begin(state, request_id),
         TopologyEvent::ClaimStabilize {
             reporter,

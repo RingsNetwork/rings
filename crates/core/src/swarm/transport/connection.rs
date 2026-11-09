@@ -475,7 +475,8 @@ impl SwarmTransport {
             let confirmed = reported.confirmed_by(|peer| {
                 peer == self.dht.did || self.is_routable_active_candidate(peer, &active)
             });
-            let unconfirmed = reported.unconfirmed_peers(self.dht.did, |peer| {
+            let capacity = self.dht.successors().capacity();
+            let unconfirmed = reported.unconfirmed_peers(self.dht.did, capacity, |peer| {
                 self.is_routable_active_candidate(peer, &active)
             });
             observe_confirmation();
@@ -499,7 +500,8 @@ impl SwarmTransport {
             if !self.is_routable_active_candidate(reporter, &active) {
                 return Ok(());
             }
-            let unconfirmed = reported.unconfirmed_peers(self.dht.did, |peer| {
+            let capacity = self.dht.successors().capacity();
+            let unconfirmed = reported.unconfirmed_peers(self.dht.did, capacity, |peer| {
                 self.is_routable_active_candidate(peer, &active)
             });
             self.dht.record_bridged_peers(reporter, unconfirmed)
