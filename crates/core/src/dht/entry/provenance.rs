@@ -59,7 +59,7 @@ enum DataProvenance<'a> {
     /// Full-carrier reset (`Overwrite`) authored by `writer`.
     Reset { entry: &'a Entry, writer: Did },
     /// Element-set append (`Extend`) authored by `writer`.
-    Append,
+    Append { entry: &'a Entry, writer: Did },
     /// Element retraction (`Tombstone`) authored by `writer` under `witness`.
     Retract {
         witness: RetractionWitness<'a>,
@@ -82,7 +82,7 @@ impl<'a> DataProvenance<'a> {
                     .ok_or(Error::DataEntryWriteUnauthorized),
                 EntryOperation::Extend(entry) => entry
                     .has_delta_envelope()
-                    .then_some(Self::Append)
+                    .then_some(Self::Append { entry, writer })
                     .ok_or(Error::DataEntryWriteUnauthorized),
                 EntryOperation::Tombstone(entry) => entry
                     .has_delta_envelope()
@@ -98,7 +98,7 @@ impl<'a> DataProvenance<'a> {
     fn for_local(op: &'a EntryOperation, writer: Did) -> Self {
         match op {
             EntryOperation::Overwrite(entry) => Self::Reset { entry, writer },
-            EntryOperation::Extend(_) => Self::Append,
+            EntryOperation::Extend(entry) => Self::Append { entry, writer },
             EntryOperation::Tombstone(entry) => Self::Retract {
                 witness: RetractionWitness::of(entry),
                 writer,
@@ -110,7 +110,7 @@ impl<'a> DataProvenance<'a> {
     fn verify_on_live(&self, live: &Entry) -> Result<()> {
         match self {
             Self::Reset { entry, writer } => live.permits_reset_by(entry, *writer),
-            Self::Append => Ok(()),
+            Self::Append { entry, writer } => live.permits_append_by(entry, *writer),
             Self::Retract { witness, writer } => live.permits_retraction_by(witness, *writer),
         }
     }
@@ -209,15 +209,37 @@ impl Entry {
             .ok_or(Error::DataEntryWriteUnauthorized)
     }
 
+    /// Verify that `incoming` does not overwrite any live element in `self` authored by a peer
+    /// other than `writer`.
+    fn permits_append_by(&self, incoming: &Self, writer: Did) -> Result<()> {
+        self.topic_buffer().and_then(|buffer| {
+            incoming
+                .data
+                .iter()
+                .all(|value| {
+                    buffer
+                        .dots_for(value)
+                        .all(|held_dot| held_dot.version.is_authored_by(writer))
+                })
+                .then_some(())
+                .ok_or(Error::DataEntryWriteUnauthorized)
+        })
+    }
+
     /// Verify that `witness` retracts no element of this live carrier authored by a peer other
     /// than `writer`.
     fn permits_retraction_by(&self, witness: &RetractionWitness<'_>, writer: Did) -> Result<()> {
         self.topic_buffer().and_then(|buffer| {
             buffer
                 .values
-                .into_iter()
-                .all(|(value, held_dot)| {
-                    !witness.matches(&value, &held_dot) || held_dot.version.is_authored_by(writer)
+                .keys()
+                .all(|value| {
+                    !buffer
+                        .dots_for(value)
+                        .any(|held_dot| witness.matches(value, &held_dot))
+                        || buffer
+                            .dots_for(value)
+                            .all(|held_dot| held_dot.version.is_authored_by(writer))
                 })
                 .then_some(())
                 .ok_or(Error::DataEntryWriteUnauthorized)
@@ -228,9 +250,10 @@ impl Entry {
     /// the storage slot (#1179).
     ///
     /// Rejects:
-    /// - A synced reset floor `register` with empty `data`, or whose versions span another writer,
-    ///   or that would overwrite a live carrier holding versions from another writer (`actor !=
-    ///   floor.actor`).
+    /// - A synced reset floor `register` with no elements, removes, or removal-only floor, or
+    ///   with versions below `floor`, or whose versions at or below `floor` span another writer,
+    ///   or that would overwrite a live carrier holding versions at or below `floor` from another
+    ///   writer (`actor != floor.actor`).
     /// - A synced remove covering a live element in `local` authored by a different writer
     ///   (`held_dot.version.actor != remove_dot.version.actor`).
     pub(crate) fn validate_data_sync_on_local(&self, local: Option<&Self>) -> Result<()> {
@@ -239,15 +262,33 @@ impl Entry {
         })
     }
 
-    /// Verify that any reset floor on `self` is self-consistent and compatible with `local`.
+    /// Whether `self` carries at least one element, remove, or removal-only floor.
+    fn has_synced_register_witness(&self) -> bool {
+        !self.data.is_empty() || !self.crdt.tombstones.is_empty() || self.expires_at_ms == Some(0)
+    }
+
+    /// Whether every version in `self` at or below `floor` was authored by `floor.actor`.
+    fn versions_through_floor_authored_by(&self, floor: EntryVersion) -> bool {
+        self.versions()
+            .filter(|&version| version <= floor)
+            .all(|version| version.is_authored_by(floor.actor))
+    }
+
+    /// Verify that any reset floor on `self` or `local` is self-consistent and compatible across
+    /// the two carriers.
     fn permits_synced_register_on(&self, local: Option<&Self>) -> Result<()> {
-        self.crdt.register.map_or(Ok(()), |floor| {
-            (!self.data.is_empty()
-                && self.is_exclusively_authored_by(floor.actor)
-                && local.is_none_or(|live| live.is_exclusively_authored_by(floor.actor)))
+        let valid_self = self.crdt.register.is_none_or(|floor| {
+            self.has_synced_register_witness()
+                && self.versions().all(|version| version >= floor)
+                && self.versions_through_floor_authored_by(floor)
+                && local.is_none_or(|live| live.versions_through_floor_authored_by(floor))
+        });
+        let valid_local = local
+            .and_then(|live| live.crdt.register)
+            .is_none_or(|live_floor| self.versions_through_floor_authored_by(live_floor));
+        (valid_self && valid_local)
             .then_some(())
             .ok_or(Error::DataEntryWriteUnauthorized)
-        })
     }
 
     /// Verify that no tombstone on `self` covers a live element in `live` authored by a different
@@ -294,43 +335,77 @@ impl Entry {
             .collect()
     }
 
-    /// Iterate over `(value, dot)` pairs in `self` whose dot carries a non-default author.
+    /// Iterate over `(value, dot)` pairs in `self` (both primary and co-author dots) whose dot
+    /// carries a non-default author.
     fn attributed_elements(&self) -> impl Iterator<Item = (&Bytes, EntryDot)> + '_ {
         self.data
             .iter()
             .zip(self.crdt.dots.iter().copied())
+            .chain(self.crdt.co_dots.iter().filter_map(|&(index, dot)| {
+                self.data.get(index as usize).map(|value| (value, dot))
+            }))
             .filter(|(_, dot)| dot.is_attributed())
     }
 
-    /// Resolve the author of element `index` in `self`, falling back to `fallback_actor` when the
-    /// element's dot is absent or unattributed.
-    fn element_actor_or(&self, index: usize, fallback_actor: Did) -> Did {
-        self.crdt
+    /// Resolve the authors of element `index` in `self`, falling back to `fallback_actor` when
+    /// the element's dot is absent or unattributed.
+    fn element_actors_at<'a>(
+        &'a self,
+        index: usize,
+        fallback_actor: Did,
+    ) -> impl Iterator<Item = Did> + 'a {
+        let primary = self
+            .crdt
             .dots
             .get(index)
             .map(|dot| dot.version.actor)
             .filter(|actor| !actor.is_default())
-            .unwrap_or(fallback_actor)
+            .unwrap_or(fallback_actor);
+        let co_actors = self
+            .crdt
+            .co_dots
+            .iter()
+            .filter(move |&&(co_index, _)| co_index as usize == index)
+            .map(|(_, dot)| dot.version.actor)
+            .filter(|actor| !actor.is_default());
+        (!primary.is_default())
+            .then_some(primary)
+            .into_iter()
+            .chain(co_actors)
     }
 
-    /// Map each attributed element digest in `self` to its resolved author.
-    fn element_actors_by_digest(&self, fallback_actor: Did) -> BTreeMap<ElementDigest, Did> {
-        self.data
-            .iter()
-            .enumerate()
-            .filter_map(|(index, value)| {
-                let actor = self.element_actor_or(index, fallback_actor);
-                (!actor.is_default()).then(|| (ElementDigest::of(value), actor))
-            })
-            .collect()
+    /// Map each attributed element digest in `self` to `Some(actor)` when exclusively authored by
+    /// `actor`, or `None` when co-authored by multiple distinct writers.
+    fn element_actors_by_digest(
+        &self,
+        fallback_actor: Did,
+    ) -> BTreeMap<ElementDigest, Option<Did>> {
+        let mut by_digest = BTreeMap::<ElementDigest, Option<Did>>::new();
+        for (index, value) in self.data.iter().enumerate() {
+            let mut actors = self.element_actors_at(index, fallback_actor).peekable();
+            if actors.peek().is_some() {
+                let digest = ElementDigest::of(value);
+                for actor in actors {
+                    by_digest
+                        .entry(digest)
+                        .and_modify(|current| {
+                            if *current != Some(actor) {
+                                *current = None;
+                            }
+                        })
+                        .or_insert(Some(actor));
+                }
+            }
+        }
+        by_digest
     }
 
     /// Whether every element in `self` is either unattributed or authored by `writer` under
     /// `fallback_actor`.
     fn all_elements_authored_by(&self, writer: Did, fallback_actor: Did) -> bool {
         (0..self.data.len()).all(|index| {
-            let actor = self.element_actor_or(index, fallback_actor);
-            actor.is_default() || actor == writer
+            self.element_actors_at(index, fallback_actor)
+                .all(|actor| actor == writer)
         })
     }
 
@@ -356,11 +431,73 @@ impl Entry {
                 !tombstone.dot.is_attributed()
                     || incoming_actors
                         .get(&tombstone.element)
-                        .is_none_or(|actor| *actor == tombstone.dot.version.actor)
+                        .is_none_or(|actor| *actor == Some(tombstone.dot.version.actor))
             });
         });
         self
     }
+}
+
+/// Materialize normalized data-topic elements under the fair per-writer cap `max_len`,
+/// returning `(data, dots, co_dots)`.
+///
+/// Each `(value, actor)` attribution is ranked independently by [`retain_fair_data_elements`];
+/// surviving attributions for the same `Bytes` payload are then grouped so `data` and `dots`
+/// hold each unique payload once at its greatest surviving dot while `co_dots` preserves any
+/// surviving co-author dots `(element_index, dot)` for future merges and retraction checks.
+pub(super) fn materialize_data_elements(
+    values: BTreeMap<Bytes, EntryDot>,
+    mut co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
+    max_len: usize,
+) -> (Vec<Bytes>, Vec<EntryDot>, Vec<(u32, EntryDot)>) {
+    let mut visible = Vec::with_capacity(values.len());
+    for (value, primary_dot) in values {
+        match co_values.remove(&value) {
+            Some(actors) if !actors.is_empty() => {
+                if !primary_dot.is_attributed() {
+                    visible.push((value.clone(), primary_dot));
+                }
+                visible.extend(actors.into_values().map(|dot| (value.clone(), dot)));
+            }
+            _ => visible.push((value, primary_dot)),
+        }
+    }
+    visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+        left_dot
+            .cmp(right_dot)
+            .then_with(|| left_value.cmp(right_value))
+    });
+    if visible.len() > max_len {
+        visible = retain_fair_data_elements(visible, max_len);
+    }
+    let mut by_value = BTreeMap::<Bytes, Vec<EntryDot>>::new();
+    for (value, dot) in visible {
+        by_value.entry(value).or_default().push(dot);
+    }
+    let mut primary = by_value
+        .into_iter()
+        .filter_map(|(value, mut actor_dots)| {
+            actor_dots
+                .pop()
+                .map(|primary_dot| (value, primary_dot, actor_dots))
+        })
+        .collect::<Vec<_>>();
+    primary.sort_by(|(left_value, left_dot, _), (right_value, right_dot, _)| {
+        left_dot
+            .cmp(right_dot)
+            .then_with(|| left_value.cmp(right_value))
+    });
+    let mut data = Vec::with_capacity(primary.len());
+    let mut dots = Vec::with_capacity(primary.len());
+    let mut co_dots = Vec::new();
+    for (index, (value, primary_dot, extra_dots)) in primary.into_iter().enumerate() {
+        if let Ok(index_u32) = u32::try_from(index) {
+            co_dots.extend(extra_dots.into_iter().map(|dot| (index_u32, dot)));
+        }
+        data.push(value);
+        dots.push(primary_dot);
+    }
+    (data, dots, co_dots)
 }
 
 /// Retain `max_len` elements from `visible` (already sorted ascending by `(dot, value)`),

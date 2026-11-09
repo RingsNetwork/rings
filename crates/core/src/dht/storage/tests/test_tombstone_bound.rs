@@ -90,6 +90,7 @@ fn test_carrier_wire_suprema_are_the_widest_encodings() -> Result<()> {
         crdt: EntryCrdt {
             register: Some(widest_version()),
             dots: vec![widest_dot(); ENTRY_DATA_MAX_LEN],
+            co_dots: Vec::new(),
             tombstones: vec![tombstone; DATA_TOMBSTONE_MAX_LEN],
         },
         expires_at_ms: Some(u128::MAX),

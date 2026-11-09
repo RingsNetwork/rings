@@ -457,7 +457,11 @@ impl Stabilizer {
                 continue;
             };
             let request_id = self.dht.ask_relay_holder(key)?;
-            let query = Message::FindRelayHolder(FindRelayHolder { key, request_id });
+            let query = Message::FindRelayHolder(FindRelayHolder {
+                key,
+                request_id,
+                excluded: Vec::new(),
+            });
             if let Err(error) = self
                 .transport
                 .protocol_egress()

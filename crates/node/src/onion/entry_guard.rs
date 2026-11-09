@@ -32,6 +32,9 @@ const ENTRY_GUARD_ROTATION_LIFETIME_MS: u128 = 30 * 24 * 60 * 60 * 1_000;
 /// Grace window a persisted entry guard may remain absent from live snapshots before eviction
 /// (24 hours).
 const ENTRY_GUARD_UNREACHABLE_GRACE_MS: u128 = 24 * 60 * 60 * 1_000;
+const PACKED_UNREACHABLE_TAG: u128 = 1_u128 << 127;
+const PACKED_LOW_64_MASK: u128 = u64::MAX as u128;
+const PACKED_HIGH_63_MASK: u128 = (1_u128 << 63) - 1;
 
 /// Serialized local entry-guard snapshot.
 ///
@@ -48,12 +51,72 @@ pub struct OnionEntryGuardState {
 pub type OnionEntryGuardStorage =
     Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<OnionEntryGuardState>)>;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct OnionEntryGuardRecord {
+    did: Did,
+    selected_at_ms: u128,
+    unreachable_since_ms: Option<u128>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HumanReadableGuardRecord {
     did: Did,
     selected_at_ms: u128,
     #[serde(default)]
     unreachable_since_ms: Option<u128>,
+}
+
+impl Serialize for OnionEntryGuardRecord {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if serializer.is_human_readable() {
+            HumanReadableGuardRecord {
+                did: self.did,
+                selected_at_ms: self.selected_at_ms,
+                unreachable_since_ms: self.unreachable_since_ms,
+            }
+            .serialize(serializer)
+        } else {
+            let packed = self.unreachable_since_ms.map_or(
+                self.selected_at_ms & !PACKED_UNREACHABLE_TAG,
+                |unreachable_ms| {
+                    PACKED_UNREACHABLE_TAG
+                        | ((unreachable_ms & PACKED_HIGH_63_MASK) << 64)
+                        | (self.selected_at_ms & PACKED_LOW_64_MASK)
+                },
+            );
+            (self.did, packed).serialize(serializer)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OnionEntryGuardRecord {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        if deserializer.is_human_readable() {
+            HumanReadableGuardRecord::deserialize(deserializer).map(|r| Self {
+                did: r.did,
+                selected_at_ms: r.selected_at_ms,
+                unreachable_since_ms: r.unreachable_since_ms,
+            })
+        } else {
+            <(Did, u128)>::deserialize(deserializer).map(|(did, packed)| {
+                let (selected_at_ms, unreachable_since_ms) =
+                    match packed & PACKED_UNREACHABLE_TAG != 0 {
+                        false => (packed, None),
+                        true => (
+                            packed & PACKED_LOW_64_MASK,
+                            Some((packed >> 64) & PACKED_HIGH_63_MASK),
+                        ),
+                    };
+                Self {
+                    did,
+                    selected_at_ms,
+                    unreachable_since_ms,
+                }
+            })
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,10 +233,14 @@ impl OnionEntryGuardRecord {
         now_ms.saturating_sub(self.selected_at_ms) < ENTRY_GUARD_ROTATION_LIFETIME_MS
     }
 
-    fn reconciled_at(&self, now_ms: u128, healthy_snapshot_dids: &BTreeSet<Did>) -> Option<Self> {
+    fn reconciled_at(
+        &self,
+        now_ms: u128,
+        healthy_snapshot_dids: &BTreeSet<Did>,
+        eligible_dids: &BTreeSet<Did>,
+    ) -> Option<Self> {
         self.is_within_rotation_lifetime(now_ms).then(|| {
-            healthy_snapshot_dids
-                .contains(&self.did)
+            (healthy_snapshot_dids.contains(&self.did) || eligible_dids.contains(&self.did))
                 .then_some(Self {
                     did: self.did,
                     selected_at_ms: self.selected_at_ms,
@@ -228,7 +295,7 @@ fn reconcile_guard_state(
         .iter()
         .filter_map(|guard| {
             (!guard_dids.contains(&guard.did))
-                .then(|| guard.reconciled_at(now_ms, healthy_snapshot_dids))
+                .then(|| guard.reconciled_at(now_ms, healthy_snapshot_dids, eligible_dids))
                 .flatten()
                 .inspect(|reconciled| {
                     guard_dids.insert(reconciled.did);
@@ -259,9 +326,7 @@ fn reconcile_guard_state(
 
     let mut active_dids = retained
         .iter()
-        .filter(|guard| {
-            healthy_snapshot_dids.contains(&guard.did) && eligible_dids.contains(&guard.did)
-        })
+        .filter(|guard| eligible_dids.contains(&guard.did))
         .map(|guard| guard.did)
         .collect::<BTreeSet<_>>();
     let needed_active = target_guard_count.saturating_sub(active_dids.len());
@@ -844,6 +909,91 @@ mod tests {
 
         assert_eq!(reselected.dids.len(), 2);
         assert_eq!(reopened, reselected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_legacy_two_field_native_guard_record_migrates_across_storage_reopen() -> Result<()>
+    {
+        #[derive(Deserialize, Serialize)]
+        struct LegacyGuardRecord {
+            did: Did,
+            selected_at_ms: u128,
+        }
+        #[derive(Deserialize, Serialize)]
+        struct LegacyGuardState {
+            network_id: u32,
+            guards: Vec<LegacyGuardRecord>,
+        }
+
+        let root = std::env::temp_dir().join(format!("rings-entry-guards-{}", Uuid::new_v4()));
+        let r0 = relay()?;
+        let r1 = relay()?;
+        let r2 = relay()?;
+        let relays = vec![r0, r1, r2];
+        let t0 = 50_000_u128;
+        {
+            let legacy_store = FileStorage::new_with_cap_path_and_authority(
+                4096,
+                &root,
+                RecordAuthority::DurableCache,
+            )
+            .await?;
+            KvStorageInterface::<LegacyGuardState>::put(
+                &legacy_store,
+                &entry_guard_state_key(7),
+                &LegacyGuardState {
+                    network_id: 7,
+                    guards: vec![
+                        LegacyGuardRecord {
+                            did: r0.did,
+                            selected_at_ms: t0,
+                        },
+                        LegacyGuardRecord {
+                            did: r1.did,
+                            selected_at_ms: t0,
+                        },
+                    ],
+                },
+            )
+            .await
+            .map_err(Error::Storage)?;
+        }
+        let reopened = {
+            let manager =
+                OnionEntryGuards::new_with_target_count(Box::new(durable_cache(&root).await?), 2);
+            let mut entropy = FixedEntropy::new([u64::MAX, u64::MAX]);
+            manager
+                .select_relay_guards_at(7, &relays, &[], t0 + 1_000, &mut entropy, |_| true)
+                .await?
+        };
+        let _ = std::fs::remove_dir_all(root);
+        assert_eq!(reopened.dids, BTreeSet::from([r0.did, r1.did]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_degraded_permitted_first_hop_fallback_preserved_when_unpermitted_relay_is_healthy(
+    ) -> Result<()> {
+        let direct = relay()?;
+        let indirect = relay()?;
+        let relays = vec![direct, indirect];
+        let manager = OnionEntryGuards::new_with_target_count(storage(), 1);
+        let mut entropy = FixedEntropy::new([0]);
+        let selected = manager
+            .select_relay_guards_at(
+                7,
+                &relays,
+                &[
+                    (direct.did, PeerQuality::Degraded),
+                    (indirect.did, PeerQuality::Healthy),
+                ],
+                10_000,
+                &mut entropy,
+                |did| did == direct.did,
+            )
+            .await?;
+        assert_eq!(selected.dids, BTreeSet::from([direct.did]));
         Ok(())
     }
 }

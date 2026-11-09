@@ -275,6 +275,7 @@ impl Entry {
             data: Vec::new(),
             crdt: EntryCrdt {
                 dots: Vec::new(),
+                co_dots: Vec::new(),
                 ..self.crdt
             },
             ..self
@@ -292,6 +293,7 @@ impl Entry {
         let retires_add = |dot: &EntryDot| retention.retires_add(dot, now_ms);
         let retires_remove = |version: &EntryVersion| retention.retires_remove(version, now_ms);
         let crossed = self.crdt.dots.iter().any(retires_add)
+            || self.crdt.co_dots.iter().any(|(_, dot)| retires_add(dot))
             || self
                 .crdt
                 .tombstones
@@ -301,12 +303,34 @@ impl Entry {
         if !crossed {
             return self;
         }
-        let (data, dots) = self
-            .data
+        let mut data = Vec::with_capacity(self.data.len());
+        let mut dots = Vec::with_capacity(self.crdt.dots.len());
+        let mut remapped = Vec::with_capacity(self.crdt.dots.len());
+        for (value, dot) in self.data.into_iter().zip(self.crdt.dots) {
+            if retires_add(&dot) {
+                remapped.push(None);
+            } else {
+                remapped.push(u32::try_from(data.len()).ok());
+                data.push(value);
+                dots.push(dot);
+            }
+        }
+        let co_dots = self
+            .crdt
+            .co_dots
             .into_iter()
-            .zip(self.crdt.dots)
-            .filter(|(_, dot)| !retires_add(dot))
-            .unzip();
+            .filter_map(|(index, dot)| {
+                (!retires_add(&dot))
+                    .then(|| {
+                        remapped
+                            .get(usize::try_from(index).ok()?)
+                            .copied()
+                            .flatten()
+                    })
+                    .flatten()
+                    .map(|new_index| (new_index, dot))
+            })
+            .collect();
         Self {
             data,
             crdt: EntryCrdt {
@@ -315,6 +339,7 @@ impl Entry {
                     .register
                     .filter(|version| !retires_remove(version)),
                 dots,
+                co_dots,
                 tombstones: self
                     .crdt
                     .tombstones

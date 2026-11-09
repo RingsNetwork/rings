@@ -49,7 +49,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// The wire version of this build; see the bump rule.
-pub const WIRE_VERSION: u16 = 2;
+pub const WIRE_VERSION: u16 = 3;
 
 /// The opening of every frame, fixed forever (the frame-header law).
 const FRAME_MAGIC: &[u8] = b"RINGS\0";

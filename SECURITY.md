@@ -42,7 +42,7 @@ circuit-level anonymity.**
 |---|---|
 | Controlled membership | Full support: operators authorize participating keys |
 | Open authenticated membership | Full support: combines slot-based admission, per-origin rate quotas, age-gated custody, and application-level authorization |
-| Adversarial position-grinding resistance | Protected today by slot isolation, peer quality ranking, and pinned entry guards; extended in 2.0 with epoch-randomized ring placement (`pos(did, e) = H(did, beacon(e))`, #780) and DRanking trust algebra (#748) |
+| Adversarial position-grinding resistance | Partial mitigation today: `PeerRing` positions are still deterministically derived from delegator public keys, so an attacker can generate keys to target a ring interval or attempt initial eclipse positioning; slot isolation, peer quality ranking, and pinned entry guards bound the impact of positioned Sybils until epoch-randomized ring placement (`pos(did, e) = H(did, beacon(e))`, #780) and DRanking trust algebra (#748) land in 2.0 |
 
 ## Layer Contracts
 

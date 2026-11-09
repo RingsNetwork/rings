@@ -103,6 +103,9 @@ pub struct FindRelayHolder {
     pub key: Did,
     /// One-shot identity that binds the owner's answer to this query (`Law (Asked)`).
     pub request_id: uuid::Uuid,
+    /// Candidate holders the asker already suspects or knows to hold no relay mail (#1182).
+    #[serde(default)]
+    pub excluded: Vec<Did>,
 }
 
 /// The owner's answer to [`FindRelayHolder`]: the holder its view names for `key`, `None` for a

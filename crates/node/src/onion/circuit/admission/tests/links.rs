@@ -457,7 +457,7 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
             .with_slot_roster(Arc::clone(&roster));
     for attacker in 0..15_u32 {
         let did = 1_000 + attacker;
-        roster.arrive(Did::from(did), &clean_first.floor_use_at(ORIGIN_MS / Q));
+        roster.arrive(Did::from(did), &SlotFloorUse::default());
         open(&mut clean_first, ORIGIN_MS, link(did));
         assert_eq!(
             send(
@@ -472,7 +472,7 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
         clean_first.link_closed(ORIGIN_MS, link(did));
         roster.depart(Did::from(did));
     }
-    roster.arrive(Did::from(50_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
+    roster.arrive(Did::from(50_u32), &SlotFloorUse::default());
     open(&mut clean_first, ORIGIN_MS, link(50));
     assert_eq!(
         clean_first.slot_of(Did::from(50_u32)),
@@ -482,7 +482,7 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
 
     // The next arriving peer (51) takes slot 0 (which already carries `f` units from attacker
     // 1_000) and shares slot 0's `ONION_ADMISSION_SENDER_UNITS` budget with it.
-    roster.arrive(Did::from(51_u32), &clean_first.floor_use_at(ORIGIN_MS / Q));
+    roster.arrive(Did::from(51_u32), &SlotFloorUse::default());
     open(&mut clean_first, ORIGIN_MS, link(51));
     assert_eq!(
         clean_first.slot_of(Did::from(51_u32)),
@@ -507,7 +507,35 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
         send(&mut clean_first, ORIGIN_MS, 51, 1, layer(x, 2_001)),
         Verdict::Unpaid(OnionChargeRejection::SenderBudget)
     );
-    let _ = SlotFloorUse::default();
+
+    // Retained identities expire once their own retirement window elapses, even when a successor
+    // peer on the same slot keeps the slot's aggregate ledger load positive across quanta.
+    assert_eq!(
+        send(&mut clean_first, ORIGIN_MS, 50, 1, layer(x, 2_500)),
+        Verdict::Admitted
+    );
+    clean_first.link_closed(ORIGIN_MS, link(50));
+    roster.depart(Did::from(50_u32));
+    roster.arrive(Did::from(52_u32), &SlotFloorUse::default());
+    open(&mut clean_first, ORIGIN_MS, link(52));
+    assert_eq!(
+        clean_first.slot_of(Did::from(52_u32)),
+        Some(OnionSlotId::new(15))
+    );
+    for step in 1..=5_u128 {
+        let now = ORIGIN_MS + step * Q;
+        let expiry = latest_expiry(now);
+        assert_eq!(
+            send(&mut clean_first, now, 52, 1, layer(expiry, 3_000 + step)),
+            Verdict::Admitted
+        );
+    }
+    assert_eq!(clean_first.slot_of(Did::from(50_u32)), None);
+    assert_eq!(
+        clean_first.slot_of(Did::from(52_u32)),
+        Some(OnionSlotId::new(15))
+    );
+    assert_eq!(sender_load(&clean_first, 52, ORIGIN_MS + 5 * Q), Some(5));
 }
 
 /// Law (#1183): `reconcile` allocates connection slots without depending on `Did` ordering, so an
