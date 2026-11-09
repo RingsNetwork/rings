@@ -63,10 +63,11 @@ impl RelayHolderHints {
         self.named.retain(|key, _| unplaced.contains(key));
     }
 
-    /// Record `request_id` as the live correlation token for `key` (`Law (Asked)`).
+    /// Record `request_id` as the live correlation token for `key` (`Law (Asked)`), keeping an
+    /// existing token while a query for `key` is already outstanding so a resend does not
+    /// invalidate an in-flight multi-hop answer.
     fn ask(&mut self, key: Did, request_id: uuid::Uuid) -> uuid::Uuid {
-        self.asked.insert(key, request_id);
-        request_id
+        *self.asked.entry(key).or_insert(request_id)
     }
 
     /// Consume `(key, request_id)` once (`Law (Asked)`) and update the named holder for `key`,
@@ -345,6 +346,40 @@ impl PeerRing {
         self.ask_relay_holder_with_id(key, crate::utils::new_uuid())
     }
 
+    /// The peers this node knows not to chain through (#1070, #1182): peers that declared
+    /// `HoldsNone` or are currently suspected.
+    pub(crate) fn relay_excluded_holders(&self) -> Result<Vec<Did>> {
+        let neighborhood = self.lock_relay_neighborhood()?;
+        let mut excluded = neighborhood.storage_less_peers();
+        excluded.extend(neighborhood.suspects());
+        excluded.sort_unstable();
+        excluded.dedup();
+        Ok(excluded)
+    }
+
+    /// The `(holder, horizon)` this node answers as the owner of `key` when `excluded` holders
+    /// are skipped (`Law (Owner places)`, #1182).
+    pub(crate) fn answer_relay_holder_query(
+        &self,
+        key: Did,
+        excluded: &[Did],
+    ) -> Result<(Option<Did>, Option<Did>)> {
+        let segment = self.relay_segment()?;
+        let holder =
+            crate::dht::relay_holder::owner_answer_excluding(&segment, self.did, key, excluded);
+        let horizon = match holder {
+            Some(_) => None,
+            None => self.with_topology_state(|state| {
+                state
+                    .successors
+                    .last()
+                    .copied()
+                    .or_else(|| excluded.contains(&self.did).then_some(self.did))
+            })?,
+        };
+        Ok((holder, horizon))
+    }
+
     /// Whether `origin`'s answer `(holder, horizon)` for `key` is consistent with `origin`
     /// owning `key` (`owner_answer`, `Law (Owner places)`): an owner answers itself
     /// (`holder == Some(origin)`), or names the first holder at or after `key` in its segment
@@ -360,7 +395,7 @@ impl PeerRing {
         origin != self.did
             && match (holder, horizon) {
                 (Some(holder), None) => holder == origin || in_arc(origin, key, holder),
-                (None, Some(horizon)) => in_arc(origin, key, horizon),
+                (None, Some(horizon)) => horizon == origin || in_arc(origin, key, horizon),
                 (None, None) => origin != key,
                 (Some(_), Some(_)) => false,
             }

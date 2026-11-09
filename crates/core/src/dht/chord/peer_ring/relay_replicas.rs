@@ -453,13 +453,14 @@ impl PeerRing {
         self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, horizon| {
             let named = self.verified_chain_holder(holder)?;
             let next_query = holder
-                .filter(|&skipped| skipped != self.did && skipped != key)
-                .map(|skipped| (skipped, next_request_id))
-                .or_else(|| {
-                    horizon
-                        .filter(|&horizon| horizon != self.did)
-                        .map(|horizon| (horizon + Did::from(1u32), next_request_id))
-                });
+                .or(horizon)
+                .filter(|&stepped| stepped != self.did)
+                .map(|stepped| stepped + Did::from(1u32))
+                .filter(|&next_key| {
+                    next_key != self.did
+                        && crate::dht::relay_holder::in_arc(key, next_key, self.did)
+                })
+                .map(|next_key| (next_key, next_request_id));
             Ok(self
                 .lock_relay_next_holder()?
                 .take_answer(key, request_id, named, next_query))

@@ -131,7 +131,12 @@ pub(crate) async fn ask_owner(
     let PeerRingAction::RemoteAction(next, _) = transport.dht.find_successor(key)? else {
         return Ok(());
     };
-    let query = Message::FindRelayHolder(FindRelayHolder { key, request_id });
+    let excluded = transport.dht.relay_excluded_holders()?;
+    let query = Message::FindRelayHolder(FindRelayHolder {
+        key,
+        request_id,
+        excluded,
+    });
     if let Err(error) = transport.protocol_egress().send_message(query, next).await {
         tracing::debug!(
             local = %transport.dht.did,

@@ -168,13 +168,14 @@ async fn live_entry(
     }
 }
 
-/// The counts a projection can change: elements, element dots, removes, and whether a register
-/// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
-/// projection with the same shape is the same value.
-fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
+/// The counts a projection can change: elements, element dots, co-dots, removes, and whether a
+/// register is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops,
+/// so a projection with the same shape is the same value.
+fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, bool) {
     (
         entry.data.len(),
         entry.crdt.dots.len(),
+        entry.crdt.co_dots.len(),
         entry.crdt.tombstones.len(),
         entry.crdt.register.is_some(),
     )

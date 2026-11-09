@@ -224,6 +224,7 @@ sample_message_body!(EntryStoreReport, |fixture| EntryStoreReport {
 sample_message_body!(FindRelayHolder, |fixture| FindRelayHolder {
     key: fixture.did,
     request_id: uuid::Uuid::nil(),
+    excluded: Vec::new(),
 });
 sample_message_body!(RelayHolderFound, |fixture| RelayHolderFound {
     key: fixture.did,

@@ -241,6 +241,7 @@ fn data_actor_value_range(
         crdt: EntryCrdt {
             register: None,
             dots,
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -259,6 +260,7 @@ fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) ->
         crdt: EntryCrdt {
             register: Some(version),
             dots: vec![storage_dot(version, 0)],
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -273,6 +275,7 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: vec![dot],
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -288,6 +291,7 @@ fn relay_remove_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: Vec::new(),
+            co_dots: Vec::new(),
             tombstones: vec![EntryTombstone::of(&storage_element(label), dot)],
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -320,7 +324,14 @@ fn storage_delta_entry(carrier: StorageJoinCarrier, bit: u8) -> Entry {
                 2_000,
                 ENTRY_DATA_MAX_LEN,
             ),
-            0b010 => data_actor_value_range(storage_model_did(4), 2, "honest-a2", 100, 2),
+            0b010 => {
+                let mut entry =
+                    data_actor_value_range(storage_model_did(4), 2, "honest-a2", 100, 2);
+                if let Some(first) = entry.data.first_mut() {
+                    *first = storage_element("flood-a1-0");
+                }
+                entry
+            }
             0b100 => data_actor_value_range(storage_model_did(4), 3, "honest-a3", 500, 2),
             _ => panic!("storage model delta bit must be singleton"),
         },

@@ -175,6 +175,7 @@ impl RemovalRecord {
             crdt: EntryCrdt {
                 register: self.register.map(|register| register.version),
                 dots: Vec::new(),
+                co_dots: Vec::new(),
                 tombstones: self.removes.iter().map(|remove| remove.tombstone).collect(),
             },
             expires_at_ms: Some(0),
@@ -200,6 +201,7 @@ fn element_side(value: &Entry) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: value.crdt.dots.clone(),
+            co_dots: value.crdt.co_dots.clone(),
             tombstones: Vec::new(),
         },
         ..value.clone()
@@ -223,6 +225,7 @@ fn glue(elements: Option<Entry>, removals: Option<&RemovalRecord>) -> Result<Opt
         crdt: EntryCrdt {
             register: remove_side.crdt.register,
             dots: elements.crdt.dots,
+            co_dots: elements.crdt.co_dots,
             tombstones: remove_side.crdt.tombstones,
         },
         expires_at_ms: elements.expires_at_ms.max(remove_side.expires_at_ms),
@@ -405,7 +408,10 @@ impl CarrierStore<'_> {
             };
             let whole = !held.crdt.tombstones.is_empty() || held.crdt.register.is_some();
             let normalized = held.join(record.as_entry())?;
-            if whole || normalized.data.len() != held.data.len() {
+            if whole
+                || normalized.data.len() != held.data.len()
+                || normalized.crdt.co_dots.len() != held.crdt.co_dots.len()
+            {
                 elements.put(&key, &element_side(&normalized)).await?;
             }
         }

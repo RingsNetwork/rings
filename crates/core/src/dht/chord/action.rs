@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// Describes either a completed peer-ring operation or work to continue remotely.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PeerRingAction {
     /// No result, the whole manipulation is done internally.

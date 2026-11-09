@@ -85,8 +85,8 @@ use crate::simulation::SimulationRuntimeGuard;
 /// the rule of `frame` (once per release, relative to the last released version), then set
 /// this pair to the new version and the hash the failure reports, in the same commit.
 const PINNED: (u16, &str) = (
-    2,
-    "b7bc64fdbe1d1c48de7f272dac17912a2b8d2e2d9ac40ec56990b16849159827",
+    3,
+    "76d73ef209c98c0787df0dc52dfedc2119931ff85212d444a201bcdcc5cb8bed",
 );
 
 /// The overlay every golden is signed in.
@@ -399,7 +399,7 @@ fn rust_sources(crates: &Path) -> Result<Vec<PathBuf>> {
             for entry in std::fs::read_dir(&path).map_err(io)? {
                 pending.push(entry.map_err(io)?.path());
             }
-        } else if path.extension().is_some_and(|extension| extension == "rs") {
+        } else if path.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
             sources.push(path);
         }
     }

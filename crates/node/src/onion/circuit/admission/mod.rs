@@ -178,7 +178,9 @@ use rings_core::message::SlotRoster;
 
 pub(crate) use self::bloom::OnionReplayFilterKey;
 use self::bloom::ReplayStore;
+pub(crate) use self::ledger::OnionSlotId;
 use self::ledger::QuantumLedger;
+use self::ledger::SlotLedger;
 use super::OnionExpiry;
 use super::OnionReplayNonce;
 use super::ONION_ADMISSION_WINDOW_MS;
@@ -245,22 +247,6 @@ pub(crate) struct OnionAdmissionCharge {
     arrival_ms: u128,
     /// The epoch of the state that charged the cell.
     epoch: OnionProcessEpoch,
-}
-
-/// Identifier of one connection slot `0..2·R` in [`OnionAdmissionState`].
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct OnionSlotId(usize);
-
-impl OnionSlotId {
-    /// Wrap a zero-based slot index.
-    pub(crate) const fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    /// The zero-based slot index.
-    pub(crate) const fn index(self) -> usize {
-        self.0
-    }
 }
 
 /// One generation of an authenticated link from a sender DID, as the data plane numbers core's
@@ -349,70 +335,6 @@ impl OnionRefusedLinks {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionEpochNotFresh;
 
-/// One connection slot's unit ledger, the live link generations currently occupying it, and any
-/// disconnected DIDs still bound to this slot while its window load drains.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct SlotLedger {
-    /// Units charged to this connection slot in the window.
-    ledger: QuantumLedger,
-    /// The live link generations of each DID currently occupying this slot.
-    live: BTreeMap<Did, BTreeSet<u64>>,
-    /// Disconnected DIDs whose prior charges remain in `ledger` until the slot drains.
-    retained: BTreeSet<Did>,
-}
-
-impl SlotLedger {
-    /// Whether no live link currently occupies this slot.
-    fn is_free(&self) -> bool {
-        self.live.is_empty()
-    }
-
-    /// Whether the slot ledger may be released at `quantum`: it has no live link and no load.
-    fn is_releasable_at(&self, quantum: u128) -> bool {
-        self.live.is_empty() && self.ledger.load(quantum) == 0
-    }
-
-    /// Whether `did` holds `generation` as a live link on this slot.
-    fn contains_live(&self, did: Did, generation: u64) -> bool {
-        self.live
-            .get(&did)
-            .is_some_and(|generations| generations.contains(&generation))
-    }
-
-    /// The number of live link generations on this slot.
-    fn live_link_count(&self) -> usize {
-        self.live.values().map(BTreeSet::len).sum()
-    }
-
-    /// Remove `generation` from `did`'s live set on this slot, returning `Some(true)` when
-    /// `did`'s last live generation on this slot was removed, `Some(false)` when `did` still
-    /// holds another live generation, or `None` when `(did, generation)` was not live.
-    fn remove_live_generation(&mut self, did: Did, generation: u64) -> Option<bool> {
-        let (removed, empty) = {
-            let generations = self.live.get_mut(&did)?;
-            (generations.remove(&generation), generations.is_empty())
-        };
-        removed.then(|| {
-            if empty {
-                self.live.remove(&did);
-            }
-            empty
-        })
-    }
-
-    /// Take the retained DIDs that have finished draining at `quantum` and are not currently
-    /// live on this slot.
-    fn take_drained_retained(&mut self, quantum: u128) -> impl Iterator<Item = Did> + '_ {
-        let drained = match self.ledger.load(quantum) == 0 {
-            true => std::mem::take(&mut self.retained),
-            false => BTreeSet::new(),
-        };
-        drained
-            .into_iter()
-            .filter(|did| !self.live.contains_key(did))
-    }
-}
-
 /// The admission state `S` of one hop for one process lifetime.
 pub(crate) struct OnionAdmissionState {
     /// This process's epoch `epoch_i`.
@@ -475,6 +397,8 @@ impl OnionAdmissionState {
 
     /// Attach a shared [`SlotRoster`] (such as `PeerRing::edges()`) to this admission state.
     pub(crate) fn with_slot_roster(mut self, slot_roster: Arc<SlotRoster>) -> Self {
+        let quantum = self.clock_ms / ONION_EXPIRY_QUANTUM_MS;
+        slot_roster.set_extra_floor_use(self.floor_use_at(quantum));
         self.slot_roster = slot_roster;
         self.owns_slot_roster = false;
         self
@@ -533,11 +457,13 @@ impl OnionAdmissionState {
                             slots.insert(slot_id, SlotLedger {
                                 ledger: QuantumLedger::default(),
                                 live: slot.live,
-                                retained: BTreeSet::new(),
+                                retained: BTreeMap::new(),
                             });
                             (slots, peer_slots)
                         },
                     );
+                self.slot_roster
+                    .set_extra_floor_use(SlotFloorUse::default());
                 *self = Self {
                     epoch,
                     clock_ms: 0,
@@ -660,7 +586,7 @@ impl OnionAdmissionState {
             match (has_load, slot_empty) {
                 (true, _) => {
                     if let Some(slot) = self.slots.get_mut(&slot_id) {
-                        slot.retained.insert(did);
+                        slot.retained.insert(did, quantum);
                     }
                 }
                 (false, false) => {
@@ -669,12 +595,14 @@ impl OnionAdmissionState {
                 (false, true) => {
                     self.peer_slots.remove(&did);
                     if let Some(removed) = self.slots.remove(&slot_id) {
-                        removed.retained.into_iter().for_each(|retained_did| {
+                        removed.retained.into_keys().for_each(|retained_did| {
                             self.peer_slots.remove(&retained_did);
                         });
                     }
                 }
             }
+            self.slot_roster
+                .set_extra_floor_use(self.floor_use_at(quantum));
         }
     }
 
@@ -775,6 +703,8 @@ impl OnionAdmissionState {
         slot.ledger = charged_slot;
         self.global = charged_global;
         self.pool_load = next_pool_load;
+        self.slot_roster
+            .set_extra_floor_use(self.floor_use_at(quantum));
         Ok(OnionAdmissionCharge {
             arrival_ms: self.clock_ms,
             epoch: self.epoch,
@@ -885,14 +815,34 @@ impl OnionAdmissionState {
         did: Did,
         quantum: u128,
     ) -> Result<OnionSlotId, OnionLinkTableFull> {
+        let floor_use = self.floor_use_at(quantum);
         self.resume_existing_slot(did, quantum)
-            .or_else(|| self.roster_slot_of(did))
             .or_else(|| {
-                let floor_use = self.floor_use_at(quantum);
+                self.roster_slot_of(did).filter(|slot_id| {
+                    self.slots.get(slot_id).is_none_or(SlotLedger::is_free)
+                        && self.is_cleanest_free_roster_slot(*slot_id, &floor_use)
+                })
+            })
+            .or_else(|| {
                 self.acquire_roster_slot(did, &floor_use)
                     .or_else(|| self.cleanest_free_slot(&floor_use))
             })
             .ok_or(OnionLinkTableFull)
+    }
+
+    fn is_cleanest_free_roster_slot(
+        &self,
+        assigned: OnionSlotId,
+        floor_use: &SlotFloorUse,
+    ) -> bool {
+        let assigned_use = u16::try_from(assigned.index())
+            .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+        assigned_use == FloorUse::CLEAN
+            || self.cleanest_free_slot(floor_use).is_none_or(|cleanest| {
+                let cleanest_use = u16::try_from(cleanest.index())
+                    .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+                assigned_use <= cleanest_use
+            })
     }
 
     /// The floor use `min(load(κ), f) / f` of every charged slot at `quantum` (paper, Def. 1).
@@ -978,6 +928,8 @@ impl OnionAdmissionState {
                 .map(|slot| slot.ledger.load(quantum).saturating_sub(self.floor_units))
                 .fold(0_u32, u32::saturating_add);
             self.swept_quantum = quantum;
+            self.slot_roster
+                .set_extra_floor_use(self.floor_use_at(quantum));
         }
         quantum
     }

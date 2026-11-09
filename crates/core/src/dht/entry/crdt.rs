@@ -198,7 +198,9 @@ impl EntryTombstone {
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
-/// remove side: one covering remove per removed payload.
+/// remove side: one covering remove per removed payload. `co_dots` preserves
+/// surviving per-actor add witnesses `(element_index, dot)` when multiple
+/// attributed writers concurrently publish the same payload bytes.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryCrdt {
     /// Optional LWW reset floor for the entry payload.
@@ -208,6 +210,10 @@ pub struct EntryCrdt {
     pub dots: Vec<EntryDot>,
     /// Covering removes, at most one per payload digest.
     pub tombstones: Vec<EntryTombstone>,
+    /// Additional per-actor add dots `(element_index, dot)` for elements concurrently held by
+    /// multiple attributed writers.
+    #[serde(default)]
+    pub co_dots: Vec<(u32, EntryDot)>,
 }
 
 impl EntryCrdt {
@@ -216,6 +222,7 @@ impl EntryCrdt {
             || self
                 .dots
                 .iter()
+                .chain(self.co_dots.iter().map(|(_, dot)| dot))
                 .any(|dot| !dot.version.actor.is_default() || !dot.version.operation.is_default())
     }
 
@@ -232,6 +239,8 @@ pub struct DataTopicBuffer {
     pub(super) register: Option<EntryVersion>,
     /// Every element held and not covered by a remove, with the greatest dot that added it.
     pub(super) values: BTreeMap<Bytes, EntryDot>,
+    /// Per-actor add dots for each held element, keyed by attributed writer DID.
+    pub(super) co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
     /// Every remove, by the digest of its element, with the greatest add dot it covers.
     pub(super) removes: BTreeMap<ElementDigest, EntryDot>,
 }
@@ -245,41 +254,102 @@ pub(super) fn insert_max<K: Ord>(map: &mut BTreeMap<K, EntryDot>, key: K, dot: E
 }
 
 impl DataTopicBuffer {
+    /// Record `(value, dot)` into `values` and, when attributed, into `co_values`.
+    pub(super) fn insert_value(
+        values: &mut BTreeMap<Bytes, EntryDot>,
+        co_values: &mut BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
+        value: Bytes,
+        dot: EntryDot,
+    ) {
+        if !dot.version.actor.is_default() {
+            insert_max(
+                co_values.entry(value.clone()).or_default(),
+                dot.version.actor,
+                dot,
+            );
+        }
+        insert_max(values, value, dot);
+    }
+
     /// Normalize a carrier: drop what the reset floor or a covering remove shadows.
     ///
     /// Post: every kept value and remove has a dot at or after `register`, and no kept value is
     /// covered by a kept remove.
+    #[allow(dead_code)]
     pub(super) fn new(
         register: Option<EntryVersion>,
+        values: BTreeMap<Bytes, EntryDot>,
+        removes: BTreeMap<ElementDigest, EntryDot>,
+    ) -> Self {
+        let mut co_values = BTreeMap::<Bytes, BTreeMap<Did, EntryDot>>::new();
+        for (value, dot) in &values {
+            if !dot.version.actor.is_default() {
+                insert_max(
+                    co_values.entry(value.clone()).or_default(),
+                    dot.version.actor,
+                    *dot,
+                );
+            }
+        }
+        Self::with_co_values(register, values, co_values, removes)
+    }
+
+    /// Normalize a carrier with explicit per-actor add dots `co_values`.
+    pub(super) fn with_co_values(
+        register: Option<EntryVersion>,
         mut values: BTreeMap<Bytes, EntryDot>,
+        mut co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
         mut removes: BTreeMap<ElementDigest, EntryDot>,
     ) -> Self {
         if let Some(floor) = register {
             values.retain(|_, dot| dot.version >= floor);
             removes.retain(|_, dot| dot.version >= floor);
+            co_values.values_mut().for_each(|actors| {
+                actors.retain(|_, dot| dot.version >= floor);
+            });
         }
-        values.retain(|value, dot| !Self::covered_by(&removes, value, *dot));
+        for (value, dot) in &values {
+            if !dot.version.actor.is_default() {
+                insert_max(
+                    co_values.entry(value.clone()).or_default(),
+                    dot.version.actor,
+                    *dot,
+                );
+            }
+        }
+        values.retain(|value, dot| {
+            let remove_dot = (!removes.is_empty())
+                .then(|| removes.get(&ElementDigest::of(value)).copied())
+                .flatten();
+            if let Some(actors) = co_values.get_mut(value) {
+                if let Some(remove) = remove_dot {
+                    actors.retain(|_, actor_dot| *actor_dot > remove);
+                }
+            }
+            remove_dot.is_none_or(|remove| *dot > remove)
+        });
+        co_values.retain(|value, actors| values.contains_key(value) && !actors.is_empty());
         Self {
             register,
             values,
+            co_values,
             removes,
         }
     }
 
-    /// Whether a remove in `removes` covers the add `(value, dot)`.
-    pub(super) fn covered_by(
-        removes: &BTreeMap<ElementDigest, EntryDot>,
-        value: &Bytes,
-        dot: EntryDot,
-    ) -> bool {
-        !removes.is_empty()
-            && removes
-                .get(&ElementDigest::of(value))
-                .is_some_and(|remove| dot.le(remove))
+    /// Iterate over all surviving add dots held for `value` (`values` and `co_values`).
+    pub(super) fn dots_for<'a>(&'a self, value: &'a Bytes) -> impl Iterator<Item = EntryDot> + 'a {
+        self.values.get(value).copied().into_iter().chain(
+            self.co_values
+                .get(value)
+                .into_iter()
+                .flat_map(|actors| actors.values().copied()),
+        )
     }
 
     /// Record a covering remove for `value` at its held dot, if the carrier holds `value`.
     pub(super) fn remove(&mut self, value: &Bytes) {
+        self.co_values.remove(value);
         if let Some(dot) = self.values.remove(value) {
             insert_max(&mut self.removes, ElementDigest::of(value), dot);
         }
@@ -295,6 +365,12 @@ impl JoinSemilattice for DataTopicBuffer {
         for (value, dot) in other.values {
             insert_max(&mut self.values, value, dot);
         }
-        Self::new(self.register, self.values, self.removes)
+        for (value, actors) in other.co_values {
+            let entry = self.co_values.entry(value).or_default();
+            for (actor, dot) in actors {
+                insert_max(entry, actor, dot);
+            }
+        }
+        Self::with_co_values(self.register, self.values, self.co_values, self.removes)
     }
 }

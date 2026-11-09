@@ -7,7 +7,6 @@ use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::EntryOperation;
-use crate::dht::relay_holder::owner_answer;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayHolder;
 use crate::dht::Chord;
@@ -269,15 +268,10 @@ impl HandleMsg<FindRelayHolder> for MessageHandler {
         }
         match self.dht.find_successor(msg.key)? {
             PeerRingAction::Some(_) => {
-                let holder = owner_answer(&self.dht.relay_segment()?, self.dht.did, msg.key);
                 // With no holder, the last node this owner places, past which the asker asks
-                // again for its next member (#777).
-                let horizon = match holder {
-                    Some(_) => None,
-                    None => self
-                        .dht
-                        .with_topology_state(|state| state.successors.last().copied())?,
-                };
+                // again for its next member (#777, #1182).
+                let (holder, horizon) =
+                    self.dht.answer_relay_holder_query(msg.key, &msg.excluded)?;
                 self.run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::RelayHolderFound(RelayHolderFound {

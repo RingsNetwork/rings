@@ -245,9 +245,13 @@ fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result
     assert!(!ring.name_relay_holder(key, wrong_token, named, Some(named), None)?);
     assert!(ring.relay_holder_hints()?.is_empty());
 
-    // Asked: a mismatched token or an inconsistent origin is rejected without consuming the
-    // outstanding query, while the matching token from a consistent origin is taken once.
+    // Asked: a retry while the query is still outstanding reuses the live token so an in-flight
+    // multi-hop response from the previous pass is not invalidated; a mismatched token or an
+    // inconsistent origin is rejected without consuming the outstanding query, while the matching
+    // token from a consistent origin is taken once.
     let token = ring.ask_relay_holder(key)?;
+    let retry_token = ring.ask_relay_holder(key)?;
+    assert_eq!(retry_token, token);
     assert!(!ring.name_relay_holder(key, wrong_token, named, Some(named), None)?);
     // `key` (51) is outside `(60, 70]` and `70 != 60`, so `origin = 60` cannot claim `70`.
     assert!(!ring.name_relay_holder(key, token, Did::from(60u32), Some(Did::from(70u32)), None,)?);
@@ -391,5 +395,67 @@ fn test_next_relay_holder_requires_matching_token_and_consistent_origin() -> Res
         ring.relay_chain_neighbours()?,
         (Some(predecessor), Some(resolved_holder))
     );
+    Ok(())
+}
+
+/// On a capacity-1 ring `H0(100) -> X(200, HoldsNone) -> H1(300, suspected) -> H2(400)`, next-holder
+/// discovery advances strictly forward past suspected `H1(300)` without cycling `300 <-> 301` and
+/// resolves `H2(400)` (#1182).
+#[test]
+fn test_next_relay_holder_advances_past_suspected_holder_with_single_successor() -> Result<()> {
+    let replication = crate::tests::ungated_relay_replication();
+    let (h0_id, x_id, h1_id, h2_id) = (
+        Did::from(100u32),
+        Did::from(200u32),
+        Did::from(300u32),
+        Did::from(400u32),
+    );
+    let h0 = PeerRing::new_with_storage(h0_id, 1, Box::new(crate::storage::MemStorage::new()))
+        .with_relay_replication(replication)
+        .with_relay_storage(Box::new(crate::storage::MemStorage::new()));
+    let x = PeerRing::new_with_storage(x_id, 1, Box::new(crate::storage::MemStorage::new()))
+        .with_relay_replication(replication);
+    let h1 = PeerRing::new_with_storage(h1_id, 1, Box::new(crate::storage::MemStorage::new()))
+        .with_relay_replication(replication)
+        .with_relay_storage(Box::new(crate::storage::MemStorage::new()));
+    let h2 = PeerRing::new_with_storage(h2_id, 1, Box::new(crate::storage::MemStorage::new()))
+        .with_relay_replication(replication)
+        .with_relay_storage(Box::new(crate::storage::MemStorage::new()));
+
+    h0.admit_connected(x_id, None)?;
+    let _ = crate::dht::Chord::notify(&h0, h2_id)?;
+    x.admit_connected(h1_id, None)?;
+    let _ = crate::dht::Chord::notify(&x, h0_id)?;
+    h1.admit_connected(h2_id, None)?;
+    let _ = crate::dht::Chord::notify(&h1, x_id)?;
+    h2.admit_connected(h0_id, None)?;
+    let _ = crate::dht::Chord::notify(&h2, h1_id)?;
+
+    for ring in [&h0, &x, &h1, &h2] {
+        ring.observe_relay_custody(x_id, RelayCustody::HoldsNone)?;
+    }
+    h0.suspect_relay_chain_neighbour(h1_id)?;
+
+    let (key0, token0) = h0
+        .outstanding_next_relay_holder_query()?
+        .ok_or_else(|| Error::InvalidMessage("expected initial query at 201".to_string()))?;
+    assert_eq!(key0, Did::from(201u32));
+
+    // Even if X(200) answers Some(300) before seeing H0's exclusion set, H0 advances directly to
+    // 301 (never cycling back to 300), and H1(300) answers Some(400) under H0's exclusion set.
+    let (key1, token1) = h0
+        .take_next_relay_holder(key0, token0, x_id, Some(h1_id), None)?
+        .ok_or_else(|| Error::InvalidMessage("expected query to advance past 300".to_string()))?;
+    assert_eq!(key1, Did::from(301u32));
+
+    let excluded = h0.relay_excluded_holders()?;
+    assert!(excluded.contains(&h1_id));
+    let (holder, horizon) = h1.answer_relay_holder_query(key1, &excluded)?;
+    assert_eq!((holder, horizon), (Some(h2_id), None));
+    assert_eq!(
+        h0.take_next_relay_holder(key1, token1, h1_id, holder, horizon)?,
+        None
+    );
+    assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h2_id));
     Ok(())
 }

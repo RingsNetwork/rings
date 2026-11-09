@@ -285,7 +285,18 @@ pub(crate) fn relay_holder(segment: &RelaySegment, key: Did) -> RelayHolder {
 ///
 /// Law (Owner places): a node that owns `key` (`key ∈ (n, succ(n)]`, its segment's own arc)
 /// never finds its owner `Unknown`: `owner_answer` is the holder the owner's view names.
+#[cfg(test)]
 pub(crate) fn owner_answer(segment: &RelaySegment, owner: Did, key: Did) -> Option<Did> {
+    owner_answer_excluding(segment, owner, key, &[])
+}
+
+/// [`owner_answer`] skipping any candidate holder in `excluded` (#1182).
+pub(crate) fn owner_answer_excluding(
+    segment: &RelaySegment,
+    owner: Did,
+    key: Did,
+    excluded: &[Did],
+) -> Option<Did> {
     let owner_index = segment.owner_index(key).filter(|&index| {
         segment
             .nodes
@@ -298,7 +309,7 @@ pub(crate) fn owner_answer(segment: &RelaySegment, owner: Did, key: Did) -> Opti
         .is_some_and(|head| head.did == key);
     segment
         .clockwise_from(owner_index)
-        .filter(|node| !skip_head || node.did != key)
+        .filter(|node| (!skip_head || node.did != key) && !excluded.contains(&node.did))
         .find(|node| node.holds)
         .map(|node| node.did)
 }

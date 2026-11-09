@@ -86,6 +86,8 @@ struct SlotTable {
     held: BTreeMap<Did, u16>,
     /// The current edges that arrived with no slot free.
     unslotted: BTreeSet<Did>,
+    /// Additional per-slot floor use contributed by external tables sharing this roster.
+    extra_floor_use: SlotFloorUse,
 }
 
 /// The connection slots of a node (module documentation).
@@ -110,6 +112,7 @@ impl SlotRoster {
                 free,
                 held: BTreeMap::new(),
                 unslotted: BTreeSet::new(),
+                extra_floor_use: SlotFloorUse::default(),
             }),
             changed: Event::new(),
         }
@@ -129,14 +132,22 @@ impl SlotRoster {
         self.arrive_preferring(edge, None, floor_use);
     }
 
+    /// Update the additional per-slot floor use combined with caller-supplied floor use on
+    /// arrival (used by external slot-accounted tables sharing this roster, such as Onion link
+    /// admission).
+    pub fn set_extra_floor_use(&self, floor_use: SlotFloorUse) {
+        self.table().extra_floor_use = floor_use;
+    }
+
     /// Give `edge` `preferred` if that slot is currently free, or else the cleanest free slot
-    /// under `floor_use` (module law), unless `edge` already holds a slot. Used when a reconnecting
-    /// peer still has residual window load bound to `preferred` so it resumes its own slot ledger
-    /// instead of acquiring a fresh one.
+    /// under `floor_use` joined with any registered external floor use (module law), unless `edge`
+    /// already holds a slot. Used when a reconnecting peer still has residual window load bound to
+    /// `preferred` so it resumes its own slot ledger instead of acquiring a fresh one.
     pub fn arrive_preferring(&self, edge: Did, preferred: Option<u16>, floor_use: &SlotFloorUse) {
         let arrived = {
             let mut table = self.table();
             (!table.held.contains_key(&edge)).then(|| {
+                let combined = floor_use.clone().join(table.extra_floor_use.clone());
                 let was_current = table.unslotted.remove(&edge);
                 let chosen = preferred
                     .filter(|slot| table.free.contains(slot))
@@ -145,7 +156,7 @@ impl SlotRoster {
                             .free
                             .iter()
                             .copied()
-                            .min_by_key(|slot| (floor_use.of(*slot), *slot))
+                            .min_by_key(|slot| (combined.of(*slot), *slot))
                     });
                 match chosen {
                     Some(slot) => {
