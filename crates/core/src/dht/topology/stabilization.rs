@@ -71,6 +71,30 @@ pub fn successor_head(state: &TopologyState) -> Option<Did> {
         .find(|successor| *successor != state.local)
 }
 
+/// The remote peers notified when `state.local` departs voluntarily (#1057): `predecessor`
+/// followed by `successor_head`, deduplicated and excluding `state.local`.
+///
+/// Law: returns at most 2 distinct remote peers (`predecessor` and `successor_head`), empty
+/// when the node stands alone, and length 1 on a 2-node ring where
+/// `predecessor == successor_head`.
+pub fn leave_targets(state: &TopologyState) -> Vec<Did> {
+    let mut targets = Vec::with_capacity(2);
+    for candidate in state.predecessor.into_iter().chain(successor_head(state)) {
+        if candidate != state.local && !targets.contains(&candidate) {
+            targets.push(candidate);
+        }
+    }
+    targets
+}
+
+impl TopologyState {
+    /// The remote peers notified when `self.local` departs voluntarily (#1057): see
+    /// [`leave_targets`].
+    pub fn leave_targets(&self) -> Vec<Did> {
+        leave_targets(self)
+    }
+}
+
 /// Highest slot whose target lies in the local successor interval
 /// `(local, head]`. That interval is verified by a stabilization report from
 /// `head` whose predecessor is `local`, not by routing a query around the ring.

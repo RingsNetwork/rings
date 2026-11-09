@@ -307,6 +307,30 @@ impl PeerRing {
 /// `request_id` correlates the answer to the exact admission lookup that asked
 /// it (`Law (Asked)`). At most one token is kept per admitted `peer`, bounded
 /// by [`topology::edge_slots`].
+fn ask_connect_lookup(
+    pending: &mut std::collections::VecDeque<(Did, uuid::Uuid)>,
+    peer: Did,
+    request_id: uuid::Uuid,
+    limit: usize,
+) {
+    pending.retain(|(existing_peer, _)| *existing_peer != peer);
+    while pending.len() >= limit {
+        pending.pop_front();
+    }
+    pending.push_back((peer, request_id));
+}
+
+fn take_connect_lookup(
+    pending: &mut std::collections::VecDeque<(Did, uuid::Uuid)>,
+    request_id: uuid::Uuid,
+) -> bool {
+    let Some(index) = pending.iter().position(|(_, token)| *token == request_id) else {
+        return false;
+    };
+    pending.remove(index);
+    true
+}
+
 impl PeerRing {
     /// Record `request_id` as the live connect-lookup token for `peer`.
     ///
@@ -320,11 +344,7 @@ impl PeerRing {
     pub(crate) fn begin_connect_lookup(&self, peer: Did, request_id: uuid::Uuid) -> Result<()> {
         let limit = topology::edge_slots(self.successor_seq.capacity());
         let mut pending = self.lock_pending_connect_lookup()?;
-        pending.retain(|(existing_peer, _)| *existing_peer != peer);
-        while pending.len() >= limit {
-            pending.pop_front();
-        }
-        pending.push_back((peer, request_id));
+        ask_connect_lookup(&mut pending, peer, request_id, limit);
         Ok(())
     }
 
@@ -336,11 +356,7 @@ impl PeerRing {
     /// Returns an error when a backing lock is poisoned.
     pub(crate) fn claim_connect_lookup(&self, request_id: uuid::Uuid) -> Result<bool> {
         let mut pending = self.lock_pending_connect_lookup()?;
-        let Some(index) = pending.iter().position(|(_, token)| *token == request_id) else {
-            return Ok(false);
-        };
-        pending.remove(index);
-        Ok(true)
+        Ok(take_connect_lookup(&mut pending, request_id))
     }
 
     /// Release `(peer, request_id)` when sending the connect lookup failed.

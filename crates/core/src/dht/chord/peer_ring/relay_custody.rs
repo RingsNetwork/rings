@@ -56,6 +56,33 @@ pub(crate) struct RelayHolderHints {
     named: BTreeMap<Did, Did>,
 }
 
+impl RelayHolderHints {
+    /// Prune both maps to keys still in `unplaced`.
+    fn retain_unplaced(&mut self, unplaced: &[Did]) {
+        self.asked.retain(|key, _| unplaced.contains(key));
+        self.named.retain(|key, _| unplaced.contains(key));
+    }
+
+    /// Record `request_id` as the live correlation token for `key` (`Law (Asked)`).
+    fn ask(&mut self, key: Did, request_id: uuid::Uuid) -> uuid::Uuid {
+        self.asked.insert(key, request_id);
+        request_id
+    }
+
+    /// Consume `(key, request_id)` once (`Law (Asked)`) and update the named holder for `key`,
+    /// returning whether the named holder changed.
+    fn take_answer(&mut self, key: Did, request_id: uuid::Uuid, holder: Option<Did>) -> bool {
+        if self.asked.get(&key) != Some(&request_id) {
+            return false;
+        }
+        self.asked.remove(&key);
+        match holder {
+            Some(holder) => self.named.insert(key, holder) != Some(holder),
+            None => self.named.remove(&key).is_some(),
+        }
+    }
+}
+
 impl PeerRing {
     /// Whether this node holds relay mail: it keeps a retained relay store and has been online
     /// for the age gate (`Law (Age gate)`, #777), so a node that leaves within its first minutes
@@ -300,20 +327,24 @@ impl PeerRing {
             .map(|(key, _)| key.placement())
             .filter(|key| relay_holder(&segment, *key) == RelayHolder::Unknown)
             .collect::<Vec<_>>();
-        let mut hints = self.lock_relay_holder_hints()?;
-        hints.asked.retain(|key, _| unplaced.contains(key));
-        hints.named.retain(|key, _| unplaced.contains(key));
+        self.lock_relay_holder_hints()?.retain_unplaced(&unplaced);
         Ok(unplaced)
+    }
+
+    /// Record that the owner of `key` is asked for its holder with `request_id` (`Law (Asked)`),
+    /// returning the single-use correlation token the answer must echo.
+    pub(crate) fn ask_relay_holder_with_id(
+        &self,
+        key: Did,
+        request_id: uuid::Uuid,
+    ) -> Result<uuid::Uuid> {
+        Ok(self.lock_relay_holder_hints()?.ask(key, request_id))
     }
 
     /// Record that the owner of `key` is asked for its holder (`Law (Asked)`), returning the
     /// single-use correlation token the answer must echo.
     pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<uuid::Uuid> {
-        let request_id = crate::utils::new_uuid();
-        self.lock_relay_holder_hints()?
-            .asked
-            .insert(key, request_id);
-        Ok(request_id)
+        self.ask_relay_holder_with_id(key, crate::utils::new_uuid())
     }
 
     /// Whether `origin`'s answer `(holder, horizon)` for `key` is consistent with `origin`
@@ -362,16 +393,9 @@ impl PeerRing {
             Some(holder) if holds(holder)? => Some(holder),
             _ => None,
         };
-        let mut hints = self.lock_relay_holder_hints()?;
-        if hints.asked.get(&key) != Some(&request_id) {
-            return Ok(false);
-        }
-        hints.asked.remove(&key);
-        let changed = match holder {
-            Some(holder) => hints.named.insert(key, holder) != Some(holder),
-            None => hints.named.remove(&key).is_some(),
-        };
-        Ok(changed)
+        Ok(self
+            .lock_relay_holder_hints()?
+            .take_answer(key, request_id, holder))
     }
 
     /// The holders the keys' owners named, by key.

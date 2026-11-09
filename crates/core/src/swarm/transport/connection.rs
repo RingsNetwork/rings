@@ -381,16 +381,7 @@ impl SwarmTransport {
         }
 
         let state = self.dht.topology_state()?;
-        let mut targets = Vec::with_capacity(2);
-        for candidate in state
-            .predecessor
-            .into_iter()
-            .chain(state.successors.first().copied())
-        {
-            if candidate != self.dht.did && !targets.contains(&candidate) {
-                targets.push(candidate);
-            }
-        }
+        let targets = state.leave_targets();
         let leave_msg = Message::Leave(Leave {
             successor_list: state.successors,
         });

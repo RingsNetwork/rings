@@ -57,6 +57,48 @@ pub(crate) struct NextHolder {
     asked: Option<(Did, uuid::Uuid)>,
 }
 
+impl NextHolder {
+    /// Record `(key, request_id)` as the single outstanding query iff none is active (`Law (Asked)`).
+    fn ask_if_idle(&mut self, key: Did, request_id: uuid::Uuid) -> Option<(Did, uuid::Uuid)> {
+        if self.asked.is_some() {
+            return None;
+        }
+        let query = (key, request_id);
+        self.asked = Some(query);
+        Some(query)
+    }
+
+    /// Ensure an outstanding query `(key, request_id)` is recorded when neither a resolved
+    /// holder nor an active query exists (`Law (Asked)`).
+    fn ensure_asked(&mut self, key: Did, request_id: uuid::Uuid) -> Option<(Did, uuid::Uuid)> {
+        if self.holder.is_none() && self.asked.is_none() {
+            self.asked = Some((key, request_id));
+        }
+        self.asked
+    }
+
+    /// Consume the outstanding query iff it matches `(key, request_id)` (`Law (Asked)`),
+    /// installing `named` when resolved or advancing to `next_query` otherwise.
+    fn take_answer(
+        &mut self,
+        key: Did,
+        request_id: uuid::Uuid,
+        named: Option<Did>,
+        next_query: Option<(Did, uuid::Uuid)>,
+    ) -> Option<(Did, uuid::Uuid)> {
+        if self.asked != Some((key, request_id)) {
+            return None;
+        }
+        if named.is_some() {
+            self.asked = None;
+            self.holder = named;
+            return None;
+        }
+        self.asked = next_query;
+        self.asked
+    }
+}
+
 /// What this node does next with a hold it took, as the holder or a member of its key.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum ReplicationStep {
@@ -326,38 +368,44 @@ impl PeerRing {
     /// Ask for the first holder past the successor list (`Law (Asked)`): the owner of the key
     /// just past its last node answers the first holder at or after it.
     ///
-    /// Post: `Ask` with that key and a fresh `request_id` iff no query is outstanding; `Wait`
+    /// Post: `Ask` with that key and `request_id` iff no query is outstanding; `Wait`
     /// otherwise, or without a successor.
-    fn ask_next_relay_holder(&self) -> Result<ReplicationStep> {
+    pub(crate) fn ask_next_relay_holder_with_id(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ReplicationStep> {
         let Some(last) = self.with_topology_state(|state| state.successors.last().copied())? else {
             return Ok(ReplicationStep::Wait);
         };
         let mut next = self.lock_relay_next_holder()?;
-        if next.asked.is_some() {
-            return Ok(ReplicationStep::Wait);
-        }
-        let key = last + Did::from(1u32);
-        let request_id = crate::utils::new_uuid();
-        next.asked = Some((key, request_id));
-        Ok(ReplicationStep::Ask { key, request_id })
+        Ok(match next.ask_if_idle(last + Did::from(1u32), request_id) {
+            Some((key, request_id)) => ReplicationStep::Ask { key, request_id },
+            None => ReplicationStep::Wait,
+        })
+    }
+
+    /// Ask for the first holder past the successor list (`Law (Asked)`) with a fresh token.
+    fn ask_next_relay_holder(&self) -> Result<ReplicationStep> {
+        self.ask_next_relay_holder_with_id(crate::utils::new_uuid())
     }
 
     /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
     /// next holder (`Law (Asked)`): the holder it names, which is cached, or, when it names none
     /// (or one this node cannot chain through), the position past which the query is asked again
-    /// with a fresh token.
+    /// with `next_request_id`.
     ///
     /// Post: `None` for an answer nobody asked for, a mismatched `request_id`, or an `origin`
-    /// inconsistent with `key`; `Some((key′, request_id′))` iff the query is to be asked again
-    /// for `key′`; a named holder this node knows to hold no relay mail or suspects is not taken,
-    /// and the query advances past it.
-    pub(crate) fn take_next_relay_holder(
+    /// inconsistent with `key`; `Some((key′, next_request_id))` iff the query is to be asked
+    /// again for `key′`; a named holder this node knows to hold no relay mail or suspects is not
+    /// taken, and the query advances past it.
+    pub(crate) fn take_next_relay_holder_with_id(
         &self,
         key: Did,
         request_id: uuid::Uuid,
         origin: Did,
         holder: Option<Did>,
         horizon: Option<Did>,
+        next_request_id: uuid::Uuid,
     ) -> Result<Option<(Did, uuid::Uuid)>> {
         if !self.responder_answers_relay_key(origin, key, holder, horizon) {
             return Ok(None);
@@ -370,24 +418,37 @@ impl PeerRing {
             }
             _ => None,
         };
-        let mut next = self.lock_relay_next_holder()?;
-        if next.asked != Some((key, request_id)) {
-            return Ok(None);
-        }
-        if named.is_some() {
-            next.asked = None;
-            next.holder = named;
-            return Ok(None);
-        }
-        next.asked = match holder {
+        let next_query = match holder {
             Some(skipped) if skipped != self.did && skipped != key => {
-                Some((skipped, crate::utils::new_uuid()))
+                Some((skipped, next_request_id))
             }
             _ => horizon
                 .filter(|horizon| *horizon != self.did)
-                .map(|horizon| (horizon + Did::from(1u32), crate::utils::new_uuid())),
+                .map(|horizon| (horizon + Did::from(1u32), next_request_id)),
         };
-        Ok(next.asked)
+        Ok(self
+            .lock_relay_next_holder()?
+            .take_answer(key, request_id, named, next_query))
+    }
+
+    /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
+    /// next holder (`Law (Asked)`), issuing a fresh token when the query advances.
+    pub(crate) fn take_next_relay_holder(
+        &self,
+        key: Did,
+        request_id: uuid::Uuid,
+        origin: Did,
+        holder: Option<Did>,
+        horizon: Option<Did>,
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
+        self.take_next_relay_holder_with_id(
+            key,
+            request_id,
+            origin,
+            holder,
+            horizon,
+            crate::utils::new_uuid(),
+        )
     }
 
     /// Whether a next holder past the successor list is currently resolved.
@@ -396,9 +457,13 @@ impl PeerRing {
     }
 
     /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
-    /// again each pass until it is answered; starts the query when this node holds relay mail and
-    /// its entire successor list is storage-less with no holder resolved past it (#1182).
-    pub(crate) fn outstanding_next_relay_holder_query(&self) -> Result<Option<(Did, uuid::Uuid)>> {
+    /// again each pass until it is answered; starts the query with `request_id` when this node
+    /// holds relay mail and its entire successor list is storage-less with no holder resolved
+    /// past it (#1182).
+    pub(crate) fn outstanding_next_relay_holder_query_with_id(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
         if let Some(asked) = self.lock_relay_next_holder()?.asked {
             return Ok(Some(asked));
         }
@@ -422,11 +487,16 @@ impl PeerRing {
         let Some(last) = last else {
             return Ok(None);
         };
-        let mut next = self.lock_relay_next_holder()?;
-        if next.holder.is_none() && next.asked.is_none() {
-            next.asked = Some((last + Did::from(1u32), crate::utils::new_uuid()));
-        }
-        Ok(next.asked)
+        Ok(self
+            .lock_relay_next_holder()?
+            .ensure_asked(last + Did::from(1u32), request_id))
+    }
+
+    /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
+    /// again each pass until it is answered; starts the query when this node holds relay mail and
+    /// its entire successor list is storage-less with no holder resolved past it (#1182).
+    pub(crate) fn outstanding_next_relay_holder_query(&self) -> Result<Option<(Did, uuid::Uuid)>> {
+        self.outstanding_next_relay_holder_query_with_id(crate::utils::new_uuid())
     }
 
     /// Whether this node asks the owner of `key` with `request_id` for its next holder: an
