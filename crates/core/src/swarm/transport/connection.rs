@@ -475,13 +475,36 @@ impl SwarmTransport {
             let confirmed = reported.confirmed_by(|peer| {
                 peer == self.dht.did || self.is_routable_active_candidate(peer, &active)
             });
-            if !confirmed.has_confirmed_peer() {
-                return Ok(None);
-            }
+            let capacity = self.dht.successors().capacity();
+            let unconfirmed = reported.unconfirmed_peers(self.dht.did, capacity, |peer| {
+                self.is_routable_active_candidate(peer, &active)
+            });
             observe_confirmation();
-            self.dht
-                .stabilize_reported_by(reporter, request_id, confirmed)
-                .map(Some)
+            let action = self
+                .dht
+                .stabilize_reported_by(reporter, request_id, confirmed)?;
+            self.dht.record_bridged_peers(reporter, unconfirmed)?;
+            Ok(Some(action))
+        })
+    }
+
+    /// Record passive 1-hop bridge reachability hints from a correlated topology report while
+    /// `reporter` remains a routable active connection.
+    pub(crate) fn sync_routable_topology_bridges(
+        &self,
+        reporter: Did,
+        reported: &TopoInfo,
+    ) -> Result<()> {
+        self.with_connection_lifecycle(|| {
+            let active = self.active_connections()?;
+            if !self.is_routable_active_candidate(reporter, &active) {
+                return Ok(());
+            }
+            let capacity = self.dht.successors().capacity();
+            let unconfirmed = reported.unconfirmed_peers(self.dht.did, capacity, |peer| {
+                self.is_routable_active_candidate(peer, &active)
+            });
+            self.dht.record_bridged_peers(reporter, unconfirmed)
         })
     }
 

@@ -183,6 +183,7 @@ sample_message_body!(QueryForTopoInfoReport, |fixture| QueryForTopoInfoReport {
     info: TopoInfo {
         successors: vec![fixture.did],
         predecessor: Some(fixture.did),
+        predecessors: vec![fixture.did],
     },
     then: QueryFor::Stabilization,
     request_id: uuid::Uuid::nil(),

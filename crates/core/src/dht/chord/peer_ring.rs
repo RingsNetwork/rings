@@ -116,8 +116,12 @@ pub struct PeerRing {
     finger: Arc<Mutex<FingerTable>>,
     /// Bounded successor list shared with storage placement and routing.
     successor_seq: SuccessorSeq,
-    /// Current predecessor learned through Chord notifications.
+    /// Current primary predecessor learned through Chord notifications.
     predecessor: Arc<Mutex<Option<Did>>>,
+    /// Bounded multi-predecessor list learned through topology-validated Chord notifications.
+    predecessors: Mutex<Vec<Did>>,
+    /// Passive 1-hop reachability hints mapping unconfirmed peers to admitted reporters.
+    bridged: Mutex<BTreeMap<Did, Did>>,
     /// Persistent replicated-entry storage of the data namespace: the element sides of the
     /// overlay's replicated topics, rebuildable from their replicas, which its budget may evict
     /// (see `chord::carrier_store`).
@@ -252,6 +256,8 @@ impl PeerRing {
         Self {
             successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
+            predecessors: Mutex::new(Vec::new()),
+            bridged: Mutex::new(BTreeMap::new()),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
             removal_storage: Box::new(MemStorage::new()),
@@ -303,7 +309,9 @@ impl PeerRing {
     /// its predecessor or one of its successors (load-bounds paper, Sec. V, the custody
     /// principal `χ`).
     pub(crate) fn names_previous_owner(&self, node: Did) -> Result<bool> {
-        Ok(*self.lock_predecessor_state()? == Some(node) || self.successor_seq.contains(&node)?)
+        Ok(*self.lock_predecessor_state()? == Some(node)
+            || self.lock_predecessors_state()?.contains(&node)
+            || self.successor_seq.contains(&node)?)
     }
 
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
@@ -372,6 +380,14 @@ impl PeerRing {
         self.predecessor.lock().map_err(|_| Error::LockPoisoned)
     }
 
+    fn lock_predecessors_state(&self) -> Result<MutexGuard<'_, Vec<Did>>> {
+        self.predecessors.lock().map_err(|_| Error::LockPoisoned)
+    }
+
+    fn lock_bridged_state(&self) -> Result<MutexGuard<'_, BTreeMap<Did, Did>>> {
+        self.bridged.lock().map_err(|_| Error::LockPoisoned)
+    }
+
     fn lock_pending_stabilization(
         &self,
     ) -> Result<MutexGuard<'_, Option<topology::StabilizationRequest>>> {
@@ -407,13 +423,20 @@ impl PeerRing {
     fn snapshot_unlocked(&self) -> Result<TopologyState> {
         let successors = self.successor_seq.list()?;
         let predecessor = *self.lock_predecessor_state()?;
+        let mut predecessors = self.lock_predecessors_state()?.clone();
+        if predecessors.first().copied() != predecessor {
+            predecessors = predecessor.into_iter().collect();
+        }
+        let bridged = self.lock_bridged_state()?.clone();
         let finger = self.lock_finger_state()?;
         let pending_stabilization = *self.lock_pending_stabilization()?;
         Ok(TopologyState::restore(
             self.did,
             successors,
             predecessor,
+            predecessors,
             finger.list().clone(),
+            bridged,
             finger.convergence_state().clone(),
             pending_stabilization,
         ))
@@ -424,10 +447,14 @@ impl PeerRing {
     /// Caller holds `topology_transition`, as for [`Self::snapshot_unlocked`].
     fn commit_unlocked(&self, next: &TopologyState) -> Result<()> {
         let mut predecessor = self.lock_predecessor_state()?;
+        let mut predecessors = self.lock_predecessors_state()?;
+        let mut bridged = self.lock_bridged_state()?;
         let mut finger = self.lock_finger_state()?;
         let mut pending_stabilization = self.lock_pending_stabilization()?;
         self.successor_seq.replace_state(&next.successors)?;
         *predecessor = next.predecessor;
+        *predecessors = next.predecessors.clone();
+        *bridged = next.bridged.clone();
         finger.replace_state(&next.fingers, next.finger_convergence_state().clone());
         *pending_stabilization = next.pending_stabilization();
         Ok(())
@@ -629,7 +656,7 @@ impl PeerRing {
                 let capacity = self.successor_seq.capacity();
                 let (_, acted) = self.transition(|state, _| {
                     match (
-                        state.predecessor == Some(sender),
+                        state.predecessor == Some(sender) || state.predecessors.contains(&sender),
                         state.successors.contains(&sender),
                     ) {
                         (false, false) => (
@@ -922,17 +949,8 @@ impl Chord<PeerRingAction> for PeerRing {
 impl PeerRing {
     /// Apply a predecessor candidate only when it is consistent with the current topology.
     pub(crate) fn notify_within_topology(&self, did: Did) -> Result<Option<Did>> {
-        let (next, ()) = self.transition(|state, _| {
-            let mut next_state = state.clone();
-            next_state.predecessor = topology::rectify_predecessor_in(state, did);
-            (
-                TopologyStep {
-                    state: next_state,
-                    actions: Vec::new(),
-                },
-                (),
-            )
-        })?;
+        let next =
+            self.transition_topology(TopologyEvent::NotifyWithinTopology { predecessor: did })?;
         Ok(next.state.predecessor)
     }
 }

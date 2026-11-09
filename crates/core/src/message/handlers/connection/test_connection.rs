@@ -262,6 +262,7 @@ async fn test_sync_successor_report_requires_token_before_connecting_successor()
                 info: TopoInfo {
                     successors: vec![node3.did()],
                     predecessor: None,
+                    predecessors: Vec::new(),
                 },
                 then: QueryFor::SyncSuccessor,
                 request_id: uuid::Uuid::from_u128(404),
@@ -281,6 +282,7 @@ async fn test_sync_successor_report_requires_token_before_connecting_successor()
                 info: TopoInfo {
                     successors: vec![node3.did()],
                     predecessor: None,
+                    predecessors: Vec::new(),
                 },
                 then: QueryFor::SyncSuccessor,
                 request_id,
@@ -324,6 +326,7 @@ async fn test_stale_stabilization_report_does_not_start_advertised_connections()
                 info: TopoInfo {
                     successors: vec![node3.did()],
                     predecessor: Some(node1.did()),
+                    predecessors: vec![node1.did()],
                 },
                 then: QueryFor::Stabilization,
                 request_id: uuid::Uuid::from_u128(404),

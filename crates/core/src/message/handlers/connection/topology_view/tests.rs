@@ -25,6 +25,7 @@ fn test_topology_report_keeps_only_confirmed_peers() {
         &TopoInfo {
             successors: vec![active, pending_successor],
             predecessor: Some(pending_predecessor),
+            predecessors: vec![pending_predecessor],
         },
         |peer| peer == active,
     );
@@ -43,6 +44,7 @@ fn test_stabilization_candidate_effects_are_deduplicated_and_capacity_bounded() 
     let predecessor = Did::from(1u32);
     let report = TopoInfo {
         predecessor: Some(predecessor),
+        predecessors: vec![predecessor],
         successors: vec![
             predecessor,
             local,
@@ -77,6 +79,7 @@ fn test_sync_candidate_effects_are_deduplicated_and_capacity_bounded() {
     let local = Did::from(0u32);
     let report = TopoInfo {
         predecessor: Some(Did::from(9u32)),
+        predecessors: vec![Did::from(9u32)],
         successors: vec![
             local,
             Did::from(1u32),
