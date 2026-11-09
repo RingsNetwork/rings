@@ -19,10 +19,12 @@ function isUnrewritableTarget(value) {
 function createUrlTransformer({ prefix, targetBase, locationOrigin, controlledAssetPaths }) {
   const controlledPaths = new Set(controlledAssetPaths);
   function controlledAssetPath(input) {
-    if (!locationOrigin) return undefined;
+    if (!locationOrigin || locationOrigin === "null") return undefined;
     try {
       const url = new URL(String(input), locationOrigin);
-      if (controlledPaths.has(url.pathname)) return `${url.pathname}${url.search}${url.hash}`;
+      if (url.origin === locationOrigin && controlledPaths.has(url.pathname)) {
+        return `${url.pathname}${url.search}${url.hash}`;
+      }
     } catch (_error) {}
     return undefined;
   }
@@ -47,7 +49,13 @@ function createUrlTransformer({ prefix, targetBase, locationOrigin, controlledAs
     if (controlled) return controlled;
     const gatewayPath = gatewayPathFromText(text, prefix, locationOrigin);
     if (gatewayPath) return gatewayPath;
-    return prefix + encodeURIComponent(new URL(text, base).href);
+    try {
+      const target = new URL(text, base);
+      if (target.protocol !== "http:" && target.protocol !== "https:") return text;
+      return prefix + encodeURIComponent(target.href);
+    } catch (_error) {
+      return text;
+    }
   }
   return Object.freeze({ gatewayPath, decodeGatewayTarget, encodeTarget });
 }

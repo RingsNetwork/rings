@@ -326,12 +326,20 @@ impl Session {
     }
 
     /// The client's name, once greeted.
-    fn client(&self) -> Option<&str> {
+    pub(super) fn client(&self) -> Option<&str> {
         match &self.phase {
             Phase::Fresh => None,
             Phase::Ready { client }
             | Phase::Transaction { client, .. }
             | Phase::Data { client, .. } => Some(client),
+        }
+    }
+
+    /// The `(client, from)` envelope while a message body is being read.
+    pub(super) fn data_envelope(&self) -> Option<(&str, &str)> {
+        match &self.phase {
+            Phase::Data { client, from, .. } => Some((client, from)),
+            _ => None,
         }
     }
 

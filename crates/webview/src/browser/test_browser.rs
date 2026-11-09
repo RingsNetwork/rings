@@ -394,3 +394,136 @@ assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(ru
     }
     Ok(())
 }
+
+#[test]
+fn test_bootstrap_captures_srcdoc_source_at_init_and_guards_malformed_or_cross_origin_urls(
+) -> Result<()> {
+    let document_url = Url::parse("https://example.test/docs/index.html")?;
+    let script = bootstrap_script("/webview/", &document_url);
+    let program = format!(
+        r#"
+const calls = [];
+const gateway = (url) => "/webview/" + encodeURIComponent(url);
+function assert(condition, message) {{
+  if (!condition) throw new Error(message);
+}}
+let bootstrapNode = {{
+  textContent: "/*immutable-bootstrap-source*/",
+  hasAttribute(name) {{ return name === "data-rings-webview-bootstrap"; }}
+}};
+class MockElement {{
+  constructor(tagName) {{
+    this.nodeType = 1;
+    this.tagName = String(tagName || "").toUpperCase();
+    this.attributes = [];
+    this.children = [];
+    this.textContent = "";
+    this.parentNode = null;
+    this.nextSibling = null;
+  }}
+  get firstChild() {{
+    return this.children[0] || null;
+  }}
+  setAttribute(name, value) {{
+    const existing = this.attributes.find((attr) => attr.name === name);
+    if (existing) existing.value = String(value);
+    else this.attributes.push({{ name, value: String(value) }});
+    calls.push(["attribute", this.tagName, name, String(value)]);
+  }}
+  getAttribute(name) {{
+    const existing = this.attributes.find((attr) => attr.name === name);
+    return existing ? existing.value : null;
+  }}
+  insertBefore(node, anchor) {{
+    node.parentNode = this;
+    const index = anchor ? this.children.indexOf(anchor) : -1;
+    if (index >= 0) this.children.splice(index, 0, node);
+    else this.children.push(node);
+    for (let i = 0; i < this.children.length; i += 1) {{
+      this.children[i].nextSibling = this.children[i + 1] || null;
+    }}
+    return node;
+  }}
+  querySelector(selector) {{
+    if (selector === "head") return this.children.find((child) => child.tagName === "HEAD") || null;
+    if (selector === "base[href]") return this.children.find((child) => child.tagName === "BASE" && child.getAttribute("href")) || null;
+    return null;
+  }}
+  querySelectorAll() {{
+    return [...this.children];
+  }}
+  get innerHTML() {{
+    return this.children.map((child) => {{
+      const attrs = child.attributes.map((a) => `${{a.name}}="${{a.value}}"`).join(" ");
+      return `<${{child.tagName.toLowerCase()}}${{attrs ? " " + attrs : ""}}>${{child.textContent}}</${{child.tagName.toLowerCase()}}>`;
+    }}).join("");
+  }}
+  set innerHTML(value) {{
+    this.children = [];
+    if (String(value).includes("<p>frame</p>")) {{
+      const p = new MockElement("p");
+      p.textContent = "frame";
+      this.insertBefore(p, null);
+    }}
+  }}
+}}
+globalThis.Element = MockElement;
+Object.defineProperty(globalThis, "location", {{
+  value: {{ origin: "http://127.0.0.1:3000" }},
+  configurable: true
+}});
+Object.defineProperty(globalThis, "document", {{
+  value: {{
+    currentScript: bootstrapNode,
+    querySelector(selector) {{
+      if (selector === "script[data-rings-webview-bootstrap]") return bootstrapNode;
+      return null;
+    }},
+    createElement(tagName) {{
+      return new MockElement(tagName);
+    }}
+  }},
+  configurable: true
+}});
+{script}
+// Mutate and remove the DOM bootstrap script after initialization.
+bootstrapNode.textContent = "window.__tampered = true;";
+bootstrapNode = null;
+
+const iframe = new MockElement("iframe");
+iframe.setAttribute("srcdoc", "<p>frame</p>");
+const rewrittenSrcdoc = iframe.getAttribute("srcdoc");
+assert(rewrittenSrcdoc.includes("/*immutable-bootstrap-source*/"), "srcdoc did not use init-captured bootstrap source: " + rewrittenSrcdoc);
+assert(!rewrittenSrcdoc.includes("__tampered"), "srcdoc read mutated DOM bootstrap source: " + rewrittenSrcdoc);
+
+const scriptEl = new MockElement("script");
+scriptEl.setAttribute("src", "https://evil.example/assets/webview-overlay.js");
+assert(scriptEl.getAttribute("src") === gateway("https://evil.example/assets/webview-overlay.js"), "cross-origin controlled asset path bypassed gateway: " + scriptEl.getAttribute("src"));
+
+const localScriptEl = new MockElement("script");
+localScriptEl.setAttribute("src", "/assets/webview-overlay.js");
+assert(localScriptEl.getAttribute("src") === "/assets/webview-overlay.js", "same-origin controlled asset path was broken: " + localScriptEl.getAttribute("src"));
+
+const malformedLink = new MockElement("a");
+malformedLink.setAttribute("href", "http://[invalid");
+assert(malformedLink.getAttribute("href") === "http://[invalid", "malformed URL was not preserved safely: " + malformedLink.getAttribute("href"));
+"#,
+        script = script
+    );
+
+    let output = std::process::Command::new("node")
+        .arg("--input-type=module")
+        .arg("-e")
+        .arg(program)
+        .output()
+        .map_err(|error| WebviewError::Browser(error.to_string()))?;
+
+    if !output.status.success() {
+        return Err(WebviewError::Browser(format!(
+            "node srcdoc/bounds bootstrap test failed: stdout={} stderr={}",
+            String::from_utf8_lossy(output.stdout.as_slice()),
+            String::from_utf8_lossy(output.stderr.as_slice())
+        )));
+    }
+    Ok(())
+}

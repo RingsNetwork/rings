@@ -178,17 +178,22 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
         });
     }
     if let Some(proxy_options) = onion_http_proxy {
+        let proxy_processor = processor.clone();
         tasks.spawn(async move {
-            run_onion_http_proxy(proxy_options, processor, onion)
+            run_onion_http_proxy(proxy_options, proxy_processor, onion)
                 .await
                 .context("Onion HTTP proxy stopped")
         });
+    } else {
+        drop(onion);
     }
+    drop((relay, provider));
     await_foreground_exit(
         stop,
         tasks,
         gateway_task,
         processor_task,
+        processor,
         gateway_configured,
     )
     .await
@@ -433,12 +438,35 @@ fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> OwnedTask<anyh
 }
 
 /// Wait for a signal or the first service to exit, then stop everything: the services at once,
-/// the gateway and the processor through their cleanup.
+/// the gateway, the processor listener, and finally `Processor::close` (`leave`, `swarm.close`,
+/// and measurement flush).
 async fn await_foreground_exit(
+    stop: StopSource,
+    tasks: JoinSet<anyhow::Result<()>>,
+    gateway_task: OwnedTask<anyhow::Result<()>>,
+    processor_task: OwnedTask<anyhow::Result<()>>,
+    processor: Arc<Processor>,
+    gateway_configured: bool,
+) -> anyhow::Result<()> {
+    await_foreground_exit_with_signal(
+        shutdown_signal(),
+        stop,
+        tasks,
+        gateway_task,
+        processor_task,
+        processor,
+        gateway_configured,
+    )
+    .await
+}
+
+async fn await_foreground_exit_with_signal(
+    shutdown: impl Future<Output = anyhow::Result<()>>,
     stop: StopSource,
     mut tasks: JoinSet<anyhow::Result<()>>,
     mut gateway_task: OwnedTask<anyhow::Result<()>>,
     mut processor_task: OwnedTask<anyhow::Result<()>>,
+    processor: Arc<Processor>,
     gateway_configured: bool,
 ) -> anyhow::Result<()> {
     enum ForegroundExit {
@@ -448,7 +476,7 @@ async fn await_foreground_exit(
         Processor(Result<anyhow::Result<()>, JoinError>),
     }
     let exit = tokio::select! {
-        signal = shutdown_signal() => ForegroundExit::Signal(signal),
+        signal = shutdown => ForegroundExit::Signal(signal),
         service = tasks.join_next() => ForegroundExit::Service(service),
         gateway = &mut gateway_task => ForegroundExit::Gateway(gateway),
         processor = &mut processor_task => ForegroundExit::Processor(processor),
@@ -457,6 +485,7 @@ async fn await_foreground_exit(
     // Stop request-serving tasks immediately, but keep the processor task separate so it can
     // flush measurements through its cooperative `listen_with` shutdown path.
     tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
 
     let (primary, gateway_finished, processor_finished) = match exit {
         ForegroundExit::Signal(result) => (result, false, false),
@@ -479,7 +508,8 @@ async fn await_foreground_exit(
     } else {
         await_task_cleanup(&mut processor_task, "node processor shutdown").await
     };
-    combine_foreground_results(primary, gateway_cleanup, processor_cleanup)
+    let processor_close = await_processor_close(&processor).await;
+    combine_foreground_results(primary, gateway_cleanup, processor_cleanup, processor_close)
 }
 
 fn configure_api_security(
@@ -558,10 +588,20 @@ async fn await_task_cleanup(
     }
 }
 
+async fn await_processor_close(processor: &Processor) -> anyhow::Result<()> {
+    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, processor.close()).await {
+        Ok(result) => result.context("node processor close failed"),
+        Err(_) => Err(anyhow::anyhow!(
+            "node processor close did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
+        )),
+    }
+}
+
 fn combine_foreground_results(
     primary: anyhow::Result<()>,
     gateway_cleanup: anyhow::Result<()>,
     processor_cleanup: anyhow::Result<()>,
+    processor_close: anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let failures = [
         primary.err().map(|error| format!("foreground: {error}")),
@@ -571,6 +611,9 @@ fn combine_foreground_results(
         processor_cleanup
             .err()
             .map(|error| format!("processor cleanup: {error}")),
+        processor_close
+            .err()
+            .map(|error| format!("processor close: {error}")),
     ]
     .into_iter()
     .flatten()
@@ -854,6 +897,51 @@ mod tests {
 
         assert!(cleanup.is_ok());
         assert!(flushed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn foreground_shutdown_closes_processor_network() -> anyhow::Result<()> {
+        let key = rings_node::prelude::rings_core::ecc::SecretKey::random();
+        let delegatee_key =
+            rings_node::prelude::rings_core::delegation::DelegateeKey::new_with_seckey(&key)?;
+        let processor_config =
+            super::ProcessorConfig::new(0, "stun://127.0.0.1:3478".to_string(), delegatee_key, 200)
+                .dht_virtual_nodes(0);
+        let replay = Box::new(rings_node::prelude::rings_core::storage::MemStorage::new());
+        let processor = Arc::new(
+            super::ProcessorBuilder::from_config(&processor_config)?
+                .replay_storage(replay)
+                .build()?,
+        );
+        let stop = rings_node::prelude::StopSource::new();
+        let mut tasks = super::JoinSet::new();
+        let task_stop = stop.token();
+        tasks.spawn(async move {
+            task_stop.stopped().await;
+            Ok(())
+        });
+        let gateway_task = super::start_gateway(None, stop.token()).await?;
+        let processor_task = super::spawn_processor(Arc::clone(&processor), stop.token());
+
+        super::await_foreground_exit_with_signal(
+            async { Ok(()) },
+            stop,
+            tasks,
+            gateway_task,
+            processor_task,
+            Arc::clone(&processor),
+            false,
+        )
+        .await?;
+
+        let peer = rings_node::prelude::rings_core::ecc::SecretKey::random()
+            .address()
+            .into();
+        assert!(matches!(
+            processor.swarm.create_offer(peer).await,
+            Err(rings_node::prelude::rings_core::error::Error::SwarmClosed)
+        ));
+        Ok(())
     }
 
     #[tokio::test]

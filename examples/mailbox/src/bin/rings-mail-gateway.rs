@@ -72,6 +72,9 @@ async fn main() -> ExitCode {
         Ok(listener) => listener,
         Err(error) => {
             eprintln!("cannot listen on {}: {error}", args.smtp);
+            if let Err(close_error) = node.close().await {
+                eprintln!("{close_error}");
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -84,10 +87,23 @@ async fn main() -> ExitCode {
     };
     println!("node:     {}", node.processor.did());
     println!("gateway:  {} as {}, {starttls}", args.smtp, args.host);
-    let service = gateway.smtp_service(args.host, tls).serve(listener);
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => ExitCode::SUCCESS,
-        () = service => ExitCode::FAILURE,
-        _ = node.tasks.join_next() => ExitCode::FAILURE,
+    let exit = {
+        let service = gateway.smtp_service(args.host, tls).serve(listener);
+        tokio::select! {
+            signal = node::shutdown_signal() => match signal {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("shutdown signal failed: {error}");
+                    ExitCode::FAILURE
+                }
+            },
+            () = service => ExitCode::FAILURE,
+            _ = node.tasks.join_next() => ExitCode::FAILURE,
+        }
+    };
+    if let Err(error) = node.close().await {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
     }
+    exit
 }

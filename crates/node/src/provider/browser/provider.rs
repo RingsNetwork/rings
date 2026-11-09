@@ -513,6 +513,18 @@ impl Provider {
         })
     }
 
+    /// Close this node and release its browser storage Web Lock (#1055, #1085): stop background
+    /// tasks (`Backend::serve`, `Recipient::run`, and listener generations), hand off relay
+    /// carriers and send `Leave`, close every peer connection, flush measurements, and await the
+    /// Web Lock release when unshared.
+    #[wasm_bindgen(js_name = close)]
+    pub fn close_js(self) -> js_sys::Promise {
+        future_to_promise(async move {
+            self.close().await.map_err(JsError::from)?;
+            Ok(JsValue::null())
+        })
+    }
+
     /// Send a namespaced message to a peer: `provider.send_message(did, namespace, payload)`.
     ///
     /// The payload reaches the peer's protocol registered under `namespace` (see
