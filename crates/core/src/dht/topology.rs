@@ -29,6 +29,7 @@
 //! is reported through this one action and the shell schedules the placement
 //! repair from it.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use num_bigint::BigUint;
@@ -69,11 +70,13 @@ pub use stabilization::leave_targets;
 use stabilization::local_successor_range_end;
 pub use stabilization::rectify_predecessor;
 pub use stabilization::rectify_predecessor_in;
+pub use stabilization::rectify_predecessors_in;
 pub use stabilization::stabilize_notify;
 pub use stabilization::stabilize_query;
 pub use stabilization::stabilize_successors;
 use stabilization::step_begin;
 use stabilization::step_claim;
+use stabilization::step_record_bridged_peers;
 use stabilization::step_stabilize;
 pub use stabilization::successor_head;
 pub(crate) use successor_sync::SuccessorSyncState;
@@ -117,10 +120,15 @@ pub struct TopologyState {
     pub local: Did,
     /// Known successors, ordered by clockwise distance from `local`.
     pub successors: Vec<Did>,
-    /// Known predecessor.
+    /// Known primary predecessor.
     pub predecessor: Option<Did>,
+    /// Bounded multi-predecessor list ordered by descending clockwise distance from `local`.
+    pub predecessors: Vec<Did>,
     /// Sparse/no-wrap finger table.
     pub fingers: Vec<Option<Did>>,
+    /// Passive 1-hop reachability hints mapping an unconfirmed remote peer to the admitted
+    /// topology reporter (`via`) that advertised it.
+    pub bridged: BTreeMap<Did, Did>,
     /// Per-slot proof, lookup, retry, and admission state for finger convergence.
     ///
     /// This metadata is kept beside `fingers` so every pure transition updates
@@ -173,11 +181,14 @@ impl TopologyState {
         fingers: Vec<Option<Did>>,
     ) -> Self {
         let finger_convergence = FingerConvergenceState::new(fingers.len());
+        let predecessors = predecessor.into_iter().collect();
         Self {
             local,
             successors,
             predecessor,
+            predecessors,
             fingers,
+            bridged: BTreeMap::new(),
             finger_convergence,
             pending_stabilization: None,
         }
@@ -192,7 +203,9 @@ impl TopologyState {
         local: Did,
         successors: Vec<Did>,
         predecessor: Option<Did>,
+        predecessors: Vec<Did>,
         fingers: Vec<Option<Did>>,
+        bridged: BTreeMap<Did, Did>,
         finger_convergence: FingerConvergenceState,
         pending_stabilization: Option<StabilizationRequest>,
     ) -> Self {
@@ -200,7 +213,9 @@ impl TopologyState {
             local,
             successors,
             predecessor,
+            predecessors,
             fingers,
+            bridged,
             finger_convergence,
             pending_stabilization,
         }
@@ -305,19 +320,23 @@ impl TopologyState {
             .iter()
             .copied()
             .chain(self.predecessor)
+            .chain(self.predecessors.iter().copied())
             .chain(self.fingers.iter().flatten().copied())
             .filter(move |peer| *peer != self.local)
     }
 
     /// `RoutesEqual(s, t)`: both states route every position alike.
     ///
-    /// Routing reads the successor list, the predecessor and the finger hints only
-    /// (`find_successor`, `is_responsible_for`); convergence evidence and report tokens authorize
-    /// changes to those slots but route nothing themselves.
+    /// Routing reads the successor list, the predecessor(s), the finger hints, and passive
+    /// 1-hop bridge hints (`find_successor`, `is_responsible_for`, `delivery_step`);
+    /// convergence evidence and report tokens authorize changes to those slots but route
+    /// nothing themselves.
     pub(crate) fn routes_equal(&self, other: &Self) -> bool {
         self.successors == other.successors
             && self.predecessor == other.predecessor
+            && self.predecessors == other.predecessors
             && self.fingers == other.fingers
+            && self.bridged == other.bridged
     }
 
     /// `Referenced(n, p)`: `p` occupies a successor, predecessor, or finger
@@ -411,6 +430,21 @@ pub enum TopologyEvent {
     Notify {
         /// Candidate predecessor.
         predecessor: Did,
+    },
+    /// Topology-validated multi-predecessor notify input: retains up to `capacity`
+    /// sub-ring predecessors behind the primary predecessor while superseding stale
+    /// predecessors when a strictly closer predecessor joins.
+    NotifyWithinTopology {
+        /// Candidate predecessor.
+        predecessor: Did,
+    },
+    /// Record passive 1-hop bridge hints for unconfirmed peers advertised by an
+    /// admitted topology reporter (`reporter`).
+    RecordBridgedPeers {
+        /// Admitted topology reporter that advertised `unconfirmed`.
+        reporter: Did,
+        /// Unconfirmed peers advertised by `reporter`.
+        unconfirmed: Vec<Did>,
     },
     /// Start one stabilization query against the current successor head.
     BeginStabilize {
@@ -774,7 +808,28 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
         return FindSuccessorStep::Local(state.local);
     };
     let target = dist(state.local, did);
-    if target <= dist(state.local, head) {
+    let head_dist = dist(state.local, head);
+    if target <= head_dist {
+        if did != state.local {
+            if let Some(bridged_peer) = state
+                .bridged
+                .iter()
+                .filter(|(&peer, &via)| {
+                    peer != state.local
+                        && via != state.local
+                        && state.references(via)
+                        && !state.references(peer)
+                })
+                .filter_map(|(&peer, _)| {
+                    let peer_dist = dist(state.local, peer);
+                    (target <= peer_dist && peer_dist < head_dist).then_some((peer_dist, peer))
+                })
+                .min_by(|(dist_a, _), (dist_b, _)| dist_a.cmp(dist_b))
+                .map(|(_, peer)| peer)
+            {
+                return FindSuccessorStep::Local(bridged_peer);
+            }
+        }
         return FindSuccessorStep::Local(head);
     }
     let next = closest_preceding_finger(state, &target).unwrap_or(head);
@@ -816,13 +871,22 @@ fn step_admit(
         next: peer,
         did: state.local,
     });
+    let mut next_state = TopologyState {
+        successors,
+        fingers,
+        finger_convergence,
+        ..verified
+    };
+    let mut bridged = next_state.bridged.clone();
+    bridged.retain(|&target, &mut via| {
+        target != next_state.local
+            && target != peer
+            && !next_state.references(target)
+            && next_state.references(via)
+    });
+    next_state.bridged = bridged;
     TopologyStep {
-        state: TopologyState {
-            successors,
-            fingers,
-            finger_convergence,
-            ..verified
-        },
+        state: next_state,
         actions,
     }
 }
@@ -859,14 +923,40 @@ fn step_remove(
         // the previous topology.
         finger_convergence.invalidate_all_evidence();
     }
+    let mut predecessors: Vec<Did> = state
+        .predecessors
+        .iter()
+        .copied()
+        .filter(|&did| did != peer)
+        .collect();
+    let predecessor = state
+        .predecessor
+        .filter(|&did| did != peer)
+        .or_else(|| predecessors.first().copied());
+    if let Some(pred) = predecessor {
+        if !predecessors.contains(&pred) {
+            predecessors.insert(0, pred);
+        }
+    }
+    let mut next_state = TopologyState {
+        successors: next_successors,
+        predecessor,
+        predecessors,
+        fingers,
+        finger_convergence,
+        ..state.clone()
+    };
+    let mut bridged = state.bridged.clone();
+    bridged.retain(|&target, &mut via| {
+        target != peer
+            && via != peer
+            && target != next_state.local
+            && !next_state.references(target)
+            && next_state.references(via)
+    });
+    next_state.bridged = bridged;
     TopologyStep {
-        state: TopologyState {
-            successors: next_successors,
-            predecessor: state.predecessor.filter(|&did| did != peer),
-            fingers,
-            finger_convergence,
-            ..state.clone()
-        },
+        state: next_state,
         actions: Vec::new(),
     }
 }
@@ -901,13 +991,42 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             now_ms,
         } => step_admit(state, peer, deferred_proof, now_ms, capacity),
         TopologyEvent::Remove { peer, successor } => step_remove(state, peer, successor, capacity),
-        TopologyEvent::Notify { predecessor } => TopologyStep {
-            state: TopologyState {
-                predecessor: rectify_predecessor(state.local, state.predecessor, predecessor),
+        TopologyEvent::Notify { predecessor } => {
+            let next_predecessor = rectify_predecessor(state.local, state.predecessor, predecessor);
+            let predecessors = next_predecessor.into_iter().collect();
+            TopologyStep {
+                state: TopologyState {
+                    predecessor: next_predecessor,
+                    predecessors,
+                    ..state.clone()
+                },
+                actions: Vec::new(),
+            }
+        }
+        TopologyEvent::NotifyWithinTopology { predecessor } => {
+            let predecessors = rectify_predecessors_in(state, predecessor, capacity);
+            let next_predecessor = predecessors.first().copied();
+            let mut next_state = TopologyState {
+                predecessor: next_predecessor,
+                predecessors,
                 ..state.clone()
-            },
-            actions: Vec::new(),
-        },
+            };
+            let mut bridged = state.bridged.clone();
+            bridged.retain(|&target, &mut via| {
+                target != next_state.local
+                    && !next_state.references(target)
+                    && next_state.references(via)
+            });
+            next_state.bridged = bridged;
+            TopologyStep {
+                state: next_state,
+                actions: Vec::new(),
+            }
+        }
+        TopologyEvent::RecordBridgedPeers {
+            reporter,
+            unconfirmed,
+        } => step_record_bridged_peers(state, reporter, &unconfirmed),
         TopologyEvent::BeginStabilize { request_id } => step_begin(state, request_id),
         TopologyEvent::ClaimStabilize {
             reporter,

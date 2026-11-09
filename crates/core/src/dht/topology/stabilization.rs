@@ -151,6 +151,56 @@ pub fn rectify_predecessor_in(state: &TopologyState, candidate: Did) -> Option<D
         .or(state.predecessor)
 }
 
+/// Correct bounded multi-predecessor list after one topology-aware rectify transition.
+///
+/// Law:
+/// 1. If `!can_rectify_predecessor(state, candidate)` or `capacity == 0`, the existing
+///    predecessor list is preserved (ordered by descending `dist(local, p)`).
+/// 2. If `candidate` is strictly closer to `state.local` counter-clockwise than the current
+///    primary predecessor (`dist(local, candidate) > dist(local, primary)`), `candidate`
+///    supersedes the list as `vec![candidate]` so that on a transitive ring a newly joined
+///    closer predecessor immediately retires stale predecessors behind it.
+/// 3. Otherwise (`dist(local, candidate) <= dist(local, primary)`), `candidate` is a sub-ring
+///    predecessor behind `primary` that still treats `state.local` as its reachable head; it is
+///    inserted into `predecessors` ordered by descending `dist(local, p)`, deduplicated, and
+///    truncated to `capacity`.
+pub fn rectify_predecessors_in(state: &TopologyState, candidate: Did, capacity: usize) -> Vec<Did> {
+    let mut existing: Vec<Did> = state
+        .predecessors
+        .iter()
+        .copied()
+        .chain(state.predecessor)
+        .filter(|&peer| peer != state.local)
+        .fold(Vec::new(), |mut acc, peer| {
+            push_unique(&mut acc, peer);
+            acc
+        });
+    existing.sort_by_key(|&peer| std::cmp::Reverse(dist(state.local, peer)));
+    existing.truncate(capacity);
+
+    if capacity == 0 || !can_rectify_predecessor(state, candidate) {
+        return existing;
+    }
+
+    let mut current: Vec<Did> = existing
+        .into_iter()
+        .filter(|&peer| can_rectify_predecessor(state, peer))
+        .collect();
+
+    match current.first().copied() {
+        None => vec![candidate],
+        Some(primary) if dist(state.local, candidate) > dist(state.local, primary) => {
+            vec![candidate]
+        }
+        Some(_) => {
+            push_unique(&mut current, candidate);
+            current.sort_by_key(|&peer| std::cmp::Reverse(dist(state.local, peer)));
+            current.truncate(capacity);
+            current
+        }
+    }
+}
+
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
 /// The candidate set is the HMCC merge `known = {local} ∪ current ∪ {pred} ∪
@@ -356,14 +406,54 @@ pub(super) fn step_stabilize(
     if let Some(end) = successor_proof_end {
         finger_convergence.confirm_range(0, end);
     }
+    let mut next_state = TopologyState {
+        successors: next_successors,
+        fingers,
+        finger_convergence,
+        pending_stabilization: None,
+        ..state.clone()
+    };
+    let mut bridged = state.bridged.clone();
+    bridged.retain(|&target, &mut via| {
+        target != next_state.local && !next_state.references(target) && next_state.references(via)
+    });
+    next_state.bridged = bridged;
+    TopologyStep {
+        state: next_state,
+        actions,
+    }
+}
+
+/// Record passive 1-hop bridge reachability hints for unconfirmed peers advertised by an
+/// admitted topology reporter (`reporter`).
+pub(super) fn step_record_bridged_peers(
+    state: &TopologyState,
+    reporter: Did,
+    unconfirmed: &[Did],
+) -> TopologyStep {
+    if reporter == state.local || !state.references(reporter) {
+        return TopologyStep {
+            state: state.clone(),
+            actions: Vec::new(),
+        };
+    }
+    let mut bridged = state.bridged.clone();
+    bridged.retain(|&target, &mut via| {
+        target != state.local
+            && !state.references(target)
+            && state.references(via)
+            && (via != reporter || unconfirmed.contains(&target))
+    });
+    for &peer in unconfirmed {
+        if peer != state.local && !state.references(peer) {
+            bridged.insert(peer, reporter);
+        }
+    }
     TopologyStep {
         state: TopologyState {
-            successors: next_successors,
-            fingers,
-            finger_convergence,
-            pending_stabilization: None,
+            bridged,
             ..state.clone()
         },
-        actions,
+        actions: Vec::new(),
     }
 }

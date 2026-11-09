@@ -581,6 +581,7 @@ impl NodeState {
                     let reported = TopoInfo {
                         successors,
                         predecessor,
+                        predecessors: predecessor.into_iter().collect(),
                     };
                     effects = self.stabilize_reported_by(via.peer(), request_id, reported, overlay);
                 }

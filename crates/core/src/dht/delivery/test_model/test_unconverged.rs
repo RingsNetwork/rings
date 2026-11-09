@@ -348,3 +348,81 @@ fn test_route_law_holds_on_random_unconverged_views() {
         Overlay::with_links(views, links).check_all_routes();
     }
 }
+
+/// Non-transitive two-clique ring (`#1195`): cliques `V₁ = {A(10), B(30), C(50)}` and
+/// `V₂ = {C(50), D(80), E(40)}` share only articulation node `C(50)` with interleaved ring
+/// order `A(10) < B(30) < E(40) < C(50) < D(80)`. With bounded multi-predecessor retention at
+/// `C(50)` and passive 1-hop bridge hints learned from `C(50)`'s `TopoInfo`, every ordered pair
+/// delivers in at most 2 hops and satisfies all route safety laws.
+#[test]
+fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_laws() {
+    let [a, b, e, c, d] = [10u32, 30, 40, 50, 80].map(Did::from);
+    let clique_v1 = [a, b, c];
+    let clique_v2 = [c, d, e];
+
+    let mut view_a = converged_view(&clique_v1, a);
+    view_a.bridged.insert(d, c);
+    view_a.bridged.insert(e, c);
+
+    let mut view_b = converged_view(&clique_v1, b);
+    view_b.bridged.insert(d, c);
+    view_b.bridged.insert(e, c);
+
+    let mut view_c = TopologyState::new(
+        c,
+        vec![d, a, b],
+        Some(e),
+        crate::dht::topology::finger_table(&[a, b, c, d, e], c),
+    );
+    view_c.predecessors = vec![e, b];
+
+    let mut view_d = converged_view(&clique_v2, d);
+    view_d.bridged.insert(a, c);
+    view_d.bridged.insert(b, c);
+
+    let mut view_e = converged_view(&clique_v2, e);
+    view_e.bridged.insert(a, c);
+    view_e.bridged.insert(b, c);
+
+    let views = BTreeMap::from([
+        (a, view_a),
+        (b, view_b),
+        (c, view_c),
+        (d, view_d),
+        (e, view_e),
+    ]);
+    let links = [(a, b), (b, c), (a, c), (c, d), (d, e), (c, e)];
+    let overlay = Overlay::with_links(views, links);
+
+    for route in overlay.check_all_routes() {
+        assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
+        assert!(
+            route.path().len() <= 3,
+            "expected at most 2 hops: {route:?}"
+        );
+    }
+
+    let e_to_a = overlay.check_route_law(e, a, RouteStage::TOWARD);
+    assert_eq!(
+        (e_to_a.path(), e_to_a.outcome),
+        (vec![e, c, a], Outcome::Delivered)
+    );
+
+    let d_to_b = overlay.check_route_law(d, b, RouteStage::TOWARD);
+    assert_eq!(
+        (d_to_b.path(), d_to_b.outcome),
+        (vec![d, c, b], Outcome::Delivered)
+    );
+
+    let a_to_e = overlay.check_route_law(a, e, RouteStage::TOWARD);
+    assert_eq!(
+        (a_to_e.path(), a_to_e.outcome),
+        (vec![a, c, e], Outcome::Delivered)
+    );
+
+    let b_to_d = overlay.check_route_law(b, d, RouteStage::TOWARD);
+    assert_eq!(
+        (b_to_d.path(), b_to_d.outcome),
+        (vec![b, c, d], Outcome::Delivered)
+    );
+}

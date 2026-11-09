@@ -160,6 +160,7 @@ fn linked_known_peers<'state>(
         .successors
         .iter()
         .copied()
+        .chain(state.predecessors.iter().copied())
         .chain(state.fingers.iter().flatten().copied())
         .filter(move |peer| *peer != state.local && linked(*peer))
 }
@@ -245,6 +246,16 @@ pub fn delivery_step(
     if linked(destination) {
         return Some(NextHop::new(destination, stage));
     }
+    if stage.via.is_none() {
+        if let Some(&bridge) = view.bridged.get(&destination) {
+            if bridge != view.local && linked(bridge) {
+                return Some(NextHop::new(bridge, RouteStage {
+                    via: Some(bridge),
+                    handed_off: stage.handed_off,
+                }));
+            }
+        }
+    }
     let aim = stage.aim(destination);
     if aim != destination {
         if aim == view.local {
@@ -254,9 +265,30 @@ pub fn delivery_step(
             return Some(NextHop::new(aim, stage));
         }
     }
-    match route_toward(view, aim, linked) {
+    match route_toward(view, aim, &linked) {
         RouteStep::Forward(peer) => Some(NextHop::new(peer, stage)),
         RouteStep::Handoff(peer) if !stage.handed_off => {
+            if stage.via.is_none() {
+                let handoff_dist = dist(view.local, peer);
+                if let Some(bridge) = view
+                    .bridged
+                    .iter()
+                    .filter(|(&bridged_peer, &via)| {
+                        bridged_peer != view.local
+                            && via != view.local
+                            && linked(via)
+                            && !linked(bridged_peer)
+                    })
+                    .filter_map(|(&bridged_peer, &via)| {
+                        let bridged_dist = dist(view.local, bridged_peer);
+                        (bridged_dist < handoff_dist).then_some((bridged_dist, via))
+                    })
+                    .min_by(|(dist_a, _), (dist_b, _)| dist_a.cmp(dist_b))
+                    .map(|(_, via)| via)
+                {
+                    return Some(NextHop::new(bridge, stage.handed_off()));
+                }
+            }
             Some(NextHop::new(peer, stage.handed_off()))
         }
         RouteStep::Handoff(_) | RouteStep::Isolated => None,
