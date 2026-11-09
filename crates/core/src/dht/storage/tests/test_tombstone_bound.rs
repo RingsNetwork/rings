@@ -287,7 +287,7 @@ fn test_legacy_persisted_entry_record_decodes_and_co_dots_round_trip() -> Result
 
     let co_dot = EntryDot {
         version: EntryVersion::new(1_700_000_000_001, did, writer),
-        index: 1,
+        index: 65_536,
     };
     let mut with_co_dots = decoded_entry;
     with_co_dots.crdt.co_dots.push((0, co_dot));
@@ -296,6 +296,7 @@ fn test_legacy_persisted_entry_record_decodes_and_co_dots_round_trip() -> Result
     let (_, roundtrip_entry): (String, Entry) =
         rings_codec::deserialize(&roundtrip_bytes).map_err(Error::CodecDeserialize)?;
     assert_eq!(roundtrip_entry, with_co_dots);
+    assert_eq!(roundtrip_entry.crdt.co_dots[0].1.index, 65_536);
     Ok(())
 }
 

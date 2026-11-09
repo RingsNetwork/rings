@@ -472,5 +472,26 @@ fn test_next_relay_holder_advances_past_suspected_holder_with_single_successor()
         None
     );
     assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h1_id));
+
+    // Custody declarations from an unrelated peer 500 beyond confirmed H1(300) neither discard
+    // H1(300) nor cancel an in-flight next-holder query token.
+    let unrelated = Did::from(500u32);
+    h0.observe_relay_custody(unrelated, RelayCustody::HoldsNone)?;
+    h0.observe_relay_custody(unrelated, RelayCustody::Holds)?;
+    assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h1_id));
+
+    h0.forget_next_relay_holder(None)?;
+    let (ask_key, ask_token) = h0
+        .outstanding_next_relay_holder_query()?
+        .ok_or_else(|| Error::InvalidMessage("expected query at 201".to_string()))?;
+    for _ in 0..3 {
+        h0.observe_relay_custody(unrelated, RelayCustody::HoldsNone)?;
+        h0.observe_relay_custody(unrelated, RelayCustody::Holds)?;
+    }
+    assert_eq!(
+        h0.take_next_relay_holder(ask_key, ask_token, x_id, Some(h1_id), None)?,
+        None
+    );
+    assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h1_id));
     Ok(())
 }

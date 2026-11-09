@@ -194,10 +194,14 @@ impl EntryTombstone {
     }
 }
 
-const CO_DOT_TAG: u32 = 1 << 31;
-const CO_DOT_ELEM_SHIFT: u32 = 16;
-const CO_DOT_ELEM_MASK: u32 = 0x7FFF;
-const CO_DOT_INDEX_MASK: u32 = 0xFFFF;
+fn co_dot_sentinel_version() -> EntryVersion {
+    EntryVersion {
+        logical_time_ms: u128::MAX,
+        counter: u32::MAX,
+        actor: Did::default(),
+        operation: Did::default(),
+    }
+}
 
 /// CRDT metadata carried beside the entry payload.
 ///
@@ -233,16 +237,21 @@ struct WireEntryCrdt {
 
 impl From<EntryCrdt> for WireEntryCrdt {
     fn from(crdt: EntryCrdt) -> Self {
-        let mut dots = Vec::with_capacity(crdt.dots.len().saturating_add(crdt.co_dots.len()));
-        dots.extend(crdt.dots.into_iter().map(|mut dot| {
-            dot.index &= !CO_DOT_TAG;
-            dot
-        }));
-        dots.extend(crdt.co_dots.into_iter().map(|(elem_idx, dot)| EntryDot {
-            version: dot.version,
-            index: CO_DOT_TAG
-                | ((elem_idx & CO_DOT_ELEM_MASK) << CO_DOT_ELEM_SHIFT)
-                | (dot.index & CO_DOT_INDEX_MASK),
+        let sentinel = co_dot_sentinel_version();
+        let mut dots = Vec::with_capacity(
+            crdt.dots
+                .len()
+                .saturating_add(crdt.co_dots.len().saturating_mul(2)),
+        );
+        dots.extend(crdt.dots);
+        dots.extend(crdt.co_dots.into_iter().flat_map(|(elem_idx, dot)| {
+            [
+                EntryDot {
+                    version: sentinel,
+                    index: elem_idx,
+                },
+                dot,
+            ]
         }));
         Self {
             register: crdt.register,
@@ -254,18 +263,17 @@ impl From<EntryCrdt> for WireEntryCrdt {
 
 impl From<WireEntryCrdt> for EntryCrdt {
     fn from(wire: WireEntryCrdt) -> Self {
+        let sentinel = co_dot_sentinel_version();
         let mut dots = Vec::with_capacity(wire.dots.len());
         let mut co_dots = Vec::new();
-        for dot in wire.dots {
-            if dot.index & CO_DOT_TAG == 0 {
-                dots.push(dot);
+        let mut iter = wire.dots.into_iter();
+        while let Some(dot) = iter.next() {
+            if dot.version == sentinel {
+                if let Some(co_dot) = iter.next() {
+                    co_dots.push((dot.index, co_dot));
+                }
             } else {
-                let elem_idx = (dot.index >> CO_DOT_ELEM_SHIFT) & CO_DOT_ELEM_MASK;
-                let orig_index = dot.index & CO_DOT_INDEX_MASK;
-                co_dots.push((elem_idx, EntryDot {
-                    version: dot.version,
-                    index: orig_index,
-                }));
+                dots.push(dot);
             }
         }
         Self {

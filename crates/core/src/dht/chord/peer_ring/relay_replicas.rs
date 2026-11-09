@@ -110,14 +110,47 @@ impl NextHolder {
     }
 
     /// Forget `holder` when it matches `peer` (or unconditionally when `peer` is `None`),
-    /// invalidating any in-flight query tied to the previous eligibility set and returning the
-    /// downstream peer whose pending replications should be reset.
+    /// returning the downstream peer whose pending replications should be reset.
     fn forget(&mut self, peer: Option<Did>) -> Option<Did> {
-        self.asked = None;
+        if peer.is_none() {
+            self.asked = None;
+        }
         let forgotten = (peer.is_none() || self.holder == peer)
             .then(|| self.holder.take())
             .flatten();
         peer.or(forgotten)
+    }
+
+    /// Invalidate `holder` or `asked` when `peer` becomes an eligible holder that lies in
+    /// `successors` or strictly precedes the resolved holder / advanced query past
+    /// `last_successor`.
+    fn invalidate_before(
+        &mut self,
+        last_successor: Option<Did>,
+        peer: Did,
+        in_successors: bool,
+        clear_initial_ask: bool,
+    ) -> Option<Did> {
+        if in_successors || last_successor.is_none() {
+            return self.forget(None);
+        }
+        let last = last_successor.unwrap_or_default();
+        if let Some(current_holder) = self.holder {
+            return (peer != current_holder
+                && crate::dht::relay_holder::in_arc(last, peer, current_holder))
+            .then(|| self.forget(None))
+            .flatten();
+        }
+        if let Some((asked_key, _)) = self.asked {
+            let start = last + Did::from(1u32);
+            let skipped = (asked_key != start
+                && crate::dht::relay_holder::in_arc(last, peer, asked_key - Did::from(1u32)))
+                || (clear_initial_ask && asked_key == start);
+            if skipped {
+                self.asked = None;
+            }
+        }
+        None
     }
 }
 
@@ -540,6 +573,35 @@ impl PeerRing {
     /// that forgotten downstream member is marked unforwarded so it resumes to the replacement.
     pub(crate) fn forget_next_relay_holder(&self, peer: Option<Did>) -> Result<()> {
         let target = self.lock_relay_next_holder()?.forget(peer);
+        self.clear_downstream_replications_for(target)
+    }
+
+    /// Invalidate the cached next holder or advanced query when `peer` becomes eligible and lies
+    /// before the resolved holder or advanced query key.
+    pub(crate) fn invalidate_next_relay_holder_before(
+        &self,
+        peer: Did,
+        clear_initial_ask: bool,
+    ) -> Result<()> {
+        if peer == self.did {
+            return Ok(());
+        }
+        let (in_successors, last_successor) = self.with_topology_state(|state| {
+            (
+                state.successors.contains(&peer),
+                state.successors.last().copied(),
+            )
+        })?;
+        let target = self.lock_relay_next_holder()?.invalidate_before(
+            last_successor,
+            peer,
+            in_successors,
+            clear_initial_ask,
+        );
+        self.clear_downstream_replications_for(target)
+    }
+
+    fn clear_downstream_replications_for(&self, target: Option<Did>) -> Result<()> {
         target
             .map(|target| -> Result<()> {
                 self.lock_relay_replications()?
@@ -631,7 +693,7 @@ impl PeerRing {
             .lock_relay_neighborhood()?
             .observe_answer(peer, on_time)
         {
-            self.forget_next_relay_holder(None)?;
+            self.invalidate_next_relay_holder_before(peer, true)?;
             self.relay_chain_changed();
         }
         Ok(())
