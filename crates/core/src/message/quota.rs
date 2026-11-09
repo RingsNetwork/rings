@@ -776,25 +776,22 @@ impl OriginQuotaTable {
         now: OriginQuotaInstant,
         eligible: impl Fn(&OriginQuotaRecord) -> bool,
     ) -> Result<Option<OriginQuotaKey>, OriginQuotaAdmissionError> {
-        let mut victim = None;
-        for (key, record) in self
-            .records
+        self.records
             .iter()
             .filter(|(key, record)| key.lane == lane && eligible(record))
-        {
-            if !record
-                .quota
-                .fully_replenished_at(config, now)
-                .map_err(OriginQuotaAdmissionError::Arithmetic)?
-            {
-                continue;
-            }
-            let candidate = (record.quota.last_refill, *key);
-            if victim.is_none_or(|current| candidate < current) {
-                victim = Some(candidate);
-            }
-        }
-        Ok(victim.map(|(_, key)| key))
+            .try_fold(None, |victim, (key, record)| {
+                record
+                    .quota
+                    .fully_replenished_at(config, now)
+                    .map_err(OriginQuotaAdmissionError::Arithmetic)
+                    .map(|replenished| {
+                        replenished
+                            .then_some((record.quota.last_refill, *key))
+                            .filter(|&candidate| victim.is_none_or(|current| candidate < current))
+                            .or(victim)
+                    })
+            })
+            .map(|victim| victim.map(|(_, key)| key))
     }
 
     #[cfg(test)]

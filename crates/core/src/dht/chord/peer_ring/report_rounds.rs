@@ -324,11 +324,11 @@ fn take_connect_lookup(
     pending: &mut std::collections::VecDeque<(Did, uuid::Uuid)>,
     request_id: uuid::Uuid,
 ) -> bool {
-    let Some(index) = pending.iter().position(|(_, token)| *token == request_id) else {
-        return false;
-    };
-    pending.remove(index);
-    true
+    pending
+        .iter()
+        .position(|(_, token)| *token == request_id)
+        .and_then(|index| pending.remove(index))
+        .is_some()
 }
 
 impl PeerRing {

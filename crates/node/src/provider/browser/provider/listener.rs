@@ -66,20 +66,21 @@ pub(crate) struct PagehideListener {
 impl PagehideListener {
     /// Register a `pagehide` listener on the global `window`, if one exists in this JS realm.
     pub(crate) fn register(processor: &Arc<Processor>) -> Option<Self> {
-        let window = web_sys::window()?;
-        let weak = Arc::downgrade(processor);
-        let callback = Closure::wrap(Box::new(move |_event: web_sys::Event| {
-            if let Some(processor) = weak.upgrade() {
-                let tasks = processor.tasks().clone();
-                let _ = tasks.spawn(async move {
-                    let _ = processor.leave().await;
+        web_sys::window().and_then(|window| {
+            let weak = Arc::downgrade(processor);
+            let callback = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                weak.upgrade().into_iter().for_each(|processor| {
+                    let tasks = processor.tasks().clone();
+                    let _ = tasks.spawn(async move {
+                        let _ = processor.leave().await;
+                    });
                 });
-            }
-        }) as Box<dyn FnMut(web_sys::Event)>);
-        window
-            .add_event_listener_with_callback("pagehide", callback.as_ref().unchecked_ref())
-            .ok()?;
-        Some(Self { window, callback })
+            }) as Box<dyn FnMut(web_sys::Event)>);
+            window
+                .add_event_listener_with_callback("pagehide", callback.as_ref().unchecked_ref())
+                .ok()
+                .map(|()| Self { window, callback })
+        })
     }
 }
 

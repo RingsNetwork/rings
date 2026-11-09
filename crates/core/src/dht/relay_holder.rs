@@ -493,6 +493,33 @@ impl RelayNeighborhood {
         self.storage_less.retain(|peer| keep(*peer));
     }
 
+    /// Whether `nearest` is a valid first previous-holder link passed from `from` in `state`.
+    fn admits_nearest_previous(
+        &self,
+        state: &TopologyState,
+        from: Did,
+        nearest: PreviousHolder,
+    ) -> bool {
+        self.holds(nearest.holder)
+            && if nearest.holder == from {
+                nearest.run_start == state.local
+            } else if nearest.holder == state.local {
+                !self.holds(from)
+                    && nearest.run_start != state.local
+                    && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
+                    && !state
+                        .successors
+                        .iter()
+                        .any(|&succ| succ != state.local && self.holds(succ))
+            } else {
+                !self.holds(from)
+                    && in_arc(nearest.holder, nearest.run_start, from)
+                    && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
+                    && in_arc(state.local, nearest.holder, from)
+                    && nearest.holder != from
+            }
+    }
+
     /// Take the previous holders `previous` that `from` passed to `local`, nearest first, iff
     /// `from` is the predecessor of `state`, the nearest names a node that may hold relay mail
     /// and agrees with `from`'s declaration, and its run starts after it and ends at `local`
@@ -507,46 +534,20 @@ impl RelayNeighborhood {
         from: Did,
         previous: Vec<PreviousHolder>,
     ) -> bool {
-        if state.predecessor != Some(from) {
-            return false;
-        }
-        let Some(nearest) = previous.first().copied() else {
-            return false;
-        };
-        if !self.holds(nearest.holder) {
-            return false;
-        }
-        let valid_nearest = if nearest.holder == from {
-            self.holds(from) && nearest.run_start == state.local
-        } else if nearest.holder == state.local {
-            !self.holds(from)
-                && nearest.run_start != state.local
-                && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
-                && !state
-                    .successors
-                    .iter()
-                    .any(|&succ| succ != state.local && self.holds(succ))
-        } else {
-            !self.holds(from)
-                && self.holds(nearest.holder)
-                && in_arc(nearest.holder, nearest.run_start, from)
-                && (from == nearest.run_start || in_arc(nearest.run_start, from, state.local))
-                && in_arc(state.local, nearest.holder, from)
-                && nearest.holder != from
-        };
-        if !valid_nearest {
-            return false;
-        }
-        let (previous, closed) = self.chain(state, previous);
-        if previous.is_empty() {
-            return false;
-        }
-        self.passed = Some(Passed {
-            from,
-            previous,
-            closed,
-        });
-        true
+        (state.predecessor == Some(from))
+            .then(|| previous.first().copied())
+            .flatten()
+            .filter(|&nearest| self.admits_nearest_previous(state, from, nearest))
+            .map(|_| self.chain(state, previous))
+            .filter(|(chain, _)| !chain.is_empty())
+            .map(|(previous, closed)| {
+                self.passed = Some(Passed {
+                    from,
+                    previous,
+                    closed,
+                });
+            })
+            .is_some()
     }
 
     /// The longest prefix of `previous` that is a chain of previous holders behind `local`: at
@@ -720,20 +721,20 @@ impl RelayNeighborhood {
         leaving: Did,
     ) -> RelaySegment {
         let mut segment = self.segment(state, local_holds);
-        if state.predecessor.is_none()
+        (state.predecessor.is_none()
             && leaving != state.local
-            && !segment.nodes.iter().any(|node| node.did == leaving)
-        {
+            && !segment.nodes.iter().any(|node| node.did == leaving))
+        .then(|| {
             segment.nodes.insert(0, RelayNode {
                 did: leaving,
                 holds: false,
             });
-        }
-        for node in &mut segment.nodes {
-            if node.did == leaving {
-                node.holds = false;
-            }
-        }
+        });
+        segment
+            .nodes
+            .iter_mut()
+            .filter(|node| node.did == leaving)
+            .for_each(|node| node.holds = false);
         segment
     }
 
@@ -827,7 +828,6 @@ mod members;
 pub(crate) use members::chain_position;
 pub(crate) use members::relay_carrier_offer;
 pub(crate) use members::relay_members;
-pub(crate) use members::CarrierOffer;
 pub(crate) use members::ChainNext;
 pub(crate) use members::ChainPosition;
 pub(crate) use members::RelayMembers;

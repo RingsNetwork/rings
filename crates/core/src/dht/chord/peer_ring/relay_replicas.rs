@@ -60,12 +60,11 @@ pub(crate) struct NextHolder {
 impl NextHolder {
     /// Record `(key, request_id)` as the single outstanding query iff none is active (`Law (Asked)`).
     fn ask_if_idle(&mut self, key: Did, request_id: uuid::Uuid) -> Option<(Did, uuid::Uuid)> {
-        if self.asked.is_some() {
-            return None;
-        }
-        let query = (key, request_id);
-        self.asked = Some(query);
-        Some(query)
+        self.asked.is_none().then(|| {
+            let query = (key, request_id);
+            self.asked = Some(query);
+            query
+        })
     }
 
     /// Ensure an outstanding query `(key, request_id)` is recorded when neither a resolved
@@ -86,16 +85,19 @@ impl NextHolder {
         named: Option<Did>,
         next_query: Option<(Did, uuid::Uuid)>,
     ) -> Option<(Did, uuid::Uuid)> {
-        if self.asked != Some((key, request_id)) {
-            return None;
-        }
-        if named.is_some() {
-            self.asked = None;
-            self.holder = named;
-            return None;
-        }
-        self.asked = next_query;
-        self.asked
+        (self.asked == Some((key, request_id)))
+            .then(|| match named {
+                Some(resolved) => {
+                    self.asked = None;
+                    self.holder = Some(resolved);
+                    None
+                }
+                None => {
+                    self.asked = next_query;
+                    self.asked
+                }
+            })
+            .flatten()
     }
 }
 
@@ -155,15 +157,13 @@ impl PeerRing {
     /// either under its current view, or under its view with `sender` holding no relay mail
     /// (#1057).
     pub(crate) fn is_relay_member_for_handoff(&self, key: Did, sender: Did) -> Result<bool> {
-        if self.is_relay_member(key)? {
-            return Ok(true);
-        }
-        Ok(relay_members(
-            &self.relay_segment_without(sender)?,
-            key,
-            self.relay_replicas(),
-        )
-        .contains(self.did))
+        Ok(self.is_relay_member(key)?
+            || relay_members(
+                &self.relay_segment_without(sender)?,
+                key,
+                self.relay_replicas(),
+            )
+            .contains(self.did))
     }
 
     /// This node's place in the chain of `key`, `None` when it is no member.
@@ -467,29 +467,30 @@ impl PeerRing {
         if let Some(asked) = self.lock_relay_next_holder()?.asked {
             return Ok(Some(asked));
         }
-        if !self.holds_relay_mail() {
-            return Ok(None);
-        }
-        let last = self.with_relay_view(|state, neighborhood| {
-            let covers_ring = state
-                .predecessor
-                .is_some_and(|predecessor| state.successors.contains(&predecessor));
-            let all_successors_storage_less = !covers_ring
-                && !state.successors.is_empty()
-                && state
-                    .successors
-                    .iter()
-                    .all(|successor| !neighborhood.holds(*successor));
-            all_successors_storage_less
-                .then(|| state.successors.last().copied())
-                .flatten()
-        })?;
-        let Some(last) = last else {
-            return Ok(None);
-        };
-        Ok(self
-            .lock_relay_next_holder()?
-            .ensure_asked(last + Did::from(1u32), request_id))
+        self.holds_relay_mail()
+            .then(|| {
+                self.with_relay_view(|state, neighborhood| {
+                    let covers_ring = state
+                        .predecessor
+                        .is_some_and(|predecessor| state.successors.contains(&predecessor));
+                    let all_successors_storage_less = !covers_ring
+                        && !state.successors.is_empty()
+                        && state
+                            .successors
+                            .iter()
+                            .all(|successor| !neighborhood.holds(*successor));
+                    all_successors_storage_less
+                        .then(|| state.successors.last().copied())
+                        .flatten()
+                })
+            })
+            .transpose()
+            .map(Option::flatten)?
+            .map_or(Ok(None), |last| {
+                Ok(self
+                    .lock_relay_next_holder()?
+                    .ensure_asked(last + Did::from(1u32), request_id))
+            })
     }
 
     /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask

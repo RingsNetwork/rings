@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -17,8 +16,8 @@ use crate::error::Error;
 use crate::error::Result;
 
 mod crdt;
-mod data_auth;
 pub(crate) mod inbox;
+mod provenance;
 mod retention;
 
 #[cfg(test)]
@@ -32,7 +31,8 @@ pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
-use data_auth::retain_fair_data_elements;
+use provenance::retain_fair_data_elements;
+use provenance::RetractionWitness;
 pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
@@ -766,23 +766,18 @@ impl Entry {
         self.validate_same_carrier(&other)?;
 
         let expires_at_ms = self.expires_at_ms;
-        let has_dot_witness = other.crdt.has_write_witness() && !other.crdt.dots.is_empty();
-        let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
-        let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
+        let witness = RetractionWitness::of(&other);
 
         let mut buffer = self.topic_buffer()?;
         let removed = buffer
             .values
             .iter()
-            .filter(|(value, dot)| match has_dot_witness {
-                true => target_dots.contains(*dot),
-                false => target_values.contains(*value),
-            })
+            .filter(|(value, dot)| witness.matches(value, dot))
             .map(|(value, _)| value.clone())
             .collect::<Vec<_>>();
-        for value in removed.iter() {
+        removed.iter().for_each(|value| {
             buffer.remove(value);
-        }
+        });
         Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
     }
 }

@@ -622,57 +622,65 @@ impl PeerRing {
         successor_list: &[Did],
         is_routable: impl Fn(Did) -> bool,
     ) -> Result<Option<TopologyRemoval>> {
-        if sender == self.did {
-            return Ok(None);
-        }
-        let (previous, next) = self.relay_chain_neighbours()?;
-        let chain_neighbour = previous == Some(sender) || next == Some(sender);
-        let capacity = self.successor_seq.capacity();
-        let (_, acted) = self.transition(|state, _| {
-            let held_as_predecessor = state.predecessor == Some(sender);
-            let held_as_successor = state.successors.contains(&sender);
-            if !held_as_predecessor && !held_as_successor {
-                return (
-                    TopologyStep {
-                        state: state.clone(),
-                        actions: Vec::new(),
-                    },
-                    false,
-                );
-            }
-            let mut step = self.step(state, TopologyEvent::Remove {
-                peer: sender,
-                successor: SuccessorRemoval::Preserve,
-            });
-            if held_as_successor {
-                for &candidate in successor_list {
-                    if step.state.successors.len() >= capacity {
-                        break;
+        (sender != self.did)
+            .then(|| {
+                let (previous, next) = self.relay_chain_neighbours()?;
+                let chain_neighbour = previous == Some(sender) || next == Some(sender);
+                let capacity = self.successor_seq.capacity();
+                let (_, acted) = self.transition(|state, _| {
+                    match (
+                        state.predecessor == Some(sender),
+                        state.successors.contains(&sender),
+                    ) {
+                        (false, false) => (
+                            TopologyStep {
+                                state: state.clone(),
+                                actions: Vec::new(),
+                            },
+                            false,
+                        ),
+                        (_, held_as_successor) => {
+                            let mut step = self.step(state, TopologyEvent::Remove {
+                                peer: sender,
+                                successor: SuccessorRemoval::Preserve,
+                            });
+                            if held_as_successor {
+                                step.state.successors = successor_list
+                                    .iter()
+                                    .copied()
+                                    .filter(|&candidate| {
+                                        candidate != state.local
+                                            && candidate != sender
+                                            && is_routable(candidate)
+                                    })
+                                    .fold(step.state.successors, |successors, candidate| {
+                                        match successors.len() < capacity
+                                            && !successors.contains(&candidate)
+                                        {
+                                            true => topology::update_successors(
+                                                state.local,
+                                                &successors,
+                                                candidate,
+                                                capacity,
+                                            ),
+                                            false => successors,
+                                        }
+                                    });
+                            }
+                            (step, true)
+                        }
                     }
-                    if candidate != state.local
-                        && candidate != sender
-                        && !step.state.successors.contains(&candidate)
-                        && is_routable(candidate)
-                    {
-                        step.state.successors = topology::update_successors(
-                            state.local,
-                            &step.state.successors,
-                            candidate,
-                            capacity,
-                        );
-                    }
-                }
-            }
-            (step, true)
-        })?;
-        if !acted {
-            return Ok(None);
-        }
-        self.forget_relay_custody(sender)?;
-        if chain_neighbour {
-            self.relay_chain_changed();
-        }
-        Ok(Some(TopologyRemoval::Referenced))
+                })?;
+                acted
+                    .then(|| -> Result<TopologyRemoval> {
+                        self.forget_relay_custody(sender)?;
+                        chain_neighbour.then(|| self.relay_chain_changed());
+                        Ok(TopologyRemoval::Referenced)
+                    })
+                    .transpose()
+            })
+            .transpose()
+            .map(Option::flatten)
     }
 }
 

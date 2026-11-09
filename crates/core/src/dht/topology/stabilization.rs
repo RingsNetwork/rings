@@ -78,13 +78,15 @@ pub fn successor_head(state: &TopologyState) -> Option<Did> {
 /// when the node stands alone, and length 1 on a 2-node ring where
 /// `predecessor == successor_head`.
 pub fn leave_targets(state: &TopologyState) -> Vec<Did> {
-    let mut targets = Vec::with_capacity(2);
-    for candidate in state.predecessor.into_iter().chain(successor_head(state)) {
-        if candidate != state.local && !targets.contains(&candidate) {
-            targets.push(candidate);
-        }
-    }
-    targets
+    state
+        .predecessor
+        .into_iter()
+        .chain(successor_head(state))
+        .filter(|&candidate| candidate != state.local)
+        .fold(Vec::with_capacity(2), |mut targets, candidate| {
+            push_unique(&mut targets, candidate);
+            targets
+        })
 }
 
 impl TopologyState {
@@ -92,6 +94,21 @@ impl TopologyState {
     /// [`leave_targets`].
     pub fn leave_targets(&self) -> Vec<Did> {
         leave_targets(self)
+    }
+
+    /// Whether `self` represents a two-node wrapping ring with `head`: `predecessor` is either
+    /// absent or `head`, and no referenced topology slot names a peer other than `head`.
+    fn is_two_node_ring_with(&self, head: Did) -> bool {
+        self.predecessor.is_none_or(|pred| pred == head)
+            && self.referenced_slots().all(|peer| peer == head)
+    }
+
+    /// Whether the current successor head `head` permits `candidate` as `self.local`'s
+    /// predecessor: `candidate` lies at or beyond `head` clockwise, and equals `head` only on a
+    /// two-node wrapping ring.
+    fn head_permits_predecessor(&self, head: Did, candidate: Did) -> bool {
+        dist(self.local, candidate) >= dist(self.local, head)
+            && (candidate != head || self.is_two_node_ring_with(head))
     }
 }
 
@@ -108,13 +125,11 @@ pub(super) fn local_successor_range_end(state: &TopologyState) -> Option<usize> 
 /// leaves the current value; the responsibility interval `(pred, local]` is
 /// then never empty by a self-reference.
 pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> Option<Did> {
-    if candidate == local {
-        return current;
-    }
-    match current {
-        Some(cur) if dist(local, cur) >= dist(local, candidate) => Some(cur),
-        _ => Some(candidate),
-    }
+    Some(candidate)
+        .filter(|&cand| {
+            cand != local && current.is_none_or(|cur| dist(local, cur) < dist(local, cand))
+        })
+        .or(current)
 }
 
 /// Whether `candidate` may be adopted as `state.local`'s predecessor in `state`.
@@ -124,31 +139,16 @@ pub fn rectify_predecessor(local: Did, current: Option<Did>, candidate: Did) -> 
 /// where `state` references no peer other than `head` and holds no distinct
 /// predecessor.
 pub fn can_rectify_predecessor(state: &TopologyState, candidate: Did) -> bool {
-    if candidate == state.local {
-        return false;
-    }
-    if let Some(head) = successor_head(state) {
-        let candidate_dist = dist(state.local, candidate);
-        let head_dist = dist(state.local, head);
-        if candidate_dist < head_dist {
-            return false;
-        }
-        if candidate == head
-            && (state.predecessor.is_some_and(|pred| pred != head)
-                || state.referenced_slots().any(|peer| peer != head))
-        {
-            return false;
-        }
-    }
-    true
+    candidate != state.local
+        && successor_head(state).is_none_or(|head| state.head_permits_predecessor(head, candidate))
 }
 
 /// Correct predecessor value after one topology-aware rectify transition.
 pub fn rectify_predecessor_in(state: &TopologyState, candidate: Did) -> Option<Did> {
-    if !can_rectify_predecessor(state, candidate) {
-        return state.predecessor;
-    }
-    rectify_predecessor(state.local, state.predecessor, candidate)
+    Some(candidate)
+        .filter(|&cand| can_rectify_predecessor(state, cand))
+        .and_then(|cand| rectify_predecessor(state.local, state.predecessor, cand))
+        .or(state.predecessor)
 }
 
 /// Correct successor list after one HMCC/Zave stabilize transition.
@@ -172,15 +172,15 @@ pub fn stabilize_successors(
     topo_predecessor: Option<Did>,
     capacity: usize,
 ) -> Vec<Did> {
-    let mut known = vec![local];
-    for candidate in current
+    let known = current
         .iter()
         .copied()
         .chain(topo_predecessor)
         .chain(topo_successors.iter().copied())
-    {
-        push_unique(&mut known, candidate);
-    }
+        .fold(vec![local], |mut known, candidate| {
+            push_unique(&mut known, candidate);
+            known
+        });
     successors(&known, local, capacity)
 }
 

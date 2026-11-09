@@ -229,19 +229,14 @@ async fn join_live_entry(
 ) -> Result<Entry> {
     let admitted = admitted.into_entry();
     let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
-    if matches!(store, CarrierStore::Factored { .. }) && admitted.kind == EntryKind::Data {
-        admitted.validate_data_sync_on_local(live.as_ref())?;
-    }
+    store
+        .enforces_data_provenance(admitted.kind)
+        .then(|| admitted.validate_data_sync_on_local(live.as_ref()))
+        .transpose()?;
     let joined = match live {
-        Some(live) => {
-            let live = match matches!(store, CarrierStore::Factored { .. })
-                && admitted.kind == EntryKind::Data
-            {
-                true => live.without_cross_actor_tombstones_for(&admitted, Did::default()),
-                false => live,
-            };
-            live.join(admitted)?
-        }
+        Some(live) => store
+            .sanitize_local_tombstones(live, &admitted, Did::default())
+            .join(admitted)?,
         None => admitted,
     }
     .retired_at(now_ms);
@@ -268,16 +263,12 @@ async fn operate_live_entry(
     now_ms: u128,
 ) -> Result<()> {
     let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
-    if matches!(store, CarrierStore::Factored { .. }) && op.kind() == EntryKind::Data {
-        op.validate_data_write_on_local(live.as_ref(), actor)?;
-    }
+    store
+        .enforces_data_provenance(op.kind())
+        .then(|| op.validate_data_write_on_local(live.as_ref(), actor))
+        .transpose()?;
     let local = match live {
-        Some(local) => {
-            match matches!(store, CarrierStore::Factored { .. }) && op.kind() == EntryKind::Data {
-                true => local.without_cross_actor_tombstones_for(op.entry(), actor),
-                false => local,
-            }
-        }
+        Some(local) => store.sanitize_local_tombstones(local, op.entry(), actor),
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
@@ -421,17 +412,14 @@ impl PeerRing {
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
         let local = live_entry(&store, &key, now_ms, Projection::ReturnedOnly).await?;
-        if incoming.kind == EntryKind::Data {
-            incoming.validate_data_sync_on_local(local.as_ref())?;
-        }
+        store
+            .enforces_data_provenance(incoming.kind)
+            .then(|| incoming.validate_data_sync_on_local(local.as_ref()))
+            .transpose()?;
         let stored = match local {
-            Some(local) => {
-                let local = match incoming.kind == EntryKind::Data {
-                    true => local.without_cross_actor_tombstones_for(&incoming, Did::default()),
-                    false => local,
-                };
-                local.join(incoming)?
-            }
+            Some(local) => store
+                .sanitize_local_tombstones(local, &incoming, Did::default())
+                .join(incoming)?,
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);

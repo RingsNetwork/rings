@@ -165,6 +165,48 @@ struct ReconciledGuards {
     set: OnionEntryGuardSet,
 }
 
+impl OnionEntryGuardRecord {
+    fn is_within_rotation_lifetime(&self, now_ms: u128) -> bool {
+        now_ms.saturating_sub(self.selected_at_ms) < ENTRY_GUARD_ROTATION_LIFETIME_MS
+    }
+
+    fn reconciled_at(&self, now_ms: u128, healthy_snapshot_dids: &BTreeSet<Did>) -> Option<Self> {
+        self.is_within_rotation_lifetime(now_ms).then(|| {
+            healthy_snapshot_dids
+                .contains(&self.did)
+                .then_some(Self {
+                    did: self.did,
+                    selected_at_ms: self.selected_at_ms,
+                    unreachable_since_ms: None,
+                })
+                .or_else(|| {
+                    let unreachable_since_ms = self.unreachable_since_ms.unwrap_or(now_ms);
+                    (now_ms.saturating_sub(unreachable_since_ms) < ENTRY_GUARD_UNREACHABLE_GRACE_MS)
+                        .then_some(Self {
+                            did: self.did,
+                            selected_at_ms: self.selected_at_ms,
+                            unreachable_since_ms: Some(unreachable_since_ms),
+                        })
+                })
+        })?
+    }
+}
+
+fn pick_next_weighted_candidate(
+    eligible_dids: &BTreeSet<Did>,
+    excluded: impl Fn(Did) -> bool,
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+) -> Option<Did> {
+    let remaining = eligible_dids
+        .iter()
+        .copied()
+        .filter(|&did| !excluded(did))
+        .collect::<Vec<_>>();
+    pick_weighted_index(&remaining, quality_by_did, entropy)
+        .and_then(|index| remaining.get(index).copied())
+}
+
 fn reconcile_guard_state(
     network_id: u32,
     previous: Option<OnionEntryGuardState>,
@@ -178,50 +220,29 @@ fn reconcile_guard_state(
         healthy_snapshot_dids,
         eligible_dids,
     } = candidates;
-    let mut retained = Vec::new();
     let mut guard_dids = BTreeSet::new();
-
-    for guard in previous
+    let mut retained = previous
         .as_ref()
         .map(|state| state.guards.as_slice())
         .unwrap_or_default()
-    {
-        if now_ms.saturating_sub(guard.selected_at_ms) >= ENTRY_GUARD_ROTATION_LIFETIME_MS {
-            continue;
-        }
-        if !guard_dids.insert(guard.did) {
-            continue;
-        }
-        if healthy_snapshot_dids.contains(&guard.did) {
-            retained.push(OnionEntryGuardRecord {
-                did: guard.did,
-                selected_at_ms: guard.selected_at_ms,
-                unreachable_since_ms: None,
-            });
-        } else {
-            let unreachable_since_ms = guard.unreachable_since_ms.unwrap_or(now_ms);
-            if now_ms.saturating_sub(unreachable_since_ms) < ENTRY_GUARD_UNREACHABLE_GRACE_MS {
-                retained.push(OnionEntryGuardRecord {
-                    did: guard.did,
-                    selected_at_ms: guard.selected_at_ms,
-                    unreachable_since_ms: Some(unreachable_since_ms),
-                });
-            } else {
-                guard_dids.remove(&guard.did);
-            }
-        }
-    }
+        .iter()
+        .filter_map(|guard| {
+            (!guard_dids.contains(&guard.did))
+                .then(|| guard.reconciled_at(now_ms, healthy_snapshot_dids))
+                .flatten()
+                .inspect(|reconciled| {
+                    guard_dids.insert(reconciled.did);
+                })
+        })
+        .collect::<Vec<_>>();
 
     while retained.len() < target_guard_count {
-        let remaining = eligible_dids
-            .iter()
-            .copied()
-            .filter(|did| !guard_dids.contains(did))
-            .collect::<Vec<_>>();
-        let Some(index) = pick_weighted_index(&remaining, quality_by_did, entropy) else {
-            break;
-        };
-        let Some(did) = remaining.get(index).copied() else {
+        let Some(did) = pick_next_weighted_candidate(
+            eligible_dids,
+            |did| guard_dids.contains(&did),
+            quality_by_did,
+            entropy,
+        ) else {
             break;
         };
         retained.push(OnionEntryGuardRecord {
@@ -240,15 +261,12 @@ fn reconcile_guard_state(
         .map(|guard| guard.did)
         .collect::<BTreeSet<_>>();
     while active_dids.len() < target_guard_count {
-        let remaining = eligible_dids
-            .iter()
-            .copied()
-            .filter(|did| !active_dids.contains(did) && !guard_dids.contains(did))
-            .collect::<Vec<_>>();
-        let Some(index) = pick_weighted_index(&remaining, quality_by_did, entropy) else {
-            break;
-        };
-        let Some(did) = remaining.get(index).copied() else {
+        let Some(did) = pick_next_weighted_candidate(
+            eligible_dids,
+            |did| active_dids.contains(&did) || guard_dids.contains(&did),
+            quality_by_did,
+            entropy,
+        ) else {
             break;
         };
         active_dids.insert(did);

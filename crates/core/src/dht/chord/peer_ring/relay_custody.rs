@@ -72,14 +72,13 @@ impl RelayHolderHints {
     /// Consume `(key, request_id)` once (`Law (Asked)`) and update the named holder for `key`,
     /// returning whether the named holder changed.
     fn take_answer(&mut self, key: Did, request_id: uuid::Uuid, holder: Option<Did>) -> bool {
-        if self.asked.get(&key) != Some(&request_id) {
-            return false;
-        }
-        self.asked.remove(&key);
-        match holder {
-            Some(holder) => self.named.insert(key, holder) != Some(holder),
-            None => self.named.remove(&key).is_some(),
-        }
+        (self.asked.get(&key) == Some(&request_id)).then(|| {
+            self.asked.remove(&key);
+            match holder {
+                Some(holder) => self.named.insert(key, holder) != Some(holder),
+                None => self.named.remove(&key).is_some(),
+            }
+        }) == Some(true)
     }
 }
 
@@ -320,10 +319,9 @@ impl PeerRing {
     pub(crate) async fn unplaced_relay_keys(&self, now_ms: u128) -> Result<Vec<Did>> {
         let segment = self.relay_segment()?;
         let unplaced = self
-            .live_storage_entries(now_ms)
+            .get_relay(now_ms)
             .await?
             .into_iter()
-            .filter(|(key, _)| key.kind().is_relay_inbox())
             .map(|(key, _)| key.placement())
             .filter(|key| relay_holder(&segment, *key) == RelayHolder::Unknown)
             .collect::<Vec<_>>();

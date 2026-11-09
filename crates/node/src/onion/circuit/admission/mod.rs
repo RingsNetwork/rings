@@ -544,12 +544,10 @@ impl OnionAdmissionState {
     ) -> OnionRefusedLinks {
         self.advance(now_ms);
         let mut seen = BTreeSet::new();
-        let mut snapshot = Vec::new();
-        for link in live {
-            if seen.insert(link) {
-                snapshot.push(link);
-            }
-        }
+        let mut snapshot = live
+            .into_iter()
+            .filter(|&link| seen.insert(link))
+            .collect::<Vec<_>>();
         let mut absent =
             self.slots
                 .iter()
@@ -563,9 +561,9 @@ impl OnionAdmissionState {
                 .filter(|(_, link)| !seen.contains(link))
                 .collect::<Vec<_>>();
         absent.sort_by_key(|(slot_id, link)| (*slot_id, link.generation()));
-        for (_, link) in absent {
-            self.link_closed(now_ms, link);
-        }
+        absent
+            .into_iter()
+            .for_each(|(_, link)| self.link_closed(now_ms, link));
         snapshot.sort_by_key(|&link| {
             let already_live = self.is_link_live(link);
             let assigned = self.assigned_slot_of(link.peer());
@@ -576,12 +574,10 @@ impl OnionAdmissionState {
                 link.generation(),
             )
         });
-        let mut refused = Vec::new();
-        for link in snapshot {
-            if self.link_opened(now_ms, link).is_err() {
-                refused.push(link);
-            }
-        }
+        let refused = snapshot
+            .into_iter()
+            .filter(|&link| self.link_opened(now_ms, link).is_err())
+            .collect();
         OnionRefusedLinks(refused)
     }
 
