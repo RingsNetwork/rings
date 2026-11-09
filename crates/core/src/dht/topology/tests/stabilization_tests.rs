@@ -91,9 +91,10 @@ fn test_multi_predecessor_rectification_retains_sub_ring_predecessors_and_supers
     assert!(converged.is_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
 }
 
-/// Law (Theorem 2): passive 1-hop bridge hints recorded from an admitted successor allow
-/// `find_successor` to resolve targets in the unreachable gap `(local, head)` while preserving
-/// `RoutesClockwise` on every target.
+/// Law (`#1221` Item 2): passive 1-hop bridge hints recorded from an admitted successor are
+/// retained in `TopologyState::bridged`, while `topology::find_successor` returns only
+/// referenced topology peers (`Local(head)`) so local storage ownership (`HoldAuthority`) and
+/// `StorageSync` never shrink or target unconnected bridged peers.
 #[test]
 fn test_record_bridged_peers_and_gap_aware_find_successor_preserve_routes_clockwise() {
     let d = did(80);
@@ -117,15 +118,15 @@ fn test_record_bridged_peers_and_gap_aware_find_successor_preserve_routes_clockw
     assert_eq!(with_bridges.bridged.get(&b), Some(&c));
     assert_eq!(
         find_successor(&with_bridges, a),
-        FindSuccessorStep::Local(a)
+        FindSuccessorStep::Local(e)
     );
     assert_eq!(
         find_successor(&with_bridges, did(20)),
-        FindSuccessorStep::Local(b)
+        FindSuccessorStep::Local(e)
     );
     assert_eq!(
         find_successor(&with_bridges, b),
-        FindSuccessorStep::Local(b)
+        FindSuccessorStep::Local(e)
     );
     assert_eq!(
         find_successor(&with_bridges, did(35)),
@@ -134,6 +135,121 @@ fn test_record_bridged_peers_and_gap_aware_find_successor_preserve_routes_clockw
     for target in 0..100u32 {
         assert!(with_bridges.routes_clockwise_toward(did(target)));
     }
+}
+
+/// Regression (`#1221` Item 1): in `step_record_bridged_peers`, a farther successor cannot
+/// overwrite an existing `(peer, closer_successor)` bridge entry, while a closer successor
+/// can replace a farther successor's entry.
+#[test]
+fn test_record_bridged_peers_prevents_farther_reporter_from_overwriting_closer_successor() {
+    let local = did(10);
+    let closer = did(20);
+    let farther = did(40);
+    let target = did(60);
+
+    let initial = state(local, vec![closer, farther], None, vec![None; 8], 0);
+    let after_closer = step(
+        &initial,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: closer,
+            unconfirmed: vec![target],
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(after_closer.bridged.get(&target), Some(&closer));
+
+    // Farther successor reporting the same target must not overwrite `closer`.
+    let after_farther = step(
+        &after_closer,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: farther,
+            unconfirmed: vec![target],
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(after_farther.bridged.get(&target), Some(&closer));
+
+    // Conversely, if `farther` reported first, `closer` may supersede it.
+    let seeded_farther = step(
+        &initial,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: farther,
+            unconfirmed: vec![target],
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(seeded_farther.bridged.get(&target), Some(&farther));
+    let superseded_by_closer = step(
+        &seeded_farther,
+        TopologyEvent::RecordBridgedPeers {
+            reporter: closer,
+            unconfirmed: vec![target],
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(superseded_by_closer.bridged.get(&target), Some(&closer));
+}
+
+/// Regression (`#1221` Item 3): when a 2-node wrapping ring `{local(10), head(30)}` with
+/// `predecessor = Some(head(30))` admits a 3rd peer `50`, `head(30)` is immediately pruned
+/// from `predecessor` and `predecessors`.
+#[test]
+fn test_two_node_predecessor_is_pruned_when_ring_expands() {
+    let local = did(10);
+    let head = did(30);
+    let third = did(50);
+
+    let two_node = state(local, vec![head], Some(head), vec![None; 8], 0);
+    let expanded = step(
+        &two_node,
+        TopologyEvent::Admit {
+            peer: third,
+            deferred_proof: None,
+            now_ms: 1_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(expanded.successors, vec![head, third]);
+    assert_eq!(expanded.predecessor, None);
+    assert!(expanded.predecessors.is_empty());
+}
+
+/// Regression (`#1221` Item 4): `SuccessorRemoval::PromoteReplacements` promotes routable
+/// replacements inside `topology::step`, updating finger hints and emitting
+/// `TopologyAction::SuccessorHeadChanged`.
+#[test]
+fn test_remove_with_promote_replacements_updates_fingers_and_emits_head_change() {
+    let local = did(10);
+    let leaving_head = did(20);
+    let replacement = did(30);
+
+    let initial = state(
+        local,
+        vec![leaving_head],
+        None,
+        vec![Some(leaving_head); 8],
+        0,
+    );
+    let removed = step(
+        &initial,
+        TopologyEvent::Remove {
+            peer: leaving_head,
+            successor: crate::dht::topology::SuccessorRemoval::PromoteReplacements(vec![
+                replacement,
+            ]),
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert_eq!(removed.state.successors, vec![replacement]);
+    assert!(removed.state.fingers.contains(&Some(replacement)));
+    assert!(removed
+        .actions
+        .contains(&TopologyAction::SuccessorHeadChanged(replacement)));
 }
 
 /// Law (Capacity Bound): `TopoInfo::unconfirmed_peers` and `TopologyEvent::RecordBridgedPeers`

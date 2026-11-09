@@ -537,9 +537,9 @@ impl PeerRing {
                 .holds_relay_mail()
                 .then(|| {
                     self.with_relay_view(|state, neighborhood| {
-                        let covers_ring = state
-                            .predecessor
-                            .is_some_and(|predecessor| state.successors.contains(&predecessor));
+                        let covers_ring = state.predecessor.is_some_and(|predecessor| {
+                            state.successors.last() == Some(&predecessor)
+                        });
                         (!covers_ring && neighborhood.all_successors_storage_less(state))
                             .then(|| state.successors.last().copied())
                             .flatten()

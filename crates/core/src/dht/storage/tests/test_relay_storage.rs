@@ -277,6 +277,20 @@ fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result
     assert!(ring.relay_holder_hints()?.is_empty());
     let token = ring.ask_relay_holder(key)?;
     assert!(ring.name_relay_holder(key, token, named, Some(named), None)?);
+
+    // Horizon stepping (`#1221` Item 5): when an owner answers `(None, Some(horizon))` for an
+    // unplaced `carrier_key`, `ask_relay_holder_query(carrier_key)` advances to `horizon + 1`
+    // and records the subsequent owner's holder under the original `carrier_key`.
+    let horizon = Did::from(70u32);
+    let (query_key_1, token_1) = ring.ask_relay_holder_query(key)?;
+    assert_eq!(query_key_1, key);
+    assert!(ring.name_relay_holder(query_key_1, token_1, storage_less, None, Some(horizon))?);
+    assert!(ring.relay_holder_hints()?.is_empty());
+    let (query_key_2, token_2) = ring.ask_relay_holder_query(key)?;
+    assert_eq!(query_key_2, horizon + Did::from(1u32));
+    let resolved_holder = Did::from(80u32);
+    assert!(ring.name_relay_holder(query_key_2, token_2, horizon, Some(resolved_holder), None)?);
+    assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&resolved_holder));
     Ok(())
 }
 

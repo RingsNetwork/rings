@@ -968,3 +968,73 @@ async fn test_finger_when_disconnect() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression (`#1221` Item 2): `MessageHandler::find_successor_for_query` consults
+/// `TopologyState::bridged` only for query-level resolution:
+/// - `FindSuccessorReportHandler::None` (`strict: false`) reports `bridged_peer`.
+/// - `FindSuccessorReportHandler::Connect` (`strict: false`) reports the connected `head`.
+/// - `strict: true` routes via the connected `via` successor (`RemoteAction(via, ..)`).
+#[tokio::test]
+async fn test_find_successor_for_query_isolates_connect_and_routes_strict_via_bridge() -> Result<()>
+{
+    use crate::dht::PeerRingAction;
+    use crate::message::FindSuccessorSend;
+    use crate::message::FindSuccessorThen;
+
+    let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    let node3 = prepare_node(key3).await;
+
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    wait_for_msgs([&node1, &node3]).await;
+
+    // `node1` has connected head `node3`, and records `node2` in `(node1, node3)` bridged via `node3`.
+    node1
+        .dht()
+        .record_bridged_peers(node3.did(), vec![node2.did()])?;
+
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
+
+    // 1. Application lookup (`None`, `strict: false`) reports `node2`.
+    let app_query = FindSuccessorSend {
+        did: node2.did(),
+        strict: false,
+        then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+    };
+    assert_eq!(
+        handler.find_successor_for_query(&app_query)?,
+        PeerRingAction::Some(node2.did())
+    );
+
+    // 2. Bootstrap `Connect` (`strict: false`) reports connected `head` (`node3`), not unconnected `node2`.
+    let connect_query = FindSuccessorSend {
+        did: node2.did(),
+        strict: false,
+        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+            request_id: crate::utils::new_uuid(),
+        }),
+    };
+    assert_eq!(
+        handler.find_successor_for_query(&connect_query)?,
+        PeerRingAction::Some(node3.did())
+    );
+
+    // 3. Strict lookup (`strict: true`) routes via `node3` (`via`) instead of unconnected `node2`.
+    let strict_query = FindSuccessorSend {
+        did: node2.did(),
+        strict: true,
+        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+            request_id: crate::utils::new_uuid(),
+        }),
+    };
+    assert_eq!(
+        handler.find_successor_for_query(&strict_query)?,
+        PeerRingAction::RemoteAction(
+            node3.did(),
+            crate::dht::PeerRingRemoteAction::FindSuccessor(node2.did()),
+        )
+    );
+
+    Ok(())
+}
