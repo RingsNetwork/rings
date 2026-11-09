@@ -201,3 +201,189 @@ async fn test_held_message_is_delivered_when_peer_returns_through_its_predecesso
 
     drain_and_assert_delivered(&node2, node1.did()).await
 }
+
+/// Relay inbox consumption is keyed by complete signed transaction identity
+/// `(stream_key, sequence, digest)` rather than bare `tx_id: Uuid` (#1208):
+/// 1. When two distinct valid signed transactions (`payload_a` from `sender_a` and `payload_b`
+///    from `sender_b`) share the exact same `tx_id: Uuid`, consuming `payload_a` from the
+///    application inbox while its carrier dot has not yet been retired marks `payload_a` as
+///    `Consumed` in `RelayInFlight` without aliasing `payload_b`.
+/// 2. When `payload_b` is present in the inbox on the next drain pass alongside the not-yet-retired
+///    `payload_a`, `payload_a`'s dot is retired while `payload_b` is offered, admitted, and
+///    delivered to the application inbox instead of being retired undelivered.
+/// 3. Genuine copies of the same signed transaction remain deduplicated.
+#[tokio::test]
+async fn test_inbox_drain_tracks_consumption_by_full_transaction_identity_across_shared_uuid(
+) -> Result<()> {
+    use crate::delegation::DelegateeKey;
+    use crate::dht::delivery::NextHop;
+    use crate::dht::entry::inbox::inbox_key;
+    use crate::dht::entry::inbox::HeldMessage;
+    use crate::dht::entry::Entry;
+    use crate::dht::entry::EntryOperation;
+    use crate::ecc::SecretKey;
+    use crate::fair_admission::Principal;
+    use crate::message::HopBudget;
+    use crate::message::MessageRelay;
+    use crate::message::MessageSigner;
+    use crate::message::Transaction;
+    use crate::tests::TEST_NETWORK_ID;
+
+    let recipient = prepare_node(SecretKey::random()).await;
+    let recipient_did = recipient.did();
+    let inbox_slot = StorageKey::inbox_of(recipient_did);
+    let placement = inbox_key(recipient_did);
+    let application = recipient.swarm.application_inbox()?;
+
+    let sender_a = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let sender_b = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let signer_a = MessageSigner::new(&sender_a, TEST_NETWORK_ID);
+    let signer_b = MessageSigner::new(&sender_b, TEST_NETWORK_ID);
+
+    // Both senders craft valid signed CustomMessage transactions with the exact same `tx_id`.
+    let shared_tx_id = uuid::Uuid::new_v4();
+    let body_a = b"from-sender-a-shared-uuid".to_vec();
+    let body_b = b"from-sender-b-shared-uuid".to_vec();
+
+    let tx_a = Transaction::new(
+        recipient_did,
+        shared_tx_id,
+        0,
+        None,
+        Message::CustomMessage(CustomMessage(body_a.clone())),
+        signer_a.by_ref(),
+    )?;
+    let payload_a = MessagePayload::new(
+        tx_a,
+        signer_a.by_ref(),
+        MessageRelay::new(
+            NextHop::toward(recipient_did),
+            recipient_did,
+            HopBudget::MAX,
+        ),
+    )?;
+
+    let tx_b = Transaction::new(
+        recipient_did,
+        shared_tx_id,
+        0,
+        None,
+        Message::CustomMessage(CustomMessage(body_b.clone())),
+        signer_b.by_ref(),
+    )?;
+    let payload_b = MessagePayload::new(
+        tx_b,
+        signer_b.by_ref(),
+        MessageRelay::new(
+            NextHop::toward(recipient_did),
+            recipient_did,
+            HopBudget::MAX,
+        ),
+    )?;
+    assert_eq!(payload_a.transaction.tx_id, payload_b.transaction.tx_id);
+
+    // Hold `payload_a` (plus a duplicate hold of the exact same signed `payload_a`) in the
+    // recipient's local relay inbox carrier.
+    let now_ms = get_epoch_ms();
+    let held_a1 = HeldMessage::hold(
+        payload_a.clone(),
+        recipient.swarm.transport.message_signer(),
+        now_ms,
+    )?;
+    let hold_a1 =
+        EntryOperation::Extend(Entry::inbox_delta(&held_a1)?).stamped(now_ms, recipient_did)?;
+    recipient
+        .dht()
+        .operate_storage_entry(now_ms, placement, hold_a1, recipient_did, Principal::Local)
+        .await?;
+
+    let held_a2 = HeldMessage::hold(
+        payload_a.clone(),
+        recipient.swarm.transport.message_signer(),
+        now_ms + 1,
+    )?;
+    let hold_a2 =
+        EntryOperation::Extend(Entry::inbox_delta(&held_a2)?).stamped(now_ms + 1, recipient_did)?;
+    recipient
+        .dht()
+        .operate_storage_entry(
+            now_ms + 1,
+            placement,
+            hold_a2,
+            recipient_did,
+            Principal::Local,
+        )
+        .await?;
+
+    // Drain pass 1: `held_a1` is queued into `application` while duplicate `held_a2` is refused by
+    // replay admission and retired.
+    recipient.swarm.stabilizer().stabilize().await?;
+    let delivered_a = match tokio::time::timeout(TEST_HANG_GUARD, application.next()).await {
+        Ok(Some(ApplicationDelivery::Message(msg))) => msg,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "expected payload_a from inbox, got {other:?}"
+            )));
+        }
+    };
+    assert_eq!(delivered_a.from, sender_a.delegator_did());
+    assert_eq!(
+        delivered_a.data,
+        ApplicationData::Custom(CustomMessage(body_a))
+    );
+    // Allow the detached custody-release task triggered by taking `delivered_a` to complete so
+    // `payload_a` transitions to `Consumed` in `RelayInFlight`.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+
+    // Now `payload_a` has been taken by the application (so its `RelayInFlight` entry is ready to
+    // transition to `Consumed`), and its dot is still stored in `inbox_slot`. Before `payload_a`
+    // is retired, `payload_b` (sharing `shared_tx_id`) arrives in the inbox carrier!
+    let held_b = HeldMessage::hold(
+        payload_b,
+        recipient.swarm.transport.message_signer(),
+        now_ms + 2,
+    )?;
+    let hold_b =
+        EntryOperation::Extend(Entry::inbox_delta(&held_b)?).stamped(now_ms + 2, recipient_did)?;
+    recipient
+        .dht()
+        .operate_storage_entry(
+            now_ms + 2,
+            placement,
+            hold_b,
+            recipient_did,
+            Principal::Local,
+        )
+        .await?;
+
+    // Drain pass 2: `payload_a` transitions to `Consumed` and its dot is retired, while `payload_b`
+    // (distinct `RelayTransactionId` despite identical `tx_id`) is `Unknown` -> offered and queued!
+    recipient.swarm.stabilizer().stabilize().await?;
+    let delivered_b = match tokio::time::timeout(TEST_HANG_GUARD, application.next()).await {
+        Ok(Some(ApplicationDelivery::Message(msg))) => msg,
+        other => {
+            return Err(Error::InvalidMessage(format!(
+                "expected payload_b from inbox, got {other:?}"
+            )));
+        }
+    };
+    assert_eq!(delivered_b.from, sender_b.delegator_did());
+    assert_eq!(
+        delivered_b.data,
+        ApplicationData::Custom(CustomMessage(body_b))
+    );
+
+    // Drain pass 3: once the detached custody-release task for `delivered_b` completes, `payload_b`'s
+    // dot is retired too and the inbox carrier becomes empty.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    recipient.swarm.stabilizer().stabilize().await?;
+    wait_for_storage_state(&recipient, inbox_slot, "drained", |stored| {
+        stored.is_some_and(|entry| entry.data.is_empty())
+    })
+    .await
+    .map(drop)
+}

@@ -315,3 +315,41 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
     assert_eq!(retried_entries, expected_remaining);
     Ok(())
 }
+
+/// A delayed hand-off acknowledgement from an earlier custody incarnation must not delete a
+/// re-acquired entry of the exact same value, while a fresh hand-off acknowledgement from the new
+/// custody incarnation still cleans up normally (#1207).
+#[tokio::test]
+async fn test_stale_sync_ack_from_prior_custody_incarnation_retains_reacquired_same_value(
+) -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let new_successor = Did::from(50u32);
+    let key = Did::from(100u32);
+    let value = data_entry(Did::from(10u32));
+
+    // Incarnation 0: store `value`, acknowledge hand-off, and verify local cleanup.
+    node.storage.put(&key.to_string(), &value).await?;
+    let old_ack = SyncedEntryAck::new(key, value.clone());
+    node.acknowledge_synced_entries(&[old_ack.clone()]).await?;
+    assert!(node.storage.get(&key.to_string()).await?.is_none());
+
+    // Re-acquire the exact same `value` at incarnation 1; a delayed `old_ack` from incarnation 0
+    // must not delete it.
+    node.storage.put(&key.to_string(), &value).await?;
+    node.acknowledge_synced_entries(&[old_ack]).await?;
+    assert_eq!(
+        node.storage.get(&key.to_string()).await?.as_ref(),
+        Some(&value)
+    );
+
+    // A new hand-off in incarnation 1 stamps its `PlacedEntry` with incarnation 1, and an ack
+    // bound to incarnation 1 deletes the second custody epoch cleanly.
+    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+    assert_eq!(batches.len(), 1);
+    let fresh_placed = &batches[0].1[0];
+    assert_eq!(fresh_placed.custody_incarnation(), Some(1));
+    let fresh_ack = SyncedEntryAck::new(key, value.clone()).with_custody_incarnation(1);
+    node.acknowledge_synced_entries(&[fresh_ack]).await?;
+    assert!(node.storage.get(&key.to_string()).await?.is_none());
+    Ok(())
+}

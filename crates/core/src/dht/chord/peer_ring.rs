@@ -37,9 +37,10 @@
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -51,6 +52,8 @@ use super::carrier_store::CarrierStore;
 use super::carrier_store::RemovalIndex;
 use super::carrier_store::RemovalStorage;
 use super::carrier_store::REMOVAL_SHARES;
+use super::storage::StorageCustodyIncarnation;
+use super::storage::StorageKey;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
@@ -183,6 +186,9 @@ pub struct PeerRing {
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
+    /// Per-slot local custody incarnation used to bind hand-off cleanup acknowledgements to the
+    /// custody epoch that emitted them (#1207).
+    pub(super) storage_custody_incarnations: Mutex<BTreeMap<StorageKey, StorageCustodyIncarnation>>,
     /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
     pub(super) cache_transition: FuturesMutex<()>,
     /// Count of committed transitions that changed the routes (`Law (Epoch)`).
@@ -202,8 +208,12 @@ pub struct PeerRing {
     relay_replications: Mutex<RelayReplications>,
     /// How relay custody is replicated: `r` and the age gate (see `relay_replicas`).
     relay_replication: RelayReplication,
-    /// The peers this node declared to that it holds relay mail, once its age gate opened.
-    relay_custody_declared: Mutex<BTreeSet<Did>>,
+    /// Effective age-gate threshold in milliseconds (mirrors `relay_replication.age_gate_ms` in
+    /// production; deterministically openable in tests).
+    relay_age_gate_ms: AtomicU64,
+    /// The peers this node declared to that it holds relay mail, once its age gate opened,
+    /// keyed by the transaction ID of the outstanding or admitted declaration.
+    relay_custody_declared: Mutex<BTreeMap<Did, uuid::Uuid>>,
     /// The first holder after this node past its successor list (see `relay_replicas`).
     relay_next_holder: Mutex<NextHolder>,
     /// Whether a chain neighbour was lost and the chain exchange has not run since (`Law
@@ -273,6 +283,7 @@ impl PeerRing {
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
+            storage_custody_incarnations: Mutex::new(BTreeMap::new()),
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
@@ -280,8 +291,9 @@ impl PeerRing {
             last_stamped: Mutex::new(None),
             relay_holder_hints: Mutex::new(RelayHolderHints::default()),
             relay_replications: Mutex::new(BTreeMap::new()),
+            relay_age_gate_ms: AtomicU64::new(RelayReplication::default().age_gate_ms),
             relay_replication: RelayReplication::default(),
-            relay_custody_declared: Mutex::new(BTreeSet::new()),
+            relay_custody_declared: Mutex::new(BTreeMap::new()),
             relay_next_holder: Mutex::new(NextHolder::default()),
             relay_chain_repair_due: AtomicBool::new(false),
             relay_chain_losses: Epoch::default(),
@@ -330,6 +342,8 @@ impl PeerRing {
             replicas: replication.replicas.max(1),
             ..replication
         };
+        self.relay_age_gate_ms
+            .store(replication.age_gate_ms, Ordering::Relaxed);
         self.relay_replication = replication;
         self.relay_neighborhood =
             Mutex::new(RelayNeighborhood::with_replicas(replication.replicas));

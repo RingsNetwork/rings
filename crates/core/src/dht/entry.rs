@@ -36,7 +36,7 @@ use provenance::RetractionWitness;
 pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EntryKind {
     /// Application elements stored in the DHT, each as its bytes.
     Data,
@@ -248,18 +248,44 @@ pub struct Entry {
 ///
 /// `key` is the DHT storage location. `entry.did` is the resource identity. These two
 /// values may differ for redundant replicas.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlacedEntry {
     /// The key used to place this value in DHT storage.
     pub key: Did,
     /// The stored entry value.
     pub entry: Entry,
+    /// Local custody incarnation observed when this entry was queued for hand-off.
+    #[serde(skip)]
+    custody_incarnation: Option<u64>,
 }
+
+impl PartialEq for PlacedEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.entry == other.entry
+    }
+}
+
+impl Eq for PlacedEntry {}
 
 impl PlacedEntry {
     /// Pair an entry value with the key where it is stored.
     pub fn new(key: Did, entry: Entry) -> Self {
-        Self { key, entry }
+        Self {
+            key,
+            entry,
+            custody_incarnation: None,
+        }
+    }
+
+    /// Attach the local custody incarnation observed when this entry was queued for hand-off.
+    pub(crate) fn with_custody_incarnation(mut self, incarnation: u64) -> Self {
+        self.custody_incarnation = Some(incarnation);
+        self
+    }
+
+    /// The local custody incarnation observed when this entry was queued for hand-off, if any.
+    pub(crate) const fn custody_incarnation(&self) -> Option<u64> {
+        self.custody_incarnation
     }
 
     /// Enforce that `key` belongs to `entry.did`'s affine replica set.
@@ -279,21 +305,48 @@ impl PlacedEntry {
 /// `key` is the placement key updated by the receiver. `entry` is the copied
 /// delta that the receiver joined into its local least upper bound. Before
 /// deleting, the sender compares the copied value with its current local value,
-/// both normalized and projected by [`Entry::retired_at`] at the sender's clock;
-/// if the sender has observed any newer durable delta meanwhile, deletion is
-/// skipped.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// both normalized and projected by [`Entry::retired_at`] at the sender's clock,
+/// and verifies that the acknowledgement is bound to the current local custody
+/// incarnation of that storage slot; if the sender has observed any newer durable
+/// delta or custody re-acquisition meanwhile, deletion is skipped.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SyncedEntryAck {
     /// The placement key durably persisted by the sync receiver.
     pub key: Did,
     /// The copied value the sync receiver durably joined.
     pub entry: Entry,
+    /// Local custody incarnation that emitted the hand-off this acknowledgement confirms.
+    #[serde(skip)]
+    custody_incarnation: u64,
 }
+
+impl PartialEq for SyncedEntryAck {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.entry == other.entry
+    }
+}
+
+impl Eq for SyncedEntryAck {}
 
 impl SyncedEntryAck {
     /// Witness that `entry` was durably joined at `key`.
     pub fn new(key: Did, entry: Entry) -> Self {
-        Self { key, entry }
+        Self {
+            key,
+            entry,
+            custody_incarnation: 0,
+        }
+    }
+
+    /// Bind this acknowledgement to the sender's local custody incarnation `incarnation`.
+    pub(crate) fn with_custody_incarnation(mut self, incarnation: u64) -> Self {
+        self.custody_incarnation = incarnation;
+        self
+    }
+
+    /// The sender's local custody incarnation bound to this acknowledgement.
+    pub(crate) const fn custody_incarnation(&self) -> u64 {
+        self.custody_incarnation
     }
 
     /// Returns whether this ack proves that `local` equals the copied value at the clock

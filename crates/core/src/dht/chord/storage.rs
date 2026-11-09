@@ -70,10 +70,20 @@ pub(crate) enum OperateRoute {
 /// placement, so values written by earlier builds stay addressable.
 ///
 /// Law: `StorageKey::from_str(&key.to_string()) == Ok(key)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct StorageKey {
     kind: EntryKind,
     placement: Did,
+}
+
+/// Local custody incarnation of one [`StorageKey`] slot (#1207).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct StorageCustodyIncarnation {
+    /// Monotonically increasing custody generation for this slot.
+    pub(super) generation: u64,
+    /// Whether an outgoing hand-off has observed `generation` since the slot was last retired or
+    /// advanced.
+    pub(super) handoff_observed: bool,
 }
 
 impl StorageKey {
@@ -262,7 +272,7 @@ async fn operate_live_entry(
     actor: Did,
     introducer: Principal,
     now_ms: u128,
-) -> Result<()> {
+) -> Result<bool> {
     let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
     store
         .enforces_data_provenance(op.kind())
@@ -275,9 +285,13 @@ async fn operate_live_entry(
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
         Some(value) => {
             value.check_tombstone_bound()?;
-            store.put(key, &value, introducer, now_ms).await
+            store.put(key, &value, introducer, now_ms).await?;
+            Ok(true)
         }
-        None => store.remove(key).await,
+        None => {
+            store.remove(key).await?;
+            Ok(false)
+        }
     }
 }
 
@@ -358,12 +372,68 @@ impl PeerRing {
         Ok(live)
     }
 
+    /// Current local custody incarnation for `key`.
+    pub(crate) fn storage_custody_incarnation(&self, key: StorageKey) -> Result<u64> {
+        let incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(incarnations
+            .get(&key)
+            .map(|state| state.generation)
+            .unwrap_or(0))
+    }
+
+    /// Record that an outgoing hand-off has observed the current custody incarnation of `key`,
+    /// returning that incarnation so the resulting acknowledgement can be bound to it (#1207).
+    pub(crate) fn observe_storage_handoff_incarnation(&self, key: StorageKey) -> Result<u64> {
+        let mut incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let state = incarnations.entry(key).or_default();
+        state.handoff_observed = true;
+        Ok(state.generation)
+    }
+
+    /// Advance the custody incarnation of `key` after its local custody epoch ends, invalidating
+    /// any still-in-flight hand-off acknowledgements from the retired epoch (#1207).
+    pub(crate) fn advance_storage_custody_incarnation(&self, key: StorageKey) -> Result<u64> {
+        let mut incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let state = incarnations.entry(key).or_default();
+        state.generation = state.generation.saturating_add(1);
+        state.handoff_observed = false;
+        Ok(state.generation)
+    }
+
+    /// Record a local write or inbound join at `key`. If an outgoing hand-off had already observed
+    /// the current generation, advancing the generation invalidates that hand-off's cleanup
+    /// authority so a delayed acknowledgement cannot delete the newly written or re-acquired
+    /// custody state (#1207).
+    pub(crate) fn note_storage_custody_write(&self, key: StorageKey) -> Result<()> {
+        let mut incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let state = incarnations.entry(key).or_default();
+        if state.handoff_observed {
+            state.generation = state.generation.saturating_add(1);
+            state.handoff_observed = false;
+        }
+        Ok(())
+    }
+
     /// Remove the value stored at `key` iff `ack` proves the receiver holds exactly that
-    /// value: the ack-gated local cleanup of an ownership hand-off.
+    /// value and is bound to the current local custody incarnation: the ack-gated local cleanup
+    /// of an ownership hand-off (#1207).
     ///
-    /// Post: a value written after the hand-off copy was taken differs from the acked one and
-    /// stays; the comparison and the removal are one storage transition, so a write landing
-    /// between them cannot be removed by an ack for an older value.
+    /// Post: a value written or re-acquired after the hand-off copy was taken either differs from
+    /// the acked one or sits at a newer custody incarnation and stays; the comparison and the
+    /// removal are one storage transition, so a write landing between them cannot be removed by
+    /// an ack for an older value or an earlier custody incarnation.
     pub(crate) async fn remove_storage_entry_confirmed_by(
         &self,
         key: StorageKey,
@@ -379,8 +449,11 @@ impl PeerRing {
         else {
             return Ok(());
         };
-        if ack.confirms_local_value(&local, now_ms) {
+        if self.storage_custody_incarnation(key)? == ack.custody_incarnation()
+            && ack.confirms_local_value(&local, now_ms)
+        {
             store.remove(&key.to_string()).await?;
+            self.advance_storage_custody_incarnation(key)?;
         }
         Ok(())
     }
@@ -407,7 +480,8 @@ impl PeerRing {
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
         let store = self.carrier_store_for_write(incoming.kind)?;
-        let key = StorageKey::new(incoming.kind, key).to_string();
+        let slot = StorageKey::new(incoming.kind, key);
+        let key = slot.to_string();
         let _transition = self.storage_transition.lock().await;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
@@ -426,6 +500,7 @@ impl PeerRing {
         .retired_at(now_ms);
         stored.check_tombstone_bound()?;
         store.put(&key, &stored, introducer, now_ms).await?;
+        self.note_storage_custody_write(slot)?;
         Ok(stored)
     }
 
@@ -446,9 +521,12 @@ impl PeerRing {
         introducer: Principal,
     ) -> Result<Entry> {
         let store = self.carrier_store_for_write(admitted.kind())?;
-        let key = StorageKey::new(admitted.kind(), key).to_string();
+        let slot = StorageKey::new(admitted.kind(), key);
+        let key = slot.to_string();
         let _transition = self.storage_transition.lock().await;
-        join_live_entry(&store, &key, admitted, introducer, now_ms).await
+        let stored = join_live_entry(&store, &key, admitted, introducer, now_ms).await?;
+        self.note_storage_custody_write(slot)?;
+        Ok(stored)
     }
 
     /// Apply a stamped operation issued by `writer`, delivered by `introducer`, to the value
@@ -490,9 +568,15 @@ impl PeerRing {
             }
         }
         let store = self.carrier_store_for_write(op.kind())?;
-        let key = StorageKey::new(op.kind(), placement).to_string();
+        let slot = StorageKey::new(op.kind(), placement);
+        let key = slot.to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&store, &key, op, writer, introducer, now_ms).await
+        if operate_live_entry(&store, &key, op, writer, introducer, now_ms).await? {
+            self.note_storage_custody_write(slot)?;
+        } else {
+            self.advance_storage_custody_incarnation(slot)?;
+        }
+        Ok(())
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -953,6 +1037,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             now_ms,
         )
         .await
+        .map(drop)
     }
 
     /// Read a cached entry, as a lookup serves it.

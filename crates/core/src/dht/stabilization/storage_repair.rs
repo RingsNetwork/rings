@@ -393,19 +393,20 @@ impl Stabilizer {
 
     /// Declare to every connected peer not declared to yet that this node holds relay mail, once
     /// its age gate opened (`Law (Age gate)`, #777): those peers may have read its handshake while
-    /// it held none. A peer is recorded once its declaration is queued, so a declaration that is
-    /// not queued is sent again on the next pass to that peer alone.
+    /// it held none. A peer is recorded with the declaration's transaction ID before queueing and
+    /// cleared if the transfer fails or is dropped before first-frame admission, so a lost
+    /// declaration is sent again on the next pass to that peer alone.
     async fn declare_opened_relay_custody(&self) -> Result<()> {
         let custody = self.dht.relay_custody();
         let connected = self.transport.get_connection_ids();
+        let egress = self.transport.protocol_egress();
         for peer in self.dht.undeclared_relay_custody_peers(connected)? {
             let declaration = Message::DeclareRelayCustody(DeclareRelayCustody { custody });
-            if let Err(error) = self
-                .transport
-                .protocol_egress()
-                .send_message(declaration, peer)
-                .await
-            {
+            let payload = egress.originate(declaration, peer, None).await?;
+            let tx_id = payload.transaction.tx_id;
+            self.dht.record_relay_custody_declaration(peer, tx_id)?;
+            if let Err(error) = egress.send_payload(payload).await {
+                self.dht.clear_relay_custody_declaration(peer, tx_id)?;
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -413,9 +414,7 @@ impl Stabilizer {
                     error = ?error,
                     "STABILIZATION relay custody declaration not queued; sent again next pass"
                 );
-                continue;
             }
-            self.dht.record_relay_custody_declared(peer)?;
         }
         Ok(())
     }

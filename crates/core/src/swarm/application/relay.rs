@@ -30,13 +30,43 @@
 //! class horizon; the witness admits only custom messages, of class Application, into a relay
 //! inbox, so the two instants are equal and no untaken element outlives its custody entry.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 
 use futures::channel::oneshot;
+
+use crate::error::Result;
+use crate::message::StreamKey;
+use crate::message::Transaction;
+use crate::message::TransactionDigest;
+
+/// Complete signed transaction identity used to track relay inbox consumption (#1208).
+///
+/// Keying consumption by `(stream, sequence, digest)` instead of the caller-chosen `tx_id: Uuid`
+/// ensures that two distinct signed transactions sharing a UUID never alias in [`RelayInFlight`].
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RelayTransactionId {
+    /// Destination-scoped stream identity `(network_id, origin_account, destination, class)`.
+    pub(crate) stream: StreamKey,
+    /// Sequence number within `stream`.
+    pub(crate) sequence: u64,
+    /// Canonical digest of the exact signed [`Transaction`].
+    pub(crate) digest: TransactionDigest,
+}
+
+impl RelayTransactionId {
+    /// Derive the complete signed transaction identity of `transaction` in `network_id`.
+    pub(crate) fn of(transaction: &Transaction, network_id: u32) -> Result<Self> {
+        Ok(Self {
+            stream: transaction.stream_key(network_id)?,
+            sequence: transaction.sequence,
+            digest: transaction.digest()?,
+        })
+    }
+}
 
 /// Where one stored relay element stands toward the application.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,21 +94,21 @@ enum InFlight {
     Consumed,
 }
 
-/// The relay elements handed to the inbox, by transaction.
+/// The relay elements handed to the inbox, keyed by complete signed transaction identity (#1208).
 #[derive(Default)]
-pub(crate) struct RelayInFlight(Mutex<HashMap<uuid::Uuid, InFlight>>);
+pub(crate) struct RelayInFlight(Mutex<BTreeMap<RelayTransactionId, InFlight>>);
 
 impl RelayInFlight {
     /// The table; every critical section leaves it consistent, so a poisoned lock is still valid.
-    fn lock(&self) -> MutexGuard<'_, HashMap<uuid::Uuid, InFlight>> {
+    fn lock(&self) -> MutexGuard<'_, BTreeMap<RelayTransactionId, InFlight>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Where the element of `tx_id` stands. A consumed element stays recorded as consumed until
+    /// Where the element of `id` stands. A consumed element stays recorded as consumed until
     /// it leaves storage ([`Self::retain`]).
-    pub(crate) fn poll(&self, tx_id: uuid::Uuid) -> RelayConsumption {
+    pub(crate) fn poll(&self, id: RelayTransactionId) -> RelayConsumption {
         let mut table = self.lock();
-        let Some(entry) = table.get_mut(&tx_id) else {
+        let Some(entry) = table.get_mut(&id) else {
             return RelayConsumption::Unknown;
         };
         let InFlight::Queued { taken, .. } = entry else {
@@ -93,23 +123,23 @@ impl RelayInFlight {
         }
     }
 
-    /// Record the element of `tx_id` as handed over, with the signal its taking fires and the
+    /// Record the element of `id` as handed over, with the signal its taking fires and the
     /// instant it is spent.
     pub(crate) fn queued(
         &self,
-        tx_id: uuid::Uuid,
+        id: RelayTransactionId,
         taken: oneshot::Receiver<()>,
         spent_at_ms: u128,
     ) {
         self.lock()
-            .insert(tx_id, InFlight::Queued { taken, spent_at_ms });
+            .insert(id, InFlight::Queued { taken, spent_at_ms });
     }
 
     /// Forget every element absent from `stored`, the elements of a carrier read at `now_ms`,
     /// unless it was handed over and is not spent yet (the laws of this module).
-    pub(crate) fn retain(&self, stored: &BTreeSet<uuid::Uuid>, now_ms: u128) {
-        self.lock().retain(|tx_id, entry| {
-            stored.contains(tx_id)
+    pub(crate) fn retain(&self, stored: &BTreeSet<RelayTransactionId>, now_ms: u128) {
+        self.lock().retain(|id, entry| {
+            stored.contains(id)
                 || matches!(entry, InFlight::Queued { spent_at_ms, .. } if now_ms < *spent_at_ms)
         });
     }
@@ -121,16 +151,34 @@ mod tests {
 
     use super::RelayConsumption;
     use super::RelayInFlight;
+    use super::RelayTransactionId;
+    use crate::dht::Did;
+    use crate::message::MessageCategory;
+    use crate::message::StreamKey;
+    use crate::message::TransactionDigest;
 
     /// The instant the elements of these tests are spent.
     const SPENT_AT_MS: u128 = 1_000;
+
+    fn sample_id(origin_tag: u32, sequence: u64, digest_tag: u8) -> RelayTransactionId {
+        RelayTransactionId {
+            stream: StreamKey::new(
+                1,
+                Did::from(origin_tag),
+                Did::from(0xffu32),
+                MessageCategory::Application,
+            ),
+            sequence,
+            digest: TransactionDigest::new([digest_tag; 32]),
+        }
+    }
 
     /// An element is consumed only once taken, and stays consumed until a carrier read lacks
     /// it, so a retirement that failed is retried by a later pass instead of redelivering it.
     #[test]
     fn test_relay_mail_is_consumed_once_taken_until_it_leaves_storage() {
         let table = RelayInFlight::default();
-        let taken = uuid::Uuid::new_v4();
+        let taken = sample_id(1, 0, 0x11);
         assert_eq!(table.poll(taken), RelayConsumption::Unknown);
         let (fire, wait) = oneshot::channel();
         table.queued(taken, wait, SPENT_AT_MS);
@@ -148,7 +196,7 @@ mod tests {
     #[test]
     fn test_discarded_relay_mail_stays_untaken() {
         let table = RelayInFlight::default();
-        let discarded = uuid::Uuid::new_v4();
+        let discarded = sample_id(2, 0, 0x22);
         let (dropped, wait) = oneshot::channel::<()>();
         table.queued(discarded, wait, SPENT_AT_MS);
         drop(dropped);
@@ -161,12 +209,38 @@ mod tests {
     #[test]
     fn test_untaken_relay_mail_is_forgotten_only_once_spent() {
         let table = RelayInFlight::default();
-        let untaken = uuid::Uuid::new_v4();
+        let untaken = sample_id(3, 0, 0x33);
         let (_fire, wait) = oneshot::channel::<()>();
         table.queued(untaken, wait, SPENT_AT_MS);
         table.retain(&Default::default(), SPENT_AT_MS - 1);
         assert_eq!(table.poll(untaken), RelayConsumption::Untaken);
         table.retain(&Default::default(), SPENT_AT_MS);
         assert_eq!(table.poll(untaken), RelayConsumption::Unknown);
+    }
+
+    /// Distinct signed transactions never collide in `RelayInFlight` even if they came from
+    /// payloads that shared a caller-chosen UUID (#1208).
+    #[test]
+    fn test_distinct_relay_transaction_identities_track_consumption_independently() {
+        let table = RelayInFlight::default();
+        let first = sample_id(1, 0, 0xaa);
+        let second_origin = sample_id(2, 0, 0xaa);
+        let second_seq = sample_id(1, 1, 0xbb);
+
+        let (fire_first, wait_first) = oneshot::channel();
+        let (_fire_second, wait_second) = oneshot::channel();
+        table.queued(first, wait_first, SPENT_AT_MS);
+        table.queued(second_origin, wait_second, SPENT_AT_MS);
+
+        fire_first.send(()).unwrap();
+        assert_eq!(table.poll(first), RelayConsumption::Consumed);
+        assert_eq!(table.poll(second_origin), RelayConsumption::Untaken);
+        assert_eq!(table.poll(second_seq), RelayConsumption::Unknown);
+
+        // Retaining only `second_origin` forgets `first` (consumed and absent) while keeping
+        // `second_origin` untaken until spent.
+        table.retain(&[second_origin].into(), 0);
+        assert_eq!(table.poll(first), RelayConsumption::Unknown);
+        assert_eq!(table.poll(second_origin), RelayConsumption::Untaken);
     }
 }
