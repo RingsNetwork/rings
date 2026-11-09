@@ -989,6 +989,27 @@ fn test_rectify_never_adopts_the_local_node_as_predecessor() {
     assert!(is_responsible_for(&notified_by_itself.state, did(7)));
 }
 
+#[test]
+fn test_rectify_in_rejects_forward_successor_interval_on_non_wrapping_ring() {
+    let local = did(10);
+    // When `local` knows successor `head = 30` and a peer `11` inside `(local, head]` connects
+    // (either before or after admission into `successors`), `11` cannot set itself as predecessor
+    // to inflate `is_responsible_for` across `(11, 10]`.
+    let before_admit = state(local, vec![did(30)], None, vec![None; 5], 0);
+    assert!(!can_rectify_predecessor(&before_admit, did(11)));
+    assert_eq!(rectify_predecessor_in(&before_admit, did(11)), None);
+
+    let after_admit = state(local, vec![did(11), did(30)], None, vec![None; 5], 0);
+    assert!(!can_rectify_predecessor(&after_admit, did(11)));
+    assert_eq!(rectify_predecessor_in(&after_admit, did(11)), None);
+    assert!(!is_responsible_for(&after_admit, did(50)));
+
+    // On a two-node wrapping ring `{local, peer}`, `peer` is both successor and predecessor.
+    let two_node = state(local, vec![did(30)], None, vec![None; 5], 0);
+    assert!(can_rectify_predecessor(&two_node, did(30)));
+    assert_eq!(rectify_predecessor_in(&two_node, did(30)), Some(did(30)));
+}
+
 /// Admission-focused regression tests for deferred finger proofs.
 ///
 /// The submodule keeps timeout, duplicate, and supersession cases close to the

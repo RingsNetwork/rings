@@ -156,7 +156,7 @@ impl ScopedStorage<'_> {
         let dht = &self.transport.dht;
         let operation = dht.stamp_operation(operation, now_ms, None).await?;
         operate_entry(self.transport, operation.clone(), self.attempts()).await?;
-        dht.local_cache_observe_write(operation).await
+        dht.local_cache_observe_write_at(operation, now_ms).await
     }
 
     /// [`Self::operate_observed`] whose remote placements ask their owners for a store report
@@ -173,7 +173,7 @@ impl ScopedStorage<'_> {
         let receipt =
             operate_entry_reported(self.transport, operation.clone(), self.attempts(), quorum)
                 .await?;
-        dht.local_cache_observe_write(operation).await?;
+        dht.local_cache_observe_write_at(operation, now_ms).await?;
         Ok(receipt)
     }
 

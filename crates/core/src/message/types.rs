@@ -163,6 +163,19 @@ pub struct NotifyPredecessorSend {
     pub did: Did,
 }
 
+/// A leaving node's best-effort departure announcement to its predecessor and successor head
+/// (#1057).
+///
+/// Carries the sender's current `successor_list` so a predecessor whose successor head is
+/// leaving can promote a connected replacement immediately. The receiver acts on it only for
+/// the authenticated sender (`ctx.transaction.origin()`) and only when it holds the sender
+/// as its predecessor or successor.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
+pub struct Leave {
+    /// The leaving node's current successor list.
+    pub successor_list: Vec<Did>,
+}
+
 /// Reason a peer requested another node's topology view.
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
@@ -369,7 +382,10 @@ pub enum FindSuccessorReportHandler {
     /// None: do nothing but return.
     None,
     /// - Connect: connect origin node.
-    Connect,
+    Connect {
+        /// One-shot identity that binds the report to the lookup that asked for it.
+        request_id: uuid::Uuid,
+    },
     /// - FixFingerTable: update one proved finger-table range.
     FixFingerTable {
         /// Slot/range request that identifies the lookup this report may satisfy.
@@ -448,6 +464,8 @@ macro_rules! with_message_variants {
             30 => RelayCarriersWanted(RelayCarriersWanted): Storage, NoStorageRoute,
             /// The owner's report of a reported entry operation, to its origin (#866).
             31 => EntryStoreReport(EntryStoreReport): Storage, NoStorageRoute,
+            /// A leaving node's best-effort departure announcement to its predecessor and successor head (#1057).
+            32 => Leave(Leave): DhtControl, NoStorageRoute,
         }
     };
 }

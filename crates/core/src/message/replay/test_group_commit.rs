@@ -279,11 +279,7 @@ async fn test_a_link_admission_is_released_at_once_and_its_charge_rewinds_with_a
     let verdict = replay
         .admit_on_link(
             &mut window,
-            stream(1),
-            7,
-            digest(7),
-            MessageCategory::Application.into(),
-            0,
+            super::Admission::for_test(stream(1), 7, digest(7), 0),
         )
         .await?;
     assert_eq!(verdict, SequenceVerdict::First);

@@ -146,13 +146,13 @@ pub(super) fn send(
     send_on(admission, now_ms, link(from), n, layer)
 }
 
-/// The units charged to `from` in the window ending at the quantum of `now_ms`, if it has a
-/// ledger.
+/// The units charged to `from`'s connection slot in the window ending at the quantum of `now_ms`,
+/// if `from` is bound to a slot ledger.
 pub(super) fn sender_load(admission: &OnionAdmissionState, from: u32, now_ms: u128) -> Option<u32> {
     admission
-        .senders
-        .get(&Did::from(from))
-        .map(|sender| sender.ledger.load(now_ms / Q))
+        .slot_of(Did::from(from))
+        .and_then(|slot_id| admission.slots.get(&slot_id))
+        .map(|slot| slot.ledger.load(now_ms / Q))
 }
 
 /// The live filter keys in expiry order.

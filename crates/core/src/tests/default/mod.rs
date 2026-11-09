@@ -276,6 +276,18 @@ pub fn prepare_node_without_relay_storage(key: SecretKey) -> Result<Node> {
     Ok(Node::build(fixture_builder(&key, TEST_ICE_SERVERS)?))
 }
 
+/// A fixture node with a relay store and explicit relay replication parameters.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn prepare_node_with_relay_replication(
+    key: SecretKey,
+    relay_replication: crate::dht::RelayReplication,
+) -> Result<Node> {
+    let builder = fixture_builder(&key, TEST_ICE_SERVERS)?
+        .relay_replication(relay_replication)
+        .relay_storage(crate::tests::volatile_relay_storage());
+    Ok(Node::build(builder))
+}
+
 /// Builds a node with explicit ICE servers and optional measurement recording.
 fn prepare_node_with_ice_servers_and_measure(
     key: SecretKey,

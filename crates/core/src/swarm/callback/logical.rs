@@ -398,7 +398,7 @@ impl LogicalInbound {
         payload: &MessagePayload,
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
-        edge: EdgeRelation,
+        arrival: Arrival,
     ) -> crate::error::Result<()> {
         if !self.is_local_destination(payload) {
             return Ok(());
@@ -406,10 +406,12 @@ impl LogicalInbound {
         let class = lane
             .class()
             .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
+        let edge = arrival.edge_relation(payload);
+        let introducer = arrival.introducer(self.transport.dht.edges());
         let charge = OriginQuotaCharge::select(class, edge, || self.delegates_admission(message));
         let mut windows = windows.lock().await;
         self.transport
-            .admit_link_transaction(&mut windows, &payload.transaction, charge)
+            .admit_link_transaction(&mut windows, &payload.transaction, charge, introducer)
             .await
     }
 

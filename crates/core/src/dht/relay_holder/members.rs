@@ -77,6 +77,21 @@ pub(crate) struct CarrierOffer {
     pub(crate) targets: Vec<Did>,
 }
 
+impl CarrierOffer {
+    /// Targets to which this offer emits a direct ownership hand-off, falling back to
+    /// `fallback_targets` when no member or endpoint is placed (`Law (Chain repair)`).
+    pub(crate) fn into_handoff_targets(self, fallback_targets: &[Did]) -> Vec<Did> {
+        self.purpose
+            .permits_source_cleanup()
+            .then_some(self.targets)
+            .map(|targets| match targets.is_empty() {
+                true => fallback_targets.to_vec(),
+                false => targets,
+            })
+            .unwrap_or_default()
+    }
+}
+
 /// The offer `local`, which keeps the carrier of `key`, makes under `segment`: to the other
 /// members as copies when `local` is a member; to the members as a hand-off when it is not; and,
 /// when the view does not place the key's owner, as a hand-off to the holder the owner named

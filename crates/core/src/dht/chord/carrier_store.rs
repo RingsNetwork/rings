@@ -175,6 +175,7 @@ impl RemovalRecord {
             crdt: EntryCrdt {
                 register: self.register.map(|register| register.version),
                 dots: Vec::new(),
+                co_dots: Vec::new(),
                 tombstones: self.removes.iter().map(|remove| remove.tombstone).collect(),
             },
             expires_at_ms: Some(0),
@@ -200,6 +201,7 @@ fn element_side(value: &Entry) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: value.crdt.dots.clone(),
+            co_dots: value.crdt.co_dots.clone(),
             tombstones: Vec::new(),
         },
         ..value.clone()
@@ -223,6 +225,7 @@ fn glue(elements: Option<Entry>, removals: Option<&RemovalRecord>) -> Result<Opt
         crdt: EntryCrdt {
             register: remove_side.crdt.register,
             dots: elements.crdt.dots,
+            co_dots: elements.crdt.co_dots,
             tombstones: remove_side.crdt.tombstones,
         },
         expires_at_ms: elements.expires_at_ms.max(remove_side.expires_at_ms),
@@ -359,6 +362,26 @@ pub(crate) enum CarrierStore<'a> {
 }
 
 impl CarrierStore<'_> {
+    /// Whether this store is the factored replicated data store, where per-actor provenance is
+    /// enforced (the fetch cache uses [`Self::Whole`]).
+    pub(crate) const fn enforces_data_provenance(&self, kind: EntryKind) -> bool {
+        matches!(self, Self::Factored { .. }) && matches!(kind, EntryKind::Data)
+    }
+
+    /// Return `local` with cross-actor tombstones targeting `incoming` evicted when this store
+    /// enforces data provenance, or unchanged otherwise.
+    pub(crate) fn sanitize_local_tombstones(
+        &self,
+        local: Entry,
+        incoming: &Entry,
+        fallback_actor: Did,
+    ) -> Entry {
+        match self.enforces_data_provenance(incoming.kind) {
+            true => local.without_cross_actor_tombstones_for(incoming, fallback_actor),
+            false => local,
+        }
+    }
+
     /// Run the recovery pass once: normalize every element side that has a remove side against
     /// it, and count every remove side. Later calls only read the flag, and hold no lock.
     async fn ensure_recovered(
@@ -385,7 +408,10 @@ impl CarrierStore<'_> {
             };
             let whole = !held.crdt.tombstones.is_empty() || held.crdt.register.is_some();
             let normalized = held.join(record.as_entry())?;
-            if whole || normalized.data.len() != held.data.len() {
+            if whole
+                || normalized.data.len() != held.data.len()
+                || normalized.crdt.co_dots.len() != held.crdt.co_dots.len()
+            {
                 elements.put(&key, &element_side(&normalized)).await?;
             }
         }

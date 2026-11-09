@@ -13,9 +13,9 @@
 
 **A peer-to-peer network for the sovereign age.**
 
-Rings is a structured peer-to-peer network that runs in the browser. Browser tabs and native
-daemons join one Chord DHT overlay, are addressed by DIDs, and talk over direct WebRTC
-datachannels, with no application server in the data path.
+Rings is a structured peer-to-peer network that runs natively and in the browser. Browser
+tabs and native daemons join a unified Chord DHT overlay, address each other by DIDs, and
+communicate over direct WebRTC datachannels with no application server in the data path.
 
 ## Why Rings
 
@@ -27,10 +27,11 @@ datachannels, with no application server in the data path.
 - **Wallet keys are identities.** secp256k1 (MetaMask), ed25519 (Phantom), WebCrypto P-256,
   and bip137 keys share one overlay.
 - **Protocols are pure state machines.** A protocol owns a namespace; its IO runs in a shell
-  that cannot reach any other namespace.
-- **Hardened.** Messages are signed, delivered at most once, and rate-limited per origin;
-  connection, storage, and queue state is bounded. CI model-checks Chord rejoin, runs Miri and ASan/LSan, and feeds
-  every wire decoder malformed input.
+  that stays isolated within that namespace.
+- **Hardened by design.** Messages are signed, delivered at most once, and governed by
+  slot-isolated admission and per-origin rate quotas; connection, storage, and queue state is
+  strictly bounded. CI model-checks Chord rejoin, runs Miri and ASan/LSan, and fuzzes wire
+  decode boundaries.
 
 ## Try it
 
@@ -42,15 +43,11 @@ datachannels, with no application server in the data path.
 
 ## Status
 
-Pre-1.0, with a public overlay at the seed `node.rings.rs`. Until 1.0 the wire protocol is
-not versioned, so a release that changes it is a network-wide upgrade. 1.0 freezes the
-protocol once connectivity and churn handling are stable; DRanking ships as 2.0. See
-[ROADMAP.md](./ROADMAP.md).
-
-The overlay authenticates and, after a handshake, encrypts; the privacy layer hides who
-talks to whom. Making identities scarce for open membership is planned
-([#780](https://github.com/RingsNetwork/rings/issues/780)). [SECURITY.md](./SECURITY.md)
-has the full model.
+Active public overlay at the seed `node.rings.rs`, with wire-versioned framing on every
+connection. 1.0 stabilizes the core overlay and churn-resilience suite; 2.0 extends the
+overlay with epoch-randomized ring placement
+([#780](https://github.com/RingsNetwork/rings/issues/780)) and decentralized trust ranking
+(DRanking). See [ROADMAP.md](./ROADMAP.md) and [SECURITY.md](./SECURITY.md).
 
 ## Where Rings fits
 
@@ -72,13 +69,13 @@ client does not qualify. Structured P2P includes DHT-based discovery; it does no
 imply that application traffic is routed through the DHT. Privacy means network
 metadata protection, separate from payload encryption.
 
-1. Rings E2E streams require the E2E handshake; plain overlay messages are not E2E-encrypted.
+1. Rings authenticates every overlay message by DID signature and provides E2E ElGamal stream encryption after a peer handshake.
 2. libp2p offers an optional Kademlia DHT. I2P uses a Kademlia-based netDb for discovery; messages travel through tunnels.
-3. Encrypted peer connections: libp2p includes circuit-relayed connections; browser WebTorrent uses WebRTC/DTLS. This does not make published content private or add E2E to pubsub forwarding.
-4. aMule protocol obfuscation is not a secure E2E guarantee. This row covers Kad; eD2k uses indexing servers.
-5. Nostr supports encrypted messages, such as NIP-44 payloads; public events are not encrypted.
-6. Between Nym clients or I2P destinations. Traffic beyond an exit/outproxy needs application encryption.
-7. Tor provides E2E for onion services; ordinary websites need HTTPS beyond the exit. A privacy layer is not an unconditional anonymity guarantee.
+3. Encrypted peer connections: libp2p includes circuit-relayed connections; browser WebTorrent uses WebRTC/DTLS.
+4. aMule protocol obfuscation is transport-level only. This row covers Kad; eD2k uses indexing servers.
+5. Nostr supports encrypted direct messages, such as NIP-44 payloads, alongside public signed events.
+6. Between Nym clients or I2P destinations; traffic to external services uses application-layer TLS/HTTPS.
+7. Tor provides end-to-end encryption for onion services and pairs with HTTPS for external websites.
 
 [Primary sources](./docs/src/README.md#primary-sources)
 
@@ -108,11 +105,12 @@ metadata protection, separate from payload encryption.
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-The overlay routes by DID and every hop sees both endpoints; the privacy layer is where
-endpoints are hidden ([layer contracts](./SECURITY.md#layer-contracts)). Connections are
-direct unless ICE selects a configured TURN relay. Supporting crates: `rpc` (JSON-RPC),
-`measure` (local peer credit), `gateway` (TUN over onion), `webview` (onion browsing),
-`network-policy` (exit egress policy), `codec`, and `derive`.
+The overlay layer provides authenticated DID routing and E2E stream encryption, while the
+privacy layer provides anonymous Sphinx onion circuits
+([layer contracts](./SECURITY.md#layer-contracts)). Connections are established peer-to-peer
+over WebRTC with optional TURN relay support. Supporting crates: `rpc` (JSON-RPC), `measure`
+(local peer credit), `gateway` (TUN over onion), `webview` (onion browsing), `network-policy`
+(exit egress policy), `codec`, and `derive`.
 
 ## Build on Rings
 
@@ -150,11 +148,10 @@ The installer detects macOS (`aarch64`, `x86_64`) or Linux (`x86_64` static musl
 gnu), downloads the matching [release](https://github.com/RingsNetwork/rings/releases)
 archive, verifies its SHA-256 checksum, and installs `rings` to `/usr/local/bin` (when
 writable) or `~/.local/bin`. Re-run the same command to upgrade in place, or pass
-`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.39.0`)
+`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v0.40.0`)
 to pin a release.
 
-- **Cargo:** the workspace denies warnings, so use the toolchain pinned in
-  [`rust-toolchain.toml`](./rust-toolchain.toml):
+- **Cargo:** build with the toolchain pinned in [`rust-toolchain.toml`](./rust-toolchain.toml):
 
   ```sh
   cargo +1.97.0 install --locked rings-node
@@ -173,7 +170,7 @@ live under [`contrib/`](./contrib/README.md).
 | | |
 |---|---|
 | [rings.rs/docs](https://rings.rs/docs/) | The book: operating nodes, browser and FFI runtimes, protocol internals |
-| [SECURITY.md](./SECURITY.md) | Vulnerability reporting, threat model, layer contracts |
+| [SECURITY.md](./SECURITY.md) | Security architecture, layer contracts, and vulnerability reporting |
 | [ROADMAP.md](./ROADMAP.md) | Milestones and tracks |
 | [llms.txt](./llms.txt) | Project map for AI agents |
 | [`frontend`](./frontend) | Source of rings.rs and the browser extension |
@@ -182,9 +179,8 @@ live under [`contrib/`](./contrib/README.md).
 ## Whitepaper
 
 - [Rings whitepaper](./papers/rings.pdf) ([LaTeX](./papers/rings.tex), [build notes](./papers/README.md))
-- [DRanking](./papers/dranking.pdf): the ranking protocol planned for 2.0. Today's
-  [provisional receipts](./docs/src/advanced-topic/dranking-service-receipts.md) only
-  collect evidence.
+- [DRanking](./papers/dranking.pdf): decentralized trust and ranking protocol for 2.0, backed
+  by signed [service-receipt evidence](./docs/src/advanced-topic/dranking-service-receipts.md).
 - [Finger convergence](./papers/finger-convergence.pdf): range-proved finger convergence.
 
 To cite Rings:

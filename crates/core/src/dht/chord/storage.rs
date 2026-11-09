@@ -168,13 +168,14 @@ async fn live_entry(
     }
 }
 
-/// The counts a projection can change: elements, element dots, removes, and whether a register
-/// is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops, so a
-/// projection with the same shape is the same value.
-fn projection_shape(entry: &Entry) -> (usize, usize, usize, bool) {
+/// The counts a projection can change: elements, element dots, co-dots, removes, and whether a
+/// register is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops,
+/// so a projection with the same shape is the same value.
+fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, bool) {
     (
         entry.data.len(),
         entry.crdt.dots.len(),
+        entry.crdt.co_dots.len(),
         entry.crdt.tombstones.len(),
         entry.crdt.register.is_some(),
     )
@@ -228,8 +229,15 @@ async fn join_live_entry(
     now_ms: u128,
 ) -> Result<Entry> {
     let admitted = admitted.into_entry();
-    let joined = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
-        Some(live) => live.join(admitted)?,
+    let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
+    store
+        .enforces_data_provenance(admitted.kind)
+        .then(|| admitted.validate_data_sync_on_local(live.as_ref()))
+        .transpose()?;
+    let joined = match live {
+        Some(live) => store
+            .sanitize_local_tombstones(live, &admitted, Did::default())
+            .join(admitted)?,
         None => admitted,
     }
     .retired_at(now_ms);
@@ -255,8 +263,13 @@ async fn operate_live_entry(
     introducer: Principal,
     now_ms: u128,
 ) -> Result<()> {
-    let local = match live_entry(store, key, now_ms, Projection::ReturnedOnly).await? {
-        Some(local) => local,
+    let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
+    store
+        .enforces_data_provenance(op.kind())
+        .then(|| op.validate_data_write_on_local(live.as_ref(), actor))
+        .transpose()?;
+    let local = match live {
+        Some(local) => store.sanitize_local_tombstones(local, op.entry(), actor),
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
@@ -400,8 +413,14 @@ impl PeerRing {
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
         let local = live_entry(&store, &key, now_ms, Projection::ReturnedOnly).await?;
+        store
+            .enforces_data_provenance(incoming.kind)
+            .then(|| incoming.validate_data_sync_on_local(local.as_ref()))
+            .transpose()?;
         let stored = match local {
-            Some(local) => local.join(incoming)?,
+            Some(local) => store
+                .sanitize_local_tombstones(local, &incoming, Did::default())
+                .join(incoming)?,
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);
@@ -455,7 +474,9 @@ impl PeerRing {
         introducer: Principal,
     ) -> Result<()> {
         match op.entry().kind {
-            EntryKind::Data => op.validate_admissible_at(now_ms, self.network_id())?,
+            EntryKind::Data => {
+                op.validate_data_write(now_ms, self.network_id(), writer, introducer)?
+            }
             EntryKind::RelayMessage => {
                 op.entry().validate_bounds_at(now_ms)?;
                 // Only a hold needs to know who is responsible for the recipient.
@@ -471,7 +492,7 @@ impl PeerRing {
         let store = self.carrier_store_for_write(op.kind())?;
         let key = StorageKey::new(op.kind(), placement).to_string();
         let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&store, &key, op, self.did, introducer, now_ms).await
+        operate_live_entry(&store, &key, op, writer, introducer, now_ms).await
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -669,6 +690,18 @@ impl PeerRing {
         now_ms: u128,
         placement: Option<Did>,
     ) -> Result<EntryOperation> {
+        self.stamp_operation_by(op, now_ms, self.did, placement)
+            .await
+    }
+
+    /// [`Self::stamp_operation`] attributing any newly issued write witness to `actor` (#1179).
+    pub(crate) async fn stamp_operation_by(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+        actor: Did,
+        placement: Option<Did>,
+    ) -> Result<EntryOperation> {
         let observed = self.observed_version(&op, now_ms, placement).await?;
         let ceiling = now_ms
             .saturating_add(TS_OFFSET_TOLERANCE_MS)
@@ -679,7 +712,7 @@ impl PeerRing {
         };
         let mut last = self.last_stamped.lock().map_err(|_| Error::LockPoisoned)?;
         let floor = (*last).max(observed).map(cap);
-        let stamped = op.stamped_after(now_ms, self.did, floor)?;
+        let stamped = op.stamped_after(now_ms, actor, floor)?;
         // The last value is kept capped, so a version passed through above the cap leaves this
         // node's own stamps free to ascend by the counter below it.
         *last = floor.max(stamped.entry().max_observed_version().map(cap));
@@ -822,6 +855,39 @@ impl PeerRing {
         )
         .await
     }
+
+    /// Whether this node's own data write `op` is authorized against any live entry already held
+    /// in its local fetch cache (#1179).
+    pub(crate) async fn local_cache_can_observe(
+        &self,
+        op: &EntryOperation,
+        now_ms: u128,
+    ) -> Result<bool> {
+        match op.kind().is_relay_inbox() {
+            true => Ok(false),
+            false => Ok(op
+                .validate_data_write_on_local(
+                    self.local_cache_held(op.entry().did, now_ms)
+                        .await?
+                        .as_ref(),
+                    self.did,
+                )
+                .is_ok()),
+        }
+    }
+
+    /// Observe this node's own write `op` in its local fetch cache iff [`Self::local_cache_can_observe`]
+    /// admits it at `now_ms` (#1179).
+    pub(crate) async fn local_cache_observe_write_at(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+    ) -> Result<()> {
+        match self.local_cache_can_observe(&op, now_ms).await? {
+            true => self.local_cache_observe_write(op).await,
+            false => Ok(()),
+        }
+    }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -871,7 +937,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         let now_ms = get_epoch_ms();
         if op.kind().is_relay_inbox()
             || op
-                .validate_admissible_at(now_ms, self.network_id())
+                .validate_data_write(now_ms, self.network_id(), self.did, Principal::Local)
                 .is_err()
         {
             return Ok(());

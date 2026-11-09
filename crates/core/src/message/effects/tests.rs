@@ -191,7 +191,9 @@ fn test_dht_find_successor_for_connect_sends_direct_report() -> Result<()> {
                 assert_eq!(msg.did, target);
                 assert!(!msg.strict);
                 match msg.then {
-                    FindSuccessorThen::Report(FindSuccessorReportHandler::Connect) => {}
+                    FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+                        request_id,
+                    }) => assert!(!request_id.is_nil()),
                     handler => {
                         return Err(Error::InvalidMessage(format!(
                             "expected connect report handler, got {handler:?}"

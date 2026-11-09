@@ -184,7 +184,7 @@ pub const ENTRY_TOMBSTONE_WIRE_MAX: usize = 32 + ENTRY_DOT_WIRE_MAX;
 /// `test_carrier_wire_suprema_are_the_widest_encodings`.
 pub const ENTRY_REGISTER_WIRE_MAX: usize = 111;
 /// Encoded bytes of a full data carrier's fixed fields, at most: its DID (43), the length
-/// prefixes of its elements, dots and removes (2 each at 1024), its kind (1), and its retention
+/// prefixes of its elements, dots, and removes (2 each at 1024), its kind (1), and its retention
 /// bound (an option tag and a varint `u128`, 20), `43 + 2 + 1 + 2 + 2 + 20 = 70`; witnessed with
 /// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
 pub const ENTRY_CARRIER_HEADER_WIRE_MAX: usize = 70;

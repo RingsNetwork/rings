@@ -90,6 +90,7 @@ fn test_carrier_wire_suprema_are_the_widest_encodings() -> Result<()> {
         crdt: EntryCrdt {
             register: Some(widest_version()),
             dots: vec![widest_dot(); ENTRY_DATA_MAX_LEN],
+            co_dots: Vec::new(),
             tombstones: vec![tombstone; DATA_TOMBSTONE_MAX_LEN],
         },
         expires_at_ms: Some(u128::MAX),
@@ -232,5 +233,114 @@ async fn test_a_remove_past_the_bound_is_refused_until_the_held_removes_are_stab
     let after = stored(&node, did, stable_ms).await?;
     assert_eq!(after.as_ref().map(|entry| entry.data.len()), Some(0));
     assert_eq!(after.map(|entry| entry.crdt.tombstones.len()), Some(1));
+    Ok(())
+}
+
+/// A legacy v0.39.0 3-field `EntryCrdt` embedded inside a persisted `(String, Entry)` record
+/// decodes losslessly into `Entry`, while a new `Entry` carrying `co_dots` round-trips through the
+/// same 3-field wire representation without breaking positional fields after `crdt`.
+#[test]
+fn test_legacy_persisted_entry_record_decodes_and_co_dots_round_trip() -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct LegacyEntryCrdt {
+        register: Option<EntryVersion>,
+        dots: Vec<EntryDot>,
+        tombstones: Vec<EntryTombstone>,
+    }
+    #[derive(serde::Serialize)]
+    struct LegacyEntry {
+        did: Did,
+        data: Vec<Bytes>,
+        kind: EntryKind,
+        crdt: LegacyEntryCrdt,
+        expires_at_ms: Option<u128>,
+    }
+
+    let did = Did::from(42u32);
+    let writer = Did::from(7u32);
+    let key = StorageKey::new(EntryKind::Data, did).to_string();
+    let dot = EntryDot {
+        version: EntryVersion::new(1_700_000_000_000, did, writer),
+        index: 0,
+    };
+    let elem = Bytes::from_static(b"relay-mail-payload");
+    let legacy_record = (key.clone(), LegacyEntry {
+        did,
+        data: vec![elem.clone()],
+        kind: EntryKind::Data,
+        crdt: LegacyEntryCrdt {
+            register: None,
+            dots: vec![dot],
+            tombstones: Vec::new(),
+        },
+        expires_at_ms: Some(1_700_000_060_000),
+    });
+    let bytes = rings_codec::serialize(&legacy_record).map_err(Error::CodecSerialize)?;
+    let (decoded_key, decoded_entry): (String, Entry) =
+        rings_codec::deserialize(&bytes).map_err(Error::CodecDeserialize)?;
+    assert_eq!(decoded_key, key);
+    assert_eq!(decoded_entry.did, did);
+    assert_eq!(decoded_entry.data, vec![elem]);
+    assert_eq!(decoded_entry.crdt.dots, vec![dot]);
+    assert!(decoded_entry.crdt.co_dots.is_empty());
+    assert_eq!(decoded_entry.expires_at_ms, Some(1_700_000_060_000));
+
+    let co_dot = EntryDot {
+        version: EntryVersion::new(1_700_000_000_001, did, writer),
+        index: 65_536,
+    };
+    let mut with_co_dots = decoded_entry;
+    with_co_dots.crdt.co_dots.push((0, co_dot));
+    let roundtrip_bytes =
+        rings_codec::serialize(&(&key, &with_co_dots)).map_err(Error::CodecSerialize)?;
+    let (_, roundtrip_entry): (String, Entry) =
+        rings_codec::deserialize(&roundtrip_bytes).map_err(Error::CodecDeserialize)?;
+    assert_eq!(roundtrip_entry, with_co_dots);
+    assert_eq!(roundtrip_entry.crdt.co_dots[0].1.index, 65_536);
+    Ok(())
+}
+
+/// An `Overwrite` whose TTL has expired at `now_ms` produces a live carrier with empty `data` and
+/// `tombstones`, an unstable `crdt.register`, and its original nonzero `expires_at_ms`; syncing
+/// that reset-floor carrier onto a replica succeeds and suppresses older pre-reset values.
+#[tokio::test]
+async fn test_expired_overwrite_reset_floor_syncs_across_replicas() -> Result<()> {
+    let source = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let target = PeerRing::new_with_storage(Did::from(2u32), 3, Box::new(MemStorage::new()));
+    let did = Did::from(99u32);
+    let writer = Did::from(7u32);
+    let now_ms = get_epoch_ms();
+
+    let initial = stamped_operation(EntryOperation::Extend, did, &["stale"], now_ms, writer)?;
+    target
+        .operate_storage_entry(now_ms, did, initial, writer, Principal::Unbound)
+        .await?;
+
+    let overwrite = EntryOperation::Overwrite(crate::tests::with_retention(
+        Entry::new(did, vec![Bytes::from_static(b"ephemeral")], EntryKind::Data),
+        now_ms + 1_000,
+    ))
+    .stamped(now_ms + 10, writer)?;
+    source
+        .operate_storage_entry(now_ms + 10, did, overwrite, writer, Principal::Unbound)
+        .await?;
+
+    let after_expiry_ms = now_ms + 1_001;
+    let reset_floor = stored(&source, did, after_expiry_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected live reset floor".to_string()))?;
+    assert!(reset_floor.data.is_empty());
+    assert!(reset_floor.crdt.tombstones.is_empty());
+    assert!(reset_floor.crdt.register.is_some());
+    assert_eq!(reset_floor.expires_at_ms, Some(now_ms + 1_000));
+
+    target
+        .join_storage_entry(after_expiry_ms, did, reset_floor, Principal::Slot(0))
+        .await?;
+    let target_live = stored(&target, did, after_expiry_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected synced reset floor".to_string()))?;
+    assert!(target_live.data.is_empty());
+    assert!(target_live.crdt.register.is_some());
     Ok(())
 }

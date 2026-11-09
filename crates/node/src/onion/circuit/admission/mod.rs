@@ -88,22 +88,25 @@
 //!   its false-positive rate is `≤ 64·2⁻²⁶ = 2⁻²⁰`. A tag is live only if it was admitted in the
 //!   current ledger window, so all live filters together hold `≤ G` tags in `≤ 64 + 5` blocks
 //!   (`≈ 5.3 MB`).
-//! * **Budgets.** Every aligned window of five arrival quanta charges one sender DID at most `B`
+//! * **Budgets.** Every aligned window of five arrival quanta charges one connection slot at most `B`
 //!   units and the hop at most `G = 64·B`. An aligned window covers between `4Q` and `5Q` of wall
-//!   time. So every interval of length `≤ 4Q` carries at most `B` units per sender. An interval
+//!   time. So every interval of length `≤ 4Q` carries at most `B` units per slot. An interval
 //!   just over `4Q` can straddle two windows and carry up to `2·B` (a burst at the end of quantum
 //!   `s` and another at the start of `s + 5`). The long-run rate is `B / V ≈ 109` units/s per
-//!   sender and `≈ 6990` units/s in total. `G` is one pool shared by all links, which `γ`-failing
-//!   cover cells also consume.
-//! * **Links and ledgers.** A link is one generation of an authenticated link to a DID,
+//!   slot and `≈ 6990` units/s in total. `G` is split into a reserved per-slot floor `f > 0` across
+//!   the `2·R` connection slots and a shared pool `P = G − 2·R·f` (#907, #1183): a slot's charges up
+//!   to `f` draw only from its own floor and cannot be starved by noisy slots exhausting `P`, while
+//!   over-floor charges (`> f` up to `B`) draw from `P`. `γ`-failing cover cells also consume
+//!   these budgets.
+//! * **Links, slots, and ledgers.** A link is one generation of an authenticated link to a DID,
 //!   [`OnionAdmissionLink`] `= (did, generation)`: plain data. Core's link facts reach the
 //!   data plane as `LinkFact::{Admitted, Retired}` in its namespace's queue, in core's order and
 //!   never dropped (`extension::dispatch`), and the shell numbers each admission of a DID with a
-//!   fresh generation. The state keeps the set of live links, and one budget ledger per DID with
-//!   at least one live link or some load.
+//!   fresh generation. The state keeps the set of live links, and one budget ledger per connection
+//!   slot ([`OnionSlotId`] via [`SlotRoster`]) with at least one live link or some window load.
 //!   * **Event-pairing obligation.** Between resets the live set shrinks only through
-//!     `link_closed` and `reconcile`, so a lost `Retired` would pin a live link and a ledger
-//!     slot. The dispatch queue loses no fact, so the obligation holds by construction once the
+//!     `link_closed` and `reconcile`, so a lost `Retired` would pin a live link and a slot.
+//!     The dispatch queue loses no fact, so the obligation holds by construction once the
 //!     data plane's namespace is registered; the links admitted before then are read once, by
 //!     the [`OnionAdmissionState::reconcile`] the shell applies when it is installed.
 //!     `reconcile` closes every live link absent from the snapshot and opens every snapshot link
@@ -115,34 +118,33 @@
 //!     drains the live set is exactly core's admitted links minus the refused ones. A fact
 //!     queued before the read and applied after it may briefly close or reopen a link the
 //!     snapshot already reflects; the facts after it restore core's state.
-//!   * [`OnionAdmissionState::link_opened`] makes a link live, creating its DID's ledger, and is
-//!     idempotent on a live link. [`OnionAdmissionState::link_closed`] makes it not live, and is
-//!     idempotent too: closing an unknown, refused or closed link changes nothing. A close
-//!     therefore affects only its own generation, under any interleaving (`open(g₁) open(g₂)
-//!     close(g₁)` leaves `g₂` live, and a late close of a refused `g₁` is a no-op).
+//!   * [`OnionAdmissionState::link_opened`] makes a link live, assigning its peer to a connection
+//!     slot via [`SlotRoster`] (cleanest-first when connecting fresh, or resuming its retained slot
+//!     when reconnecting within the window), and is idempotent on a live link.
+//!     [`OnionAdmissionState::link_closed`] makes it not live, and is idempotent too: closing an
+//!     unknown, refused or closed link changes nothing. A close therefore affects only its own
+//!     generation, under any interleaving (`open(g₁) open(g₂) close(g₁)` leaves `g₂` live, and a
+//!     late close of a refused `g₁` is a no-op).
 //!   * A cell is charged only against a live link, so a cell that arrives before its link is
 //!     opened, after it is closed, or on a refused link is never charged and never decrypted.
-//!   * A ledger is *releasable* when its DID has no live link and zero window load. Invariant:
-//!     after every step no ledger is releasable, because `link_closed` releases a drained ledger
-//!     at once and every step that enters a new quantum sweeps the ledgers that have drained.
-//!     A load can reach zero only when the quantum advances, since charges only add to it.
-//!   * The table holds at most `2·R` ledgers, where `R` is the transport connection-registry
-//!     capacity (#723). There is no recycling. Within one epoch, a ledger is never reset while it
-//!     carries load, so no DID regains budget by closing and reopening links: a reconnecting DID
-//!     finds its old ledger. `(iii)` of the paper's replay bounds therefore holds per DID within an
-//!     epoch, however many other DIDs churn. The live-link set is also capped at `2·R`. This is
-//!     only a memory bound: under core's laws, which allow at most one live generation per DID and
-//!     at most `R` DIDs, the cap is unreachable, and it only matters if the event obligation above
-//!     is broken.
-//!   * At most `R` links are live, and a closed ledger drains within one window. So the table
-//!     fills only under connection churn beyond `R` within `V`. `link_opened` then refuses the
-//!     *link*, which stays not live (fail closed): it carries no onion cell, every cell from it
-//!     is refused uncharged, and core's link itself is core's to keep (#935). The peer's next
-//!     admission is a new generation. There is no fairness here: a churner that opens cheap
-//!     DIDs at rate `R / V` can win every freed slot. The event path serves links first come,
-//!     first served. `reconcile` opens a snapshot's links in DID order, so when the table is
-//!     full, small DIDs win, and DID prefixes can be ground cheaply. Eventual admission of an
-//!     honest redial is a liveness *assumption* on churn, as #834 states, not a guarantee.
+//!   * A slot ledger is *releasable* when its slot has no live link and zero window load. Invariant:
+//!     after every step no ledger is releasable, because `link_closed` releases a drained slot
+//!     ledger at once and every step that enters a new quantum sweeps the slot ledgers that have
+//!     drained. A load can reach zero only when the quantum advances, since charges only add to it.
+//!   * The table has `2·R` connection slots (`0..2·R`), where `R` is the transport
+//!     connection-registry capacity (#723). When a link closes with non-zero window load, its slot
+//!     is freed in the [`SlotRoster`] for cleanest-first reuse while the slot's ledger retains its
+//!     residual load and remembers the peer until the window drains (#907, #1094, #1183). Thus a
+//!     reconnecting DID resumes its old slot ledger without regaining budget, and rotating `> 2·R`
+//!     Sybil connections within `V` reuses free slots cleanest-first instead of exhausting the
+//!     ledger table with `OnionLinkTableFull`. The live-link set is capped at `2·R`. Under core's
+//!     laws, which allow at most one live generation per DID and at most `R` DIDs, the cap is
+//!     unreachable, and it only matters if the event obligation above is broken.
+//!   * When `2·R` links are already live, `link_opened` refuses a new link with
+//!     [`OnionLinkTableFull`], which stays not live (fail closed): it carries no onion cell, every
+//!     cell from it is refused uncharged, and core's link itself is core's to keep (#935).
+//!     `reconcile` orders snapshot links by liveness, assigned slot, and admission generation —
+//!     never by `Did` — so grinding small `Did`s gives no advantage during reconciliation (#1183).
 //!   * [`OnionAdmissionState::renew`] (the epoch reset) requires a *fresh* epoch. Renewing into the
 //!     current epoch would clear the replay store while keeping `epoch_i`, so a replay of an
 //!     admitted `(x, ν)` could be admitted again. The state rejects only `e′ = epoch_i`. The shell
@@ -151,10 +153,10 @@
 //!     The chance that some reset reuses *any* earlier epoch, the `A → B → A` sequence that would
 //!     revive `A`'s layers, is at most the birthday bound `k²·2⁻¹²⁹`. The reset keeps the table's
 //!     own live set, `ρ = reconcile(live_links(S)) ∘ clear`, which refuses nothing since it held
-//!     that set before; every DID with a live link starts with a zero-load ledger, so every live
-//!     link still has a ledger. The per-DID bound `B` therefore holds within one epoch.
+//!     that set before; every slot with a live link starts with a zero-load ledger, so every live
+//!     link still has a ledger. The per-slot bound `B` therefore holds within one epoch.
 //!     A token charged before the reset is never admitted after it, because its epoch differs.
-//!   * `G` is independent of the table size and bounds what all DIDs admit together, and hence the
+//!   * `G` is independent of the table size and bounds what all slots admit together, and hence the
 //!     replay store.
 
 mod bloom;
@@ -162,17 +164,23 @@ mod ledger;
 #[cfg(all(test, rings_native))]
 mod tests;
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use rings_core::dht::Did;
+use rings_core::message::FloorUse;
+use rings_core::message::Principal;
+use rings_core::message::SlotFloorUse;
+use rings_core::message::SlotRoster;
 
 pub(crate) use self::bloom::OnionReplayFilterKey;
 use self::bloom::ReplayStore;
+pub(crate) use self::ledger::OnionSlotId;
 use self::ledger::QuantumLedger;
+use self::ledger::SlotLedger;
 use super::OnionExpiry;
 use super::OnionReplayNonce;
 use super::ONION_ADMISSION_WINDOW_MS;
@@ -188,8 +196,14 @@ const ADMISSION_WINDOW_QUANTA: usize = 5;
 /// `N = V / Q` in the quantum domain.
 const ADMISSION_WINDOW_QUANTA_WIDE: u128 = ONION_ADMISSION_WINDOW_MS / ONION_EXPIRY_QUANTUM_MS;
 
-/// Per-sender budget `B`: units of 16 KiB per DID per aligned window of `N` quanta.
+/// Per-sender (per-slot) budget `B`: units of 16 KiB per connection slot per aligned window of `N`
+/// quanta.
 pub(crate) const ONION_ADMISSION_SENDER_UNITS: u32 = 16_384;
+
+/// Default per-slot floor `f`: units of 16 KiB reserved per connection slot in the global budget
+/// when `2·R·f ≤ G / 2`. At `1_024` units (`16 MiB`), one slot's floor covers at least one cell of
+/// the largest loop class (`MiB12`, `768` units) and divides `B` and `G` evenly.
+pub(crate) const ONION_ADMISSION_SLOT_FLOOR_UNITS: u32 = 1_024;
 
 /// Global budget `G = 64·B` units per aligned window of `N` quanta. It is independent of the number
 /// of links and bounds the replay store at 64 blocks per filter.
@@ -197,6 +211,12 @@ const ONION_ADMISSION_GLOBAL_UNITS: u32 = 64 * ONION_ADMISSION_SENDER_UNITS;
 
 /// Compile-time law: the ledger's array length is `N = V / Q`.
 const _: () = assert!(ADMISSION_WINDOW_QUANTA_WIDE == ADMISSION_WINDOW_QUANTA as u128);
+
+/// Compile-time law: a slot's floor fits within its per-slot budget `B`.
+const _: () = assert!(
+    ONION_ADMISSION_SLOT_FLOOR_UNITS > 0
+        && ONION_ADMISSION_SLOT_FLOOR_UNITS <= ONION_ADMISSION_SENDER_UNITS
+);
 
 /// Units of 16 KiB charged for one cell. A class-`b` cell costs `b / 16 KiB ≥ 1` units.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -236,7 +256,7 @@ pub(crate) struct OnionAdmissionCharge {
 /// admission of `did` for the life of the data plane.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct OnionAdmissionLink {
-    /// The link's sender DID, which owns the budget ledger.
+    /// The link's sender DID.
     did: Did,
     /// The shell's generation of this admission of `did`.
     generation: u64,
@@ -275,9 +295,9 @@ pub(crate) struct OnionAdmissionLayer {
 pub(crate) enum OnionChargeRejection {
     /// The cell's link is not live: not yet opened, closed, or refused.
     LinkNotLive,
-    /// The sender's ledger lacks headroom for the cell's units.
+    /// The connection slot's ledger lacks headroom for the cell's units.
     SenderBudget,
-    /// The hop lacks headroom under `G = 64·B`.
+    /// The hop lacks headroom in the shared pool `P` under `G = 64·B`.
     GlobalBudget,
 }
 
@@ -292,8 +312,8 @@ pub(crate) enum OnionAdmissionRejection {
     Replayed,
 }
 
-/// A link refused because the table is full (connection churn beyond `R` within `V`). The link
-/// stays not live, and the peer's next admission is a new generation.
+/// A link refused because `2·R` live links already occupy the table. The link stays not live, and
+/// the peer's next admission is a new generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionLinkTableFull;
 
@@ -304,7 +324,7 @@ pub(crate) struct OnionLinkTableFull;
 pub(crate) struct OnionRefusedLinks(Vec<OnionAdmissionLink>);
 
 impl OnionRefusedLinks {
-    /// The refused links, in DID order.
+    /// The refused links, in the order `reconcile` attempted to open them.
     pub(crate) fn links(&self) -> &[OnionAdmissionLink] {
         self.0.as_slice()
     }
@@ -314,22 +334,6 @@ impl OnionRefusedLinks {
 /// epoch would clear the replay store while keeping `epoch_i`, and so re-admit replays.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OnionEpochNotFresh;
-
-/// One sender DID's unit ledger and its live link generations.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct SenderLedger {
-    /// Units charged to this DID in the window.
-    ledger: QuantumLedger,
-    /// The generations of this DID's live links.
-    live: BTreeSet<u64>,
-}
-
-impl SenderLedger {
-    /// Whether the ledger may be released at `quantum`: it has no live link and no load.
-    fn is_releasable_at(&self, quantum: u128) -> bool {
-        self.live.is_empty() && self.ledger.load(quantum) == 0
-    }
-}
 
 /// The admission state `S` of one hop for one process lifetime.
 pub(crate) struct OnionAdmissionState {
@@ -343,30 +347,86 @@ pub(crate) struct OnionAdmissionState {
     replay: ReplayStore,
     /// Units charged to the whole hop.
     global: QuantumLedger,
-    /// Capacity `2·R`, both of the ledger table and of the live-link set.
+    /// Capacity `2·R`, both of the connection-slot table and of the live-link set.
     capacity: usize,
-    /// At most `capacity` sender ledgers, none of them releasable between steps.
-    senders: BTreeMap<Did, SenderLedger>,
+    /// Reserved per-slot floor `f` in units of 16 KiB.
+    floor_units: u32,
+    /// Shared pool `P = G − capacity · f` for over-floor charges.
+    pool_units: u32,
+    /// Aggregate over-floor load `Σ_κ max(0, load(κ) − f)` at the current quantum.
+    pool_load: u32,
+    /// Connection-slot roster assigning arriving peers cleanest-first.
+    slot_roster: Arc<SlotRoster>,
+    /// Whether `slot_roster` is owned locally (`true` in standalone states) or shared with
+    /// `PeerRing::edges()` (`false` when attached via [`Self::with_slot_roster`], where the
+    /// transport owns `arrive`/`depart`).
+    owns_slot_roster: bool,
+    /// Active or draining slot ledgers, keyed by connection slot `0..capacity`.
+    slots: BTreeMap<OnionSlotId, SlotLedger>,
+    /// The connection slot of every DID that has a live link or retained load in `slots`.
+    peer_slots: BTreeMap<Did, OnionSlotId>,
 }
 
 impl OnionAdmissionState {
     /// The initial state of a process with epoch `epoch` and probe key `filter_key`, both drawn
-    /// once at process start by the caller. The table holds `2·R` ledgers and live links, where `R`
-    /// is the transport connection-registry capacity.
+    /// once at process start by the caller. The table holds `2·R` connection slots and live links,
+    /// where `R` is the transport connection-registry capacity.
     pub(crate) fn new(
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
         link_registry_capacity: NonZeroUsize,
     ) -> Self {
+        let capacity = link_registry_capacity.get().saturating_mul(2);
+        let (floor_units, pool_units) = Self::slot_shares(capacity);
         Self {
             epoch,
             clock_ms: 0,
             swept_quantum: 0,
             replay: ReplayStore::new(filter_key),
             global: QuantumLedger::default(),
-            capacity: link_registry_capacity.get().saturating_mul(2),
-            senders: BTreeMap::new(),
+            capacity,
+            floor_units,
+            pool_units,
+            pool_load: 0,
+            slot_roster: Arc::new(SlotRoster::new(capacity)),
+            owns_slot_roster: true,
+            slots: BTreeMap::new(),
+            peer_slots: BTreeMap::new(),
         }
+    }
+
+    /// Attach a shared [`SlotRoster`] (such as `PeerRing::edges()`) to this admission state.
+    pub(crate) fn with_slot_roster(mut self, slot_roster: Arc<SlotRoster>) -> Self {
+        let quantum = self.clock_ms / ONION_EXPIRY_QUANTUM_MS;
+        slot_roster.set_extra_floor_use(self.floor_use_at(quantum));
+        self.slot_roster = slot_roster;
+        self.owns_slot_roster = false;
+        self
+    }
+
+    /// The connection slot currently bound to `did` (either live or retained while draining).
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn slot_of(&self, did: Did) -> Option<OnionSlotId> {
+        self.peer_slots.get(&did).copied()
+    }
+
+    /// The per-slot floor `f` and shared pool `P` for `capacity` connection slots.
+    #[cfg(all(test, rings_native))]
+    pub(crate) const fn shares(&self) -> (u32, u32) {
+        (self.floor_units, self.pool_units)
+    }
+
+    /// Compute `(floor_units, pool_units)` such that `capacity · floor_units + pool_units = G` and
+    /// `floor_units > 0` whenever `capacity ≤ G`.
+    fn slot_shares(capacity: usize) -> (u32, u32) {
+        let slots = u32::try_from(capacity).unwrap_or(u32::MAX).max(1);
+        let half_global = ONION_ADMISSION_GLOBAL_UNITS / 2;
+        let floor_units = (half_global / slots)
+            .min(ONION_ADMISSION_SLOT_FLOOR_UNITS)
+            .max(u32::from(slots <= ONION_ADMISSION_GLOBAL_UNITS));
+        let reserved = slots.saturating_mul(floor_units);
+        let pool_units = ONION_ADMISSION_GLOBAL_UNITS.saturating_sub(reserved);
+        (floor_units, pool_units)
     }
 
     /// Whether the wall clock has rolled back far enough behind the monotone clock that honest
@@ -377,129 +437,193 @@ impl OnionAdmissionState {
 
     /// The reset `ρ(epoch, key)`: the epoch reset. It requires a fresh `epoch` and otherwise
     /// changes nothing. On success the state is the initial state of `epoch` with probe key
-    /// `filter_key` and the same live links, each DID with a zero-load ledger: `ρ =
-    /// reconcile(live_links(S)) ∘ clear`. It refuses nothing, since the table held these links
+    /// `filter_key` and the same live links on their assigned slots, each with a zero-load ledger:
+    /// `ρ = reconcile(live_links(S)) ∘ clear`. It refuses nothing, since the table held these links
     /// before, so it keeps no link the shell would have to close.
     pub(crate) fn renew(
         &mut self,
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
     ) -> Result<(), OnionEpochNotFresh> {
-        if epoch == self.epoch {
-            return Err(OnionEpochNotFresh);
-        }
-        let senders = std::mem::take(&mut self.senders)
-            .into_iter()
-            .filter(|(_, sender)| !sender.live.is_empty())
-            .map(|(did, sender)| {
-                (did, SenderLedger {
-                    ledger: QuantumLedger::default(),
-                    live: sender.live,
-                })
+        (epoch != self.epoch)
+            .then(|| {
+                let (slots, peer_slots) = std::mem::take(&mut self.slots)
+                    .into_iter()
+                    .filter(|(_, slot)| !slot.live.is_empty())
+                    .fold(
+                        (BTreeMap::new(), BTreeMap::new()),
+                        |(mut slots, mut peer_slots), (slot_id, slot)| {
+                            peer_slots.extend(slot.live.keys().map(|&did| (did, slot_id)));
+                            slots.insert(slot_id, SlotLedger {
+                                ledger: QuantumLedger::default(),
+                                live: slot.live,
+                                retained: BTreeMap::new(),
+                            });
+                            (slots, peer_slots)
+                        },
+                    );
+                self.slot_roster
+                    .set_extra_floor_use(SlotFloorUse::default());
+                *self = Self {
+                    epoch,
+                    clock_ms: 0,
+                    swept_quantum: 0,
+                    replay: ReplayStore::new(filter_key),
+                    global: QuantumLedger::default(),
+                    capacity: self.capacity,
+                    floor_units: self.floor_units,
+                    pool_units: self.pool_units,
+                    pool_load: 0,
+                    slot_roster: Arc::clone(&self.slot_roster),
+                    owns_slot_roster: self.owns_slot_roster,
+                    slots,
+                    peer_slots,
+                };
             })
-            .collect();
-        *self = Self {
-            epoch,
-            clock_ms: 0,
-            swept_quantum: 0,
-            replay: ReplayStore::new(filter_key),
-            global: QuantumLedger::default(),
-            capacity: self.capacity,
-            senders,
-        };
-        Ok(())
+            .ok_or(OnionEpochNotFresh)
     }
 
     /// The step `δ` on `Reconcile(live)`: make the live-link set equal core's registry snapshot
     /// `live`, up to refusals. Every live link absent from the snapshot is closed first, which
-    /// frees its slot. Then every snapshot link that is not live is opened in DID order, with the
-    /// table's usual refusal. Afterwards the live set is `live \ refused`, no link that was already
-    /// live and is in the snapshot is refused, and a second reconciliation with the same snapshot,
-    /// in any order, changes nothing. It seeds the links admitted before the data plane was
-    /// installed. The snapshot must be linearised with the event stream (see the module laws).
+    /// frees its slot. Then every snapshot link is opened in slot/generation order (never `Did`
+    /// order), with the table's usual refusal. Afterwards the live set is `live \ refused`, no link
+    /// that was already live and is in the snapshot is refused, and a second reconciliation with
+    /// the same snapshot, in any order, changes nothing. It seeds the links admitted before the
+    /// data plane was installed. The snapshot must be linearised with the event stream (see the
+    /// module laws).
     pub(crate) fn reconcile(
         &mut self,
         now_ms: u128,
         live: impl IntoIterator<Item = OnionAdmissionLink>,
     ) -> OnionRefusedLinks {
         self.advance(now_ms);
-        let mut snapshot = BTreeMap::<Did, BTreeSet<u64>>::new();
-        for link in live {
-            snapshot
-                .entry(link.peer())
-                .or_default()
-                .insert(link.generation());
-        }
-        let absent = self
-            .senders
-            .iter()
-            .flat_map(|(&did, sender)| {
-                let kept = snapshot.get(&did);
-                sender
-                    .live
-                    .iter()
-                    .copied()
-                    .filter(move |generation| {
-                        !kept.is_some_and(|generations| generations.contains(generation))
-                    })
-                    .map(move |generation| OnionAdmissionLink::new(did, generation))
-            })
+        let mut seen = BTreeSet::new();
+        let mut snapshot = live
+            .into_iter()
+            .filter(|&link| seen.insert(link))
             .collect::<Vec<_>>();
-        for link in absent {
-            self.link_closed(now_ms, link);
-        }
-        let mut refused = Vec::new();
-        for (did, generations) in snapshot {
-            for generation in generations {
-                let link = OnionAdmissionLink::new(did, generation);
-                if self.link_opened(now_ms, link).is_err() {
-                    refused.push(link);
-                }
-            }
-        }
+        let mut absent =
+            self.slots
+                .iter()
+                .flat_map(|(&slot_id, slot)| {
+                    slot.live.iter().flat_map(move |(&did, generations)| {
+                        generations.iter().copied().map(move |generation| {
+                            (slot_id, OnionAdmissionLink::new(did, generation))
+                        })
+                    })
+                })
+                .filter(|(_, link)| !seen.contains(link))
+                .collect::<Vec<_>>();
+        absent.sort_by_key(|(slot_id, link)| (*slot_id, link.generation()));
+        absent
+            .into_iter()
+            .for_each(|(_, link)| self.link_closed(now_ms, link));
+        snapshot.sort_by_key(|&link| {
+            let already_live = self.is_link_live(link);
+            let assigned = self.assigned_slot_of(link.peer());
+            (
+                !already_live,
+                assigned.is_none(),
+                assigned.unwrap_or(OnionSlotId::new(0)),
+                link.generation(),
+            )
+        });
+        let refused = snapshot
+            .into_iter()
+            .filter(|&link| self.link_opened(now_ms, link).is_err())
+            .collect();
         OnionRefusedLinks(refused)
     }
 
-    /// The step `δ` on `LinkOpened(link)`: make `link` live, creating its DID's ledger if it has
-    /// none. Opening a live link again changes nothing. A full table refuses the link, which stays
+    /// The step `δ` on `LinkOpened(link)`: make `link` live, assigning its peer to a connection
+    /// slot via [`SlotRoster`] (cleanest-first when connecting fresh, or resuming its retained
+    /// slot when reconnecting while its prior slot still carries load). Opening a live link again
+    /// changes nothing. When `2·R` links are already live, the table refuses the link, which stays
     /// not live.
     pub(crate) fn link_opened(
         &mut self,
         now_ms: u128,
         link: OnionAdmissionLink,
     ) -> Result<(), OnionLinkTableFull> {
-        self.advance(now_ms);
-        let live_links = self.live_link_count();
-        let ledgers = self.senders.len();
-        let capacity = self.capacity;
-        let sender = match self.senders.entry(link.peer()) {
-            Entry::Occupied(occupied) if occupied.get().live.contains(&link.generation()) => {
-                return Ok(());
-            }
-            Entry::Occupied(occupied) if live_links < capacity => occupied.into_mut(),
-            Entry::Vacant(vacant) if live_links < capacity && ledgers < capacity => {
-                vacant.insert(SenderLedger {
-                    ledger: QuantumLedger::default(),
-                    live: BTreeSet::new(),
-                })
-            }
-            Entry::Occupied(_) | Entry::Vacant(_) => return Err(OnionLinkTableFull),
-        };
-        sender.live.insert(link.generation());
-        Ok(())
+        let quantum = self.advance(now_ms);
+        match self.is_link_live(link) {
+            true => Ok(()),
+            false => (self.live_link_count() < self.capacity)
+                .then_some(())
+                .ok_or(OnionLinkTableFull)
+                .and_then(|()| {
+                    let did = link.peer();
+                    let slot_id = self.acquire_slot_for(did, quantum)?;
+                    let slot = self.slots.entry(slot_id).or_default();
+                    slot.live.entry(did).or_default().insert(link.generation());
+                    self.peer_slots.insert(did, slot_id);
+                    Ok(())
+                }),
+        }
     }
 
-    /// The step `δ` on `LinkClosed(link)`: make `link` no longer live, and release its DID's ledger
-    /// at once if that leaves it releasable. It is idempotent: closing a link that is not live
-    /// (unknown, refused, or already closed) changes nothing, so a close can never take another
-    /// generation's liveness away.
+    /// The step `δ` on `LinkClosed(link)`: make `link` no longer live, free its slot in the
+    /// [`SlotRoster`] when `link`'s peer has no remaining live generations on the slot, and
+    /// release the slot ledger at once if it has no remaining live links and zero load. It is
+    /// idempotent: closing a link that is not live (unknown, refused, or already closed) changes
+    /// nothing, so a close can never take another generation's liveness away.
     pub(crate) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
         let quantum = self.advance(now_ms);
-        if let Entry::Occupied(mut occupied) = self.senders.entry(link.peer()) {
-            occupied.get_mut().live.remove(&link.generation());
-            if occupied.get().is_releasable_at(quantum) {
-                occupied.remove();
+        let did = link.peer();
+        let removed_last_for_peer = self.peer_slots.get(&did).copied().and_then(|slot_id| {
+            let slot = self.slots.get_mut(&slot_id)?;
+            let last = slot.remove_live_generation(did, link.generation())?;
+            last.then(|| {
+                let remaining_peer = slot.live.first_key_value().map(|(&peer, _)| peer);
+                let has_load = slot.ledger.load(quantum) > 0;
+                let retain_did = slot.has_unexpired_charge(did, quantum);
+                let slot_empty = slot.live.is_empty();
+                (slot_id, remaining_peer, has_load, retain_did, slot_empty)
+            })
+        });
+        if let Some((slot_id, remaining_peer, has_load, retain_did, slot_empty)) =
+            removed_last_for_peer
+        {
+            self.release_roster_slot_on_close(did, slot_id, remaining_peer);
+            if !retain_did {
+                if let Some(slot) = self.slots.get_mut(&slot_id) {
+                    slot.retained.remove(&did);
+                }
+                self.peer_slots.remove(&did);
             }
+            if !has_load && slot_empty {
+                if let Some(removed) = self.slots.remove(&slot_id) {
+                    removed.retained.into_keys().for_each(|retained_did| {
+                        self.peer_slots.remove(&retained_did);
+                    });
+                }
+            }
+            self.slot_roster
+                .set_extra_floor_use(self.floor_use_at(quantum));
+        }
+    }
+
+    fn release_roster_slot_on_close(
+        &self,
+        did: Did,
+        slot_id: OnionSlotId,
+        remaining_peer: Option<Did>,
+    ) {
+        if self.owns_slot_roster
+            && self.slot_roster.principal_of(Some(did))
+                == u16::try_from(slot_id.index()).map_or(Principal::Unbound, Principal::Slot)
+        {
+            self.slot_roster.depart(did);
+            remaining_peer
+                .filter(|&peer| !self.slot_roster.holds(peer))
+                .into_iter()
+                .for_each(|peer| {
+                    self.slot_roster.arrive_preferring(
+                        peer,
+                        u16::try_from(slot_id.index()).ok(),
+                        &SlotFloorUse::default(),
+                    );
+                });
         }
     }
 
@@ -523,16 +647,18 @@ impl OnionAdmissionState {
             .map(|charge| Charged::new(cell, charge))
     }
 
-    /// The step `δ` on `Charge(link, u)`: charge a cell received on `link` to its DID's ledger and
-    /// to the global ledger, both or neither, before its key is computed. Only a live link is
+    /// The step `δ` on `Charge(link, u)`: charge a cell received on `link` to its connection
+    /// slot's ledger (using its reserved floor `f` first and the shared pool `P` for any overflow)
+    /// and to the global ledger, both or neither, before its key is computed. Only a live link is
     /// charged. Private: the crate charges cells through [`Self::charge`].
     ///
     /// ```text
     ///  now := max(now, clock);  drop R[x] for x ≤ now;  s = ⌊now / Q⌋;  sweep if s is new
-    ///   ├─ link not live ─────────────────→ LinkNotLive
-    ///   ├─ load_did(s) + u > B ───────────→ SenderBudget
-    ///   ├─ load_global(s) + u > G ────────→ GlobalBudget
-    ///   └─ charge both ledgers ───────────→ Ok(token = (clock, epoch_i))
+    ///   ├─ link not live ──────────────────────────────────→ LinkNotLive
+    ///   ├─ load_slot(s) + u > B ───────────────────────────→ SenderBudget
+    ///   ├─ Δo > 0 ∧ pool_load(s) + Δo > P ─────────────────→ GlobalBudget
+    ///   ├─ load_global(s) + u > G ─────────────────────────→ GlobalBudget
+    ///   └─ charge slot, pool, and global ledgers ──────────→ Ok(token = (clock, epoch_i))
     /// ```
     fn charge_units(
         &mut self,
@@ -541,21 +667,42 @@ impl OnionAdmissionState {
         units: OnionAdmissionUnits,
     ) -> Result<OnionAdmissionCharge, OnionChargeRejection> {
         let quantum = self.advance(now_ms);
-        let sender = self
-            .senders
-            .get_mut(&link.peer())
-            .filter(|sender| sender.live.contains(&link.generation()))
+        let did = link.peer();
+        let slot_id = self
+            .peer_slots
+            .get(&did)
+            .copied()
             .ok_or(OnionChargeRejection::LinkNotLive)?;
-        let charged_sender = sender
+        let slot = self
+            .slots
+            .get_mut(&slot_id)
+            .filter(|slot| slot.contains_live(did, link.generation()))
+            .ok_or(OnionChargeRejection::LinkNotLive)?;
+        let old_over = slot.ledger.load(quantum).saturating_sub(self.floor_units);
+        let charged_slot = slot
             .ledger
             .charged(quantum, units.get(), ONION_ADMISSION_SENDER_UNITS)
             .ok_or(OnionChargeRejection::SenderBudget)?;
+        let new_over = charged_slot.load(quantum).saturating_sub(self.floor_units);
+        let overflow = new_over.saturating_sub(old_over);
+        let next_pool_load = if overflow > 0 {
+            self.pool_load
+                .checked_add(overflow)
+                .filter(|&pool| pool <= self.pool_units)
+                .ok_or(OnionChargeRejection::GlobalBudget)?
+        } else {
+            self.pool_load
+        };
         let charged_global = self
             .global
             .charged(quantum, units.get(), ONION_ADMISSION_GLOBAL_UNITS)
             .ok_or(OnionChargeRejection::GlobalBudget)?;
-        sender.ledger = charged_sender;
+        slot.ledger = charged_slot;
+        slot.retained.insert(did, quantum);
         self.global = charged_global;
+        self.pool_load = next_pool_load;
+        self.slot_roster
+            .set_extra_floor_use(self.floor_use_at(quantum));
         Ok(OnionAdmissionCharge {
             arrival_ms: self.clock_ms,
             epoch: self.epoch,
@@ -567,37 +714,160 @@ impl OnionAdmissionState {
     /// two live until the next reconciliation, the newest is taken, since core's generations
     /// increase.
     pub(crate) fn live_link(&self, did: Did) -> Option<OnionAdmissionLink> {
-        self.senders
-            .get(&did)
-            .and_then(|sender| sender.live.last().copied())
+        let slot_id = self.peer_slots.get(&did).copied()?;
+        self.slots
+            .get(&slot_id)
+            .and_then(|slot| slot.live.get(&did))
+            .and_then(|generations| generations.last().copied())
             .map(|generation| OnionAdmissionLink::new(did, generation))
     }
 
-    /// The units charged to `did` in the window of the state's clock, for tests of the Paid law.
+    /// The units charged to `did`'s connection slot in the window of the state's clock, for tests
+    /// of the Paid law.
     #[cfg(all(test, rings_native))]
     pub(crate) fn sender_units(&self, did: Did) -> u32 {
-        self.senders.get(&did).map_or(0, |sender| {
-            sender.ledger.load(self.clock_ms / ONION_EXPIRY_QUANTUM_MS)
-        })
+        self.peer_slots
+            .get(&did)
+            .and_then(|slot_id| self.slots.get(slot_id))
+            .map_or(0, |slot| {
+                slot.ledger.load(self.clock_ms / ONION_EXPIRY_QUANTUM_MS)
+            })
     }
 
     /// Every live link, in DID and generation order: the table's own view, linearised with the
     /// facts it has applied.
     pub(crate) fn live_links(&self) -> Vec<OnionAdmissionLink> {
-        self.senders
-            .iter()
-            .flat_map(|(&did, sender)| {
-                sender
-                    .live
-                    .iter()
-                    .map(move |&generation| OnionAdmissionLink::new(did, generation))
+        let mut links = self
+            .slots
+            .values()
+            .flat_map(|slot| {
+                slot.live.iter().flat_map(|(&did, generations)| {
+                    generations
+                        .iter()
+                        .map(move |&generation| OnionAdmissionLink::new(did, generation))
+                })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        links.sort();
+        links
     }
 
-    /// The number of live links, `Σ_d |live(d)|`, derived rather than stored.
+    /// The number of live links, `Σ_κ Σ_d |live(κ, d)|`, derived rather than stored.
     fn live_link_count(&self) -> usize {
-        self.senders.values().map(|sender| sender.live.len()).sum()
+        self.slots.values().map(SlotLedger::live_link_count).sum()
+    }
+
+    /// Whether `link` is currently live on its peer's slot.
+    fn is_link_live(&self, link: OnionAdmissionLink) -> bool {
+        self.peer_slots
+            .get(&link.peer())
+            .and_then(|slot_id| self.slots.get(slot_id))
+            .is_some_and(|slot| slot.contains_live(link.peer(), link.generation()))
+    }
+
+    fn roster_slot_of(&self, did: Did) -> Option<OnionSlotId> {
+        match self.slot_roster.principal_of(Some(did)) {
+            Principal::Slot(slot) if usize::from(slot) < self.capacity => {
+                Some(OnionSlotId::new(usize::from(slot)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The slot already bound to `did` in `peer_slots` or pre-assigned in `slot_roster`, if within
+    /// `0..capacity`.
+    fn assigned_slot_of(&self, did: Did) -> Option<OnionSlotId> {
+        self.peer_slots
+            .get(&did)
+            .copied()
+            .or_else(|| self.roster_slot_of(did))
+    }
+
+    fn resume_existing_slot(&self, did: Did, quantum: u128) -> Option<OnionSlotId> {
+        self.peer_slots.get(&did).copied().inspect(|&slot_id| {
+            let slot_was_free = self.slots.get(&slot_id).is_none_or(SlotLedger::is_free);
+            if self.owns_slot_roster && slot_was_free && !self.slot_roster.holds(did) {
+                let floor_use = self.floor_use_at(quantum);
+                self.slot_roster.arrive_preferring(
+                    did,
+                    u16::try_from(slot_id.index()).ok(),
+                    &floor_use,
+                );
+            }
+        })
+    }
+
+    fn acquire_roster_slot(&self, did: Did, floor_use: &SlotFloorUse) -> Option<OnionSlotId> {
+        self.owns_slot_roster
+            .then(|| {
+                self.slot_roster.arrive(did, floor_use);
+                self.roster_slot_of(did)
+                    .filter(|slot_id| self.slots.get(slot_id).is_none_or(SlotLedger::is_free))
+            })
+            .flatten()
+    }
+
+    /// Resolve or assign a connection slot in `0..capacity` for `did` at `quantum`.
+    fn acquire_slot_for(
+        &mut self,
+        did: Did,
+        quantum: u128,
+    ) -> Result<OnionSlotId, OnionLinkTableFull> {
+        let floor_use = self.floor_use_at(quantum);
+        self.resume_existing_slot(did, quantum)
+            .or_else(|| {
+                self.roster_slot_of(did).filter(|slot_id| {
+                    self.slots.get(slot_id).is_none_or(SlotLedger::is_free)
+                        && self.is_cleanest_free_roster_slot(*slot_id, &floor_use)
+                })
+            })
+            .or_else(|| {
+                self.acquire_roster_slot(did, &floor_use)
+                    .or_else(|| self.cleanest_free_slot(&floor_use))
+            })
+            .ok_or(OnionLinkTableFull)
+    }
+
+    fn is_cleanest_free_roster_slot(
+        &self,
+        assigned: OnionSlotId,
+        floor_use: &SlotFloorUse,
+    ) -> bool {
+        let assigned_use = u16::try_from(assigned.index())
+            .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+        assigned_use == FloorUse::CLEAN
+            || self.cleanest_free_slot(floor_use).is_none_or(|cleanest| {
+                let cleanest_use = u16::try_from(cleanest.index())
+                    .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+                assigned_use <= cleanest_use
+            })
+    }
+
+    /// The floor use `min(load(κ), f) / f` of every charged slot at `quantum` (paper, Def. 1).
+    pub(crate) fn floor_use_at(&self, quantum: u128) -> SlotFloorUse {
+        let floor = usize::try_from(self.floor_units).unwrap_or(1).max(1);
+        SlotFloorUse::from_slots(self.slots.iter().filter_map(|(&slot_id, slot)| {
+            let slot_u16 = u16::try_from(slot_id.index()).ok()?;
+            let load = usize::try_from(slot.ledger.load(quantum)).unwrap_or(usize::MAX);
+            (load > 0).then(|| (slot_u16, FloorUse::of(load, floor)))
+        }))
+    }
+
+    /// Fallback cleanest-first slot selection over `0..capacity` when an external `SlotRoster`
+    /// was configured with fewer slots than `capacity`.
+    fn cleanest_free_slot(&self, floor_use: &SlotFloorUse) -> Option<OnionSlotId> {
+        (0..self.capacity)
+            .filter(|&index| {
+                self.slots
+                    .get(&OnionSlotId::new(index))
+                    .is_none_or(SlotLedger::is_free)
+            })
+            .min_by_key(|&index| {
+                let use_at =
+                    u16::try_from(index).map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+                (use_at, index)
+            })
+            .map(OnionSlotId::new)
     }
 
     /// The step `δ` on `Admit(token, e, x, ν)`: admit a charged, `γ`-verified layer, or reject it.
@@ -621,31 +891,43 @@ impl OnionAdmissionState {
     ) -> Result<(), OnionAdmissionRejection> {
         let OnionAdmissionCharge { arrival_ms, epoch } = charge;
         self.advance(now_ms);
-        if layer.epoch != self.epoch || epoch != self.epoch {
-            return Err(OnionAdmissionRejection::StaleEpoch);
-        }
-        if !layer.expiry.admissible_at(arrival_ms) || layer.expiry.has_passed_at(self.clock_ms) {
-            return Err(OnionAdmissionRejection::OutsideWindow);
-        }
+        (layer.epoch == self.epoch && epoch == self.epoch)
+            .then_some(())
+            .ok_or(OnionAdmissionRejection::StaleEpoch)?;
+        (layer.expiry.admissible_at(arrival_ms) && !layer.expiry.has_passed_at(self.clock_ms))
+            .then_some(())
+            .ok_or(OnionAdmissionRejection::OutsideWindow)?;
         let probe = self.replay.probe(layer.tag);
-        if self.replay.contains(layer.expiry, &probe) {
-            return Err(OnionAdmissionRejection::Replayed);
-        }
-        self.replay.insert(layer.expiry, &probe);
-        Ok(())
+        (!self.replay.contains(layer.expiry, &probe))
+            .then(|| self.replay.insert(layer.expiry, &probe))
+            .ok_or(OnionAdmissionRejection::Replayed)
     }
 
     /// Advance the monotone clock to `max(now, clock)`, drop every filter whose `x` has passed,
-    /// and, on entering a new quantum, release every ledger that has become releasable. Return the
-    /// current arrival quantum `⌊clock / Q⌋`.
+    /// and, on entering a new quantum, release every slot ledger that has become releasable and
+    /// refresh the aggregate pool load. Return the current arrival quantum `⌊clock / Q⌋`.
     fn advance(&mut self, now_ms: u128) -> u128 {
         self.clock_ms = self.clock_ms.max(now_ms);
         self.replay.forget_through(self.clock_ms);
         let quantum = self.clock_ms / ONION_EXPIRY_QUANTUM_MS;
         if quantum > self.swept_quantum {
-            self.senders
-                .retain(|_, sender| !sender.is_releasable_at(quantum));
+            let drained_dids = self
+                .slots
+                .values_mut()
+                .flat_map(|slot| slot.take_drained_retained(quantum))
+                .collect::<Vec<_>>();
+            drained_dids.into_iter().for_each(|did| {
+                self.peer_slots.remove(&did);
+            });
+            self.slots.retain(|_, slot| !slot.is_releasable_at(quantum));
+            self.pool_load = self
+                .slots
+                .values()
+                .map(|slot| slot.ledger.load(quantum).saturating_sub(self.floor_units))
+                .fold(0_u32, u32::saturating_add);
             self.swept_quantum = quantum;
+            self.slot_roster
+                .set_extra_floor_use(self.floor_use_at(quantum));
         }
         quantum
     }

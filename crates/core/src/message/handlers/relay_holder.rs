@@ -7,7 +7,6 @@ use async_trait::async_trait;
 
 use crate::dht::entry::inbox::inbox_key;
 use crate::dht::entry::EntryOperation;
-use crate::dht::relay_holder::owner_answer;
 use crate::dht::relay_holder::PreviousHolder;
 use crate::dht::relay_holder::RelayHolder;
 use crate::dht::Chord;
@@ -19,6 +18,7 @@ use crate::error::Result;
 use crate::message::effects::CoreEffect;
 use crate::message::handlers::inbox::send_relay_hold;
 use crate::message::handlers::relay_replica::ask_owner;
+use crate::message::handlers::relay_replica::connect_relay_chain_neighbours;
 use crate::message::handlers::relay_replica::forward;
 use crate::message::handlers::relay_replica::replicate_taken_hold;
 use crate::message::handlers::relay_replica::resume_relay_replications;
@@ -62,15 +62,18 @@ impl HandleMsg<AnnounceRelayHolder> for MessageHandler {
                 run_start: link.run_start,
             })
             .collect::<Vec<_>>();
-        if !self.dht.accept_previous_relay_holder(from, previous)? {
-            tracing::debug!(
-                local = %self.dht.did,
-                %from,
-                previous = ?msg.previous,
-                "previous relay holders not taken"
-            );
+        match self.dht.accept_previous_relay_holder(from, previous)? {
+            true => connect_relay_chain_neighbours(&self.transport).await,
+            false => {
+                tracing::debug!(
+                    local = %self.dht.did,
+                    %from,
+                    previous = ?msg.previous,
+                    "previous relay holders not taken"
+                );
+                Ok(())
+            }
         }
-        Ok(())
     }
 }
 
@@ -265,19 +268,15 @@ impl HandleMsg<FindRelayHolder> for MessageHandler {
         }
         match self.dht.find_successor(msg.key)? {
             PeerRingAction::Some(_) => {
-                let holder = owner_answer(&self.dht.relay_segment()?, self.dht.did, msg.key);
                 // With no holder, the last node this owner places, past which the asker asks
-                // again for its next member (#777).
-                let horizon = match holder {
-                    Some(_) => None,
-                    None => self
-                        .dht
-                        .with_topology_state(|state| state.successors.last().copied())?,
-                };
+                // again for its next member (#777, #1182).
+                let (holder, horizon) =
+                    self.dht.answer_relay_holder_query(msg.key, &msg.excluded)?;
                 self.run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::RelayHolderFound(RelayHolderFound {
                         key: msg.key,
+                        request_id: msg.request_id,
                         holder,
                         horizon,
                     }),
@@ -296,11 +295,12 @@ impl HandleMsg<FindRelayHolder> for MessageHandler {
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<RelayHolderFound> for MessageHandler {
-    /// Take the answer to this node's outstanding query for `msg.key` (`Law (Asked)`). An answer
-    /// about its next holder (#777) is cached, the holds waiting for it resume, and an owner that
-    /// names none is asked past by its horizon. Otherwise record the holder the owner named as a
-    /// keeper's hint, and ask for a repair pass, which offers the carrier there, only when that
-    /// hint changed. An answer nobody asked for, a second answer, or a wrong one costs no pass and
+    /// Take the answer to this node's outstanding query for `(msg.key, msg.request_id)`
+    /// (`Law (Asked)`). An answer about its next holder (#777) is cached, the holds waiting for
+    /// it resume, and an owner that names none is asked past by its horizon. Otherwise record
+    /// the holder the owner named as a keeper's hint, and ask for a repair pass, which offers
+    /// the carrier there, only when that hint changed. An answer nobody asked for, a second
+    /// answer, a mismatched token, or an origin inconsistent with `msg.key` costs no pass and
     /// moves nothing.
     async fn handle(&self, context: &HandlerContext<'_>, msg: &RelayHolderFound) -> Result<()> {
         let ctx = context.payload();
@@ -309,20 +309,35 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
                 .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
-        if self.dht.asks_next_relay_holder(msg.key)? {
-            return match self
-                .dht
-                .take_next_relay_holder(msg.key, msg.holder, msg.horizon)?
-            {
-                Some(again) => ask_owner(&self.transport, again).await,
-                None => resume_relay_replications(&self.transport).await,
-            };
+        let origin = ctx.transaction.origin();
+        match self.dht.asks_next_relay_holder(msg.key, msg.request_id)? {
+            true => match self.dht.take_next_relay_holder(
+                msg.key,
+                msg.request_id,
+                origin,
+                msg.holder,
+                msg.horizon,
+            )? {
+                Some((again, request_id)) => ask_owner(&self.transport, again, request_id).await,
+                None if self.dht.has_resolved_next_relay_holder()? => {
+                    resume_relay_replications(&self.transport).await
+                }
+                None => Ok(()),
+            },
+            false => match self.dht.name_relay_holder(
+                msg.key,
+                msg.request_id,
+                origin,
+                msg.holder,
+                msg.horizon,
+            )? {
+                true => {
+                    self.run_effects([CoreEffect::request_storage_repair()])
+                        .await
+                }
+                false => Ok(()),
+            },
         }
-        if self.dht.name_relay_holder(msg.key, msg.holder)? {
-            self.run_effects([CoreEffect::request_storage_repair()])
-                .await?;
-        }
-        Ok(())
     }
 }
 
@@ -340,5 +355,162 @@ impl HandleMsg<DeclareRelayCustody> for MessageHandler {
         }
         self.dht
             .observe_relay_custody(ctx.transaction.origin(), msg.custody)
+    }
+}
+
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+mod tests {
+    use super::*;
+    use crate::ecc::tests::gen_ordered_keys;
+    use crate::ecc::SecretKey;
+    use crate::message::Principal;
+    use crate::tests::default::prepare_node;
+    use crate::tests::default::wait_for_msgs;
+    use crate::tests::manually_establish_connection;
+
+    /// Proves that `HandleMsg<RelayHolderFound>` rejects unsolicited, mismatched-token,
+    /// inconsistent-origin, and replayed answers, while taking a valid correlated answer once
+    /// (#1181).
+    #[tokio::test]
+    async fn test_relay_holder_found_handler_rejects_unsolicited_mismatched_and_inconsistent_origin(
+    ) -> Result<()> {
+        let [key1, key2, key3]: [SecretKey; 3] = gen_ordered_keys::<3>();
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+        let node3 = prepare_node(key3).await;
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2]).await;
+
+        let queried_key = node2.did() + crate::dht::Did::from(1u32);
+        let handler = MessageHandler::new(node1.swarm.transport.clone());
+
+        // 1. Unsolicited RelayHolderFound is ignored.
+        let unsolicited = RelayHolderFound {
+            key: queried_key,
+            request_id: uuid::Uuid::from_u128(701),
+            holder: Some(node2.did()),
+            horizon: None,
+        };
+        let payload = node2
+            .swarm
+            .transport
+            .protocol_egress()
+            .originate(
+                Message::RelayHolderFound(unsolicited.clone()),
+                node1.did(),
+                Some(node1.did()),
+            )
+            .await?;
+        handler
+            .handle(
+                &HandlerContext::new(&payload, Principal::Local),
+                &unsolicited,
+            )
+            .await?;
+        assert!(node1.dht().relay_holder_hints()?.is_empty());
+
+        // 2. Mismatched token leaves the outstanding query intact.
+        let token = node1.dht().ask_relay_holder(queried_key)?;
+        let mismatched = RelayHolderFound {
+            key: queried_key,
+            request_id: uuid::Uuid::from_u128(702),
+            holder: Some(node2.did()),
+            horizon: None,
+        };
+        let payload = node2
+            .swarm
+            .transport
+            .protocol_egress()
+            .originate(
+                Message::RelayHolderFound(mismatched.clone()),
+                node1.did(),
+                Some(node1.did()),
+            )
+            .await?;
+        handler
+            .handle(
+                &HandlerContext::new(&payload, Principal::Local),
+                &mismatched,
+            )
+            .await?;
+        assert!(node1.dht().relay_holder_hints()?.is_empty());
+
+        // 3. Inconsistent origin (`queried_key = node2 + 1` is outside `(node3, node2]` and
+        // `node2 != node3`) is rejected without retiring `token`.
+        let forged_origin = RelayHolderFound {
+            key: queried_key,
+            request_id: token,
+            holder: Some(node2.did()),
+            horizon: None,
+        };
+        let payload = node3
+            .swarm
+            .transport
+            .protocol_egress()
+            .originate(
+                Message::RelayHolderFound(forged_origin.clone()),
+                node1.did(),
+                Some(node1.did()),
+            )
+            .await?;
+        handler
+            .handle(
+                &HandlerContext::new(&payload, Principal::Local),
+                &forged_origin,
+            )
+            .await?;
+        assert!(node1.dht().relay_holder_hints()?.is_empty());
+
+        // 4. Matching token from relay-holding owner `node2` naming `node3` for
+        // `queried_key = node2 + 1 ∈ (node2, node3]` records `node3` and consumes `token`.
+        let matching = RelayHolderFound {
+            key: queried_key,
+            request_id: token,
+            holder: Some(node3.did()),
+            horizon: None,
+        };
+        let payload = node2
+            .swarm
+            .transport
+            .protocol_egress()
+            .originate(
+                Message::RelayHolderFound(matching.clone()),
+                node1.did(),
+                Some(node1.did()),
+            )
+            .await?;
+        handler
+            .handle(&HandlerContext::new(&payload, Principal::Local), &matching)
+            .await?;
+        assert_eq!(
+            node1.dht().relay_holder_hints()?.get(&queried_key),
+            Some(&node3.did())
+        );
+
+        // 5. Replaying `token` cannot overwrite the hint.
+        let replay = RelayHolderFound {
+            key: queried_key,
+            request_id: token,
+            holder: Some(node2.did()),
+            horizon: None,
+        };
+        let payload = node2
+            .swarm
+            .transport
+            .protocol_egress()
+            .originate(
+                Message::RelayHolderFound(replay.clone()),
+                node1.did(),
+                Some(node1.did()),
+            )
+            .await?;
+        handler
+            .handle(&HandlerContext::new(&payload, Principal::Local), &replay)
+            .await?;
+        assert_eq!(
+            node1.dht().relay_holder_hints()?.get(&queried_key),
+            Some(&node3.did())
+        );
+        Ok(())
     }
 }

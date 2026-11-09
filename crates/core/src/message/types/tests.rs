@@ -110,6 +110,9 @@ sample_message_body!(FindSuccessorReport, |fixture| FindSuccessorReport {
 sample_message_body!(NotifyPredecessorSend, |fixture| NotifyPredecessorSend {
     did: fixture.did,
 });
+sample_message_body!(Leave, |fixture| Leave {
+    successor_list: vec![fixture.did],
+});
 sample_message_body!(ProbeRequest, |fixture| ProbeRequest {
     epoch: ProvisionalEpoch { slot: 1 },
     nonce: [u8::from(fixture.did != Did::from(0_u32)); 32],
@@ -219,10 +222,13 @@ sample_message_body!(EntryStoreReport, |fixture| EntryStoreReport {
     outcome: StoreOutcome::Stored,
 });
 sample_message_body!(FindRelayHolder, |fixture| FindRelayHolder {
-    key: fixture.did
+    key: fixture.did,
+    request_id: uuid::Uuid::nil(),
+    excluded: Vec::new(),
 });
 sample_message_body!(RelayHolderFound, |fixture| RelayHolderFound {
     key: fixture.did,
+    request_id: uuid::Uuid::nil(),
     holder: Some(fixture.did),
     horizon: None,
 });
@@ -324,18 +330,44 @@ fn test_find_successor_send_predicate_names_local_report_rule() {
 fn test_find_successor_report_predicate_names_remote_successor() {
     let local = random_did();
     let remote = random_did();
+    let request_id = uuid::Uuid::from_u128(19);
 
     let local_report = FindSuccessorReport {
         did: local,
-        handler: FindSuccessorReportHandler::Connect,
+        handler: FindSuccessorReportHandler::Connect { request_id },
     };
     assert!(!local_report.reports_remote_successor(local));
 
     let remote_report = FindSuccessorReport {
         did: remote,
-        handler: FindSuccessorReportHandler::Connect,
+        handler: FindSuccessorReportHandler::Connect { request_id },
     };
     assert!(remote_report.reports_remote_successor(local));
+}
+
+/// Proves that the connect report handler preserves its correlation token across wire
+/// serialization.
+#[test]
+fn test_connect_report_handler_round_trips_its_correlation_token() -> Result<()> {
+    let request_id = uuid::Uuid::from_u128(99);
+    let handler = FindSuccessorReportHandler::Connect { request_id };
+    let wire = rings_codec::serialize(&handler).map_err(crate::error::Error::CodecSerialize)?;
+    let decoded: FindSuccessorReportHandler =
+        rings_codec::deserialize(&wire).map_err(crate::error::Error::CodecDeserialize)?;
+
+    match decoded {
+        FindSuccessorReportHandler::Connect {
+            request_id: decoded,
+        } => {
+            assert_eq!(decoded, request_id);
+        }
+        _ => {
+            return Err(crate::error::Error::InvalidMessage(
+                "connect correlation token changed variant on wire round trip".to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Proves that the finger report handler preserves both components of its

@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -18,6 +17,7 @@ use crate::error::Result;
 
 mod crdt;
 pub(crate) mod inbox;
+mod provenance;
 mod retention;
 
 #[cfg(test)]
@@ -31,6 +31,8 @@ pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
+use provenance::materialize_data_elements;
+use provenance::RetractionWitness;
 pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
@@ -494,6 +496,7 @@ impl Entry {
             .enumerate()
             .map(|(index, _)| EntryDot::for_index(version, index))
             .collect::<Result<Vec<_>>>()?;
+        self.crdt.co_dots.clear();
         Ok(self)
     }
 
@@ -548,12 +551,14 @@ impl Entry {
         }
     }
 
-    /// Every version this entry carries: element dots, tombstones, and the reset floor.
-    fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
+    /// Every version this entry carries: element dots, co-author dots, tombstones, and the reset
+    /// floor.
+    pub(super) fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
             .iter()
             .map(|dot| dot.version)
+            .chain(self.crdt.co_dots.iter().map(|(_, dot)| dot.version))
             .chain(
                 self.crdt
                     .tombstones
@@ -589,8 +594,19 @@ impl Entry {
     /// remove, each keyed by its greatest dot, and the register.
     fn raw_buffer(&self) -> Result<DataTopicBuffer> {
         let mut values = BTreeMap::new();
+        let mut co_values = BTreeMap::new();
         for (index, value) in self.data.iter().cloned().enumerate() {
-            insert_max(&mut values, value, self.dot_for_element(index)?);
+            DataTopicBuffer::insert_value(
+                &mut values,
+                &mut co_values,
+                value,
+                self.dot_for_element(index)?,
+            );
+        }
+        for &(index, dot) in &self.crdt.co_dots {
+            if let Some(value) = self.data.get(index as usize).cloned() {
+                DataTopicBuffer::insert_value(&mut values, &mut co_values, value, dot);
+            }
         }
         let mut removes = BTreeMap::new();
         for tombstone in self.crdt.tombstones.iter() {
@@ -599,14 +615,20 @@ impl Entry {
         Ok(DataTopicBuffer {
             register: self.crdt.register,
             values,
+            co_values,
             removes,
         })
     }
 
-    /// This entry's normalized carrier state (see [`DataTopicBuffer::new`]).
-    fn topic_buffer(&self) -> Result<DataTopicBuffer> {
+    /// This entry's normalized carrier state (see [`DataTopicBuffer::with_co_values`]).
+    pub(super) fn topic_buffer(&self) -> Result<DataTopicBuffer> {
         let raw = self.raw_buffer()?;
-        Ok(DataTopicBuffer::new(raw.register, raw.values, raw.removes))
+        Ok(DataTopicBuffer::with_co_values(
+            raw.register,
+            raw.values,
+            raw.co_values,
+            raw.removes,
+        ))
     }
 
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
@@ -623,17 +645,23 @@ impl Entry {
         let DataTopicBuffer {
             register,
             values,
+            co_values,
             removes,
         } = buffer;
-        let mut visible = values.into_iter().collect::<Vec<_>>();
-        visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
-            left_dot
-                .cmp(right_dot)
-                .then_with(|| left_value.cmp(right_value))
-        });
-        let skip_count = visible.len().saturating_sub(kind.max_data_len());
-        let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
-        let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+        let (data, dots, co_dots) = match kind {
+            EntryKind::Data => materialize_data_elements(values, co_values, kind.max_data_len()),
+            EntryKind::RelayMessage => {
+                let mut visible = values.into_iter().collect::<Vec<_>>();
+                visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+                    left_dot
+                        .cmp(right_dot)
+                        .then_with(|| left_value.cmp(right_value))
+                });
+                let skip_count = visible.len().saturating_sub(kind.max_data_len());
+                let (data, dots) = visible.into_iter().skip(skip_count).unzip();
+                (data, dots, Vec::new())
+            }
+        };
         let mut tombstones = removes
             .into_iter()
             .map(|(element, dot)| EntryTombstone { element, dot })
@@ -653,6 +681,7 @@ impl Entry {
                 register,
                 dots,
                 tombstones: tombstones.into_iter().skip(tombstone_skip).collect(),
+                co_dots,
             },
             expires_at_ms,
         }
@@ -757,23 +786,18 @@ impl Entry {
         self.validate_same_carrier(&other)?;
 
         let expires_at_ms = self.expires_at_ms;
-        let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
-        let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
-        let has_dot_witness = !target_dots.is_empty();
+        let witness = RetractionWitness::of(&other);
 
         let mut buffer = self.topic_buffer()?;
         let removed = buffer
             .values
             .iter()
-            .filter(|(value, dot)| match has_dot_witness {
-                true => target_dots.contains(*dot),
-                false => target_values.contains(*value),
-            })
+            .filter(|(value, dot)| witness.matches(value, dot))
             .map(|(value, _)| value.clone())
             .collect::<Vec<_>>();
-        for value in removed.iter() {
+        removed.iter().for_each(|value| {
             buffer.remove(value);
-        }
+        });
         Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
     }
 }

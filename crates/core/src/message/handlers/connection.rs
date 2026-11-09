@@ -234,11 +234,13 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
                             let did = match handler {
-                                FindSuccessorReportHandler::Connect => connect_successor_hint(
-                                    self.dht.as_ref(),
-                                    ctx.transaction.origin(),
-                                    did,
-                                )?,
+                                FindSuccessorReportHandler::Connect { .. } => {
+                                    connect_successor_hint(
+                                        self.dht.as_ref(),
+                                        ctx.transaction.origin(),
+                                        did,
+                                    )?
+                                }
                                 _ => did,
                             };
                             self.run_effects([CoreEffect::send_report_message(
@@ -299,10 +301,13 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     }
                 }
             }
-            FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {
+            FindSuccessorReportHandler::Connect { request_id }
+                if self.dht.claim_connect_lookup(*request_id)?
+                    && msg.reports_remote_successor(self.dht.did) =>
+            {
                 self.connect_dht_peer(msg.did).await?;
             }
-            FindSuccessorReportHandler::Connect => {}
+            FindSuccessorReportHandler::Connect { .. } => {}
             // An application lookup: resolve the handle the application awaits. A report no
             // live lookup awaits is unsolicited and dropped here; the application never sees it.
             FindSuccessorReportHandler::None => {

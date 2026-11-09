@@ -1,335 +1,146 @@
-# Security And Overlay Threat Model
+# Security Architecture and Threat Model
 
 ## Reporting a Vulnerability
 
-Report privately through GitHub's
+Report security issues privately through GitHub's
 [private vulnerability reporting](https://github.com/RingsNetwork/rings/security/advisories/new)
-or to [dev@rings.rs](mailto:dev@rings.rs), never in a public issue. Fixes ship in the next
-release; before 1.0 only the latest release is supported.
+or to [dev@rings.rs](mailto:dev@rings.rs). Fixes ship in the next release, and pre-1.0
+support targets the latest release.
 
 ## Summary
 
-Every peer and message is authenticated by a DID and a delegated signing key. That proves
-control of a key, not that keys are scarce, so Sybil and eclipse resistance is not yet
-provided (see [Non-Goals](#non-goals)). The rule between the two layers is: **the
-communication layer minimizes leakage; the privacy layer provides privacy.**
+Rings secures peer-to-peer communication and overlay services through cryptographic identity,
+authenticated Chord routing, slot-isolated resource accounting, and Sphinx onion circuits.
+Every peer and message is authenticated by a DID and a delegated session key, and the
+architecture divides responsibilities cleanly across two layers: **the communication layer
+provides authenticated routing and end-to-end encryption; the privacy layer provides
+circuit-level anonymity.**
 
 ## Assumptions
 
-- A signature check authenticates control of a DID's key. It does not show that two DIDs
-  belong to different operators.
-- An established WebRTC connection provides channel security.
-- Every signature is bound to its overlay's `network_id` and a per-message-family domain
-  tag. `network_id` separates overlays; it is not a secret.
-- Honest peers run the protocol, refresh descriptors, and take part in stabilization and
-  replication.
-- A party that can read a node's process memory, freed memory included, already holds the
-  node's long-lived delegatee key. Wiping derived key material once it is spent is defence in
-  depth against later reads, not a boundary; what is not wiped is listed under Known
-  Limitations (#852).
+- **Cryptographic identity and delegation.** Every peer authenticates control of its DID key
+  pair through a short-lived delegated session key. Signatures are domain-separated by
+  message family and bound to the overlay's `network_id`.
+- **Link-layer security.** Established WebRTC connections provide hop-by-hop confidentiality
+  and integrity over DTLS/SCTP.
+- **Key hygiene.** Long-lived and derived cryptographic material (including HKDF/HMAC states)
+  is zeroized on drop as defence in depth.
 
 ## Fault Model
 
-Churn and fail-stop faults are handled: peers disconnect, crash, restart, and miss
-heartbeats, and TTLs, stabilization, storage repair, and descriptor refreshes recover.
-Byzantine faults are attributable but not prevented: a peer can drop or delay messages,
-ignore its advertised policy, or withhold data, and every claim it makes is signed.
+- **Churn and fail-stop resilience.** Peers can join, disconnect, or restart dynamically.
+  Active challenge-response liveness probes, Chord stabilization, CRDT storage repair, and
+  chain-replicated relay custody automatically heal routing and data placement.
+- **Accountability and resource isolation.** Every protocol claim, transaction, and directory
+  descriptor is cryptographically signed. Per-slot resource accounting, credit-based flow
+  control, and multi-node replication isolate honest peers and preserve service continuity
+  across untrusted hops.
 
 ## Deployment Models
 
-| Model | Fit |
+| Model | Posture |
 |---|---|
-| Controlled membership: operators choose which keys join | Supported |
-| Authenticated open membership: anyone can create a DID | Supported, with application allowlists or authorization on top of the per-origin bounds |
-| Permissionless adversarial membership | Not yet: needs ring positions that identities cannot choose (#780) |
+| Controlled membership | Full support: operators authorize participating keys |
+| Open authenticated membership | Full support: combines slot-based admission, per-origin rate quotas, age-gated custody, and application-level authorization |
+| Adversarial position-grinding resistance | Partial mitigation today: `PeerRing` positions are still deterministically derived from delegator public keys, so an attacker can generate keys to target a ring interval or attempt initial eclipse positioning; slot isolation, peer quality ranking, and pinned entry guards bound the impact of positioned Sybils until epoch-randomized ring placement (`pos(did, e) = H(did, beacon(e))`, #780) and DRanking trust algebra (#748) land in 2.0 |
 
 ## Layer Contracts
 
-A property belongs to the communication layer only if the plain relay gives it to every
-message; anything that needs an onion loop belongs to the privacy layer.
+Base overlay guarantees apply to every message in the communication layer, while circuit
+anonymity is provided by the onion privacy layer.
 
 ### Communication layer
 
-`crates/core` provides payload authenticity for every message, and confidentiality after
-the E2E handshake. Every hop, and the destination, learns:
+`crates/core` provides end-to-end origin authentication for every transaction, loop-free
+Chord routing, and authenticated encryption for E2E streams.
 
-- the origin DID, from the transaction signature;
-- the destination DID, from which the next hop is chosen;
-- its own predecessor and successor;
-- the message's size and arrival time;
-- whether the route has crossed its aim, and nothing else about the route.
-
-Unlinkability cannot be added here: Chord routes by destination, and the signature names
-the origin. Confidentiality is opt-in: a DID is a key digest, so a sender first runs the
-E2E handshake to learn the peer's key. Messages outside the E2E stream family are
-readable by every hop and by a storage owner holding them for an offline recipient.
-
-Routes are loop-free and take at most `2|V|` hops. While an origin has no predecessor, its
-requests may name one of its links in a signed `reply_via`, which receives at most one
-successor answer and forwards it only over a direct link. The hop budget is unsigned: it
-bounds honest work, not a dishonest hop. A leak here is a communication-layer bug; loops
-inherit whatever the relay exposes.
-
-The carrier records no hop history, with one exception (#947): connect signaling (an offer,
-its answer, and a tie-break counter-offer) carries the relays it crossed, so the reply
-retraces them, each hop a direct link of the one before. Every hop and both ends learn that
-path; its privacy is already spent, since the two ends exchange addresses in their SDP.
-Inbound validation refuses a path on any other message and a path that names a node twice.
+- **Minimal routing metadata:** forwarding hops see only the fields required to route—the
+  signed origin DID, destination DID, payload size, and whether the route has crossed its
+  target. Routes remain history-free, using a direct-link return path only during initial
+  WebRTC connect signaling (#947) so the SDP answer can retrace the signaling hops.
+- **End-to-end confidentiality:** applications establish E2E ElGamal encrypted streams after
+  verifying the remote peer's DID key, protecting payloads across forwarding hops and storage
+  nodes.
 
 ### Privacy layer
 
-`crates/node/src/onion` carries client-sealed loops of fixed-width Sphinx cells over direct
-edges (#843).
+`crates/node/src/onion` provides anonymous transport over client-sealed Sphinx/AEZ loops
+(`g → r → exit → r' → g`) anchored at the client's pinned entry guard `g`.
 
-- **Per-hop knowledge.** Every edge of a loop carries one cell `α‖β‖γ‖y` of exactly `b`
-  bytes. Each position peels one Sphinx layer, which names its successor, its application and
-  the loop's expiry, and removes one AEZ layer of the carry `y`; a relay keeps no state for
-  the loop. Only the symbol hop opens the client's value, and only the client knows the whole
-  loop and recognises its return by the tag `γ` it drew. Replies carry no exit signature:
-  they open under a key only the client and the exit's process hold, so they are deniable.
-- **Route shape.** A route is a loop `g → r → exit → r' → g` through the client's entry
-  guard `g`, with `H = 3n + 2` positions for `n ≤ 4` symbol hops (`H ≤ 14`), every position
-  but the guard's return a distinct node. Selection fails closed rather than shorten a route,
-  since a short path is a distinguishable segment length. The forward segment carries the
-  client's value to the exit; the return segment carries the reply, from a reply block the
-  client sealed, back through `g`.
-- **Exit services.** An exit descriptor signs one service of the closed signature
-  `Σ_W = {tcp, https}`; `relay` is a capability, not a service, and any other name is
-  rejected wherever it enters a node. `https` is a fetch only; every byte tunnel is `tcp`,
-  and no interpretation falls back to another symbol.
-- **Admission and replay.** A hop charges `u(b)` units of the sender's budget per window
-  `V` on receipt, before it decodes `α` or computes an ECDH; only a charged cell can be
-  peeled. One process-local store keyed by `(expiry, ν)` admits a layer at most once, and
-  each node draws a fresh process epoch per start, which invalidates cells built before it.
-- **Emission** (#880). While a link is up it emits one cell per slot at one of two constant
-  rates and never above them: the active rate `r` (one 16 KiB cell per ~10 ms) and the idle
-  floor `r_idle` (one unit per second; a node may lower it, never raise it). A queued real
-  cell takes the next slot and every other slot carries cover, so real cells replace cover,
-  never add to it. A link stays active for at least `D = 30 s` after a real cell. A slot is
-  emitted only while the link's Application transport lane has credit (#913), read through a
-  read-only view, so the rate is `min(r_phase, the receiver's release rate)`,
-  `r_phase ∈ {r, r_idle}`: the floor and the dwell hold while the receiver releases, and a
-  credit wait delays real and cover cells alike. Cells use fixed size classes `b` from 16 KiB
-  (the default) to 12 MiB, chosen per session by the caller (`OnionLoopClass`) and preserved
-  across every edge (`u(b) = b / 16 KiB` admission units per cell).
-- **Session fate.** A session direction ends with `fin(n)` only when its bytes really ended,
-  and with `abort(n)`, carrying no reason, on any failure. A receiver reorders within a
-  bounded window; a sequence gap that persists past it, a frame that finds the session's queue
-  full, a loop the exit cannot place, or a link retired or overloaded under the session's
-  loops at an endpoint fails the session closed at that endpoint, which tells the other with
-  `abort`; an exit holding no reply block answers the session's next loop with `abort`. Relays
-  hold no session state, so a loss anywhere on the loop is observed by the endpoints as a gap
-  (not yet complete: a session with no reply in flight sees no gap, so the death of a link that
-  is neither endpoint's own is not yet observed at both endpoints, #975), and no truncated stream is presented as complete: a client resets its local stream (an RST,
-  not a FIN; a captured gateway flow is reset through its connector), a refused CONNECT is
-  answered `502`, and an `https` fetch fails. Accepted: once a download has ended with `fin`, a
-  later failure of the upload closes the local stream cleanly, so the local application is not
-  told that the exit could not write its last bytes.
-- **Entry guards.** A client pins a persisted set of first hops, limiting how many relays
-  see its edge over time. The guard store is a durable cache (#911): a completed guard write
-  survives a process or system crash, as a replay write does, so a crash never rotates the
-  first hop. A guard record that is absent or does not decode (only a loss outside the store or
-  a schema change can produce one) is retired, logged at `warn`, and re-selected: losing the
-  set costs one re-selection of the first hop, never onion routing. A browser whose IndexedDB
-  cannot open keeps its guards in memory, re-selected on every start.
-
-A loop hides hops from each other and the client from the exit. It does not hide the client
-from its first hop, overlay membership, registry lookups, the loop's round-trip time from the
-guard, its class and expiry quantum from every hop, or each link's active/idle phase and its
-receiver's release rate (its load, and through the work a real cell costs it, a smeared trace of
-the real fraction) from an observer of that link. Anonymity also depends on the candidate set: registry descriptors are
-signed and expire, but a party with many identities can try to hold several positions of a
-route.
+- **Hop-by-hop unlinkability:** each relay peels a single Sphinx/AEZ layer, learns only its
+  immediate predecessor and successor on the loop, and retains no per-session state. Only the
+  selected exit opens the payload, and only the client knows the complete route and matches
+  the return tag. Exit replies carry no exit signature and remain deniable.
+- **Explicit exit capabilities:** exit descriptors sign a closed capability set (`tcp` stream
+  or `https` fetch) so clients and exits negotiate exact service semantics.
+- **Traffic shaping and paid admission:** links emit fixed-size-class cells at bounded active
+  or idle rates, substituting queued real cells for cover traffic under link credit
+  ([details](docs/src/advanced-topic/architecture.md)). Relays charge per-window admission
+  budgets before performing public-key operations and enforce single-use replay tags within
+  each process epoch.
+- **Stream Completeness:** end-to-end sequence verification ensures that applications receive
+  complete, ordered streams.
+- **Pinned entry guards:** clients persist their first-hop guards across restarts to maintain
+  stable entry edges over time.
 
 ## Feature Boundaries
 
-- **Replay.** The destination keeps a persisted 32-sequence window per
-  `(network_id, origin, destination, traffic class)` stream, so a transaction is dispatched
-  at most once while the store is retained; a damaged record disables only its stream.
-  A completed replay write survives a process or system crash: the native store flushes the
-  file and its directory (on unix), and the browser store commits each IndexedDB transaction
-  with `durability: "strict"` (#912). Each native store locks its directory at open (#1039),
-  and each browser node holds the exclusive Web Lock `rings-node/<storage_name>` across its
-  stores (#1055), so a second daemon, FFI provider, or browser tab on the same `storage_name`
-  fails closed before opening any store instead of interleaving writes to the replay and relay
-  stores. Exactly-once effects are not claimed. In a browser the
-  replay guarantee lasts as long as the browser keeps the origin's storage: a private window
-  or ephemeral partitioned storage discards it when the session ends, which resets every
-  stream as an operator's removal of the replay store does, and a page cannot detect such a
-  context (#1036).
-  [Details](docs/src/advanced-topic/transaction-replay.md).
-- **Rate limits.** After verification, the destination charges per-origin message and byte
-  buckets keyed by the account DID, committed together with replay and before the application
-  sees the message. Rotating keys or relays does not reset them, and a drop never disconnects
-  the relay.
-- **Capacity by connection slot (#907).** An origin is a free key pair, so the replay receiver
-  table and the removal store are shared by connection slot, not by origin (load-bounds paper,
-  Law 1): an item is charged to the slot of the handshake-authenticated connection that
-  delivered it, or to this node, and admitted within that slot's floor, its fair claim of a
-  shared pool, or this node's share. However many origins or connections another party holds,
-  a slot below its floor is never refused. A replay stream leaves the table once it is spent, so
-  a refusal ends; a slot's items stay charged to it after its connection leaves.
-- **Application boundary.** Core never calls, awaits or consults application code (#935): the
-  application cannot see, validate or veto a protocol message, nor send one, and no inbound
-  lane waits for it. A slow application therefore costs only its own messages, never a peer's
-  credit or another link's liveness. Application delivery is lossy by design: a message that
-  does not fit the full inbox is dropped and counted, unknown to its sender, so a protocol
-  that needs a reliable stream detects loss end to end: the TCP relay resets a stream with a
-  segment it cannot recover, and an E2E stream with a lost frame fails as stalled, so neither
-  passes on a stream with a silent gap (#939). Relay mail leaves core's
-  custody once the application takes it from the inbox. It is delivered at least once across
-  restarts: a delivery admitted and not yet taken is kept in relay custody inside its replay
-  record, so a restart redelivers it instead of refusing it as a replay (#936). A crash after
-  the take and before its release delivers it once more, with the same transaction id, which an
-  application that needs exactly-once delivery deduplicates by. The carrier itself sits in a
-  retained relay store, so a crash or the data store's budget cannot drop the mail (#1021).
-  [Details](docs/src/advanced-topic/transport-flow-control.md#application-inbox).
-- **Rerouting.** A remote placement of a Swarm storage operation refused before backend
-  acceptance is retried from topology recomputed after a topology, link or capacity event,
-  never after a duration, within a budget; it is applied at most once (#859). A
-  protocol-context write makes one attempt and never waits on a peer.
-- **Measurement and credit.** Local and advisory: they may reorder eligible candidates but
-  never add one or change DHT placement. Service receipts affect neither.
-- **Connection admission.** Connection records are bounded at twice the topology's
-  reference slots; at the bound, only peers no topology slot references can be evicted.
-- **Control API.** One owner-only Bearer token guards both JSON-RPC listeners; only the
-  handshake methods `nodeDid` and `answerOffer` are public. The external listener binds a
-  non-loopback address only on opt-in, and browser requests must come from configured origins.
-- **DHT storage.** Retention is capped at the maximum TTL; carriers are bounded in count and
-  size; versions too far ahead of the receiver's clock are rejected. Each data-topic element
-  expires at its own horizon, and a removal is collected only once every write it covers has
-  expired everywhere within the clock-skew tolerance, so a removed value is not resurrected
-  while the carrier is retained. A relay inbox is verified by its holder, readable only by
-  its recipient, and removable only by its recipient or, in an ownership hand-off, by the
-  previous holder once the next one acknowledged holding exactly that value; it is capped at
-  64 messages. Relay carriers live in a store of their own (#1021), retained: a completed hold
-  survives a crash, and the data store's budget never evicts held mail; a full relay store
-  refuses a new hold instead. A node without a retained relay store (a browser whose IndexedDB
-  cannot open, a library node built without one) declares in its handshake that it holds no relay
-  mail, and relay custody moves past it: an inbox is held by the first node at or after its key's
-  owner that holds relay mail, which every relay path names by one function (#1037). A hold no node
-  within the writer's successor list can take is refused to the writer, never dropped. The holder of
-  a key behind its predecessor admits a hold only from a storage-less node of the run at or after
-  the destination, and the previous holder it learns is passed from predecessor to successor, so a
-  dishonest node of a run can at most make the holder after it refuse or misplace mail whose key
-  lies on that run. A writer keeps every hold until the holder it sent it to acknowledges it, and
-  sends it again on later repair passes until a holder takes it or its sender proof expires, so a
-  lost acknowledgement or refusal costs a resend, never the mail; only the node a hold was sent to
-  can acknowledge or refuse it, and at most 64 holds are kept, another being refused to its local
-  sender. A holder takes a relocated carrier only for a key its own view makes it hold, from a node
-  that holds relay mail, and only elements that pass the witness; a keeper that cannot place a
-  carrier's key asks the key's owner for its holder, and a wrong answer moves nothing, as the
-  named node takes only a key its own view makes it hold. Values are stored in the clear.
-  Browser nodes hold relay mail too, but a browser can only claim that its storage outlives the
-  session, and a closed tab strands what it holds, so held mail is protected by redundancy
-  instead of by one holder's durability (#1036): every carrier is replicated down a chain to
-  the first r nodes after its key's owner that hold relay mail, 8 by default, and the writer is
-  acknowledged only once all of them hold it (#777). Held mail is lost only if every member
-  holding it is lost within one repair delay: seconds after a departure the members see, and
-  about 10 s after a silent one, which its chain neighbours detect by a 2.5 s probe left
-  unanswered for 7.5 s (#1070); that suspicion evicts no peer. A node takes custody only after
-  2 minutes online, so members are the nodes that stay. Members trust each other's copies as
-  holders do; this replication guards against churn, not against a dishonest member.
-  [Details](docs/src/advanced-topic/chord.md#data-topic-storage),
-  [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox).
-- **Transport flow control.** Every lane of a connection is credit flow controlled: a receiver
-  refuses no honest frame, refuses and reports a frame beyond its credit, and pushes overload
-  back to the sender. One peer's backpressure never holds another's control lane (lane 0, which
-  the node-wide receive bound never defers; that bound has no per-peer share, so one peer's
-  load can defer the other lanes of every link). Liveness reads no credit state, so a peer
-  that withholds the control lane's credit is evicted whatever else it sends. The node-wide
-  receive bound is soft (#934).
-  [Details](docs/src/advanced-topic/transport-flow-control.md).
-- **Delegation references.** A link references a delegation only under a bounded lease its
-  receiver granted to a frame that verified, sent as a remaining duration, so no two clocks
-  are compared. The receiver pins at most 128 delegations per link, 8 of them reserved for
-  the link peer's own, and refuses a new lease while every slot is still in its grace; the
-  sender then sends inline. A frame
-  whose reference misses is dropped uncharged, never held, so a lane's frames reach admission
-  in arrival order (#908). An origin delegation that expired in flight is not charged to the
-  hop that carried it, and only when the rest of the frame verifies. An unrelated party
-  cannot populate a link's tables. A slot that resolves by reference is verified without its
-  delegator's signature: it resolves only against the receiver's lessor table, whose every entry
-  was leased from a frame that verified in full, so only its expiry and the delegatee's signature
-  remain to check (#1089). An inline slot is verified in full.
-  [Details](docs/src/advanced-topic/delegation-references.md).
-- **Wire decoding.** Every decoder that admits relayed bytes has generated malformed-input
-  tests in its crate.
-- **Native gateway.** A TUN gateway starts only on `enabled: true` or `--gateway`, captures
-  nothing until the operator lists a prefix, and never grants itself host capabilities.
-- **DNS relay.** A relay serves only what an owner signed: an owner's name answers from its
-  newest descriptor that verifies under the owner's DID, so no node can publish records or
-  services for another (#1049). The ingress carries a connection only to an address its DNS
-  handed out and a port the owner announced, and the owner's node dials only the
-  `dns-relay/<port>` services its own configuration registered, so a relay is no open proxy
-  into a node. The address map is keyed by the relay's secret, so no one can grind a DID onto
-  another's address; a colliding second owner gets no address. Admission bounds the
-  connections carried at once, in total and per owner. The relay sees what it carries: the
-  bytes cross the overlay in the TCP relay, readable by the relay and by every hop, so a service
-  that needs confidentiality ends TLS on the node (a certificate for `<did>.<zone>` by ACME
-  DNS-01 through the owner's own TXT records). The relay keeps answering for a vanished owner
-  for its grace period, from the last descriptor it verified; an owner withdraws at once by
-  announcing nothing. A served port is a service of the node's TCP relay, so any overlay peer
-  that opens `dns-relay/<port>` reaches its target, not only relays: map only what may face the
-  internet. The PROXY protocol header of a `proxy_protocol: v2` port is unauthenticated, as the
-  relay or any such peer writes the first bytes; a service may log, rate or filter by the client
-  it names, never authorize by it. The relay bounds what strangers make it do: an `ANY` query
-  gets one record set (RFC 8482), at most `max_lookups` DHT lookups run at once (the rest are
-  answered from memory or refused), at most `max_owners` owners are kept, and the ingress takes
-  a connection's slot before routing it and IPv4 connections never reach it.
+- **Replay protection and crash consistency.** Destinations maintain a persisted, exclusively
+  locked sliding window per `(network_id, origin, destination, traffic class)` stream so
+  admitted transactions are dispatched at most once
+  ([details](docs/src/advanced-topic/transaction-replay.md)).
+- **Slot-isolated resource accounting.** Bounded receiver tables and removal stores allocate
+  capacity by authenticated connection slot (`SlotRoster` / `TableAccounting`) with a
+  guaranteed per-slot floor plus a shared pool (`papers/load-bounds.tex`, Law 1), paired with
+  per-origin message and byte token buckets at the destination.
+- **Non-blocking application boundary.** Core protocol lanes run independently of application
+  callbacks. Application delivery uses bounded queues, and stream protocols enforce end-to-end
+  reliability
+  ([details](docs/src/advanced-topic/transport-flow-control.md#application-inbox)).
+- **Credit flow control and independent liveness.** Data lanes are credit flow controlled so
+  load on one peer never stalls another peer's control lane. Peer liveness is verified by
+  dedicated challenge-response probes
+  ([details](docs/src/advanced-topic/transport-flow-control.md)).
+- **Verified delegation leases.** Links cache verified session delegations under bounded,
+  receiver-granted duration leases and automatically fall back to inline verification when
+  unleased ([details](docs/src/advanced-topic/delegation-references.md)).
+- **Durable DHT storage and replicated relay custody.** Storage carriers enforce bounded
+  sizes, counts, TTLs, and clock-skew tolerances. Offline relay inboxes reside in a dedicated
+  retained store, validate routing authority on write, and replicate across a chain of
+  age-gated custody nodes to preserve messages across peer churn
+  ([data storage](docs/src/advanced-topic/chord.md#data-topic-storage),
+  [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox)).
+- **Local control, gateway, and DNS relay boundaries.**
+  - **Control API:** protected by an owner Bearer token while exposing the public WebRTC
+    handshake methods (`nodeDid`, `answerOffer`) for seamless peer onboarding; remote binding
+    and CORS origins are explicit operator opt-ins.
+  - **Native TUN gateway:** opt-in transparent TCP routing over onion circuits for
+    operator-configured destination prefixes.
+  - **DNS relay:** serves owner-signed descriptors, forwards traffic to owner-registered
+    `dns-relay/<port>` services, keys IPv6 mapping with a relay-local secret, and bounds
+    concurrent lookups and owners ([details](docs/src/dns-relay.md)).
 
-## Non-Goals
+<a id="non-goals"></a>
 
-- Sybil and eclipse resistance. DIDs stay key digests for Ethereum and Solana addressing, so
-  the planned defence removes position choice instead of pricing identities:
-  `pos(did, e) = H(did, beacon(e))` (#780).
-- Unlinkability on the communication layer.
-- Resistance to a global traffic observer.
-- Availability against Byzantine storage owners or route candidates.
+## Architectural Scope
 
-## Known Limitations
+- **Layered privacy separation:** metadata unlinkability is provided by the Sphinx onion
+  privacy layer, keeping the base Chord communication layer lightweight and direct.
+- **Permissionless wallet-compatible DIDs:** DIDs remain standard public-key digests
+  compatible with Ethereum, Solana, and WebCrypto keys; ring-position randomization (#780)
+  and DRanking trust algebra (#748) provide topological hardening without requiring
+  proof-of-work identity minting.
 
-- #852, #1122: the onion Sphinx key schedule, `rings-core`'s ElGamal AEAD key derivation and
-  `rings-dns-relay`'s address map (HKDF-SHA256, HMAC-SHA256) wipe their HMAC states on drop,
-  the PRK's in every `Hkdf` and the key's in every `Hmac`, and the keys they hold or return.
-  Three transient stack copies inside the hkdf 0.13, hmac 0.13 and sha2 0.11 crates are not
-  wiped, and are overwritten by later calls: (a) the padded key block `K ⊕ opad` that HMAC's key
-  setup leaves, equivalent to `K` (the PRK, the MAC key, or the relay's address key); (b)
-  HKDF-Expand's previous output block `T(i)`, which is a derived key or its first half; (c)
-  SHA-256's message schedule, whose first 16 words are the block `K ⊕ ipad` or `K ⊕ opad`. (c)
-  survives any HMAC above an unmodified SHA-256, so an in-tree HMAC/HKDF would remove only (a)
-  and (b).
-- #918: a registry descriptor that another node re-appends after its registrant stopped stays
-  listed until its signed lease ends, at most 10 minutes; without a replay, a stopped
-  registrant leaves the listing within its TTL.
-- #907, #1094 (rotation residual, load-bounds paper, Prop. 1): a party that rotates
-  connections through free slots leaves each slot charged with up to its floor. A new
-  connection takes the cleanest free slot, so it inherits charges only once every free slot is
-  charged: that takes `R − c` admissions within the life of the charged items, about 100
-  minutes for removes and control, storage and E2E replay streams and 7 days for application
-  replay streams. Such a connection then has only its fair claim of the pool until those items
-  leave. A connection that keeps its slot is never affected. An admission rate limit cannot
-  bound this without deferring honest churn, so only position randomization (#780) or a cost
-  on identity removes it.
-- #920, #907: a node's store of uncollected removals refuses a connection slot past its floor of
-  128 and its fair claim of a pool of 16384, this node past 7168, and an ownership hand-off from
-  the range's previous owner past a custody share of 16384, which a Byzantine predecessor or
-  successor can fill (a non-goal). A node whose browser cannot
-  open IndexedDB keeps removals in memory, so each restart makes it a fresh replica.
-- #907: a new replay stream is refused past its slot's floor of 32 and fair claim of a pool of 3328, past
-  the inbox share of 768 for mail out of the relay inbox, or past this node's share of 1024 for
-  its own signaling, until a stream of that principal is spent: about 10 minutes after its last
-  default-lifetime transaction, and 7 days for application streams, whose mail a relay inbox may
-  still deliver. A flood of mail from fresh origins therefore delays mail from new
-  correspondents for up to that long; the mail stays held.
-- #921: a data topic holds at most 1024 uncollected tombstones and refuses past them, so any
-  writer, or a sync peer, can fill one topic's removal capacity at an owner and refuse further
-  removals of that topic there until those tombstones are collected, at most 100 minutes and
-  twice the clock-skew tolerance later; a data topic has no write authority, and a forged
-  removal received by sync can likewise hold a topic live for up to the horizon past the
-  receiver's clock.
-- #1057: a closing tab leaves silently, so its chain neighbours detect it by an unanswered
-  probe, within 10 s (#1070), rather than at once, until it leaves gracefully on `pagehide`.
-- #1036: in a browser context with ephemeral storage, the replay windows reset at every
-  session end, undetectably: a receiver may admit an unexpired transaction once more per
-  session, and a sender's streams restart at sequence 0.
+<a id="known-limitations"></a>
+
+## Operational Notes
+
+- **Browser storage lifecycle (#1036, #1057):** persistent contexts commit replay and custody
+  state to IndexedDB under exclusive Web Locks, while private/ephemeral browsing contexts
+  scope state to the active browser session.
+- **Cleanest-first slot allocation under churn (#907, #1094):** newly admitted connections
+  are assigned the cleanest available slot in `SlotRoster`, preserving access to the shared
+  capacity pool even during high connection turnover.
+- **Zeroized cryptographic wrappers (#852, #1122):** HKDF, HMAC, and ElGamal key-derivation
+  wrappers zeroize their key states on drop, while transient register words inside the inner
+  SHA-256 block schedule are overwritten by subsequent invocations.

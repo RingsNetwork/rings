@@ -7,11 +7,14 @@ use super::expiry;
 use super::latest_expiry;
 use super::layer;
 use super::link;
+use super::open;
 use super::send;
 use super::sender_load;
 use super::state;
+use super::state_with;
 use super::units;
 use super::Verdict;
+use super::EPOCH;
 use super::ORIGIN_MS;
 use super::Q;
 use crate::onion::circuit::admission::OnionAdmissionRejection;
@@ -19,6 +22,7 @@ use crate::onion::circuit::admission::OnionChargeRejection;
 use crate::onion::circuit::admission::ADMISSION_WINDOW_QUANTA_WIDE;
 use crate::onion::circuit::admission::ONION_ADMISSION_GLOBAL_UNITS;
 use crate::onion::circuit::admission::ONION_ADMISSION_SENDER_UNITS;
+use crate::onion::circuit::admission::ONION_ADMISSION_SLOT_FLOOR_UNITS;
 use crate::onion::circuit::ONION_ADMISSION_WINDOW_MS;
 
 /// Law (charging): a cell is charged exactly once, before its key is computed. A `γ`-failing cell
@@ -137,20 +141,34 @@ fn test_sender_budget_is_bounded_over_the_sliding_window() {
     );
 }
 
-/// Law: the hop admits at most `G = 64·B` units per window, however many DIDs send. A refused
-/// charge leaves every ledger unchanged.
+/// Law: the hop admits at most `G = 64·B` units per window across all slots (floors plus shared
+/// pool). Once both the shared pool `P` and every slot's floor `f` are spent, a further charge is
+/// refused with [`OnionChargeRejection::GlobalBudget`] and leaves every ledger unchanged.
 #[test]
 fn test_global_budget_bounds_every_sender_together() {
     let mut rng = StdRng::seed_from_u64(0x0841_0006);
-    let mut admission = state(&mut rng);
+    let mut admission = state_with(&mut rng, EPOCH, 64, 0..128);
     let x = latest_expiry(ORIGIN_MS);
+    for sender in 64..128_u32 {
+        assert_eq!(
+            send(
+                &mut admission,
+                ORIGIN_MS,
+                sender,
+                ONION_ADMISSION_SLOT_FLOOR_UNITS,
+                layer(x, u128::from(sender))
+            ),
+            Verdict::Admitted
+        );
+    }
+    let per_noisy_slot = ONION_ADMISSION_SENDER_UNITS - ONION_ADMISSION_SLOT_FLOOR_UNITS;
     for sender in 0..64_u32 {
         assert_eq!(
             send(
                 &mut admission,
                 ORIGIN_MS,
                 sender,
-                ONION_ADMISSION_SENDER_UNITS,
+                per_noisy_slot,
                 layer(x, u128::from(sender))
             ),
             Verdict::Admitted
@@ -160,12 +178,12 @@ fn test_global_budget_bounds_every_sender_together() {
         admission.global.load(ORIGIN_MS / Q),
         ONION_ADMISSION_GLOBAL_UNITS
     );
-    let before = admission.senders.clone();
+    let before = admission.slots.clone();
     assert_eq!(
-        send(&mut admission, ORIGIN_MS, 64, 1, layer(x, 64)),
+        send(&mut admission, ORIGIN_MS, 64, 1, layer(x, 200)),
         Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
     );
-    assert_eq!(admission.senders, before);
+    assert_eq!(admission.slots, before);
     let next_window = ORIGIN_MS + ONION_ADMISSION_WINDOW_MS;
     assert_eq!(
         send(
@@ -173,8 +191,77 @@ fn test_global_budget_bounds_every_sender_together() {
             next_window,
             64,
             1,
-            layer(latest_expiry(next_window), 64)
+            layer(latest_expiry(next_window), 200)
         ),
         Verdict::Admitted
     );
+}
+
+/// Law (#1183): `ONION_ADMISSION_GLOBAL_UNITS` reserves a non-zero per-slot floor `f > 0`
+/// separate from the shared pool `P`. Even when 64 noisy Sybil slots exhaust the entire shared
+/// pool `P`, they cannot starve an honest connection slot (either already open or newly admitted)
+/// below its guaranteed floor `f`.
+#[test]
+fn test_per_slot_floor_protects_honest_slot_when_64_noisy_slots_exhaust_pool() {
+    let mut rng = StdRng::seed_from_u64(0x0841_0020);
+    let mut admission = state(&mut rng);
+    let (floor_units, pool_units) = admission.shares();
+    assert_eq!(floor_units, ONION_ADMISSION_SLOT_FLOOR_UNITS);
+    assert!(floor_units >= 768);
+    assert_eq!(128 * floor_units + pool_units, ONION_ADMISSION_GLOBAL_UNITS);
+
+    let x = latest_expiry(ORIGIN_MS);
+    let mut tag = 0_u128;
+    // 64 noisy slots each spend their floor plus as much of the shared pool `P` as fits in `B`.
+    for sender in 0..64_u32 {
+        let remaining_pool = pool_units.saturating_sub(admission.pool_load);
+        let over_floor =
+            remaining_pool.min(ONION_ADMISSION_SENDER_UNITS - ONION_ADMISSION_SLOT_FLOOR_UNITS);
+        let spend = ONION_ADMISSION_SLOT_FLOOR_UNITS + over_floor;
+        tag += 1;
+        assert_eq!(
+            send(&mut admission, ORIGIN_MS, sender, spend, layer(x, tag)),
+            Verdict::Admitted
+        );
+    }
+    assert_eq!(admission.pool_load, pool_units);
+    // The 64th noisy slot (`sender = 63`) still has personal sender-budget headroom, but the
+    // shared pool `P` is exhausted, so its next unit is rejected with `GlobalBudget`.
+    assert!(
+        sender_load(&admission, 63, ORIGIN_MS).unwrap_or(0) < ONION_ADMISSION_SENDER_UNITS,
+        "noisy slot 63 still has personal sender-budget headroom"
+    );
+    tag += 1;
+    assert_eq!(
+        send(&mut admission, ORIGIN_MS, 63, 1, layer(x, tag)),
+        Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
+    );
+
+    // Honest live slot 64 (and a newly opened honest slot 65) can still spend their full
+    // guaranteed floor `f`, including a maximum-size 768-unit (`MiB12`) cell, without starvation.
+    open(&mut admission, ORIGIN_MS, link(65));
+    for honest in [64_u32, 65_u32] {
+        tag += 1;
+        assert_eq!(
+            send(&mut admission, ORIGIN_MS, honest, 768, layer(x, tag)),
+            Verdict::Admitted
+        );
+        tag += 1;
+        assert_eq!(
+            send(
+                &mut admission,
+                ORIGIN_MS,
+                honest,
+                floor_units - 768,
+                layer(x, tag)
+            ),
+            Verdict::Admitted
+        );
+        // One unit beyond its floor `f` requires the exhausted pool `P` and is refused.
+        tag += 1;
+        assert_eq!(
+            send(&mut admission, ORIGIN_MS, honest, 1, layer(x, tag)),
+            Verdict::Unpaid(OnionChargeRejection::GlobalBudget)
+        );
+    }
 }

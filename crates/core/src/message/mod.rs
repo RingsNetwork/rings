@@ -81,8 +81,11 @@ pub use replay::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
 pub use replay::TRANSACTION_REPLAY_STREAM_CAPACITY;
 pub use replay::TRANSACTION_REPLAY_WINDOW;
 
+pub use crate::fair_admission::FloorUse;
 pub use crate::fair_admission::Principal;
 pub use crate::fair_admission::ShareRefusal;
+pub use crate::fair_admission::SlotFloorUse;
+pub use crate::fair_admission::SlotRoster;
 
 mod service_receipt;
 #[cfg(test)]

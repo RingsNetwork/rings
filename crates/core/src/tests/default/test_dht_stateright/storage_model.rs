@@ -90,6 +90,7 @@ impl StoragePartition {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub(super) enum StorageJoinCarrier {
     DataBoundedTopN,
+    DataFairMultiWriter,
     DataOverwriteReset,
     RelayTombstone,
 }
@@ -198,7 +199,7 @@ fn storage_dot(version: EntryVersion, index: usize) -> EntryDot {
 }
 
 /// The element whose bytes are `label`'s: elements are stored as their bytes (#926).
-fn storage_element(label: &str) -> Bytes {
+pub(super) fn storage_element(label: &str) -> Bytes {
     Bytes::copy_from_slice(label.as_bytes())
 }
 
@@ -213,7 +214,13 @@ pub(super) fn storage_join_entry(left: Entry, right: Entry) -> Entry {
     }
 }
 
-fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usize) -> Entry {
+fn data_actor_value_range(
+    did: Did,
+    actor: u32,
+    label: &'static str,
+    start_time: u128,
+    count: usize,
+) -> Entry {
     let data = (0..count)
         .map(|index| storage_element(&format!("{label}-{index}")))
         .collect::<Vec<_>>();
@@ -222,7 +229,7 @@ fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usiz
             let index = storage_index(offset);
             let time = start_time.saturating_add(u128::from(index));
             storage_dot(
-                storage_version(time, 1, 1_000u32.saturating_add(index)),
+                storage_version(time, actor, 1_000u32.saturating_add(index)),
                 offset,
             )
         })
@@ -234,10 +241,15 @@ fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usiz
         crdt: EntryCrdt {
             register: None,
             dots,
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
     }
+}
+
+fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usize) -> Entry {
+    data_actor_value_range(did, 1, label, start_time, count)
 }
 
 fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) -> Entry {
@@ -248,6 +260,7 @@ fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) ->
         crdt: EntryCrdt {
             register: Some(version),
             dots: vec![storage_dot(version, 0)],
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -262,6 +275,7 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: vec![dot],
+            co_dots: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -277,6 +291,7 @@ fn relay_remove_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
         crdt: EntryCrdt {
             register: None,
             dots: Vec::new(),
+            co_dots: Vec::new(),
             tombstones: vec![EntryTombstone::of(&storage_element(label), dot)],
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -301,6 +316,25 @@ fn storage_delta_entry(carrier: StorageJoinCarrier, bit: u8) -> Entry {
             },
             ENTRY_DATA_MAX_LEN,
         ),
+        StorageJoinCarrier::DataFairMultiWriter => match bit {
+            0b001 => data_actor_value_range(
+                storage_model_did(4),
+                1,
+                "flood-a1",
+                2_000,
+                ENTRY_DATA_MAX_LEN,
+            ),
+            0b010 => {
+                let mut entry =
+                    data_actor_value_range(storage_model_did(4), 2, "honest-a2", 100, 2);
+                if let Some(first) = entry.data.first_mut() {
+                    *first = storage_element("flood-a1-0");
+                }
+                entry
+            }
+            0b100 => data_actor_value_range(storage_model_did(4), 3, "honest-a3", 500, 2),
+            _ => panic!("storage model delta bit must be singleton"),
+        },
         StorageJoinCarrier::DataOverwriteReset => match bit {
             0b001 => data_value_range(storage_model_did(2), "stale-a", 1, 3),
             0b010 => {
@@ -325,6 +359,7 @@ fn storage_delta_entry(carrier: StorageJoinCarrier, bit: u8) -> Entry {
 fn storage_bottom_entry(carrier: StorageJoinCarrier) -> Entry {
     let (did, kind) = match carrier {
         StorageJoinCarrier::DataBoundedTopN => (storage_model_did(1), EntryKind::Data),
+        StorageJoinCarrier::DataFairMultiWriter => (storage_model_did(4), EntryKind::Data),
         StorageJoinCarrier::DataOverwriteReset => (storage_model_did(2), EntryKind::Data),
         StorageJoinCarrier::RelayTombstone => (storage_model_did(3), EntryKind::RelayMessage),
     };
@@ -352,6 +387,14 @@ pub(super) fn storage_join_scenarios() -> Vec<StorageJoinScenario> {
             ],
         },
         StorageJoinScenario {
+            name: "data fair multi-writer water-filling cap",
+            initial: [
+                storage_value_from_bits(StorageJoinCarrier::DataFairMultiWriter, 0b001),
+                storage_value_from_bits(StorageJoinCarrier::DataFairMultiWriter, 0b010),
+                storage_value_from_bits(StorageJoinCarrier::DataFairMultiWriter, 0b100),
+            ],
+        },
+        StorageJoinScenario {
             name: "data overwrite reset floor",
             initial: [
                 storage_value_from_bits(StorageJoinCarrier::DataOverwriteReset, 0b001),
@@ -370,9 +413,10 @@ pub(super) fn storage_join_scenarios() -> Vec<StorageJoinScenario> {
     ]
 }
 
-pub(super) fn storage_join_carriers() -> [StorageJoinCarrier; 3] {
+pub(super) fn storage_join_carriers() -> [StorageJoinCarrier; 4] {
     [
         StorageJoinCarrier::DataBoundedTopN,
+        StorageJoinCarrier::DataFairMultiWriter,
         StorageJoinCarrier::DataOverwriteReset,
         StorageJoinCarrier::RelayTombstone,
     ]

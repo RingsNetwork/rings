@@ -48,13 +48,110 @@ pub(crate) struct PendingReplication {
     downstream: Option<Did>,
 }
 
+impl PendingReplication {
+    /// Clear `downstream` when it matches `target` so the hold resumes replication.
+    fn clear_downstream_if(&mut self, target: Did) {
+        if self.downstream == Some(target) {
+            self.downstream = None;
+        }
+    }
+}
+
 /// The first holder after this node past its successor list, as the owner query resolved it.
 #[derive(Debug, Default)]
 pub(crate) struct NextHolder {
     /// The resolved holder, valid until the successor list changes or it is forgotten.
     holder: Option<Did>,
-    /// The key whose owner is asked and has not answered yet (`Law (Asked)`).
-    asked: Option<Did>,
+    /// The key whose owner is asked and has not answered yet, with its correlation token (`Law (Asked)`).
+    asked: Option<(Did, uuid::Uuid)>,
+}
+
+impl NextHolder {
+    /// Record `(key, request_id)` as the single outstanding query iff none is active (`Law (Asked)`).
+    fn ask_if_idle(&mut self, key: Did, request_id: uuid::Uuid) -> Option<(Did, uuid::Uuid)> {
+        self.asked.is_none().then(|| {
+            let query = (key, request_id);
+            self.asked = Some(query);
+            query
+        })
+    }
+
+    /// Ensure an outstanding query `(key, request_id)` is recorded when neither a resolved
+    /// holder nor an active query exists (`Law (Asked)`).
+    fn ensure_asked(&mut self, key: Did, request_id: uuid::Uuid) -> Option<(Did, uuid::Uuid)> {
+        if self.holder.is_none() && self.asked.is_none() {
+            self.asked = Some((key, request_id));
+        }
+        self.asked
+    }
+
+    /// Consume the outstanding query iff it matches `(key, request_id)` (`Law (Asked)`),
+    /// installing `named` when resolved or advancing to `next_query` otherwise.
+    fn take_answer(
+        &mut self,
+        key: Did,
+        request_id: uuid::Uuid,
+        named: Option<Did>,
+        next_query: Option<(Did, uuid::Uuid)>,
+    ) -> Option<(Did, uuid::Uuid)> {
+        (self.asked == Some((key, request_id)))
+            .then(|| match named {
+                Some(resolved) => {
+                    self.asked = None;
+                    self.holder = Some(resolved);
+                    None
+                }
+                None => {
+                    self.asked = next_query;
+                    self.asked
+                }
+            })
+            .flatten()
+    }
+
+    /// Forget `holder` when it matches `peer` (or unconditionally when `peer` is `None`),
+    /// returning the downstream peer whose pending replications should be reset.
+    fn forget(&mut self, peer: Option<Did>) -> Option<Did> {
+        if peer.is_none() {
+            self.asked = None;
+        }
+        let forgotten = (peer.is_none() || self.holder == peer)
+            .then(|| self.holder.take())
+            .flatten();
+        peer.or(forgotten)
+    }
+
+    /// Invalidate `holder` or `asked` when `peer` becomes an eligible holder that lies in
+    /// `successors` or strictly precedes the resolved holder / advanced query past
+    /// `last_successor`.
+    fn invalidate_before(
+        &mut self,
+        last_successor: Option<Did>,
+        peer: Did,
+        in_successors: bool,
+        clear_initial_ask: bool,
+    ) -> Option<Did> {
+        if in_successors || last_successor.is_none() {
+            return self.forget(None);
+        }
+        let last = last_successor.unwrap_or_default();
+        if let Some(current_holder) = self.holder {
+            return (peer != current_holder
+                && crate::dht::relay_holder::in_arc(last, peer, current_holder))
+            .then(|| self.forget(None))
+            .flatten();
+        }
+        if let Some((asked_key, _)) = self.asked {
+            let start = last + Did::from(1u32);
+            let skipped = (asked_key != start
+                && crate::dht::relay_holder::in_arc(last, peer, asked_key - Did::from(1u32)))
+                || (clear_initial_ask && asked_key == start);
+            if skipped {
+                self.asked = None;
+            }
+        }
+        None
+    }
 }
 
 /// What this node does next with a hold it took, as the holder or a member of its key.
@@ -74,6 +171,8 @@ pub(crate) enum ReplicationStep {
     Ask {
         /// The key past the successor list to ask about.
         key: Did,
+        /// The single-use correlation token the owner's answer must echo.
+        request_id: uuid::Uuid,
     },
     /// The next member is being resolved, or the hold is not tracked: wait for a resend.
     Wait,
@@ -107,6 +206,19 @@ impl PeerRing {
         Ok(self.relay_members(key)?.contains(self.did))
     }
 
+    /// Whether this node is a member of the relay key `key` under a hand-off from `sender`:
+    /// either under its current view, or under its view with `sender` holding no relay mail
+    /// (#1057).
+    pub(crate) fn is_relay_member_for_handoff(&self, key: Did, sender: Did) -> Result<bool> {
+        Ok(self.is_relay_member(key)?
+            || relay_members(
+                &self.relay_segment_without(sender)?,
+                key,
+                self.relay_replicas(),
+            )
+            .contains(self.did))
+    }
+
     /// This node's place in the chain of `key`, `None` when it is no member.
     pub(crate) fn relay_chain_position(&self, key: Did) -> Result<Option<ChainPosition>> {
         Ok(chain_position(
@@ -123,7 +235,11 @@ impl PeerRing {
         Ok(match position.next {
             ChainNext::End => None,
             ChainNext::Member(next) => Some(next),
-            ChainNext::BeyondView => self.lock_relay_next_holder()?.holder,
+            ChainNext::BeyondView => {
+                let candidate = self.lock_relay_next_holder()?.holder;
+                let neighborhood = self.lock_relay_neighborhood()?;
+                candidate.filter(|holder| neighborhood.chains(*holder))
+            }
         })
     }
 
@@ -180,6 +296,12 @@ impl PeerRing {
             .is_some_and(|position| position.previous == Some(sender)))
     }
 
+    /// Return `candidate` iff it is a remote peer that currently qualifies as a chain member.
+    fn verified_chain_holder(&self, candidate: Option<Did>) -> Result<Option<Did>> {
+        let neighborhood = self.lock_relay_neighborhood()?;
+        Ok(candidate.filter(|&holder| holder != self.did && neighborhood.chains(holder)))
+    }
+
     /// The chain neighbours of this node, `p₁` and `n₁` (`Law (Chain repair)`): its nearest
     /// previous holder, and the first holder after it, in its successor list or resolved past
     /// it. Every carrier this node keeps as a member has these as its previous and next member,
@@ -197,9 +319,61 @@ impl PeerRing {
         })?;
         let next = match next {
             Some(next) => Some(next),
-            None => self.lock_relay_next_holder()?.holder,
+            None => self.verified_chain_holder(self.lock_relay_next_holder()?.holder)?,
         };
         Ok((previous, next))
+    }
+
+    /// The chain neighbours of this node that lie beyond its immediate predecessor and successor
+    /// list across a storage-less run (#1182): a previous holder separated by a storage-less
+    /// predecessor, or a next holder resolved past a storage-less successor list. Immediate
+    /// neighbours (`state.predecessor` and `state.successors`) are already managed by Chord
+    /// stabilization.
+    pub(crate) fn remote_relay_chain_neighbours(&self) -> Result<(Option<Did>, Option<Did>)> {
+        self.holds_relay_mail()
+            .then(|| {
+                let candidate = self.lock_relay_next_holder()?.holder;
+                self.with_relay_view(|state, neighborhood| {
+                    let previous = state
+                        .predecessor
+                        .filter(|&predecessor| !neighborhood.holds(predecessor))
+                        .and_then(|_| neighborhood.nearest_previous_holder(state))
+                        .filter(|&peer| peer != state.local && !state.successors.contains(&peer));
+                    let next = neighborhood
+                        .all_successors_storage_less(state)
+                        .then(|| {
+                            candidate.filter(|&holder| {
+                                holder != state.local
+                                    && !state.successors.contains(&holder)
+                                    && neighborhood.chains(holder)
+                            })
+                        })
+                        .flatten();
+                    (previous, next)
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    /// Whether `peer` is referenced in `TopologyState` or is a remote relay chain neighbour
+    /// (#1182).
+    pub(crate) fn retains_active_connection(&self, peer: Did) -> Result<bool> {
+        let (remote_prev, remote_next) = self.remote_relay_chain_neighbours()?;
+        Ok(
+            self.with_topology_state(|topology| topology.references(peer))?
+                || remote_prev == Some(peer)
+                || remote_next == Some(peer),
+        )
+    }
+
+    /// The union of `TopologyState::referenced_peers` and any remote relay chain neighbours
+    /// (#1182).
+    pub(crate) fn referenced_and_chain_peers(&self) -> Result<std::collections::BTreeSet<Did>> {
+        let mut referenced = self.topology_state()?.referenced_peers();
+        let (remote_prev, remote_next) = self.remote_relay_chain_neighbours()?;
+        referenced.extend(remote_prev.into_iter().chain(remote_next));
+        Ok(referenced)
     }
 
     /// Lock the replications, a leaf of `Law (Lock order)`.
@@ -266,73 +440,176 @@ impl PeerRing {
     /// Ask for the first holder past the successor list (`Law (Asked)`): the owner of the key
     /// just past its last node answers the first holder at or after it.
     ///
-    /// Post: `Ask` with that key iff no query is outstanding; `Wait` otherwise, or without a
-    /// successor.
-    fn ask_next_relay_holder(&self) -> Result<ReplicationStep> {
+    /// Post: `Ask` with that key and `request_id` iff no query is outstanding; `Wait`
+    /// otherwise, or without a successor.
+    pub(crate) fn ask_next_relay_holder_with_id(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<ReplicationStep> {
         let Some(last) = self.with_topology_state(|state| state.successors.last().copied())? else {
             return Ok(ReplicationStep::Wait);
         };
         let mut next = self.lock_relay_next_holder()?;
-        if next.asked.is_some() {
-            return Ok(ReplicationStep::Wait);
-        }
-        let key = last + Did::from(1u32);
-        next.asked = Some(key);
-        Ok(ReplicationStep::Ask { key })
+        Ok(match next.ask_if_idle(last + Did::from(1u32), request_id) {
+            Some((key, request_id)) => ReplicationStep::Ask { key, request_id },
+            None => ReplicationStep::Wait,
+        })
     }
 
-    /// Take the owner's answer about `key` to this node's outstanding query for its next holder
-    /// (`Law (Asked)`): the holder it names, which is cached, or, when it names none, the last
-    /// node it places, past which the query is asked again.
+    /// Ask for the first holder past the successor list (`Law (Asked)`) with a fresh token.
+    fn ask_next_relay_holder(&self) -> Result<ReplicationStep> {
+        self.ask_next_relay_holder_with_id(crate::utils::new_uuid())
+    }
+
+    /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
+    /// next holder (`Law (Asked)`): the holder it names, which is cached, or, when it names none
+    /// (or one this node cannot chain through), the position past which the query is asked again
+    /// with `next_request_id`.
     ///
-    /// Post: `None` for an answer nobody asked for; `Some(key′)` iff the query is to be asked
-    /// again for `key′`; a named holder this node knows to hold no relay mail is not taken.
+    /// Post: `None` for an answer nobody asked for, a mismatched `request_id`, or an `origin`
+    /// inconsistent with `key`; `Some((key′, next_request_id))` iff the query is to be asked
+    /// again for `key′`; a named holder this node knows to hold no relay mail or suspects is not
+    /// taken, and the query advances past it.
+    pub(crate) fn take_next_relay_holder_with_id(
+        &self,
+        key: Did,
+        request_id: uuid::Uuid,
+        origin: Did,
+        holder: Option<Did>,
+        horizon: Option<Did>,
+        next_request_id: uuid::Uuid,
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
+        self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, horizon| {
+            let named = self.verified_chain_holder(holder)?;
+            let next_query = holder
+                .or(horizon)
+                .filter(|&stepped| stepped != self.did)
+                .map(|stepped| stepped + Did::from(1u32))
+                .filter(|&next_key| {
+                    next_key != self.did
+                        && crate::dht::relay_holder::in_arc(key, next_key, self.did)
+                })
+                .map(|next_key| (next_key, next_request_id));
+            Ok(self
+                .lock_relay_next_holder()?
+                .take_answer(key, request_id, named, next_query))
+        })
+        .map(Option::flatten)
+    }
+
+    /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
+    /// next holder (`Law (Asked)`), issuing a fresh token when the query advances.
     pub(crate) fn take_next_relay_holder(
         &self,
         key: Did,
+        request_id: uuid::Uuid,
+        origin: Did,
         holder: Option<Did>,
         horizon: Option<Did>,
-    ) -> Result<Option<Did>> {
-        let named = match holder {
-            Some(holder) if holder != self.did && self.lock_relay_neighborhood()?.holds(holder) => {
-                Some(holder)
-            }
-            _ => None,
-        };
-        let mut next = self.lock_relay_next_holder()?;
-        if next.asked != Some(key) {
-            return Ok(None);
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
+        self.take_next_relay_holder_with_id(
+            key,
+            request_id,
+            origin,
+            holder,
+            horizon,
+            crate::utils::new_uuid(),
+        )
+    }
+
+    /// Whether a next holder past the successor list is currently resolved.
+    pub(crate) fn has_resolved_next_relay_holder(&self) -> Result<bool> {
+        Ok(self.lock_relay_next_holder()?.holder.is_some())
+    }
+
+    /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
+    /// again each pass until it is answered; starts the query with `request_id` when this node
+    /// holds relay mail and its entire successor list is storage-less with no holder resolved
+    /// past it (#1182).
+    pub(crate) fn outstanding_next_relay_holder_query_with_id(
+        &self,
+        request_id: uuid::Uuid,
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
+        let existing = self.lock_relay_next_holder()?.asked;
+        match existing {
+            Some(asked) => Ok(Some(asked)),
+            None => self
+                .holds_relay_mail()
+                .then(|| {
+                    self.with_relay_view(|state, neighborhood| {
+                        let covers_ring = state
+                            .predecessor
+                            .is_some_and(|predecessor| state.successors.contains(&predecessor));
+                        (!covers_ring && neighborhood.all_successors_storage_less(state))
+                            .then(|| state.successors.last().copied())
+                            .flatten()
+                    })
+                })
+                .transpose()
+                .map(Option::flatten)?
+                .map_or(Ok(None), |last| {
+                    Ok(self
+                        .lock_relay_next_holder()?
+                        .ensure_asked(last + Did::from(1u32), request_id))
+                }),
         }
-        if named.is_some() {
-            next.asked = None;
-            next.holder = named;
-            return Ok(None);
-        }
-        next.asked = horizon
-            .filter(|horizon| *horizon != self.did)
-            .map(|horizon| horizon + Did::from(1u32));
-        Ok(next.asked)
     }
 
-    /// The key of this node's outstanding query for its next holder, to ask again each pass
-    /// until it is answered.
-    pub(crate) fn outstanding_next_relay_holder_query(&self) -> Result<Option<Did>> {
-        Ok(self.lock_relay_next_holder()?.asked)
+    /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
+    /// again each pass until it is answered; starts the query when this node holds relay mail and
+    /// its entire successor list is storage-less with no holder resolved past it (#1182).
+    pub(crate) fn outstanding_next_relay_holder_query(&self) -> Result<Option<(Did, uuid::Uuid)>> {
+        self.outstanding_next_relay_holder_query_with_id(crate::utils::new_uuid())
     }
 
-    /// Whether this node asks the owner of `key` for its next holder: an answer about `key` is
-    /// the chain's, not a keeper's hint.
-    pub(crate) fn asks_next_relay_holder(&self, key: Did) -> Result<bool> {
-        Ok(self.lock_relay_next_holder()?.asked == Some(key))
+    /// Whether this node asks the owner of `key` with `request_id` for its next holder: an
+    /// answer matching `(key, request_id)` is the chain's, not a keeper's hint.
+    pub(crate) fn asks_next_relay_holder(&self, key: Did, request_id: uuid::Uuid) -> Result<bool> {
+        Ok(self.lock_relay_next_holder()?.asked == Some((key, request_id)))
     }
 
-    /// Forget the resolved next holder when it is `peer`, which left, or whatever it is with
-    /// `None`, the successor list having changed.
+    /// Forget the resolved next holder when it is `peer`, which left or was suspected, or
+    /// whatever it is with `None`, the successor list having changed; any replication waiting on
+    /// that forgotten downstream member is marked unforwarded so it resumes to the replacement.
     pub(crate) fn forget_next_relay_holder(&self, peer: Option<Did>) -> Result<()> {
-        let mut next = self.lock_relay_next_holder()?;
-        if peer.is_none() || next.holder == peer {
-            next.holder = None;
+        let target = self.lock_relay_next_holder()?.forget(peer);
+        self.clear_downstream_replications_for(target)
+    }
+
+    /// Invalidate the cached next holder or advanced query when `peer` becomes eligible and lies
+    /// before the resolved holder or advanced query key.
+    pub(crate) fn invalidate_next_relay_holder_before(
+        &self,
+        peer: Did,
+        clear_initial_ask: bool,
+    ) -> Result<()> {
+        if peer == self.did {
+            return Ok(());
         }
+        let (in_successors, last_successor) = self.with_topology_state(|state| {
+            (
+                state.successors.contains(&peer),
+                state.successors.last().copied(),
+            )
+        })?;
+        let target = self.lock_relay_next_holder()?.invalidate_before(
+            last_successor,
+            peer,
+            in_successors,
+            clear_initial_ask,
+        );
+        self.clear_downstream_replications_for(target)
+    }
+
+    fn clear_downstream_replications_for(&self, target: Option<Did>) -> Result<()> {
+        target
+            .map(|target| -> Result<()> {
+                self.lock_relay_replications()?
+                    .values_mut()
+                    .for_each(|pending| pending.clear_downstream_if(target));
+                Ok(())
+            })
+            .transpose()?;
         Ok(())
     }
 
@@ -416,6 +693,7 @@ impl PeerRing {
             .lock_relay_neighborhood()?
             .observe_answer(peer, on_time)
         {
+            self.invalidate_next_relay_holder_before(peer, true)?;
             self.relay_chain_changed();
         }
         Ok(())

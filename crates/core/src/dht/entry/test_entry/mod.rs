@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use bytes::Bytes;
 
 use super::*;
@@ -755,6 +757,211 @@ fn test_legacy_value_without_bound_is_not_live() -> Result<()> {
     let entry: Entry = serde_json::from_value(legacy).map_err(Error::Deserialize)?;
     assert_eq!(entry.expires_at_ms, None);
     assert!(!entry.is_live_at(0));
+    Ok(())
+}
+
+/// Fair per-actor truncation law (#1179): one actor flooding `ENTRY_DATA_MAX_LEN` elements
+/// into a shared topic cannot evict other authenticated actors' newest elements, and the
+/// truncated join remains a commutative, associative, idempotent join-semilattice.
+#[test]
+fn test_fair_per_actor_truncation_preserves_other_writers_and_lattice_laws() -> Result<()> {
+    let topic_did = Entry::gen_did("shared-topic")?;
+    let honest_a = Did::from(10u32);
+    let honest_b = Did::from(20u32);
+    let flooder = Did::from(99u32);
+
+    let entry_a = Entry::new(
+        topic_did,
+        vec![Bytes::from("honest-a-old"), Bytes::from("honest-a-new")],
+        EntryKind::Data,
+    )
+    .stamp_delta(EntryVersion::new(100, honest_a, honest_a))?;
+
+    let entry_b = Entry::new(topic_did, vec![Bytes::from("honest-b")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(200, honest_b, honest_b))?;
+
+    let flood_payloads = (0..ENTRY_DATA_MAX_LEN)
+        .map(|i| Bytes::from(format!("flood-{i}")))
+        .collect::<Vec<_>>();
+    let entry_flood = Entry::new(topic_did, flood_payloads, EntryKind::Data)
+        .stamp_delta(EntryVersion::new(300, flooder, flooder))?;
+
+    let combined = entry_a
+        .clone()
+        .join(entry_b.clone())?
+        .join(entry_flood.clone())?;
+    assert_eq!(combined.data.len(), ENTRY_DATA_MAX_LEN);
+    let decoded = decode_entry_data(&combined)?;
+    assert!(
+        decoded.contains(&"honest-a-old".to_string()),
+        "honest writer A's older item survives the flood"
+    );
+    assert!(
+        decoded.contains(&"honest-a-new".to_string()),
+        "honest writer A's newest item survives the flood"
+    );
+    assert!(
+        decoded.contains(&"honest-b".to_string()),
+        "honest writer B's item survives the flood"
+    );
+    assert!(
+        !decoded.contains(&"flood-0".to_string())
+            && !decoded.contains(&"flood-1".to_string())
+            && !decoded.contains(&"flood-2".to_string()),
+        "the flooder's oldest 3 items are evicted first to make room for honest writers"
+    );
+    assert!(
+        decoded.contains(&format!("flood-{}", ENTRY_DATA_MAX_LEN - 1)),
+        "the flooder's newest items are retained"
+    );
+
+    let reverse = entry_flood
+        .clone()
+        .join(entry_b.clone())?
+        .join(entry_a.clone())?;
+    let idempotent = combined
+        .clone()
+        .join(entry_a)?
+        .join(entry_b)?
+        .join(entry_flood)?;
+    assert_eq!(combined, reverse);
+    assert_eq!(combined, idempotent);
+    Ok(())
+}
+
+/// Cross-actor tombstone eviction law (#1179): a pre-planted tombstone authored by `attacker`
+/// for `ElementDigest::of(honest_value)` at a higher logical timestamp (`ts = 100`) is evicted
+/// by `without_cross_actor_tombstones_for` when `honest`'s element (`ts = 50`) arrives, while
+/// refused outright by `validate_data_sync_on_local` if `honest`'s element is already held.
+#[test]
+fn test_cross_actor_tombstone_evicted_on_late_honest_arrival_and_rejected_when_held() -> Result<()>
+{
+    let topic_did = Entry::gen_did("shared-topic-out-of-order")?;
+    let honest = Did::from(10u32);
+    let attacker = Did::from(99u32);
+    let honest_value = Bytes::from("honest-record");
+
+    let honest_entry = Entry::new(topic_did, vec![honest_value.clone()], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(50, honest, honest))?;
+
+    let mut attacker_entry = Entry::new(
+        topic_did,
+        vec![Bytes::from("attacker-record")],
+        EntryKind::Data,
+    )
+    .stamp_delta(EntryVersion::new(100, attacker, attacker))?;
+    let attacker_dot = attacker_entry.crdt.dots[0];
+    attacker_entry
+        .crdt
+        .tombstones
+        .push(EntryTombstone::of(&honest_value, attacker_dot));
+
+    // Order 1: honest_entry is held first; attacker_entry sync is rejected.
+    assert!(matches!(
+        attacker_entry.validate_data_sync_on_local(Some(&honest_entry)),
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // Order 2: attacker_entry is held first; honest_entry arrives later and evicts the
+    // cross-actor tombstone before join so honest_value survives.
+    honest_entry.validate_data_sync_on_local(Some(&attacker_entry))?;
+    let joined = attacker_entry
+        .without_cross_actor_tombstones_for(&honest_entry, honest)
+        .join(honest_entry)?;
+    assert_entry_data_set(&joined, &["honest-record", "attacker-record"])?;
+    assert!(joined.crdt.tombstones.is_empty());
+    Ok(())
+}
+
+/// Shared-payload join associativity and provenance law (#1179):
+/// 1. Joining a 1,024-item flood by `actor_a` (containing `"shared"` at `t = 100`), a write of
+///    `"shared"` by `actor_b` (`t = 200`), and a newer write `"a-newer"` by `actor_a` (`t = 300`)
+///    is associative across `(flood ⊔ b) ⊔ a_newer` and `flood ⊔ (b ⊔ a_newer)`.
+/// 2. Accumulated replicated states (`Overwrite` by `actor_a` followed by `Extend` by `actor_b`,
+///    and `Overwrite` of 1 item by `actor_a` followed by `Tombstone` by `actor_a`) pass
+///    `validate_data_sync_on_local`.
+/// 3. An attacker cannot hijack or tombstone an honest writer's live payload by re-appending the
+///    same bytes under its own actor.
+#[test]
+fn test_shared_payload_join_associativity_accumulated_register_sync_and_payload_copy_defense(
+) -> Result<()> {
+    let topic_did = Entry::gen_did("shared-payload-associativity")?;
+    let actor_a = Did::from(10u32);
+    let actor_b = Did::from(20u32);
+
+    let mut flood_items = vec![Bytes::from("shared")];
+    flood_items.extend((1..ENTRY_DATA_MAX_LEN).map(|i| Bytes::from(format!("flood-{i}"))));
+    let flood_a = Entry::new(topic_did, flood_items, EntryKind::Data)
+        .stamp_delta(EntryVersion::new(100, actor_a, actor_a))?;
+    let shared_b = Entry::new(topic_did, vec![Bytes::from("shared")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(200, actor_b, actor_b))?;
+    let newer_a = Entry::new(topic_did, vec![Bytes::from("a-newer")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(300, actor_a, actor_a))?;
+
+    let left_assoc = flood_a
+        .clone()
+        .join(shared_b.clone())?
+        .join(newer_a.clone())?;
+    let right_assoc = flood_a.join(shared_b.clone().join(newer_a)?)?;
+    assert_eq!(left_assoc, right_assoc);
+    assert!(left_assoc.data.contains(&Bytes::from("shared")));
+    assert!(left_assoc.data.contains(&Bytes::from("a-newer")));
+
+    // Accumulated state 1: Overwrite by A at t=100, then Extend by B at t=200.
+    let overwrite_a = EntryOperation::Overwrite(Entry::new(
+        topic_did,
+        vec![Bytes::from("a-base")],
+        EntryKind::Data,
+    ))
+    .stamped(100, actor_a)?;
+    let base_a = overwrite_a.entry().clone();
+    let extend_b = EntryOperation::Extend(Entry::new(
+        topic_did,
+        vec![Bytes::from("b-ext")],
+        EntryKind::Data,
+    ))
+    .stamped(200, actor_b)?;
+    let accumulated_ab = base_a.clone().operate(200, extend_b, actor_b)?;
+    accumulated_ab.validate_data_sync_on_local(None)?;
+    accumulated_ab.validate_data_sync_on_local(Some(&base_a))?;
+    base_a.validate_data_sync_on_local(Some(&accumulated_ab))?;
+
+    // Accumulated state 2: Overwrite of 1 item by A at t=100, then Tombstone by A at t=150.
+    let tomb_a = EntryOperation::Tombstone(Entry::new(
+        topic_did,
+        vec![Bytes::from("a-base")],
+        EntryKind::Data,
+    ))
+    .stamped(150, actor_a)?;
+    let emptied_a = base_a.clone().operate(150, tomb_a, actor_a)?;
+    assert!(emptied_a.data.is_empty());
+    assert!(!emptied_a.crdt.tombstones.is_empty());
+    emptied_a.validate_data_sync_on_local(None)?;
+    emptied_a.validate_data_sync_on_local(Some(&base_a))?;
+
+    // Payload-copying defense: B cannot Extend("a-base") over A's live "a-base", nor Tombstone it
+    // even after joining a carrier where B also stamped "a-base".
+    let copy_extend_b = EntryOperation::Extend(Entry::new(
+        topic_did,
+        vec![Bytes::from("a-base")],
+        EntryKind::Data,
+    ))
+    .stamped(250, actor_b)?;
+    assert!(matches!(
+        copy_extend_b.validate_data_write_on_local(Some(&base_a), actor_b),
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+    let co_held = base_a.join(copy_extend_b.entry().clone())?;
+    let copy_tomb_b = EntryOperation::Tombstone(Entry::new(
+        topic_did,
+        vec![Bytes::from("a-base")],
+        EntryKind::Data,
+    ))
+    .stamped(260, actor_b)?;
+    assert!(matches!(
+        copy_tomb_b.validate_data_write_on_local(Some(&co_held), actor_b),
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
     Ok(())
 }
 

@@ -143,7 +143,8 @@ impl ApplicationData {
             | Message::DeclareRelayCustody(_)
             | Message::RelayCarrierDigests(_)
             | Message::RelayCarriersWanted(_)
-            | Message::EntryStoreReport(_) => None,
+            | Message::EntryStoreReport(_)
+            | Message::Leave(_) => None,
         }
     }
 
