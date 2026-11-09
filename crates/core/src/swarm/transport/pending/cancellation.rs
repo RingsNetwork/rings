@@ -142,6 +142,7 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         operation: &str,
     ) {
+        self.record_candidate_dial_failure(attempt.peer);
         if let Err(error) = self.cancel_unadmitted_connection(attempt).await {
             tracing::warn!(
                 "failed to cancel pending connection to {} after {operation}: {error}",
@@ -169,6 +170,7 @@ impl SwarmTransport {
         };
         for (expired, connection) in expired {
             let attempt = expired.attempt;
+            self.record_candidate_dial_failure(attempt.peer);
             let state = connection
                 .as_ref()
                 .map(|connection| connection.webrtc_connection_state());

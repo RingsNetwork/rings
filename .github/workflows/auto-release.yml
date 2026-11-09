@@ -87,7 +87,7 @@ jobs:
           token: "${{ secrets.GITHUB_TOKEN }}"
           body: "${{ steps.git-cliff.outputs.content }}"
           tag_name: ${{ needs.gen_version.outputs.version }}
-          prerelease: ${{ needs.gen_version.outputs.version == 'prerelease' }}
+          prerelease: ${{ needs.gen_version.outputs.version == 'prerelease' || contains(needs.gen_version.outputs.version, '-') }}
           title: ${{ needs.gen_version.outputs.version }}
           files: |
             LICENSE

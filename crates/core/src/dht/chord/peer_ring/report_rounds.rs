@@ -173,6 +173,20 @@ impl PeerRing {
         Ok(self.topology_multi_actions(next.actions))
     }
 
+    /// Record passive 1-hop bridge reachability hints for unconfirmed peers advertised by an
+    /// admitted topology reporter (`reporter`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when topology state cannot be read or committed.
+    pub(crate) fn record_bridged_peers(&self, reporter: Did, unconfirmed: Vec<Did>) -> Result<()> {
+        self.transition_topology(TopologyEvent::RecordBridgedPeers {
+            reporter,
+            unconfirmed,
+        })
+        .map(|_| ())
+    }
+
     /// Release the stabilization token `request_id`, and only that one.
     ///
     /// The pure model compares tokens before clearing, so an old cancellation

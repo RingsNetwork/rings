@@ -88,32 +88,90 @@ pub enum RemoteAction {
     },
 }
 
-/// Information about a node's successors and predecessor.
-#[derive(Debug, PartialEq, Eq, Deserialize, Serialize, Clone)]
+/// Information about a node's successors and predecessors.
+#[derive(Debug, Default, PartialEq, Eq, Deserialize, Serialize, Clone)]
 pub struct TopoInfo {
     /// Successor list.
     pub successors: Vec<Did>,
-    /// Predecessor.
+    /// Primary predecessor.
     pub predecessor: Option<Did>,
+    /// Bounded multi-predecessor list ordered by descending clockwise distance from the reporter.
+    #[serde(default)]
+    pub predecessors: Vec<Did>,
 }
 
 impl TopoInfo {
     /// Retain only peers supported by the caller's current routing evidence.
     pub(crate) fn confirmed_by(&self, mut is_routable: impl FnMut(Did) -> bool) -> Self {
+        let successors = self
+            .successors
+            .iter()
+            .copied()
+            .filter(|peer| is_routable(*peer))
+            .collect();
+        let mut predecessors: Vec<Did> = self
+            .predecessors
+            .iter()
+            .copied()
+            .filter(|peer| is_routable(*peer))
+            .collect();
+        if let Some(pred) = self.predecessor {
+            if !self.predecessors.contains(&pred)
+                && is_routable(pred)
+                && !predecessors.contains(&pred)
+            {
+                predecessors.insert(0, pred);
+            }
+        }
+        let predecessor = self.predecessor.filter(|peer| is_routable(*peer));
         Self {
-            successors: self
-                .successors
-                .iter()
-                .copied()
-                .filter(|peer| is_routable(*peer))
-                .collect(),
-            predecessor: self.predecessor.filter(|peer| is_routable(*peer)),
+            successors,
+            predecessor,
+            predecessors,
         }
     }
 
+    /// Return at most `2 * capacity` advertised peers (at most `capacity` from the predecessor
+    /// sequence and at most `capacity` from the successor sequence) that are neither `local`
+    /// nor confirmed by `is_routable`, preserving declaration order without duplicates.
+    pub(crate) fn unconfirmed_peers(
+        &self,
+        local: Did,
+        capacity: usize,
+        mut is_routable: impl FnMut(Did) -> bool,
+    ) -> Vec<Did> {
+        let per_role = crate::dht::topology::bounded_connection_candidates(
+            local,
+            capacity,
+            self.predecessor
+                .into_iter()
+                .chain(self.predecessors.iter().copied()),
+        )
+        .into_iter()
+        .chain(crate::dht::topology::bounded_connection_candidates(
+            local,
+            capacity,
+            self.successors.iter().copied(),
+        ));
+        let budget = capacity.saturating_mul(2);
+        let mut seen = Vec::with_capacity(budget);
+        let mut unconfirmed = Vec::with_capacity(budget);
+        for peer in per_role {
+            if seen.contains(&peer) {
+                continue;
+            }
+            seen.push(peer);
+            if !is_routable(peer) {
+                unconfirmed.push(peer);
+            }
+        }
+        unconfirmed
+    }
+
     /// Return whether any reported topology position survived confirmation.
+    #[cfg(test)]
     pub(crate) fn has_confirmed_peer(&self) -> bool {
-        self.predecessor.is_some() || !self.successors.is_empty()
+        self.predecessor.is_some() || !self.predecessors.is_empty() || !self.successors.is_empty()
     }
 }
 
@@ -125,6 +183,7 @@ impl TryFrom<&PeerRing> for TopoInfo {
         Ok(Self {
             successors: state.successors,
             predecessor: state.predecessor,
+            predecessors: state.predecessors,
         })
     }
 }

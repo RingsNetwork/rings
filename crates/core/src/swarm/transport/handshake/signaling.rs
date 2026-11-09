@@ -59,6 +59,7 @@ impl SwarmTransport {
         peer: Did,
         callback: SwarmTransportCallback,
     ) -> Result<()> {
+        self.clear_candidate_dial_backoff(peer);
         let Some(pending) = self.open_offer(peer, callback).await? else {
             return Ok(());
         };
@@ -175,6 +176,7 @@ impl SwarmTransport {
                 Ok(())
             }
             error => {
+                self.record_candidate_dial_failure(peer);
                 self.record_peer_message_send_failed(
                     peer,
                     crate::measure::Authentication::LocallyAddressed,
@@ -270,6 +272,7 @@ impl SwarmTransport {
     ) -> Result<()> {
         let carrier = self.signaling_reply_carrier(request)?;
         let peer = request.transaction.origin();
+        self.clear_candidate_dial_backoff(peer);
         match self
             .open_answer(peer, OfferOwner::Overlay, callback, offer)
             .await?

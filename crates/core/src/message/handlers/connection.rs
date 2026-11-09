@@ -241,6 +241,17 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                                         did,
                                     )?
                                 }
+                                FindSuccessorReportHandler::FixFingerTable { .. }
+                                    if did != self.dht.did
+                                        && self.transport.get_connection(did).is_none() =>
+                                {
+                                    self.dht
+                                        .successors()
+                                        .list()?
+                                        .into_iter()
+                                        .next()
+                                        .unwrap_or(did)
+                                }
                                 _ => did,
                             };
                             self.run_effects([CoreEffect::send_report_message(

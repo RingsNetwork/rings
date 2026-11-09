@@ -228,6 +228,7 @@ pub struct SwarmTransport {
     /// The node's watcher of every detached send's first-frame admission.
     admission_watcher: payload_send::AdmissionWatcher,
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
+    candidate_dial_backoff: Mutex<CandidateDialBackoffMap>,
     measure: Option<MeasureImpl>,
     transaction_replay: Arc<TransactionReplay>,
     /// Synchronous bounded sink for semantic message and lookup activity.
@@ -241,6 +242,18 @@ struct MeasuredDisconnect {
     generation: u64,
     disconnected_since_ms: i64,
 }
+
+const CANDIDATE_DIAL_BACKOFF_BASE_MS: i64 = 30_000;
+const CANDIDATE_DIAL_BACKOFF_MAX_MS: i64 = 300_000;
+const CANDIDATE_DIAL_BACKOFF_CAPACITY: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CandidateDialBackoff {
+    failures: u32,
+    retry_after_ms: i64,
+}
+
+type CandidateDialBackoffMap = BTreeMap<Did, CandidateDialBackoff>;
 
 /// Runtime settings used by [`SwarmTransport`].
 #[derive(Clone, Copy)]
@@ -360,10 +373,60 @@ impl SwarmTransport {
             outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
+            candidate_dial_backoff: Mutex::new(BTreeMap::new()),
             measure,
             transaction_replay,
             observer,
         }
+    }
+
+    /// Record that an unadmitted candidate dial attempt to `peer` failed or timed out before
+    /// admission, applying bounded exponential backoff to automatic topology-report dials.
+    pub(crate) fn record_candidate_dial_failure(&self, peer: Did) {
+        if peer == self.dht.did {
+            return;
+        }
+        let now_ms = get_epoch_ms_i64();
+        let Ok(mut map) = self.candidate_dial_backoff.lock() else {
+            return;
+        };
+        let failures = map
+            .get(&peer)
+            .map_or(1, |entry| entry.failures.saturating_add(1));
+        let shift = failures.saturating_sub(1).min(4);
+        let delay_ms = CANDIDATE_DIAL_BACKOFF_BASE_MS
+            .saturating_mul(1i64 << shift)
+            .min(CANDIDATE_DIAL_BACKOFF_MAX_MS);
+        if !map.contains_key(&peer) && map.len() >= CANDIDATE_DIAL_BACKOFF_CAPACITY {
+            if let Some(evict_peer) = map
+                .iter()
+                .min_by_key(|(_, entry)| entry.retry_after_ms)
+                .map(|(&candidate, _)| candidate)
+            {
+                map.remove(&evict_peer);
+            }
+        }
+        map.insert(peer, CandidateDialBackoff {
+            failures,
+            retry_after_ms: now_ms.saturating_add(delay_ms),
+        });
+    }
+
+    /// Clear any candidate dial backoff recorded for `peer`.
+    pub(crate) fn clear_candidate_dial_backoff(&self, peer: Did) {
+        if let Ok(mut map) = self.candidate_dial_backoff.lock() {
+            map.remove(&peer);
+        }
+    }
+
+    /// Return whether automatic topology-report dials to `peer` are currently in backoff.
+    pub(crate) fn is_candidate_dial_backed_off(&self, peer: Did) -> bool {
+        let now_ms = get_epoch_ms_i64();
+        let Ok(map) = self.candidate_dial_backoff.lock() else {
+            return false;
+        };
+        map.get(&peer)
+            .is_some_and(|entry| now_ms < entry.retry_after_ms)
     }
 
     /// Publish one already-sanitized message observation without blocking protocol progress.

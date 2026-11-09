@@ -66,10 +66,22 @@ impl TopologyState {
                 .all(|(nearer, farther)| nearer < farther)
     }
 
-    /// `PredecessorWellFormed(s)`: `pred ≠ n`, so the responsibility interval
+    /// `PredecessorWellFormed(s)`: `pred ≠ n` and `predecessors` is a strictly
+    /// `d(n, ·)`-decreasing chain of non-self peers, so the responsibility interval
     /// `(pred, n]` is never emptied by a self reference.
     pub(crate) fn predecessor_is_well_formed(&self) -> bool {
+        let distances = self
+            .predecessors
+            .iter()
+            .copied()
+            .map(|pred| dist(self.local, pred))
+            .collect::<Vec<_>>();
         self.predecessor != Some(self.local)
+            && self.predecessors.iter().all(|&pred| pred != self.local)
+            && distances
+                .iter()
+                .zip(distances.iter().skip(1))
+                .all(|(closer, farther)| closer > farther)
     }
 
     /// `FingersWellFormed(s)`: `∀i. finger[i] = f ⇒ d(n, f) ≥ 2^i`, and

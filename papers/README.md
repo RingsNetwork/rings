@@ -14,6 +14,7 @@ behavior. A design in a paper is not, by itself, a shipped feature.
 | Durable records | [PDF](durable-records.pdf) | [LaTeX](durable-records.tex), [BibTeX](durable-records.bib) | Proposed presence and survival law of a node's local stores: authority lattice, presence witness, per-platform crash obligation, relay custody ([#911](https://github.com/RingsNetwork/rings/issues/911), [#912](https://github.com/RingsNetwork/rings/issues/912), [#915](https://github.com/RingsNetwork/rings/issues/915), [#923](https://github.com/RingsNetwork/rings/issues/923), [#936](https://github.com/RingsNetwork/rings/issues/936)), claimed browser durability ([#1036](https://github.com/RingsNetwork/rings/issues/1036)), and replicated relay custody ([#777](https://github.com/RingsNetwork/rings/issues/777)); specification before the code |
 | Removal stability | [PDF](removal-stability.pdf) | [LaTeX](removal-stability.tex), [BibTeX](removal-stability.bib) | Proposed survival, eviction and size law of data-topic removes, the fetch-cache linearization, and lease heartbeats ([#918](https://github.com/RingsNetwork/rings/issues/918), [#920](https://github.com/RingsNetwork/rings/issues/920), [#921](https://github.com/RingsNetwork/rings/issues/921), [#922](https://github.com/RingsNetwork/rings/issues/922)); specification before the code |
 | Load bounds | [PDF](load-bounds.pdf) | [LaTeX](load-bounds.tex), [BibTeX](load-bounds.bib) | Proposed node, edge and lane accounting under free identities: edge-keyed tables with floors and a pool, replay-stream horizon, credit reclaim, one charge per reassembled message, cleanest-first slot choice against rotation ([#907](https://github.com/RingsNetwork/rings/issues/907), [#927](https://github.com/RingsNetwork/rings/issues/927), [#932](https://github.com/RingsNetwork/rings/issues/932), [#934](https://github.com/RingsNetwork/rings/issues/934), [#938](https://github.com/RingsNetwork/rings/issues/938), [#1094](https://github.com/RingsNetwork/rings/issues/1094)); specification before the code |
+| Non-transitive Chord | [PDF](non-transitive-chord.pdf) | [LaTeX](non-transitive-chord.tex), [BibTeX](non-transitive-chord.bib) | Bounded multi-predecessor stabilization, candidate dial backoff, passive 1-hop gap-bridge hints, and bridge-delegated delivery over non-transitive WebRTC graphs ([#1195](https://github.com/RingsNetwork/rings/issues/1195)) |
 
 DRanking's current implementation is limited to
 [provisional service receipts](../docs/src/advanced-topic/dranking-service-receipts.md).
@@ -39,6 +40,7 @@ latexmk -xelatex -interaction=nonstopmode -halt-on-error onion-kleisli-pipeline.
 latexmk -xelatex -interaction=nonstopmode -halt-on-error durable-records.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error removal-stability.tex
 latexmk -xelatex -interaction=nonstopmode -halt-on-error load-bounds.tex
+latexmk -xelatex -interaction=nonstopmode -halt-on-error non-transitive-chord.tex
 ```
 
 Run only the command for the paper being edited when making a focused change.
