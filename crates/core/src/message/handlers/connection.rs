@@ -301,13 +301,13 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     }
                 }
             }
-            FindSuccessorReportHandler::Connect { request_id } => {
+            FindSuccessorReportHandler::Connect { request_id }
                 if self.dht.claim_connect_lookup(*request_id)?
-                    && msg.reports_remote_successor(self.dht.did)
-                {
-                    self.connect_dht_peer(msg.did).await?;
-                }
+                    && msg.reports_remote_successor(self.dht.did) =>
+            {
+                self.connect_dht_peer(msg.did).await?;
             }
+            FindSuccessorReportHandler::Connect { .. } => {}
             // An application lookup: resolve the handle the application awaits. A report no
             // live lookup awaits is unsolicited and dropped here; the application never sees it.
             FindSuccessorReportHandler::None => {

@@ -398,28 +398,27 @@ fn should_persist_synced_entry(
     sender: Did,
     placed: &PlacedEntry,
 ) -> Result<bool> {
-    if !storage_sync_destination_accepts_placement(destination, placed.key) {
-        return Ok(false);
-    }
-    // A relay carrier is persisted by the members of its key alone (`Law (Members)`), or by a
-    // member that replaces `sender` under an ownership hand-off (#1057).
-    if placed.entry.kind.is_relay_inbox() {
-        return if purpose.permits_source_cleanup() {
-            transport
+    match (
+        storage_sync_destination_accepts_placement(destination, placed.key),
+        placed.entry.kind.is_relay_inbox(),
+    ) {
+        (false, _) => Ok(false),
+        // A relay carrier is persisted by the members of its key alone (`Law (Members)`), or by a
+        // member that replaces `sender` under an ownership hand-off (#1057).
+        (true, true) => match purpose.permits_source_cleanup() {
+            true => transport
                 .dht
-                .is_relay_member_for_handoff(placed.key, sender)
-        } else {
-            transport.dht.is_relay_member(placed.key)
-        };
-    }
-
-    match transport.dht.find_storage_owner(placed.key)? {
-        // Invariant: `Some(_)` is the local-storage branch. In non-virtual
-        // Chord storage the DID carried by `Some` is the successor witness used
-        // for fallback lookup, not a remote-owner denial.
-        PeerRingAction::Some(_) => Ok(true),
-        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
-        action => Err(Error::unexpected_peer_ring_action(action)),
+                .is_relay_member_for_handoff(placed.key, sender),
+            false => transport.dht.is_relay_member(placed.key),
+        },
+        (true, false) => match transport.dht.find_storage_owner(placed.key)? {
+            // Invariant: `Some(_)` is the local-storage branch. In non-virtual
+            // Chord storage the DID carried by `Some` is the successor witness used
+            // for fallback lookup, not a remote-owner denial.
+            PeerRingAction::Some(_) => Ok(true),
+            PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        },
     }
 }
 

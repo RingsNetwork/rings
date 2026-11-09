@@ -314,9 +314,7 @@ fn ask_connect_lookup(
     limit: usize,
 ) {
     pending.retain(|(existing_peer, _)| *existing_peer != peer);
-    while pending.len() >= limit {
-        pending.pop_front();
-    }
+    pending.drain(..pending.len().saturating_sub(limit.saturating_sub(1)));
     pending.push_back((peer, request_id));
 }
 

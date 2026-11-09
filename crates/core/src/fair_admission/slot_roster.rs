@@ -136,29 +136,28 @@ impl SlotRoster {
     pub fn arrive_preferring(&self, edge: Did, preferred: Option<u16>, floor_use: &SlotFloorUse) {
         let arrived = {
             let mut table = self.table();
-            if table.held.contains_key(&edge) {
-                return;
-            }
-            let was_current = table.unslotted.remove(&edge);
-            let chosen = preferred
-                .filter(|slot| table.free.contains(slot))
-                .or_else(|| {
-                    table
-                        .free
-                        .iter()
-                        .copied()
-                        .min_by_key(|slot| (floor_use.of(*slot), *slot))
-                });
-            match chosen {
-                Some(slot) => {
-                    table.free.remove(&slot);
-                    table.held.insert(edge, slot);
+            (!table.held.contains_key(&edge)).then(|| {
+                let was_current = table.unslotted.remove(&edge);
+                let chosen = preferred
+                    .filter(|slot| table.free.contains(slot))
+                    .or_else(|| {
+                        table
+                            .free
+                            .iter()
+                            .copied()
+                            .min_by_key(|slot| (floor_use.of(*slot), *slot))
+                    });
+                match chosen {
+                    Some(slot) => {
+                        table.free.remove(&slot);
+                        table.held.insert(edge, slot);
+                    }
+                    None => {
+                        table.unslotted.insert(edge);
+                    }
                 }
-                None => {
-                    table.unslotted.insert(edge);
-                }
-            }
-            !was_current
+                !was_current
+            }) == Some(true)
         };
         if arrived {
             self.changed.notify(usize::MAX);

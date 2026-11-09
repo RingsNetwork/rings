@@ -42,22 +42,21 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 impl HandleMsg<Leave> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &Leave) -> Result<()> {
         let ctx = context.payload();
-        if ctx.should_forward_from(self.dht.did) {
-            return Ok(());
+        let repair_due = (!ctx.should_forward_from(self.dht.did))
+            .then(|| {
+                self.transport
+                    .handle_peer_leave(ctx.transaction.origin(), &msg.successor_list)
+            })
+            .transpose()?
+            .flatten()
+            .is_some_and(|removal| removal.storage_repair_due());
+        match repair_due {
+            true => {
+                self.run_effects([CoreEffect::request_storage_repair()])
+                    .await
+            }
+            false => Ok(()),
         }
-
-        let sender = ctx.transaction.origin();
-        let Some(removal) = self
-            .transport
-            .handle_peer_leave(sender, &msg.successor_list)?
-        else {
-            return Ok(());
-        };
-        if removal.storage_repair_due() {
-            self.run_effects([CoreEffect::request_storage_repair()])
-                .await?;
-        }
-        Ok(())
     }
 }
 

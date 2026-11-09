@@ -550,6 +550,68 @@ impl RelayNeighborhood {
             .is_some()
     }
 
+    /// Whether `state.successors` is non-empty and every successor in it holds no relay mail.
+    pub(crate) fn all_successors_storage_less(&self, state: &TopologyState) -> bool {
+        !state.successors.is_empty()
+            && state
+                .successors
+                .iter()
+                .all(|successor| !self.holds(*successor))
+    }
+
+    /// Whether a closing record `link` (`link.holder == state.local`) behind a non-empty `chain`
+    /// ending at `farthest` covers every forward holder in `state.successors` and agrees with the
+    /// forward boundary (`Law (Previous holders)`).
+    fn closes_non_empty_chain(
+        &self,
+        state: &TopologyState,
+        chain: &[PreviousHolder],
+        farthest: PreviousHolder,
+        link: PreviousHolder,
+    ) -> bool {
+        let local = state.local;
+        let first_holding_succ = state
+            .successors
+            .iter()
+            .copied()
+            .find(|&succ| succ != local && self.holds(succ));
+        let matches_forward_holders = state
+            .successors
+            .iter()
+            .copied()
+            .filter(|&succ| succ != local && self.holds(succ))
+            .all(|succ| chain.iter().any(|known| known.holder == succ));
+        let matches_farthest = first_holding_succ.map_or_else(
+            || {
+                state.successors.last().is_none_or(|&last_succ| {
+                    in_arc(last_succ, farthest.holder, local) && farthest.holder != local
+                })
+            },
+            |first| farthest.holder == first,
+        );
+        link.run_start != local
+            && in_arc(local, link.run_start, farthest.holder)
+            && matches_forward_holders
+            && matches_farthest
+    }
+
+    /// Whether `link` extends `chain` behind `local` as a strictly farther, distinct holder whose
+    /// run lies between `link.holder` and the previous link (`Law (Previous holders)`).
+    fn admits_chain_extension(
+        &self,
+        local: Did,
+        chain: &[PreviousHolder],
+        link: PreviousHolder,
+    ) -> bool {
+        chain.last().is_none_or(|nearer| {
+            self.holds(link.holder)
+                && in_arc(local, link.holder, nearer.holder)
+                && link.holder != nearer.holder
+                && in_arc(link.holder, link.run_start, nearer.holder)
+                && chain.iter().all(|known| known.holder != link.holder)
+        })
+    }
+
     /// The longest prefix of `previous` that is a chain of previous holders behind `local`: at
     /// most `r` distinct holders, each presumed to hold relay mail, each one
     /// behind the one before it with its run between them (`run_start ∈ (holder, nearer]`), and
@@ -562,55 +624,34 @@ impl RelayNeighborhood {
         state: &TopologyState,
         previous: Vec<PreviousHolder>,
     ) -> (Vec<PreviousHolder>, bool) {
-        let local = state.local;
-        let mut chain: Vec<PreviousHolder> = Vec::with_capacity(self.replicas);
-        let mut closed = false;
-        for link in previous.into_iter().take(self.replicas) {
-            if link.holder == local {
-                if chain.is_empty() {
-                    closed = true;
-                    chain.push(link);
-                } else if let Some(&farthest) = chain.last() {
-                    let first_holding_succ = state
-                        .successors
-                        .iter()
-                        .copied()
-                        .find(|&succ| succ != local && self.holds(succ));
-                    let matches_forward_holders = state
-                        .successors
-                        .iter()
-                        .copied()
-                        .filter(|&succ| succ != local && self.holds(succ))
-                        .all(|succ| chain.iter().any(|known| known.holder == succ));
-                    let matches_farthest = match first_holding_succ {
-                        Some(first) => farthest.holder == first,
-                        None => state.successors.last().is_none_or(|&last_succ| {
-                            in_arc(last_succ, farthest.holder, local) && farthest.holder != local
-                        }),
+        let step = previous.into_iter().take(self.replicas).try_fold(
+            Vec::with_capacity(self.replicas),
+            |mut chain, link| match link.holder == state.local {
+                true => {
+                    let closed = match chain.last().copied() {
+                        None => {
+                            chain.push(link);
+                            true
+                        }
+                        Some(farthest) => {
+                            self.closes_non_empty_chain(state, &chain, farthest, link)
+                        }
                     };
-                    closed = link.run_start != local
-                        && in_arc(local, link.run_start, farthest.holder)
-                        && matches_forward_holders
-                        && matches_farthest;
+                    std::ops::ControlFlow::Break((chain, closed))
                 }
-                break;
-            }
-            let follows = match chain.last() {
-                None => true,
-                Some(nearer) => {
-                    self.holds(link.holder)
-                        && in_arc(local, link.holder, nearer.holder)
-                        && link.holder != nearer.holder
-                        && in_arc(link.holder, link.run_start, nearer.holder)
-                        && chain.iter().all(|known| known.holder != link.holder)
-                }
-            };
-            if !follows {
-                break;
-            }
-            chain.push(link);
+                false => match self.admits_chain_extension(state.local, &chain, link) {
+                    true => {
+                        chain.push(link);
+                        std::ops::ControlFlow::Continue(chain)
+                    }
+                    false => std::ops::ControlFlow::Break((chain, false)),
+                },
+            },
+        );
+        match step {
+            std::ops::ControlFlow::Continue(chain) => (chain, false),
+            std::ops::ControlFlow::Break(done) => done,
         }
-        (chain, closed)
     }
 
     /// The previous holders, nearest first, iff the current predecessor passed them and the

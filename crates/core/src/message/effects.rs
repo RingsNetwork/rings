@@ -452,30 +452,12 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 Ok(())
             }
             CoreEffect::SendDirectMessage { msg, destination } => {
-                let connect_request = match msg.as_ref() {
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        then:
-                            FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
-                                request_id,
-                            }),
-                        ..
-                    }) => Some(*request_id),
-                    _ => None,
-                };
-                if let Some(request_id) = connect_request {
-                    self.transport
-                        .dht
-                        .begin_connect_lookup(destination, request_id)?;
-                }
-                if let Err(error) = egress.send_direct_message(*msg, destination).await {
-                    if let Some(request_id) = connect_request {
-                        self.transport
-                            .dht
-                            .cancel_connect_lookup(destination, request_id)?;
-                    }
-                    return Err(error);
-                }
-                Ok(())
+                let request_id = connect_lookup_request_id(&msg);
+                self.with_connect_lookup_and_then(destination, request_id, || async move {
+                    egress.send_direct_message(*msg, destination).await?;
+                    Ok(())
+                })
+                .await
             }
             CoreEffect::SendSuccessorQuery { query, destination } => {
                 // Register the request id before the message is visible on the
@@ -537,6 +519,42 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             }
         }
         Ok(())
+    }
+
+    /// Registers an admission connect-lookup token before executing `send`, cancelling it if
+    /// `send` fails before leaving the node.
+    async fn with_connect_lookup_and_then<F, Fut>(
+        &self,
+        destination: Did,
+        request_id: Option<uuid::Uuid>,
+        send: F,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<()>>,
+    {
+        request_id
+            .map(|id| self.transport.dht.begin_connect_lookup(destination, id))
+            .transpose()?;
+        match send().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                request_id
+                    .map(|id| self.transport.dht.cancel_connect_lookup(destination, id))
+                    .transpose()?;
+                Err(error)
+            }
+        }
+    }
+}
+
+fn connect_lookup_request_id(msg: &Message) -> Option<uuid::Uuid> {
+    match msg {
+        Message::FindSuccessorSend(FindSuccessorSend {
+            then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect { request_id }),
+            ..
+        }) => Some(*request_id),
+        _ => None,
     }
 }
 

@@ -650,44 +650,48 @@ impl OriginQuotaTable {
         now: OriginQuotaInstant,
     ) -> Result<OriginQuotaReservation, OriginQuotaAdmissionError> {
         let lane_config = self.config.lane(key.lane);
-        if let Some(previous) = self.records.get(&key).copied() {
-            let (next_quota, origin_verdict) = previous
-                .quota
-                .admit(lane_config, message_limit, byte_cost, now)
-                .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-            self.records.insert(key, OriginQuotaRecord {
-                quota: next_quota,
-                introducer: previous.introducer,
-            });
-            if let Some(rejection) = origin_verdict.rejection() {
-                return Err(OriginQuotaAdmissionError::Verdict(rejection));
+        match self.records.get(&key).copied() {
+            Some(previous) => {
+                let (next_quota, origin_verdict) = previous
+                    .quota
+                    .admit(lane_config, message_limit, byte_cost, now)
+                    .map_err(OriginQuotaAdmissionError::Arithmetic)?;
+                self.records.insert(key, OriginQuotaRecord {
+                    quota: next_quota,
+                    introducer: previous.introducer,
+                });
+                origin_verdict.rejection().map_or_else(
+                    || {
+                        Ok(OriginQuotaReservation {
+                            key,
+                            introducer: previous.introducer,
+                            previous: Some(previous),
+                            evicted: None,
+                        })
+                    },
+                    |rejection| Err(OriginQuotaAdmissionError::Verdict(rejection)),
+                )
             }
-            return Ok(OriginQuotaReservation {
-                key,
-                introducer: previous.introducer,
-                previous: Some(previous),
-                evicted: None,
-            });
+            None => {
+                let (next_quota, origin_verdict) = OriginQuota::full(lane_config, now)
+                    .admit(lane_config, message_limit, byte_cost, now)
+                    .map_err(OriginQuotaAdmissionError::Arithmetic)?;
+                origin_verdict.rejection().map_or(Ok(()), |rejection| {
+                    Err(OriginQuotaAdmissionError::Verdict(rejection))
+                })?;
+                let evicted = self.allocate_record(key.lane, introducer, lane_config, now)?;
+                self.records.insert(key, OriginQuotaRecord {
+                    quota: next_quota,
+                    introducer,
+                });
+                Ok(OriginQuotaReservation {
+                    key,
+                    introducer,
+                    previous: None,
+                    evicted,
+                })
+            }
         }
-
-        let (next_quota, origin_verdict) = OriginQuota::full(lane_config, now)
-            .admit(lane_config, message_limit, byte_cost, now)
-            .map_err(OriginQuotaAdmissionError::Arithmetic)?;
-        if let Some(rejection) = origin_verdict.rejection() {
-            return Err(OriginQuotaAdmissionError::Verdict(rejection));
-        }
-
-        let evicted = self.allocate_record(key.lane, introducer, lane_config, now)?;
-        self.records.insert(key, OriginQuotaRecord {
-            quota: next_quota,
-            introducer,
-        });
-        Ok(OriginQuotaReservation {
-            key,
-            introducer,
-            previous: None,
-            evicted,
-        })
     }
 
     fn allocate_record(
@@ -699,74 +703,106 @@ impl OriginQuotaTable {
     ) -> Result<Option<(OriginQuotaKey, OriginQuotaRecord)>, OriginQuotaAdmissionError> {
         let floor = shares_for_capacity(config.max_records).floor;
         let held = self.lane_accounting(lane).held(introducer);
-        if matches!(introducer, Principal::Slot(_) | Principal::Unbound) && held >= floor {
-            if let Some(victim_key) =
-                self.safe_victim(lane, config, now, |record| record.introducer == introducer)?
-            {
-                let evicted = self
-                    .records
-                    .remove(&victim_key)
-                    .map(|record| (victim_key, record));
-                if let Some((_, ref victim_record)) = evicted {
-                    self.lane_accounting_mut(lane)
-                        .release(victim_record.introducer, 1);
-                }
-                self.lane_accounting_mut(lane).hold(introducer, 1);
-                return Ok(evicted);
-            }
-        }
+        let prefers_own_floor_recycle =
+            matches!(introducer, Principal::Slot(_) | Principal::Unbound) && held >= floor;
 
+        if let Some(evicted) =
+            self.evict_own_victim_if(lane, introducer, config, now, prefers_own_floor_recycle)?
+        {
+            Ok(Some(evicted))
+        } else if self.admit_into_free_capacity(lane, introducer, config) {
+            Ok(None)
+        } else if let Some(evicted) =
+            self.evict_own_victim_if(lane, introducer, config, now, held > 0)?
+        {
+            Ok(Some(evicted))
+        } else {
+            self.evict_pool_victim_for(lane, introducer, config, now)?
+                .map(Some)
+                .ok_or(OriginQuotaAdmissionError::Verdict(
+                    OriginQuotaRejection::Capacity {
+                        capacity: config.max_records,
+                    },
+                ))
+        }
+    }
+
+    fn evict_own_victim_if(
+        &mut self,
+        lane: MessageCategory,
+        introducer: Principal,
+        config: OriginQuotaLaneConfig,
+        now: OriginQuotaInstant,
+        eligible: bool,
+    ) -> Result<Option<(OriginQuotaKey, OriginQuotaRecord)>, OriginQuotaAdmissionError> {
+        eligible
+            .then(|| self.safe_victim(lane, config, now, |record| record.introducer == introducer))
+            .transpose()
+            .map(|victim| {
+                victim
+                    .flatten()
+                    .and_then(|victim_key| {
+                        self.records
+                            .remove(&victim_key)
+                            .map(|record| (victim_key, record))
+                    })
+                    .inspect(|(_, victim_record)| {
+                        self.lane_accounting_mut(lane)
+                            .release(victim_record.introducer, 1);
+                        self.lane_accounting_mut(lane).hold(introducer, 1);
+                    })
+            })
+    }
+
+    fn admit_into_free_capacity(
+        &mut self,
+        lane: MessageCategory,
+        introducer: Principal,
+        config: OriginQuotaLaneConfig,
+    ) -> bool {
         let lane_records = self
             .records
             .keys()
             .filter(|candidate| candidate.lane == lane)
             .count();
-        if lane_records < config.max_records && self.lane_accounting(lane).admit(introducer).is_ok()
-        {
-            self.lane_accounting_mut(lane).hold(introducer, 1);
-            return Ok(None);
-        }
+        (lane_records < config.max_records && self.lane_accounting(lane).admit(introducer).is_ok())
+            .then(|| self.lane_accounting_mut(lane).hold(introducer, 1))
+            .is_some()
+    }
 
-        if held > 0 {
-            if let Some(victim_key) =
-                self.safe_victim(lane, config, now, |record| record.introducer == introducer)?
-            {
-                let evicted = self
-                    .records
-                    .remove(&victim_key)
-                    .map(|record| (victim_key, record));
-                if let Some((_, ref victim_record)) = evicted {
-                    self.lane_accounting_mut(lane)
-                        .release(victim_record.introducer, 1);
-                }
-                self.lane_accounting_mut(lane).hold(introducer, 1);
-                return Ok(evicted);
-            }
-        }
-
+    fn evict_pool_victim_for(
+        &mut self,
+        lane: MessageCategory,
+        introducer: Principal,
+        config: OriginQuotaLaneConfig,
+        now: OriginQuotaInstant,
+    ) -> Result<Option<(OriginQuotaKey, OriginQuotaRecord)>, OriginQuotaAdmissionError> {
         let accounting = self.lane_accounting(lane);
         let pool_victim = self.safe_victim(lane, config, now, |record| {
             accounting.pool_items(record.introducer) > 0
         })?;
-        if let Some(victim_key) = pool_victim {
-            if let Some(victim_record) = self.records.remove(&victim_key) {
+        Ok(pool_victim
+            .and_then(|victim_key| {
+                self.records
+                    .remove(&victim_key)
+                    .map(|record| (victim_key, record))
+            })
+            .and_then(|(victim_key, victim_record)| {
                 self.lane_accounting_mut(lane)
                     .release(victim_record.introducer, 1);
-                if self.lane_accounting(lane).admit(introducer).is_ok() {
-                    self.lane_accounting_mut(lane).hold(introducer, 1);
-                    return Ok(Some((victim_key, victim_record)));
+                match self.lane_accounting(lane).admit(introducer).is_ok() {
+                    true => {
+                        self.lane_accounting_mut(lane).hold(introducer, 1);
+                        Some((victim_key, victim_record))
+                    }
+                    false => {
+                        self.lane_accounting_mut(lane)
+                            .hold(victim_record.introducer, 1);
+                        self.records.insert(victim_key, victim_record);
+                        None
+                    }
                 }
-                self.lane_accounting_mut(lane)
-                    .hold(victim_record.introducer, 1);
-                self.records.insert(victim_key, victim_record);
-            }
-        }
-
-        Err(OriginQuotaAdmissionError::Verdict(
-            OriginQuotaRejection::Capacity {
-                capacity: config.max_records,
-            },
-        ))
+            }))
     }
 
     fn safe_victim(

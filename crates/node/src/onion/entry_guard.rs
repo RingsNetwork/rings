@@ -236,22 +236,26 @@ fn reconcile_guard_state(
         })
         .collect::<Vec<_>>();
 
-    while retained.len() < target_guard_count {
-        let Some(did) = pick_next_weighted_candidate(
-            eligible_dids,
-            |did| guard_dids.contains(&did),
-            quality_by_did,
-            entropy,
-        ) else {
-            break;
-        };
-        retained.push(OnionEntryGuardRecord {
-            did,
-            selected_at_ms: now_ms,
-            unreachable_since_ms: None,
-        });
-        guard_dids.insert(did);
-    }
+    let needed_retained = target_guard_count.saturating_sub(retained.len());
+    retained.extend(
+        std::iter::from_fn(|| {
+            pick_next_weighted_candidate(
+                eligible_dids,
+                |did| guard_dids.contains(&did),
+                quality_by_did,
+                entropy,
+            )
+            .inspect(|&did| {
+                guard_dids.insert(did);
+            })
+            .map(|did| OnionEntryGuardRecord {
+                did,
+                selected_at_ms: now_ms,
+                unreachable_since_ms: None,
+            })
+        })
+        .take(needed_retained),
+    );
 
     let mut active_dids = retained
         .iter()
@@ -260,17 +264,19 @@ fn reconcile_guard_state(
         })
         .map(|guard| guard.did)
         .collect::<BTreeSet<_>>();
-    while active_dids.len() < target_guard_count {
-        let Some(did) = pick_next_weighted_candidate(
+    let needed_active = target_guard_count.saturating_sub(active_dids.len());
+    std::iter::from_fn(|| {
+        let picked = pick_next_weighted_candidate(
             eligible_dids,
             |did| active_dids.contains(&did) || guard_dids.contains(&did),
             quality_by_did,
             entropy,
-        ) else {
-            break;
-        };
-        active_dids.insert(did);
-    }
+        )?;
+        active_dids.insert(picked);
+        Some(picked)
+    })
+    .take(needed_active)
+    .for_each(drop);
 
     let state = OnionEntryGuardState {
         network_id,
@@ -283,22 +289,32 @@ fn reconcile_guard_state(
     }
 }
 
-fn healthy_snapshot_guard_dids(
+fn preferred_or_live_guard_dids(
     relays: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
+    predicate: impl Fn(Did) -> bool,
 ) -> BTreeSet<Did> {
-    let live = relays.iter().map(|hop| hop.did).collect::<BTreeSet<_>>();
+    let live = relays
+        .iter()
+        .map(|hop| hop.did)
+        .filter(|&did| predicate(did))
+        .collect::<BTreeSet<_>>();
     let preferred = live
         .iter()
         .copied()
         .filter(|did| quality_by_did.get(did) != Some(&PeerQuality::Degraded))
         .collect::<BTreeSet<_>>();
-
-    if preferred.is_empty() {
-        live
-    } else {
-        preferred
+    match preferred.is_empty() {
+        true => live,
+        false => preferred,
     }
+}
+
+fn healthy_snapshot_guard_dids(
+    relays: &[OnionRouteHop],
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+) -> BTreeSet<Did> {
+    preferred_or_live_guard_dids(relays, quality_by_did, |_| true)
 }
 
 fn eligible_guard_dids(
@@ -306,22 +322,7 @@ fn eligible_guard_dids(
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     first_hop_permitted: &impl Fn(Did) -> bool,
 ) -> BTreeSet<Did> {
-    let live = relays
-        .iter()
-        .map(|hop| hop.did)
-        .filter(|did| first_hop_permitted(*did))
-        .collect::<BTreeSet<_>>();
-    let preferred = live
-        .iter()
-        .copied()
-        .filter(|did| quality_by_did.get(did) != Some(&PeerQuality::Degraded))
-        .collect::<BTreeSet<_>>();
-
-    if preferred.is_empty() {
-        live
-    } else {
-        preferred
-    }
+    preferred_or_live_guard_dids(relays, quality_by_did, first_hop_permitted)
 }
 
 fn entry_guard_state_key(network_id: u32) -> String {

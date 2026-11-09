@@ -135,14 +135,17 @@ impl SlotFloorUse {
     }
 
     /// The worst of `self` and `other`, slot by slot.
-    pub fn join(mut self, other: Self) -> Self {
-        for (slot, floor_use) in other.0 {
-            self.0
-                .entry(slot)
-                .and_modify(|held| *held = (*held).max(floor_use))
-                .or_insert(floor_use);
-        }
-        self
+    pub fn join(self, other: Self) -> Self {
+        other
+            .0
+            .into_iter()
+            .fold(self, |mut acc, (slot, floor_use)| {
+                acc.0
+                    .entry(slot)
+                    .and_modify(|held| *held = (*held).max(floor_use))
+                    .or_insert(floor_use);
+                acc
+            })
     }
 
     /// The floor use of `slot`: [`FloorUse::CLEAN`] if no table charges it.

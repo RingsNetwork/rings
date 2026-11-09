@@ -357,15 +357,28 @@ impl PeerRing {
         holder: Option<Did>,
         horizon: Option<Did>,
     ) -> bool {
-        if origin == self.did {
-            return false;
-        }
-        match (holder, horizon) {
-            (Some(holder), None) => holder == origin || in_arc(origin, key, holder),
-            (None, Some(horizon)) => in_arc(origin, key, horizon),
-            (None, None) => origin != key,
-            (Some(_), Some(_)) => false,
-        }
+        origin != self.did
+            && match (holder, horizon) {
+                (Some(holder), None) => holder == origin || in_arc(origin, key, holder),
+                (None, Some(horizon)) => in_arc(origin, key, horizon),
+                (None, None) => origin != key,
+                (Some(_), Some(_)) => false,
+            }
+    }
+
+    /// Invokes `then` iff `origin`'s answer `(holder, horizon)` is consistent with `key`
+    /// (`Law (Owner places)`).
+    pub(super) fn with_verified_relay_answer_and_then<T>(
+        &self,
+        origin: Did,
+        key: Did,
+        holder: Option<Did>,
+        horizon: Option<Did>,
+        then: impl FnOnce(Option<Did>, Option<Did>) -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.responder_answers_relay_key(origin, key, holder, horizon)
+            .then(|| then(holder, horizon))
+            .transpose()
     }
 
     /// Take `holder`, `origin`'s answer to the outstanding query `(key, request_id)`
@@ -381,19 +394,16 @@ impl PeerRing {
         holder: Option<Did>,
         horizon: Option<Did>,
     ) -> Result<bool> {
-        if !self.responder_answers_relay_key(origin, key, holder, horizon) {
-            return Ok(false);
-        }
-        let holds = |holder: Did| -> Result<bool> {
-            Ok(holder != self.did && self.lock_relay_neighborhood()?.holds(holder))
-        };
-        let holder = match holder {
-            Some(holder) if holds(holder)? => Some(holder),
-            _ => None,
-        };
-        Ok(self
-            .lock_relay_holder_hints()?
-            .take_answer(key, request_id, holder))
+        self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, _| {
+            let neighborhood = self.lock_relay_neighborhood()?;
+            let verified_holder =
+                holder.filter(|&candidate| candidate != self.did && neighborhood.holds(candidate));
+            drop(neighborhood);
+            Ok(self
+                .lock_relay_holder_hints()?
+                .take_answer(key, request_id, verified_holder))
+        })
+        .map(|changed| changed.unwrap_or(false))
     }
 
     /// The holders the keys' owners named, by key.

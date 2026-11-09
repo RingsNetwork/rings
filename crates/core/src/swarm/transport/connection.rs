@@ -370,14 +370,17 @@ impl SwarmTransport {
     /// members through the ack-gated hand-off and send `Leave { successor_list }` to this node's
     /// predecessor and successor head before transports close.
     pub(crate) async fn leave(&self) -> Result<()> {
-        if let Ok(action) = self.dht.hand_off_relay_carriers_for_leave().await {
-            if let Ok(deliveries) = action.coalesced_storage_sync_deliveries() {
-                join_all(deliveries.into_iter().map(|delivery| async move {
-                    let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-                    let _ = self.send_storage_sync_tracked(msg).await;
-                }))
-                .await;
-            }
+        if let Ok(deliveries) = self
+            .dht
+            .hand_off_relay_carriers_for_leave()
+            .await
+            .and_then(|action| action.coalesced_storage_sync_deliveries())
+        {
+            join_all(deliveries.into_iter().map(|delivery| async move {
+                let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
+                let _ = self.send_storage_sync_tracked(msg).await;
+            }))
+            .await;
         }
 
         let state = self.dht.topology_state()?;
@@ -385,21 +388,23 @@ impl SwarmTransport {
         let leave_msg = Message::Leave(Leave {
             successor_list: state.successors,
         });
-        join_all(targets.into_iter().map(|target| {
-            let leave_msg = leave_msg.clone();
-            async move {
-                if self.get_connection(target).is_none() {
-                    return;
-                }
-                if let Ok(payload) = self
-                    .protocol_egress()
-                    .originate(leave_msg, target, Some(target))
-                    .await
-                {
-                    let _ = self.send_payload_tracked(payload).await;
-                }
-            }
-        }))
+        join_all(
+            targets
+                .into_iter()
+                .filter(|&target| self.get_connection(target).is_some())
+                .map(|target| {
+                    let leave_msg = leave_msg.clone();
+                    async move {
+                        if let Ok(payload) = self
+                            .protocol_egress()
+                            .originate(leave_msg, target, Some(target))
+                            .await
+                        {
+                            let _ = self.send_payload_tracked(payload).await;
+                        }
+                    }
+                }),
+        )
         .await;
         Ok(())
     }
@@ -735,17 +740,13 @@ impl SwarmTransport {
     ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
         let outcome = self.retire_active_connection_if(attempt, |_| {
-            let (remote_prev, remote_next) = self.dht.remote_relay_chain_neighbours()?;
-            if self
-                .dht
-                .with_topology_state(|topology| topology.references(attempt.peer))?
-                || remote_prev == Some(attempt.peer)
-                || remote_next == Some(attempt.peer)
-            {
-                return Ok(None);
+            match self.dht.retains_active_connection(attempt.peer)? {
+                true => Ok(None),
+                false => {
+                    self.dht.remove(attempt.peer)?;
+                    Ok(Some(()))
+                }
             }
-            self.dht.remove(attempt.peer)?;
-            Ok(Some(()))
         })?;
         if let (true, Some(connection)) = (outcome.is_retired(), connection) {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {

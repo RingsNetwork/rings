@@ -383,6 +383,34 @@ impl SlotLedger {
     fn live_link_count(&self) -> usize {
         self.live.values().map(BTreeSet::len).sum()
     }
+
+    /// Remove `generation` from `did`'s live set on this slot, returning `Some(true)` when
+    /// `did`'s last live generation on this slot was removed, `Some(false)` when `did` still
+    /// holds another live generation, or `None` when `(did, generation)` was not live.
+    fn remove_live_generation(&mut self, did: Did, generation: u64) -> Option<bool> {
+        let (removed, empty) = {
+            let generations = self.live.get_mut(&did)?;
+            (generations.remove(&generation), generations.is_empty())
+        };
+        removed.then(|| {
+            if empty {
+                self.live.remove(&did);
+            }
+            empty
+        })
+    }
+
+    /// Take the retained DIDs that have finished draining at `quantum` and are not currently
+    /// live on this slot.
+    fn take_drained_retained(&mut self, quantum: u128) -> impl Iterator<Item = Did> + '_ {
+        let drained = match self.ledger.load(quantum) == 0 {
+            true => std::mem::take(&mut self.retained),
+            false => BTreeSet::new(),
+        };
+        drained
+            .into_iter()
+            .filter(|did| !self.live.contains_key(did))
+    }
 }
 
 /// The admission state `S` of one hop for one process lifetime.
@@ -493,40 +521,40 @@ impl OnionAdmissionState {
         epoch: OnionProcessEpoch,
         filter_key: OnionReplayFilterKey,
     ) -> Result<(), OnionEpochNotFresh> {
-        if epoch == self.epoch {
-            return Err(OnionEpochNotFresh);
-        }
-        let mut peer_slots = BTreeMap::new();
-        let slots = std::mem::take(&mut self.slots)
-            .into_iter()
-            .filter(|(_, slot)| !slot.live.is_empty())
-            .map(|(slot_id, slot)| {
-                for &did in slot.live.keys() {
-                    peer_slots.insert(did, slot_id);
-                }
-                (slot_id, SlotLedger {
-                    ledger: QuantumLedger::default(),
-                    live: slot.live,
-                    retained: BTreeSet::new(),
-                })
+        (epoch != self.epoch)
+            .then(|| {
+                let (slots, peer_slots) = std::mem::take(&mut self.slots)
+                    .into_iter()
+                    .filter(|(_, slot)| !slot.live.is_empty())
+                    .fold(
+                        (BTreeMap::new(), BTreeMap::new()),
+                        |(mut slots, mut peer_slots), (slot_id, slot)| {
+                            peer_slots.extend(slot.live.keys().map(|&did| (did, slot_id)));
+                            slots.insert(slot_id, SlotLedger {
+                                ledger: QuantumLedger::default(),
+                                live: slot.live,
+                                retained: BTreeSet::new(),
+                            });
+                            (slots, peer_slots)
+                        },
+                    );
+                *self = Self {
+                    epoch,
+                    clock_ms: 0,
+                    swept_quantum: 0,
+                    replay: ReplayStore::new(filter_key),
+                    global: QuantumLedger::default(),
+                    capacity: self.capacity,
+                    floor_units: self.floor_units,
+                    pool_units: self.pool_units,
+                    pool_load: 0,
+                    slot_roster: Arc::clone(&self.slot_roster),
+                    owns_slot_roster: self.owns_slot_roster,
+                    slots,
+                    peer_slots,
+                };
             })
-            .collect();
-        *self = Self {
-            epoch,
-            clock_ms: 0,
-            swept_quantum: 0,
-            replay: ReplayStore::new(filter_key),
-            global: QuantumLedger::default(),
-            capacity: self.capacity,
-            floor_units: self.floor_units,
-            pool_units: self.pool_units,
-            pool_load: 0,
-            slot_roster: Arc::clone(&self.slot_roster),
-            owns_slot_roster: self.owns_slot_roster,
-            slots,
-            peer_slots,
-        };
-        Ok(())
+            .ok_or(OnionEpochNotFresh)
     }
 
     /// The step `δ` on `Reconcile(live)`: make the live-link set equal core's registry snapshot
@@ -592,20 +620,21 @@ impl OnionAdmissionState {
         link: OnionAdmissionLink,
     ) -> Result<(), OnionLinkTableFull> {
         let quantum = self.advance(now_ms);
-        let did = link.peer();
-        let generation = link.generation();
-        if self.is_link_live(link) {
-            return Ok(());
+        match self.is_link_live(link) {
+            true => Ok(()),
+            false => (self.live_link_count() < self.capacity)
+                .then_some(())
+                .ok_or(OnionLinkTableFull)
+                .and_then(|()| {
+                    let did = link.peer();
+                    let slot_id = self.acquire_slot_for(did, quantum)?;
+                    let slot = self.slots.entry(slot_id).or_default();
+                    slot.retained.remove(&did);
+                    slot.live.entry(did).or_default().insert(link.generation());
+                    self.peer_slots.insert(did, slot_id);
+                    Ok(())
+                }),
         }
-        if self.live_link_count() >= self.capacity {
-            return Err(OnionLinkTableFull);
-        }
-        let slot_id = self.acquire_slot_for(did, quantum)?;
-        let slot = self.slots.entry(slot_id).or_default();
-        slot.retained.remove(&did);
-        slot.live.entry(did).or_default().insert(generation);
-        self.peer_slots.insert(did, slot_id);
-        Ok(())
     }
 
     /// The step `δ` on `LinkClosed(link)`: make `link` no longer live, free its slot in the
@@ -616,48 +645,60 @@ impl OnionAdmissionState {
     pub(crate) fn link_closed(&mut self, now_ms: u128, link: OnionAdmissionLink) {
         let quantum = self.advance(now_ms);
         let did = link.peer();
-        let Some(&slot_id) = self.peer_slots.get(&did) else {
-            return;
-        };
-        let Some(slot) = self.slots.get_mut(&slot_id) else {
-            return;
-        };
-        let Some(generations) = slot.live.get_mut(&did) else {
-            return;
-        };
-        if !generations.remove(&link.generation()) {
-            return;
+        let removed_last_for_peer = self.peer_slots.get(&did).copied().and_then(|slot_id| {
+            let slot = self.slots.get_mut(&slot_id)?;
+            let last = slot.remove_live_generation(did, link.generation())?;
+            last.then(|| {
+                let remaining_peer = slot.live.first_key_value().map(|(&peer, _)| peer);
+                let has_load = slot.ledger.load(quantum) > 0;
+                let slot_empty = slot.live.is_empty();
+                (slot_id, remaining_peer, has_load, slot_empty)
+            })
+        });
+        if let Some((slot_id, remaining_peer, has_load, slot_empty)) = removed_last_for_peer {
+            self.release_roster_slot_on_close(did, slot_id, remaining_peer);
+            match (has_load, slot_empty) {
+                (true, _) => {
+                    if let Some(slot) = self.slots.get_mut(&slot_id) {
+                        slot.retained.insert(did);
+                    }
+                }
+                (false, false) => {
+                    self.peer_slots.remove(&did);
+                }
+                (false, true) => {
+                    self.peer_slots.remove(&did);
+                    if let Some(removed) = self.slots.remove(&slot_id) {
+                        removed.retained.into_iter().for_each(|retained_did| {
+                            self.peer_slots.remove(&retained_did);
+                        });
+                    }
+                }
+            }
         }
-        if !generations.is_empty() {
-            return;
-        }
-        slot.live.remove(&did);
+    }
+
+    fn release_roster_slot_on_close(
+        &self,
+        did: Did,
+        slot_id: OnionSlotId,
+        remaining_peer: Option<Did>,
+    ) {
         if self.owns_slot_roster
             && self.slot_roster.principal_of(Some(did))
                 == u16::try_from(slot_id.index()).map_or(Principal::Unbound, Principal::Slot)
         {
             self.slot_roster.depart(did);
-            if let Some((&remaining_did, _)) = slot.live.first_key_value() {
-                if !self.slot_roster.holds(remaining_did) {
+            remaining_peer
+                .filter(|&peer| !self.slot_roster.holds(peer))
+                .into_iter()
+                .for_each(|peer| {
                     self.slot_roster.arrive_preferring(
-                        remaining_did,
+                        peer,
                         u16::try_from(slot_id.index()).ok(),
                         &SlotFloorUse::default(),
                     );
-                }
-            }
-        }
-        if slot.ledger.load(quantum) > 0 {
-            slot.retained.insert(did);
-        } else {
-            self.peer_slots.remove(&did);
-            if slot.live.is_empty() {
-                let retained = std::mem::take(&mut slot.retained);
-                for retained_did in retained {
-                    self.peer_slots.remove(&retained_did);
-                }
-                self.slots.remove(&slot_id);
-            }
+                });
         }
     }
 
@@ -796,12 +837,7 @@ impl OnionAdmissionState {
             .is_some_and(|slot| slot.contains_live(link.peer(), link.generation()))
     }
 
-    /// The slot already bound to `did` in `peer_slots` or pre-assigned in `slot_roster`, if within
-    /// `0..capacity`.
-    fn assigned_slot_of(&self, did: Did) -> Option<OnionSlotId> {
-        if let Some(&slot_id) = self.peer_slots.get(&did) {
-            return Some(slot_id);
-        }
+    fn roster_slot_of(&self, did: Did) -> Option<OnionSlotId> {
         match self.slot_roster.principal_of(Some(did)) {
             Principal::Slot(slot) if usize::from(slot) < self.capacity => {
                 Some(OnionSlotId::new(usize::from(slot)))
@@ -810,51 +846,52 @@ impl OnionAdmissionState {
         }
     }
 
+    /// The slot already bound to `did` in `peer_slots` or pre-assigned in `slot_roster`, if within
+    /// `0..capacity`.
+    fn assigned_slot_of(&self, did: Did) -> Option<OnionSlotId> {
+        self.peer_slots
+            .get(&did)
+            .copied()
+            .or_else(|| self.roster_slot_of(did))
+    }
+
+    fn resume_existing_slot(&self, did: Did, quantum: u128) -> Option<OnionSlotId> {
+        self.peer_slots.get(&did).copied().inspect(|&slot_id| {
+            let slot_was_free = self.slots.get(&slot_id).is_none_or(SlotLedger::is_free);
+            if self.owns_slot_roster && slot_was_free && !self.slot_roster.holds(did) {
+                let floor_use = self.floor_use_at(quantum);
+                self.slot_roster.arrive_preferring(
+                    did,
+                    u16::try_from(slot_id.index()).ok(),
+                    &floor_use,
+                );
+            }
+        })
+    }
+
+    fn acquire_roster_slot(&self, did: Did, floor_use: &SlotFloorUse) -> Option<OnionSlotId> {
+        self.owns_slot_roster
+            .then(|| {
+                self.slot_roster.arrive(did, floor_use);
+                self.roster_slot_of(did)
+                    .filter(|slot_id| self.slots.get(slot_id).is_none_or(SlotLedger::is_free))
+            })
+            .flatten()
+    }
+
     /// Resolve or assign a connection slot in `0..capacity` for `did` at `quantum`.
     fn acquire_slot_for(
         &mut self,
         did: Did,
         quantum: u128,
     ) -> Result<OnionSlotId, OnionLinkTableFull> {
-        if let Some(&existing_slot) = self.peer_slots.get(&did) {
-            if self.owns_slot_roster {
-                let slot_was_free = self
-                    .slots
-                    .get(&existing_slot)
-                    .is_none_or(SlotLedger::is_free);
-                if slot_was_free && !self.slot_roster.holds(did) {
-                    let floor_use = self.floor_use_at(quantum);
-                    self.slot_roster.arrive_preferring(
-                        did,
-                        u16::try_from(existing_slot.index()).ok(),
-                        &floor_use,
-                    );
-                }
-            }
-            return Ok(existing_slot);
-        }
-        if let Principal::Slot(slot) = self.slot_roster.principal_of(Some(did)) {
-            let index = usize::from(slot);
-            if index < self.capacity {
-                return Ok(OnionSlotId::new(index));
-            }
-        }
-        let floor_use = self.floor_use_at(quantum);
-        if self.owns_slot_roster {
-            self.slot_roster.arrive(did, &floor_use);
-            if let Principal::Slot(slot) = self.slot_roster.principal_of(Some(did)) {
-                let index = usize::from(slot);
-                if index < self.capacity
-                    && self
-                        .slots
-                        .get(&OnionSlotId::new(index))
-                        .is_none_or(SlotLedger::is_free)
-                {
-                    return Ok(OnionSlotId::new(index));
-                }
-            }
-        }
-        self.cleanest_free_slot(&floor_use)
+        self.resume_existing_slot(did, quantum)
+            .or_else(|| self.roster_slot_of(did))
+            .or_else(|| {
+                let floor_use = self.floor_use_at(quantum);
+                self.acquire_roster_slot(did, &floor_use)
+                    .or_else(|| self.cleanest_free_slot(&floor_use))
+            })
             .ok_or(OnionLinkTableFull)
     }
 
@@ -906,18 +943,16 @@ impl OnionAdmissionState {
     ) -> Result<(), OnionAdmissionRejection> {
         let OnionAdmissionCharge { arrival_ms, epoch } = charge;
         self.advance(now_ms);
-        if layer.epoch != self.epoch || epoch != self.epoch {
-            return Err(OnionAdmissionRejection::StaleEpoch);
-        }
-        if !layer.expiry.admissible_at(arrival_ms) || layer.expiry.has_passed_at(self.clock_ms) {
-            return Err(OnionAdmissionRejection::OutsideWindow);
-        }
+        (layer.epoch == self.epoch && epoch == self.epoch)
+            .then_some(())
+            .ok_or(OnionAdmissionRejection::StaleEpoch)?;
+        (layer.expiry.admissible_at(arrival_ms) && !layer.expiry.has_passed_at(self.clock_ms))
+            .then_some(())
+            .ok_or(OnionAdmissionRejection::OutsideWindow)?;
         let probe = self.replay.probe(layer.tag);
-        if self.replay.contains(layer.expiry, &probe) {
-            return Err(OnionAdmissionRejection::Replayed);
-        }
-        self.replay.insert(layer.expiry, &probe);
-        Ok(())
+        (!self.replay.contains(layer.expiry, &probe))
+            .then(|| self.replay.insert(layer.expiry, &probe))
+            .ok_or(OnionAdmissionRejection::Replayed)
     }
 
     /// Advance the monotone clock to `max(now, clock)`, drop every filter whose `x` has passed,
@@ -928,15 +963,14 @@ impl OnionAdmissionState {
         self.replay.forget_through(self.clock_ms);
         let quantum = self.clock_ms / ONION_EXPIRY_QUANTUM_MS;
         if quantum > self.swept_quantum {
-            for slot in self.slots.values_mut() {
-                if slot.ledger.load(quantum) == 0 {
-                    for retained_did in std::mem::take(&mut slot.retained) {
-                        if !slot.live.contains_key(&retained_did) {
-                            self.peer_slots.remove(&retained_did);
-                        }
-                    }
-                }
-            }
+            let drained_dids = self
+                .slots
+                .values_mut()
+                .flat_map(|slot| slot.take_drained_retained(quantum))
+                .collect::<Vec<_>>();
+            drained_dids.into_iter().for_each(|did| {
+                self.peer_slots.remove(&did);
+            });
             self.slots.retain(|_, slot| !slot.is_releasable_at(quantum));
             self.pool_load = self
                 .slots

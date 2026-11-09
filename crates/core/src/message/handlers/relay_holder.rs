@@ -63,16 +63,18 @@ impl HandleMsg<AnnounceRelayHolder> for MessageHandler {
                 run_start: link.run_start,
             })
             .collect::<Vec<_>>();
-        if !self.dht.accept_previous_relay_holder(from, previous)? {
-            tracing::debug!(
-                local = %self.dht.did,
-                %from,
-                previous = ?msg.previous,
-                "previous relay holders not taken"
-            );
-            return Ok(());
+        match self.dht.accept_previous_relay_holder(from, previous)? {
+            true => connect_relay_chain_neighbours(&self.transport).await,
+            false => {
+                tracing::debug!(
+                    local = %self.dht.did,
+                    %from,
+                    previous = ?msg.previous,
+                    "previous relay holders not taken"
+                );
+                Ok(())
+            }
         }
-        connect_relay_chain_neighbours(&self.transport).await
     }
 }
 
@@ -314,8 +316,8 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
                 .await;
         }
         let origin = ctx.transaction.origin();
-        if self.dht.asks_next_relay_holder(msg.key, msg.request_id)? {
-            return match self.dht.take_next_relay_holder(
+        match self.dht.asks_next_relay_holder(msg.key, msg.request_id)? {
+            true => match self.dht.take_next_relay_holder(
                 msg.key,
                 msg.request_id,
                 origin,
@@ -327,16 +329,21 @@ impl HandleMsg<RelayHolderFound> for MessageHandler {
                     resume_relay_replications(&self.transport).await
                 }
                 None => Ok(()),
-            };
+            },
+            false => match self.dht.name_relay_holder(
+                msg.key,
+                msg.request_id,
+                origin,
+                msg.holder,
+                msg.horizon,
+            )? {
+                true => {
+                    self.run_effects([CoreEffect::request_storage_repair()])
+                        .await
+                }
+                false => Ok(()),
+            },
         }
-        if self
-            .dht
-            .name_relay_holder(msg.key, msg.request_id, origin, msg.holder, msg.horizon)?
-        {
-            self.run_effects([CoreEffect::request_storage_repair()])
-                .await?;
-        }
-        Ok(())
     }
 }
 

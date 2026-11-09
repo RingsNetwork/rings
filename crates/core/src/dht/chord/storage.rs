@@ -862,13 +862,30 @@ impl PeerRing {
         op: &EntryOperation,
         now_ms: u128,
     ) -> Result<bool> {
-        if op.kind().is_relay_inbox() {
-            return Ok(false);
+        match op.kind().is_relay_inbox() {
+            true => Ok(false),
+            false => Ok(op
+                .validate_data_write_on_local(
+                    self.local_cache_held(op.entry().did, now_ms)
+                        .await?
+                        .as_ref(),
+                    self.did,
+                )
+                .is_ok()),
         }
-        let held = self.local_cache_held(op.entry().did, now_ms).await?;
-        Ok(op
-            .validate_data_write_on_local(held.as_ref(), self.did)
-            .is_ok())
+    }
+
+    /// Observe this node's own write `op` in its local fetch cache iff [`Self::local_cache_can_observe`]
+    /// admits it at `now_ms` (#1179).
+    pub(crate) async fn local_cache_observe_write_at(
+        &self,
+        op: EntryOperation,
+        now_ms: u128,
+    ) -> Result<()> {
+        match self.local_cache_can_observe(&op, now_ms).await? {
+            true => self.local_cache_observe_write(op).await,
+            false => Ok(()),
+        }
     }
 }
 

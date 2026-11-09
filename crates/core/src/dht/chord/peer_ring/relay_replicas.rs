@@ -48,6 +48,15 @@ pub(crate) struct PendingReplication {
     downstream: Option<Did>,
 }
 
+impl PendingReplication {
+    /// Clear `downstream` when it matches `target` so the hold resumes replication.
+    fn clear_downstream_if(&mut self, target: Did) {
+        if self.downstream == Some(target) {
+            self.downstream = None;
+        }
+    }
+}
+
 /// The first holder after this node past its successor list, as the owner query resolved it.
 #[derive(Debug, Default)]
 pub(crate) struct NextHolder {
@@ -98,6 +107,21 @@ impl NextHolder {
                 }
             })
             .flatten()
+    }
+
+    /// Forget `holder` when it matches `peer` (or unconditionally when `peer` is `None`),
+    /// returning the downstream peer whose pending replications should be reset.
+    fn forget(&mut self, peer: Option<Did>) -> Option<Did> {
+        let forgotten = (peer.is_none() || self.holder == peer)
+            .then(|| {
+                let taken = self.holder.take();
+                if peer.is_some() || taken.is_some() {
+                    self.asked = None;
+                }
+                taken
+            })
+            .flatten();
+        peer.or(forgotten)
     }
 }
 
@@ -243,6 +267,12 @@ impl PeerRing {
             .is_some_and(|position| position.previous == Some(sender)))
     }
 
+    /// Return `candidate` iff it is a remote peer that currently qualifies as a chain member.
+    fn verified_chain_holder(&self, candidate: Option<Did>) -> Result<Option<Did>> {
+        let neighborhood = self.lock_relay_neighborhood()?;
+        Ok(candidate.filter(|&holder| holder != self.did && neighborhood.chains(holder)))
+    }
+
     /// The chain neighbours of this node, `p₁` and `n₁` (`Law (Chain repair)`): its nearest
     /// previous holder, and the first holder after it, in its successor list or resolved past
     /// it. Every carrier this node keeps as a member has these as its previous and next member,
@@ -260,11 +290,7 @@ impl PeerRing {
         })?;
         let next = match next {
             Some(next) => Some(next),
-            None => {
-                let candidate = self.lock_relay_next_holder()?.holder;
-                let neighborhood = self.lock_relay_neighborhood()?;
-                candidate.filter(|holder| *holder != self.did && neighborhood.chains(*holder))
-            }
+            None => self.verified_chain_holder(self.lock_relay_next_holder()?.holder)?,
         };
         Ok((previous, next))
     }
@@ -275,33 +301,50 @@ impl PeerRing {
     /// neighbours (`state.predecessor` and `state.successors`) are already managed by Chord
     /// stabilization.
     pub(crate) fn remote_relay_chain_neighbours(&self) -> Result<(Option<Did>, Option<Did>)> {
-        if !self.holds_relay_mail() {
-            return Ok((None, None));
-        }
-        let candidate = self.lock_relay_next_holder()?.holder;
-        self.with_relay_view(|state, neighborhood| {
-            let previous = state
-                .predecessor
-                .is_some_and(|predecessor| !neighborhood.holds(predecessor))
-                .then(|| neighborhood.nearest_previous_holder(state))
-                .flatten()
-                .filter(|peer| *peer != state.local && !state.successors.contains(peer));
-            let all_successors_storage_less = !state.successors.is_empty()
-                && state
-                    .successors
-                    .iter()
-                    .all(|successor| !neighborhood.holds(*successor));
-            let next = all_successors_storage_less
-                .then(|| {
-                    candidate.filter(|holder| {
-                        *holder != state.local
-                            && !state.successors.contains(holder)
-                            && neighborhood.chains(*holder)
-                    })
+        self.holds_relay_mail()
+            .then(|| {
+                let candidate = self.lock_relay_next_holder()?.holder;
+                self.with_relay_view(|state, neighborhood| {
+                    let previous = state
+                        .predecessor
+                        .filter(|&predecessor| !neighborhood.holds(predecessor))
+                        .and_then(|_| neighborhood.nearest_previous_holder(state))
+                        .filter(|&peer| peer != state.local && !state.successors.contains(&peer));
+                    let next = neighborhood
+                        .all_successors_storage_less(state)
+                        .then(|| {
+                            candidate.filter(|&holder| {
+                                holder != state.local
+                                    && !state.successors.contains(&holder)
+                                    && neighborhood.chains(holder)
+                            })
+                        })
+                        .flatten();
+                    (previous, next)
                 })
-                .flatten();
-            (previous, next)
-        })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    /// Whether `peer` is referenced in `TopologyState` or is a remote relay chain neighbour
+    /// (#1182).
+    pub(crate) fn retains_active_connection(&self, peer: Did) -> Result<bool> {
+        let (remote_prev, remote_next) = self.remote_relay_chain_neighbours()?;
+        Ok(
+            self.with_topology_state(|topology| topology.references(peer))?
+                || remote_prev == Some(peer)
+                || remote_next == Some(peer),
+        )
+    }
+
+    /// The union of `TopologyState::referenced_peers` and any remote relay chain neighbours
+    /// (#1182).
+    pub(crate) fn referenced_and_chain_peers(&self) -> Result<std::collections::BTreeSet<Did>> {
+        let mut referenced = self.topology_state()?.referenced_peers();
+        let (remote_prev, remote_next) = self.remote_relay_chain_neighbours()?;
+        referenced.extend(remote_prev.into_iter().chain(remote_next));
+        Ok(referenced)
     }
 
     /// Lock the replications, a leaf of `Law (Lock order)`.
@@ -407,28 +450,21 @@ impl PeerRing {
         horizon: Option<Did>,
         next_request_id: uuid::Uuid,
     ) -> Result<Option<(Did, uuid::Uuid)>> {
-        if !self.responder_answers_relay_key(origin, key, holder, horizon) {
-            return Ok(None);
-        }
-        let named = match holder {
-            Some(holder)
-                if holder != self.did && self.lock_relay_neighborhood()?.chains(holder) =>
-            {
-                Some(holder)
-            }
-            _ => None,
-        };
-        let next_query = match holder {
-            Some(skipped) if skipped != self.did && skipped != key => {
-                Some((skipped, next_request_id))
-            }
-            _ => horizon
-                .filter(|horizon| *horizon != self.did)
-                .map(|horizon| (horizon + Did::from(1u32), next_request_id)),
-        };
-        Ok(self
-            .lock_relay_next_holder()?
-            .take_answer(key, request_id, named, next_query))
+        self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, horizon| {
+            let named = self.verified_chain_holder(holder)?;
+            let next_query = holder
+                .filter(|&skipped| skipped != self.did && skipped != key)
+                .map(|skipped| (skipped, next_request_id))
+                .or_else(|| {
+                    horizon
+                        .filter(|&horizon| horizon != self.did)
+                        .map(|horizon| (horizon + Did::from(1u32), next_request_id))
+                });
+            Ok(self
+                .lock_relay_next_holder()?
+                .take_answer(key, request_id, named, next_query))
+        })
+        .map(Option::flatten)
     }
 
     /// Take `origin`'s answer about `(key, request_id)` to this node's outstanding query for its
@@ -464,33 +500,29 @@ impl PeerRing {
         &self,
         request_id: uuid::Uuid,
     ) -> Result<Option<(Did, uuid::Uuid)>> {
-        if let Some(asked) = self.lock_relay_next_holder()?.asked {
-            return Ok(Some(asked));
-        }
-        self.holds_relay_mail()
-            .then(|| {
-                self.with_relay_view(|state, neighborhood| {
-                    let covers_ring = state
-                        .predecessor
-                        .is_some_and(|predecessor| state.successors.contains(&predecessor));
-                    let all_successors_storage_less = !covers_ring
-                        && !state.successors.is_empty()
-                        && state
-                            .successors
-                            .iter()
-                            .all(|successor| !neighborhood.holds(*successor));
-                    all_successors_storage_less
-                        .then(|| state.successors.last().copied())
-                        .flatten()
+        let existing = self.lock_relay_next_holder()?.asked;
+        match existing {
+            Some(asked) => Ok(Some(asked)),
+            None => self
+                .holds_relay_mail()
+                .then(|| {
+                    self.with_relay_view(|state, neighborhood| {
+                        let covers_ring = state
+                            .predecessor
+                            .is_some_and(|predecessor| state.successors.contains(&predecessor));
+                        (!covers_ring && neighborhood.all_successors_storage_less(state))
+                            .then(|| state.successors.last().copied())
+                            .flatten()
+                    })
                 })
-            })
-            .transpose()
-            .map(Option::flatten)?
-            .map_or(Ok(None), |last| {
-                Ok(self
-                    .lock_relay_next_holder()?
-                    .ensure_asked(last + Did::from(1u32), request_id))
-            })
+                .transpose()
+                .map(Option::flatten)?
+                .map_or(Ok(None), |last| {
+                    Ok(self
+                        .lock_relay_next_holder()?
+                        .ensure_asked(last + Did::from(1u32), request_id))
+                }),
+        }
     }
 
     /// The `(key, request_id)` of this node's outstanding query for its next holder, to ask
@@ -510,25 +542,15 @@ impl PeerRing {
     /// whatever it is with `None`, the successor list having changed; any replication waiting on
     /// that forgotten downstream member is marked unforwarded so it resumes to the replacement.
     pub(crate) fn forget_next_relay_holder(&self, peer: Option<Did>) -> Result<()> {
-        let mut forgotten_holder = None;
-        {
-            let mut next = self.lock_relay_next_holder()?;
-            let matches_holder = peer.is_none() || next.holder == peer;
-            if matches_holder {
-                forgotten_holder = next.holder.take();
-                if peer.is_some() || forgotten_holder.is_some() {
-                    next.asked = None;
-                }
-            }
-        }
-        if let Some(target) = peer.or(forgotten_holder) {
-            let mut replications = self.lock_relay_replications()?;
-            for pending in replications.values_mut() {
-                if pending.downstream == Some(target) {
-                    pending.downstream = None;
-                }
-            }
-        }
+        let target = self.lock_relay_next_holder()?.forget(peer);
+        target
+            .map(|target| -> Result<()> {
+                self.lock_relay_replications()?
+                    .values_mut()
+                    .for_each(|pending| pending.clear_downstream_if(target));
+                Ok(())
+            })
+            .transpose()?;
         Ok(())
     }
 
