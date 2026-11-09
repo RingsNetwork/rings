@@ -13,6 +13,7 @@ use super::owner_answer;
 use super::relay_carrier_offer;
 use super::relay_holder;
 use super::HoldAuthority;
+use super::PreviousHolder;
 use super::RelayCustody;
 use super::RelayHolder;
 use super::RelayNeighborhood;
@@ -168,8 +169,15 @@ fn test_hand_off_targets_are_the_holder_or_the_holding_ends_of_the_view() {
 
 #[test]
 fn test_the_owner_answers_with_the_holder_of_its_own_arc_alone() {
-    let owner = RelaySegment::new(vec![node(10, false), node(20, false), node(30, true)]);
+    let owner = RelaySegment::new(vec![
+        node(10, false),
+        node(20, false),
+        node(30, true),
+        node(40, true),
+    ]);
     assert_eq!(owner_answer(&owner, did(20), did(25)), Some(did(30)));
+    // Asking at the successor head itself skips that suspected holder and names the next (#1182).
+    assert_eq!(owner_answer(&owner, did(20), did(30)), Some(did(40)));
     // A key of another node's arc is not this node's to answer for.
     assert_eq!(owner_answer(&owner, did(20), did(15)), None);
     let without_holder = RelaySegment::new(vec![node(10, false), node(20, false)]);
@@ -703,4 +711,70 @@ fn test_model_two_holders_joining_one_long_run_strand_no_carrier() {
     assert_views_agree_with_the_truth(&after);
     assert_carriers_follow_the_holder(&before, &after);
     assert_window_loses_nothing(&before, &after);
+}
+
+#[test]
+fn test_pass_rejects_unverified_predecessor_phantom_holders_and_false_closure() {
+    let state = TopologyState::new(
+        did(200),
+        vec![did(300), did(400)],
+        Some(did(100)),
+        Vec::new(),
+    );
+    let phantoms = (1..=8)
+        .map(|i| PreviousHolder {
+            holder: did(10 + i * 10),
+            run_start: if i == 1 {
+                did(200)
+            } else {
+                did(10 + (i - 1) * 10)
+            },
+        })
+        .collect::<Vec<_>>();
+
+    // 1. An unverified predecessor that has not declared `HoldsNone` is presumed to hold
+    // relay mail (`Holds`), so it may announce itself (`holder == from && run_start == local`),
+    // but cannot inject 8 phantom `PreviousHolder` entries (`nearest.holder != from`) or force
+    // `knows_every_holder = true`.
+    let mut unverified = RelayNeighborhood::default();
+    assert!(!unverified.pass(&state, did(100), phantoms.clone()));
+    assert!(!unverified.pass(&state, did(100), vec![PreviousHolder {
+        holder: did(200),
+        run_start: did(300),
+    }]));
+    assert!(!unverified.segment(&state, true).knows_every_holder);
+    assert!(unverified.pass(&state, did(100), vec![PreviousHolder {
+        holder: did(100),
+        run_start: did(200),
+    }]));
+
+    // 2. Even after observing `from = 100` as a holder, `from` cannot inject 8 phantom
+    // `PreviousHolder` DIDs whose nearest entry does not match `(from, local)`, nor can it
+    // force `closed = true` (`knows_every_holder = true`) on a multi-holder ring without
+    // covering `state.successors`.
+    let mut observed = RelayNeighborhood::default();
+    observed.observe(did(100), RelayCustody::Holds);
+    observed.observe(did(300), RelayCustody::Holds);
+    observed.observe(did(400), RelayCustody::Holds);
+
+    assert!(!observed.pass(&state, did(100), phantoms));
+    assert!(!observed.pass(&state, did(100), vec![PreviousHolder {
+        holder: did(200),
+        run_start: did(300),
+    }]));
+
+    // Passing `[100, 200]` on a ring with holding successors `[300, 400]` keeps `100` as the
+    // immediate previous holder but refuses to close the ring (`knows_every_holder == false`).
+    assert!(observed.pass(&state, did(100), vec![
+        PreviousHolder {
+            holder: did(100),
+            run_start: did(200),
+        },
+        PreviousHolder {
+            holder: did(200),
+            run_start: did(300),
+        },
+    ]));
+    let segment = observed.segment(&state, true);
+    assert!(!segment.knows_every_holder);
 }

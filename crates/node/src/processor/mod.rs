@@ -586,8 +586,19 @@ impl Processor {
             .map_err(Error::CloseConnectionError)
     }
 
-    /// Close this node's network: the swarm opens no connection from now on and closes every
-    /// one it has (`Swarm::close`, #1098), then the applied measurements are flushed.
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
+    /// members and send `Leave { successor_list }` to this node's predecessor and successor head
+    /// before transports close.
+    pub async fn leave(&self) -> Result<()> {
+        self.swarm
+            .leave()
+            .await
+            .map_err(Error::CloseConnectionError)
+    }
+
+    /// Close this node's network: the swarm sends a best-effort departure (`Swarm::leave`,
+    /// #1057), opens no connection from now on and closes every one it has (`Swarm::close`,
+    /// #1098), then the applied measurements are flushed.
     ///
     /// These are steps (c) and (d) of [`Provider::close`](crate::provider::Provider::close)
     /// only: this stops no task and releases no store. A node that stops in a process that
@@ -597,6 +608,7 @@ impl Processor {
     ///
     /// Both steps run even if the first fails; the first failure is returned.
     pub async fn close(&self) -> Result<()> {
+        let _ = self.leave().await;
         let closed = self
             .swarm
             .close()

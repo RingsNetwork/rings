@@ -4,6 +4,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
 use crate::message::handlers::HandlerContext;
+use crate::message::types::Leave;
 use crate::message::types::NotifyPredecessorSend;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -33,6 +34,29 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
             return Err(Error::NotifyPredecessorOriginNotAdmitted { origin });
         }
         Ok(())
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<Leave> for MessageHandler {
+    async fn handle(&self, context: &HandlerContext<'_>, msg: &Leave) -> Result<()> {
+        let ctx = context.payload();
+        let repair_due = (!ctx.should_forward_from(self.dht.did))
+            .then(|| {
+                self.transport
+                    .handle_peer_leave(ctx.transaction.origin(), &msg.successor_list)
+            })
+            .transpose()?
+            .flatten()
+            .is_some_and(|removal| removal.storage_repair_due());
+        match repair_due {
+            true => {
+                self.run_effects([CoreEffect::request_storage_repair()])
+                    .await
+            }
+            false => Ok(()),
+        }
     }
 }
 

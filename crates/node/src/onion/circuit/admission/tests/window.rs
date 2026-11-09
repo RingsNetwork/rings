@@ -275,7 +275,7 @@ fn test_late_admissions_never_exceed_the_global_bound_per_filter() {
     let per_sender = ONION_ADMISSION_SENDER_UNITS / UNITS;
     let bound = ONION_ADMISSION_GLOBAL_UNITS / UNITS;
     let mut rng = StdRng::seed_from_u64(0x0841_0016);
-    let mut admission = state(&mut rng);
+    let mut admission = state_with(&mut rng, EPOCH, 32, 0..64);
     let mut tag = 0_u128;
     for round in 0..4_u128 {
         let k = ORIGIN_MS / Q + 20 + 10 * round;

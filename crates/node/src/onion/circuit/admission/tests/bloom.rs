@@ -9,7 +9,9 @@ use super::latest_expiry;
 use super::layer;
 use super::send;
 use super::state;
+use super::state_with;
 use super::Verdict;
+use super::EPOCH;
 use super::ORIGIN_MS;
 use super::Q;
 use crate::onion::circuit::admission::bloom::ReplayStore;
@@ -123,7 +125,7 @@ fn test_filled_blocks_meet_the_false_positive_target() {
 #[test]
 fn test_all_live_filters_stay_within_the_memory_bound() {
     let mut rng = StdRng::seed_from_u64(0x0841_000e);
-    let mut admission = state(&mut rng);
+    let mut admission = state_with(&mut rng, EPOCH, 32, 0..64);
     let mut refusals = 0_u32;
     for step in 0..10_u128 {
         let now_ms = ORIGIN_MS + step * Q;

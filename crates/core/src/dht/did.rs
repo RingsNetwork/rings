@@ -114,6 +114,11 @@ impl Did {
 
     const ZERO: Self = Self(H160([0u8; Self::BYTE_LEN]));
 
+    /// Whether this identity is the default zero identity (`0x00..00`).
+    pub fn is_default(&self) -> bool {
+        *self == Self::ZERO
+    }
+
     fn from_be_bytes(bytes: [u8; Self::BYTE_LEN]) -> Self {
         Self(H160::from(bytes))
     }

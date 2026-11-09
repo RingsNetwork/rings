@@ -146,6 +146,9 @@ wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.64", optional = true, features = [
     "AbortController",
     "AbortSignal",
+    "Event",
+    "EventTarget",
+    "Window",
 ] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]

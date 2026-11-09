@@ -9,6 +9,7 @@ use super::next_held_message;
 use super::HELD_MESSAGE;
 use crate::consts::DEFAULT_RELAY_INBOX_REPLICAS;
 use crate::dht::entry::inbox::inbox_key;
+use crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
 use crate::dht::Did;
 use crate::dht::RelayCustody;
 use crate::dht::RelayReplication;
@@ -24,6 +25,7 @@ use crate::swarm::transport::ProbeScope;
 use crate::swarm::transport::ProbeWork;
 use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
 use crate::swarm::transport::CHAIN_NEIGHBOUR_SUSPICION_MS;
+use crate::swarm::transport::UNREFERENCED_CONNECTION_GRACE_MS;
 use crate::tests::default::gen_pure_dht;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_without_relay_storage;
@@ -446,6 +448,251 @@ async fn test_a_suspect_is_still_probed_on_the_chain_period() -> Result<()> {
             ProbeWork::Issue(attempt) if attempt.peer() == node3.did()
         )),
         "the suspect's probe is due on the chain period"
+    );
+    Ok(())
+}
+
+/// Voluntary departure (#1057) over the controlled transport:
+/// 1. When a holder gracefully leaves (`Swarm::leave`), it hands off its relay carriers to a
+///    remaining member via the ack-gated hand-off and sends `Leave` to its predecessor and
+///    successor head, which remove the leaving sender immediately upon receiving `Leave` (before
+///    failure detection or transport close).
+/// 2. A `Leave` message cannot remove any node other than the authenticated sender itself, and is
+///    ignored by nodes that do not hold the sender as their predecessor or successor.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_graceful_leave_hands_off_relay_carriers_and_removes_only_leaving_sender() -> Result<()>
+{
+    use rings_transport::connections::dummy_controlled;
+
+    use crate::message::handlers::HandleMsg;
+    use crate::message::Leave;
+    use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
+    use crate::tests::default::prepare_node_with_relay_replication;
+    use crate::tests::default::wait_for_storage_absence;
+
+    let [key1, key2, key3, key4] = gen_ordered_keys::<4>();
+    let single_replica = RelayReplication {
+        replicas: 1,
+        age_gate_ms: 0,
+    };
+    let node1 = prepare_node_with_relay_replication(key1, single_replica)?;
+    let node3 = prepare_node_with_relay_replication(key3, single_replica)?;
+    let node4 = prepare_node_with_relay_replication(key4, single_replica)?;
+    let recipient: Did = key2.address().into();
+    ring_of_three(&node1, &node3, &node4).await?;
+    let ring = [&node1, &node3, &node4];
+    settle_previous_holders(&ring, &ring).await?;
+
+    // With `replicas = 1`, `node1` is the sole holder of `inbox_key(recipient)` in `(node1, node3]`.
+    node1
+        .swarm
+        .send_message(ApplicationData::custom(HELD_MESSAGE), recipient)
+        .await?;
+    wait_for_msgs(ring).await;
+    let inbox = StorageKey::inbox_of(recipient);
+    assert_every_member_holds(&[&node1], inbox).await?;
+    wait_for_storage_absence(&node3, inbox).await?;
+    wait_for_storage_absence(&node4, inbox).await?;
+
+    // Enter controlled transport mode so every frame is stepped deterministically without timers.
+    let _controlled = ControlledDeliveryGuard::new();
+    let pump_controlled = || async {
+        for _ in 0..512 {
+            if dummy_controlled::pending() == 0
+                && !node1.in_flight()
+                && !node3.in_flight()
+                && !node4.in_flight()
+            {
+                break;
+            }
+            if dummy_controlled::pending() > 0 {
+                let _ = dummy_controlled::deliver(0).await;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+
+    // Law (Who may act on it): an authenticated sender that is neither predecessor nor successor
+    // of `node3` is ignored, even if present in `node3`'s finger table, and cannot remove `node1`
+    // or `node4`.
+    let outsider = prepare_node(SecretKey::random()).await;
+    node3
+        .dht()
+        .replace_fingers_for_test(&[(0, outsider.did())])?;
+    // Originate from `outsider`'s signer and handle at `node3`.
+    let outsider_leave = crate::message::MessagePayload::new_send(
+        Message::Leave(Leave {
+            successor_list: vec![node1.did(), node4.did()],
+        }),
+        outsider.swarm.transport.message_signer(),
+        node3.did(),
+        node3.did(),
+    )?;
+    crate::message::MessageHandler::new(node3.swarm.transport.clone())
+        .handle(
+            &crate::message::HandlerContext::unbound_for_test(&outsider_leave),
+            &Leave {
+                successor_list: vec![node1.did(), node4.did()],
+            },
+        )
+        .await?;
+    assert_eq!(*node3.dht().lock_predecessor()?, Some(node1.did()));
+    assert_eq!(node3.dht().successors().list()?, vec![
+        node4.did(),
+        node1.did()
+    ]);
+    assert_eq!(node3.dht().lock_finger()?.get(0), Some(outsider.did()));
+
+    // Graceful leave of `node1`: hands off its relay carrier to `node3` and sends `Leave` to
+    // `node4` (its predecessor) and `node3` (its successor head) before closing transport.
+    node1.swarm.leave().await?;
+    pump_controlled().await;
+
+    // 1. The carrier was handed off to `node3`, and `node3`'s ack cleaned up `node1`'s copy.
+    assert_every_member_holds(&[&node3], inbox).await?;
+    wait_for_storage_absence(&node1, inbox).await?;
+
+    // 2. Both `node4` (predecessor of `node1`) and `node3` (successor head of `node1`) removed
+    //    `node1` immediately upon receiving `Leave`, and removed no other peer.
+    assert_eq!(*node4.dht().lock_predecessor()?, Some(node3.did()));
+    assert_eq!(node4.dht().successors().list()?, vec![node3.did()]);
+    assert_eq!(*node3.dht().lock_predecessor()?, None);
+    assert_eq!(node3.dht().successors().list()?, vec![node4.did()]);
+
+    Ok(())
+}
+
+/// Join `joining` into the settled ring of `existing`, which already contains `anchor`, its
+/// clockwise successor, and stabilize `ring` (`existing` plus `joining`) until every adjacent
+/// pair's successor head and predecessor agree.
+async fn join_before<'a>(joining: &'a Node, anchor: &'a Node, ring: &[&'a Node]) -> Result<()> {
+    manually_establish_connection(&joining.swarm, &anchor.swarm).await;
+    wait_for_msgs(ring.iter().copied()).await;
+    wait_for_successor(joining, anchor.did()).await?;
+    for _ in 0..ring.len() * 2 {
+        for node in ring {
+            node.swarm.stabilizer().stabilize().await?;
+        }
+        wait_for_msgs(ring.iter().copied()).await;
+    }
+    for index in 0..ring.len() {
+        let current = ring[index];
+        let next = ring[(index + 1) % ring.len()];
+        wait_for_successor(current, next.did()).await?;
+        wait_for_predecessor(next, current.did()).await?;
+    }
+    Ok(())
+}
+
+/// When `n₁` lies past a storage-less run of length `L >= DEFAULT_SUCCESSOR_CAPACITY` so that
+/// neither `n₁` nor `p₁` is in the other's `state.successors`, both chain neighbours establish
+/// and retain direct connections probed on the `P_c + τ_c = 10 s` chain clock (#1182); when `n₁`
+/// stops answering probes, `h₀` suspects `n₁` within the 10 s bound, clears `relay_next_holder`,
+/// resolves the next live holder `n₂` past the storage-less run, and connects directly to `n₂`.
+#[tokio::test]
+async fn test_chain_neighbour_past_a_storage_less_run_is_directly_probed_and_fails_over_within_ten_seconds(
+) -> Result<()> {
+    let [key_h0, key_s1, key_s2, key_s3, key_n1, key_n2, key_n3] = gen_ordered_keys::<7>();
+    let h0 = prepare_node(key_h0).await;
+    let s1 = prepare_node_without_relay_storage(key_s1)?;
+    let s2 = prepare_node_without_relay_storage(key_s2)?;
+    let s3 = prepare_node_without_relay_storage(key_s3)?;
+    let n1 = prepare_node(key_n1).await;
+    let n2 = prepare_node(key_n2).await;
+    let n3 = prepare_node(key_n3).await;
+
+    // Form the four-holder ring first, then insert the storage-less run s1 -> s2 -> s3 of length
+    // DEFAULT_SUCCESSOR_CAPACITY between h0 and n1.
+    ring_of_three(&h0, &n1, &n2).await?;
+    join_before(&n3, &h0, &[&h0, &n1, &n2, &n3]).await?;
+    join_before(&s3, &n1, &[&h0, &s3, &n1, &n2, &n3]).await?;
+    join_before(&s2, &s3, &[&h0, &s2, &s3, &n1, &n2, &n3]).await?;
+    join_before(&s1, &s2, &[&h0, &s1, &s2, &s3, &n1, &n2, &n3]).await?;
+
+    let ring = [&h0, &s1, &s2, &s3, &n1, &n2, &n3];
+    settle_previous_holders(&ring, &ring).await?;
+
+    let h0_successors = h0.dht().topology_state()?.successors;
+    assert_eq!(h0_successors.len(), DEFAULT_SUCCESSOR_CAPACITY);
+    assert_eq!(h0_successors, vec![s1.did(), s2.did(), s3.did()]);
+    assert!(
+        !h0_successors.contains(&n1.did()),
+        "n1 lies past the storage-less successor list of length DEFAULT_SUCCESSOR_CAPACITY"
+    );
+
+    // Retire the pre-existing h0 <-> n1 connection from before the storage-less run was inserted,
+    // and verify that chain-neighbour maintenance re-establishes the direct link between h0 and n1
+    // via RelayHolderFound / AnnounceRelayHolder even though neither is in the other's successors.
+    h0.swarm.disconnect(n1.did()).await?;
+    n1.swarm.disconnect(h0.did()).await?;
+    wait_for_msgs(ring).await;
+    assert!(!h0.swarm.transport.has_active_connection(n1.did()));
+    assert!(!n1.swarm.transport.has_active_connection(h0.did()));
+
+    settle_previous_holders(&ring, &ring).await?;
+
+    assert_eq!(
+        h0.dht().relay_chain_neighbours()?,
+        (Some(n3.did()), Some(n1.did()))
+    );
+    assert_eq!(
+        n1.dht().relay_chain_neighbours()?,
+        (Some(h0.did()), Some(n2.did()))
+    );
+    assert!(
+        h0.swarm.transport.has_active_connection(n1.did()),
+        "h0 establishes a direct connection to n1 past the storage-less run"
+    );
+    assert!(
+        n1.swarm.transport.has_active_connection(h0.did()),
+        "n1 establishes a direct connection to p1 (h0) behind the storage-less run"
+    );
+
+    // Retention protects chain neighbours even when they are not in state.successors.
+    h0.swarm
+        .transport
+        .evict_unreferenced_connection_with_plan_observer_for_test(
+            get_epoch_ms_i64() + UNREFERENCED_CONNECTION_GRACE_MS * 10,
+            |plan| {
+                assert!(
+                    plan.iter().all(|attempt| attempt.peer() != n1.did()),
+                    "n1 must not be evictable while it is h0's chain neighbour"
+                );
+            },
+        )
+        .await?;
+
+    // n1 silently stops answering probes: h0 and n2 detect the loss within P_c + τ_c = 10 s,
+    // while s3 (storage-less, on the 45 s regular clock) still keeps n1 as its successor head.
+    h0.dht().take_relay_chain_repair_due();
+    let _late_h0 = suspect_by_a_late_probe(&h0, n1.did()).await?;
+    let _late_n2 = suspect_by_a_late_probe(&n2, n1.did()).await?;
+    assert!(h0.dht().is_relay_suspected(n1.did())?);
+    assert!(
+        h0.dht().take_relay_chain_repair_due(),
+        "suspecting n1 past a storage-less run triggers chain repair"
+    );
+    assert_eq!(
+        s3.dht().topology_state()?.successors.first().copied(),
+        Some(n1.did()),
+        "the storage-less predecessor s3 has not evicted n1 at the 10 s chain bound"
+    );
+
+    // Run the event-driven chain repair triggered by suspecting n1, drive the FindRelayHolder /
+    // RelayHolderFound resolution across the ring, and verify that within the 10 s chain bound
+    // (before s3's 45 s regular liveness timeout evicts n1), h0 clears dead n1, resolves n2 past
+    // the storage-less run, and connects directly to n2.
+    h0.swarm.stabilizer().repair_relay_chain().await?;
+    wait_for_msgs(ring).await;
+    assert_eq!(
+        h0.dht().relay_chain_neighbours()?.1,
+        Some(n2.did()),
+        "h0 clears dead n1 and resolves the next live holder n2 past the storage-less run"
+    );
+    assert!(
+        h0.swarm.transport.has_active_connection(n2.did()),
+        "h0 establishes a direct connection to the newly resolved n2"
     );
     Ok(())
 }

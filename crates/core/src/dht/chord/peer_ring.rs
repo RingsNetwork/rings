@@ -38,6 +38,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -161,6 +162,9 @@ pub struct PeerRing {
     /// reporter is still a successor; the transition core prunes departed
     /// reporters' tokens when a commit changes the successor list.
     pending_successor_sync: Mutex<topology::SuccessorSyncState>,
+    /// Per-peer ownership of outstanding `FindSuccessorReportHandler::Connect` lookups, in
+    /// insertion order so capacity eviction is FIFO.
+    pending_connect_lookup: Mutex<VecDeque<(Did, uuid::Uuid)>>,
     /// Origin of the monotonic clock behind every finger deadline and retry
     /// floor.
     ///
@@ -259,6 +263,7 @@ impl PeerRing {
             topology_transition: Mutex::new(()),
             pending_stabilization: Mutex::new(None),
             pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
+            pending_connect_lookup: Mutex::new(VecDeque::new()),
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
@@ -302,7 +307,7 @@ impl PeerRing {
     }
 
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
-    pub(crate) fn edges(&self) -> &SlotRoster {
+    pub fn edges(&self) -> &Arc<SlotRoster> {
         &self.edges
     }
 
@@ -377,6 +382,12 @@ impl PeerRing {
 
     fn lock_pending_successor_sync(&self) -> Result<MutexGuard<'_, topology::SuccessorSyncState>> {
         self.pending_successor_sync
+            .lock()
+            .map_err(|_| Error::LockPoisoned)
+    }
+
+    fn lock_pending_connect_lookup(&self) -> Result<MutexGuard<'_, VecDeque<(Did, uuid::Uuid)>>> {
+        self.pending_connect_lookup
             .lock()
             .map_err(|_| Error::LockPoisoned)
     }
@@ -589,6 +600,7 @@ impl PeerRing {
             (self.step(state, event), removal)
         })?;
         self.forget_relay_custody(did)?;
+        self.cancel_connect_lookup_for_peer(did)?;
         if chain_neighbour {
             self.relay_chain_changed();
         }
@@ -597,6 +609,78 @@ impl PeerRing {
         } else {
             removal
         })
+    }
+
+    /// Apply a voluntary `Leave` from `sender` iff this node holds `sender` as its predecessor
+    /// or successor (#1057).
+    ///
+    /// Removes only `sender` from this node's topology view and promotes any routable replacement
+    /// from `successor_list` while successor capacity remains, without removing any other peer.
+    pub(crate) fn handle_leave(
+        &self,
+        sender: Did,
+        successor_list: &[Did],
+        is_routable: impl Fn(Did) -> bool,
+    ) -> Result<Option<TopologyRemoval>> {
+        (sender != self.did)
+            .then(|| {
+                let (previous, next) = self.relay_chain_neighbours()?;
+                let chain_neighbour = previous == Some(sender) || next == Some(sender);
+                let capacity = self.successor_seq.capacity();
+                let (_, acted) = self.transition(|state, _| {
+                    match (
+                        state.predecessor == Some(sender),
+                        state.successors.contains(&sender),
+                    ) {
+                        (false, false) => (
+                            TopologyStep {
+                                state: state.clone(),
+                                actions: Vec::new(),
+                            },
+                            false,
+                        ),
+                        (_, held_as_successor) => {
+                            let mut step = self.step(state, TopologyEvent::Remove {
+                                peer: sender,
+                                successor: SuccessorRemoval::Preserve,
+                            });
+                            if held_as_successor {
+                                step.state.successors = successor_list
+                                    .iter()
+                                    .copied()
+                                    .filter(|&candidate| {
+                                        candidate != state.local
+                                            && candidate != sender
+                                            && is_routable(candidate)
+                                    })
+                                    .fold(step.state.successors, |successors, candidate| {
+                                        match successors.len() < capacity
+                                            && !successors.contains(&candidate)
+                                        {
+                                            true => topology::update_successors(
+                                                state.local,
+                                                &successors,
+                                                candidate,
+                                                capacity,
+                                            ),
+                                            false => successors,
+                                        }
+                                    });
+                            }
+                            (step, true)
+                        }
+                    }
+                })?;
+                acted
+                    .then(|| -> Result<TopologyRemoval> {
+                        self.forget_relay_custody(sender)?;
+                        chain_neighbour.then(|| self.relay_chain_changed());
+                        Ok(TopologyRemoval::Referenced)
+                    })
+                    .transpose()
+            })
+            .transpose()
+            .map(Option::flatten)
     }
 }
 
@@ -832,6 +916,24 @@ impl Chord<PeerRingAction> for PeerRing {
     fn fix_fingers(&self) -> Result<PeerRingAction> {
         self.begin_finger_revalidation()?;
         self.advance_finger_convergence()
+    }
+}
+
+impl PeerRing {
+    /// Apply a predecessor candidate only when it is consistent with the current topology.
+    pub(crate) fn notify_within_topology(&self, did: Did) -> Result<Option<Did>> {
+        let (next, ()) = self.transition(|state, _| {
+            let mut next_state = state.clone();
+            next_state.predecessor = topology::rectify_predecessor_in(state, did);
+            (
+                TopologyStep {
+                    state: next_state,
+                    actions: Vec::new(),
+                },
+                (),
+            )
+        })?;
+        Ok(next.state.predecessor)
     }
 }
 

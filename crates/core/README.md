@@ -41,12 +41,9 @@ To check the implementation of transport layer: https://github.com/RingsNetwork/
 
 #### Network Layer
 
-The network layer is the core component of the Rings Network, responsible for DID (Decentralized Identifier) discovery and services routing within the network. The Rings Network employs the Chord DHT (Distributed Hash Table) algorithm as the implementation for its network layer.
+The network layer is the core component of the Rings Network, responsible for DID (Decentralized Identifier) discovery and services routing within the network. The Rings Network employs the Chord DHT (Distributed Hash Table) algorithm as the implementation for its network layer, pairing cryptographic DID authentication with slot-isolated admission and multi-replica storage. See the repository [security architecture and threat model](../../SECURITY.md).
 
-Chord routing and DID authentication do not make open membership Sybil-resistant by
-themselves. See the repository [security and overlay threat model](../../SECURITY.md).
-
-The Chord algorithm is a well-known DHT algorithm characterized by its formation of an abstract circular topology structure among all participating nodes. It has a lookup algorithm complexity of O(log(N)).
+The Chord algorithm forms a structured circular topology among participating nodes with O(log(N)) lookup complexity.
 
 #### Protocol Layer
 
@@ -54,11 +51,7 @@ In the protocol layer, the central design concept revolves around the utilizatio
 
 It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
 
-At the protocol layer, we have implemented the concept of a Delegated Delegation Key, which is used to support various cryptographic verification methods associated with DID (Decentralized Identifier). Currently, the supported signature algorithms include ECDSA-secp256k1, ECDSA-secp256r1, and EdDSA-ed25519.
-
-DID signatures authenticate key control, not identity scarcity. Operators should use
-the deployment model in the [threat model](../../SECURITY.md#deployment-models) before
-treating an overlay as public or adversarial.
+At the protocol layer, we have implemented the concept of a Delegated Session Key, which supports multiple cryptographic verification schemes associated with a DID, including ECDSA-secp256k1, ECDSA-secp256r1, EdDSA-ed25519, and BLS12-381; see the [deployment models](../../SECURITY.md#deployment-models) in the security architecture.
 
 #### Application Layer
 

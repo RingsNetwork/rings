@@ -111,7 +111,7 @@ impl InboundProcessor {
             }
             ReplayWindow::Link => {
                 self.logical
-                    .admit_link_transaction(&self.link_windows, payload, message, lane, edge)
+                    .admit_link_transaction(&self.link_windows, payload, message, lane, arrival)
                     .await
             }
         }

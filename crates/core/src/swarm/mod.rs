@@ -278,6 +278,13 @@ impl Swarm {
         self.transport.disconnect(peer).await
     }
 
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
+    /// members through the ack-gated hand-off and send `Leave { successor_list }` to this node's
+    /// predecessor and successor head before transports close.
+    pub async fn leave(&self) -> Result<()> {
+        self.transport.leave().await
+    }
+
     /// Close this swarm: it opens no connection from now on, and every connection it has,
     /// admitted or still handshaking, is disconnected and physically closed before this returns
     /// (the close law of `SwarmTransport::close`, #1098).

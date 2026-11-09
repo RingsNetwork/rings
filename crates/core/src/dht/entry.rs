@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use bytes::Bytes;
@@ -18,6 +17,7 @@ use crate::error::Result;
 
 mod crdt;
 pub(crate) mod inbox;
+mod provenance;
 mod retention;
 
 #[cfg(test)]
@@ -31,6 +31,8 @@ pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
+use provenance::retain_fair_data_elements;
+use provenance::RetractionWitness;
 pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
@@ -549,7 +551,7 @@ impl Entry {
     }
 
     /// Every version this entry carries: element dots, tombstones, and the reset floor.
-    fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
+    pub(super) fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
             .iter()
@@ -604,7 +606,7 @@ impl Entry {
     }
 
     /// This entry's normalized carrier state (see [`DataTopicBuffer::new`]).
-    fn topic_buffer(&self) -> Result<DataTopicBuffer> {
+    pub(super) fn topic_buffer(&self) -> Result<DataTopicBuffer> {
         let raw = self.raw_buffer()?;
         Ok(DataTopicBuffer::new(raw.register, raw.values, raw.removes))
     }
@@ -631,8 +633,15 @@ impl Entry {
                 .cmp(right_dot)
                 .then_with(|| left_value.cmp(right_value))
         });
-        let skip_count = visible.len().saturating_sub(kind.max_data_len());
-        let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
+        if visible.len() > kind.max_data_len() {
+            visible = match kind {
+                EntryKind::Data => retain_fair_data_elements(visible, kind.max_data_len()),
+                EntryKind::RelayMessage => {
+                    let skip_count = visible.len().saturating_sub(kind.max_data_len());
+                    visible.into_iter().skip(skip_count).collect()
+                }
+            };
+        }
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
         let mut tombstones = removes
             .into_iter()
@@ -757,23 +766,18 @@ impl Entry {
         self.validate_same_carrier(&other)?;
 
         let expires_at_ms = self.expires_at_ms;
-        let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
-        let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
-        let has_dot_witness = !target_dots.is_empty();
+        let witness = RetractionWitness::of(&other);
 
         let mut buffer = self.topic_buffer()?;
         let removed = buffer
             .values
             .iter()
-            .filter(|(value, dot)| match has_dot_witness {
-                true => target_dots.contains(*dot),
-                false => target_values.contains(*value),
-            })
+            .filter(|(value, dot)| witness.matches(value, dot))
             .map(|(value, _)| value.clone())
             .collect::<Vec<_>>();
-        for value in removed.iter() {
+        removed.iter().for_each(|value| {
             buffer.remove(value);
-        }
+        });
         Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
     }
 }

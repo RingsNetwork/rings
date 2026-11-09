@@ -359,6 +359,26 @@ pub(crate) enum CarrierStore<'a> {
 }
 
 impl CarrierStore<'_> {
+    /// Whether this store is the factored replicated data store, where per-actor provenance is
+    /// enforced (the fetch cache uses [`Self::Whole`]).
+    pub(crate) const fn enforces_data_provenance(&self, kind: EntryKind) -> bool {
+        matches!(self, Self::Factored { .. }) && matches!(kind, EntryKind::Data)
+    }
+
+    /// Return `local` with cross-actor tombstones targeting `incoming` evicted when this store
+    /// enforces data provenance, or unchanged otherwise.
+    pub(crate) fn sanitize_local_tombstones(
+        &self,
+        local: Entry,
+        incoming: &Entry,
+        fallback_actor: Did,
+    ) -> Entry {
+        match self.enforces_data_provenance(incoming.kind) {
+            true => local.without_cross_actor_tombstones_for(incoming, fallback_actor),
+            false => local,
+        }
+    }
+
     /// Run the recovery pass once: normalize every element side that has a remove side against
     /// it, and count every remove side. Later calls only read the flag, and hold no lock.
     async fn ensure_recovered(

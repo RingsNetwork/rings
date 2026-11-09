@@ -401,3 +401,104 @@ async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression test (#1179): over the 2-node Swarm message pipeline, a second peer (`node2`)
+/// cannot wipe `node1`'s topic entry via `storage_store` (`EntryOperation::Overwrite`) or
+/// `storage_tombstone_data` (`EntryOperation::Tombstone`), nor evict `node1`'s entry by
+/// flooding `ENTRY_DATA_MAX_LEN` items via `storage_extend`.
+#[tokio::test]
+async fn test_unprivileged_peer_cannot_wipe_or_evict_other_peers_data_topic() -> Result<()> {
+    let topic = "shared-discovery-topic-1179".to_string();
+    let entry_key = Entry::gen_did(&topic)?;
+    let (node1, node2) = writer_and_remote_owner(entry_key).await?;
+
+    // node1 publishes its record onto the shared topic.
+    node1
+        .swarm
+        .storage_append_data(&topic, Bytes::from("node1-record"))
+        .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    // 1. node2 attempts to wipe the topic with an empty Overwrite (`vec![]`) and a single-item Overwrite.
+    let empty_entry = Entry::new(entry_key, vec![], crate::dht::entry::EntryKind::Data);
+    assert!(matches!(
+        node2.swarm.storage_store(empty_entry.clone()).await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    let hijack_entry: Entry = (topic.clone(), Bytes::from("node2-overwrite")).try_into()?;
+    assert!(matches!(
+        node2.swarm.storage_store(hijack_entry.clone()).await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 2. node2 attempts to tombstone node1's record.
+    assert!(matches!(
+        node2
+            .swarm
+            .storage_tombstone_data(&topic, Bytes::from("node1-record"))
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // Also verify over-the-wire rejection when node2 publishes its own record and remote node1
+    // tries to tombstone node2's record or overwrite the shared topic.
+    node2
+        .swarm
+        .storage_append_data(&topic, Bytes::from("node2-record"))
+        .await?;
+    node1.swarm.storage_store(empty_entry).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    node1.swarm.storage_store(hijack_entry).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    node1
+        .swarm
+        .storage_tombstone_data(&topic, Bytes::from("node2-record"))
+        .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    let held_after_attacks = node2
+        .dht()
+        .storage
+        .get(&entry_key.to_string())
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("topic missing on owner".to_string()))?;
+    assert_eq!(held_after_attacks.data, vec![
+        Bytes::from("node1-record"),
+        Bytes::from("node2-record"),
+    ]);
+
+    // 3. node1 floods `ENTRY_DATA_MAX_LEN` items via `storage_extend` over the wire;
+    //    node2's record (and node1's newest items) must survive.
+    let flood = (0..crate::consts::ENTRY_DATA_MAX_LEN)
+        .map(|i| Bytes::from(format!("flood-{i}")))
+        .collect::<Vec<_>>();
+    node1
+        .swarm
+        .storage_extend(&topic, flood, MAX_TTL_MS)
+        .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    let held_after_flood = node2
+        .dht()
+        .storage
+        .get(&entry_key.to_string())
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("topic missing after flood".to_string()))?;
+    assert_eq!(
+        held_after_flood.data.len(),
+        crate::consts::ENTRY_DATA_MAX_LEN
+    );
+    assert!(
+        held_after_flood.data.contains(&Bytes::from("node2-record")),
+        "node2's record must not be evicted by node1's flood"
+    );
+    Ok(())
+}

@@ -23,12 +23,15 @@ use super::SwarmConnection;
 use super::SwarmTransport;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::dht::topology::TopologyRemoval;
-use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::Leave;
+use crate::message::Message;
+use crate::message::PayloadSender;
+use crate::message::SyncEntriesWithSuccessor;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
@@ -348,6 +351,64 @@ impl SwarmTransport {
         self.notify_admitted_predecessor_with_observer(peer, || {})
     }
 
+    /// Apply a voluntary `Leave` from `sender` iff this node holds `sender` as its predecessor
+    /// or successor (#1057).
+    pub(crate) fn handle_peer_leave(
+        &self,
+        sender: Did,
+        successor_list: &[Did],
+    ) -> Result<Option<TopologyRemoval>> {
+        self.with_connection_lifecycle(|| {
+            let active = self.active_connections()?;
+            self.dht.handle_leave(sender, successor_list, |peer| {
+                self.is_routable_active_candidate(peer, &active)
+            })
+        })
+    }
+
+    /// Best-effort voluntary departure (#1057): hand off live relay carriers to remaining
+    /// members through the ack-gated hand-off and send `Leave { successor_list }` to this node's
+    /// predecessor and successor head before transports close.
+    pub(crate) async fn leave(&self) -> Result<()> {
+        if let Ok(deliveries) = self
+            .dht
+            .hand_off_relay_carriers_for_leave()
+            .await
+            .and_then(|action| action.coalesced_storage_sync_deliveries())
+        {
+            join_all(deliveries.into_iter().map(|delivery| async move {
+                let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
+                let _ = self.send_storage_sync_tracked(msg).await;
+            }))
+            .await;
+        }
+
+        let state = self.dht.topology_state()?;
+        let targets = state.leave_targets();
+        let leave_msg = Message::Leave(Leave {
+            successor_list: state.successors,
+        });
+        join_all(
+            targets
+                .into_iter()
+                .filter(|&target| self.get_connection(target).is_some())
+                .map(|target| {
+                    let leave_msg = leave_msg.clone();
+                    async move {
+                        if let Ok(payload) = self
+                            .protocol_egress()
+                            .originate(leave_msg, target, Some(target))
+                            .await
+                        {
+                            let _ = self.send_payload_tracked(payload).await;
+                        }
+                    }
+                }),
+        )
+        .await;
+        Ok(())
+    }
+
     fn notify_admitted_predecessor_with_observer(
         &self,
         peer: Did,
@@ -359,7 +420,9 @@ impl SwarmTransport {
                 return Ok(None);
             }
             observe_admission();
-            self.dht.notify(peer).map(Some)
+            self.dht
+                .notify_within_topology(peer)
+                .map(|predecessor| Some(predecessor.unwrap_or(peer)))
         })
     }
 
@@ -677,14 +740,13 @@ impl SwarmTransport {
     ) -> Result<RetirementOutcome<()>> {
         let connection = self.get_raw_connection(attempt.peer);
         let outcome = self.retire_active_connection_if(attempt, |_| {
-            if self
-                .dht
-                .with_topology_state(|topology| topology.references(attempt.peer))?
-            {
-                return Ok(None);
+            match self.dht.retains_active_connection(attempt.peer)? {
+                true => Ok(None),
+                false => {
+                    self.dht.remove(attempt.peer)?;
+                    Ok(Some(()))
+                }
             }
-            self.dht.remove(attempt.peer)?;
-            Ok(Some(()))
         })?;
         if let (true, Some(connection)) = (outcome.is_retired(), connection) {
             if let Err(error) = self.close_connection_for_disconnect(&connection).await {

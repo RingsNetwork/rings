@@ -311,8 +311,9 @@ async fn place_entry_operation(
     match route {
         OperateRoute::Owned => {
             let now_ms = get_epoch_ms();
+            let writer = ctx.transaction.origin();
             let applied = match dht
-                .stamp_operation(msg.op.clone(), now_ms, Some(msg.placement))
+                .stamp_operation_by(msg.op.clone(), now_ms, writer, Some(msg.placement))
                 .await
             {
                 Ok(op) => {
@@ -320,7 +321,7 @@ async fn place_entry_operation(
                         now_ms,
                         msg.placement,
                         op,
-                        ctx.transaction.origin(),
+                        writer,
                         context.introducer(),
                     )
                     .await

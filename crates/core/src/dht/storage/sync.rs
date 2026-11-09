@@ -13,7 +13,6 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::relay_holder::relay_carrier_offer;
-use crate::dht::relay_holder::CarrierOffer;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageKey;
@@ -188,13 +187,13 @@ impl PeerRing {
 
         // The wire batching happens once, in
         // `PeerRingAction::coalesced_storage_sync_deliveries`.
-        if data.is_empty() {
-            return Ok(PeerRingAction::None);
-        }
-        Ok(PeerRingAction::sync_entries_for_handoff(
-            StorageSyncDestination::PhysicalOwner(new_successor),
-            data,
-        ))
+        Ok(match data.is_empty() {
+            true => PeerRingAction::None,
+            false => PeerRingAction::sync_entries_for_handoff(
+                StorageSyncDestination::PhysicalOwner(new_successor),
+                data,
+            ),
+        })
     }
 
     /// Hand every relay carrier of `items` this node keeps as no member to the nodes
@@ -209,25 +208,70 @@ impl PeerRing {
     /// remove the local copy, once a member holds it.
     fn hand_off_relay_carriers(&self, items: Vec<(StorageKey, Entry)>) -> Result<PeerRingAction> {
         let segment = self.relay_segment()?;
+        self.hand_off_relay_carriers_with_segment(items, &segment, &[])
+    }
+
+    /// Every live relay-inbox carrier stored on this node at `now_ms`.
+    pub(crate) async fn get_relay(&self, now_ms: u128) -> Result<Vec<(StorageKey, Entry)>> {
+        Ok(self
+            .live_storage_entries(now_ms)
+            .await?
+            .into_iter()
+            .filter(|(_, entry)| entry.kind.is_relay_inbox())
+            .collect())
+    }
+
+    /// Invokes `then` when this node holds at least one live relay-inbox carrier at `now_ms`,
+    /// returning [`PeerRingAction::None`] when none are stored.
+    async fn with_non_empty_relay_and_then(
+        &self,
+        now_ms: u128,
+        then: impl FnOnce(Vec<(StorageKey, Entry)>) -> Result<PeerRingAction>,
+    ) -> Result<PeerRingAction> {
+        let relay = self.get_relay(now_ms).await?;
+        match relay.is_empty() {
+            true => Ok(PeerRingAction::None),
+            false => then(relay),
+        }
+    }
+
+    /// Offer every live relay carrier this node keeps as an ownership hand-off before leaving
+    /// (#1057), computing membership under a view where this node holds no relay mail.
+    pub(crate) async fn hand_off_relay_carriers_for_leave(&self) -> Result<PeerRingAction> {
+        self.with_non_empty_relay_and_then(get_epoch_ms(), |relay| {
+            let segment = self.relay_segment_for_leave()?;
+            let (previous, next) = self.relay_chain_neighbours()?;
+            let fallback = next
+                .into_iter()
+                .chain(previous)
+                .filter(|&peer| peer != self.did)
+                .collect::<Vec<_>>();
+            self.hand_off_relay_carriers_with_segment(relay, &segment, &fallback)
+        })
+        .await
+    }
+
+    fn hand_off_relay_carriers_with_segment(
+        &self,
+        items: Vec<(StorageKey, Entry)>,
+        segment: &crate::dht::relay_holder::RelaySegment,
+        fallback_targets: &[Did],
+    ) -> Result<PeerRingAction> {
         let hints = self.relay_holder_hints()?;
         Ok(items
             .into_iter()
             .flat_map(|(key, entry)| {
                 let named = hints.get(&key.placement()).copied();
-                let CarrierOffer { purpose, targets } = relay_carrier_offer(
-                    &segment,
+                // A member's copies go through chain repair, one offer per neighbour (`Law
+                // (Chain repair)`); a keeper that is no member hands its carrier off here.
+                let targets = relay_carrier_offer(
+                    segment,
                     key.placement(),
                     self.did,
                     named,
                     self.relay_replicas(),
-                );
-                // A member's copies go through chain repair, one offer per neighbour (`Law
-                // (Chain repair)`); a keeper that is no member hands its carrier off here.
-                let targets = if purpose.permits_source_cleanup() {
-                    targets
-                } else {
-                    Vec::new()
-                };
+                )
+                .into_handoff_targets(fallback_targets);
                 targets.into_iter().map(move |target| {
                     PeerRingAction::sync_entries_for_handoff(
                         StorageSyncDestination::PhysicalOwner(target),

@@ -90,7 +90,7 @@ struct SlotTable {
 
 /// The connection slots of a node (module documentation).
 #[derive(Debug)]
-pub(crate) struct SlotRoster {
+pub struct SlotRoster {
     /// The slot assignment.
     table: Mutex<SlotTable>,
     /// Notified after every change of the current edges (the edge-watch law).
@@ -99,7 +99,7 @@ pub(crate) struct SlotRoster {
 
 impl SlotRoster {
     /// A roster of `slots` free slots, `0..slots` (at most `u16::MAX + 1`).
-    pub(crate) fn new(slots: usize) -> Self {
+    pub fn new(slots: usize) -> Self {
         let last = u16::try_from(slots.saturating_sub(1)).unwrap_or(u16::MAX);
         let free = match slots {
             0 => BTreeSet::new(),
@@ -125,28 +125,39 @@ impl SlotRoster {
     /// holds none and its deliveries are [`Principal::Unbound`]; it is a current edge all the
     /// same, and takes a slot at a later arrival that finds one free. Only an edge that was not
     /// current changes the count and notifies (the edge-watch law). `O(R log R)`.
-    pub(crate) fn arrive(&self, edge: Did, floor_use: &SlotFloorUse) {
+    pub fn arrive(&self, edge: Did, floor_use: &SlotFloorUse) {
+        self.arrive_preferring(edge, None, floor_use);
+    }
+
+    /// Give `edge` `preferred` if that slot is currently free, or else the cleanest free slot
+    /// under `floor_use` (module law), unless `edge` already holds a slot. Used when a reconnecting
+    /// peer still has residual window load bound to `preferred` so it resumes its own slot ledger
+    /// instead of acquiring a fresh one.
+    pub fn arrive_preferring(&self, edge: Did, preferred: Option<u16>, floor_use: &SlotFloorUse) {
         let arrived = {
             let mut table = self.table();
-            if table.held.contains_key(&edge) {
-                return;
-            }
-            let was_current = table.unslotted.remove(&edge);
-            let cleanest = table
-                .free
-                .iter()
-                .copied()
-                .min_by_key(|slot| (floor_use.of(*slot), *slot));
-            match cleanest {
-                Some(slot) => {
-                    table.free.remove(&slot);
-                    table.held.insert(edge, slot);
+            (!table.held.contains_key(&edge)).then(|| {
+                let was_current = table.unslotted.remove(&edge);
+                let chosen = preferred
+                    .filter(|slot| table.free.contains(slot))
+                    .or_else(|| {
+                        table
+                            .free
+                            .iter()
+                            .copied()
+                            .min_by_key(|slot| (floor_use.of(*slot), *slot))
+                    });
+                match chosen {
+                    Some(slot) => {
+                        table.free.remove(&slot);
+                        table.held.insert(edge, slot);
+                    }
+                    None => {
+                        table.unslotted.insert(edge);
+                    }
                 }
-                None => {
-                    table.unslotted.insert(edge);
-                }
-            }
-            !was_current
+                !was_current
+            }) == Some(true)
         };
         if arrived {
             self.changed.notify(usize::MAX);
@@ -155,12 +166,12 @@ impl SlotRoster {
 
     /// Whether `edge` holds a slot: an arrival of such an edge keeps it, so its caller need not
     /// read the tables' floor use.
-    pub(crate) fn holds(&self, edge: Did) -> bool {
+    pub fn holds(&self, edge: Did) -> bool {
         self.table().held.contains_key(&edge)
     }
 
     /// Free the slot of `edge`, if it holds one; `edge` is no longer a current edge.
-    pub(crate) fn depart(&self, edge: Did) {
+    pub fn depart(&self, edge: Did) {
         {
             let mut table = self.table();
             if let Some(slot) = table.held.remove(&edge) {
@@ -173,20 +184,20 @@ impl SlotRoster {
     }
 
     /// The number of current edges (the edge-watch law).
-    pub(crate) fn count(&self) -> usize {
+    pub fn count(&self) -> usize {
         let table = self.table();
         table.held.len().saturating_add(table.unslotted.len())
     }
 
     /// A listener woken by the next change of the current edges after this call (the edge-watch
     /// law).
-    pub(crate) fn changed(&self) -> EventListener {
+    pub fn changed(&self) -> EventListener {
         self.changed.listen()
     }
 
     /// The principal a delivery on `edge` is charged to: its slot, or [`Principal::Unbound`]
     /// for no edge or an edge that holds none.
-    pub(crate) fn principal_of(&self, edge: Option<Did>) -> Principal {
+    pub fn principal_of(&self, edge: Option<Did>) -> Principal {
         edge.and_then(|edge| self.table().held.get(&edge).copied())
             .map_or(Principal::Unbound, Principal::Slot)
     }

@@ -6,18 +6,17 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 
 ## What Rings is
 
-- Overlay (communication layer): a Chord DHT (successor list, finger table, stabilization) keyed by DID. `network_id` isolates independent overlays. Its contract is routing and, after the E2E handshake, confidentiality to a DID; every hop sees the origin DID by signature and the destination DID by routing, so it has no unlinkability goal. It minimizes leakage; it does not provide privacy.
-- Privacy layer: onion loops in `crates/node/src/onion`, client-sealed loops of fixed-width Sphinx cells over direct edges, with constant-rate link emission that substitutes real cells for cover, paid admission, fixed cell size classes, and route selection from the onion-relay and onion-exit registries. Each position learns only its predecessor and successor; the client is hidden from the exit but not from its first hop, and membership and each link's active/idle phase are not hidden. The two contracts are drawn in SECURITY.md under Layer Contracts.
-- Transport: WebRTC datachannels, native and browser (web_sys), with STUN/ICE/SDP for NAT traversal. No server sits in the data path; seed nodes only help a peer find its first connection.
-- Identity: a DID derived from a public key. Signature schemes: secp256k1 (EIP-191, bip137), secp256r1 (P-256), ed25519, BLS; the browser console signs with WebCrypto P-256, MetaMask, or Phantom. DID authentication proves control of a key; making identities scarce is a separate property, planned as epoch-randomized ring positions (#780). SECURITY.md is authoritative for every security claim.
+- Overlay (communication layer): a Chord DHT (successor list, finger table, stabilization) keyed by DID with `network_id` overlay isolation. It provides authenticated O(log N) routing, replicated CRDT and relay-inbox storage, and end-to-end ElGamal stream encryption after a peer handshake.
+- Privacy layer: onion loops in `crates/node/src/onion`, client-sealed loops of fixed-width Sphinx cells over direct edges through pinned entry guards, with constant-rate link emission that substitutes real cells for cover, paid per-hop admission, fixed cell size classes, and route selection from the signed onion-relay and onion-exit directories. Each relay learns only its immediate predecessor and successor, while exits process payloads without learning the client identity. The layer contracts are defined in SECURITY.md under Layer Contracts.
+- Transport: WebRTC datachannels, native and browser (web_sys), with STUN/ICE/SDP for NAT traversal. Data flows directly peer to peer; seed nodes assist initial bootstrap discovery.
+- Identity: a DID derived from a public key. Signature schemes: secp256k1 (EIP-191, bip137), secp256r1 (P-256), ed25519, BLS; the browser console signs with WebCrypto P-256, MetaMask, or Phantom. DIDs pair short-lived session delegations with slot-isolated admission, with epoch-randomized ring placement (#780) and DRanking trust algebra (#748) on the 2.0 track. SECURITY.md is authoritative for security architecture claims.
 - Protocol runtime: `Protocol::step` is pure (state, event -> state, effects); an `Interpret` shell performs the effects through a namespace-scoped capability. Built-in protocols: relay (TCP/UDP tunnels over the overlay) and echo. Applications register their own by namespace: `provider.register_protocol(..)` in Rust, `provider.on(namespace, initialState, handler)` in JavaScript.
 - Targets: the native daemon (`rings` CLI with a JSON-RPC API over HTTP), the browser/Wasm node (npm `@ringsnetwork/rings-node`; the rings.rs frontend and its Chrome extension), and a C FFI (`crates/node/include/rings.h`).
 
 ## Status
 
-- Shipped: the overlay, native and browser nodes, the onion privacy layer (TCP/HTTPS exits, TUN gateway, onion WebView), replay protection and per-origin rate limits, a public seed (https://node.rings.rs), and the hosted console (https://rings.rs/#node).
-- Versions: pre-1.0 the wire protocol is unversioned, and a release that changes it is a network-wide upgrade. 1.0 freezes the protocol once connectivity and churn handling are stable; DRanking is 2.0.
-- Next: churn handling (#773-#779), onion loops (#834), then epoch-randomized ring positions (#780); see ROADMAP.md.
+- Shipped: the Chord overlay, native and browser nodes, wire-versioned framing, the onion privacy layer (TCP/HTTPS exits, TUN gateway, onion WebView), crash-consistent replay protection, slot-isolated resource accounting, per-origin rate quotas, chain-replicated relay custody, a public seed (https://node.rings.rs), and the hosted console (https://rings.rs/#node).
+- Roadmap: 1.0 completes adaptive churn handling (#773-#779) and onion Kleisli pipelines (#834); 2.0 delivers epoch-randomized ring positions (#780) and DRanking decentralized trust ranking (#748). See ROADMAP.md.
 - To evaluate Rings, read README.md, SECURITY.md, and ROADMAP.md, in that order.
 
 ## Documentation
@@ -25,7 +24,7 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 - [Documentation book](https://rings.rs/docs/): the reference; source in `docs/src`, built with mdBook and published from master.
 - [Guide](https://rings.rs/#guide): the abridged version: one card per runtime and the first commands; the book is authoritative.
 - [README](https://github.com/RingsNetwork/rings/blob/master/README.md): overview, architecture table, examples, whitepaper citation.
-- [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): threat model, assumptions, deployment models, non-goals, the communication-layer and privacy-layer contracts, feature boundaries, and how to report a vulnerability.
+- [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): security architecture, layer contracts, feature guarantees, deployment models, and vulnerability reporting.
 - [ROADMAP.md](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): shipped foundations and the network-layer and privacy-layer tracks.
 - [Whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the protocol paper; LaTeX source beside it.
 - [JSON-RPC API](https://rings.rs/docs/jsonrpc.html): every method of the node API with curl examples.
@@ -36,41 +35,41 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 
 ## Source map
 
-- `crates/core`: Chord DHT, swarm, DID and elliptic-curve identity, message types, DHT storage bounds. Protocol only: application registries and descriptors do not belong here.
+- `crates/core`: Chord DHT, swarm, DID and elliptic-curve identity, message types, DHT storage bounds. Protocol only: application registries and descriptors live in `node`.
 - `crates/transport`: the WebRTC transports (`native-webrtc`, `web-sys-webrtc`) and the `dummy` transport that topology tests run on.
 - `crates/node`: the node. Native daemon and CLI (`bin/rings.rs`, `src/native`), browser provider (`src/provider/browser`), FFI provider (`src/provider/ffi.rs`, feature `ffi`), extension runtime and built-in protocols (`src/extension`), the privacy layer: onion loops, constant-rate link emission, paid admission, exit registry (`src/onion`), JSON-RPC handlers (`src/rpc_impl.rs`), seeds, peer quotas, registries.
-- `crates/rpc`: RPC types and the JSON-RPC client. Its protos are plain data mirrors of node types, never behaviour.
+- `crates/rpc`: RPC types and the JSON-RPC client. Its protos are plain data mirrors of node types.
 - `crates/codec`: the serde wire codec. `crates/derive`: proc macros, including `wasm_export`.
 - `crates/measure`: pure local peer credit and reliability algorithms. `crates/network-policy`: the public-network admission policy for egress targets. `crates/gateway`: the native TUN gateway that carries selected TCP destinations over onion loops (vendored netlink under `vendor/`). `crates/webview`: onion-backed WebView gateway primitives.
-- `frontend/`: the Yew/Wasm web app and Chrome MV3 extension, its own Cargo workspace; TypeScript glue in `extension-assets/` and `scripts/` is compiled, never checked in as JavaScript.
+- `frontend/`: the Yew/Wasm web app and Chrome MV3 extension, its own Cargo workspace; TypeScript glue in `extension-assets/` and `scripts/` is compiled from source.
 - `examples/`: `mailbox` (SMTP in, IMAP out, through a DNS relay or a mail gateway, and the mail gateway `rings-mail-gateway`), `native` and `relay` (workspace members), `dweb` (its own Yew workspace), `ffi` (Python, Swift, Kotlin wrappers and tests), `proof-demo`.
-- `docs/`: the mdBook (`book.toml`, `src/`, `theme/`). `papers/`: the whitepaper.
+- `docs/`: the mdBook (`book.toml`, `src/`, `theme/`). `papers/`: the whitepaper and formal companion papers.
 
 ## Build and test
 
-- Toolchain: `rust-toolchain.toml` pins the stable compiler. The workspace denies warnings, so install commands name the pin (`cargo +<pin> install --locked rings-node`); a pin bump updates them in README.md, `crates/node/README.md`, `docs/src/install-a-native-node.md`, and `frontend/src/guide.rs`; formatting requires nightly rustfmt (`cargo +nightly fmt`), and stable rustfmt produces a different layout that fails CI. TOML is formatted with taplo; spelling is checked with typos.
+- Toolchain: `rust-toolchain.toml` pins the stable compiler (`cargo +<pin> install --locked rings-node`); a pin bump updates README.md, `crates/node/README.md`, `docs/src/install-a-native-node.md`, and `frontend/src/guide.rs`; formatting uses nightly rustfmt (`cargo +nightly fmt`). TOML is formatted with taplo; spelling is checked with typos.
 - Native: `cargo build`; `cargo test --release --all --all-targets`; install the CLI with `cargo install --path crates/node`, then `rings init` and `rings run`.
-- Wasm: `cargo clippy -p rings-node --features browser --no-default-features --target wasm32-unknown-unknown`; the npm package is built by `wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default` (`npm run wasm_pack`); browser tests use wasm-bindgen-test in a headless Chrome.
+- Wasm: `cargo clippy -p rings-node --features browser --no-default-features --target wasm32-unknown-unknown`; the npm package is built by `wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default` (`npm run wasm_pack`); browser tests use wasm-bindgen-test in headless Chrome.
 - Frontend (from `frontend/`): `cargo check --target wasm32-unknown-unknown`; `cargo clippy --target wasm32-unknown-unknown --all-targets -- -D warnings`; `cargo test --release --target wasm32-unknown-unknown`; `trunk serve --release true` to run it. Extension: `npm ci --ignore-scripts && npm run package:frontend-extension` from the root.
 - FFI: `cargo build -p rings-node --features ffi`; `RINGS_FFI_REQUIRE_LIBRARY=1 pytest examples/ffi/tests`.
-- Docs: `mdbook build docs`; `mdbook serve docs` to preview; a chapter listed in `SUMMARY.md` without a file fails the build.
-- Decode-boundary smoke: set `RINGS_DECODE_BOUNDARY_SEED` and `RINGS_DECODE_BOUNDARY_CASES`, then run the `decode_boundary` test filters for `rings-core`, `rings-transport`, and `rings-node`; CI generates these values instead of committing corpora.
+- Docs: `mdbook build docs`; `mdbook serve docs` to preview.
+- Decode-boundary smoke: set `RINGS_DECODE_BOUNDARY_SEED` and `RINGS_DECODE_BOUNDARY_CASES`, then run the `decode_boundary` test filters for `rings-core`, `rings-transport`, and `rings-node`.
 - Gates a change must pass (`.github/workflows/qaci.yml`): clippy with `-D warnings` on the native, wasm, and ffi feature sets; `cargo +nightly fmt --check`; rustdoc with `-D warnings`; `taplo format --check`; typos; cargo-deny; Miri on core invariants; the native, wasm, frontend, dweb, gateway, and generated decode-boundary test suites; the docs build.
 
 ## Conventions
 
 - Layering: `core` is protocol only; application registries and descriptors live in `node`; `rpc` protos are plain DTO mirrors. Check every new type's vocabulary against the crate it lands in.
 - Pure core, imperative shell: keep state transitions pure and explicit, represent effects as data, and confine IO to the interpreter that runs them.
-- Lints are declared in the workspace `[lints]`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, and `indexing_slicing` are denied on production paths. Never add `#[allow(..)]` for a quality lint; fix the cause (a struct for too many arguments, `Box` for a large enum variant).
+- Lints are declared in the workspace `[lints]`: `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, and `indexing_slicing` are denied on production paths. Fix the underlying structure (a struct for many arguments, `Box` for a large enum variant) rather than suppressing lints.
 - Imports: one item per `use` line, no glob imports. Prefer method forms (`deref()`, `as_ref()`, `as_slice()`, `clone()`) to `&` and `*` in expressions.
-- Tests are deterministic: wait for a concrete event (a generation counter, a channel message, a state predicate), never for a duration; run topology tests on the `dummy` transport.
-- Comments and docs explain why, not what. When a behaviour or boundary changes, sweep every comment and document that states it in the same commit.
+- Tests are deterministic: wait for a concrete event (a generation counter, a channel message, a state predicate) and run topology tests on the `dummy` transport.
+- Comments and docs explain why, not what. When a behaviour or boundary changes, update every comment and document that states it in the same commit.
 - Commit messages, pull requests, and reviews are written in English. The workspace version in `Cargo.toml` is bumped with user-visible changes.
-- License: AGPL-3.0-only for every crate, the frontend, and the npm package (`LICENSE`, the `license` fields, `deny.toml`). Derived works and network services built on Rings must publish their source; a commercial license for use outside those terms is available from Rings Network on request. Never add code under a license the AGPL cannot absorb.
+- License: AGPL-3.0-only for every crate, the frontend, and the npm package (`LICENSE`, the `license` fields, `deny.toml`). Derived works and network services built on Rings publish their source under the AGPL; a commercial license is available from Rings Network on request.
 
 ## Optional
 
 - [crates.io: rings-node](https://crates.io/crates/rings-node), [docs.rs](https://docs.rs/rings-node), [npm: @ringsnetwork/rings-node](https://www.npmjs.com/package/@ringsnetwork/rings-node).
 - [Releases](https://github.com/RingsNetwork/rings/releases): prebuilt `rings` for macOS (x86_64, aarch64) and Linux (x86_64 musl, aarch64 gnu), and the wasm package; one-line installer at `install.sh` (https://rings.rs/install.sh) and static service templates under `contrib/`.
-- Public seed node: https://node.rings.rs. Its external handshake (`nodeDid`, `answerOffer`) is public; status and control methods need its Bearer token.
+- Public seed node: https://node.rings.rs. Its external handshake (`nodeDid`, `answerOffer`) is public; status and control methods use its Bearer token.
 - Official X (Twitter) account: https://x.com/RingsNetworkio.
