@@ -151,6 +151,56 @@ pub fn rectify_predecessor_in(state: &TopologyState, candidate: Did) -> Option<D
         .or(state.predecessor)
 }
 
+/// Correct bounded multi-predecessor list after one topology-aware rectify transition.
+///
+/// Law:
+/// 1. If `!can_rectify_predecessor(state, candidate)` or `capacity == 0`, the existing
+///    predecessor list is preserved (ordered by descending `dist(local, p)`).
+/// 2. If `candidate` is strictly closer to `state.local` counter-clockwise than the current
+///    primary predecessor (`dist(local, candidate) > dist(local, primary)`), `candidate`
+///    supersedes the list as `vec![candidate]` so that on a transitive ring a newly joined
+///    closer predecessor immediately retires stale predecessors behind it.
+/// 3. Otherwise (`dist(local, candidate) <= dist(local, primary)`), `candidate` is a sub-ring
+///    predecessor behind `primary` that still treats `state.local` as its reachable head; it is
+///    inserted into `predecessors` ordered by descending `dist(local, p)`, deduplicated, and
+///    truncated to `capacity`.
+pub fn rectify_predecessors_in(state: &TopologyState, candidate: Did, capacity: usize) -> Vec<Did> {
+    let mut existing: Vec<Did> = state
+        .predecessors
+        .iter()
+        .copied()
+        .chain(state.predecessor)
+        .filter(|&peer| peer != state.local)
+        .fold(Vec::new(), |mut acc, peer| {
+            push_unique(&mut acc, peer);
+            acc
+        });
+    existing.sort_by_key(|&peer| std::cmp::Reverse(dist(state.local, peer)));
+    existing.truncate(capacity);
+
+    if capacity == 0 || !can_rectify_predecessor(state, candidate) {
+        return existing;
+    }
+
+    let mut current: Vec<Did> = existing
+        .into_iter()
+        .filter(|&peer| can_rectify_predecessor(state, peer))
+        .collect();
+
+    match current.first().copied() {
+        None => vec![candidate],
+        Some(primary) if dist(state.local, candidate) > dist(state.local, primary) => {
+            vec![candidate]
+        }
+        Some(_) => {
+            push_unique(&mut current, candidate);
+            current.sort_by_key(|&peer| std::cmp::Reverse(dist(state.local, peer)));
+            current.truncate(capacity);
+            current
+        }
+    }
+}
+
 /// Correct successor list after one HMCC/Zave stabilize transition.
 ///
 /// The candidate set is the HMCC merge `known = {local} ∪ current ∪ {pred} ∪
@@ -356,14 +406,99 @@ pub(super) fn step_stabilize(
     if let Some(end) = successor_proof_end {
         finger_convergence.confirm_range(0, end);
     }
+    let mut next_state = TopologyState {
+        successors: next_successors,
+        fingers,
+        finger_convergence,
+        pending_stabilization: None,
+        ..state.clone()
+    };
+    prune_bridged(&mut next_state, None, capacity);
     TopologyStep {
-        state: TopologyState {
-            successors: next_successors,
-            fingers,
-            finger_convergence,
-            pending_stabilization: None,
-            ..state.clone()
-        },
+        state: next_state,
         actions,
+    }
+}
+
+/// Maximum number of passive bridge hints retained for a single reporter (`2 * capacity`),
+/// and across all `capacity` successors (`2 * capacity^2`).
+pub(super) const fn bridged_reporter_budget(capacity: usize) -> usize {
+    capacity.saturating_mul(2)
+}
+
+/// Maximum total passive bridge hints retained in `TopologyState::bridged` (`2 * capacity^2`).
+pub(super) const fn bridged_total_capacity(capacity: usize) -> usize {
+    capacity.saturating_mul(capacity).saturating_mul(2)
+}
+
+/// Prune `state.bridged` so every target is a non-local unreferenced peer, every `via` bridge
+/// is a current successor in `state.successors` (not equal to `excluded_peer`), and the total
+/// map size is bounded by `2 * capacity^2`.
+pub(super) fn prune_bridged(
+    state: &mut TopologyState,
+    excluded_peer: Option<Did>,
+    capacity: usize,
+) {
+    let local = state.local;
+    let referenced = state.referenced_peers();
+    let successors = state.successors.clone();
+    state.bridged.retain(|&target, &mut via| {
+        target != local
+            && excluded_peer != Some(target)
+            && excluded_peer != Some(via)
+            && !referenced.contains(&target)
+            && successors.contains(&via)
+    });
+    let max_total = bridged_total_capacity(capacity);
+    while state.bridged.len() > max_total {
+        let Some((&farthest, _)) = state
+            .bridged
+            .iter()
+            .max_by_key(|(&target, _)| dist(local, target))
+        else {
+            break;
+        };
+        state.bridged.remove(&farthest);
+    }
+}
+
+/// Record passive 1-hop bridge reachability hints for unconfirmed peers advertised by an
+/// admitted successor reporter (`reporter`), enforcing per-reporter (`2K`) and total (`2K^2`)
+/// capacity bounds.
+pub(super) fn step_record_bridged_peers(
+    state: &TopologyState,
+    reporter: Did,
+    unconfirmed: &[Did],
+    capacity: usize,
+) -> TopologyStep {
+    if capacity == 0 || reporter == state.local || !state.successors.contains(&reporter) {
+        let mut next_state = state.clone();
+        prune_bridged(&mut next_state, None, capacity);
+        return TopologyStep {
+            state: next_state,
+            actions: Vec::new(),
+        };
+    }
+    let reporter_budget = bridged_reporter_budget(capacity);
+    let mut bounded_unconfirmed = Vec::with_capacity(reporter_budget);
+    for &peer in unconfirmed {
+        if bounded_unconfirmed.len() == reporter_budget {
+            break;
+        }
+        if peer != state.local && peer != reporter && !state.references(peer) {
+            push_unique(&mut bounded_unconfirmed, peer);
+        }
+    }
+    let mut next_state = state.clone();
+    next_state
+        .bridged
+        .retain(|&target, &mut via| via != reporter || bounded_unconfirmed.contains(&target));
+    for peer in bounded_unconfirmed {
+        next_state.bridged.insert(peer, reporter);
+    }
+    prune_bridged(&mut next_state, None, capacity);
+    TopologyStep {
+        state: next_state,
+        actions: Vec::new(),
     }
 }

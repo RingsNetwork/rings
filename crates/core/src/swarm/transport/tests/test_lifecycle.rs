@@ -839,6 +839,7 @@ async fn test_topology_report_serializes_with_generation_retirement() -> Result<
     let reported = TopoInfo {
         successors: vec![peer],
         predecessor: Some(peer),
+        predecessors: vec![peer],
     };
     let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let stabilization_transport = Arc::clone(&transport);
@@ -885,6 +886,63 @@ async fn test_predecessor_notification_serializes_with_generation_retirement() -
     assert_eq!(retirement.finish()?, Some(()));
     assert!(!transport.has_active_connection(peer));
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+/// Prove that a stabilization report from an active routable head whose advertised peers are all
+/// unroutable still commits the stabilization transition (emitting `Notify(reporter)`) and records
+/// passive 1-hop bridge hints (`#1195`).
+#[tokio::test]
+async fn test_empty_confirmed_stabilization_report_commits_notify_and_records_bridged_peers(
+) -> Result<()> {
+    let (transport, reporter, _attempt) = transport_with_routable_peer().await?;
+    transport.dht.admit_connected(reporter, None)?;
+    let request_id = uuid::Uuid::from_u128(77);
+    let _ = transport.dht.begin_stabilization(request_id)?;
+    let claim = transport
+        .dht
+        .claim_stabilization_report(reporter, request_id)?;
+    assert!(claim.is_some());
+
+    let unreachable_succ = SecretKey::random().address().into();
+    let unreachable_pred = SecretKey::random().address().into();
+    let reported = TopoInfo {
+        successors: vec![unreachable_succ],
+        predecessor: Some(unreachable_pred),
+        predecessors: vec![unreachable_pred],
+    };
+
+    let committed = transport.stabilize_routable_topology(reporter, request_id, &reported)?;
+    drop(claim);
+
+    assert_eq!(
+        committed,
+        Some(crate::dht::PeerRingAction::MultiActions(vec![
+            crate::dht::PeerRingAction::RemoteAction(
+                reporter,
+                crate::dht::PeerRingRemoteAction::Notify(transport.dht.did),
+            ),
+        ]))
+    );
+    let state = transport.dht.topology_state()?;
+    assert_eq!(state.bridged.get(&unreachable_succ), Some(&reporter));
+    assert_eq!(state.bridged.get(&unreachable_pred), Some(&reporter));
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_candidate_dial_backoff_records_failure_and_clears_on_reset() -> Result<()> {
+    let (transport, _peer, _attempt) = transport_with_routable_peer().await?;
+    let unreachable: Did = SecretKey::random().address().into();
+    assert!(!transport.is_candidate_dial_backed_off(unreachable));
+
+    transport.record_candidate_dial_failure(unreachable);
+    assert!(transport.is_candidate_dial_backed_off(unreachable));
+
+    transport.clear_candidate_dial_backoff(unreachable);
+    assert!(!transport.is_candidate_dial_backed_off(unreachable));
     Ok(())
 }
 

@@ -664,6 +664,7 @@ impl SwarmTransport {
         let action = self.dht.admit_connected(attempt.peer, deferred_proof)?;
 
         admitting.activate();
+        self.clear_candidate_dial_backoff(attempt.peer);
         self.announce(&lifecycle, SwarmEvent::PeerAdmitted { peer: attempt.peer });
         pending_finger_updates.remove(&attempt);
         self.connection_lifecycle.link_transitions().advance();

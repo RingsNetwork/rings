@@ -129,11 +129,16 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 while let ConnectionStep::Connect(peer) =
                     self.dht.advance_successor_sync_connection_plan(&mut plan)?
                 {
+                    if self.transport.is_candidate_dial_backed_off(peer) {
+                        continue;
+                    }
                     self.connect_dht_peer(peer).await?;
                     if self.transport.get_connection(peer).is_some() {
                         self.join_dht(peer).await?;
                     }
                 }
+                self.transport
+                    .sync_routable_topology_bridges(reporter, &msg.info)?;
             }
             QueryFor::Stabilization => {
                 self.handle_stabilization_report(ctx, msg).await?;
@@ -187,6 +192,7 @@ impl MessageHandler {
             msg.info
                 .predecessor
                 .into_iter()
+                .chain(msg.info.predecessors.iter().copied())
                 .chain(msg.info.successors.iter().copied()),
         );
         let candidates = self
@@ -205,6 +211,9 @@ impl MessageHandler {
         loop {
             match self.dht.advance_stabilization_connection_plan(&mut plan)? {
                 ConnectionStep::Connect(candidate) => {
+                    if self.transport.is_candidate_dial_backed_off(candidate) {
+                        continue;
+                    }
                     // A connection failure leaves the handler, and leaving
                     // releases the claim.
                     self.connect_dht_peer(candidate).await?;

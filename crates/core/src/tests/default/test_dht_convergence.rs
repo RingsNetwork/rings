@@ -379,6 +379,7 @@ fn assert_correct_stabilize_matches_spec(
         .stabilize_reported_by(head, request_id, TopoInfo {
             successors: topo_successors.to_vec(),
             predecessor: topo_predecessor,
+            predecessors: topo_predecessor.into_iter().collect(),
         })
         .unwrap();
     let expected_successors = spec::correct_stabilize_successors(
