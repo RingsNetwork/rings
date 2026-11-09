@@ -52,6 +52,9 @@
 //!     bounds table (peers, successor capacity, state counts, CI wall-clock
 //!     limit). The topology laws it checks are the named predicates of
 //!     `dht::topology::invariants`, shared with any later churn simulator.
+//!   * Stage 7 — relay custody across storage-less runs (`#1182`), single-use
+//!     next-holder correlation tokens (`#1181`, `Law (Asked)`), chain
+//!     replication, and voluntary departure handoff (`#1057`).
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -179,18 +182,22 @@ impl ChordNode {
         )
     }
 
-    /// The predecessor update — a direct reimplementation of `PeerRing::notify`
-    /// (predecessor becomes the candidate closer *behind* `me`), used instead of
+    /// The topology-aware predecessor update (`PeerRing::notify_within_topology`
+    /// / `topology::rectify_predecessor_in`, `#1184`), evaluated on the node's
+    /// oracle successor list `spec::successors(&self.all, me)`. Used instead of
     /// a throwaway `PeerRing` (which allocates its storage) so the checker can
     /// expand states cheaply. It is NOT assumed equivalent: the test
     /// `test_apply_notify_matches_peer_ring` checks it against the real
-    /// `PeerRing::notify` across representative states, so it remains a faithful
-    /// regression guard even though the model doesn't call the production fn.
-    fn apply_notify(&self, me: Did, current: Option<Did>, from: Did) -> Did {
-        match current {
-            Some(cur) if spec::dist(me, cur) >= spec::dist(me, from) => cur,
-            _ => from,
-        }
+    /// `PeerRing::notify_within_topology` across representative states on
+    /// `N = 2, 3, 4` rings, so it remains a faithful regression guard.
+    fn apply_notify(&self, me: Did, current: Option<Did>, from: Did) -> Option<Did> {
+        let state = crate::dht::topology::TopologyState::new(
+            me,
+            spec::successors(&self.all, me),
+            current,
+            Vec::new(),
+        );
+        crate::dht::topology::rectify_predecessor_in(&state, from)
     }
 }
 
@@ -209,15 +216,16 @@ impl Actor for ChordNode {
     }
 
     fn on_timeout(&self, id: Id, _state: &mut Cow<NodeState>, _timer: &Timer, o: &mut Out<Self>) {
-        // Oracle subprotocol: tell each known successor "I might be your predecessor",
-        // then re-arm; this is not production's head-only scheduling. The network is a
-        // duplicating *set* (`new_unordered_duplicating`), so a re-sent identical
-        // notification neither grows the state nor is lost: it stays available to
-        // be (re-)delivered, which is exactly the effect of periodic re-sending
-        // under a reliable channel, while keeping the state space finite.
+        // Oracle subprotocol: tell each peer in the ring (honest predecessor
+        // notifications plus unilateral/adversarial notifications from `me`,
+        // `head`, and non-predecessor peers) "I might be your predecessor",
+        // then re-arm. The network is a duplicating *set*
+        // (`new_unordered_duplicating`), so a re-sent identical notification
+        // neither grows the state nor is lost: it stays available to be
+        // (re-)delivered in any order while keeping the state space finite.
         let me = self.did(id);
-        for s in spec::successors(&self.all, me) {
-            o.send(self.id_of(s), Msg::NotifyPred { from: me });
+        for &peer in &self.all {
+            o.send(self.id_of(peer), Msg::NotifyPred { from: me });
         }
         o.set_timer(Timer::Stabilize, model_timeout());
     }
@@ -227,8 +235,8 @@ impl Actor for ChordNode {
         match msg {
             Msg::NotifyPred { from } => {
                 let new_pred = self.apply_notify(me, state.pred, from);
-                if state.pred != Some(new_pred) {
-                    state.to_mut().pred = Some(new_pred);
+                if state.pred != new_pred {
+                    state.to_mut().pred = new_pred;
                 }
                 // The handler would also report its predecessor back so the
                 // sender can connect to it; on a full mesh that target is already
@@ -261,6 +269,35 @@ fn prop_pred_wellformed(
         })
 }
 
+/// `Always` (`#1184`): on `N >= 3` rings, `predecessor` is never `me` and never
+/// `head`, never strictly inside `(me, head)`, and once set to the true
+/// `spec::predecessor` no unilateral `NotifyPred` from any ring member can
+/// overwrite it.
+fn prop_pred_rejects_head_and_interior_preemption(
+    model: &ActorModel<ChordNode, Cfg, ()>,
+    st: &ActorModelState<ChordNode>,
+) -> bool {
+    let all = &model.cfg.all;
+    let node = ChordNode { all: all.clone() };
+    st.actor_states.iter().enumerate().all(|(i, s)| {
+        let me = all[i];
+        let succs = spec::successors(all, me);
+        let head = succs.first().copied();
+        let not_self = s.pred != Some(me);
+        let not_head_on_multi_ring = all.len() < 3 || s.pred != head;
+        let not_inside_head_interval = match (s.pred, head) {
+            (Some(p), Some(h)) => spec::dist(me, p) >= spec::dist(me, h),
+            _ => true,
+        };
+        let true_pred = spec::predecessor(all, me);
+        let true_pred_non_preemptible = s.pred != true_pred
+            || all
+                .iter()
+                .all(|&candidate| node.apply_notify(me, s.pred, candidate) == true_pred);
+        not_self && not_head_on_multi_ring && not_inside_head_interval && true_pred_non_preemptible
+    })
+}
+
 /// Every node's predecessor equals the formal `spec::predecessor` fixpoint.
 fn prop_all_converged(
     model: &ActorModel<ChordNode, Cfg, ()>,
@@ -285,6 +322,11 @@ fn notify_model(all: Vec<Did>) -> ActorModel<ChordNode, Cfg, ()> {
             Expectation::Always,
             "predecessor well-formed",
             prop_pred_wellformed,
+        )
+        .property(
+            Expectation::Always,
+            "rejects head and interior preemption",
+            prop_pred_rejects_head_and_interior_preemption,
         )
         .property(
             Expectation::Sometimes,
@@ -568,12 +610,14 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 /// This stage owns its adversarial environment alphabet and checks the real
 /// topology reducer directly instead of duplicating transition semantics.
 mod finger_retry_model;
+mod relay_custody_model;
 mod storage_model;
 
 #[cfg(test)]
 mod tests {
     use super::storage_model::*;
     use super::*;
+    use crate::consts::ENTRY_DATA_MAX_LEN;
 
     /// Build a fully-converged DHT for `node` (the production join/notify path).
     fn build_converged(node: Did, all: &[Did]) -> PeerRing {
@@ -587,28 +631,67 @@ mod tests {
         dht
     }
 
-    /// `apply_notify` (the model's predecessor rule) must equal the production
-    /// `PeerRing::notify` on every representative (current, from) state, so the
-    /// model stays a regression guard even though it doesn't call the real fn.
+    /// `apply_notify` / `rectify_predecessor_in` (the model's topology-aware
+    /// predecessor rule, `#1184`) must equal the production
+    /// `PeerRing::notify_within_topology` across all candidate `(current, from)`
+    /// states on `N = 2, 3, 4` rings, including when `successors` are populated
+    /// (and across non-empty partial successor subsets that create interior
+    /// `(local, head)` intervals).
     #[test]
     fn test_apply_notify_matches_peer_ring() {
-        let all: Vec<Did> = (0..4u64).map(|i| did_frac(i, 4)).collect();
-        let node = ChordNode { all: all.clone() };
-        let candidates = std::iter::once(None).chain(all.iter().copied().map(Some));
-        for &me in &all {
-            for current in candidates.clone() {
-                if current == Some(me) {
-                    continue;
-                }
-                for &from in all.iter().filter(|&&d| d != me) {
-                    let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
-                    *dht.lock_predecessor().unwrap() = current;
-                    let real = dht.notify(from).unwrap();
-                    assert_eq!(
-                        node.apply_notify(me, current, from),
-                        real,
-                        "apply_notify != PeerRing::notify (me={me}, cur={current:?}, from={from})"
-                    );
+        for n in 2..=4u64 {
+            let all: Vec<Did> = (0..n).map(|i| did_frac(i, n)).collect();
+            let node = ChordNode { all: all.clone() };
+            let candidates = std::iter::once(None).chain(all.iter().copied().map(Some));
+            for &me in &all {
+                let others: Vec<Did> = all.iter().copied().filter(|&d| d != me).collect();
+                for current in candidates.clone() {
+                    if current == Some(me) {
+                        continue;
+                    }
+                    for &from in &all {
+                        // 1. Oracle successor list populated (`ChordNode::apply_notify`).
+                        let dht =
+                            PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
+                        for s in spec::successors(&all, me) {
+                            dht.successors().update(s).unwrap();
+                        }
+                        *dht.lock_predecessor().unwrap() = current;
+                        let real = dht.notify_within_topology(from).unwrap();
+                        assert_eq!(
+                            node.apply_notify(me, current, from),
+                            real,
+                            "apply_notify != PeerRing::notify_within_topology (n={n}, me={me}, cur={current:?}, from={from})"
+                        );
+
+                        // 2. Every partial successor subset (including gaps where `from` lies
+                        // strictly inside `(me, head)`).
+                        for mask in 0u32..(1 << others.len()) {
+                            let dht_sub = PeerRing::new_with_storage(
+                                me,
+                                K as u8,
+                                Box::new(MemStorage::new()),
+                            );
+                            for (bit, &peer) in others.iter().enumerate() {
+                                if mask & (1 << bit) != 0 {
+                                    dht_sub.successors().update(peer).unwrap();
+                                }
+                            }
+                            *dht_sub.lock_predecessor().unwrap() = current;
+                            let succ_list = dht_sub.successors().list().unwrap();
+                            let state = crate::dht::topology::TopologyState::new(
+                                me,
+                                succ_list.clone(),
+                                current,
+                                Vec::new(),
+                            );
+                            assert_eq!(
+                                crate::dht::topology::rectify_predecessor_in(&state, from),
+                                dht_sub.notify_within_topology(from).unwrap(),
+                                "rectify_predecessor_in != PeerRing::notify_within_topology (n={n}, me={me}, succ={succ_list:?}, cur={current:?}, from={from})"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -686,6 +769,25 @@ mod tests {
             .spawn_bfs()
             .join()
             .assert_properties();
+    }
+
+    /// Stage 1 (`#1184`): under full-mesh oracle successors plus adversarial/unilateral
+    /// `NotifyPred` from `me`, `head`, and every `non_predecessor` on `N = 3, 4` rings,
+    /// Stateright BFS proves:
+    /// - `Always`: `predecessor` is never `me` and never `head`, and once set to the
+    ///   true `spec::predecessor` no unilateral `NotifyPred` from any other ring member
+    ///   can overwrite it;
+    /// - `Eventually`: every node's predecessor still converges to `spec::predecessor`.
+    #[test]
+    fn test_notify_predecessor_rejects_head_and_interior_preemption_under_full_mesh() {
+        for n in [3u64, 4] {
+            let all: Vec<Did> = (0..n).map(|i| did_frac(i, n)).collect();
+            notify_model(all)
+                .checker()
+                .spawn_bfs()
+                .join()
+                .assert_properties();
+        }
     }
 
     /// Stage 2 — safety + reachability. Over the whole interleaving graph of the
@@ -798,6 +900,42 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// Stage 3 (`#1179`) — Anti-Eviction Safety Property for `retain_fair_data_elements`.
+    /// For every non-empty bitmask `bits` in `1..8`, whenever bit `0b001` (actor 1's flood of
+    /// `ENTRY_DATA_MAX_LEN` high-timestamp elements), `0b010` (actor 2), or `0b100` (actor 3)
+    /// is set in `bits`, that actor's newest element (`r = 0`) is preserved in
+    /// `storage_value_from_bits(StorageJoinCarrier::DataFairMultiWriter, bits).entry.data`,
+    /// proving that a flooding writer cannot evict honest writers' newest elements under any
+    /// join order.
+    #[test]
+    fn test_fair_multi_writer_preserves_every_active_writer_newest_element() {
+        let newest_a1 = storage_element(&format!("flood-a1-{}", ENTRY_DATA_MAX_LEN - 1));
+        let newest_a2 = storage_element("honest-a2-1");
+        let newest_a3 = storage_element("honest-a3-1");
+
+        for bits in 1u8..8 {
+            let value = storage_value_from_bits(StorageJoinCarrier::DataFairMultiWriter, bits);
+            if bits & 0b001 != 0 {
+                assert!(
+                    value.entry.data.contains(&newest_a1),
+                    "actor 1 newest element (r=0) missing at bits={bits:#05b}"
+                );
+            }
+            if bits & 0b010 != 0 {
+                assert!(
+                    value.entry.data.contains(&newest_a2),
+                    "actor 2 newest element (r=0) evicted by flood at bits={bits:#05b}"
+                );
+            }
+            if bits & 0b100 != 0 {
+                assert!(
+                    value.entry.data.contains(&newest_a3),
+                    "actor 3 newest element (r=0) evicted by flood at bits={bits:#05b}"
+                );
             }
         }
     }
