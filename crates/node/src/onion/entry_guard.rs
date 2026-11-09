@@ -186,14 +186,11 @@ impl OnionEntryGuards {
             .map_err(Error::Storage)?
             .filter(|state| state.network_id == network_id);
         let quality_by_did = qualities.iter().copied().collect::<BTreeMap<_, _>>();
-        let candidates = GuardCandidates {
-            healthy_snapshot_dids: healthy_snapshot_guard_dids(relays, &quality_by_did),
-            eligible_dids: eligible_guard_dids(relays, &quality_by_did, &first_hop_permitted),
-        };
+        let eligible_dids = eligible_guard_dids(relays, &quality_by_did, &first_hop_permitted);
         let next = reconcile_guard_state(
             network_id,
             stored,
-            &candidates,
+            &eligible_dids,
             &quality_by_did,
             self.target_guard_count,
             now_ms,
@@ -217,11 +214,6 @@ impl OnionEntryGuards {
     }
 }
 
-struct GuardCandidates {
-    healthy_snapshot_dids: BTreeSet<Did>,
-    eligible_dids: BTreeSet<Did>,
-}
-
 struct ReconciledGuards {
     previous: Option<OnionEntryGuardState>,
     state: OnionEntryGuardState,
@@ -233,29 +225,27 @@ impl OnionEntryGuardRecord {
         now_ms.saturating_sub(self.selected_at_ms) < ENTRY_GUARD_ROTATION_LIFETIME_MS
     }
 
-    fn reconciled_at(
-        &self,
-        now_ms: u128,
-        healthy_snapshot_dids: &BTreeSet<Did>,
-        eligible_dids: &BTreeSet<Did>,
-    ) -> Option<Self> {
-        self.is_within_rotation_lifetime(now_ms).then(|| {
-            (healthy_snapshot_dids.contains(&self.did) || eligible_dids.contains(&self.did))
-                .then_some(Self {
-                    did: self.did,
-                    selected_at_ms: self.selected_at_ms,
-                    unreachable_since_ms: None,
-                })
-                .or_else(|| {
-                    let unreachable_since_ms = self.unreachable_since_ms.unwrap_or(now_ms);
-                    (now_ms.saturating_sub(unreachable_since_ms) < ENTRY_GUARD_UNREACHABLE_GRACE_MS)
-                        .then_some(Self {
-                            did: self.did,
-                            selected_at_ms: self.selected_at_ms,
-                            unreachable_since_ms: Some(unreachable_since_ms),
-                        })
-                })
-        })?
+    fn reconciled_at(&self, now_ms: u128, eligible_dids: &BTreeSet<Did>) -> Option<Self> {
+        if !self.is_within_rotation_lifetime(now_ms) {
+            return None;
+        }
+        if eligible_dids.contains(&self.did) {
+            return Some(Self {
+                did: self.did,
+                selected_at_ms: self.selected_at_ms,
+                unreachable_since_ms: None,
+            });
+        }
+        let unreachable_since_ms = self.unreachable_since_ms.unwrap_or(now_ms);
+        if now_ms.saturating_sub(unreachable_since_ms) < ENTRY_GUARD_UNREACHABLE_GRACE_MS {
+            Some(Self {
+                did: self.did,
+                selected_at_ms: self.selected_at_ms,
+                unreachable_since_ms: Some(unreachable_since_ms),
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -277,71 +267,65 @@ fn pick_next_weighted_candidate(
 fn reconcile_guard_state(
     network_id: u32,
     previous: Option<OnionEntryGuardState>,
-    candidates: &GuardCandidates,
+    eligible_dids: &BTreeSet<Did>,
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     target_guard_count: usize,
     now_ms: u128,
     entropy: &mut impl RouteEntropy,
 ) -> ReconciledGuards {
-    let GuardCandidates {
-        healthy_snapshot_dids,
-        eligible_dids,
-    } = candidates;
     let mut guard_dids = BTreeSet::new();
-    let mut retained = previous
-        .as_ref()
-        .map(|state| state.guards.as_slice())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|guard| {
-            (!guard_dids.contains(&guard.did))
-                .then(|| guard.reconciled_at(now_ms, healthy_snapshot_dids, eligible_dids))
-                .flatten()
-                .inspect(|reconciled| {
-                    guard_dids.insert(reconciled.did);
-                })
-        })
-        .collect::<Vec<_>>();
+    let mut retained = Vec::new();
+    if let Some(state) = previous.as_ref() {
+        for guard in &state.guards {
+            if guard_dids.contains(&guard.did) {
+                continue;
+            }
+            if let Some(reconciled) = guard.reconciled_at(now_ms, eligible_dids) {
+                guard_dids.insert(reconciled.did);
+                retained.push(reconciled);
+            }
+        }
+    }
 
     let needed_retained = target_guard_count.saturating_sub(retained.len());
-    retained.extend(
-        std::iter::from_fn(|| {
-            pick_next_weighted_candidate(
-                eligible_dids,
-                |did| guard_dids.contains(&did),
-                quality_by_did,
-                entropy,
-            )
-            .inspect(|&did| {
-                guard_dids.insert(did);
-            })
-            .map(|did| OnionEntryGuardRecord {
-                did,
-                selected_at_ms: now_ms,
-                unreachable_since_ms: None,
-            })
-        })
-        .take(needed_retained),
-    );
+    for _ in 0..needed_retained {
+        let Some(did) = pick_next_weighted_candidate(
+            eligible_dids,
+            |did| guard_dids.contains(&did),
+            quality_by_did,
+            entropy,
+        ) else {
+            break;
+        };
+        guard_dids.insert(did);
+        retained.push(OnionEntryGuardRecord {
+            did,
+            selected_at_ms: now_ms,
+            unreachable_since_ms: None,
+        });
+    }
 
+    // 1-in-K gate (#1180, #1224): route solely through reachable persisted guards whenever at
+    // least one persisted guard is eligible; sample unpersisted fallback candidates only when
+    // every persisted guard is currently ineligible (`active_dids.is_empty()`).
     let mut active_dids = retained
         .iter()
         .filter(|guard| eligible_dids.contains(&guard.did))
         .map(|guard| guard.did)
         .collect::<BTreeSet<_>>();
-    let needed_active = target_guard_count.saturating_sub(active_dids.len());
-    std::iter::from_fn(|| {
-        let picked = pick_next_weighted_candidate(
-            eligible_dids,
-            |did| active_dids.contains(&did) || guard_dids.contains(&did),
-            quality_by_did,
-            entropy,
-        )?;
-        active_dids.insert(picked);
-        Some(picked)
-    })
-    .take(needed_active)
-    .for_each(drop);
+    if active_dids.is_empty() {
+        for _ in 0..target_guard_count {
+            let Some(picked) = pick_next_weighted_candidate(
+                eligible_dids,
+                |did| active_dids.contains(&did) || guard_dids.contains(&did),
+                quality_by_did,
+                entropy,
+            ) else {
+                break;
+            };
+            active_dids.insert(picked);
+        }
+    }
 
     let state = OnionEntryGuardState {
         network_id,
@@ -354,40 +338,26 @@ fn reconcile_guard_state(
     }
 }
 
-fn preferred_or_live_guard_dids(
+fn eligible_guard_dids(
     relays: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
-    predicate: impl Fn(Did) -> bool,
+    first_hop_permitted: &impl Fn(Did) -> bool,
 ) -> BTreeSet<Did> {
     let live = relays
         .iter()
         .map(|hop| hop.did)
-        .filter(|&did| predicate(did))
+        .filter(|&did| first_hop_permitted(did))
         .collect::<BTreeSet<_>>();
     let preferred = live
         .iter()
         .copied()
         .filter(|did| quality_by_did.get(did) != Some(&PeerQuality::Degraded))
         .collect::<BTreeSet<_>>();
-    match preferred.is_empty() {
-        true => live,
-        false => preferred,
+    if preferred.is_empty() {
+        live
+    } else {
+        preferred
     }
-}
-
-fn healthy_snapshot_guard_dids(
-    relays: &[OnionRouteHop],
-    quality_by_did: &BTreeMap<Did, PeerQuality>,
-) -> BTreeSet<Did> {
-    preferred_or_live_guard_dids(relays, quality_by_did, |_| true)
-}
-
-fn eligible_guard_dids(
-    relays: &[OnionRouteHop],
-    quality_by_did: &BTreeMap<Did, PeerQuality>,
-    first_hop_permitted: &impl Fn(Did) -> bool,
-) -> BTreeSet<Did> {
-    preferred_or_live_guard_dids(relays, quality_by_did, first_hop_permitted)
 }
 
 fn entry_guard_state_key(network_id: u32) -> String {
@@ -474,14 +444,13 @@ mod tests {
         let first = manager
             .select_relay_guards(7, &relays, &[], &mut first_entropy, |_| true)
             .await?;
-        let degraded_did = first
-            .dids
-            .iter()
-            .next()
-            .copied()
-            .ok_or(Error::InvalidData)?;
+        let mut guard_iter = first.dids.iter().copied();
+        let degraded_did = guard_iter.next().ok_or(Error::InvalidData)?;
+        let healthy_guard_did = guard_iter.next().ok_or(Error::InvalidData)?;
         assert!(first.contains(degraded_did));
 
+        // 1-in-K gate (#1224): while `healthy_guard_did` remains reachable, route solely through
+        // that persisted guard without padding active guards with unpersisted relays.
         let mut second_entropy = FixedEntropy::new([0]);
         let second = manager
             .select_relay_guards(
@@ -493,13 +462,31 @@ mod tests {
             )
             .await?;
 
-        assert!(!second.contains(degraded_did));
-        assert_eq!(second.dids.len(), 2);
+        assert_eq!(second.dids, BTreeSet::from([healthy_guard_did]));
+
+        // Once all persisted guards are degraded, fallback samples unpersisted healthy candidates.
+        let mut third_entropy = FixedEntropy::new([0]);
+        let third = manager
+            .select_relay_guards(
+                7,
+                &relays,
+                &[
+                    (degraded_did, PeerQuality::Degraded),
+                    (healthy_guard_did, PeerQuality::Degraded),
+                ],
+                &mut third_entropy,
+                |_| true,
+            )
+            .await?;
+        assert!(!third.contains(degraded_did));
+        assert!(!third.contains(healthy_guard_did));
+        assert_eq!(third.dids.len(), 1);
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_first_hop_permitted_exclusion_does_not_mark_guard_unreachable() -> Result<()> {
+    async fn test_first_hop_permitted_exclusion_marks_guard_unreachable_and_evicts_after_grace(
+    ) -> Result<()> {
         let r0 = relay()?;
         let r1 = relay()?;
         let r2 = relay()?;
@@ -513,26 +500,24 @@ mod tests {
             .await?;
         assert_eq!(first.dids.len(), 2);
 
-        let excluded_did = first
-            .dids
-            .iter()
-            .next()
-            .copied()
-            .ok_or(Error::InvalidData)?;
+        let mut guard_iter = first.dids.iter().copied();
+        let excluded_did = guard_iter.next().ok_or(Error::InvalidData)?;
+        let connected_guard_did = guard_iter.next().ok_or(Error::InvalidData)?;
+        let t_disconnected = t0 + 1_000;
         let mut second_entropy = FixedEntropy::new([0]);
         let second = manager
             .select_relay_guards_at(
                 7,
                 &all_relays,
                 &[],
-                t0 + 1_000,
+                t_disconnected,
                 &mut second_entropy,
                 |did| did != excluded_did,
             )
             .await?;
 
-        assert!(!second.contains(excluded_did));
-        assert_eq!(second.dids.len(), 2);
+        // 1-in-K gate: only the connected persisted guard is active; no unpersisted relay is mixed.
+        assert_eq!(second.dids, BTreeSet::from([connected_guard_did]));
 
         let persisted = manager
             .storage
@@ -548,10 +533,24 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             first.dids
         );
-        assert!(persisted
+        let excluded_record = persisted
             .guards
             .iter()
-            .all(|guard| guard.selected_at_ms == t0 && guard.unreachable_since_ms.is_none()));
+            .find(|guard| guard.did == excluded_did)
+            .ok_or(Error::InvalidData)?;
+        assert_eq!(excluded_record.selected_at_ms, t0);
+        assert_eq!(excluded_record.unreachable_since_ms, Some(t_disconnected));
+
+        // After 24h without a direct transport link, the unreachable guard is evicted and rotated.
+        let t_evict = t_disconnected + ENTRY_GUARD_UNREACHABLE_GRACE_MS;
+        let mut third_entropy = FixedEntropy::new([0]);
+        let after_grace = manager
+            .select_relay_guards_at(7, &all_relays, &[], t_evict, &mut third_entropy, |did| {
+                did != excluded_did
+            })
+            .await?;
+        assert!(!after_grace.contains(excluded_did));
+        assert_eq!(after_grace.dids.len(), 2);
         Ok(())
     }
 
@@ -601,9 +600,7 @@ mod tests {
                 |_| true,
             )
             .await?;
-        assert!(!during_miss.contains(missing_did));
-        assert!(during_miss.contains(surviving_did));
-        assert_eq!(during_miss.dids.len(), 2);
+        assert_eq!(during_miss.dids, BTreeSet::from([surviving_did]));
 
         let persisted_during_miss = manager
             .storage
@@ -746,7 +743,7 @@ mod tests {
                 |_| true,
             )
             .await?;
-        assert_eq!(before_eviction.dids, BTreeSet::from([r1.did, r2.did]));
+        assert_eq!(before_eviction.dids, BTreeSet::from([r1.did]));
         let persisted_before_eviction = manager
             .storage
             .get(&entry_guard_state_key(7))

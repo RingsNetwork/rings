@@ -30,7 +30,6 @@ use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionLoopClass;
-use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
 use crate::provider::BrowserDirectoryEndpoint;
@@ -88,18 +87,6 @@ fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<Brow
 struct BrowserOnionDirectoryReader {
     processor: Arc<Processor>,
     endpoint: Option<BrowserDirectoryEndpoint>,
-}
-
-impl BrowserOnionDirectoryReader {
-    fn direct_peer_dids(&self) -> BTreeSet<Did> {
-        let local = self.processor.did();
-        self.processor
-            .swarm
-            .peer_dids()
-            .into_iter()
-            .filter(|did| *did != local)
-            .collect()
-    }
 }
 
 /// Builds a directory RPC client under the shared credential transport policy.
@@ -165,6 +152,16 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
             .collect()
     }
 
+    fn direct_peer_dids(&self) -> BTreeSet<Did> {
+        let local = self.processor.did();
+        self.processor
+            .swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|did| *did != local)
+            .collect()
+    }
+
     fn onion_entry_guards(&self) -> &crate::onion::OnionEntryGuards {
         self.processor.onion_entry_guards()
     }
@@ -175,20 +172,7 @@ async fn build_browser_route_from_reader(
     reader: &BrowserOnionDirectoryReader,
     target: OnionProxyTarget,
 ) -> NodeResult<OnionProxyRoute> {
-    let direct_peers = reader.direct_peer_dids();
-    let allowed_peers = direct_peers.clone();
-    let route = directory::build_onion_proxy_route_with_first_hop(
-        reader,
-        OnionProxyProtocol::HttpsProxy,
-        target,
-        move |did| allowed_peers.contains(&did),
-    )
-    .await?;
-    let first_hop = route.route.hops().guard().did;
-    if first_hop != reader.processor.did() && direct_peers.contains(&first_hop) {
-        return Ok(route);
-    }
-    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+    directory::build_onion_proxy_route(reader, OnionProxyProtocol::HttpsProxy, target).await
 }
 
 async fn build_browser_onion_proxy_route(

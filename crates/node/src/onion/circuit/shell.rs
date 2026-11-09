@@ -272,6 +272,14 @@ impl OnionCircuitShell {
         }
     }
 
+    /// The symbols registered in this shell's exit algebra, for tests of [`OnionRuntime::install`].
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn registered_services(
+        &self,
+    ) -> std::collections::BTreeSet<crate::onion::OnionServiceName> {
+        self.algebra.symbols().cloned().collect()
+    }
+
     /// `Cell(from, cell)` of the module diagram.
     async fn hop(
         &self,

@@ -52,6 +52,9 @@ pub(crate) struct OnionRuntime {
     /// The witness of the data plane's link table.
     #[cfg(all(test, rings_native))]
     links: OnionLinkWitness,
+    /// The exit services registered in the installed shell's algebra.
+    #[cfg(all(test, rings_native))]
+    registered_services: std::collections::BTreeSet<OnionServiceName>,
 }
 
 impl OnionRuntime {
@@ -94,6 +97,8 @@ impl OnionRuntime {
         );
         #[cfg(all(test, rings_native))]
         let links = shell.link_witness();
+        #[cfg(all(test, rings_native))]
+        let registered_services = shell.registered_services();
         extensions.register(OnionCircuitProtocol, shell)?;
         let scope = Scope::new(core.clone(), ONION_CIRCUIT_NAMESPACE.to_string());
         // Registered first, so every admission after the read below reaches the data plane as a
@@ -111,6 +116,8 @@ impl OnionRuntime {
             loops: OnionLoopClient::new(core.did(), tags, link_sender),
             #[cfg(all(test, rings_native))]
             links,
+            #[cfg(all(test, rings_native))]
+            registered_services,
         })
     }
 
@@ -176,4 +183,68 @@ pub(super) fn exit_algebra(
                 algebra
             }
         })
+}
+
+#[cfg(all(test, rings_native))]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::onion::OnionExitPolicy;
+    use crate::onion::OnionRole;
+    use crate::tests::native::prepare_processor_with_onion_role;
+
+    /// Regression (#1224 / #1229 item 5): `OnionRuntime::install` registers `ONION_CIRCUIT_NAMESPACE`
+    /// and wires an exit algebra whose registered services equal the processor's offered services
+    /// (`{}` for `Client` and `Relay`, and `offer.services()` for single- and dual-service `Exit`s),
+    /// while `install_with` installs the caller-provided algebra verbatim.
+    #[tokio::test]
+    async fn test_install_registers_exact_offered_services_in_runtime_shell() -> Result<()> {
+        let policy =
+            OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
+        let https_offer = OnionExitOffer::new([OnionServiceName::https()], policy.clone())?;
+        let tcp_offer = OnionExitOffer::new([OnionServiceName::tcp()], policy.clone())?;
+        let both_offer = OnionExitOffer::new(
+            [OnionServiceName::tcp(), OnionServiceName::https()],
+            policy.clone(),
+        )?;
+
+        for (role, expected) in [
+            (OnionRole::Client, BTreeSet::new()),
+            (OnionRole::Relay, BTreeSet::new()),
+            (
+                OnionRole::Exit(https_offer),
+                BTreeSet::from([OnionServiceName::https()]),
+            ),
+            (
+                OnionRole::Exit(tcp_offer),
+                BTreeSet::from([OnionServiceName::tcp()]),
+            ),
+            (
+                OnionRole::Exit(both_offer),
+                BTreeSet::from([OnionServiceName::https(), OnionServiceName::tcp()]),
+            ),
+        ] {
+            let processor = Arc::new(prepare_processor_with_onion_role(role).await);
+            let extensions = Extensions::new(processor);
+            let runtime = OnionRuntime::install(&extensions)?;
+            assert!(extensions.contains(ONION_CIRCUIT_NAMESPACE));
+            assert_eq!(runtime.registered_services, expected);
+        }
+
+        // `install_with` installs the caller-chosen algebra even on a `Client` processor.
+        let client = Arc::new(prepare_processor_with_onion_role(OnionRole::Client).await);
+        let custom_extensions = Extensions::new(client);
+        let custom_offer = OnionExitOffer::new([OnionServiceName::https()], policy)?;
+        let custom_runtime =
+            OnionRuntime::install_with(&custom_extensions, |accounting, link_sender| {
+                exit_algebra(Some(&custom_offer), accounting, link_sender)
+            })?;
+        assert_eq!(
+            custom_runtime.registered_services,
+            BTreeSet::from([OnionServiceName::https()])
+        );
+        Ok(())
+    }
 }

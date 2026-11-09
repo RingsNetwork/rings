@@ -975,3 +975,60 @@ fn test_credit_ledger_saturates_at_the_pool_bound() {
     assert_eq!(credit.count(NOW_MS), 0);
     assert!(OnionCreditWindow::DEFAULT.credit_loops(credit.count(NOW_MS), CLASS) > 0);
 }
+
+/// Regression (#1224): `credit_blocks` caps per-frame SURB minting at `min(W, Q_max)`, and
+/// `credit_loops` triggers refills at session open and throughout steady multi-frame downloads
+/// across every loop class (`KiB16..MiB12`), preventing both `credit_loops == 0` starvation and
+/// wasteful over-minting beyond `ONION_SURB_POOL_CAPACITY`.
+#[test]
+fn test_credit_window_caps_blocks_and_refills_every_loop_class() {
+    let default_window = OnionCreditWindow::DEFAULT;
+    let wide_window = OnionCreditWindow::new(500);
+    let x = OnionExpiry::from_ms(150_000).expect("on the grid");
+
+    for class in [
+        OnionLoopClass::KiB16,
+        OnionLoopClass::KiB64,
+        OnionLoopClass::KiB256,
+        OnionLoopClass::MiB1,
+        OnionLoopClass::MiB4,
+        OnionLoopClass::MiB12,
+    ] {
+        let blocks = default_window.credit_blocks(class);
+        assert!(blocks >= 1);
+        assert!(blocks <= 64, "{class:?} minted {blocks} > 64");
+        assert!(
+            wide_window.credit_blocks(class) <= ONION_SURB_POOL_CAPACITY,
+            "{class:?} exceeded pool bound"
+        );
+
+        assert!(
+            default_window.credit_loops(0, class) >= 1,
+            "{class:?} starved at 0 outstanding"
+        );
+        assert!(
+            default_window.credit_loops(1, class) >= 1,
+            "{class:?} starved after open loop (+1 outstanding)"
+        );
+
+        let mut credit = OnionClientCredit::default();
+        // Open loop contributes 1 implicit reply block, then Refill runs.
+        credit.sent(NOW_MS, x, 0);
+        for _ in 0..default_window.credit_loops(credit.count(NOW_MS), class) {
+            credit.sent(NOW_MS, x, blocks);
+        }
+        assert!(credit.count(NOW_MS) > 1, "{class:?} failed to top up pool");
+
+        // Stream 200 replies in `class` without credit ever dropping to 0.
+        for step in 0..200_usize {
+            assert!(
+                credit.count(NOW_MS) > 0,
+                "{class:?} starved at reply {step}"
+            );
+            credit.replied(NOW_MS);
+            for _ in 0..default_window.credit_loops(credit.count(NOW_MS), class) {
+                credit.sent(NOW_MS, x, blocks);
+            }
+        }
+    }
+}

@@ -1,5 +1,6 @@
 //! Processor of rings-node rpc server.
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -906,6 +907,15 @@ impl OnionDirectoryReader for Processor {
             .await
             .into_iter()
             .map(|measurement| (measurement.did, measurement.quality))
+            .collect()
+    }
+
+    fn direct_peer_dids(&self) -> BTreeSet<Did> {
+        let local = self.did();
+        self.swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|did| *did != local)
             .collect()
     }
 

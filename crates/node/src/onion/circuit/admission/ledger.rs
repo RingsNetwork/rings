@@ -142,6 +142,11 @@ impl SlotLedger {
             .is_some_and(|generations| generations.contains(&generation))
     }
 
+    /// Whether `did` holds any live link generation on this slot.
+    pub(super) fn contains_live_peer(&self, did: Did) -> bool {
+        self.live.contains_key(&did)
+    }
+
     /// Whether `did` has an unexpired charge of its own on this slot at `quantum`.
     pub(super) fn has_unexpired_charge(&self, did: Did, quantum: u128) -> bool {
         self.ledger.load(quantum) > 0
@@ -160,16 +165,15 @@ impl SlotLedger {
     /// `did`'s last live generation on this slot was removed, `Some(false)` when `did` still
     /// holds another live generation, or `None` when `(did, generation)` was not live.
     pub(super) fn remove_live_generation(&mut self, did: Did, generation: u64) -> Option<bool> {
-        let (removed, empty) = {
-            let generations = self.live.get_mut(&did)?;
-            (generations.remove(&generation), generations.is_empty())
-        };
-        removed.then(|| {
-            if empty {
-                self.live.remove(&did);
-            }
-            empty
-        })
+        let generations = self.live.get_mut(&did)?;
+        if !generations.remove(&generation) {
+            return None;
+        }
+        let empty = generations.is_empty();
+        if empty {
+            self.live.remove(&did);
+        }
+        Some(empty)
     }
 
     /// Take the retained DIDs whose window since retirement has elapsed (or whose slot load has

@@ -592,13 +592,22 @@ impl OnionSessionDriver {
         Ok(())
     }
 
-    /// One full credit loop: `k` fresh reply blocks, `k + 1` at `h`, and the forward high-water
-    /// mark `m` (Law Mark).
+    /// One credit loop: `b` fresh reply blocks (`b = window.credit_blocks(class)`), `b + 1` at
+    /// `h`, and the forward high-water mark `m` (Law Mark).
     fn credit_loop(&mut self, sink: &OnionReplySink) -> Result<()> {
-        let blocks = OnionFrame::credit_capacity(self.class);
-        let (surbs, expiry) = self.loops.surbs(&self.route, self.class, blocks, sink)?;
-        let frame = self.machine.credit(surbs).map_err(|_| Error::InvalidData)?;
-        self.enqueue(&frame, sink)?;
+        let blocks = self.window.credit_blocks(self.class);
+        let (surbs, tags, expiry) = self.loops.surbs(&self.route, self.class, blocks, sink)?;
+        let frame = match self.machine.credit(surbs) {
+            Ok(frame) => frame,
+            Err(_) => {
+                self.loops.unregister_tags(tags);
+                return Err(Error::InvalidData);
+            }
+        };
+        if let Err(error) = self.enqueue(&frame, sink) {
+            self.loops.unregister_tags(tags);
+            return Err(error);
+        }
         self.credit.sent(get_epoch_ms(), expiry, blocks);
         Ok(())
     }

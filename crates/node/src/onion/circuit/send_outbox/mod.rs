@@ -311,16 +311,14 @@ impl OnionLinkSender {
             };
             // Registered under the refusal's lock; this future's drop, at the deadline or
             // anywhere else, leaves the wait, and a retry hands it back to `enqueue` instead.
-            let registration = OnionLaneWait {
-                state: Arc::clone(&self.state),
-                peer: link.peer,
-                armed: true,
-            };
-            let space = space.fuse();
-            futures::pin_mut!(space);
-            futures::select! {
-                _ = space => {},
-                _ = deadline => return Err(timed_out()),
+            let mut registration = OnionLaneWait::new(Arc::clone(&self.state), link.peer, space);
+            {
+                let wait = registration.wait().fuse();
+                futures::pin_mut!(wait);
+                futures::select! {
+                    () = wait => {},
+                    _ = deadline => return Err(timed_out()),
+                }
             }
             registration.hand_back();
             role = QueueRole::Endpoint { holding: true };
@@ -354,28 +352,61 @@ impl OnionLinkSender {
 
 /// An endpoint's registration in a lane's `waiting` count, for as long as it waits: dropped
 /// armed, it leaves the wait, so an endpoint whose `send` is abandoned never keeps relays
-/// yielding the lane.
-struct OnionLaneWait {
+/// yielding the lane, and forwards any already-delivered wakeup to the next waiting endpoint.
+struct OnionLaneWait<T> {
     /// The queue state the registration is in.
-    state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
+    state: Arc<Mutex<OrderedSendState<T>>>,
     /// The lane waited for.
     peer: Did,
+    /// Receiver for the wakeup slot; `None` once the wakeup was already received.
+    space: Option<oneshot::Receiver<()>>,
     /// Whether the drop still has to leave the wait.
     armed: bool,
 }
 
-impl OnionLaneWait {
+impl<T> OnionLaneWait<T> {
+    fn new(
+        state: Arc<Mutex<OrderedSendState<T>>>,
+        peer: Did,
+        space: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            state,
+            peer,
+            space: Some(space),
+            armed: true,
+        }
+    }
+
+    async fn wait(&mut self) {
+        if let Some(space) = self.space.as_mut() {
+            if space.await.is_ok() {
+                self.space = None;
+            }
+        }
+    }
+
     /// The endpoint retries: the retry's `enqueue` leaves the wait under its own lock.
     fn hand_back(mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for OnionLaneWait {
+impl<T> Drop for OnionLaneWait<T> {
     fn drop(&mut self) {
         if self.armed {
+            let consumed_wakeup = match self.space.as_mut() {
+                None => true,
+                Some(space) => {
+                    space.close();
+                    matches!(space.try_recv(), Ok(Some(())))
+                }
+            };
             if let Ok(mut state) = lock(&self.state) {
                 state.leave(self.peer);
+                if consumed_wakeup {
+                    state.wake_one(self.peer);
+                }
             }
         }
     }

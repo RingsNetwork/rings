@@ -98,3 +98,68 @@ impl fmt::Debug for StoresReleased {
             .finish()
     }
 }
+
+#[cfg(all(test, rings_native))]
+mod tests {
+    use std::future::IntoFuture;
+
+    use futures::FutureExt;
+    use rings_core::storage::file::FileStorage;
+    use rings_core::storage::RecordAuthority;
+    use uuid::Uuid;
+
+    use super::StoresReleased;
+
+    #[tokio::test]
+    async fn test_stores_released_empty_and_partial_vs_full_resolution() {
+        // Boundary `n = 0`: `default()` and `of([])` report `len() == 0`, `is_empty()`, and
+        // resolve immediately on first poll.
+        let empty = StoresReleased::default();
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty());
+        assert_eq!(format!("{empty:?}"), "StoresReleased { stores: 0 }");
+        assert_eq!(empty.into_future().now_or_never(), Some(()));
+        assert_eq!(
+            StoresReleased::of([]).into_future().now_or_never(),
+            Some(())
+        );
+
+        // Partial vs. full resolution (`n = 2`): remains `Pending` while any store stays live, and
+        // resolves (along with clones) once all stores drop.
+        let root = std::env::temp_dir().join(format!("rings-stores-released-{}", Uuid::new_v4()));
+        let first = FileStorage::new_with_cap_path_and_authority(
+            64,
+            root.join("first"),
+            RecordAuthority::DurableCache,
+        )
+        .await
+        .expect("open first store");
+        let second = FileStorage::new_with_cap_path_and_authority(
+            64,
+            root.join("second"),
+            RecordAuthority::DurableCache,
+        )
+        .await
+        .expect("open second store");
+
+        let released = StoresReleased::of([first.released(), second.released()]);
+        let cloned = released.clone();
+        assert_eq!(released.len(), 2);
+        assert!(!released.is_empty());
+        assert_eq!(format!("{released:?}"), "StoresReleased { stores: 2 }");
+
+        let mut fut = released.into_future();
+        assert!(futures::poll!(&mut fut).is_pending());
+
+        // Dropping only 1 of 2 stores must leave `StoresReleased` pending.
+        drop(first);
+        assert!(futures::poll!(&mut fut).is_pending());
+
+        // Dropping the 2nd store resolves both the in-flight future and any cloned witness.
+        drop(second);
+        assert_eq!(fut.now_or_never(), Some(()));
+        assert_eq!(cloned.into_future().now_or_never(), Some(()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

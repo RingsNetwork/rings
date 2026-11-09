@@ -90,9 +90,58 @@ struct SlotTable {
     extra_floor_use: SlotFloorUse,
 }
 
+impl SlotTable {
+    /// Give `edge` `preferred` if that slot is currently free, or else the cleanest free slot
+    /// under `floor_use` joined with any registered external floor use, unless `edge` already
+    /// holds a slot. Return whether `edge` newly entered the current-edge set.
+    fn arrive_preferring(
+        &mut self,
+        edge: Did,
+        preferred: Option<u16>,
+        floor_use: &SlotFloorUse,
+    ) -> bool {
+        if self.held.contains_key(&edge) {
+            return false;
+        }
+        let combined = floor_use.clone().join(self.extra_floor_use.clone());
+        let was_current = self.unslotted.remove(&edge);
+        let chosen = preferred
+            .filter(|slot| self.free.contains(slot))
+            .or_else(|| {
+                self.free
+                    .iter()
+                    .copied()
+                    .min_by_key(|slot| (combined.of(*slot), *slot))
+            });
+        match chosen {
+            Some(slot) => {
+                self.free.remove(&slot);
+                self.held.insert(edge, slot);
+            }
+            None => {
+                self.unslotted.insert(edge);
+            }
+        }
+        !was_current
+    }
+
+    /// Free the slot of `edge`, if it holds one, or remove it from `unslotted`. Return whether
+    /// `edge` left the current-edge set.
+    fn depart(&mut self, edge: Did) -> bool {
+        if let Some(slot) = self.held.remove(&edge) {
+            self.free.insert(slot);
+            true
+        } else {
+            self.unslotted.remove(&edge)
+        }
+    }
+}
+
 /// The connection slots of a node (module documentation).
 #[derive(Debug)]
 pub struct SlotRoster {
+    /// Number of connection slots `0..capacity` in this roster.
+    capacity: usize,
     /// The slot assignment.
     table: Mutex<SlotTable>,
     /// Notified after every change of the current edges (the edge-watch law).
@@ -103,11 +152,13 @@ impl SlotRoster {
     /// A roster of `slots` free slots, `0..slots` (at most `u16::MAX + 1`).
     pub fn new(slots: usize) -> Self {
         let last = u16::try_from(slots.saturating_sub(1)).unwrap_or(u16::MAX);
-        let free = match slots {
+        let free: BTreeSet<u16> = match slots {
             0 => BTreeSet::new(),
             _ => (0..=last).collect(),
         };
+        let capacity = free.len();
         Self {
+            capacity,
             table: Mutex::new(SlotTable {
                 free,
                 held: BTreeMap::new(),
@@ -116,6 +167,11 @@ impl SlotRoster {
             }),
             changed: Event::new(),
         }
+    }
+
+    /// The number of connection slots `0..capacity` managed by this roster.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// The slot table, for one pure step.
@@ -144,32 +200,7 @@ impl SlotRoster {
     /// already holds a slot. Used when a reconnecting peer still has residual window load bound to
     /// `preferred` so it resumes its own slot ledger instead of acquiring a fresh one.
     pub fn arrive_preferring(&self, edge: Did, preferred: Option<u16>, floor_use: &SlotFloorUse) {
-        let arrived = {
-            let mut table = self.table();
-            (!table.held.contains_key(&edge)).then(|| {
-                let combined = floor_use.clone().join(table.extra_floor_use.clone());
-                let was_current = table.unslotted.remove(&edge);
-                let chosen = preferred
-                    .filter(|slot| table.free.contains(slot))
-                    .or_else(|| {
-                        table
-                            .free
-                            .iter()
-                            .copied()
-                            .min_by_key(|slot| (combined.of(*slot), *slot))
-                    });
-                match chosen {
-                    Some(slot) => {
-                        table.free.remove(&slot);
-                        table.held.insert(edge, slot);
-                    }
-                    None => {
-                        table.unslotted.insert(edge);
-                    }
-                }
-                !was_current
-            }) == Some(true)
-        };
+        let arrived = self.table().arrive_preferring(edge, preferred, floor_use);
         if arrived {
             self.changed.notify(usize::MAX);
         }
@@ -183,15 +214,10 @@ impl SlotRoster {
 
     /// Free the slot of `edge`, if it holds one; `edge` is no longer a current edge.
     pub fn depart(&self, edge: Did) {
-        {
-            let mut table = self.table();
-            if let Some(slot) = table.held.remove(&edge) {
-                table.free.insert(slot);
-            } else if !table.unslotted.remove(&edge) {
-                return;
-            }
+        let departed = self.table().depart(edge);
+        if departed {
+            self.changed.notify(usize::MAX);
         }
-        self.changed.notify(usize::MAX);
     }
 
     /// The number of current edges (the edge-watch law).
@@ -250,7 +276,9 @@ mod tests {
     /// change nothing, notify none.
     #[test]
     fn test_the_edge_count_and_its_change_follow_arrivals_and_departures() {
+        assert_eq!(SlotRoster::new(0).capacity(), 0);
         let roster = SlotRoster::new(1);
+        assert_eq!(roster.capacity(), 1);
         let clean = SlotFloorUse::default();
         let (a, b) = (Did::from(1_u32), Did::from(2_u32));
         assert_eq!(roster.count(), 0);
