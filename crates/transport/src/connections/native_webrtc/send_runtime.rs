@@ -104,16 +104,23 @@ pub(super) fn native_send_runtime() -> Result<tokio::runtime::Handle> {
     tokio::runtime::Handle::try_current().map_err(|_| Error::NativeSendRuntimeUnavailable)
 }
 
-/// Detach physical close ownership from the lifetime of its join waiter.
-pub(super) async fn run_native_close_task(
+/// Recover or synthesize the typed join failure when a detached physical-close task stops
+/// without publishing a terminal result.
+pub(super) async fn native_close_task_stopped(
     runtime: &tokio::runtime::Handle,
-    close: impl Future<Output = Result<()>> + Send + 'static,
-) -> Result<()> {
-    runtime
-        .spawn(close)
-        .await
-        .map_err(Error::NativeConnectionCloseTask)
-        .and_then(std::convert::identity)
+    join_handle: Option<tokio::task::JoinHandle<()>>,
+) -> Error {
+    if let Some(handle) = join_handle {
+        if let Err(error) = handle.await {
+            return Error::NativeConnectionCloseTask(error);
+        }
+    }
+    let aborted = runtime.spawn(std::future::pending::<()>());
+    aborted.abort();
+    match aborted.await {
+        Err(error) => Error::NativeConnectionCloseTask(error),
+        Ok(()) => unreachable!("aborted pending task cannot complete with Ok"),
+    }
 }
 
 /// Move the already-admitted resource owner into a bounded continuation.
