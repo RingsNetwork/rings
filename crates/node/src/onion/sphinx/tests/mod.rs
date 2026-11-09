@@ -95,7 +95,7 @@ fn admitted(bytes: Vec<u8>, key: &DelegateeKey) -> OnionAdmittedCell {
             OnionCell::parse(&bytes).expect("a cell"),
         )
         .expect("the fixture link has budget")
-        .peel(key)
+        .peel(std::slice::from_ref(key))
         .expect("peel")
         .admit(&mut admission, FIXTURE_ARRIVAL_MS)
         .expect("a fixture layer is admissible")

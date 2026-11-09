@@ -564,8 +564,15 @@ impl Swarm {
                 ),
             )
             .await?;
-        self.transport
-            .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)?;
+        if let Err(error) =
+            self.transport
+                .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)
+        {
+            return Err(self
+                .transport
+                .classify_step_failure(attempt, error, "marking connection offer sent")
+                .await?);
+        }
 
         Ok((ConnectionAttempt(attempt), payload))
     }

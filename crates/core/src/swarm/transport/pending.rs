@@ -290,6 +290,20 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Transfer any deferred finger proof owned by `from` to `to`, the generation that
+    /// atomically replaced it on the same peer (`Law (Atomic yield)`).
+    fn rebind_pending_finger_updates(
+        &self,
+        from: PendingConnectionAttempt,
+        to: PendingConnectionAttempt,
+    ) -> Result<()> {
+        let mut pending_updates = self.pending_finger_updates()?;
+        if let Some(request) = pending_updates.remove(&from) {
+            pending_updates.insert(to, request);
+        }
+        Ok(())
+    }
+
     /// Close `connection`'s physical generation iff it is still the backend's current one;
     /// returns whether it was.
     pub(super) async fn close_if_current(&self, connection: &SwarmConnection) -> Result<bool> {
@@ -845,7 +859,7 @@ impl SwarmTransport {
                 },
             },
             Err(error) => {
-                let _ = self.retire_pending_connection(attempt);
+                let _ = self.fail_pending_connection_without_close(attempt);
                 return Err(Error::Transport(error));
             }
         };

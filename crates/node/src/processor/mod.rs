@@ -205,10 +205,12 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
-        let (next, horizon) = self.session_keys.renew_with(now_ms, mint, persist)?;
-        self.swarm
-            .set_delegatee_key(next)
-            .map_err(Error::CoreError)?;
+        let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
+            persist(next)?;
+            self.swarm
+                .set_delegatee_key(next.clone())
+                .map_err(Error::CoreError)
+        })?;
         Ok(horizon)
     }
 

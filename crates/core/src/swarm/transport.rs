@@ -524,15 +524,25 @@ impl SwarmTransport {
             .clone()
     }
 
-    /// Replace the session key this node signs with, when it authorizes the same account DID.
+    /// Replace the session key this node signs with, when it carries a valid delegator
+    /// signature for the same account DID and strictly advances the signing horizon.
     pub(crate) fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
         if delegatee_key.delegator_did() != self.dht.did {
             return Err(Error::VerifySignatureFailed);
         }
-        *self
+        let delegation = delegatee_key.delegation();
+        delegation.verify_delegator_authorization_at(delegation.created_at_ms())?;
+        let next_horizon = crate::swarm::signing_horizon_ms(delegation.expires_at_ms());
+        let mut current = self
             .delegatee_key
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = delegatee_key;
+            .unwrap_or_else(PoisonError::into_inner);
+        let current_horizon =
+            crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
+        if next_horizon <= current_horizon {
+            return Err(Error::DelegationExpiresWithinMargin);
+        }
+        *current = delegatee_key;
         Ok(())
     }
 

@@ -304,13 +304,9 @@ impl BoundCallback {
             .processor
             .logical
             .transport
-            .cancel_unadmitted_connection(attempt)
+            .fail_unadmitted_connection(attempt)
             .await?
         {
-            self.processor
-                .logical
-                .transport
-                .record_candidate_dial_failure(attempt.peer());
             self.processor.discard_pre_admission_hold();
             self.processor
                 .logical
@@ -333,13 +329,9 @@ impl BoundCallback {
             .processor
             .logical
             .transport
-            .cancel_unadmitted_connection(attempt)
+            .fail_unadmitted_connection(attempt)
             .await?
         {
-            self.processor
-                .logical
-                .transport
-                .record_candidate_dial_failure(attempt.peer());
             self.processor.discard_pre_admission_hold();
             self.processor
                 .logical

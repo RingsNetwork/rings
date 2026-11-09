@@ -281,12 +281,12 @@ impl OnionCircuitShell {
     ) -> Result<()> {
         let now_ms = get_epoch_ms();
         self.renew_if_rolled_back(now_ms)?;
-        let key = scope.lifecycle().delegatee_key();
+        let keys = scope.lifecycle().decryption_keys_at(now_ms);
         let outcome = {
             let mut admission = lock(&self.admission)?;
             hop(
                 &mut admission,
-                &key,
+                &keys,
                 self.relays,
                 |tag| self.tags.expects(from, tag),
                 from,

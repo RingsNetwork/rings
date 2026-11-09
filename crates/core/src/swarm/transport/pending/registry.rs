@@ -103,6 +103,7 @@ pub(in crate::swarm::transport) struct ExpiredUnadmittedPeer {
     pub(in crate::swarm::transport) attempt: PendingConnectionAttempt,
     pub(in crate::swarm::transport) age_ms: i64,
     pub(in crate::swarm::transport) phase: UnadmittedPhase,
+    pub(in crate::swarm::transport) was_offering: bool,
 }
 
 /// Read-only projection of active generations still eligible for data-plane work.
@@ -652,10 +653,13 @@ impl ConnectionLifecycleRegistry {
                     PeerConnectionLifecycle::Active { .. } => return None,
                 };
                 let age_ms = now_ms.saturating_sub(*started_at_ms);
+                let was_offering =
+                    matches!(self.handshake(*attempt), Some(Handshake::Offering { .. }));
                 (age_ms >= PENDING_CONNECTION_TIMEOUT_MS).then_some(ExpiredUnadmittedPeer {
                     attempt: *attempt,
                     age_ms,
                     phase,
+                    was_offering,
                 })
             })
             .collect::<Vec<_>>();
