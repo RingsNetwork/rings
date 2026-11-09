@@ -110,16 +110,12 @@ impl NextHolder {
     }
 
     /// Forget `holder` when it matches `peer` (or unconditionally when `peer` is `None`),
-    /// returning the downstream peer whose pending replications should be reset.
+    /// invalidating any in-flight query tied to the previous eligibility set and returning the
+    /// downstream peer whose pending replications should be reset.
     fn forget(&mut self, peer: Option<Did>) -> Option<Did> {
+        self.asked = None;
         let forgotten = (peer.is_none() || self.holder == peer)
-            .then(|| {
-                let taken = self.holder.take();
-                if peer.is_some() || taken.is_some() {
-                    self.asked = None;
-                }
-                taken
-            })
+            .then(|| self.holder.take())
             .flatten();
         peer.or(forgotten)
     }
@@ -635,6 +631,7 @@ impl PeerRing {
             .lock_relay_neighborhood()?
             .observe_answer(peer, on_time)
         {
+            self.forget_next_relay_holder(None)?;
             self.relay_chain_changed();
         }
         Ok(())
