@@ -457,13 +457,14 @@ impl RelayNeighborhood {
     }
 
     /// Record the declaration `peer` made when it connected. A previous holder that now declares
-    /// it holds no relay mail is no previous holder.
-    pub(crate) fn observe(&mut self, peer: Did, custody: RelayCustody) {
+    /// it holds no relay mail is no previous holder. Returns whether `peer`'s known custody changed.
+    pub(crate) fn observe(&mut self, peer: Did, custody: RelayCustody) -> bool {
         if custody.holds() {
-            self.storage_less.remove(&peer);
+            self.storage_less.remove(&peer)
         } else {
-            self.storage_less.insert(peer);
+            let changed = self.storage_less.insert(peer);
             self.forget_previous_holder(peer);
+            changed
         }
     }
 

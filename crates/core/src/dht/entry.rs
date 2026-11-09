@@ -791,13 +791,9 @@ impl Entry {
         let mut buffer = self.topic_buffer()?;
         let removed = buffer
             .values
-            .keys()
-            .filter(|value| {
-                buffer
-                    .dots_for(value)
-                    .any(|dot| witness.matches(value, &dot))
-            })
-            .cloned()
+            .iter()
+            .filter(|(value, dot)| witness.matches(value, dot))
+            .map(|(value, _)| value.clone())
             .collect::<Vec<_>>();
         removed.iter().for_each(|value| {
             buffer.remove(value);

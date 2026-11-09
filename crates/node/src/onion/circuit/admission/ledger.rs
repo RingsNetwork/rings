@@ -113,14 +113,14 @@ impl QuantumLedger {
 }
 
 /// One connection slot's unit ledger, the live link generations currently occupying it, and any
-/// disconnected DIDs still bound to this slot while its window load drains.
+/// DIDs whose own prior charges remain in `ledger` while the window drains.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct SlotLedger {
     /// Units charged to this connection slot in the window.
     pub(super) ledger: QuantumLedger,
     /// The live link generations of each DID currently occupying this slot.
     pub(super) live: BTreeMap<Did, BTreeSet<u64>>,
-    /// Disconnected DIDs whose prior charges remain in `ledger`, mapped to their retirement quantum.
+    /// DIDs that have charged units on this slot, mapped to the latest quantum they were charged.
     pub(super) retained: BTreeMap<Did, u128>,
 }
 
@@ -140,6 +140,15 @@ impl SlotLedger {
         self.live
             .get(&did)
             .is_some_and(|generations| generations.contains(&generation))
+    }
+
+    /// Whether `did` has an unexpired charge of its own on this slot at `quantum`.
+    pub(super) fn has_unexpired_charge(&self, did: Did, quantum: u128) -> bool {
+        self.ledger.load(quantum) > 0
+            && self
+                .retained
+                .get(&did)
+                .is_some_and(|&charged_quantum| QuantumLedger::in_window(charged_quantum, quantum))
     }
 
     /// The number of live link generations on this slot.

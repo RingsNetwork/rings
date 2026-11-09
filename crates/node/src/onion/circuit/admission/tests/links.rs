@@ -536,6 +536,21 @@ fn test_sybil_churn_beyond_2r_never_locks_out_admitted_slot_and_assigns_cleanest
         Some(OnionSlotId::new(15))
     );
     assert_eq!(sender_load(&clean_first, 52, ORIGIN_MS + 5 * Q), Some(5));
+
+    // Disconnecting peers that sent zero Onion cells on a charged slot leave no retained identity
+    // in `slot.retained` or `peer_slots`, keeping identity state bounded by `2·R + B·S`.
+    let zero_cell_now = ORIGIN_MS + 5 * Q;
+    for zero_peer in 10_000..10_100_u32 {
+        clean_first.link_closed(zero_cell_now, link(52));
+        roster.depart(Did::from(52_u32));
+        roster.arrive(Did::from(zero_peer), &SlotFloorUse::default());
+        open(&mut clean_first, zero_cell_now, link(zero_peer));
+        clean_first.link_closed(zero_cell_now, link(zero_peer));
+        roster.depart(Did::from(zero_peer));
+        assert_eq!(clean_first.slot_of(Did::from(zero_peer)), None);
+        roster.arrive(Did::from(52_u32), &SlotFloorUse::default());
+        open(&mut clean_first, zero_cell_now, link(52));
+    }
 }
 
 /// Law (#1183): `reconcile` allocates connection slots without depending on `Did` ordering, so an

@@ -457,5 +457,20 @@ fn test_next_relay_holder_advances_past_suspected_holder_with_single_successor()
         None
     );
     assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h2_id));
+
+    // Once two on-time probe answers clear H1(300)'s suspicion, H0 invalidates its cached fallback
+    // holder H2(400) and re-queries at 201 to restore H1(300) as its immediate relay successor.
+    h0.observe_chain_neighbour_answer(h1_id, true)?;
+    h0.observe_chain_neighbour_answer(h1_id, true)?;
+    assert_eq!(h0.remote_relay_chain_neighbours()?.1, None);
+    let (recovery_key, recovery_token) = h0
+        .outstanding_next_relay_holder_query()?
+        .ok_or_else(|| Error::InvalidMessage("expected recovery query at 201".to_string()))?;
+    assert_eq!(recovery_key, Did::from(201u32));
+    assert_eq!(
+        h0.take_next_relay_holder(recovery_key, recovery_token, x_id, Some(h1_id), None)?,
+        None
+    );
+    assert_eq!(h0.remote_relay_chain_neighbours()?.1, Some(h1_id));
     Ok(())
 }

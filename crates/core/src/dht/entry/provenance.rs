@@ -232,11 +232,9 @@ impl Entry {
         self.topic_buffer().and_then(|buffer| {
             buffer
                 .values
-                .keys()
-                .all(|value| {
-                    !buffer
-                        .dots_for(value)
-                        .any(|held_dot| witness.matches(value, &held_dot))
+                .iter()
+                .all(|(value, dot)| {
+                    !witness.matches(value, dot)
                         || buffer
                             .dots_for(value)
                             .all(|held_dot| held_dot.version.is_authored_by(writer))
@@ -250,21 +248,15 @@ impl Entry {
     /// the storage slot (#1179).
     ///
     /// Rejects:
-    /// - A synced reset floor `register` with no elements, removes, or removal-only floor, or
-    ///   with versions below `floor`, or whose versions at or below `floor` span another writer,
-    ///   or that would overwrite a live carrier holding versions at or below `floor` from another
-    ///   writer (`actor != floor.actor`).
+    /// - A synced reset floor `register` with versions below `floor`, or whose versions at or
+    ///   below `floor` span another writer, or that would overwrite a live carrier holding
+    ///   versions at or below `floor` from another writer (`actor != floor.actor`).
     /// - A synced remove covering a live element in `local` authored by a different writer
     ///   (`held_dot.version.actor != remove_dot.version.actor`).
     pub(crate) fn validate_data_sync_on_local(&self, local: Option<&Self>) -> Result<()> {
         self.permits_synced_register_on(local).and_then(|()| {
             Self::with_live_and_then(local, |live| self.permits_synced_tombstones_on(live))
         })
-    }
-
-    /// Whether `self` carries at least one element, remove, or removal-only floor.
-    fn has_synced_register_witness(&self) -> bool {
-        !self.data.is_empty() || !self.crdt.tombstones.is_empty() || self.expires_at_ms == Some(0)
     }
 
     /// Whether every version in `self` at or below `floor` was authored by `floor.actor`.
@@ -278,8 +270,7 @@ impl Entry {
     /// the two carriers.
     fn permits_synced_register_on(&self, local: Option<&Self>) -> Result<()> {
         let valid_self = self.crdt.register.is_none_or(|floor| {
-            self.has_synced_register_witness()
-                && self.versions().all(|version| version >= floor)
+            self.versions().all(|version| version >= floor)
                 && self.versions_through_floor_authored_by(floor)
                 && local.is_none_or(|live| live.versions_through_floor_authored_by(floor))
         });

@@ -194,14 +194,22 @@ impl EntryTombstone {
     }
 }
 
+const CO_DOT_TAG: u32 = 1 << 31;
+const CO_DOT_ELEM_SHIFT: u32 = 16;
+const CO_DOT_ELEM_MASK: u32 = 0x7FFF;
+const CO_DOT_INDEX_MASK: u32 = 0xFFFF;
+
 /// CRDT metadata carried beside the entry payload.
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
 /// remove side: one covering remove per removed payload. `co_dots` preserves
 /// surviving per-actor add witnesses `(element_index, dot)` when multiple
-/// attributed writers concurrently publish the same payload bytes.
+/// attributed writers concurrently publish the same payload bytes, packed into
+/// the `dots` sequence on the wire and on disk so the 3-field `EntryCrdt`
+/// layout remains compatible with persisted `FileStorage` records.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "WireEntryCrdt", from = "WireEntryCrdt")]
 pub struct EntryCrdt {
     /// Optional LWW reset floor for the entry payload.
     pub register: Option<EntryVersion>,
@@ -212,8 +220,61 @@ pub struct EntryCrdt {
     pub tombstones: Vec<EntryTombstone>,
     /// Additional per-actor add dots `(element_index, dot)` for elements concurrently held by
     /// multiple attributed writers.
-    #[serde(default)]
     pub co_dots: Vec<(u32, EntryDot)>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "EntryCrdt")]
+struct WireEntryCrdt {
+    register: Option<EntryVersion>,
+    dots: Vec<EntryDot>,
+    tombstones: Vec<EntryTombstone>,
+}
+
+impl From<EntryCrdt> for WireEntryCrdt {
+    fn from(crdt: EntryCrdt) -> Self {
+        let mut dots = Vec::with_capacity(crdt.dots.len().saturating_add(crdt.co_dots.len()));
+        dots.extend(crdt.dots.into_iter().map(|mut dot| {
+            dot.index &= !CO_DOT_TAG;
+            dot
+        }));
+        dots.extend(crdt.co_dots.into_iter().map(|(elem_idx, dot)| EntryDot {
+            version: dot.version,
+            index: CO_DOT_TAG
+                | ((elem_idx & CO_DOT_ELEM_MASK) << CO_DOT_ELEM_SHIFT)
+                | (dot.index & CO_DOT_INDEX_MASK),
+        }));
+        Self {
+            register: crdt.register,
+            dots,
+            tombstones: crdt.tombstones,
+        }
+    }
+}
+
+impl From<WireEntryCrdt> for EntryCrdt {
+    fn from(wire: WireEntryCrdt) -> Self {
+        let mut dots = Vec::with_capacity(wire.dots.len());
+        let mut co_dots = Vec::new();
+        for dot in wire.dots {
+            if dot.index & CO_DOT_TAG == 0 {
+                dots.push(dot);
+            } else {
+                let elem_idx = (dot.index >> CO_DOT_ELEM_SHIFT) & CO_DOT_ELEM_MASK;
+                let orig_index = dot.index & CO_DOT_INDEX_MASK;
+                co_dots.push((elem_idx, EntryDot {
+                    version: dot.version,
+                    index: orig_index,
+                }));
+            }
+        }
+        Self {
+            register: wire.register,
+            dots,
+            tombstones: wire.tombstones,
+            co_dots,
+        }
+    }
 }
 
 impl EntryCrdt {

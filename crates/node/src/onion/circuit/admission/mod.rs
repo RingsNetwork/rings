@@ -555,7 +555,6 @@ impl OnionAdmissionState {
                     let did = link.peer();
                     let slot_id = self.acquire_slot_for(did, quantum)?;
                     let slot = self.slots.entry(slot_id).or_default();
-                    slot.retained.remove(&did);
                     slot.live.entry(did).or_default().insert(link.generation());
                     self.peer_slots.insert(did, slot_id);
                     Ok(())
@@ -577,28 +576,26 @@ impl OnionAdmissionState {
             last.then(|| {
                 let remaining_peer = slot.live.first_key_value().map(|(&peer, _)| peer);
                 let has_load = slot.ledger.load(quantum) > 0;
+                let retain_did = slot.has_unexpired_charge(did, quantum);
                 let slot_empty = slot.live.is_empty();
-                (slot_id, remaining_peer, has_load, slot_empty)
+                (slot_id, remaining_peer, has_load, retain_did, slot_empty)
             })
         });
-        if let Some((slot_id, remaining_peer, has_load, slot_empty)) = removed_last_for_peer {
+        if let Some((slot_id, remaining_peer, has_load, retain_did, slot_empty)) =
+            removed_last_for_peer
+        {
             self.release_roster_slot_on_close(did, slot_id, remaining_peer);
-            match (has_load, slot_empty) {
-                (true, _) => {
-                    if let Some(slot) = self.slots.get_mut(&slot_id) {
-                        slot.retained.insert(did, quantum);
-                    }
+            if !retain_did {
+                if let Some(slot) = self.slots.get_mut(&slot_id) {
+                    slot.retained.remove(&did);
                 }
-                (false, false) => {
-                    self.peer_slots.remove(&did);
-                }
-                (false, true) => {
-                    self.peer_slots.remove(&did);
-                    if let Some(removed) = self.slots.remove(&slot_id) {
-                        removed.retained.into_keys().for_each(|retained_did| {
-                            self.peer_slots.remove(&retained_did);
-                        });
-                    }
+                self.peer_slots.remove(&did);
+            }
+            if !has_load && slot_empty {
+                if let Some(removed) = self.slots.remove(&slot_id) {
+                    removed.retained.into_keys().for_each(|retained_did| {
+                        self.peer_slots.remove(&retained_did);
+                    });
                 }
             }
             self.slot_roster
@@ -701,6 +698,7 @@ impl OnionAdmissionState {
             .charged(quantum, units.get(), ONION_ADMISSION_GLOBAL_UNITS)
             .ok_or(OnionChargeRejection::GlobalBudget)?;
         slot.ledger = charged_slot;
+        slot.retained.insert(did, quantum);
         self.global = charged_global;
         self.pool_load = next_pool_load;
         self.slot_roster

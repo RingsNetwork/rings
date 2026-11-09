@@ -149,7 +149,11 @@ impl PeerRing {
 
     /// Record the declaration `peer` made in its connection handshake.
     pub(crate) fn observe_relay_custody(&self, peer: Did, custody: RelayCustody) -> Result<()> {
-        self.lock_relay_neighborhood()?.observe(peer, custody);
+        if self.lock_relay_neighborhood()?.observe(peer, custody) {
+            let target = (!custody.holds()).then_some(peer);
+            self.forget_next_relay_holder(target)?;
+            self.relay_chain_changed();
+        }
         Ok(())
     }
 

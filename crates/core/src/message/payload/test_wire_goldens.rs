@@ -86,7 +86,7 @@ use crate::simulation::SimulationRuntimeGuard;
 /// this pair to the new version and the hash the failure reports, in the same commit.
 const PINNED: (u16, &str) = (
     3,
-    "76d73ef209c98c0787df0dc52dfedc2119931ff85212d444a201bcdcc5cb8bed",
+    "73aea308599525b4e0e46eea4b163ed14660f51be879f463520c081f8e0661ff",
 );
 
 /// The overlay every golden is signed in.
