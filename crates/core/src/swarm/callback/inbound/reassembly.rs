@@ -197,6 +197,15 @@ async fn advance_chunk_event(
             .await;
         return Err(Error::NestedChunkMessage);
     }
+    if let Err(error) = payload
+        .relay
+        .validate_signaling_path(kind.carries_signaling_path())
+    {
+        processor
+            .record_receive_failure(event.peer, event.authentication)
+            .await;
+        return Err(error);
+    }
     let lane = InboundLane::from_kind(kind);
     // Every chunk took credit on the lane they arrived on, which must be the lane of the
     // message they carry (one lane per class).

@@ -377,6 +377,19 @@ impl MessagePayload {
         !self.is_relay_destination_for(local)
     }
 
+    /// Whether `relay.destination` obeys the destination binding of the carried message kind:
+    /// every message that cannot undergo `reset_destination` must keep
+    /// `relay.destination == transaction.destination`.
+    pub(crate) fn relay_destination_matches_transaction(&self) -> bool {
+        self.relay.destination == self.transaction.destination
+            || (MessageKind::from_wire(&self.transaction.data)
+                .is_ok_and(MessageKind::permits_destination_reset)
+                && self
+                    .transaction
+                    .data::<Message>()
+                    .is_ok_and(|message| message.permits_destination_reset()))
+    }
+
     /// Verify both the immutable origin transaction and the current payload carrier.
     pub(crate) fn verify_transaction_and_payload(&self, network_id: u32) -> bool {
         self.verify_transaction_and_payload_under(network_id, PerSlot::full_verification())
@@ -393,6 +406,7 @@ impl MessagePayload {
         let now_ms = get_epoch_ms();
         verify_message_under(&self.transaction, network_id, now_ms, authorization.origin)
             && verify_message_under(self, network_id, now_ms, authorization.hop)
+            && self.relay_destination_matches_transaction()
     }
 }
 

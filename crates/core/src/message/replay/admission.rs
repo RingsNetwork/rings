@@ -5,6 +5,7 @@ use super::StreamKey;
 use super::TransactionDigest;
 use crate::consts::MAX_RELAY_INBOX_TTL_MS;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::dht::Did;
 use crate::fair_admission::Principal;
 use crate::fair_admission::Shares;
 use crate::message::types::MessageCategory;
@@ -104,6 +105,8 @@ pub(super) fn replay_clock(started_at: Instant) -> impl FnOnce() -> ReplayInstan
 pub(crate) struct Admission {
     /// Its stream.
     pub(crate) key: StreamKey,
+    /// The local terminating node against which origin quota is charged.
+    pub(crate) quota_destination: Did,
     /// Its sequence in the stream.
     pub(crate) sequence: u64,
     /// Its digest.
@@ -130,6 +133,7 @@ impl Admission {
     ) -> Self {
         Self {
             key,
+            quota_destination: key.destination,
             sequence,
             digest,
             charge: MessageCategory::Application.into(),

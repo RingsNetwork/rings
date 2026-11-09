@@ -114,6 +114,7 @@ impl SwarmTransport {
         let proof = &transaction.verification;
         Ok(Admission {
             key,
+            quota_destination: self.dht.did,
             sequence: transaction.sequence,
             digest: transaction.digest()?,
             charge,
