@@ -116,20 +116,30 @@ struct Persisted<O> {
 impl<O> Persisted<O>
 where O: Owner
 {
-    /// Journal `changes`, then compact the journal when it has outgrown the memory.
-    async fn journal_changes(&mut self, changes: Vec<MemoryChange<O>>) -> Result<(), StateError> {
-        for change in changes {
+    /// Journal all pending changes of `memory`, marking them persisted only after the batch is
+    /// flushed, then compact the journal when it has outgrown the memory.
+    async fn flush_pending(&mut self) -> Result<(), StateError> {
+        let changes = self.memory.pending_changes();
+        let mut batch = self.journal.batch();
+        for change in &changes {
             match change {
                 MemoryChange::Keep {
                     owner,
                     announcement,
                     seen_at_ms,
                 } => {
-                    let record = MemoryRecord::of(&announcement, seen_at_ms);
-                    self.journal.put(&owner.label(), &record).await?;
+                    let record = MemoryRecord::of(announcement, *seen_at_ms);
+                    self.journal
+                        .batch_put(&mut batch, &owner.label(), &record)?;
                 }
-                MemoryChange::Forget(owner) => self.journal.remove(&owner.label()).await?,
+                MemoryChange::Forget(owner) => {
+                    self.journal.batch_remove(&mut batch, &owner.label())?;
+                }
             }
+        }
+        self.journal.append_batch(batch).await?;
+        for change in &changes {
+            self.memory.mark_persisted(change);
         }
         let remembered = self.memory.remembered().count();
         if self.journal.needs_compaction(remembered) {
@@ -141,6 +151,7 @@ where O: Owner
                 })
                 .collect::<BTreeMap<_, _>>();
             self.journal.compact(snapshot).await?;
+            self.memory.mark_compacted();
         }
         Ok(())
     }
@@ -193,9 +204,16 @@ where D: Directory
 
     async fn announcement(&self, owner: Self::Owner) -> Result<Option<Announcement>, Self::Error> {
         let asked_at = now_ms();
-        let recalled = self.persisted.lock().await.memory.recall(&owner, asked_at);
-        if let Recalled::Fresh(answer) = recalled {
-            return Ok(answer);
+        {
+            let mut persisted = self.persisted.lock().await;
+            if let Recalled::Fresh(answer) = persisted.memory.recall(&owner, asked_at) {
+                if persisted.memory.has_pending_changes() {
+                    if let Err(error) = persisted.flush_pending().await {
+                        tracing::warn!("dns relay: memory not journaled: {error}");
+                    }
+                }
+                return Ok(answer);
+            }
         }
         let Ok(_slot) = self.budget.try_acquire() else {
             let persisted = self.persisted.lock().await;
@@ -208,9 +226,11 @@ where D: Directory
         let observed = self.directory.announcement(owner).await;
         let mut persisted = self.persisted.lock().await;
         let observation = persisted.memory.observe(owner, observed, now_ms());
-        if let Err(error) = persisted.journal_changes(observation.changes).await {
-            // The answer stands; the memory is journaled again on its next change or refresh.
-            tracing::warn!("dns relay: memory not journaled: {error}");
+        if persisted.memory.has_pending_changes() {
+            if let Err(error) = persisted.flush_pending().await {
+                // The answer stands; pending changes stay dirty and are retried on the next access.
+                tracing::warn!("dns relay: memory not journaled: {error}");
+            }
         }
         observation.answer.map_err(RecallError::Directory)
     }
