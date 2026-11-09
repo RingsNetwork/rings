@@ -1,12 +1,17 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 use rings_gateway::BoxGatewayDuplex;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 
 use super::super::duplex::TcpDuplexState;
+use super::super::pump::pump_tcp_duplex;
+use super::super::pump::OnionPumpEnd;
 use super::super::NativeOnionOpenStream;
 use crate::onion::session::dial::OnionClientStream;
 use crate::onion::session::dial::OnionStreamEvent;
+use crate::onion::session::dial::ONION_SESSION_QUEUE;
 use crate::onion::session::witness::OnionSessionCondition;
 
 /// Law (half-close): each half closes independently and stays closed; the stream is over
@@ -182,4 +187,157 @@ async fn test_the_nodes_stop_resets_a_live_local_socket() {
         end.map_err(|error| error.kind()),
         Err(std::io::ErrorKind::ConnectionReset)
     );
+}
+
+/// Regression (#1200): when the download event queue is full and the peer simultaneously writes
+/// more upload chunks than `ONION_SESSION_QUEUE`, neither direction deadlocks the other, and when
+/// the upload command queue is full, download events still flow to the local stream.
+#[tokio::test]
+async fn test_pump_tcp_duplex_makes_bidirectional_progress_when_queues_fill() {
+    // 1. Download queue saturated while peer writes > ONION_SESSION_QUEUE upload chunks.
+    let (local, peer) = socket_pair().await;
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let witness = NativeOnionOpenStream::new(stream).relay_witnessed(local);
+
+    let down_chunk = Bytes::from_static(b"down-chunk-payload");
+    let mut queued_down = 0_usize;
+    while driver.try_emit(OnionStreamEvent::Data(down_chunk.clone())) {
+        queued_down += 1;
+    }
+    assert!(queued_down >= ONION_SESSION_QUEUE);
+
+    let upload_chunks = ONION_SESSION_QUEUE + 12;
+    let up_chunk = b"up-chunk-payload";
+    let expected_up_len = up_chunk.len() * upload_chunks;
+    let expected_down_len = down_chunk.len() * (queued_down + 4);
+
+    let (mut peer_read, mut peer_write) = peer.into_split();
+    let writer_task = tokio::spawn(async move {
+        for _ in 0..upload_chunks {
+            peer_write.write_all(up_chunk).await.expect("write upload");
+            tokio::task::yield_now().await;
+        }
+        peer_write.shutdown().await.expect("shutdown upload");
+    });
+
+    let reader_task = tokio::spawn(async move {
+        let mut received = Vec::new();
+        peer_read
+            .read_to_end(&mut received)
+            .await
+            .expect("read download to end");
+        received
+    });
+
+    let driver_task = tokio::spawn(async move {
+        let mut uploaded = Vec::new();
+        for extra in 0..4 {
+            if extra < 4 {
+                driver
+                    .emit(OnionStreamEvent::Data(down_chunk.clone()))
+                    .await;
+            }
+            if let Some(bytes) = driver.next_data().await {
+                uploaded.extend_from_slice(&bytes);
+            }
+        }
+        driver.emit(OnionStreamEvent::Fin).await;
+        while let Some(bytes) = driver.next_data().await {
+            uploaded.extend_from_slice(&bytes);
+        }
+        uploaded
+    });
+
+    let (write_res, read_res, driver_res) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(writer_task, reader_task, driver_task)
+    })
+    .await
+    .expect("bidirectional full-queue relay must not deadlock");
+    write_res.expect("writer task");
+    let downloaded = read_res.expect("reader task");
+    let uploaded = driver_res.expect("driver task");
+
+    assert_eq!(uploaded.len(), expected_up_len);
+    assert_eq!(downloaded.len(), expected_down_len);
+    assert_eq!(witness.condition(), OnionSessionCondition::Live);
+}
+
+/// Regression (#1200, #1205 item 2a): when the local stream write blocks midway through a frame,
+/// `pump_tcp_duplex` preserves the unwritten suffix across select iterations while continuing to
+/// read upload bytes and `fin` from the local stream.
+#[tokio::test]
+async fn test_pump_tcp_duplex_preserves_partial_write_and_polls_upload_while_write_blocks() {
+    let (mut local, mut peer) = tokio::io::duplex(1);
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let (sender, receiver) = stream.split();
+
+    let pump_task = tokio::spawn(async move {
+        let (_, end) =
+            pump_tcp_duplex(&mut local, sender, receiver, Some(Duration::from_secs(5))).await;
+        end
+    });
+
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"abcd")))
+        .await;
+    driver.emit(OnionStreamEvent::Fin).await;
+    tokio::task::yield_now().await;
+
+    // While the 4-byte download write is blocked after writing at most 1 byte into the 1-byte
+    // duplex buffer, upload writes and EOF from `peer` still progress through the pump (split
+    // across 1-byte duplex reads).
+    let collect_upload = tokio::spawn(async move {
+        let mut uploaded = Vec::new();
+        while let Some(chunk) = driver.next_data().await {
+            uploaded.extend_from_slice(&chunk);
+        }
+        uploaded
+    });
+    peer.write_all(b"up").await.expect("upload while blocked");
+    peer.shutdown().await.expect("upload fin while blocked");
+
+    let uploaded = tokio::time::timeout(Duration::from_secs(1), collect_upload)
+        .await
+        .expect("upload data and fin must not be blocked by stalled local write")
+        .expect("collect upload join");
+    assert_eq!(uploaded, b"up");
+
+    // Drain the download side and verify the partial write resumes at byte 1 without duplication.
+    let mut downloaded = Vec::new();
+    peer.read_to_end(&mut downloaded)
+        .await
+        .expect("read download");
+    assert_eq!(downloaded, b"abcd");
+
+    let end = tokio::time::timeout(Duration::from_secs(1), pump_task)
+        .await
+        .expect("pump finishes")
+        .expect("pump join");
+    assert_eq!(end, OnionPumpEnd::Closed);
+}
+
+/// Regression (#1205 item 2a): a local write that blocks indefinitely still honors the pump's
+/// `idle_timeout` and fails closed instead of hanging forever.
+#[tokio::test]
+async fn test_pump_tcp_duplex_enforces_idle_timeout_while_local_write_is_blocked() {
+    let (mut local, _peer) = tokio::io::duplex(1);
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let (sender, receiver) = stream.split();
+
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from_static(b"stalled-write")))
+        .await;
+
+    let (_, end) = tokio::time::timeout(
+        Duration::from_millis(500),
+        pump_tcp_duplex(
+            &mut local,
+            sender,
+            receiver,
+            Some(Duration::from_millis(25)),
+        ),
+    )
+    .await
+    .expect("idle timeout must fire even while local write is blocked");
+    assert_eq!(end, OnionPumpEnd::Failed);
 }

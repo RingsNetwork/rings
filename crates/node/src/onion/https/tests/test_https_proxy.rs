@@ -518,3 +518,296 @@ async fn test_concurrent_fetches_share_one_byte_budget() {
         "the one budget holds across both fetches: {recorded} bytes recorded"
     );
 }
+
+#[derive(Clone, Default)]
+struct MockCancelState {
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    body_cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    reader_cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FetchCancelTarget for MockCancelState {
+    type Body = ();
+    type Reader = ();
+
+    fn cancel_body(&mut self, (): &Self::Body) -> bool {
+        self.body_cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    fn cancel_reader(&mut self, (): &Self::Reader) -> bool {
+        self.reader_cancelled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    fn abort(&mut self) {
+        self.aborted
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+struct MockHttpsResponse {
+    status: f64,
+    headers: Vec<(String, String)>,
+    has_body: bool,
+}
+
+struct MockHttpsFetch {
+    response: Option<MockHttpsResponse>,
+    chunks: std::sync::Mutex<std::collections::VecDeque<Option<Vec<u8>>>>,
+    stall_after_chunks: bool,
+}
+
+impl CancellableHttpsFetch for MockHttpsFetch {
+    type Response = MockHttpsResponse;
+    type Body = ();
+    type Reader = ();
+    type Cancel = MockCancelState;
+
+    async fn await_response(&mut self) -> Result<Self::Response> {
+        match self.response.take() {
+            Some(response) => Ok(response),
+            None => std::future::pending().await,
+        }
+    }
+
+    fn response_status(&self, response: &Self::Response) -> Result<f64> {
+        Ok(response.status)
+    }
+
+    fn response_body(&self, response: &Self::Response) -> Result<Option<Self::Body>> {
+        Ok(response.has_body.then_some(()))
+    }
+
+    fn response_headers(&self, response: &Self::Response) -> Result<Vec<(String, String)>> {
+        Ok(response.headers.clone())
+    }
+
+    fn body_reader(&self, (): &Self::Body) -> Result<Self::Reader> {
+        Ok(())
+    }
+
+    async fn read_chunk(&self, (): &Self::Reader) -> Result<Option<Vec<u8>>> {
+        let next = self.chunks.lock().expect("chunks lock").pop_front();
+        match next {
+            Some(chunk) => Ok(chunk),
+            None if self.stall_after_chunks => std::future::pending().await,
+            None => Ok(None),
+        }
+    }
+}
+
+/// Regression (#1216): dropping the outer fetch future (e.g. on exit session teardown) or
+/// hitting the request timeout aborts the `AbortController` and cancels any active stream reader.
+#[tokio::test]
+async fn test_cancellable_https_fetch_aborts_on_outer_drop_and_timeout() {
+    use std::sync::atomic::Ordering;
+
+    // 1. Outer future dropped while waiting for initial response headers.
+    let state = MockCancelState::default();
+    {
+        let fut = drive_cancellable_https_fetch(
+            MockHttpsFetch {
+                response: None,
+                chunks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+                stall_after_chunks: true,
+            },
+            state.clone(),
+            1024,
+            Duration::from_secs(30),
+            |_| Ok(()),
+        );
+        futures::pin_mut!(fut);
+        assert!(futures::poll!(fut.as_mut()).is_pending());
+    }
+    assert!(state.aborted.load(Ordering::SeqCst));
+    assert!(!state.body_cancelled.load(Ordering::SeqCst));
+    assert!(!state.reader_cancelled.load(Ordering::SeqCst));
+
+    // 2. Outer future dropped mid-body after acquiring the stream reader.
+    let state = MockCancelState::default();
+    {
+        let fut = drive_cancellable_https_fetch(
+            MockHttpsFetch {
+                response: Some(MockHttpsResponse {
+                    status: 200.0,
+                    headers: Vec::new(),
+                    has_body: true,
+                }),
+                chunks: std::sync::Mutex::new(std::collections::VecDeque::from([Some(
+                    b"part".to_vec(),
+                )])),
+                stall_after_chunks: true,
+            },
+            state.clone(),
+            1024,
+            Duration::from_secs(30),
+            |_| Ok(()),
+        );
+        futures::pin_mut!(fut);
+        assert!(futures::poll!(fut.as_mut()).is_pending());
+    }
+    assert!(state.aborted.load(Ordering::SeqCst));
+    assert!(state.reader_cancelled.load(Ordering::SeqCst));
+    assert!(!state.body_cancelled.load(Ordering::SeqCst));
+
+    // 3. Request timeout fires while response is stalled.
+    let state = MockCancelState::default();
+    let result = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: None,
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            stall_after_chunks: true,
+        },
+        state.clone(),
+        1024,
+        Duration::from_millis(15),
+        |_| Ok(()),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::HttpRequestError(msg)) if msg.contains("timed out")));
+    assert!(state.aborted.load(Ordering::SeqCst));
+}
+
+/// Regression (#1216): rejecting response status, `content-length > max_body_bytes`, or header
+/// byte budget cancels the unconsumed response `body` stream and aborts the `AbortController`.
+#[tokio::test]
+async fn test_cancellable_https_fetch_cancels_body_and_aborts_on_header_or_length_rejection() {
+    use std::sync::atomic::Ordering;
+
+    // 1. Oversized Content-Length rejected before body reader is acquired.
+    let state = MockCancelState::default();
+    let result = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: Some(MockHttpsResponse {
+                status: 200.0,
+                headers: vec![("Content-Length".to_string(), "100".to_string())],
+                has_body: true,
+            }),
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            stall_after_chunks: false,
+        },
+        state.clone(),
+        10,
+        Duration::from_secs(5),
+        |_| Ok(()),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::NoPermission)));
+    assert!(state.body_cancelled.load(Ordering::SeqCst));
+    assert!(!state.reader_cancelled.load(Ordering::SeqCst));
+    assert!(state.aborted.load(Ordering::SeqCst));
+
+    // 2. Header byte budget rejected by accounting.
+    let state = MockCancelState::default();
+    let result = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: Some(MockHttpsResponse {
+                status: 200.0,
+                headers: vec![("X-Large".to_string(), "oversized-header".to_string())],
+                has_body: true,
+            }),
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            stall_after_chunks: false,
+        },
+        state.clone(),
+        1024,
+        Duration::from_secs(5),
+        |_| Err(Error::NoPermission),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::NoPermission)));
+    assert!(state.body_cancelled.load(Ordering::SeqCst));
+    assert!(state.aborted.load(Ordering::SeqCst));
+
+    // 3. Invalid HTTP status code rejected after response resolves.
+    let state = MockCancelState::default();
+    let result = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: Some(MockHttpsResponse {
+                status: 99.0,
+                headers: Vec::new(),
+                has_body: true,
+            }),
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            stall_after_chunks: false,
+        },
+        state.clone(),
+        1024,
+        Duration::from_secs(5),
+        |_| Ok(()),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::HttpRequestError(_))));
+    assert!(state.body_cancelled.load(Ordering::SeqCst));
+    assert!(state.aborted.load(Ordering::SeqCst));
+}
+
+/// Regression (#1216): body chunk budget overflow cancels the active stream reader and aborts the
+/// controller, whereas a complete response within budget disarms the guard without aborting.
+#[tokio::test]
+async fn test_cancellable_https_fetch_cancels_reader_on_chunk_overflow_and_disarms_on_success() {
+    use std::sync::atomic::Ordering;
+
+    // 1. Body chunk exceeds max_body_bytes mid-stream.
+    let state = MockCancelState::default();
+    let result = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: Some(MockHttpsResponse {
+                status: 200.0,
+                headers: Vec::new(),
+                has_body: true,
+            }),
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::from([
+                Some(b"1234".to_vec()),
+                Some(b"5678".to_vec()),
+            ])),
+            stall_after_chunks: false,
+        },
+        state.clone(),
+        6,
+        Duration::from_secs(5),
+        |_| Ok(()),
+    )
+    .await;
+    assert!(matches!(result, Err(Error::NoPermission)));
+    assert!(state.reader_cancelled.load(Ordering::SeqCst));
+    assert!(!state.body_cancelled.load(Ordering::SeqCst));
+    assert!(state.aborted.load(Ordering::SeqCst));
+
+    // 2. Successful completion disarms `FetchCancellationGuard` so neither cancel nor abort fires.
+    let state = MockCancelState::default();
+    let guard_check = FetchCancellationGuard::new(state.clone());
+    drop(guard_check);
+    assert!(state.aborted.load(Ordering::SeqCst));
+
+    let clean_state = MockCancelState::default();
+    let response = drive_cancellable_https_fetch(
+        MockHttpsFetch {
+            response: Some(MockHttpsResponse {
+                status: 200.0,
+                headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                has_body: true,
+            }),
+            chunks: std::sync::Mutex::new(std::collections::VecDeque::from([
+                Some(b"hello ".to_vec()),
+                Some(b"world".to_vec()),
+                None,
+            ])),
+            stall_after_chunks: false,
+        },
+        clean_state.clone(),
+        64,
+        Duration::from_secs(5),
+        |_| Ok(()),
+    )
+    .await
+    .expect("clean fetch succeeds");
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"hello world");
+    assert!(!clean_state.aborted.load(Ordering::SeqCst));
+    assert!(!clean_state.body_cancelled.load(Ordering::SeqCst));
+    assert!(!clean_state.reader_cancelled.load(Ordering::SeqCst));
+}

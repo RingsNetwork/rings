@@ -32,7 +32,15 @@ pub use self::client::OnionHttpsClientRequest;
 pub(crate) use self::client::ONION_HTTPS_RESPONSE_TIMEOUT;
 #[cfg(all(test, rings_native))]
 use self::limits::checked_status_code;
+#[cfg(all(test, rings_native))]
+use self::limits::drive_cancellable_https_fetch;
 use self::limits::https_response_body_limit;
+#[cfg(all(test, rings_native))]
+use self::limits::CancellableHttpsFetch;
+#[cfg(all(test, rings_native))]
+use self::limits::FetchCancelTarget;
+#[cfg(all(test, rings_native))]
+use self::limits::FetchCancellationGuard;
 #[cfg(rings_native)]
 use self::native::execute_https_request;
 #[cfg(all(test, rings_native))]
