@@ -65,6 +65,7 @@ use finger::cancel as cancel_finger_result;
 pub(crate) use finger::defer as defer_finger;
 pub(crate) use finger::retire_candidate as retire_finger_candidate;
 pub use stabilization::can_rectify_predecessor;
+pub use stabilization::leave_targets;
 use stabilization::local_successor_range_end;
 pub use stabilization::rectify_predecessor;
 pub use stabilization::rectify_predecessor_in;
