@@ -199,6 +199,7 @@ impl TopologyState {
     /// Every value is copied verbatim: the shell owns transport validation and
     /// the finger width is fixed at construction, so this constructor only
     /// restores the pure transition model's atomic snapshot.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         local: Did,
         successors: Vec<Did>,

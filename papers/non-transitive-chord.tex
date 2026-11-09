@@ -561,7 +561,7 @@ bridge rules while keeping the wire format of $\RouteStage$ unchanged:
 \end{enumerate}
 
 \begin{theorem}[Preservation of Route Safety Laws]
-\label{thm:route-safety}
+\label{theorem:route-safety}
 For any graph $G = (V, L)$, any collection of local views $\{S_n\}_{n \in V}$,
 any origin $n_0 \in V$, destination $T \in V$, and initial stage $\sigma_0$, the
 sequence of states $(n_0, \sigma_0), (n_1, \sigma_1), \dots$ produced by
@@ -600,7 +600,7 @@ to $T$ can fail to deliver to $T$.
 \end{proof}
 
 \begin{theorem}[All-Pairs Delivery Across Bridge-Connected Cliques]
-\label{thm:all-pairs}
+\label{theorem:all-pairs}
 Let $G = (V, L)$ consist of two cliques $V_1, V_2$ sharing bridge node $C$ with
 $|V_1 \setminus \{C\}| \le K$ and $|V_2 \setminus \{C\}| \le K$. Once each node
 in $V_1 \cup V_2$ has processed one stabilization report from its sub-clique
@@ -649,8 +649,8 @@ Lemma~\ref{lem:articulation-retention} Retention & \texttt{topology} & Unit test
 Lemma~\ref{lem:subclique-proof} Sub-clique proof & \texttt{topology} & Unit test \\
 Zero-TTL \texttt{bridged} lifecycle & \texttt{topology} & Unit test \\
 \eqref{eq:routes-clockwise} \texttt{RoutesClockwise} & \texttt{topology} & Property test \\
-Thm.~\ref{thm:route-safety} Route safety laws & \texttt{delivery} & Exhaustive \\
-Thm.~\ref{thm:all-pairs} Two-clique all-pairs & \texttt{delivery} & Model test \\
+Theorem~\ref{theorem:route-safety} Route safety & \texttt{delivery} & Exhaustive \\
+Theorem~\ref{theorem:all-pairs} Two-clique delivery & \texttt{delivery} & Model test \\
 Stage 6 rejoin BFS invariants & \texttt{rejoin\_model} & 6 BFS models \\
 \bottomrule
 \end{tabular}
