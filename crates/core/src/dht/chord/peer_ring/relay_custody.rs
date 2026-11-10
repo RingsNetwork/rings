@@ -378,6 +378,26 @@ impl PeerRing {
         Ok(unplaced)
     }
 
+    /// Current query key for `carrier_key`: the in-flight `asked` key if one is active, else
+    /// the `stepped` key, else `carrier_key` itself.
+    pub(crate) fn relay_holder_query_key(&self, carrier_key: Did) -> Result<Did> {
+        let hints = self.lock_relay_holder_hints()?;
+        Ok(hints
+            .asked
+            .get(&carrier_key)
+            .map(|&(query_key, _)| query_key)
+            .or_else(|| hints.stepped.get(&carrier_key).copied())
+            .unwrap_or(carrier_key))
+    }
+
+    /// Clear any stepped query key and outstanding query for `carrier_key`.
+    pub(crate) fn reset_relay_holder_query(&self, carrier_key: Did) -> Result<()> {
+        let mut hints = self.lock_relay_holder_hints()?;
+        hints.stepped.remove(&carrier_key);
+        hints.asked.remove(&carrier_key);
+        Ok(())
+    }
+
     /// Record that the current stepped query key for `carrier_key` is asked for its holder
     /// (`Law (Asked)`), returning `(query_key, request_id)`.
     pub(crate) fn ask_relay_holder_query(&self, carrier_key: Did) -> Result<(Did, uuid::Uuid)> {

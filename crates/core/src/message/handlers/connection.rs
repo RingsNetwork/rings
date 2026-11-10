@@ -232,13 +232,39 @@ impl MessageHandler {
     /// - Application lookups (`FindSuccessorReportHandler::None`) report the
     ///   closest bridged peer in `[msg.did, head)` when `msg` accepts a local
     ///   successor.
-    /// - Strict lookups (`msg.strict && msg.did != self.dht.did`) whose target
-    ///   falls at or before an unconnected bridged peer in `[msg.did, head)`
-    ///   route via the bridge's connected `via` successor.
+    /// - Strict lookups (`msg.strict && msg.did != self.dht.did`) forward
+    ///   directly to `msg.did` when `msg.did` is already connected or
+    ///   referenced in local topology, or route via the bridge's connected
+    ///   `via` successor when `msg.did` is recorded in `state.bridged`.
     pub(crate) fn find_successor_for_query(
         &self,
         msg: &FindSuccessorSend,
     ) -> Result<PeerRingAction> {
+        if !msg.accepts_local_successor(self.dht.did) {
+            if self.transport.get_connection(msg.did).is_some() {
+                return Ok(PeerRingAction::Some(msg.did));
+            }
+            if let Some(action) = self.dht.with_topology_state(|state| {
+                if state.references(msg.did) {
+                    return Some(PeerRingAction::Some(msg.did));
+                }
+                state
+                    .bridged
+                    .get(&msg.did)
+                    .copied()
+                    .filter(|&via| via != state.local && state.successors.contains(&via))
+                    .map(|via| {
+                        PeerRingAction::RemoteAction(
+                            via,
+                            crate::dht::PeerRingRemoteAction::FindSuccessor(msg.did),
+                        )
+                    })
+            })? {
+                return Ok(action);
+            }
+            return self.dht.find_successor(msg.did);
+        }
+
         let action = self.dht.find_successor(msg.did)?;
         let PeerRingAction::Some(head) = action else {
             return Ok(action);
@@ -265,29 +291,20 @@ impl MessageHandler {
                 .min_by(|(dist_a, _, _), (dist_b, _, _)| dist_a.cmp(dist_b))
                 .map(|(_, peer, via)| (peer, via))
         })?;
-        let Some((bridged_peer, via)) = bridged else {
+        let Some((bridged_peer, _via)) = bridged else {
             return Ok(PeerRingAction::Some(head));
         };
-        if msg.accepts_local_successor(self.dht.did) {
-            let FindSuccessorThen::Report(handler) = &msg.then;
-            match handler {
-                FindSuccessorReportHandler::None => Ok(PeerRingAction::Some(bridged_peer)),
-                FindSuccessorReportHandler::Connect { .. }
-                | FindSuccessorReportHandler::FixFingerTable { .. } => {
-                    if self.transport.get_connection(bridged_peer).is_some() {
-                        Ok(PeerRingAction::Some(bridged_peer))
-                    } else {
-                        Ok(PeerRingAction::Some(head))
-                    }
+        let FindSuccessorThen::Report(handler) = &msg.then;
+        match handler {
+            FindSuccessorReportHandler::None => Ok(PeerRingAction::Some(bridged_peer)),
+            FindSuccessorReportHandler::Connect { .. }
+            | FindSuccessorReportHandler::FixFingerTable { .. } => {
+                if self.transport.get_connection(bridged_peer).is_some() {
+                    Ok(PeerRingAction::Some(bridged_peer))
+                } else {
+                    Ok(PeerRingAction::Some(head))
                 }
             }
-        } else if self.transport.get_connection(bridged_peer).is_some() {
-            Ok(PeerRingAction::Some(bridged_peer))
-        } else {
-            Ok(PeerRingAction::RemoteAction(
-                via,
-                crate::dht::PeerRingRemoteAction::FindSuccessor(msg.did),
-            ))
         }
     }
 }
@@ -334,7 +351,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                         }
                     }
                 } else {
-                    self.run_effects([CoreEffect::forward_payload(ctx, Some(did))])
+                    self.run_effects([CoreEffect::reset_destination(ctx, did)])
                         .await
                 }
             }

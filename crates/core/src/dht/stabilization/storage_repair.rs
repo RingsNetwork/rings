@@ -454,10 +454,19 @@ impl Stabilizer {
     async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
         let excluded = self.dht.relay_excluded_holders()?;
         for carrier_key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
-            let (query_key, request_id) = self.dht.ask_relay_holder_query(carrier_key)?;
-            let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(query_key)? else {
+            let mut query_key = self.dht.relay_holder_query_key(carrier_key)?;
+            let mut action = self.dht.find_successor(query_key)?;
+            if !matches!(action, PeerRingAction::RemoteAction(_, _)) {
+                self.dht.reset_relay_holder_query(carrier_key)?;
+                if query_key != carrier_key {
+                    query_key = carrier_key;
+                    action = self.dht.find_successor(query_key)?;
+                }
+            }
+            let PeerRingAction::RemoteAction(next, _) = action else {
                 continue;
             };
+            let (query_key, request_id) = self.dht.ask_relay_holder_query(carrier_key)?;
             let query = Message::FindRelayHolder(FindRelayHolder {
                 key: query_key,
                 request_id,

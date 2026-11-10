@@ -288,9 +288,20 @@ fn test_an_owner_answer_is_taken_once_for_an_outstanding_query_alone() -> Result
     assert!(ring.relay_holder_hints()?.is_empty());
     let (query_key_2, token_2) = ring.ask_relay_holder_query(key)?;
     assert_eq!(query_key_2, horizon + Did::from(1u32));
+    assert_eq!(ring.relay_holder_query_key(key)?, query_key_2);
     let resolved_holder = Did::from(80u32);
     assert!(ring.name_relay_holder(query_key_2, token_2, horizon, Some(resolved_holder), None)?);
     assert_eq!(ring.relay_holder_hints()?.get(&key), Some(&resolved_holder));
+
+    // When a stepped query key lands inside `(local, head]` (`find_successor == Some`),
+    // `reset_relay_holder_query` clears `stepped` and `asked` so the next query falls back to
+    // `carrier_key`.
+    let (query_key_3, token_3) = ring.ask_relay_holder_query(key)?;
+    assert_eq!(query_key_3, key);
+    assert!(ring.name_relay_holder(query_key_3, token_3, storage_less, None, Some(horizon))?);
+    assert_eq!(ring.relay_holder_query_key(key)?, horizon + Did::from(1u32));
+    ring.reset_relay_holder_query(key)?;
+    assert_eq!(ring.relay_holder_query_key(key)?, key);
     Ok(())
 }
 

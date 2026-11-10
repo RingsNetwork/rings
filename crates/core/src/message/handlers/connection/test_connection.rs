@@ -1038,3 +1038,132 @@ async fn test_find_successor_for_query_isolates_connect_and_routes_strict_via_br
 
     Ok(())
 }
+
+/// In a 4-node ring `A < B < C < D` where `A` has successors `[C, D]` and passive bridge hint
+/// `B via D`, and `D` has successors `[A, B]`, a strict lookup `FindSuccessorSend { did: B,
+/// strict: true }` at `A` routes to `D`, and `D` forwards directly to `B` rather than cycling
+/// back to `A` via `D`'s successor head `A`.
+#[tokio::test]
+async fn test_strict_bridge_lookup_must_not_return_to_the_same_query_node() -> Result<()> {
+    use crate::dht::types::Chord;
+    use crate::dht::PeerRingAction;
+    use crate::message::FindSuccessorSend;
+    use crate::message::FindSuccessorThen;
+    use crate::message::HandleMsg;
+    use crate::message::HandlerContext;
+    use crate::message::PayloadSender;
+
+    let [key_a, key_b, key_c, key_d]: [SecretKey; 4] = gen_ordered_keys::<4>();
+    let node_a = prepare_node(key_a).await;
+    let node_b = prepare_node(key_b).await;
+    let node_c = prepare_node(key_c).await;
+    let node_d = prepare_node(key_d).await;
+
+    manually_establish_connection(&node_a.swarm, &node_c.swarm).await;
+    manually_establish_connection(&node_a.swarm, &node_d.swarm).await;
+    manually_establish_connection(&node_d.swarm, &node_b.swarm).await;
+    wait_for_msgs([&node_a, &node_b, &node_c, &node_d]).await;
+    if node_a
+        .swarm
+        .transport
+        .get_connection(node_b.did())
+        .is_some()
+    {
+        node_a.swarm.disconnect(node_b.did()).await?;
+        wait_until("node_a and node_b drop their direct link", || {
+            Ok(node_a
+                .swarm
+                .transport
+                .get_connection(node_b.did())
+                .is_none()
+                && !node_a.dht().successors().list()?.contains(&node_b.did()))
+        })
+        .await?;
+    }
+    wait_for_msgs([&node_a, &node_b, &node_c, &node_d]).await;
+
+    // `A` knows `[C, D]` and has passive bridge hint `B via D`.
+    node_a
+        .dht()
+        .record_bridged_peers(node_d.did(), vec![node_b.did()])?;
+    assert_eq!(node_a.dht().successors().list()?, vec![
+        node_c.did(),
+        node_d.did()
+    ]);
+    assert!(node_d
+        .dht()
+        .successors()
+        .list()?
+        .starts_with(&[node_a.did(), node_b.did()]));
+
+    let strict_query = FindSuccessorSend {
+        did: node_b.did(),
+        strict: true,
+        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect {
+            request_id: crate::utils::new_uuid(),
+        }),
+    };
+
+    let handler_a = MessageHandler::new(node_a.swarm.transport.clone());
+    let handler_d = MessageHandler::new(node_d.swarm.transport.clone());
+
+    // `A` routes the strict lookup for `B` to `D` (`via`).
+    assert_eq!(
+        handler_a.find_successor_for_query(&strict_query)?,
+        PeerRingAction::RemoteAction(
+            node_d.did(),
+            crate::dht::PeerRingRemoteAction::FindSuccessor(node_b.did()),
+        )
+    );
+
+    // Even though ordinary `D.dht().find_successor(B)` points back to `A` (`head = A`),
+    // `D.find_successor_for_query` resolves directly to `B` because `D` is connected to /
+    // references `B`.
+    assert_eq!(
+        node_d.dht().find_successor(node_b.did())?,
+        PeerRingAction::RemoteAction(
+            node_a.did(),
+            crate::dht::PeerRingRemoteAction::FindSuccessor(node_b.did()),
+        )
+    );
+    assert_eq!(
+        handler_d.find_successor_for_query(&strict_query)?,
+        PeerRingAction::Some(node_b.did())
+    );
+
+    // Execute the full handler hop `A -> D -> B` and verify `B` receives the strict query.
+    let initial_payload = node_a
+        .swarm
+        .transport
+        .protocol_egress()
+        .originate(
+            Message::FindSuccessorSend(strict_query.clone()),
+            node_a.did(),
+            Some(node_a.did()),
+        )
+        .await?;
+    handler_a
+        .handle(
+            &HandlerContext::unbound_for_test(&initial_payload),
+            &strict_query,
+        )
+        .await?;
+
+    let at_d = node_d.listen_once().await.ok_or_else(|| {
+        Error::InvalidMessage("expected strict query to arrive at node_d".to_string())
+    })?;
+    assert_eq!(at_d.relay.destination, node_d.did());
+    assert_eq!(at_d.relay.next_hop, node_d.did());
+
+    handler_d
+        .handle(&HandlerContext::unbound_for_test(&at_d), &strict_query)
+        .await?;
+
+    let at_b = node_b.listen_once().await.ok_or_else(|| {
+        Error::InvalidMessage("expected strict query to arrive at node_b".to_string())
+    })?;
+    assert_eq!(at_b.relay.destination, node_b.did());
+    assert_eq!(at_b.relay.next_hop, node_b.did());
+
+    Ok(())
+}
