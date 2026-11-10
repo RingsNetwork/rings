@@ -151,7 +151,7 @@ The installer detects macOS (`aarch64`, `x86_64`) or Linux (`x86_64` static musl
 gnu), downloads the matching [release](https://github.com/RingsNetwork/rings/releases)
 archive, verifies its SHA-256 checksum, and installs `rings` to `/usr/local/bin` (when
 writable) or `~/.local/bin`. Re-run the same command to upgrade in place, or pass
-`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.0`)
+`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-rc.0`)
 to pin a release.
 
 - **Cargo:** build with the toolchain pinned in [`rust-toolchain.toml`](./rust-toolchain.toml):

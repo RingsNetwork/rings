@@ -22,7 +22,7 @@ The script verifies the archive's SHA-256 checksum and installs `rings` to `/usr
 `--version vX.Y.Z` to install a specific tag:
 
 ```sh
-curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.0
+curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-rc.0
 ```
 
 You can also download an archive directly from
@@ -30,8 +30,8 @@ You can also download an archive directly from
 place `rings` on your `PATH`:
 
 ```bash
-shasum -a 256 -c rings-v1.0.0-pre.0-aarch64-apple-darwin.zip.sha256
-unzip rings-v1.0.0-pre.0-aarch64-apple-darwin.zip
+shasum -a 256 -c rings-v1.0.0-rc.0-aarch64-apple-darwin.zip.sha256
+unzip rings-v1.0.0-rc.0-aarch64-apple-darwin.zip
 install -m 755 rings /usr/local/bin/rings
 rings --version
 ```
