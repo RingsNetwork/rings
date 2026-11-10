@@ -807,11 +807,12 @@ async fn step_reply_or_flush(
         return ReplyOrFlush::Reply(replies.next().await);
     }
     let flushed = std::future::poll_fn(|cx| {
-        while pending.front().is_some() {
+        while !pending.is_empty() {
             match events.poll_ready(cx) {
                 Poll::Ready(Ok(())) => {
-                    let event = pending.pop_front().expect("front");
-                    if events.start_send(event).is_err() {
+                    if let Some(event) = pending.pop_front()
+                        && events.start_send(event).is_err()
+                    {
                         return Poll::Ready(Err(()));
                     }
                 }

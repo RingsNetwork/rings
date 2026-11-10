@@ -68,7 +68,7 @@ impl CancellableHttpsFetch for BrowserHttpsFetch {
     }
 
     fn response_status(&self, response: &Self::Response) -> Result<f64> {
-        Reflect::get(response.as_ref(), JsValue::from_str("status").as_ref())
+        Reflect::get(response, JsValue::from_str("status").as_ref())
             .map_err(js_error)?
             .as_f64()
             .ok_or_else(|| {
@@ -77,8 +77,7 @@ impl CancellableHttpsFetch for BrowserHttpsFetch {
     }
 
     fn response_body(&self, response: &Self::Response) -> Result<Option<Self::Body>> {
-        let body = Reflect::get(response.as_ref(), JsValue::from_str("body").as_ref())
-            .map_err(js_error)?;
+        let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
         if body.is_null() || body.is_undefined() {
             Ok(None)
         } else {
@@ -91,24 +90,22 @@ impl CancellableHttpsFetch for BrowserHttpsFetch {
     }
 
     fn body_reader(&self, body: &Self::Body) -> Result<Self::Reader> {
-        let get_reader = Reflect::get(body.as_ref(), JsValue::from_str("getReader").as_ref())
+        let get_reader = Reflect::get(body, JsValue::from_str("getReader").as_ref())
             .map_err(js_error)?
             .dyn_into::<Function>()
             .map_err(js_error)?;
-        get_reader.call0(body.as_ref()).map_err(js_error)
+        get_reader.call0(body).map_err(js_error)
     }
 
     async fn read_chunk(&self, reader: &Self::Reader) -> Result<Option<Vec<u8>>> {
-        let read = Reflect::get(reader.as_ref(), JsValue::from_str("read").as_ref())
+        let read = Reflect::get(reader, JsValue::from_str("read").as_ref())
             .map_err(js_error)?
             .dyn_into::<Function>()
             .map_err(js_error)?;
         loop {
-            let chunk = JsFuture::from(Promise::from(
-                read.call0(reader.as_ref()).map_err(js_error)?,
-            ))
-            .await
-            .map_err(js_error)?;
+            let chunk = JsFuture::from(Promise::from(read.call0(reader).map_err(js_error)?))
+                .await
+                .map_err(js_error)?;
             let done = Reflect::get(chunk.as_ref(), JsValue::from_str("done").as_ref())
                 .map_err(js_error)?
                 .as_bool()
