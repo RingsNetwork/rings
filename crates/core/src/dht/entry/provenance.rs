@@ -113,30 +113,28 @@ fn compute_merkle_tree(leaves: &[[u8; 32]]) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
         if curr.len() <= 1 {
             break;
         }
-        let mut next = Vec::with_capacity(curr.len().div_ceil(2));
-        let mut i = 0;
-        while i < curr.len() {
-            if i + 1 < curr.len() {
-                next.push(merkle_parent_hash(curr[i], curr[i + 1]));
-            } else {
-                next.push(curr[i]);
-            }
-            i += 2;
-        }
+        let next = curr
+            .chunks(2)
+            .filter_map(|pair| match pair {
+                [left, right] => Some(merkle_parent_hash(*left, *right)),
+                [only] => Some(*only),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         layers.push(next);
     }
     let root = layers
         .last()
         .and_then(|top| top.first().copied())
         .unwrap_or([0u8; 32]);
+    let non_root_layers = layers.len().saturating_sub(1);
     let mut branches = Vec::with_capacity(leaves.len());
     for leaf_idx in 0..leaves.len() {
         let mut idx = leaf_idx;
-        let mut siblings = Vec::with_capacity(layers.len().saturating_sub(1));
-        for layer in &layers[..layers.len().saturating_sub(1)] {
-            let sibling_idx = idx ^ 1;
-            if sibling_idx < layer.len() {
-                siblings.push(layer[sibling_idx]);
+        let mut siblings = Vec::with_capacity(non_root_layers);
+        for layer in layers.iter().take(non_root_layers) {
+            if let Some(&sibling) = layer.get(idx ^ 1) {
+                siblings.push(sibling);
             }
             idx /= 2;
         }

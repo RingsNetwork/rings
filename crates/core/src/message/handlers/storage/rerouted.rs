@@ -76,6 +76,7 @@ impl Placement for LookupPlacement {
     async fn settle(&self, transport: &Arc<SwarmTransport>, local: LookupSettlement) -> Result<()> {
         match local {
             LookupSettlement::Found(entry) => {
+                let entry = *entry;
                 // As every reply: counted as the round's answer only once the cache serves it.
                 super::cache_lookup_reply(
                     transport,

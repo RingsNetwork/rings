@@ -234,7 +234,9 @@ const DOT_CHUNK_BYTES: usize = 52;
 
 fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     let mut buf = [0u8; DOT_CHUNK_BYTES];
-    buf[..chunk.len()].copy_from_slice(chunk);
+    if let Some(prefix) = buf.get_mut(..chunk.len()) {
+        prefix.copy_from_slice(chunk);
+    }
     let logical_time_ms = u128::from(u64::from_be_bytes(buf[0..8].try_into().unwrap_or_default()));
     let counter = u32::from_be_bytes(buf[8..12].try_into().unwrap_or_default());
     let actor_bytes: [u8; 20] = buf[12..32].try_into().unwrap_or_default();

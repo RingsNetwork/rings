@@ -35,7 +35,7 @@ use crate::utils::get_epoch_ms;
 #[derive(Debug)]
 pub(crate) enum LookupSettlement {
     /// A live value is stored here.
-    Found(Entry),
+    Found(Box<Entry>),
     /// This node owns the placement and stores nothing for it.
     Missed(PlacementMiss),
 }
@@ -606,7 +606,9 @@ impl PeerRing {
                     .await?
                     .filter(|value| value.bound_live_at(now_ms));
                 if let Some(value) = served {
-                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(value)));
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(Box::new(
+                        value,
+                    ))));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
                 if owner != self.did {
@@ -655,7 +657,7 @@ impl PeerRing {
             {
                 PlacementLookup::Settled(LookupSettlement::Found(value)) => {
                     return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                        value, misses,
+                        *value, misses,
                     )));
                 }
                 PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
