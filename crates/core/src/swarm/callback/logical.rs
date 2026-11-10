@@ -297,39 +297,47 @@ impl LogicalInbound {
 
     /// Whether `payload` carrying `message` terminates locally at this node rather than being
     /// forwarded on:
-    /// 1. `payload.relay.destination == local_did`,
-    /// 2. DHT key ownership settles a lookup, storage operation, or placement sync locally, or
-    /// 3. `hold_for_offline_destination` intercepts a `CustomMessage` for an offline peer.
+    /// 1. DHT key ownership settles a lookup, storage operation, or placement sync locally,
+    /// 2. `hold_for_offline_destination` intercepts a `CustomMessage` for an offline peer, or
+    /// 3. `payload.relay.destination == local_did` on a non-redirecting message.
     async fn terminates_locally(
         &self,
         payload: &MessagePayload,
         message: &Message,
     ) -> crate::error::Result<bool> {
         let local = self.transport.dht.did;
-        if payload.is_relay_destination_for(local) {
-            return Ok(true);
-        }
         match message {
             Message::FindSuccessorSend(msg) => Ok(matches!(
                 self.transport.dht.find_successor(msg.did)?,
-                crate::dht::PeerRingAction::Some(_)
-            ) && (msg.accepts_local_successor(local)
-                || self
-                    .transport
-                    .dht
-                    .successors()
-                    .list()?
-                    .into_iter()
-                    .all(|peer| peer == local))),
+                crate::dht::PeerRingAction::Some(did)
+                    if msg.accepts_local_successor(local)
+                        || did == local
+                        || self
+                            .transport
+                            .dht
+                            .successors()
+                            .list()?
+                            .into_iter()
+                            .all(|peer| peer == local)
+            )),
+            Message::FindRelayHolder(msg) => Ok(payload.is_relay_destination_for(local)
+                && matches!(
+                    self.transport.dht.find_successor(msg.key)?,
+                    crate::dht::PeerRingAction::Some(_)
+                )),
             Message::OperateEntry(msg) => {
                 if msg.op.kind().is_relay_inbox() {
-                    return Ok(true);
+                    return Ok(payload.is_relay_destination_for(local));
                 }
-                let route = self
-                    .transport
-                    .dht
-                    .operate_route(msg.placement, msg.op.kind())?;
-                Ok(matches!(route, crate::dht::OperateRoute::Owned))
+                Ok(msg
+                    .validate_placement(self.transport.storage_redundancy())
+                    .is_err()
+                    || matches!(
+                        self.transport
+                            .dht
+                            .operate_route(msg.placement, msg.op.kind())?,
+                        crate::dht::OperateRoute::Owned
+                    ))
             }
             Message::SearchEntry(msg) => {
                 let query = crate::dht::entry::EntryLookupKey::new(msg.placement, msg.placement);
@@ -343,17 +351,20 @@ impl LogicalInbound {
                     crate::dht::PlacementLookup::Remote { .. }
                 ))
             }
-            Message::SyncEntriesWithSuccessor(msg) => Ok(self
-                .transport
-                .dht
-                .next_hop_for_storage_sync(msg.destination)?
-                .is_none()),
-            Message::CustomMessage(_) => Ok(matches!(
-                self.message_handler
-                    .destination_reachability(payload.transaction.destination)?,
-                crate::message::handlers::custom::Reachability::Offline
-            )),
-            _ => Ok(false),
+            Message::SyncEntriesWithSuccessor(msg) => Ok(payload.is_relay_destination_for(local)
+                || msg.destination.did() != payload.relay.destination
+                || self
+                    .transport
+                    .dht
+                    .next_hop_for_storage_sync(msg.destination)?
+                    .is_none()),
+            Message::CustomMessage(_) => Ok(payload.is_relay_destination_for(local)
+                || matches!(
+                    self.message_handler
+                        .destination_reachability(payload.transaction.destination)?,
+                    crate::message::handlers::custom::Reachability::Offline
+                )),
+            _ => Ok(payload.is_relay_destination_for(local)),
         }
     }
 
@@ -369,7 +380,7 @@ impl LogicalInbound {
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
         arrival: Arrival,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         let edge = arrival.edge_relation(payload);
         let introducer = arrival.introducer(self.transport.dht.edges());
         self.admit_charged(payload, message, lane, introducer, |class| {
@@ -386,7 +397,7 @@ impl LogicalInbound {
         payload: &MessagePayload,
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         self.admit_charged(
             payload,
             message,
@@ -414,7 +425,8 @@ impl LogicalInbound {
     }
 
     /// Commit admission of `payload`, delivered by `introducer`, under the charge `charge`
-    /// selects for its class, if it terminates at this node.
+    /// selects for its class, if it terminates at this node. Returns whether final admission
+    /// was committed.
     async fn admit_charged(
         &self,
         payload: &MessagePayload,
@@ -422,7 +434,7 @@ impl LogicalInbound {
         lane: crate::swarm::callback::InboundLane,
         introducer: Principal,
         charge: impl FnOnce(MessageCategory) -> OriginQuotaCharge,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         if self.terminates_locally(payload, message).await? {
             let class = lane
                 .class()
@@ -430,8 +442,9 @@ impl LogicalInbound {
             self.transport
                 .admit_final_transaction(&payload.transaction, charge(class), introducer)
                 .await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Whether the namespace of an application message delegated its admission, as the
@@ -472,9 +485,9 @@ impl LogicalInbound {
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
         arrival: Arrival,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         if !self.terminates_locally(payload, message).await? {
-            return Ok(());
+            return Ok(false);
         }
         let class = lane
             .class()
@@ -485,7 +498,8 @@ impl LogicalInbound {
         let mut windows = windows.lock().await;
         self.transport
             .admit_link_transaction(&mut windows, &payload.transaction, charge, introducer)
-            .await
+            .await?;
+        Ok(true)
     }
 
     /// The application message `payload` carries for this node: `None` when it is addressed

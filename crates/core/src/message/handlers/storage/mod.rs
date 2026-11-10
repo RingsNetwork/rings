@@ -260,6 +260,11 @@ async fn handle_placed_entry_operation(
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
     let ctx = context.payload();
+    if msg.op.kind().is_relay_inbox() && ctx.should_forward_from(handler.dht.did) {
+        return handler
+            .run_effects([CoreEffect::forward_payload(ctx, None)])
+            .await;
+    }
     let result = place_entry_operation(handler, context, msg).await;
     let is_hold = matches!(&msg.op, EntryOperation::Extend(entry) if entry.kind.is_relay_inbox());
     if is_hold && ctx.transaction.origin() != handler.dht.did {

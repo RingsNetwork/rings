@@ -98,7 +98,7 @@ impl InboundProcessor {
         message: &Message,
         lane: InboundLane,
         arrival: Arrival,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         let class = lane
             .class()
             .ok_or(crate::error::Error::InboundActorInvariantViolation)?;

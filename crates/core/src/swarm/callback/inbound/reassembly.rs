@@ -107,6 +107,7 @@ struct ReassembledEvent {
     payload: crate::message::MessagePayload,
     message: crate::message::Message,
     lane: InboundLane,
+    admitted_final: bool,
 }
 
 pub(super) async fn process_chunk_event(
@@ -123,6 +124,7 @@ pub(super) async fn process_chunk_event(
                 payload: reassembled.payload,
                 prepared_message: Some(reassembled.message),
                 lane: reassembled.lane,
+                admitted_final: reassembled.admitted_final,
                 carrier: event.carrier,
                 wire_bytes: event.wire_bytes,
                 permit: event.permit,
@@ -222,7 +224,7 @@ async fn advance_chunk_event(
         peer: event.peer,
         authentication: event.authentication,
     };
-    processor
+    let admitted_final = processor
         .admit_final_transaction(&payload, &message, lane, arrival)
         .await?;
     let payload = processor
@@ -232,6 +234,7 @@ async fn advance_chunk_event(
         payload,
         message,
         lane,
+        admitted_final,
     }))
 }
 
