@@ -473,7 +473,8 @@ mod tests {
 
     /// Early backend errors and output-width mismatches still hold their `OnionInvokeLease` until
     /// the full `L(f)` timer expires so concurrency quota release timing never leaks early failure.
-    #[tokio::test]
+    #[cfg_attr(rings_native, tokio::test)]
+    #[cfg_attr(rings_browser, wasm_bindgen_test::wasm_bindgen_test)]
     async fn test_early_invoke_error_and_width_mismatch_hold_lease_until_release_deadline() {
         let shape = OnionInvokeShape::new(
             OnionInputType::Fixed(OnionWidthClass::B32),
