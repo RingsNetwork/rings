@@ -52,8 +52,8 @@ use futures::future::FusedFuture;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
-use rings_core::utils::get_epoch_ms;
-use rings_runtime::sleep;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
 use zeroize::Zeroizing;
 
 use super::client::keep_alive_at;
@@ -64,6 +64,7 @@ use super::client::OnionControlStep;
 use super::client::OnionCreditWindow;
 use super::frame::OnionFrame;
 use super::pool::ONION_SURB_POOL_CAPACITY;
+use super::session_sleep;
 use super::witness::OnionSessionWitness;
 use super::OnionSessionArguments;
 use super::OnionSessionId;
@@ -321,17 +322,32 @@ pub(crate) async fn open(
     scope: Scope,
     request: OnionSessionRequest,
 ) -> Result<OnionClientStream> {
+    let clock = loops.clock().clone();
+    let rng = loops.rng().clone();
+    open_with_capabilities(loops, scope, request, clock, &rng).await
+}
+
+/// [`open`] driven by explicit `clock` and `rng` capabilities instead of ambient globals.
+pub(crate) async fn open_with_capabilities(
+    loops: OnionLoopClient,
+    scope: Scope,
+    request: OnionSessionRequest,
+    clock: SharedClock,
+    rng: &SharedRng,
+) -> Result<OnionClientStream> {
     let target = Bytes::from(request.target.authority().into_bytes());
     let arguments = OnionSessionArguments {
-        session: OnionSessionId::random(),
+        session: OnionSessionId::from_rng(&mut rng.lock_rng()),
         digest: OnionTargetDigest::of(&target),
     };
     let (commands, received) = mpsc::channel(ONION_SESSION_QUEUE);
     let (opened, mut open_result) = futures::channel::oneshot::channel();
     let (events, delivered) = mpsc::channel(ONION_SESSION_QUEUE);
+    let machine = OnionClientSession::with_clock(target, clock.as_ref());
     let driver = OnionSessionDriver {
         loops,
         scope,
+        clock,
         application: OnionApplication {
             symbol: request.symbol.into(),
             arguments: arguments.encode(),
@@ -339,7 +355,7 @@ pub(crate) async fn open(
         route: request.route,
         class: request.class,
         window: request.window,
-        machine: OnionClientSession::new(target, get_epoch_ms()),
+        machine,
         credit: OnionClientCredit::default(),
         last_forward_ms: 0,
         fin_sent: false,
@@ -351,7 +367,7 @@ pub(crate) async fn open(
     let witness = driver.witness.clone();
     let tasks = driver.scope.tasks().clone();
     tasks.spawn(driver.run(received, events, opened))?;
-    let timeout = sleep(ONION_SESSION_OPEN_TIMEOUT).fuse();
+    let timeout = session_sleep(ONION_SESSION_OPEN_TIMEOUT).fuse();
     futures::pin_mut!(timeout);
     match futures::future::select(&mut open_result, timeout).await {
         Either::Left((Ok(Ok(true)), _)) => Ok(OnionClientStream {
@@ -377,6 +393,8 @@ struct OnionSessionDriver {
     loops: OnionLoopClient,
     /// The scope the loops are sent under.
     scope: Scope,
+    /// Injected epoch clock capability driving ticks, credit counts, and deadlines.
+    clock: SharedClock,
     /// `(f, ā)`, the same on every loop.
     application: OnionApplication,
     /// The route every loop takes.
@@ -453,7 +471,7 @@ impl OnionSessionDriver {
             .map_err(|_| Error::InvalidData)?;
         self.send(&frame, &sink).await?;
         self.control(OnionControlStep::Refill, &sink)?;
-        let mut tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
+        let mut tick = Box::pin(session_sleep(self.tick_after(self.clock.now_ms())).fuse());
         let mut sending: Fuse<LoopSend> = Fuse::terminated();
         let mut upload_rest = Bytes::new();
         let mut fin_requested = false;
@@ -528,7 +546,7 @@ impl OnionSessionDriver {
                     ),
                 },
                 _ = tick => {
-                    tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
+                    tick = Box::pin(session_sleep(self.tick_after(self.clock.now_ms())).fuse());
                     (self.expire(), Some(OnionControlStep::Tick))
                 },
             };
@@ -682,7 +700,7 @@ impl OnionSessionDriver {
     /// direction silent for `Δ` (Law Deadline), fails the session.
     fn expire(&mut self) -> Result<()> {
         self.machine
-            .expire(get_epoch_ms())
+            .expire(self.clock.now_ms())
             .map_err(|_| Error::OnionRouteError(OnionRouteError::SessionFailed))
     }
 
@@ -693,7 +711,7 @@ impl OnionSessionDriver {
         if self.world_ended {
             return Ok(());
         }
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let loops = self.window.control_loops(
             step,
             self.credit.count(now_ms),
@@ -727,7 +745,7 @@ impl OnionSessionDriver {
             self.loops.unregister_tags(tags);
             return Err(error);
         }
-        self.credit.sent(get_epoch_ms(), expiry, blocks);
+        self.credit.sent(self.clock.now_ms(), expiry, blocks);
         Ok(())
     }
 
@@ -776,7 +794,7 @@ impl OnionSessionDriver {
 
     /// Count the block a departed loop of expiry `expiry` leaves at `h`.
     fn departed(&mut self, expiry: OnionExpiry) {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         self.credit.sent(now_ms, expiry, 1);
         self.last_forward_ms = now_ms;
     }

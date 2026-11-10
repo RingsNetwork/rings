@@ -27,7 +27,9 @@ use rings_core::error::Result as CoreResult;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+#[cfg(all(test, not(target_family = "wasm")))]
+use rings_core::utils::SystemClock;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -112,7 +114,6 @@ pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
 pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
-pub(crate) use route::SystemRouteEntropy;
 pub use runtime::OnionPipelineHandle;
 pub use signature::OnionBackendName;
 pub use signature::OnionInputType;
@@ -154,9 +155,16 @@ impl OnionProcessEpoch {
         self.0
     }
 
+    /// Draw a fresh process epoch from an explicit cryptographic RNG.
+    pub fn from_rng(rng: &mut impl rand::RngCore) -> Self {
+        let mut bytes = [0_u8; 16];
+        rng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
     /// Draw a fresh process epoch for one process lifetime.
     pub fn random() -> Self {
-        Self(rand::random())
+        Self::from_rng(&mut rings_core::utils::SystemEntropy)
     }
 }
 
@@ -721,12 +729,14 @@ pub(crate) struct OnionExitRegistration {
     heartbeat_interval: Duration,
     node_type: OnlineNodeType,
     process_epoch: OnionProcessEpochCell,
+    clock: SharedClock,
     started_at_ms: u128,
     offer: OnionExitOffer,
     publisher: DhtRegistrationPublisher<Vec<OnionExitDescriptor>>,
 }
 
 impl OnionExitRegistration {
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn new(
         heartbeat_interval: Duration,
         ttl: Duration,
@@ -734,11 +744,31 @@ impl OnionExitRegistration {
         offer: OnionExitOffer,
         process_epoch: OnionProcessEpochCell,
     ) -> Self {
+        Self::new_with_clock(
+            heartbeat_interval,
+            ttl,
+            node_type,
+            offer,
+            process_epoch,
+            Arc::new(SystemClock),
+        )
+    }
+
+    pub(crate) fn new_with_clock(
+        heartbeat_interval: Duration,
+        ttl: Duration,
+        node_type: OnlineNodeType,
+        offer: OnionExitOffer,
+        process_epoch: OnionProcessEpochCell,
+        clock: SharedClock,
+    ) -> Self {
+        let started_at_ms = clock.now_ms();
         Self {
             heartbeat_interval,
             node_type,
             process_epoch,
-            started_at_ms: get_epoch_ms(),
+            clock,
+            started_at_ms,
             offer,
             publisher: DhtRegistrationPublisher::new(ONION_EXITS_TOPIC, heartbeat_interval, ttl),
         }
@@ -791,7 +821,7 @@ impl OnionExitRegistration {
         context: &RegistrationContext<'_>,
     ) -> Result<Vec<OnionExitDescriptor>> {
         self.publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, self.clock.now_ms(), |terms| {
                 self.descriptors_at(context, terms)
             })
             .await

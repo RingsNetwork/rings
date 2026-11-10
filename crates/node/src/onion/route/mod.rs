@@ -182,11 +182,12 @@ pub(crate) trait RouteEntropy {
     fn next_u64(&mut self) -> u64;
 }
 
-/// Route entropy drawn from the thread-local CSPRNG.
+/// Route entropy drawn from the system entropy source.
 pub(crate) struct SystemRouteEntropy;
 
 impl SystemRouteEntropy {
     /// Build the system entropy source.
+    #[allow(dead_code)]
     pub(crate) const fn new() -> Self {
         Self
     }
@@ -194,7 +195,13 @@ impl SystemRouteEntropy {
 
 impl RouteEntropy for SystemRouteEntropy {
     fn next_u64(&mut self) -> u64 {
-        rand::random()
+        rand::RngCore::next_u64(&mut rings_core::utils::SystemEntropy)
+    }
+}
+
+impl RouteEntropy for rings_core::utils::SharedRng {
+    fn next_u64(&mut self) -> u64 {
+        rand::RngCore::next_u64(&mut self.lock_rng())
     }
 }
 

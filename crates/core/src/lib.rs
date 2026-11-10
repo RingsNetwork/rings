@@ -73,6 +73,8 @@ pub mod algebra;
 mod base58_check;
 pub mod delegation;
 pub mod dht;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub mod dummy_simulation;
 pub mod ecc;
 pub mod error;
 mod fair_admission;

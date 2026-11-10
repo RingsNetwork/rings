@@ -225,10 +225,15 @@ pub struct QueryForTopoInfoReport {
 impl QueryForTopoInfoSend {
     /// Create a successor-sync query with a fresh correlation id.
     pub fn new_for_sync(did: Did) -> Self {
+        Self::new_for_sync_with_id(did, crate::utils::new_uuid())
+    }
+
+    /// Create a successor-sync query with a caller-supplied correlation id.
+    pub fn new_for_sync_with_id(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
             then: QueryFor::SyncSuccessor,
-            request_id: crate::utils::new_uuid(),
+            request_id,
         }
     }
 

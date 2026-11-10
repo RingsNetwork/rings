@@ -70,8 +70,8 @@ use futures::future::FusedFuture;
 use futures::FutureExt;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
-use rings_runtime::sleep;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSend;
 use rings_runtime::MaybeSendSync;
 
@@ -81,6 +81,7 @@ use super::exit::OnionExitEffect;
 use super::exit::OnionExitSession;
 use super::exit::OnionWorldRead;
 use super::frame::OnionFrame;
+use super::session_sleep;
 use super::OnionSessionArguments;
 use super::OnionSessionId;
 use super::OnionTargetDigest;
@@ -266,6 +267,8 @@ struct OnionExitShared<W> {
     accounting: OnionExitAccounting,
     /// The link emitter replies leave through.
     link_sender: OnionLinkSender,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
     /// The sessions.
     sessions: Mutex<OnionExitTable>,
     /// Test-only clock override (milliseconds since epoch) for deterministic expiry tests.
@@ -288,11 +291,29 @@ pub(crate) struct OnionExitSessions<W> {
 impl<W: OnionWorld> OnionExitSessions<W> {
     /// The sessions of one symbol over `world`, under `policy` and the node's `accounting`,
     /// replying through `link_sender`.
+    #[allow(dead_code)]
     pub(crate) fn new(
         world: W,
         policy: OnionExitPolicy,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
+    ) -> Self {
+        Self::new_with_clock(
+            world,
+            policy,
+            accounting,
+            link_sender,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// [`Self::new`] driven by an explicit `clock` capability.
+    pub(crate) fn new_with_clock(
+        world: W,
+        policy: OnionExitPolicy,
+        accounting: OnionExitAccounting,
+        link_sender: OnionLinkSender,
+        clock: SharedClock,
     ) -> Self {
         Self {
             shared: Arc::new(OnionExitShared {
@@ -300,6 +321,7 @@ impl<W: OnionWorld> OnionExitSessions<W> {
                 policy,
                 accounting,
                 link_sender,
+                clock,
                 sessions: Mutex::new(OnionExitTable::default()),
                 #[cfg(all(test, rings_native))]
                 clock_ms: None,
@@ -484,7 +506,7 @@ async fn drive<W: OnionWorld>(
     let mut reading: Fuse<WorldRead<W::Reader>> = Fuse::terminated();
     let mut writing: Fuse<WorldWrite<W::Writer>> = Fuse::terminated();
     let mut closing_after_writes = false;
-    let mut tick = Box::pin(sleep(tick_period(&shared)).fuse());
+    let mut tick = Box::pin(session_sleep(tick_period(&shared)).fuse());
     loop {
         if writing.is_terminated() {
             let started = world.as_mut().and_then(|open| {
@@ -565,7 +587,7 @@ async fn drive<W: OnionWorld>(
                 }
             },
             _ = tick => {
-                tick = Box::pin(sleep(tick_period(&shared)).fuse());
+                tick = Box::pin(session_sleep(tick_period(&shared)).fuse());
                 let now = now_ms(&shared);
                 if closing_after_writes {
                     if machine.is_expired_at(now) {
@@ -618,7 +640,7 @@ fn write_world<W: OnionWorldWriter>(
                 }
             }
             .fuse();
-            let timeout_fut = sleep(timeout).fuse();
+            let timeout_fut = session_sleep(timeout).fuse();
             futures::pin_mut!(op_fut, timeout_fut);
             futures::select! {
                 ok = op_fut => ok,
@@ -722,7 +744,7 @@ async fn perform<W: OnionWorld>(
 /// queued, which would otherwise run against a failed world or send after its `abort`.
 #[cfg(all(test, rings_native))]
 fn fail(machine: &mut OnionExitSession, queue: &mut VecDeque<OnionExitEffect>) {
-    fail_at(get_epoch_ms(), machine, queue);
+    fail_at(rings_core::utils::get_epoch_ms(), machine, queue);
 }
 
 /// [`fail`] at `now_ms`.
@@ -736,9 +758,7 @@ fn now_ms<W>(shared: &OnionExitShared<W>) -> u128 {
     if let Some(clock) = &shared.clock_ms {
         return u128::from(clock.load(std::sync::atomic::Ordering::SeqCst));
     }
-    #[cfg(not(all(test, rings_native)))]
-    let _ = shared;
-    get_epoch_ms()
+    shared.clock.now_ms()
 }
 
 /// Tick period for `shared` (or its test override).
@@ -879,6 +899,7 @@ mod tests {
             policy,
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: None,
             tick_period: super::ONION_EXIT_SESSION_TICK,
@@ -1163,6 +1184,7 @@ mod tests {
             policy: policy.clone(),
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: Some(clock),
             tick_period: std::time::Duration::from_millis(5),
@@ -1259,6 +1281,7 @@ mod tests {
             policy: policy.clone(),
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: Some(clock),
             tick_period: std::time::Duration::from_millis(5),
@@ -1349,6 +1372,7 @@ mod tests {
             policy: policy.clone(),
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: Some(std::sync::Arc::clone(&clock)),
             tick_period: std::time::Duration::from_millis(5),
@@ -1478,6 +1502,7 @@ mod tests {
             policy: policy.clone(),
             accounting,
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: Some(std::sync::Arc::clone(&clock)),
             tick_period: std::time::Duration::from_millis(5),
@@ -1558,6 +1583,7 @@ mod tests {
             policy: policy.clone(),
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
             clock_ms: Some(std::sync::Arc::clone(&clock)),
             tick_period: std::time::Duration::from_secs(10),

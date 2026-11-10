@@ -108,6 +108,7 @@ pub use types::*;
 pub mod handlers;
 pub use handlers::HandleMsg;
 pub use handlers::HandlerContext;
+pub use handlers::HandlerCtx;
 pub use handlers::MessageHandler;
 
 pub use crate::swarm::storage_api::ChordStorageInterface;

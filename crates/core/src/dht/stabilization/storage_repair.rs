@@ -26,7 +26,6 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
 use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
-use crate::utils::get_epoch_ms;
 use crate::utils::try_sleep;
 use crate::utils::Instant;
 
@@ -296,7 +295,7 @@ impl Stabilizer {
         }
         self.dht.forget_stale_relay_custody(&stale)?;
         self.declare_opened_relay_custody().await?;
-        self.dht.prune_relay_replications(get_epoch_ms())?;
+        self.dht.prune_relay_replications(self.transport.now_ms())?;
         self.resend_unacknowledged_relay_holds().await?;
         self.repair_relay_chain().await?;
         self.ask_owners_of_unplaced_relay_keys().await?;
@@ -423,7 +422,7 @@ impl Stabilizer {
     /// (`Law (Acknowledged)`, `Law (Convergence)`). A hold whose sender proof has expired, which
     /// no holder admits any longer, is forgotten and logged at `warn`.
     async fn resend_unacknowledged_relay_holds(&self) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.transport.now_ms();
         for (digest, hold) in self.dht.unacknowledged_relay_holds()? {
             if !hold.hold_is_live_at(now_ms) {
                 self.dht.forget_relay_hold(digest)?;
@@ -452,7 +451,11 @@ impl Stabilizer {
     /// Bound: at most one query per kept key whose owner this view does not place, per pass.
     async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
         let excluded = self.dht.relay_excluded_holders()?;
-        for carrier_key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
+        for carrier_key in self
+            .dht
+            .unplaced_relay_keys(self.transport.now_ms())
+            .await?
+        {
             let mut query_key = self.dht.relay_holder_query_key(carrier_key)?;
             let mut action = self.dht.find_successor(query_key)?;
             if !matches!(action, PeerRingAction::RemoteAction(_, _)) {

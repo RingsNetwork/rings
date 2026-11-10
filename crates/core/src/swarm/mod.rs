@@ -71,6 +71,8 @@ use crate::swarm::transport::OfferOwner;
 pub use crate::swarm::transport::OfferReply;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
 
 /// How a successor lookup was decided: from the local topology, or routed, with the handle its
 /// report resolves.
@@ -137,6 +139,16 @@ impl Swarm {
     /// Get this swarm's network id.
     pub fn network_id(&self) -> u32 {
         self.transport.network_id
+    }
+
+    /// Return the [`SharedClock`] capability bound to this swarm.
+    pub fn clock(&self) -> &SharedClock {
+        self.transport.clock()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this swarm.
+    pub fn rng(&self) -> &SharedRng {
+        self.transport.rng()
     }
 
     /// Get the storage redundancy for this swarm's DHT protocol mode.

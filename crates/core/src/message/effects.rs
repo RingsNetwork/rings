@@ -20,19 +20,26 @@ use wasm_bindgen::JsCast;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 use wasm_bindgen::JsValue;
 
+use crate::dht::entry::Entry;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
+use crate::dht::FingerFixRequest;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::handlers::inbox::hold_for_offline_destination;
+use crate::message::handlers::storage::admit_storage_lookup_reply;
 use crate::message::types::FindSuccessorSend;
+use crate::message::types::OperationDigest;
+use crate::message::types::StoreOutcome;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
+use crate::message::Principal;
 use crate::message::QueryForTopoInfoSend;
 use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::observer::MessageActivity;
@@ -182,6 +189,23 @@ pub(crate) fn core_actor_steps<T>(
     })
 }
 
+/// Parameters for [`CoreEffect::AdmitStorageLookupReply`], boxed to keep [`CoreEffect`] compact.
+#[derive(Clone, Debug)]
+pub(crate) struct AdmitStorageLookupReplyEffect {
+    /// Looked-up resource DID.
+    pub(crate) resource: Did,
+    /// Redundancy of the lookup round.
+    pub(crate) redundancy: u16,
+    /// Single validated entry returned by the responder, if any.
+    pub(crate) found_entry: Option<Entry>,
+    /// Placement misses reported along the lookup path.
+    pub(crate) misses: Vec<PlacementMiss>,
+    /// Accounting principal of the edge that delivered the reply.
+    pub(crate) introducer: Principal,
+    /// Handler clock timestamp at which cache admission and liveness are evaluated.
+    pub(crate) now_ms: u128,
+}
+
 /// One side effect requested by a Core message handler.
 #[derive(Clone, Debug)]
 pub(crate) enum CoreEffect<'payload> {
@@ -249,12 +273,52 @@ pub(crate) enum CoreEffect<'payload> {
     HoldForOfflineDestination {
         /// Payload whose destination this node is responsible for but cannot reach.
         payload: &'payload MessagePayload,
+        /// Handler clock timestamp at which the hold is signed and stamped.
+        now_ms: u128,
     },
     /// Request a storage repair round: the placement interval changed, so the stabilizer's next
     /// repair pass must hand off what lies beyond the new successor head. Only the intent is
     /// recorded here; the pass itself runs under the repair schedule, whose admission grace
     /// outlives the peer's own admission of this node.
     RequestStorageRepair,
+    /// Admit a validated `FoundEntry` storage-lookup reply into the local cache, miss ledger, and
+    /// read-repair queue at `now_ms`.
+    AdmitStorageLookupReply(Box<AdmitStorageLookupReplyEffect>),
+    /// Advance a pending reported-store quorum receipt with one placement owner's outcome.
+    RecordStoreReport {
+        /// Digest of the stamped operation.
+        operation: OperationDigest,
+        /// Placement owner reporting the outcome.
+        placement: Did,
+        /// Stored or refused outcome.
+        outcome: StoreOutcome,
+    },
+    /// Classify and admit a correlated `FixFingerTable` lookup report, initiating a detached dial
+    /// when the candidate awaits an owner.
+    AdmitFingerCandidate {
+        /// Reported successor DID.
+        did: Did,
+        /// Correlated finger-fix request token.
+        request: FingerFixRequest,
+        /// Whether `did` names a remote peer rather than this node.
+        reports_remote: bool,
+    },
+    /// Claim a correlated `Connect` lookup token and initiate a detached dial when authorized.
+    ClaimConnectCandidate {
+        /// Reported successor DID.
+        did: Did,
+        /// Correlated connect-lookup request id.
+        request_id: uuid::Uuid,
+        /// Whether `did` names a remote peer rather than this node.
+        reports_remote: bool,
+    },
+    /// Resolve an awaiting application-layer successor lookup handle.
+    AnswerApplicationLookup {
+        /// Transaction id of the answered lookup.
+        tx_id: uuid::Uuid,
+        /// Resolved successor DID.
+        did: Did,
+    },
 }
 
 impl<'payload> CoreEffect<'payload> {
@@ -279,9 +343,12 @@ impl<'payload> CoreEffect<'payload> {
         Self::ResetDestination { payload, next_hop }
     }
 
-    /// Create an effect that holds `payload` in its destination's relay inbox.
-    pub(crate) fn hold_for_offline_destination(payload: &'payload MessagePayload) -> Self {
-        Self::HoldForOfflineDestination { payload }
+    /// Create an effect that holds `payload` in its destination's relay inbox at `now_ms`.
+    pub(crate) const fn hold_for_offline_destination_at(
+        payload: &'payload MessagePayload,
+        now_ms: u128,
+    ) -> Self {
+        Self::HoldForOfflineDestination { payload, now_ms }
     }
 
     /// Create a normally-routed send effect.
@@ -322,6 +389,69 @@ impl<'payload> CoreEffect<'payload> {
     pub(crate) const fn request_storage_repair() -> Self {
         Self::RequestStorageRepair
     }
+
+    /// Create a storage-lookup reply admission effect.
+    pub(crate) fn admit_storage_lookup_reply(
+        resource: Did,
+        redundancy: u16,
+        found_entry: Option<Entry>,
+        misses: Vec<PlacementMiss>,
+        introducer: Principal,
+        now_ms: u128,
+    ) -> Self {
+        Self::AdmitStorageLookupReply(Box::new(AdmitStorageLookupReplyEffect {
+            resource,
+            redundancy,
+            found_entry,
+            misses,
+            introducer,
+            now_ms,
+        }))
+    }
+
+    /// Create a store-report receipt update effect.
+    pub(crate) const fn record_store_report(
+        operation: OperationDigest,
+        placement: Did,
+        outcome: StoreOutcome,
+    ) -> Self {
+        Self::RecordStoreReport {
+            operation,
+            placement,
+            outcome,
+        }
+    }
+
+    /// Create a correlated finger-candidate admission effect.
+    pub(crate) const fn admit_finger_candidate(
+        did: Did,
+        request: FingerFixRequest,
+        reports_remote: bool,
+    ) -> Self {
+        Self::AdmitFingerCandidate {
+            did,
+            request,
+            reports_remote,
+        }
+    }
+
+    /// Create a correlated connect-lookup candidate claim effect.
+    pub(crate) const fn claim_connect_candidate(
+        did: Did,
+        request_id: uuid::Uuid,
+        reports_remote: bool,
+    ) -> Self {
+        Self::ClaimConnectCandidate {
+            did,
+            request_id,
+            reports_remote,
+        }
+    }
+
+    /// Create an application-lookup resolution effect.
+    pub(crate) const fn answer_application_lookup(tx_id: uuid::Uuid, did: Did) -> Self {
+        Self::AnswerApplicationLookup { tx_id, did }
+    }
 }
 
 fn find_successor_effect<'payload>(
@@ -342,9 +472,20 @@ fn find_successor_effect<'payload>(
 }
 
 /// Lower one DHT leaf action directly into a transport effect.
+#[allow(dead_code)]
 pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
     is_connected: impl Fn(Did) -> bool,
+) -> Result<Option<CoreEffect<'payload>>> {
+    lower_dht_action_with_id(act, is_connected, crate::utils::new_uuid)
+}
+
+/// Lower one DHT leaf action directly into a transport effect, drawing any fresh request
+/// identifiers from `next_uuid`.
+pub(crate) fn lower_dht_action_with_id<'payload>(
+    act: &PeerRingAction,
+    is_connected: impl Fn(Did) -> bool,
+    mut next_uuid: impl FnMut() -> uuid::Uuid,
 ) -> Result<Option<CoreEffect<'payload>>> {
     match act {
         PeerRingAction::None => Ok(None),
@@ -353,7 +494,7 @@ pub(crate) fn lower_dht_action<'payload>(
                 *next,
                 *did,
                 FindSuccessorReportHandler::Connect {
-                    request_id: crate::utils::new_uuid(),
+                    request_id: next_uuid(),
                 },
             ))
         }
@@ -368,7 +509,7 @@ pub(crate) fn lower_dht_action<'payload>(
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
                 CoreEffect::send_successor_query(
-                    QueryForTopoInfoSend::new_for_sync(*successor),
+                    QueryForTopoInfoSend::new_for_sync_with_id(*successor, next_uuid()),
                     *successor,
                 )
             } else {
@@ -427,10 +568,11 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             CoreEffect::ResetDestination { payload, next_hop } => {
                 egress.reset_destination(payload, next_hop).await
             }
-            CoreEffect::HoldForOfflineDestination { payload } => {
+            CoreEffect::HoldForOfflineDestination { payload, now_ms } => {
                 let message_kind =
                     crate::message::MessageKind::from_wire(&payload.transaction.data)?;
-                let result = hold_for_offline_destination(self.transport.clone(), payload).await;
+                let result =
+                    hold_for_offline_destination(self.transport.clone(), payload, now_ms).await;
                 self.transport.observe_message(MessageObservation {
                     activity: MessageActivity::Stored,
                     category: message_kind.class(),
@@ -445,6 +587,68 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             }
             CoreEffect::RequestStorageRepair => {
                 self.transport.request_storage_repair();
+                Ok(())
+            }
+            CoreEffect::AdmitStorageLookupReply(reply) => {
+                let AdmitStorageLookupReplyEffect {
+                    resource,
+                    redundancy,
+                    found_entry,
+                    misses,
+                    introducer,
+                    now_ms,
+                } = *reply;
+                admit_storage_lookup_reply(
+                    self.transport.clone(),
+                    resource,
+                    redundancy,
+                    found_entry,
+                    misses,
+                    introducer,
+                    now_ms,
+                )
+                .await
+            }
+            CoreEffect::RecordStoreReport {
+                operation,
+                placement,
+                outcome,
+            } => {
+                self.transport
+                    .store_reports
+                    .report(operation, placement, outcome);
+                Ok(())
+            }
+            CoreEffect::AdmitFingerCandidate {
+                did,
+                request,
+                reports_remote,
+            } => {
+                let disposition = self.transport.record_finger_candidate(did, request)?;
+                if disposition.proof_awaits_owner() && reports_remote {
+                    if let Err(error) = self.connect_dht_peer(did).await {
+                        self.transport.dht.cancel_finger_lookup(request)?;
+                        return Err(error);
+                    }
+                    let admitted = self.transport.record_finger_candidate(did, request)?;
+                    if admitted.proof_awaits_owner() {
+                        self.transport.dht.cancel_finger_lookup(request)?;
+                    }
+                }
+                Ok(())
+            }
+            CoreEffect::ClaimConnectCandidate {
+                did,
+                request_id,
+                reports_remote,
+            } => {
+                if self.transport.dht.claim_connect_lookup(request_id)? && reports_remote {
+                    self.connect_dht_peer(did).await?;
+                }
+                Ok(())
+            }
+            CoreEffect::AnswerApplicationLookup { tx_id, did } => {
+                self.transport.application().lookups.answer(tx_id, did);
                 Ok(())
             }
             CoreEffect::SendMessage { msg, destination } => {
@@ -482,28 +686,30 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 }
                 Ok(())
             }
-            CoreEffect::ConnectDhtPeer { peer } => {
-                if self.connection_is_satisfied(peer) {
-                    return Ok(());
-                }
+            CoreEffect::ConnectDhtPeer { peer } => self.connect_dht_peer(peer).await,
+        }
+    }
 
-                let callback = SwarmTransportCallback::new(Arc::clone(self.transport));
-                match self.transport.connect_detached(peer, callback).await {
-                    Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
-                    Err(
-                        error @ (Error::PendingConnectionCapacityExceeded { .. }
-                        | Error::ConnectionCapacityExceeded { .. }),
-                    ) => {
-                        tracing::debug!(
-                            peer = %peer,
-                            error = %error,
-                            "connection capacity is full; skipping DHT candidate"
-                        );
-                        Ok(())
-                    }
-                    Err(e) => Err(e),
-                }
+    async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
+        if self.connection_is_satisfied(peer) {
+            return Ok(());
+        }
+
+        let callback = SwarmTransportCallback::new(Arc::clone(self.transport));
+        match self.transport.connect_detached(peer, callback).await {
+            Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
+            Err(
+                error @ (Error::PendingConnectionCapacityExceeded { .. }
+                | Error::ConnectionCapacityExceeded { .. }),
+            ) => {
+                tracing::debug!(
+                    peer = %peer,
+                    error = %error,
+                    "connection capacity is full; skipping DHT candidate"
+                );
+                Ok(())
             }
+            Err(e) => Err(e),
         }
     }
 

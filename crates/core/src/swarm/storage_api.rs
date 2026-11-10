@@ -24,7 +24,6 @@ pub use crate::swarm::transport::store_reports::StoreUnconfirmed;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
-use crate::utils::get_epoch_ms;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
 ///
@@ -197,7 +196,7 @@ impl ScopedStorage<'_> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
         self.operate_observed_reported(
             EntryOperation::Extend(entry),
-            get_epoch_ms(),
+            self.transport.now_ms(),
             StoreQuorum::Every,
         )
         .await
@@ -214,7 +213,7 @@ impl ScopedStorage<'_> {
         lifetime_ms: u64,
         quorum: StoreQuorum,
     ) -> Result<StoreReceipt> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.transport.now_ms();
         let operation = bounded_extend(topic, data, lifetime_ms, now_ms)?;
         self.operate_observed_reported(operation, now_ms, quorum)
             .await
@@ -277,26 +276,26 @@ impl ChordStorageInterface for ScopedStorage<'_> {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        self.operate_observed(EntryOperation::Overwrite(entry), get_epoch_ms())
+        self.operate_observed(EntryOperation::Overwrite(entry), self.transport.now_ms())
             .await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        self.operate_observed(EntryOperation::Extend(entry), get_epoch_ms())
+        self.operate_observed(EntryOperation::Extend(entry), self.transport.now_ms())
             .await
     }
 
     /// The bound and the delta's version are stamped from one clock reading `t`.
     async fn storage_extend(&self, topic: &str, data: Vec<Bytes>, lifetime_ms: u64) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.transport.now_ms();
         let operation = bounded_extend(topic, data, lifetime_ms, now_ms)?;
         self.operate_observed(operation, now_ms).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        self.operate_observed(EntryOperation::Tombstone(entry), get_epoch_ms())
+        self.operate_observed(EntryOperation::Tombstone(entry), self.transport.now_ms())
             .await
     }
 }

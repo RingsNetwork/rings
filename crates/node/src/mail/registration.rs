@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rings_core::utils::get_epoch_ms;
 
 use super::descriptor::descriptor_topic;
 use super::descriptor::MailDescriptor;
@@ -129,7 +128,7 @@ impl RegistrationTask for MailRegistration {
 
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
         self.publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, context.now_ms(), |terms| {
                 self.descriptor_at(context, terms)
                     .map(|descriptor| [descriptor])
             })

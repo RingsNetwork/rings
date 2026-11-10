@@ -173,7 +173,8 @@ impl LogicalInbound {
         introducer: Principal,
         prepared_message: Option<Message>,
     ) -> crate::error::Result<Message> {
-        let context = HandlerContext::new(payload, introducer);
+        let context =
+            HandlerContext::new_with_clock(payload, introducer, self.transport.clock().as_ref());
         let message = match prepared_message {
             Some(message) => message,
             None => payload.transaction.data()?,
@@ -232,7 +233,11 @@ impl LogicalInbound {
         payload: &MessagePayload,
         data: &ApplicationData,
     ) -> crate::error::Result<()> {
-        let context = HandlerContext::new(payload, Principal::Inbox);
+        let context = HandlerContext::new_with_clock(
+            payload,
+            Principal::Inbox,
+            self.transport.clock().as_ref(),
+        );
         let (kind, result) = match data {
             ApplicationData::Custom(message) => (
                 MessageKind::CustomMessage,

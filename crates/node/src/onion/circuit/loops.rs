@@ -16,10 +16,13 @@
 //! so a reply can never arrive before its entry.
 
 use std::slice;
+use std::sync::Arc;
 
 use futures::channel::oneshot;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 
 use super::OnionClientTags;
 use super::OnionExpiry;
@@ -51,25 +54,55 @@ pub(crate) struct OnionLoopClient {
     tags: OnionClientTags,
     /// The link emitter the first cells leave through.
     link_sender: OnionLinkSender,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
+    /// Injected cryptographic RNG capability.
+    rng: SharedRng,
 }
 
 impl OnionLoopClient {
     /// The loop client of the node `local`.
-    pub(crate) const fn new(
+    #[allow(dead_code)]
+    pub(crate) fn new(local: Did, tags: OnionClientTags, link_sender: OnionLinkSender) -> Self {
+        Self::new_with_capabilities(
+            local,
+            tags,
+            link_sender,
+            Arc::new(SystemClock),
+            SharedRng::system(),
+        )
+    }
+
+    /// The loop client of the node `local` with explicit `clock` and `rng` capabilities.
+    pub(crate) const fn new_with_capabilities(
         local: Did,
         tags: OnionClientTags,
         link_sender: OnionLinkSender,
+        clock: SharedClock,
+        rng: SharedRng,
     ) -> Self {
         Self {
             local,
             tags,
             link_sender,
+            clock,
+            rng,
         }
     }
 
     /// Remove an unspent tag entry (used on local timeout/drop of a one-shot pipeline).
     pub(crate) fn remove_tag(&self, tag: &OnionLoopTag) {
         self.tags.remove(tag);
+    }
+
+    /// Return the epoch [`SharedClock`] capability bound to this loop client.
+    pub(crate) fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Return the [`SharedRng`] capability bound to this loop client.
+    pub(crate) fn rng(&self) -> &SharedRng {
+        &self.rng
     }
 
     /// Send `value` into a fresh loop of `route` that applies `application` at its symbol hop,
@@ -132,18 +165,21 @@ impl OnionLoopClient {
                 "loop class {class:?} is narrower than required {min_class:?}"
             ))));
         }
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let applications = pipeline.applications();
-        let built = build_loop(
-            route.hops(),
-            applications.as_slice(),
-            self.local,
-            class,
-            expiry,
-            input,
-            &mut rand::thread_rng(),
-        )
+        let built = {
+            let mut rng = self.rng.lock_rng();
+            build_loop(
+                route.hops(),
+                applications.as_slice(),
+                self.local,
+                class,
+                expiry,
+                input,
+                &mut rng,
+            )
+        }
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
         let tag = built.reply.tag;
         let (sender, receiver) = oneshot::channel();
@@ -176,7 +212,7 @@ impl OnionLoopClient {
         value: &[u8],
         sink: &OnionReplySink,
     ) -> Result<(OnionLink, OnionCell, OnionExpiry, OnionLoopTag)> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let built = build_loop(
             route.hops(),
@@ -185,7 +221,7 @@ impl OnionLoopClient {
             class,
             expiry,
             value,
-            &mut rand::thread_rng(),
+            &mut self.rng.lock_rng(),
         )
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
         let tag = built.reply.tag;
@@ -208,10 +244,10 @@ impl OnionLoopClient {
         count: usize,
         sink: &OnionReplySink,
     ) -> Result<(Vec<OnionSurb>, Vec<OnionLoopTag>, OnionExpiry)> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let guard = route.hops().guard().did;
-        let mut rng = rand::thread_rng();
+        let mut rng = self.rng.lock_rng();
         // Sized once: a growing vector would leave copies of the blocks' seeds in the buffers
         // it frees.
         let mut surbs = Vec::with_capacity(count);

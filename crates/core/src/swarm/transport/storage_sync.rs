@@ -25,8 +25,6 @@ use crate::message::PayloadSender;
 use crate::message::Principal;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
-use crate::utils::get_epoch_ms;
-use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
 
@@ -80,10 +78,6 @@ fn expected_storage_sync_receiver(destination: StorageSyncDestination, route_nex
         StorageSyncDestination::PhysicalOwner(owner) => owner,
         StorageSyncDestination::PlacementKey(_) => route_next_hop,
     }
-}
-
-fn storage_sync_ack_now_ms() -> i64 {
-    get_epoch_ms_i64()
 }
 
 fn expected_sync_acks(dht: &PeerRing, data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {
@@ -471,7 +465,7 @@ impl SwarmTransport {
             true => Principal::Custody,
             false => introducer,
         };
-        StorageSyncBatch::new(msg, sender, introducer, get_epoch_ms())
+        StorageSyncBatch::new(msg, sender, introducer, self.now_ms())
             .run(self)
             .await
     }
@@ -500,7 +494,7 @@ impl SwarmTransport {
             ));
         }
         let capability = StorageSyncAckCapability {
-            recorded_at_ms: storage_sync_ack_now_ms(),
+            recorded_at_ms: self.now_ms_i64(),
             purpose,
             destination,
             expected_receiver: expected_storage_sync_receiver(destination, route_next_hop),

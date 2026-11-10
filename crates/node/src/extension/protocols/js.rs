@@ -1,9 +1,9 @@
 //! JavaScript protocol adapter (browser).
 //!
-//! Bridges a JS handler into the same [`Protocol`] model so the browser sees the exact
-//! abstraction native does: state lives in the runtime, the handler is a (trusted-pure)
-//! transition returning `{ state, effects }`, and the extension's [`Interpret`] shell
-//! ([`JsShell`]) runs the effects.
+//! Bridges a JS handler into the [`Protocol`] router so browser extensions share the same
+//! registration and effect-routing surface as native protocols: state is threaded through the
+//! router, the handler returns `{ state, effects }`, and [`JsShell`] interprets the admitted
+//! outbound effects.
 //!
 //! ```text
 //!   handler : (Ctx, Event) → { state, effects }
@@ -12,9 +12,29 @@
 //!     effects: Array<{ to: string, payload: Uint8Array }>
 //! ```
 //!
-//! Effects are namespace-scoped: a handler's `send` always goes out under the protocol's own
-//! namespace (the one it was registered on via `provider.on(...)`), so a JS extension cannot
-//! address another namespace — there is no `namespace` field on an effect.
+//! # Capability & Isolation Boundary
+//!
+//! Unlike native Rust [`Protocol`] implementations—whose `step` type signature withholds
+//! [`EffectScope`], async runtimes, and ambient network handles—[`JsProtocol`] invokes synchronous
+//! JavaScript in the host realm (`window` / `WorkerGlobalScope`) inside both [`Protocol::decode`]
+//! and [`Protocol::step`]:
+//!
+//! - **Enforced boundary (outbound overlay namespace):** [`parse_effects`] admits only
+//!   `{ to: Did, payload: Uint8Array }` values with no `namespace` field, and [`JsShell::run`]
+//!   sends exclusively through its bound [`EffectScope`]. A JS handler cannot forge `from` or
+//!   emit an effect targeting another protocol namespace through the returned `effects` array.
+//! - **Unchecked host I/O capability:** Rust cannot prevent the JS `handler` function from
+//!   reading ambient clocks or randomness (`Date.now()`, `crypto.getRandomValues()`), mutating
+//!   shared JS closures or cross-namespace JS state, accessing browser storage/DOM APIs, or
+//!   invoking captured host/provider handles synchronously during `step`.
+//! - **Partial-rollback hazard on JS exceptions:** If `handler.call2(...)` throws or returns a
+//!   malformed transition, [`JsProtocol::step`] keeps the previous `Protocol::State` and emits no
+//!   [`JsSend`] effects, but any external JS mutations or host side effects already performed by
+//!   the callback before failing are **not** rolled back.
+//! - **Replay contract:** Registering a [`JsProtocol`] grants trusted same-origin host execution.
+//!   Deterministic trace replay and namespace state isolation hold only if the supplied JS handler
+//!   treats `ctx.state` as immutable, avoids ambient time/entropy/I/O, and expresses all external
+//!   actions through its returned `effects` array.
 
 use std::str::FromStr;
 
@@ -44,6 +64,14 @@ pub struct JsSend {
 }
 
 /// A protocol whose transition is a JS function. State and event are opaque [`JsValue`]s.
+///
+/// # Security & Determinism Notes
+///
+/// Invoking `handler` inside [`Protocol::step`] exercises an **unchecked synchronous host
+/// capability**: while returned [`JsSend`] effects are strictly confined to `namespace` by
+/// [`JsShell`], the JS callback executes in the ambient JS realm and is not sandboxed against
+/// reading wall-clock time/entropy, mutating external JS objects, or performing synchronous host
+/// I/O during `step`. See the [module documentation](self) for the full isolation boundary.
 pub struct JsProtocol {
     namespace: String,
     initial: JsValue,

@@ -31,7 +31,7 @@ std = [
     "rings-derive/default",
     "rings-transport/native-webrtc",
 ]
-dummy = ["std", "tokio", "rings-transport/dummy"]
+dummy = ["std", "tokio", "tokio/test-util", "rings-transport/dummy"]
 wasm = [
     "web-sys",
     "wasm-bindgen",

@@ -64,8 +64,9 @@ impl OnionRuntime {
     /// Install the data plane of the processor behind `extensions`.
     pub(crate) fn install(extensions: &Extensions) -> Result<Self> {
         let core = extensions.core();
+        let clock = core.clock().clone();
         Self::install_with(extensions, |accounting, link_sender| {
-            exit_algebra(core.onion_role().exit(), accounting, link_sender)
+            exit_algebra_with_clock(core.onion_role().exit(), accounting, link_sender, clock)
         })
     }
 
@@ -77,14 +78,16 @@ impl OnionRuntime {
         algebra: impl FnOnce(&OnionExitAccounting, &OnionLinkSender) -> OnionAlgebra,
     ) -> Result<Self> {
         let core = extensions.core();
-        let link_sender = OnionLinkSender::new(core.onion_idle_floor());
+        let clock = core.clock().clone();
+        let rng = core.rng().clone();
+        let link_sender = OnionLinkSender::new_with_rng(core.onion_idle_floor(), rng.clone());
         let tags = OnionClientTags::default();
-        let accounting = OnionExitAccounting::default();
+        let accounting = OnionExitAccounting::new_with_clock(clock.clone());
         let invokes = OnionInvokeRegistry::new(core.onion_role().invoke(), link_sender.clone());
         let capacity = NonZeroUsize::new(core.connection_registry_capacity()?)
             .ok_or_else(|| Error::InvalidConfig("connection registry of capacity 0".to_string()))?;
         let built_algebra = algebra(&accounting, &link_sender).with_invokes(invokes.clone());
-        let shell = OnionCircuitShell::new(
+        let shell = OnionCircuitShell::new_with_capabilities(
             core.onion_role().registers_relay(),
             core.onion_process_epoch(),
             capacity,
@@ -92,6 +95,8 @@ impl OnionRuntime {
             tags.clone(),
             link_sender.clone(),
             built_algebra,
+            clock.clone(),
+            rng.clone(),
         );
         #[cfg(all(test, rings_native))]
         let links = shell.link_witness();
@@ -111,7 +116,13 @@ impl OnionRuntime {
         })?;
         Ok(Self {
             scope,
-            loops: OnionLoopClient::new(core.did(), tags, link_sender),
+            loops: OnionLoopClient::new_with_capabilities(
+                core.did(),
+                tags,
+                link_sender,
+                clock,
+                rng,
+            ),
             invokes,
             #[cfg(all(test, rings_native))]
             links,
@@ -245,10 +256,26 @@ impl OnionPipelineHandle {
 
 /// `⟦−⟧` of the offer: one session interpretation per offered service this platform
 /// interprets, all sharing the exit accounting and the link sender.
+#[allow(dead_code)]
 pub(super) fn exit_algebra(
     offer: Option<&OnionExitOffer>,
     accounting: &OnionExitAccounting,
     link_sender: &OnionLinkSender,
+) -> OnionAlgebra {
+    exit_algebra_with_clock(
+        offer,
+        accounting,
+        link_sender,
+        std::sync::Arc::new(rings_core::utils::SystemClock),
+    )
+}
+
+/// [`exit_algebra`] driven by an explicit `clock` capability.
+pub(super) fn exit_algebra_with_clock(
+    offer: Option<&OnionExitOffer>,
+    accounting: &OnionExitAccounting,
+    link_sender: &OnionLinkSender,
+    clock: rings_core::utils::SharedClock,
 ) -> OnionAlgebra {
     let Some(offer) = offer else {
         return OnionAlgebra::default();
@@ -261,11 +288,12 @@ pub(super) fn exit_algebra(
             if *service == OnionServiceName::https() {
                 return algebra.register(
                     service.clone(),
-                    OnionExitSessions::new(
+                    OnionExitSessions::new_with_clock(
                         OnionHttpsWorld::new(policy.clone(), accounting.clone()),
                         policy,
                         accounting.clone(),
                         link_sender.clone(),
+                        clock.clone(),
                     ),
                 );
             }
@@ -273,11 +301,12 @@ pub(super) fn exit_algebra(
             {
                 algebra.register(
                     service.clone(),
-                    OnionExitSessions::new(
+                    OnionExitSessions::new_with_clock(
                         super::tcp::OnionTcpWorld::new(policy.clone(), accounting.clone()),
                         policy,
                         accounting.clone(),
                         link_sender.clone(),
+                        clock.clone(),
                     ),
                 )
             }

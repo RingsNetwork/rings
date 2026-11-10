@@ -78,7 +78,6 @@ use crate::swarm::callback::LocalDelivered;
 use crate::swarm::callback::LocalDelivery;
 use crate::swarm::detached::spawn_detached;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
 /// Delivery of this node's inbox to the application inbox.
 pub(crate) struct SwarmInboxDelivery {
@@ -243,7 +242,7 @@ impl SwarmInboxDelivery {
         }
         let inbox = match inbox {
             Some(entry) if entry.kind.is_relay_inbox() && entry.did == key => entry
-                .validate_admissible_at(get_epoch_ms(), self.transport.network_id)?
+                .validate_admissible_at(self.transport.now_ms(), self.transport.network_id)?
                 .into_entry(),
             Some(_) => {
                 return Err(Error::InvalidMessage(format!(
@@ -270,7 +269,7 @@ impl SwarmInboxDelivery {
         let Some(_pass) = self.transport.application().relay_drain.try_lock() else {
             return Ok(());
         };
-        let now_ms = get_epoch_ms();
+        let now_ms = self.transport.now_ms();
         let network_id = self.transport.network_id;
         let stored = inbox.stored_inbox_elements();
         let relay = &self.transport.application().relay_in_flight;
@@ -323,7 +322,7 @@ impl InboxDelivery for SwarmInboxDelivery {
                 match self
                     .transport
                     .dht
-                    .live_storage_entry(key, get_epoch_ms())
+                    .live_storage_entry(key, self.transport.now_ms())
                     .await?
                 {
                     Some(inbox) => self.drain(inbox, local).await,

@@ -20,13 +20,13 @@ use ark_ff::fields::field_hashers::DefaultFieldHasher;
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
-use rand::SeedableRng;
-use rand_hc::Hc128Rng;
+use rand::RngCore;
 
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::utils::SystemEntropy;
 
 /// this is from `<https://docs.rs/bls-signatures/latest/src/bls_signatures/signature.rs.html#24>`
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
@@ -70,10 +70,14 @@ impl sha1::digest::FixedOutputReset for BlsSha256 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature(pub [u8; 96]);
 
+/// Generate a random BLS secret key from an explicit RNG.
+pub fn random_sk_with_rng(rng: &mut impl RngCore) -> Result<SecretKey> {
+    Fr::rand(rng).try_into()
+}
+
 /// this function is used to generate a random secret key
 pub fn random_sk() -> Result<SecretKey> {
-    let mut rng = Hc128Rng::from_entropy();
-    Fr::rand(&mut rng).try_into()
+    random_sk_with_rng(&mut SystemEntropy)
 }
 
 fn from_compressed<T: CanonicalDeserialize, const S: usize>(a: &[u8; S]) -> Result<T> {

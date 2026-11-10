@@ -55,7 +55,8 @@ impl SwarmTransportCallback {
     /// Create the transport callback of one connection of `transport`, which it keeps weakly
     /// (the release law of [`WeakLogical`](super::WeakLogical)).
     pub fn new(transport: Arc<SwarmTransport>) -> Self {
-        Self::new_with_reassembly_clock(&transport, ReassemblyClock::system())
+        let clock = ReassemblyClock::from_clock(transport.clock().clone());
+        Self::new_with_reassembly_clock(&transport, clock)
     }
 
     fn new_with_reassembly_clock(
