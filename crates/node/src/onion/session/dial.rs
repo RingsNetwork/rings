@@ -810,10 +810,10 @@ async fn step_reply_or_flush(
         while !pending.is_empty() {
             match events.poll_ready(cx) {
                 Poll::Ready(Ok(())) => {
-                    if let Some(event) = pending.pop_front()
-                        && events.start_send(event).is_err()
-                    {
-                        return Poll::Ready(Err(()));
+                    if let Some(event) = pending.pop_front() {
+                        if events.start_send(event).is_err() {
+                            return Poll::Ready(Err(()));
+                        }
                     }
                 }
                 Poll::Ready(Err(_)) => return Poll::Ready(Err(())),
