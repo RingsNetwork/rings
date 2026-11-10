@@ -69,6 +69,7 @@ pub use stabilization::can_rectify_predecessor;
 pub use stabilization::leave_targets;
 use stabilization::local_successor_range_end;
 use stabilization::prune_bridged;
+use stabilization::prune_predecessors;
 pub use stabilization::rectify_predecessor;
 pub use stabilization::rectify_predecessor_in;
 pub use stabilization::rectify_predecessors_in;
@@ -570,6 +571,9 @@ pub enum SuccessorRemoval {
     /// An empty list clears every successor claim. The transition normalizes
     /// ordering, uniqueness, self references, and capacity.
     ReplaceWith(Vec<Did>),
+    /// Promote transport-routable replacements advertised in a voluntary `Leave`
+    /// while successor capacity remains (#1057).
+    PromoteReplacements(Vec<Did>),
 }
 
 /// Pure topology side effect emitted by a transition.
@@ -812,26 +816,6 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
     let target = dist(state.local, did);
     let head_dist = dist(state.local, head);
     if target <= head_dist {
-        if did != state.local {
-            if let Some(bridged_peer) = state
-                .bridged
-                .iter()
-                .filter(|(&peer, &via)| {
-                    peer != state.local
-                        && via != state.local
-                        && state.references(via)
-                        && !state.references(peer)
-                })
-                .filter_map(|(&peer, _)| {
-                    let peer_dist = dist(state.local, peer);
-                    (target <= peer_dist && peer_dist < head_dist).then_some((peer_dist, peer))
-                })
-                .min_by(|(dist_a, _), (dist_b, _)| dist_a.cmp(dist_b))
-                .map(|(_, peer)| peer)
-            {
-                return FindSuccessorStep::Local(bridged_peer);
-            }
-        }
         return FindSuccessorStep::Local(head);
     }
     let next = closest_preceding_finger(state, &target).unwrap_or(head);
@@ -879,6 +863,7 @@ fn step_admit(
         finger_convergence,
         ..verified
     };
+    prune_predecessors(&mut next_state, capacity);
     prune_bridged(&mut next_state, Some(peer), capacity);
     TopologyStep {
         state: next_state,
@@ -896,22 +881,48 @@ fn step_remove(
     // Head removals may replace the entire successor list with transport-
     // validated evidence; non-head removals preserve the existing successor tail.
     let removed_head = state.successors.first().copied() == Some(peer);
+    let removed_successor = state.successors.contains(&peer);
     let mut next_successors = state
         .successors
         .iter()
         .copied()
         .filter(|&did| did != peer)
         .collect::<Vec<_>>();
-    if removed_head {
-        match successor {
-            SuccessorRemoval::Preserve => {}
-            SuccessorRemoval::ReplaceWith(mut validated) => {
+    let mut promoted = Vec::new();
+    match successor {
+        SuccessorRemoval::Preserve => {}
+        SuccessorRemoval::ReplaceWith(mut validated) => {
+            if removed_head {
                 validated.retain(|candidate| *candidate != peer);
                 next_successors = sorted_successors(validated, state.local, capacity);
             }
         }
+        SuccessorRemoval::PromoteReplacements(replacements) => {
+            if removed_successor {
+                for candidate in replacements {
+                    if candidate != state.local
+                        && candidate != peer
+                        && next_successors.len() < capacity
+                        && !next_successors.contains(&candidate)
+                    {
+                        next_successors =
+                            update_successors(state.local, &next_successors, candidate, capacity);
+                        if next_successors.contains(&candidate) {
+                            promoted.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
     }
-    let (fingers, mut finger_convergence) = rehint(state, remove_finger_peer(&state.fingers, peer));
+    let cleared_fingers = remove_finger_peer(&state.fingers, peer);
+    let joined_fingers = promoted
+        .iter()
+        .copied()
+        .fold(cleared_fingers, |fingers, candidate| {
+            finger_join(state.local, &fingers, candidate)
+        });
+    let (fingers, mut finger_convergence) = rehint(state, joined_fingers);
     if next_successors.is_empty() {
         // Losing the last membership witness invalidates even slots whose
         // `None` hint did not change: those empty ranges were proved only in
@@ -941,6 +952,9 @@ fn step_remove(
         finger_convergence,
         ..state.clone()
     };
+    if state.references(peer) {
+        prune_predecessors(&mut next_state, capacity);
+    }
     prune_bridged(&mut next_state, Some(peer), capacity);
     TopologyStep {
         state: next_state,
@@ -1037,7 +1051,12 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             request,
             successor,
             now_ms,
-        } => apply_finger(state, request, successor, now_ms).0,
+        } => {
+            let mut step = apply_finger(state, request, successor, now_ms).0;
+            prune_predecessors(&mut step.state, capacity);
+            prune_bridged(&mut step.state, Some(successor), capacity);
+            step
+        }
         TopologyEvent::DeferFinger {
             request,
             successor,

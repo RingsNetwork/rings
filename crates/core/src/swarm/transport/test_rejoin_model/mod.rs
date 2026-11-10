@@ -127,7 +127,7 @@
 //! | configuration | peers | K | budget                                  | states    | depth | premise states (unsettled) | checked            |
 //! |---------------|-------|---|-----------------------------------------|-----------|-------|----------------------------|--------------------|
 //! | departure     | 3     | 1 | 1 departure                             | 4 862     | 21    | —                          | premise necessity  |
-//! | chain         | 4     | 2 | none (chain bootstrap)                  | 509 815   | 60    | 509 815 (495 191)          | see below          |
+//! | chain         | 4     | 2 | none (chain bootstrap)                  | 545 796   | 60    | 545 796 (531 172)          | see below          |
 //! | replacement   | 4     | 1 | 1 cut                                   | 109 840   | 35    | 91 312 (25 472)            | all laws           |
 //! | truncation    | 4     | 2 | 1 cut                                   | 237 328   | 36    | 219 664 (174 048)          | all laws           |
 //! | restart       | 3     | 1 | 1 departure, 1 rejoin                   | 542 589   | 47    | 464 848 (408 404)          | all laws           |
@@ -249,10 +249,10 @@ const REPLACEMENT_BOUNDS: Bounds = Bounds {
 };
 /// Bounds of the `chain` configuration.
 const CHAIN_BOUNDS: Bounds = Bounds {
-    states: 509_815,
+    states: 545_796,
     depth: 60,
-    premise_states: 509_815,
-    unstable_premise_states: 495_191,
+    premise_states: 545_796,
+    unstable_premise_states: 531_172,
 };
 /// `(|G|, depth)` of the `departure` configuration.
 const DEPARTURE_BOUNDS: (usize, usize) = (4_862, 21);

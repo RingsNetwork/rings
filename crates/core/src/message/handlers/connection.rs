@@ -223,12 +223,98 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     }
 }
 
+impl MessageHandler {
+    /// Resolve `msg` against the local Chord topology, consulting passive 1-hop
+    /// bridge hints (`TopologyState::bridged`) only for query-level resolution:
+    /// - `Connect` and `FixFingerTable` reports require a directly connected
+    ///   topology peer (`head`) so bootstrap `ConnectNodeSend` and finger table
+    ///   updates do not target an unreachable bridged peer.
+    /// - Application lookups (`FindSuccessorReportHandler::None`) report the
+    ///   closest bridged peer in `[msg.did, head)` when `msg` accepts a local
+    ///   successor.
+    /// - Strict lookups (`msg.strict && msg.did != self.dht.did`) forward
+    ///   directly to `msg.did` when `msg.did` is already connected or
+    ///   referenced in local topology, or route via the bridge's connected
+    ///   `via` successor when `msg.did` is recorded in `state.bridged`.
+    pub(crate) fn find_successor_for_query(
+        &self,
+        msg: &FindSuccessorSend,
+    ) -> Result<PeerRingAction> {
+        if !msg.accepts_local_successor(self.dht.did) {
+            if self.transport.get_connection(msg.did).is_some() {
+                return Ok(PeerRingAction::Some(msg.did));
+            }
+            if let Some(action) = self.dht.with_topology_state(|state| {
+                if state.references(msg.did) {
+                    return Some(PeerRingAction::Some(msg.did));
+                }
+                state
+                    .bridged
+                    .get(&msg.did)
+                    .copied()
+                    .filter(|&via| via != state.local && state.successors.contains(&via))
+                    .map(|via| {
+                        PeerRingAction::RemoteAction(
+                            via,
+                            crate::dht::PeerRingRemoteAction::FindSuccessor(msg.did),
+                        )
+                    })
+            })? {
+                return Ok(action);
+            }
+            return self.dht.find_successor(msg.did);
+        }
+
+        let action = self.dht.find_successor(msg.did)?;
+        let PeerRingAction::Some(head) = action else {
+            return Ok(action);
+        };
+        if head == self.dht.did || msg.did == self.dht.did {
+            return Ok(PeerRingAction::Some(head));
+        }
+        let bridged = self.dht.with_topology_state(|state| {
+            let target = crate::dht::topology::dist(state.local, msg.did);
+            let head_dist = crate::dht::topology::dist(state.local, head);
+            state
+                .bridged
+                .iter()
+                .filter(|(&peer, &via)| {
+                    peer != state.local
+                        && via != state.local
+                        && state.successors.contains(&via)
+                        && !state.references(peer)
+                })
+                .filter_map(|(&peer, &via)| {
+                    let peer_dist = crate::dht::topology::dist(state.local, peer);
+                    (target <= peer_dist && peer_dist < head_dist).then_some((peer_dist, peer, via))
+                })
+                .min_by(|(dist_a, _, _), (dist_b, _, _)| dist_a.cmp(dist_b))
+                .map(|(_, peer, via)| (peer, via))
+        })?;
+        let Some((bridged_peer, _via)) = bridged else {
+            return Ok(PeerRingAction::Some(head));
+        };
+        let FindSuccessorThen::Report(handler) = &msg.then;
+        match handler {
+            FindSuccessorReportHandler::None => Ok(PeerRingAction::Some(bridged_peer)),
+            FindSuccessorReportHandler::Connect { .. }
+            | FindSuccessorReportHandler::FixFingerTable { .. } => {
+                if self.transport.get_connection(bridged_peer).is_some() {
+                    Ok(PeerRingAction::Some(bridged_peer))
+                } else {
+                    Ok(PeerRingAction::Some(head))
+                }
+            }
+        }
+    }
+}
+
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &FindSuccessorSend) -> Result<()> {
         let ctx = context.payload();
-        match self.dht.find_successor(msg.did)? {
+        match self.find_successor_for_query(msg)? {
             PeerRingAction::Some(did) => {
                 if msg.accepts_local_successor(self.dht.did) {
                     match &msg.then {
@@ -265,7 +351,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                         }
                     }
                 } else {
-                    self.run_effects([CoreEffect::forward_payload(ctx, Some(did))])
+                    self.run_effects([CoreEffect::reset_destination(ctx, did)])
                         .await
                 }
             }

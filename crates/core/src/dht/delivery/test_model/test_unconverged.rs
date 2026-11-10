@@ -397,15 +397,15 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     for route in overlay.check_all_routes() {
         assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
         assert!(
-            route.path().len() <= 3,
-            "expected at most 2 hops: {route:?}"
+            route.path().len() <= 4,
+            "expected at most 3 hops: {route:?}"
         );
     }
 
     let e_to_a = overlay.check_route_law(e, a, RouteStage::TOWARD);
     assert_eq!(
         (e_to_a.path(), e_to_a.outcome),
-        (vec![e, c, a], Outcome::Delivered)
+        (vec![e, d, c, a], Outcome::Delivered)
     );
 
     let d_to_b = overlay.check_route_law(d, b, RouteStage::TOWARD);
@@ -417,7 +417,7 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     let a_to_e = overlay.check_route_law(a, e, RouteStage::TOWARD);
     assert_eq!(
         (a_to_e.path(), a_to_e.outcome),
-        (vec![a, c, e], Outcome::Delivered)
+        (vec![a, b, c, e], Outcome::Delivered)
     );
 
     let b_to_d = overlay.check_route_law(b, d, RouteStage::TOWARD);
@@ -517,5 +517,46 @@ fn test_gap_bridge_handoff_ignores_unrelated_bridges_before_destination() {
     assert_eq!(
         (route.path(), route.outcome),
         (vec![n10, n160, n60], Outcome::Delivered)
+    );
+}
+
+/// Regression (`#1221` Item 1): when `route_toward` returns `RouteStep::Handoff(peer)`, an
+/// intermediate `bridged_peer != aim` with `dist(local, aim) < dist(local, bridged_peer) <
+/// dist(local, peer)` must NOT hijack the handoff to `via`, because at `via` forwarding to
+/// `bridged_peer` would cross `aim` a second time and be dropped (`stage.handed_off == true`).
+#[test]
+fn test_gap_bridge_handoff_ignores_intermediate_bridged_peer_past_aim() {
+    let [n10, aim20, bridged30, head50, via60] = [10u32, 20, 30, 50, 60].map(Did::from);
+
+    let mut view_10 = TopologyState::new(n10, vec![head50, via60], None, vec![None; 8]);
+    // `bridged30 != aim20` lies strictly between `aim20` and `head50`, reported by `via60`.
+    // `via60` is linked to `bridged30`, NOT `aim20`, while `head50` IS linked to `aim20`.
+    view_10.bridged.insert(bridged30, via60);
+
+    let view_50 = TopologyState::new(head50, vec![via60, n10], Some(aim20), vec![None; 8]);
+    let view_60 = TopologyState::new(via60, vec![n10, bridged30], Some(head50), vec![None; 8]);
+    let view_30 = TopologyState::new(bridged30, vec![head50], Some(aim20), vec![None; 8]);
+    let view_20 = TopologyState::new(aim20, vec![head50], Some(n10), vec![None; 8]);
+
+    let views = BTreeMap::from([
+        (n10, view_10),
+        (aim20, view_20),
+        (bridged30, view_30),
+        (head50, view_50),
+        (via60, view_60),
+    ]);
+    let links = [
+        (n10, head50),
+        (n10, via60),
+        (head50, aim20),
+        (via60, bridged30),
+        (bridged30, aim20),
+    ];
+    let overlay = Overlay::with_links(views, links);
+
+    let route = overlay.check_route_law(n10, aim20, RouteStage::TOWARD);
+    assert_eq!(
+        (route.path(), route.outcome),
+        (vec![n10, head50, aim20], Outcome::Delivered)
     );
 }

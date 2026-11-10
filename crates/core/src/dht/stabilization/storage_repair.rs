@@ -452,15 +452,25 @@ impl Stabilizer {
     /// next pass offers the carrier to. A query that is not queued is asked again next pass.
     /// Bound: at most one query per kept key whose owner this view does not place, per pass.
     async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
-        for key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
-            let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
+        let excluded = self.dht.relay_excluded_holders()?;
+        for carrier_key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
+            let mut query_key = self.dht.relay_holder_query_key(carrier_key)?;
+            let mut action = self.dht.find_successor(query_key)?;
+            if !matches!(action, PeerRingAction::RemoteAction(_, _)) {
+                self.dht.reset_relay_holder_query(carrier_key)?;
+                if query_key != carrier_key {
+                    query_key = carrier_key;
+                    action = self.dht.find_successor(query_key)?;
+                }
+            }
+            let PeerRingAction::RemoteAction(next, _) = action else {
                 continue;
             };
-            let request_id = self.dht.ask_relay_holder(key)?;
+            let (query_key, request_id) = self.dht.ask_relay_holder_query(carrier_key)?;
             let query = Message::FindRelayHolder(FindRelayHolder {
-                key,
+                key: query_key,
                 request_id,
-                excluded: Vec::new(),
+                excluded: excluded.clone(),
             });
             if let Err(error) = self
                 .transport
@@ -471,7 +481,8 @@ impl Stabilizer {
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
-                    %key,
+                    %carrier_key,
+                    %query_key,
                     error = ?error,
                     "STABILIZATION relay holder query not queued; asked again next pass"
                 );

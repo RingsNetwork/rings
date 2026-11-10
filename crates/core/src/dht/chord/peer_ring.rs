@@ -653,7 +653,6 @@ impl PeerRing {
             .then(|| {
                 let (previous, next) = self.relay_chain_neighbours()?;
                 let chain_neighbour = previous == Some(sender) || next == Some(sender);
-                let capacity = self.successor_seq.capacity();
                 let (_, acted) = self.transition(|state, _| {
                     match (
                         state.predecessor == Some(sender) || state.predecessors.contains(&sender),
@@ -667,12 +666,8 @@ impl PeerRing {
                             false,
                         ),
                         (_, held_as_successor) => {
-                            let mut step = self.step(state, TopologyEvent::Remove {
-                                peer: sender,
-                                successor: SuccessorRemoval::Preserve,
-                            });
-                            if held_as_successor {
-                                step.state.successors = successor_list
+                            let replacements = if held_as_successor {
+                                successor_list
                                     .iter()
                                     .copied()
                                     .filter(|&candidate| {
@@ -680,20 +675,14 @@ impl PeerRing {
                                             && candidate != sender
                                             && is_routable(candidate)
                                     })
-                                    .fold(step.state.successors, |successors, candidate| {
-                                        match successors.len() < capacity
-                                            && !successors.contains(&candidate)
-                                        {
-                                            true => topology::update_successors(
-                                                state.local,
-                                                &successors,
-                                                candidate,
-                                                capacity,
-                                            ),
-                                            false => successors,
-                                        }
-                                    });
-                            }
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let step = self.step(state, TopologyEvent::Remove {
+                                peer: sender,
+                                successor: SuccessorRemoval::PromoteReplacements(replacements),
+                            });
                             (step, true)
                         }
                     }

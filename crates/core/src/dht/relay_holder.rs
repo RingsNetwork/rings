@@ -755,7 +755,7 @@ impl RelayNeighborhood {
         let whole_ring = passed.is_some_and(|passed| passed.closed)
             || state
                 .predecessor
-                .is_some_and(|predecessor| state.successors.contains(&predecessor));
+                .is_some_and(|predecessor| state.successors.last() == Some(&predecessor));
         if whole_ring {
             return segment.knowing_every_holder();
         }

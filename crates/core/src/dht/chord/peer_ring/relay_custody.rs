@@ -50,36 +50,77 @@ pub(crate) struct KeptRelayHold {
 /// the keys still unplaced, so they are bounded by the carriers kept here.
 #[derive(Debug, Default)]
 pub(crate) struct RelayHolderHints {
-    /// The keys whose owner was asked and has not answered yet, with their correlation tokens.
-    asked: BTreeMap<Did, uuid::Uuid>,
-    /// The holder each owner named, by key.
+    /// The keys whose owner was asked and has not answered yet, mapping each unplaced
+    /// `carrier_key` to `(query_key, request_id)`.
+    asked: BTreeMap<Did, (Did, uuid::Uuid)>,
+    /// The next stepped `query_key` for an unplaced `carrier_key` after an owner answered
+    /// with a storage-less holder or `horizon` in `[query_key, local)`.
+    stepped: BTreeMap<Did, Did>,
+    /// The holder each owner named, by `carrier_key`.
     named: BTreeMap<Did, Did>,
 }
 
 impl RelayHolderHints {
-    /// Prune both maps to keys still in `unplaced`.
+    /// Prune all maps to keys still in `unplaced`.
     fn retain_unplaced(&mut self, unplaced: &[Did]) {
         self.asked.retain(|key, _| unplaced.contains(key));
+        self.stepped.retain(|key, _| unplaced.contains(key));
         self.named.retain(|key, _| unplaced.contains(key));
     }
 
-    /// Record `request_id` as the live correlation token for `key` (`Law (Asked)`), keeping an
-    /// existing token while a query for `key` is already outstanding so a resend does not
-    /// invalidate an in-flight multi-hop answer.
-    fn ask(&mut self, key: Did, request_id: uuid::Uuid) -> uuid::Uuid {
-        *self.asked.entry(key).or_insert(request_id)
+    /// Record `(query_key, request_id)` as the live correlation query for `carrier_key`
+    /// (`Law (Asked)`), keeping an existing query while one for `carrier_key` is already
+    /// outstanding so a resend does not invalidate an in-flight multi-hop answer.
+    fn ask_query(&mut self, carrier_key: Did, request_id: uuid::Uuid) -> (Did, uuid::Uuid) {
+        let query_key = self
+            .stepped
+            .get(&carrier_key)
+            .copied()
+            .unwrap_or(carrier_key);
+        *self
+            .asked
+            .entry(carrier_key)
+            .or_insert((query_key, request_id))
     }
 
-    /// Consume `(key, request_id)` once (`Law (Asked)`) and update the named holder for `key`,
-    /// returning whether the named holder changed.
-    fn take_answer(&mut self, key: Did, request_id: uuid::Uuid, holder: Option<Did>) -> bool {
-        (self.asked.get(&key) == Some(&request_id)).then(|| {
-            self.asked.remove(&key);
-            match holder {
-                Some(holder) => self.named.insert(key, holder) != Some(holder),
-                None => self.named.remove(&key).is_some(),
+    /// Consume `(key, request_id)` once (`Law (Asked)`) and update the named holder or
+    /// stepped query key for the corresponding `carrier_key`, returning whether the hint
+    /// or stepped query changed.
+    fn take_answer(
+        &mut self,
+        key: Did,
+        request_id: uuid::Uuid,
+        holder: Option<Did>,
+        next_key: Option<Did>,
+    ) -> bool {
+        let matched = self
+            .asked
+            .iter()
+            .find_map(|(&carrier_key, &(query_key, token))| {
+                (token == request_id && (query_key == key || carrier_key == key))
+                    .then_some(carrier_key)
+            });
+        let Some(carrier_key) = matched else {
+            return false;
+        };
+        self.asked.remove(&carrier_key);
+        match holder {
+            Some(holder) => {
+                self.stepped.remove(&carrier_key);
+                self.named.insert(carrier_key, holder) != Some(holder)
             }
-        }) == Some(true)
+            None => {
+                let named_removed = self.named.remove(&carrier_key).is_some();
+                let stepped_changed = match next_key {
+                    Some(next_key) => self.stepped.insert(carrier_key, next_key) != Some(next_key),
+                    None => {
+                        self.stepped.remove(&carrier_key);
+                        false
+                    }
+                };
+                named_removed || stepped_changed
+            }
+        }
     }
 }
 
@@ -337,20 +378,39 @@ impl PeerRing {
         Ok(unplaced)
     }
 
-    /// Record that the owner of `key` is asked for its holder with `request_id` (`Law (Asked)`),
-    /// returning the single-use correlation token the answer must echo.
-    pub(crate) fn ask_relay_holder_with_id(
-        &self,
-        key: Did,
-        request_id: uuid::Uuid,
-    ) -> Result<uuid::Uuid> {
-        Ok(self.lock_relay_holder_hints()?.ask(key, request_id))
+    /// Current query key for `carrier_key`: the in-flight `asked` key if one is active, else
+    /// the `stepped` key, else `carrier_key` itself.
+    pub(crate) fn relay_holder_query_key(&self, carrier_key: Did) -> Result<Did> {
+        let hints = self.lock_relay_holder_hints()?;
+        Ok(hints
+            .asked
+            .get(&carrier_key)
+            .map(|&(query_key, _)| query_key)
+            .or_else(|| hints.stepped.get(&carrier_key).copied())
+            .unwrap_or(carrier_key))
     }
 
+    /// Clear any stepped query key and outstanding query for `carrier_key`.
+    pub(crate) fn reset_relay_holder_query(&self, carrier_key: Did) -> Result<()> {
+        let mut hints = self.lock_relay_holder_hints()?;
+        hints.stepped.remove(&carrier_key);
+        hints.asked.remove(&carrier_key);
+        Ok(())
+    }
+
+    /// Record that the current stepped query key for `carrier_key` is asked for its holder
+    /// (`Law (Asked)`), returning `(query_key, request_id)`.
+    pub(crate) fn ask_relay_holder_query(&self, carrier_key: Did) -> Result<(Did, uuid::Uuid)> {
+        Ok(self
+            .lock_relay_holder_hints()?
+            .ask_query(carrier_key, crate::utils::new_uuid()))
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     /// Record that the owner of `key` is asked for its holder (`Law (Asked)`), returning the
     /// single-use correlation token the answer must echo.
     pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<uuid::Uuid> {
-        self.ask_relay_holder_with_id(key, crate::utils::new_uuid())
+        self.ask_relay_holder_query(key).map(|(_, id)| id)
     }
 
     /// The peers this node knows not to chain through (#1070, #1182): peers that declared
@@ -436,14 +496,26 @@ impl PeerRing {
         holder: Option<Did>,
         horizon: Option<Did>,
     ) -> Result<bool> {
-        self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, _| {
+        self.with_verified_relay_answer_and_then(origin, key, holder, horizon, |holder, horizon| {
             let neighborhood = self.lock_relay_neighborhood()?;
             let verified_holder =
-                holder.filter(|&candidate| candidate != self.did && neighborhood.holds(candidate));
+                holder.filter(|&candidate| candidate != self.did && neighborhood.chains(candidate));
             drop(neighborhood);
-            Ok(self
-                .lock_relay_holder_hints()?
-                .take_answer(key, request_id, verified_holder))
+            let next_key = if verified_holder.is_none() {
+                holder
+                    .or(horizon)
+                    .filter(|&stepped| stepped != self.did)
+                    .map(|stepped| stepped + Did::from(1u32))
+                    .filter(|&next_key| next_key != self.did && in_arc(key, next_key, self.did))
+            } else {
+                None
+            };
+            Ok(self.lock_relay_holder_hints()?.take_answer(
+                key,
+                request_id,
+                verified_holder,
+                next_key,
+            ))
         })
         .map(|changed| changed.unwrap_or(false))
     }
