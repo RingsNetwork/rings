@@ -325,7 +325,7 @@ impl PeerRing {
     }
 
     /// The number of items held by `principal` in the removal store's accounting.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn removal_held(&self, principal: crate::fair_admission::Principal) -> usize {
         self.removal_index.held(principal)
     }

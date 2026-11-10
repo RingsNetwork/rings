@@ -361,7 +361,7 @@ impl RemovalIndex {
     }
 
     /// The number of items held by `principal`.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn held(&self, principal: Principal) -> usize {
         self.accounting.lock().held(principal)
     }
