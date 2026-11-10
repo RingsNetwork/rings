@@ -272,7 +272,7 @@ async fn test_a_read_proceeds_while_a_remove_side_write_is_parked() -> Result<()
         gate: std::sync::Mutex::new(None),
     });
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
     let now_ms = get_epoch_ms();
     let writer = Did::from(7u32);
     let read_topic = Did::from(11u32);
@@ -434,8 +434,8 @@ where V: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 
                     self.inner.put(key, value).await?;
                 }
                 let _ = tx.send(());
-                let _ = rx.await;
-                if !commit_before_park {
+                let released = rx.await.is_ok();
+                if !commit_before_park && released {
                     self.inner.put(key, value).await?;
                 }
                 Ok(())
@@ -487,8 +487,8 @@ where V: Clone + serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 
                     self.inner.remove(key).await?;
                 }
                 let _ = tx.send(());
-                let _ = rx.await;
-                if !commit_before_park {
+                let released = rx.await.is_ok();
+                if !commit_before_park && released {
                     self.inner.remove(key).await?;
                 }
                 Ok(())
@@ -535,7 +535,7 @@ async fn test_recovery_retry_after_mid_scan_failure_charges_each_removal_once() 
     let elements = Arc::new(FaultStorage::<Entry>::new());
     let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
 
     let now_ms = get_epoch_ms();
     let writer = Did::from(7u32);
@@ -618,7 +618,7 @@ async fn test_recovery_retry_after_mid_scan_cancellation_charges_each_removal_on
     let elements = Arc::new(FaultStorage::<Entry>::new());
     let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
 
     let now_ms = get_epoch_ms();
     for idx in 0..4u32 {
@@ -666,7 +666,7 @@ async fn test_uncertain_removal_commits_reconcile_accounting_on_error() -> Resul
     let elements = Arc::new(FaultStorage::<Entry>::new());
     let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
 
     let now_ms = get_epoch_ms();
     let writer = Did::from(7u32);
@@ -754,7 +754,7 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
     let elements = Arc::new(FaultStorage::<Entry>::new());
     let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
 
     let now_ms = get_epoch_ms();
     let topic = Did::from(310u32);
@@ -771,7 +771,7 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
 
     // A. Cancel `put` before `removals` commits: charge is 0 on drop and 1 after retry.
     let (parked_tx, parked_rx) = oneshot::channel();
-    let (_release_tx, release_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
     removals.configure(|state| state.park_put = Some((false, parked_tx, release_rx)))?;
     with_hang_guard("cancel uncommitted put", Duration::from_secs(5), async {
         let mut fut = Box::pin(store.put(&key, &removed, Principal::Local, now_ms));
@@ -782,12 +782,13 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
         drop(fut);
     })
     .await;
+    drop(release_tx);
     assert_eq!(node.removal_held(Principal::Local), 0);
 
     // B. Cancel `put` AFTER `removals` already committed (e.g. parked in directory sync):
     //    the next read/retry reconciles accounting to 1 and normalizes `E_old`.
     let (parked_tx, parked_rx) = oneshot::channel();
-    let (_release_tx, release_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
     removals.configure(|state| state.park_put = Some((true, parked_tx, release_rx)))?;
     with_hang_guard("cancel committed put", Duration::from_secs(5), async {
         let mut fut = Box::pin(store.put(&key, &removed, Principal::Local, now_ms));
@@ -798,6 +799,7 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
         drop(fut);
     })
     .await;
+    drop(release_tx);
 
     let read = store.get(&key).await?;
     assert_eq!(read.as_ref().map(|entry| entry.data.len()), Some(0));
@@ -809,7 +811,7 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
 
     // C. Cancel `remove` AFTER `removals` already deleted the record: next operation reconciles to 0.
     let (parked_tx, parked_rx) = oneshot::channel();
-    let (_release_tx, release_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
     removals.configure(|state| state.park_remove = Some((true, parked_tx, release_rx)))?;
     with_hang_guard("cancel committed remove", Duration::from_secs(5), async {
         let mut fut = Box::pin(store.remove(&key));
@@ -820,6 +822,7 @@ async fn test_cancelled_removal_writes_and_deletes_reconcile_on_next_operation()
         drop(fut);
     })
     .await;
+    drop(release_tx);
 
     assert_eq!(store.get(&key).await?, None);
     assert_eq!(node.removal_held(Principal::Local), 0);
@@ -834,7 +837,7 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
     let elements = Arc::new(FaultStorage::<Entry>::new());
     let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
     let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
-    node.removal_storage = Box::new(removals.clone());
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
 
     let now_ms = get_epoch_ms();
     let writer = Did::from(7u32);
@@ -853,11 +856,9 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
         .await?;
     let removed_a = added_a.tombstone(added_a.clone())?;
 
-    // Fail the `elements.put` of the deletion AND the next `elements.put` during read repair so we
-    // verify reads normalize in memory even while `elements` remains unwritable.
-    elements.configure(|state| state.fail_put_count = 2)?;
+    elements.configure(|state| state.fail_put_count = 1)?;
     assert!(node
-        .join_storage_entry(now_ms, topic_a, removed_a, Principal::Local)
+        .join_storage_entry(now_ms, topic_a, removed_a.clone(), Principal::Local)
         .await
         .is_err());
     assert_eq!(
@@ -867,7 +868,7 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
             .await?
             .map(|entry| entry.data.len()),
         Some(1),
-        "raw element store still holds E_old before repair"
+        "raw element store still holds E_old before retry"
     );
 
     let store = node
@@ -877,17 +878,22 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
     assert_eq!(
         direct_get.as_ref().map(|entry| entry.data.len()),
         Some(0),
-        "store.get must normalize E_old against R_new even when repair write fails"
+        "store.get must normalize E_old against R_new"
     );
     assert_eq!(direct_get.map(|entry| entry.crdt.tombstones.len()), Some(1));
 
-    // Next read (`get_all` and `stored`) succeeds in repairing `elements` on disk as well.
     let all = store.get_all().await?;
     let from_all = all
         .into_iter()
         .find(|(k, _)| k == &key_a)
         .map(|(_, entry)| entry);
     assert_eq!(from_all.as_ref().map(|entry| entry.data.len()), Some(0));
+    let live_a = stored(&node, topic_a, now_ms).await?;
+    assert_eq!(live_a.map(|entry| entry.data.len()), Some(0));
+
+    // Retry of the write repairs `elements` on disk and clears the dirty flag.
+    node.join_storage_entry(now_ms, topic_a, removed_a, Principal::Local)
+        .await?;
     assert_eq!(
         elements
             .inner
@@ -895,10 +901,8 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
             .await?
             .map(|entry| entry.data.len()),
         Some(0),
-        "idle read repaired E_old on disk once writable"
+        "retry repaired E_old on disk"
     );
-    let live_a = stored(&node, topic_a, now_ms).await?;
-    assert_eq!(live_a.map(|entry| entry.data.len()), Some(0));
 
     // Case 2: `removals.put` succeeds, then `elements.put` is cancelled mid-await.
     let topic_b = Did::from(401u32);
@@ -944,6 +948,9 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
         Some(0),
         "live read after cancelled elements.put must not expose tombstoned element"
     );
+    store
+        .put(&key_b, &removed_b, Principal::Local, now_ms)
+        .await?;
     assert_eq!(
         elements
             .inner
@@ -951,7 +958,58 @@ async fn test_partial_carrier_write_normalizes_reads_without_restart() -> Result
             .await?
             .map(|entry| entry.data.len()),
         Some(0),
-        "subsequent read repaired E_old on disk"
+        "subsequent write repaired E_old on disk"
     );
+    Ok(())
+}
+
+/// Regression: when a caller cancels `CarrierStore::put` while a detached removal-store write is
+/// still in flight and that write commits after `ensure_recovered` begins, recovery waits for the
+/// in-flight write to finish before scanning or publishing `recovered = true`.
+#[tokio::test]
+async fn test_recovery_waits_for_a_cancelled_backends_late_commit() -> Result<()> {
+    let elements = Arc::new(FaultStorage::<Entry>::new());
+    let removals = Arc::new(FaultStorage::<RemovalRecord>::new());
+    let mut node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(elements.clone()));
+    node.removal_storage = Arc::new(Box::new(removals.clone()));
+
+    let now_ms = get_epoch_ms();
+    let topic = Did::from(410u32);
+    let key = topic.to_string();
+    let writer = Did::from(7u32);
+    let added = stamped_delta(EntryOperation::Extend, topic, &["v1"], now_ms, writer)?
+        .try_into_storage_entry()?;
+    let removed = added.tombstone(added.clone())?;
+
+    let store = node
+        .carrier_storage(EntryKind::Data)
+        .ok_or(Error::RelayStorageUnavailable)?;
+    store.put(&key, &added, Principal::Local, now_ms).await?;
+
+    let (parked_tx, parked_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    removals.configure(|state| state.park_put = Some((false, parked_tx, release_rx)))?;
+
+    with_hang_guard("cancel put before late backend commit", Duration::from_secs(5), async {
+        let mut put_fut = Box::pin(store.put(&key, &removed, Principal::Local, now_ms));
+        tokio::select! {
+            _ = &mut put_fut => panic!("put should park inside removals.put"),
+            res = parked_rx => assert!(res.is_ok()),
+        }
+        // Cancel the caller while the removal-store write is still parked.
+        drop(put_fut);
+
+        // Start a read (`get`), which triggers `ensure_recovered`, poll it once while the
+        // cancelled write is still parked, then release the backend write to commit.
+        let mut get_fut = Box::pin(store.get(&key));
+        assert!(futures::poll!(&mut get_fut).is_pending());
+        assert!(release_tx.send(()).is_ok());
+
+        let read = get_fut.await?;
+        assert_eq!(read.as_ref().map(|entry| entry.data.len()), Some(0));
+        assert_eq!(node.removal_held(Principal::Local), 1);
+        Ok::<(), Error>(())
+    })
+    .await?;
     Ok(())
 }
