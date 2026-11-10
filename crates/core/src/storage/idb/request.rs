@@ -15,7 +15,9 @@
 //! event can fire (a commit's when its transaction opens, [`CommitWatch`]), resolves exactly
 //! once on the first of them, and unregisters them when its watch is dropped, whether its
 //! future ran to completion or was dropped mid-await, so a handler never outlives its watch and
-//! a later event of the same target finds no stale handler.
+//! a later event of the same target finds no stale handler. Dropping an unsettled
+//! [`CommitWatch`] also aborts its transaction, so a cancelled operation never commits a
+//! partial scope.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -201,6 +203,16 @@ pub(super) async fn request(request: &IdbRequest) -> Result<JsValue> {
     settled(&mut watch.receiver).await
 }
 
+/// Await every request in `requests`, registering every watch before awaiting the first so all
+/// requests are queued and watched in the same synchronous turn.
+pub(super) async fn requests(requests: &[IdbRequest]) -> Result<()> {
+    let watches = requests.iter().map(RequestWatch::new).collect::<Vec<_>>();
+    for mut watch in watches {
+        settled(&mut watch.receiver).await?;
+    }
+    Ok(())
+}
+
 /// The commit of one transaction, watched from the moment it opens: `complete`, `error` and
 /// `abort` handlers are registered before any request is issued, so no event can precede them
 /// whatever the caller awaits between its last request and [`Self::committed`], and they are
@@ -212,6 +224,8 @@ pub(super) struct CommitWatch {
     _handlers: [Closure<dyn FnMut(Event)>; 3],
     /// The outcome the first handler to fire settles.
     receiver: oneshot::Receiver<Result<JsValue>>,
+    /// Whether [`Self::committed`] observed the transaction settle.
+    settled: bool,
 }
 
 impl CommitWatch {
@@ -237,6 +251,7 @@ impl CommitWatch {
             transaction: transaction.clone(),
             _handlers: [on_complete, on_error, on_abort],
             receiver,
+            settled: false,
         }
     }
 
@@ -248,16 +263,22 @@ impl CommitWatch {
     /// Await the commit: `Ok` on `complete`, the transaction's error on `error` or `abort`.
     /// Under [`Durability::Strict`], `complete` is the flushed commit.
     pub(super) async fn committed(mut self) -> Result<()> {
-        settled(&mut self.receiver).await.map(|_| ())
+        let result = settled(&mut self.receiver).await.map(|_| ());
+        self.settled = true;
+        result
     }
 }
 
 impl Drop for CommitWatch {
-    /// Unregister the three handlers before they are dropped.
+    /// Unregister the three handlers before they are dropped, and abort an unfinished
+    /// transaction so a cancelled operation never commits a partial scope.
     fn drop(&mut self) {
         self.transaction.set_oncomplete(None);
         self.transaction.set_onerror(None);
         self.transaction.set_onabort(None);
+        if !self.settled {
+            self.transaction.abort().ok();
+        }
     }
 }
 

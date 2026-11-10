@@ -20,11 +20,14 @@
 //! `put` pays. Elsewhere `push` is `File::sync_all` (`fsync`), already durable, and the barrier
 //! is empty; the directory flush is still paid once per batch.
 //!
-//! **Budget.** A store that refuses (never evicts) checks the whole batch against its budget
-//! before its first write, so a refused batch changes nothing; an evicting store makes room per
-//! rename, as a `put` does.
+//! **Budget.** Every batch is checked as a whole against the budget before its first write: a
+//! store that refuses (never evicts) refuses a batch that does not fit beside the records it
+//! does not replace, changing nothing, and an evicting store refuses a deduplicated batch larger
+//! than the whole capacity and otherwise retires only pre-existing non-batch records before
+//! renaming shrinking replacements and then growing or new records, recording recency in caller
+//! last-write order.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use super::presence;
@@ -36,6 +39,7 @@ use super::FileStore;
 use super::RecordAuthority;
 use crate::error::Error;
 use crate::error::Result;
+use crate::storage::write_ordered::WriteOrderedMap;
 
 /// One file-system step of a batch, as data the store interprets (the durability law).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +91,8 @@ struct Staged {
     name: String,
     /// The encoded record.
     data: Vec<u8>,
+    /// The byte length of `data`, charged against the budget.
+    required: u64,
     /// The record's path.
     path: PathBuf,
     /// The temporary file the write goes through.
@@ -102,28 +108,29 @@ impl FileStore {
     /// in place and indexed, its survival of a crash unknown: the caller treats the batch as
     /// failed. A refused budget changes nothing.
     pub(super) fn store_batch(&self, batch: Vec<(String, Vec<u8>)>) -> Result<()> {
-        let staged = batch
-            .into_iter()
-            .collect::<BTreeMap<_, _>>()
-            .into_iter()
-            .map(|(name, data)| {
-                let path = self.root.join(&name);
-                let tmp_path = path.with_extension("tmp");
-                Staged {
-                    name,
-                    data,
-                    path,
-                    tmp_path,
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut deduplicated = WriteOrderedMap::default();
+        for (name, data) in batch {
+            deduplicated.insert(name, data);
+        }
+        let mut staged = Vec::with_capacity(deduplicated.len());
+        while let Some((name, data)) = deduplicated.pop_oldest() {
+            let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
+            let path = self.root.join(&name);
+            let tmp_path = path.with_extension("tmp");
+            staged.push(Staged {
+                name,
+                data,
+                required,
+                path,
+                tmp_path,
+            });
+        }
         if staged.is_empty() {
             return Ok(());
         }
         let mut index = self.write_index()?;
-        if !self.authority.evicts() {
-            self.admit_batch(&index, &staged)?;
-        } else {
+        self.admit_batch(&index, &staged)?;
+        if self.authority.evicts() {
             std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
         }
         let mut files = Vec::with_capacity(staged.len());
@@ -134,9 +141,7 @@ impl FileStore {
                 }),
                 BatchStep::PushTemporaries => files.iter().try_for_each(push),
                 BatchStep::Barrier => files.last().map_or(Ok(()), barrier),
-                BatchStep::Renames => staged
-                    .iter()
-                    .try_for_each(|record| self.rename_staged(&mut index, record)),
+                BatchStep::Renames => self.commit_batch(&mut index, &staged),
                 BatchStep::SyncDirectory => sync_directory(&self.root),
                 BatchStep::Witness => self.witness_batch(&mut index, &staged),
             };
@@ -151,20 +156,27 @@ impl FileStore {
         Ok(())
     }
 
-    /// Refuse the whole batch, changing nothing, unless every record of it fits the budget
-    /// beside the records it does not replace (the budget law of a store that never evicts).
+    /// Refuse the whole batch, changing nothing, unless every record of it fits the budget:
+    /// a non-evicting store requires the batch to fit beside the records it does not replace,
+    /// while an evicting store requires the deduplicated batch itself to fit in `capacity`.
     fn admit_batch(&self, index: &FileIndex, staged: &[Staged]) -> Result<()> {
         let mut required = 0_u64;
         let mut replaced = 0_u64;
         for record in staged {
-            let len = u64::try_from(record.data.len()).map_err(|_| Error::StorageCountOverflow)?;
-            required = required.saturating_add(len);
+            required = required.saturating_add(record.required);
             replaced = replaced.saturating_add(index.files.get(&record.name).copied().unwrap_or(0));
         }
-        let kept = index.used_bytes.saturating_sub(replaced);
-        if kept.saturating_add(required) > self.capacity {
-            return Err(Error::StorageBudgetExhausted {
-                used: index.used_bytes,
+        if !self.authority.evicts() {
+            let kept = index.used_bytes.saturating_sub(replaced);
+            if kept.saturating_add(required) > self.capacity {
+                return Err(Error::StorageBudgetExhausted {
+                    used: index.used_bytes,
+                    required,
+                    capacity: self.capacity,
+                });
+            }
+        } else if required > self.capacity {
+            return Err(Error::StorageValueExceedsCapacity {
                 required,
                 capacity: self.capacity,
             });
@@ -172,16 +184,53 @@ impl FileStore {
         Ok(())
     }
 
-    /// Rename the staged record over its file and index it ([`FileStore::commit_record`]).
-    fn rename_staged(&self, index: &mut FileIndex, record: &Staged) -> Result<()> {
-        let required = u64::try_from(record.data.len()).map_err(|_| Error::StorageCountOverflow)?;
-        self.commit_record(
-            index,
-            record.name.clone(),
-            &record.path,
-            &record.tmp_path,
-            required,
-        )
+    /// Retire pre-existing non-batch records until the batch fits, rename shrinking replacements
+    /// before growing or new records so intermediate disk usage never exceeds `capacity`, and
+    /// record write recency in caller last-write order.
+    fn commit_batch(&self, index: &mut FileIndex, staged: &[Staged]) -> Result<()> {
+        let required = staged
+            .iter()
+            .fold(0_u64, |total, record| total.saturating_add(record.required));
+        let replaced = staged.iter().fold(0_u64, |total, record| {
+            total.saturating_add(index.files.get(&record.name).copied().unwrap_or(0))
+        });
+        let batch_names = staged
+            .iter()
+            .map(|record| record.name.as_str())
+            .collect::<BTreeSet<_>>();
+        while index
+            .used_bytes
+            .saturating_sub(replaced)
+            .saturating_add(required)
+            > self.capacity
+        {
+            if !self.authority.evicts() {
+                return Err(Error::StorageBudgetExhausted {
+                    used: index.used_bytes,
+                    required,
+                    capacity: self.capacity,
+                });
+            }
+            let Some(name) = index.oldest_excluding(&batch_names) else {
+                break;
+            };
+            self.retire_indexed(index, &name)?;
+        }
+        let (shrinking, growing): (Vec<_>, Vec<_>) = staged.iter().partition(|record| {
+            index
+                .files
+                .get(&record.name)
+                .is_some_and(|&previous_len| record.required <= previous_len)
+        });
+        for record in shrinking.into_iter().chain(growing) {
+            presence::rename(&record.tmp_path, &record.path, self.authority.flushes())
+                .map_err(Error::ServiceIOError)?;
+            index.record(record.name.clone(), record.required);
+        }
+        for record in staged {
+            index.record(record.name.clone(), record.required);
+        }
+        Ok(())
     }
 
     /// Mark every staged record present that is not, then flush the directory once, iff any

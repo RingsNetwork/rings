@@ -214,6 +214,11 @@ impl FileIndex {
     fn oldest(&self) -> Option<String> {
         self.files.oldest().map(str::to_owned)
     }
+
+    /// The least recently written file outside `excluded`, the next one a batch retires.
+    fn oldest_excluding(&self, excluded: &BTreeSet<&str>) -> Option<String> {
+        self.files.oldest_excluding(excluded).map(str::to_owned)
+    }
 }
 
 /// One file per key under a byte budget (see the module documentation for its laws).
@@ -916,12 +921,16 @@ where V: Serialize + DeserializeOwned + Send + Sync
         file_name_for(key)
     }
 
-    /// Every record encoded first, each refused as a `put` refuses a value larger than the whole
-    /// budget, then stored by the batch plan (`batch`).
+    /// Every record deduplicated in caller write order and encoded first, each refused as a `put`
+    /// refuses a value larger than the whole budget, then stored by the batch plan (`batch`).
     async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
-        let mut encoded = Vec::with_capacity(records.len());
+        let mut deduplicated = super::write_ordered::WriteOrderedMap::default();
         for (key, value) in records {
-            let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
+            deduplicated.insert(key.to_owned(), value);
+        }
+        let mut encoded = Vec::with_capacity(deduplicated.len());
+        while let Some((key, value)) = deduplicated.pop_oldest() {
+            let data = rings_codec::serialize(&(&key, value)).map_err(Error::CodecSerialize)?;
             let required = u64::try_from(data.len()).map_err(|_| Error::StorageCountOverflow)?;
             if required > self.store.capacity {
                 return Err(Error::StorageValueExceedsCapacity {
@@ -929,7 +938,7 @@ where V: Serialize + DeserializeOwned + Send + Sync
                     capacity: self.store.capacity,
                 });
             }
-            encoded.push((file_name_for(key), data));
+            encoded.push((file_name_for(&key), data));
         }
         self.on_store(move |store| store.store_batch(encoded)).await
     }
