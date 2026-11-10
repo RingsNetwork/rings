@@ -386,7 +386,7 @@ impl PeerRing {
             .ask_query(carrier_key, crate::utils::new_uuid()))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     /// Record that the owner of `key` is asked for its holder (`Law (Asked)`), returning the
     /// single-use correlation token the answer must echo.
     pub(crate) fn ask_relay_holder(&self, key: Did) -> Result<uuid::Uuid> {
