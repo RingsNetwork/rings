@@ -138,6 +138,7 @@ fn stable_at(version: &EntryVersion) -> u128 {
 }
 
 const CO_REGISTER_DIGEST: ElementDigest = ElementDigest(*b"rings-core:co-register-floor\0\0\0\0");
+const PROOF_BUNDLE_DIGEST: ElementDigest = ElementDigest(*b"rings-core:data-proof-bundle\0\0\0\0");
 
 impl RemovalRecord {
     /// The remove side of the normalized carrier `value`, charging `charge` with what it raised
@@ -186,6 +187,23 @@ impl RemovalRecord {
         if removes.is_empty() && register.is_none() {
             return None;
         }
+        let remove_proofs = value
+            .crdt
+            .proofs
+            .iter()
+            .filter(|proof| !proof.key.is_element_add())
+            .cloned()
+            .collect::<Vec<_>>();
+        for dot in EntryCrdt::encode_proof_dots(&remove_proofs) {
+            let encoded = EntryTombstone {
+                element: PROOF_BUNDLE_DIGEST,
+                dot,
+            };
+            removes.push(ChargedRemove {
+                tombstone: encoded,
+                charge: held(&encoded).unwrap_or(charge),
+            });
+        }
         let record = Self {
             did: value.did,
             register,
@@ -198,16 +216,20 @@ impl RemovalRecord {
     fn as_entry(&self) -> Entry {
         let mut tombstones = Vec::with_capacity(self.removes.len());
         let mut co_registers = Vec::new();
+        let mut proof_dots = Vec::new();
         for remove in &self.removes {
             if remove.tombstone.element == CO_REGISTER_DIGEST
                 && remove.tombstone.dot.index == u32::MAX
             {
                 co_registers.push(remove.tombstone.dot.version);
+            } else if remove.tombstone.element == PROOF_BUNDLE_DIGEST {
+                proof_dots.push(remove.tombstone.dot);
             } else {
                 tombstones.push(remove.tombstone);
             }
         }
         co_registers.sort();
+        let proofs = EntryCrdt::decode_proof_dots(proof_dots);
         Entry {
             did: self.did,
             data: Vec::new(),
@@ -217,7 +239,7 @@ impl RemovalRecord {
                 dots: Vec::new(),
                 co_dots: Vec::new(),
                 co_registers,
-                proofs: Vec::new(),
+                proofs,
                 tombstones,
             },
             expires_at_ms: Some(0),
@@ -228,6 +250,7 @@ impl RemovalRecord {
     fn items(&self) -> impl Iterator<Item = (Principal, u128)> + '_ {
         self.removes
             .iter()
+            .filter(|remove| remove.tombstone.element != PROOF_BUNDLE_DIGEST)
             .map(|remove| (remove.charge, stable_at(&remove.tombstone.dot.version)))
             .chain(
                 self.register
@@ -239,6 +262,13 @@ impl RemovalRecord {
 
 /// `E(x)`: the carrier `value` without its remove side.
 fn element_side(value: &Entry) -> Entry {
+    let proofs = value
+        .crdt
+        .proofs
+        .iter()
+        .filter(|proof| proof.key.is_element_add())
+        .cloned()
+        .collect();
     Entry {
         did: value.did,
         data: value.data.clone(),
@@ -248,7 +278,7 @@ fn element_side(value: &Entry) -> Entry {
             dots: value.crdt.dots.clone(),
             co_dots: value.crdt.co_dots.clone(),
             co_registers: Vec::new(),
-            proofs: value.crdt.proofs.clone(),
+            proofs,
             tombstones: Vec::new(),
         },
         expires_at_ms: value.expires_at_ms,
@@ -277,13 +307,16 @@ fn glue(
         return elements.join(removals.as_entry()).map(Some);
     }
     let remove_side = removals.as_entry();
+    let mut proofs = elements.crdt.proofs;
+    proofs.extend(remove_side.crdt.proofs);
+    proofs.sort_by_key(|p| p.key);
     Ok(Some(Entry {
         crdt: EntryCrdt {
             register: remove_side.crdt.register,
             dots: elements.crdt.dots,
             co_dots: elements.crdt.co_dots,
             co_registers: remove_side.crdt.co_registers,
-            proofs: elements.crdt.proofs,
+            proofs,
             tombstones: remove_side.crdt.tombstones,
         },
         expires_at_ms: elements.expires_at_ms.max(remove_side.expires_at_ms),

@@ -702,42 +702,60 @@ impl Entry {
     /// This entry's carrier state before normalization: every element with its dot and every
     /// remove, each keyed by its greatest dot, and the reset floors.
     fn raw_buffer(&self) -> Result<DataTopicBuffer> {
+        let mut proofs = BTreeMap::new();
+        for proof in &self.crdt.proofs {
+            insert_max(&mut proofs, proof.key, proof.clone());
+        }
         let mut register = None;
         let mut co_registers = BTreeMap::new();
         if let Some(floor) = self.crdt.register {
-            DataTopicBuffer::insert_register(&mut register, &mut co_registers, floor);
+            DataTopicBuffer::insert_register_with_proofs(
+                &mut register,
+                &mut co_registers,
+                &proofs,
+                floor,
+            );
         }
         for &floor in &self.crdt.co_registers {
-            DataTopicBuffer::insert_register(&mut register, &mut co_registers, floor);
+            DataTopicBuffer::insert_register_with_proofs(
+                &mut register,
+                &mut co_registers,
+                &proofs,
+                floor,
+            );
         }
         let mut values = BTreeMap::new();
         let mut co_values = BTreeMap::new();
         for (index, value) in self.data.iter().cloned().enumerate() {
-            DataTopicBuffer::insert_value(
+            DataTopicBuffer::insert_value_with_proofs(
                 &mut values,
                 &mut co_values,
+                &proofs,
                 value,
                 self.dot_for_element(index)?,
             );
         }
         for &(index, dot) in &self.crdt.co_dots {
             if let Some(value) = self.data.get(index as usize).cloned() {
-                DataTopicBuffer::insert_value(&mut values, &mut co_values, value, dot);
+                DataTopicBuffer::insert_value_with_proofs(
+                    &mut values,
+                    &mut co_values,
+                    &proofs,
+                    value,
+                    dot,
+                );
             }
         }
         let mut removes = BTreeMap::new();
         let mut co_removes = BTreeMap::new();
         for tombstone in self.crdt.tombstones.iter() {
-            DataTopicBuffer::insert_remove(
+            DataTopicBuffer::insert_remove_with_proofs(
                 &mut removes,
                 &mut co_removes,
+                &proofs,
                 tombstone.element,
                 tombstone.dot,
             );
-        }
-        let mut proofs = BTreeMap::new();
-        for proof in &self.crdt.proofs {
-            insert_max(&mut proofs, proof.key, proof.clone());
         }
         Ok(DataTopicBuffer {
             register,
@@ -826,22 +844,24 @@ impl Entry {
         let tombstones: Vec<EntryTombstone> = tombstones.into_iter().skip(tombstone_skip).collect();
 
         if !proofs.is_empty() {
-            let mut surviving_adds = std::collections::BTreeSet::new();
+            let mut surviving_adds = BTreeMap::new();
             for (index, value) in data.iter().enumerate() {
                 let digest = ElementDigest(crate::ecc::keccak256(value.as_ref()));
                 if let Some(dot) = dots.get(index) {
                     if !dot.version.actor.is_default() {
-                        surviving_adds.insert((digest, dot.version.actor));
+                        surviving_adds.insert((digest, dot.version.actor), *dot);
                     }
                 }
                 for &(co_idx, dot) in &co_dots {
                     if co_idx as usize == index && !dot.version.actor.is_default() {
-                        surviving_adds.insert((digest, dot.version.actor));
+                        surviving_adds.insert((digest, dot.version.actor), dot);
                     }
                 }
             }
             proofs.retain(|key, proof| match *key {
-                DataProofKey::Add(digest, actor) => surviving_adds.contains(&(digest, actor)),
+                DataProofKey::Add(digest, actor) => surviving_adds
+                    .get(&(digest, actor))
+                    .is_some_and(|dot| proof.matches_add(digest, *dot)),
                 DataProofKey::Register(_) => register
                     .into_iter()
                     .chain(co_registers.iter().copied())

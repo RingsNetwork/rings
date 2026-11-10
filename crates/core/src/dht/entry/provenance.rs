@@ -225,15 +225,20 @@ pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u
     rings_codec::serialize(&WireProofBundle { batches, items }).map_err(Error::CodecSerialize)
 }
 
-pub(super) fn decode_proof_bundle(raw: &[u8]) -> Vec<SignedDataMutation> {
-    let Ok(bundle) = rings_codec::deserialize::<WireProofBundle>(raw) else {
-        return vec![SignedDataMutation::corrupted()];
-    };
+pub(super) fn decode_proof_bundle(raw: &[u8]) -> Result<Vec<SignedDataMutation>> {
+    let bundle =
+        rings_codec::deserialize::<WireProofBundle>(raw).map_err(Error::CodecDeserialize)?;
+    if bundle.batches.is_empty() || bundle.items.is_empty() {
+        return Err(Error::DataEntryWriteUnauthorized);
+    }
     let mut out = Vec::with_capacity(bundle.items.len());
     for item in bundle.items {
         let Some((claim, proof)) = bundle.batches.get(item.batch_index as usize) else {
-            return vec![SignedDataMutation::corrupted()];
+            return Err(Error::DataEntryWriteUnauthorized);
         };
+        if proof.is_none() {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
         out.push(SignedDataMutation {
             key: item.key,
             claim: *claim,
@@ -243,7 +248,7 @@ pub(super) fn decode_proof_bundle(raw: &[u8]) -> Vec<SignedDataMutation> {
             proof: proof.clone(),
         });
     }
-    out
+    Ok(out)
 }
 
 impl PartialOrd for SignedDataMutation {
@@ -260,39 +265,27 @@ impl Ord for SignedDataMutation {
         self.key
             .cmp(&other.key)
             .then_with(|| self.proof.is_some().cmp(&other.proof.is_some()))
+            .then_with(|| self.effective_version().cmp(&other.effective_version()))
+            .then_with(|| self.witness_dot.cmp(&other.witness_dot))
+            .then_with(|| self.claim.cmp(&other.claim))
             .then_with(|| {
                 self.proof
                     .as_ref()
                     .map(|p| p.ts_ms)
                     .cmp(&other.proof.as_ref().map(|p| p.ts_ms))
             })
-            .then_with(|| self.claim.cmp(&other.claim))
             .then_with(|| self.leaf_index.cmp(&other.leaf_index))
-            .then_with(|| self.witness_dot.cmp(&other.witness_dot))
             .then_with(|| self.merkle_siblings.cmp(&other.merkle_siblings))
     }
 }
 
 impl SignedDataMutation {
-    pub(crate) fn is_corrupted(&self) -> bool {
-        self.proof.is_none()
+    fn effective_version(&self) -> EntryVersion {
+        self.witness_dot.map_or(self.claim.version, |d| d.version)
     }
 
-    pub(crate) fn corrupted() -> Self {
-        Self {
-            key: DataProofKey::Register(Did::default()),
-            claim: DataMutationClaim {
-                did: Did::default(),
-                kind: DataMutationOpKind::Reset,
-                version: EntryVersion::default(),
-                leaf_count: 0,
-                merkle_root: [0u8; 32],
-            },
-            leaf_index: 0,
-            witness_dot: None,
-            merkle_siblings: Vec::new(),
-            proof: None,
-        }
+    pub(crate) fn is_corrupted(&self) -> bool {
+        self.proof.is_none()
     }
 
     pub(crate) fn matches_register(&self, floor: EntryVersion) -> bool {
@@ -300,6 +293,24 @@ impl SignedDataMutation {
             && self.key == DataProofKey::Register(floor.actor)
             && self.claim.kind == DataMutationOpKind::Reset
             && self.claim.version == floor
+    }
+
+    pub(crate) fn matches_add(&self, digest: ElementDigest, dot: EntryDot) -> bool {
+        self.proof.is_some()
+            && self.key == DataProofKey::Add(digest, dot.version.actor)
+            && matches!(
+                self.claim.kind,
+                DataMutationOpKind::Reset | DataMutationOpKind::Append
+            )
+            && self.witness_dot.is_none()
+            && self.claim.version == dot.version
+            && verify_merkle_inclusion(
+                merkle_leaf_element(digest.0),
+                self.leaf_index,
+                self.claim.leaf_count,
+                &self.merkle_siblings,
+                self.claim.merkle_root,
+            )
     }
 
     pub(crate) fn matches_remove(&self, digest: ElementDigest, remove_dot: EntryDot) -> bool {
@@ -321,13 +332,22 @@ impl SignedDataMutation {
                         self.claim.merkle_root,
                     )
             }
-            None => verify_merkle_inclusion(
-                merkle_leaf_element(digest.0),
-                self.leaf_index,
-                self.claim.leaf_count,
-                &self.merkle_siblings,
-                self.claim.merkle_root,
-            ),
+            None => {
+                !self.claim.version.actor.is_default()
+                    && remove_dot.version.actor == self.claim.version.actor
+                    && (remove_dot.version.logical_time_ms < self.claim.version.logical_time_ms
+                        || (remove_dot.version.logical_time_ms
+                            == self.claim.version.logical_time_ms
+                            && remove_dot.version.counter
+                                <= self.claim.version.counter.saturating_add(64)))
+                    && verify_merkle_inclusion(
+                        merkle_leaf_element(digest.0),
+                        self.leaf_index,
+                        self.claim.leaf_count,
+                        &self.merkle_siblings,
+                        self.claim.merkle_root,
+                    )
+            }
         }
     }
 
@@ -360,27 +380,51 @@ impl SignedDataMutation {
                         &self.merkle_siblings,
                         self.claim.merkle_root,
                     )
+                    && carrier.attributed_elements().any(|(value, dot)| {
+                        dot.version == self.claim.version && keccak256(value.as_ref()) == digest.0
+                    })
             }
-            (DataProofKey::Remove(digest, _), DataMutationOpKind::Retract) => {
-                match self.witness_dot {
-                    Some(dot) => {
-                        dot.version.actor == actor
-                            && verify_merkle_inclusion(
-                                merkle_leaf_dot(dot),
-                                self.leaf_index,
-                                self.claim.leaf_count,
-                                &self.merkle_siblings,
-                                self.claim.merkle_root,
-                            )
+            (DataProofKey::Remove(digest, key_actor), DataMutationOpKind::Retract) => {
+                *key_actor == actor
+                    && match self.witness_dot {
+                        Some(dot) => {
+                            dot.version.actor == actor
+                                && verify_merkle_inclusion(
+                                    merkle_leaf_dot(dot),
+                                    self.leaf_index,
+                                    self.claim.leaf_count,
+                                    &self.merkle_siblings,
+                                    self.claim.merkle_root,
+                                )
+                                && (carrier
+                                    .crdt
+                                    .tombstones
+                                    .iter()
+                                    .any(|t| t.element == *digest && t.dot == dot)
+                                    || (carrier.crdt.tombstones.is_empty()
+                                        && *digest == ElementDigest([0u8; 32])
+                                        && carrier.crdt.dots.contains(&dot)))
+                        }
+                        None => {
+                            !self.claim.version.actor.is_default()
+                                && self.claim.version.actor == actor
+                                && verify_merkle_inclusion(
+                                    merkle_leaf_element(digest.0),
+                                    self.leaf_index,
+                                    self.claim.leaf_count,
+                                    &self.merkle_siblings,
+                                    self.claim.merkle_root,
+                                )
+                                && (carrier.crdt.tombstones.iter().any(|t| {
+                                    t.element == *digest && self.matches_remove(t.element, t.dot)
+                                }) || (carrier.crdt.tombstones.is_empty()
+                                    && carrier.crdt.dots.is_empty()
+                                    && carrier
+                                        .data
+                                        .iter()
+                                        .any(|v| keccak256(v.as_ref()) == digest.0)))
+                        }
                     }
-                    None => verify_merkle_inclusion(
-                        merkle_leaf_element(digest.0),
-                        self.leaf_index,
-                        self.claim.leaf_count,
-                        &self.merkle_siblings,
-                        self.claim.merkle_root,
-                    ),
-                }
             }
             _ => false,
         };
@@ -623,10 +667,15 @@ impl EntryOperation {
                     let (merkle_root, branches) = compute_merkle_tree(&leaves);
                     let leaf_count = u32::try_from(dots.len())
                         .map_err(|_| Error::EntryDotIndexOutOfBounds { index: dots.len() })?;
+                    let version = dots
+                        .iter()
+                        .map(|dot| dot.version)
+                        .max()
+                        .unwrap_or_else(|| EntryVersion::new(now_ms, actor, Did::default()));
                     let claim = DataMutationClaim {
                         did: entry.did,
                         kind: DataMutationOpKind::Retract,
-                        version: EntryVersion::default(),
+                        version,
                         leaf_count,
                         merkle_root,
                     };
@@ -661,10 +710,12 @@ impl EntryOperation {
                             index: elements.len(),
                         }
                     })?;
+                    let op_digest = entry.operation_digest_for(actor, &entry.data)?;
+                    let version = EntryVersion::new(now_ms, actor, op_digest);
                     let claim = DataMutationClaim {
                         did: entry.did,
                         kind: DataMutationOpKind::Retract,
-                        version: EntryVersion::default(),
+                        version,
                         leaf_count,
                         merkle_root,
                     };
@@ -749,7 +800,7 @@ impl Entry {
             let Some(proof) = &item.proof else {
                 return Err(Error::DataEntryWriteUnauthorized);
             };
-            if proof.ts_ms > max_ts {
+            if proof.ts_ms > max_ts || item.claim.version.logical_time_ms > max_ts {
                 return Err(Error::EntryVersionAheadOfClock);
             }
             let actor = item.key.actor();
@@ -935,14 +986,14 @@ impl Entry {
     }
 
     fn floor_witness_valid_on_live(&self, floor: EntryVersion, live: &Self) -> bool {
+        if live.has_signed_proof_for(floor.actor) {
+            return self.has_signed_register_proof(floor);
+        }
         let retires_live_same_actor = live
             .versions()
             .any(|version| version.actor == floor.actor && version < floor);
         if !retires_live_same_actor {
             return true;
-        }
-        if live.has_signed_proof_for(floor.actor) {
-            return self.has_signed_register_proof(floor);
         }
         let floor_elements = self
             .data
@@ -978,9 +1029,11 @@ impl Entry {
     /// against `local`.
     fn permits_synced_register_on(&self, local: Option<&Self>) -> Result<()> {
         let valid = self.register_floors().all(|floor| {
-            self.versions()
-                .filter(|version| version.actor == floor.actor)
-                .all(|version| version >= floor)
+            (!self.has_signed_proof_for(floor.actor) || self.has_signed_register_proof(floor))
+                && self
+                    .versions()
+                    .filter(|version| version.actor == floor.actor)
+                    .all(|version| version >= floor)
                 && local.is_none_or(|live| self.floor_witness_valid_on_live(floor, live))
         });
         valid.then_some(()).ok_or(Error::DataEntryWriteUnauthorized)
@@ -994,7 +1047,13 @@ impl Entry {
         }
         let mut by_element_actor = BTreeMap::<(ElementDigest, Did), EntryDot>::new();
         for tombstone in &self.crdt.tombstones {
-            let key = (tombstone.element, tombstone.dot.version.actor);
+            let actor = tombstone.dot.version.actor;
+            if (self.has_signed_proof_for(actor) || live.has_signed_proof_for(actor))
+                && !self.has_signed_remove_proof(tombstone.element, tombstone.dot)
+            {
+                return Err(Error::DataEntryWriteUnauthorized);
+            }
+            let key = (tombstone.element, actor);
             if by_element_actor
                 .get(&key)
                 .is_none_or(|current| current < &tombstone.dot)
@@ -1169,9 +1228,10 @@ pub(super) fn retain_fair_data_elements(
     );
     let mut by_value = BTreeMap::<Bytes, Vec<EntryDot>>::new();
     for (_, value, dot) in ranked {
-        by_value.entry(value).or_default().push(dot);
-        if by_value.len() == max_len {
-            break;
+        if by_value.len() < max_len {
+            by_value.entry(value).or_default().push(dot);
+        } else if let Some(dots) = by_value.get_mut(&value) {
+            dots.push(dot);
         }
     }
     by_value

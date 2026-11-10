@@ -99,6 +99,9 @@ impl EntryVersion {
     /// wait. The bound needs `2³²` versions issued after floors at one millisecond, more than
     /// `4·10¹²` writes a second, so no writer reaches it.
     pub(super) fn after(self, floor: Option<Self>) -> Result<Self> {
+        if self.counter >= PROOF_CHUNK_SENTINEL_COUNTER {
+            return Err(Error::EntryVersionAheadOfClock);
+        }
         let Some(floor) = floor else {
             return Ok(self);
         };
@@ -108,6 +111,7 @@ impl EntryVersion {
         let counter = floor
             .counter
             .checked_add(1)
+            .filter(|&counter| counter < PROOF_CHUNK_SENTINEL_COUNTER)
             .ok_or(Error::EntryVersionAheadOfClock)?;
         Ok(Self {
             logical_time_ms: floor.logical_time_ms,
@@ -195,6 +199,9 @@ impl EntryTombstone {
 }
 
 const SENTINEL_TIME_MS: u128 = u64::MAX as u128;
+const CO_DOT_SENTINEL_COUNTER: u32 = u32::MAX;
+const CO_REGISTER_SENTINEL_COUNTER: u32 = u32::MAX - 1;
+pub(super) const PROOF_CHUNK_SENTINEL_COUNTER: u32 = u32::MAX - 2;
 
 fn is_sentinel_version(version: EntryVersion, sentinel_counter: u32) -> bool {
     (version.logical_time_ms == SENTINEL_TIME_MS || version.logical_time_ms == u128::MAX)
@@ -206,7 +213,7 @@ fn is_sentinel_version(version: EntryVersion, sentinel_counter: u32) -> bool {
 fn co_dot_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
-        counter: u32::MAX,
+        counter: CO_DOT_SENTINEL_COUNTER,
         actor: Did::default(),
         operation: Did::default(),
     }
@@ -215,7 +222,7 @@ fn co_dot_sentinel_version() -> EntryVersion {
 fn co_register_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
-        counter: u32::MAX - 1,
+        counter: CO_REGISTER_SENTINEL_COUNTER,
         actor: Did::default(),
         operation: Did::default(),
     }
@@ -224,23 +231,38 @@ fn co_register_sentinel_version() -> EntryVersion {
 fn data_proof_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
-        counter: u32::MAX - 2,
+        counter: PROOF_CHUNK_SENTINEL_COUNTER,
         actor: Did::default(),
         operation: Did::default(),
     }
 }
 
 const DOT_CHUNK_BYTES: usize = 52;
+const MAX_PROOF_BUNDLE_BYTES: usize = 1024 * 1024;
 
 fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     let mut buf = [0u8; DOT_CHUNK_BYTES];
     if let Some(prefix) = buf.get_mut(..chunk.len()) {
         prefix.copy_from_slice(chunk);
     }
-    let logical_time_ms = u128::from(u64::from_be_bytes(buf[0..8].try_into().unwrap_or_default()));
-    let counter = u32::from_be_bytes(buf[8..12].try_into().unwrap_or_default());
-    let actor_bytes: [u8; 20] = buf[12..32].try_into().unwrap_or_default();
-    let op_bytes: [u8; 20] = buf[32..52].try_into().unwrap_or_default();
+    let logical_time_ms = u128::from(u64::from_be_bytes(
+        buf.get(0..8)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or_default(),
+    ));
+    let counter = u32::from_be_bytes(
+        buf.get(8..12)
+            .and_then(|s| s.try_into().ok())
+            .unwrap_or_default(),
+    );
+    let actor_bytes: [u8; 20] = buf
+        .get(12..32)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or_default();
+    let op_bytes: [u8; 20] = buf
+        .get(32..52)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or_default();
     EntryDot {
         version: EntryVersion {
             logical_time_ms,
@@ -252,14 +274,26 @@ fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     }
 }
 
-fn unpack_proof_chunk(dot: EntryDot) -> [u8; DOT_CHUNK_BYTES] {
+fn unpack_proof_chunk(dot: EntryDot, expected_chunk_idx: usize) -> Result<[u8; DOT_CHUNK_BYTES]> {
+    if u32::try_from(expected_chunk_idx).ok() != Some(dot.index) {
+        return Err(Error::DataEntryWriteUnauthorized);
+    }
+    let low_time = u64::try_from(dot.version.logical_time_ms)
+        .map_err(|_| Error::DataEntryWriteUnauthorized)?;
     let mut buf = [0u8; DOT_CHUNK_BYTES];
-    let low_time = u64::try_from(dot.version.logical_time_ms).unwrap_or_default();
-    buf[0..8].copy_from_slice(&low_time.to_be_bytes());
-    buf[8..12].copy_from_slice(&dot.version.counter.to_be_bytes());
-    buf[12..32].copy_from_slice(dot.version.actor.as_bytes());
-    buf[32..52].copy_from_slice(dot.version.operation.as_bytes());
-    buf
+    if let Some(slice) = buf.get_mut(0..8) {
+        slice.copy_from_slice(&low_time.to_be_bytes());
+    }
+    if let Some(slice) = buf.get_mut(8..12) {
+        slice.copy_from_slice(&dot.version.counter.to_be_bytes());
+    }
+    if let Some(slice) = buf.get_mut(12..32) {
+        slice.copy_from_slice(dot.version.actor.as_bytes());
+    }
+    if let Some(slice) = buf.get_mut(32..52) {
+        slice.copy_from_slice(dot.version.operation.as_bytes());
+    }
+    Ok(buf)
 }
 
 /// CRDT metadata carried beside the entry payload.
@@ -272,7 +306,7 @@ fn unpack_proof_chunk(dot: EntryDot) -> [u8; DOT_CHUNK_BYTES] {
 /// the `dots` sequence on the wire and on disk so the 3-field `EntryCrdt`
 /// layout remains compatible with persisted `FileStorage` records.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "WireEntryCrdt", from = "WireEntryCrdt")]
+#[serde(into = "WireEntryCrdt", try_from = "WireEntryCrdt")]
 pub struct EntryCrdt {
     /// Optional greatest LWW reset floor for the entry payload.
     pub register: Option<EntryVersion>,
@@ -330,13 +364,15 @@ impl From<EntryCrdt> for WireEntryCrdt {
         }));
         if !crdt.proofs.is_empty() {
             if let Ok(encoded) = super::provenance::encode_proof_bundle(&crdt.proofs) {
-                if let Ok(byte_len) = u32::try_from(encoded.len()) {
-                    dots.push(EntryDot {
-                        version: proof_sentinel,
-                        index: byte_len,
-                    });
-                    for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
-                        dots.push(pack_proof_chunk(chunk, chunk_idx));
+                if encoded.len() <= MAX_PROOF_BUNDLE_BYTES {
+                    if let Ok(byte_len) = u32::try_from(encoded.len()) {
+                        dots.push(EntryDot {
+                            version: proof_sentinel,
+                            index: byte_len,
+                        });
+                        for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
+                            dots.push(pack_proof_chunk(chunk, chunk_idx));
+                        }
                     }
                 }
             }
@@ -349,58 +385,102 @@ impl From<EntryCrdt> for WireEntryCrdt {
     }
 }
 
-impl From<WireEntryCrdt> for EntryCrdt {
-    fn from(wire: WireEntryCrdt) -> Self {
+impl TryFrom<WireEntryCrdt> for EntryCrdt {
+    type Error = Error;
+
+    fn try_from(wire: WireEntryCrdt) -> Result<Self> {
         let mut dots = Vec::with_capacity(wire.dots.len());
         let mut co_dots = Vec::new();
         let mut co_registers = Vec::new();
         let mut proofs = Vec::new();
+        let mut saw_proof_sentinel = false;
         let mut iter = wire.dots.into_iter();
         while let Some(dot) = iter.next() {
-            if is_sentinel_version(dot.version, u32::MAX) {
-                if let Some(co_dot) = iter.next() {
-                    co_dots.push((dot.index, co_dot));
+            if is_sentinel_version(dot.version, CO_DOT_SENTINEL_COUNTER) {
+                let co_dot = iter.next().ok_or(Error::DataEntryWriteUnauthorized)?;
+                co_dots.push((dot.index, co_dot));
+            } else if is_sentinel_version(dot.version, CO_REGISTER_SENTINEL_COUNTER) {
+                let reg_dot = iter.next().ok_or(Error::DataEntryWriteUnauthorized)?;
+                co_registers.push(reg_dot.version);
+            } else if is_sentinel_version(dot.version, PROOF_CHUNK_SENTINEL_COUNTER) {
+                if saw_proof_sentinel {
+                    return Err(Error::DataEntryWriteUnauthorized);
                 }
-            } else if is_sentinel_version(dot.version, u32::MAX - 1) {
-                if let Some(reg_dot) = iter.next() {
-                    co_registers.push(reg_dot.version);
-                }
-            } else if is_sentinel_version(dot.version, u32::MAX - 2) {
+                saw_proof_sentinel = true;
                 let byte_len = dot.index as usize;
+                if byte_len == 0 || byte_len > MAX_PROOF_BUNDLE_BYTES {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
                 let chunk_count = byte_len.div_ceil(DOT_CHUNK_BYTES);
+                if chunk_count > iter.len() {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
                 let mut raw = Vec::with_capacity(chunk_count.saturating_mul(DOT_CHUNK_BYTES));
-                let mut complete = true;
-                for _ in 0..chunk_count {
-                    match iter.next() {
-                        Some(chunk_dot) => raw.extend_from_slice(&unpack_proof_chunk(chunk_dot)),
-                        None => {
-                            complete = false;
-                            break;
-                        }
-                    }
+                for chunk_idx in 0..chunk_count {
+                    let chunk_dot = iter.next().ok_or(Error::DataEntryWriteUnauthorized)?;
+                    raw.extend_from_slice(&unpack_proof_chunk(chunk_dot, chunk_idx)?);
                 }
-                if complete {
-                    raw.truncate(byte_len);
-                    proofs.extend(super::provenance::decode_proof_bundle(&raw));
-                } else {
-                    proofs.push(super::provenance::SignedDataMutation::corrupted());
+                if raw
+                    .get(byte_len..)
+                    .is_none_or(|padding| padding.iter().any(|&b| b != 0))
+                {
+                    return Err(Error::DataEntryWriteUnauthorized);
                 }
+                raw.truncate(byte_len);
+                proofs = super::provenance::decode_proof_bundle(&raw)?;
             } else {
                 dots.push(dot);
             }
         }
-        Self {
+        Ok(Self {
             register: wire.register,
             dots,
             tombstones: wire.tombstones,
             co_dots,
             co_registers,
             proofs,
-        }
+        })
     }
 }
 
 impl EntryCrdt {
+    pub(crate) fn encode_proof_dots(
+        proofs: &[super::provenance::SignedDataMutation],
+    ) -> Vec<EntryDot> {
+        let mut dots = Vec::new();
+        if !proofs.is_empty() {
+            if let Ok(encoded) = super::provenance::encode_proof_bundle(proofs) {
+                if encoded.len() <= MAX_PROOF_BUNDLE_BYTES {
+                    if let Ok(byte_len) = u32::try_from(encoded.len()) {
+                        dots.push(EntryDot {
+                            version: data_proof_sentinel_version(),
+                            index: byte_len,
+                        });
+                        for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
+                            dots.push(pack_proof_chunk(chunk, chunk_idx));
+                        }
+                    }
+                }
+            }
+        }
+        dots
+    }
+
+    pub(crate) fn decode_proof_dots(
+        dots: Vec<EntryDot>,
+    ) -> Vec<super::provenance::SignedDataMutation> {
+        if dots.is_empty() {
+            return Vec::new();
+        }
+        Self::try_from(WireEntryCrdt {
+            register: None,
+            dots,
+            tombstones: Vec::new(),
+        })
+        .map(|crdt| crdt.proofs)
+        .unwrap_or_default()
+    }
+
     pub(super) fn has_write_witness(&self) -> bool {
         let witnessed = |version: &EntryVersion| {
             !version.actor.is_default() && (!version.operation.is_default() || version.counter != 0)
@@ -448,15 +528,59 @@ pub(super) fn insert_max<K: Ord, V: Ord>(map: &mut BTreeMap<K, V>, key: K, value
     }
 }
 
+fn has_register_proof(
+    proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
+    actor: Did,
+    floor: EntryVersion,
+) -> bool {
+    !actor.is_default()
+        && proofs
+            .get(&super::provenance::DataProofKey::Register(actor))
+            .is_some_and(|p| p.matches_register(floor))
+}
+
+fn has_add_proof(
+    proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
+    digest: ElementDigest,
+    actor: Did,
+    dot: EntryDot,
+) -> bool {
+    !actor.is_default()
+        && proofs
+            .get(&super::provenance::DataProofKey::Add(digest, actor))
+            .is_some_and(|p| p.matches_add(digest, dot))
+}
+
+fn has_remove_proof(
+    proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
+    digest: ElementDigest,
+    actor: Did,
+    dot: EntryDot,
+) -> bool {
+    !actor.is_default()
+        && proofs
+            .get(&super::provenance::DataProofKey::Remove(digest, actor))
+            .is_some_and(|p| p.matches_remove(digest, dot))
+}
+
 impl DataTopicBuffer {
-    /// Record `version` as a reset floor into `register` and, when attributed, `co_registers`.
-    pub(super) fn insert_register(
+    /// Record `version` as a reset floor, preferring signed floors over unsigned floors for the
+    /// same attributed actor.
+    pub(super) fn insert_register_with_proofs(
         register: &mut Option<EntryVersion>,
         co_registers: &mut BTreeMap<Did, EntryVersion>,
+        proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
         version: EntryVersion,
     ) {
         if !version.actor.is_default() {
-            insert_max(co_registers, version.actor, version);
+            let cand_signed = has_register_proof(proofs, version.actor, version);
+            let replace = co_registers.get(&version.actor).is_none_or(|&curr| {
+                let curr_signed = has_register_proof(proofs, version.actor, curr);
+                (cand_signed, version) > (curr_signed, curr)
+            });
+            if replace {
+                co_registers.insert(version.actor, version);
+            }
         }
         *register = (*register).max(Some(version));
     }
@@ -476,19 +600,53 @@ impl DataTopicBuffer {
         insert_max(removes, element, dot);
     }
 
-    /// Record `(value, dot)` into `values` and, when attributed, into `co_values`.
-    pub(super) fn insert_value(
+    /// Record `(element, dot)` into `removes` and `co_removes`, preferring signed removes over
+    /// unsigned removes for the same `(element, actor)`.
+    pub(super) fn insert_remove_with_proofs(
+        removes: &mut BTreeMap<ElementDigest, EntryDot>,
+        co_removes: &mut BTreeMap<ElementDigest, BTreeMap<Did, EntryDot>>,
+        proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
+        element: ElementDigest,
+        dot: EntryDot,
+    ) {
+        let actor = dot.version.actor;
+        let cand_signed = has_remove_proof(proofs, element, actor, dot);
+        let actors = co_removes.entry(element).or_default();
+        let replace = actors.get(&actor).is_none_or(|&curr| {
+            let curr_signed = has_remove_proof(proofs, element, actor, curr);
+            (cand_signed, dot) > (curr_signed, curr)
+        });
+        if replace {
+            actors.insert(actor, dot);
+        }
+        insert_max(removes, element, dot);
+    }
+
+    /// Record `(value, dot)` into `values` and `co_values`, preferring signed adds over unsigned
+    /// adds for the same `(value, actor)` when `proofs` is non-empty.
+    pub(super) fn insert_value_with_proofs(
         values: &mut BTreeMap<Bytes, EntryDot>,
         co_values: &mut BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
+        proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
         value: Bytes,
         dot: EntryDot,
     ) {
-        if !dot.version.actor.is_default() {
-            insert_max(
-                co_values.entry(value.clone()).or_default(),
-                dot.version.actor,
-                dot,
-            );
+        let actor = dot.version.actor;
+        if !actor.is_default() {
+            let actors = co_values.entry(value.clone()).or_default();
+            let replace = if proofs.is_empty() {
+                actors.get(&actor).is_none_or(|&curr| dot > curr)
+            } else {
+                let digest = ElementDigest(keccak256(value.as_ref()));
+                let cand_signed = has_add_proof(proofs, digest, actor, dot);
+                actors.get(&actor).is_none_or(|&curr| {
+                    let curr_signed = has_add_proof(proofs, digest, actor, curr);
+                    (cand_signed, dot) > (curr_signed, curr)
+                })
+            };
+            if replace {
+                actors.insert(actor, dot);
+            }
         }
         insert_max(values, value, dot);
     }
@@ -563,12 +721,90 @@ impl DataTopicBuffer {
             super::provenance::SignedDataMutation,
         >,
     ) -> Self {
+        let mut scratch_register = register;
         if let Some(floor) = register {
             if !floor.actor.is_default() {
-                insert_max(&mut co_registers, floor.actor, floor);
+                Self::insert_register_with_proofs(
+                    &mut scratch_register,
+                    &mut co_registers,
+                    &proofs,
+                    floor,
+                );
             }
         }
         let unattributed_floor = register.filter(|floor| floor.actor.is_default());
+
+        for (value, dot) in &values {
+            if !dot.version.actor.is_default() {
+                let actor = dot.version.actor;
+                let actors = co_values.entry(value.clone()).or_default();
+                let replace = if proofs.is_empty() {
+                    actors.get(&actor).is_none_or(|&curr| *dot > curr)
+                } else {
+                    let digest = ElementDigest(keccak256(value.as_ref()));
+                    let cand_signed = has_add_proof(&proofs, digest, actor, *dot);
+                    actors.get(&actor).is_none_or(|&curr| {
+                        let curr_signed = has_add_proof(&proofs, digest, actor, curr);
+                        (cand_signed, *dot) > (curr_signed, curr)
+                    })
+                };
+                if replace {
+                    actors.insert(actor, *dot);
+                }
+            }
+        }
+        for (&element, &dot) in &removes {
+            Self::insert_remove_with_proofs(
+                &mut BTreeMap::new(),
+                &mut co_removes,
+                &proofs,
+                element,
+                dot,
+            );
+        }
+
+        if !proofs.is_empty() {
+            let mut signed_actors = std::collections::BTreeSet::new();
+            for (&actor, &floor) in &co_registers {
+                if has_register_proof(&proofs, actor, floor) {
+                    signed_actors.insert(actor);
+                }
+            }
+            for (value, actors) in &co_values {
+                let digest = ElementDigest(keccak256(value.as_ref()));
+                for (&actor, &dot) in actors {
+                    if has_add_proof(&proofs, digest, actor, dot) {
+                        signed_actors.insert(actor);
+                    }
+                }
+            }
+            for (&digest, actors) in &co_removes {
+                for (&actor, &dot) in actors {
+                    if has_remove_proof(&proofs, digest, actor, dot) {
+                        signed_actors.insert(actor);
+                    }
+                }
+            }
+            if !signed_actors.is_empty() {
+                co_registers.retain(|&actor, &mut floor| {
+                    !signed_actors.contains(&actor) || has_register_proof(&proofs, actor, floor)
+                });
+                for (value, actors) in &mut co_values {
+                    let digest = ElementDigest(keccak256(value.as_ref()));
+                    actors.retain(|&actor, &mut dot| {
+                        !signed_actors.contains(&actor)
+                            || has_add_proof(&proofs, digest, actor, dot)
+                    });
+                }
+                for (&digest, actors) in &mut co_removes {
+                    actors.retain(|&actor, &mut dot| {
+                        !signed_actors.contains(&actor)
+                            || has_remove_proof(&proofs, digest, actor, dot)
+                    });
+                }
+            }
+        }
+
         if let Some(u_floor) = unattributed_floor {
             co_registers.retain(|_, floor| *floor >= u_floor);
         }
@@ -589,23 +825,6 @@ impl DataTopicBuffer {
                     .is_none_or(|floor| version >= *floor)
             }
         };
-
-        for (value, dot) in &values {
-            if !dot.version.actor.is_default() {
-                insert_max(
-                    co_values.entry(value.clone()).or_default(),
-                    dot.version.actor,
-                    *dot,
-                );
-            }
-        }
-        for (&element, &dot) in &removes {
-            insert_max(
-                co_removes.entry(element).or_default(),
-                dot.version.actor,
-                dot,
-            );
-        }
 
         if max_floor.is_some() {
             co_values.values_mut().for_each(|actors| {
@@ -663,23 +882,26 @@ impl DataTopicBuffer {
         co_values.retain(|value, actors| values.contains_key(value) && !actors.is_empty());
 
         if !proofs.is_empty() {
-            let live_add_keys = co_values
+            let live_adds = co_values
                 .iter()
                 .flat_map(|(value, actors)| {
                     let digest = ElementDigest(keccak256(value.as_ref()));
-                    actors.keys().copied().map(move |actor| (digest, actor))
+                    actors
+                        .iter()
+                        .map(move |(&actor, &dot)| ((digest, actor), dot))
                 })
-                .collect::<std::collections::BTreeSet<_>>();
+                .collect::<BTreeMap<_, _>>();
             proofs.retain(|key, mutation| match *key {
                 super::provenance::DataProofKey::Register(actor) => co_registers
                     .get(&actor)
                     .is_some_and(|floor| mutation.matches_register(*floor)),
-                super::provenance::DataProofKey::Add(digest, actor) => {
-                    live_add_keys.contains(&(digest, actor))
-                }
+                super::provenance::DataProofKey::Add(digest, actor) => live_adds
+                    .get(&(digest, actor))
+                    .is_some_and(|dot| mutation.matches_add(digest, *dot)),
                 super::provenance::DataProofKey::Remove(digest, actor) => co_removes
                     .get(&digest)
-                    .is_some_and(|actors| actors.contains_key(&actor)),
+                    .and_then(|actors| actors.get(&actor))
+                    .is_some_and(|dot| mutation.matches_remove(digest, *dot)),
             });
         }
 
@@ -768,33 +990,79 @@ impl DataTopicBuffer {
 
 impl JoinSemilattice for DataTopicBuffer {
     fn join(mut self, other: Self) -> Self {
-        self.register = self.register.max(other.register);
-        for (actor, floor) in other.co_registers {
-            insert_max(&mut self.co_registers, actor, floor);
-        }
-        for (element, dot) in other.removes {
-            insert_max(&mut self.removes, element, dot);
-        }
-        for (element, actors) in other.co_removes {
-            let entry = self.co_removes.entry(element).or_default();
-            for (actor, dot) in actors {
-                insert_max(entry, actor, dot);
-            }
-        }
-        for (value, dot) in other.values {
-            insert_max(&mut self.values, value, dot);
-        }
-        for (value, actors) in other.co_values {
-            let entry = self.co_values.entry(value).or_default();
-            for (actor, dot) in actors {
-                insert_max(entry, actor, dot);
-            }
-        }
         for (key, proof) in other.proofs {
             insert_max(&mut self.proofs, key, proof);
         }
+        let unattributed_register = self
+            .register
+            .filter(|floor| floor.actor.is_default())
+            .max(other.register.filter(|floor| floor.actor.is_default()));
+        if let Some(floor) = self.register.filter(|floor| !floor.actor.is_default()) {
+            Self::insert_register_with_proofs(
+                &mut self.register,
+                &mut self.co_registers,
+                &self.proofs,
+                floor,
+            );
+        }
+        if let Some(floor) = other.register.filter(|floor| !floor.actor.is_default()) {
+            Self::insert_register_with_proofs(
+                &mut self.register,
+                &mut self.co_registers,
+                &self.proofs,
+                floor,
+            );
+        }
+        for (_, floor) in other.co_registers {
+            Self::insert_register_with_proofs(
+                &mut self.register,
+                &mut self.co_registers,
+                &self.proofs,
+                floor,
+            );
+        }
+        for (element, dot) in other.removes {
+            Self::insert_remove_with_proofs(
+                &mut self.removes,
+                &mut self.co_removes,
+                &self.proofs,
+                element,
+                dot,
+            );
+        }
+        for (element, actors) in other.co_removes {
+            for (_, dot) in actors {
+                Self::insert_remove_with_proofs(
+                    &mut self.removes,
+                    &mut self.co_removes,
+                    &self.proofs,
+                    element,
+                    dot,
+                );
+            }
+        }
+        for (value, dot) in other.values {
+            Self::insert_value_with_proofs(
+                &mut self.values,
+                &mut self.co_values,
+                &self.proofs,
+                value,
+                dot,
+            );
+        }
+        for (value, actors) in other.co_values {
+            for (_, dot) in actors {
+                Self::insert_value_with_proofs(
+                    &mut self.values,
+                    &mut self.co_values,
+                    &self.proofs,
+                    value.clone(),
+                    dot,
+                );
+            }
+        }
         Self::normalize(
-            self.register,
+            unattributed_register.or(self.register),
             self.co_registers,
             self.values,
             self.co_values,

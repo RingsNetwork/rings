@@ -1598,17 +1598,155 @@ async fn test_issue_1220_signed_data_mutation_authenticates_swarm_sync_and_local
     {
         dots_arr.pop();
     }
-    let truncated_entry: Entry = serde_json::from_value(wire_json).map_err(Error::Deserialize)?;
-    assert!(matches!(
-        owner
-            .join_storage_entry(now_ms + 13, topic, truncated_entry, Principal::Unbound)
-            .await,
-        Err(Error::DataEntryWriteUnauthorized)
-    ));
+    assert!(serde_json::from_value::<Entry>(wire_json).is_err());
+
+    // 6. Malicious 4 GiB proof-bundle sentinel (`index = u32::MAX`) is rejected at deserialization
+    //    without allocating.
+    let mut forged_oom_json =
+        serde_json::to_value(&signed_reset_state).map_err(|_| Error::SerializeToString)?;
+    if let Some(dots_arr) = forged_oom_json
+        .get_mut("crdt")
+        .and_then(|crdt| crdt.get_mut("dots"))
+        .and_then(|dots| dots.as_array_mut())
+    {
+        for dot_val in dots_arr.iter_mut() {
+            if dot_val
+                .get("version")
+                .and_then(|v| v.get("counter"))
+                .and_then(|c| c.as_u64())
+                == Some(u64::from(u32::MAX - 2))
+            {
+                dot_val["index"] = serde_json::json!(u32::MAX);
+            }
+        }
+    }
+    assert!(serde_json::from_value::<Entry>(forged_oom_json).is_err());
 
     let final_owner = owner
         .join_storage_entry(now_ms + 14, topic, signed_reset_state, Principal::Unbound)
         .await?;
     assert_eq!(final_owner.data, vec![Bytes::from("v-reset")]);
+
+    // 7. Pre-planted unsigned future floor/tombstone on an empty replica cannot wipe subsequent
+    //    Swarm-signed writes from `victim`, and `RemovalRecord` preserves `Register`/`Remove`
+    //    proofs even when the disposable `elements` store evicts the entry.
+    let fresh_topic = Did::from(1222u32);
+    let fresh_replica = PeerRing::new_with_storage(Did::from(4u32), 3, Box::new(MemStorage::new()));
+    let future_ms = now_ms + 2_000;
+    let mut preplanted = EntryOperation::Overwrite(data_entry_with_data(fresh_topic, "v-target"))
+        .stamped(future_ms, victim)?
+        .entry()
+        .clone();
+    if let Some(reg) = &mut preplanted.crdt.register {
+        reg.counter = u32::MAX - 10;
+    }
+    if let Some(dot) = preplanted.crdt.dots.first_mut() {
+        dot.version.counter = u32::MAX - 10;
+    }
+    let preplanted_dot = preplanted.crdt.dots[0];
+    preplanted.data.clear();
+    preplanted.crdt.dots.clear();
+    preplanted
+        .crdt
+        .tombstones
+        .push(crate::dht::entry::EntryTombstone::of(
+            &Bytes::from("v-target"),
+            preplanted_dot,
+        ));
+    fresh_replica
+        .join_storage_entry(now_ms + 15, fresh_topic, preplanted, Principal::Unbound)
+        .await?;
+
+    let honest_signed_extend = fresh_replica
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(fresh_topic, "v-target")),
+            now_ms + 16,
+            victim,
+            None,
+        )
+        .await?
+        .with_author_proofs(victim, victim_signer, now_ms + 16)?;
+    fresh_replica
+        .operate_storage_entry(
+            now_ms + 16,
+            fresh_topic,
+            honest_signed_extend,
+            victim,
+            Principal::Unbound,
+        )
+        .await?;
+    let after_honest = fresh_replica
+        .live_storage_entry(StorageKey::new(EntryKind::Data, fresh_topic), now_ms + 16)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("after_honest missing".to_string()))?;
+    assert_eq!(after_honest.data, vec![Bytes::from("v-target")]);
+    assert!(after_honest.crdt.register.is_none());
+    assert!(after_honest.crdt.tombstones.is_empty());
+
+    // Value-based signed Tombstone at `now_ms + 17` cannot be replayed with a forged dot at
+    // `now_ms + 25` to kill a later re-add at `now_ms + 20`, and survives element-side eviction in
+    // `RemovalRecord`.
+    let value_tomb = EntryOperation::Tombstone(data_entry_with_data(fresh_topic, "v-target"))
+        .stamped(now_ms + 17, victim)?
+        .with_author_proofs(victim, victim_signer, now_ms + 17)?;
+    fresh_replica
+        .operate_storage_entry(
+            now_ms + 17,
+            fresh_topic,
+            value_tomb,
+            victim,
+            Principal::Unbound,
+        )
+        .await?;
+    fresh_replica
+        .storage
+        .remove(&fresh_topic.to_string())
+        .await?;
+    let removal_only = fresh_replica
+        .live_storage_entry(StorageKey::new(EntryKind::Data, fresh_topic), now_ms + 17)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("removal_only missing".to_string()))?;
+    assert!(!removal_only.crdt.proofs.is_empty());
+
+    let readd_op = owner
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(fresh_topic, "v-target")),
+            now_ms + 20,
+            victim,
+            Some(fresh_topic),
+        )
+        .await?
+        .with_author_proofs(victim, victim_signer, now_ms + 20)?;
+    owner
+        .operate_storage_entry(
+            now_ms + 20,
+            fresh_topic,
+            readd_op,
+            victim,
+            Principal::Unbound,
+        )
+        .await?;
+    let owner_readded = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, fresh_topic), now_ms + 20)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("owner_readded missing".to_string()))?;
+    let readded_dot = owner_readded.crdt.dots[0];
+
+    let mut replayed_value_tomb = removal_only.clone();
+    replayed_value_tomb.crdt.tombstones = vec![crate::dht::entry::EntryTombstone::of(
+        &Bytes::from("v-target"),
+        readded_dot,
+    )];
+    assert!(matches!(
+        owner
+            .join_storage_entry(
+                now_ms + 21,
+                fresh_topic,
+                replayed_value_tomb,
+                Principal::Unbound
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
     Ok(())
 }

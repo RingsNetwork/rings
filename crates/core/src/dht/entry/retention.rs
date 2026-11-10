@@ -357,17 +357,17 @@ impl Entry {
         let proofs = if self.crdt.proofs.is_empty() {
             Vec::new()
         } else {
-            let mut surviving_adds = std::collections::BTreeSet::new();
+            let mut surviving_adds = std::collections::BTreeMap::new();
             for (index, value) in data.iter().enumerate() {
                 let digest = super::ElementDigest(crate::ecc::keccak256(value.as_ref()));
                 if let Some(dot) = dots.get(index) {
                     if !dot.version.actor.is_default() {
-                        surviving_adds.insert((digest, dot.version.actor));
+                        surviving_adds.insert((digest, dot.version.actor), *dot);
                     }
                 }
                 for &(co_idx, dot) in &co_dots {
                     if co_idx as usize == index && !dot.version.actor.is_default() {
-                        surviving_adds.insert((digest, dot.version.actor));
+                        surviving_adds.insert((digest, dot.version.actor), dot);
                     }
                 }
             }
@@ -379,9 +379,9 @@ impl Entry {
                         .into_iter()
                         .chain(surviving_floors.iter().copied())
                         .any(|floor| proof.matches_register(floor)),
-                    super::provenance::DataProofKey::Add(digest, actor) => {
-                        surviving_adds.contains(&(digest, actor))
-                    }
+                    super::provenance::DataProofKey::Add(digest, actor) => surviving_adds
+                        .get(&(digest, actor))
+                        .is_some_and(|dot| proof.matches_add(digest, *dot)),
                     super::provenance::DataProofKey::Remove(_, _) => tombstones
                         .iter()
                         .any(|t| proof.matches_remove(t.element, t.dot)),

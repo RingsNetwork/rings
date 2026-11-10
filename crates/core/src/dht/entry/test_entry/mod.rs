@@ -1212,6 +1212,91 @@ fn test_issue_1220_unique_value_water_filling_resists_co_dot_amplification_and_c
             .join(carrier_b.clone().horizon_retired_under(law, check_ms))?;
         assert_eq!(lhs, rhs, "retire_t homomorphism failed at {check_ms}");
     }
+
+    // When `values.len() > max_len` and an admitted shared value has co-dots from both a
+    // low-volume writer (`actor_c`, older timestamp `NOW_MS + 100`, rank 0) and a high-volume
+    // writer (`actor_a`, newer timestamp `NOW_MS + 350`, rank `ENTRY_DATA_MAX_LEN - 1` behind
+    // `ENTRY_DATA_MAX_LEN - 1` newer items at `NOW_MS + 400`), all co-dots of admitted values are
+    // preserved past the `by_value.len() == max_len` cutoff, the primary dot does not regress,
+    // `retire_t` commutes with `join`, and `join` is associative.
+    let actor_d = Did::from(14u32);
+    let low_vol_entries = Entry::new(topic_did, vec![Bytes::from("b-unique")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(NOW_MS + 250, actor_b, actor_b))?
+        .join(
+            Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
+                .stamp_delta(EntryVersion::new(NOW_MS + 100, actor_c, actor_c))?,
+        )?
+        .join(
+            Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
+                .stamp_delta(EntryVersion::new(NOW_MS + 300, actor_d, actor_d))?,
+        )?;
+    let high_vol_shared = Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
+        .stamp_delta(EntryVersion::new(NOW_MS + 350, actor_a, actor_a))?;
+    let high_vol_flood = Entry::new(
+        topic_did,
+        (0..(ENTRY_DATA_MAX_LEN - 1))
+            .map(|i| Bytes::from(format!("hv-{i}")))
+            .collect(),
+        EntryKind::Data,
+    )
+    .stamp_delta(EntryVersion::new(NOW_MS + 400, actor_a, actor_a))?;
+
+    let joined_lh = low_vol_entries
+        .clone()
+        .join(high_vol_shared.clone())?
+        .join(high_vol_flood.clone())?;
+    let joined_hl = low_vol_entries
+        .clone()
+        .join(high_vol_shared.clone().join(high_vol_flood.clone())?)?;
+    assert_eq!(joined_lh, joined_hl);
+    let shared_pos = joined_lh
+        .data
+        .iter()
+        .position(|v| v == &Bytes::from("co-shared"))
+        .ok_or_else(|| Error::InvalidMessage("co-shared missing".to_string()))?;
+    assert_eq!(
+        joined_lh.crdt.dots[shared_pos].version.logical_time_ms,
+        NOW_MS + 350,
+        "primary dot of admitted co-authored value must not regress to low-volume timestamp"
+    );
+    assert!(
+        joined_lh
+            .crdt
+            .co_dots
+            .iter()
+            .any(|&(idx, d)| idx as usize == shared_pos && d.version.actor == actor_c),
+        "co-dot of admitted value must be preserved past max_len cutoff"
+    );
+
+    let check_ms = NOW_MS + 100 + law.add_horizon_ms;
+    let lhs_retire = low_vol_entries
+        .clone()
+        .join(high_vol_shared.clone())?
+        .join(high_vol_flood.clone())?
+        .horizon_retired_under(law, check_ms);
+    let rhs_retire = low_vol_entries
+        .horizon_retired_under(law, check_ms)
+        .join(high_vol_shared.horizon_retired_under(law, check_ms))?
+        .join(high_vol_flood.horizon_retired_under(law, check_ms))?;
+    assert_eq!(lhs_retire, rhs_retire);
+
+    // Sentinel counter reservation in `EntryVersion::after` and relay inbox CRDT rejection.
+    let near_sentinel_floor = EntryVersion {
+        logical_time_ms: NOW_MS,
+        counter: crdt::PROOF_CHUNK_SENTINEL_COUNTER - 1,
+        actor: actor_a,
+        operation: actor_a,
+    };
+    assert!(matches!(
+        EntryVersion::new(NOW_MS, actor_a, actor_a).after(Some(near_sentinel_floor)),
+        Err(Error::EntryVersionAheadOfClock)
+    ));
+    let mut relay_with_co = Entry::new(topic_did, Vec::new(), EntryKind::RelayMessage);
+    relay_with_co.crdt.co_registers.push(near_sentinel_floor);
+    assert!(matches!(
+        relay_with_co.witnessed_inbox_elements(NOW_MS, TEST_NETWORK_ID),
+        Err(Error::RelayInboxRegisterNotAllowed)
+    ));
     Ok(())
 }
 
