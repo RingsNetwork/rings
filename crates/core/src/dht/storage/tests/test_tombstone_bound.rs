@@ -91,6 +91,8 @@ fn test_carrier_wire_suprema_are_the_widest_encodings() -> Result<()> {
             register: Some(widest_version()),
             dots: vec![widest_dot(); ENTRY_DATA_MAX_LEN],
             co_dots: Vec::new(),
+            co_registers: Vec::new(),
+            proofs: Vec::new(),
             tombstones: vec![tombstone; DATA_TOMBSTONE_MAX_LEN],
         },
         expires_at_ms: Some(u128::MAX),

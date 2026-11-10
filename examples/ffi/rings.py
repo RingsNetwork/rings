@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 SIGNATURE_LEN = 65
+MAX_SIGNATURE_LEN = 96
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_HEADER_PATH = REPO_ROOT / "crates" / "node" / "include" / "rings.h"
 DEFAULT_TARGET_ROOT = REPO_ROOT / "target"
@@ -114,13 +115,15 @@ def load_runtime(
 def gen_signer(ffi, acc):
     from eth_account.messages import encode_defunct
 
-    @ffi.callback("void (*)(const char *, char *)")
-    def signer(msg, output):
+    @ffi.callback("size_t (*)(const char *, char *, size_t)")
+    def signer(msg, output, capacity):
+        if capacity < SIGNATURE_LEN:
+            return 0
         c_input = ffi.string(msg)
         decoded = encode_defunct(c_input)
         sig = acc.sign_message(decoded)
         ffi.memmove(output, sig.signature, SIGNATURE_LEN)
-        return
+        return SIGNATURE_LEN
 
     return signer
 

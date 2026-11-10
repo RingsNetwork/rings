@@ -10,7 +10,6 @@ use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
 use rings_core::swarm::application::ApplicationData;
-use rings_core::utils::get_epoch_ms;
 
 use super::Processor;
 use crate::error::Error;
@@ -86,13 +85,14 @@ impl Processor {
         e2e::ensure_public_key_matches_did(recipient_public_key, destination)
             .map_err(Error::SendMessage)?;
         let sender_public_key = self.swarm.delegator_pubkey().map_err(Error::SendMessage)?;
-        let stream_id = uuid::Uuid::new_v4();
-        let frames = e2e::encrypt_stream_frames(
+        let stream_id = self.rng().next_uuid();
+        let frames = e2e::encrypt_stream_frames_with_rng(
             msg,
             stream_id,
             sender_public_key,
             recipient_public_key,
             max_plaintext_frame_len,
+            self.rng().clone(),
         )
         .map_err(Error::SendMessage)?
         .collect::<rings_core::error::Result<Vec<_>>>()
@@ -151,7 +151,7 @@ impl Processor {
             stream_id,
             expected_sender,
             recipient_identity_key,
-            get_epoch_ms(),
+            self.clock().now_ms(),
         ))
     }
 
@@ -164,14 +164,16 @@ impl Processor {
         frame: &E2eStreamFrame,
     ) -> Result<Vec<u8>> {
         decryptor
-            .decrypt_next(frame, get_epoch_ms())
+            .decrypt_next(frame, self.clock().now_ms())
             .map_err(Error::CoreError)
     }
 
     /// Whether an E2E stream is still live now; poll it while no frame of the stream arrives,
     /// so a lost frame (the final one included) is reported rather than waited for.
     pub fn check_e2e_stream(&self, decryptor: &E2eStreamDecryptor) -> Result<()> {
-        decryptor.check(get_epoch_ms()).map_err(Error::CoreError)
+        decryptor
+            .check(self.clock().now_ms())
+            .map_err(Error::CoreError)
     }
 
     /// Send a namespaced [`Envelope`](crate::extension::ext::Envelope) to a did over the

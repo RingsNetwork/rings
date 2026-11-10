@@ -356,6 +356,8 @@ impl TransportSpec {
                 self.reassembly_limits,
             ),
             observer: Arc::new(crate::swarm::observer::NoopSwarmObserver),
+            clock: Arc::new(crate::utils::SystemClock),
+            rng: crate::utils::SharedRng::system(),
         }))
     }
 }

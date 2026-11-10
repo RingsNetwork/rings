@@ -60,9 +60,9 @@ Options:
       --webrtc-udp-port-max <WEBRTC_UDP_PORT_MAX>
           Maximum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-min. [env: WEBRTC_UDP_PORT_MAX=]
       --storage-path <STORAGE_PATH>
-          Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings [env: STORAGE_PATH=]
+          Storage files location. If not provided, use data_storage.path in config file or ~/.rings/data [env: STORAGE_PATH=]
       --storage-capacity <STORAGE_CAPACITY>
-          Storage capacity. If not provider, use storage.capacity in config file or 200000000 [env: STORAGE_CAPACITY=] [default: 200000000]
+          Storage capacity. If not provided, use data_storage.capacity in config file or 200000000 [env: STORAGE_CAPACITY=] [default: 200000000]
       --reassembly-profile <REASSEMBLY_PROFILE>
           Inbound chunk reassembly memory profile [env: REASSEMBLY_PROFILE=] [default: production] [possible values: production, constrained]
       --advertise-onion-relay

@@ -58,7 +58,7 @@ fn processor_at(delegator: &SecretKey, ttl_ms: u64, ts_ms: u128) -> Arc<Processo
         delegatee_key,
         3,
     );
-    let processor = match test_processor_builder(&config).build() {
+    let processor = match test_processor_builder(&config).build_at(ts_ms) {
         Ok(processor) => processor,
         Err(error) => panic!("test processor build must succeed: {error}"),
     };
@@ -122,12 +122,15 @@ async fn test_a_daemon_past_its_horizon_ends_at_once() {
 /// delegator key is removed before the next renewal.
 #[tokio::test(start_paused = true)]
 async fn test_run_signing_horizon_renews_in_process_across_multiple_horizons_and_republishes() {
-    let base_ms = get_epoch_ms().max(EPOCH_MS);
+    // Anchor `base_ms` ~2 days before wall-clock `get_epoch_ms()` with `T = 2L + Δ + 5s` so
+    // `lead_start > half_life`, `h0 + 1 < h1 - L`, and `k0`, `k1`, `k2` are all simultaneously
+    // within `[ts_ms, expires_at_ms]` on the real wall clock read by `republish_registrations()`.
+    let base_ms = get_epoch_ms() - 2 * SIGNING_HORIZON_LEAD_MS - 12_500;
     let start = Instant::now();
     let now_ms = move || base_ms + start.elapsed().as_millis();
 
     let delegator = SecretKey::random();
-    let ttl_ms = u64::try_from(3 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+    let ttl_ms = u64::try_from(2 * SIGNING_HORIZON_LEAD_MS + 30_000).unwrap_or(u64::MAX);
     let processor = processor_at(&delegator, ttl_ms, base_ms);
     let initial_key = processor.delegatee_key();
     let initial_pubkey = initial_key.delegatee_public_key();

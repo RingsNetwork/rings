@@ -150,11 +150,14 @@ impl SwarmTransport {
     }
 
     /// The outcome of a connect that did not send its offer: satisfied when the peer's own
-    /// handshake took the slot or an admitted connection exists, refused as `AlreadyConnected`,
-    /// and otherwise a failure charged to the peer.
+    /// handshake took the slot or an admitted connection exists, refused without peer penalty on
+    /// `AlreadyConnected` or local capacity exhaustion, and otherwise a send failure charged to
+    /// the peer.
     async fn connect_failed(&self, peer: Did, error: Error) -> Result<()> {
         match error {
-            Error::AlreadyConnected => Err(Error::AlreadyConnected),
+            Error::AlreadyConnected
+            | Error::PendingConnectionCapacityExceeded { .. }
+            | Error::ConnectionCapacityExceeded { .. } => Err(error),
             Error::ConnectionAttemptSuperseded { generation, .. } => {
                 tracing::debug!(
                     target: "rings_core::swarm::transport::handshake",
@@ -176,7 +179,6 @@ impl SwarmTransport {
                 Ok(())
             }
             error => {
-                self.record_candidate_dial_failure(peer);
                 self.record_peer_message_send_failed(
                     peer,
                     crate::measure::Authentication::LocallyAddressed,
@@ -191,7 +193,7 @@ impl SwarmTransport {
     /// carrier that records its path. The attempt is marked `Sent` under the offer's
     /// transaction before the offer leaves, and must still own its slot when it leaves;
     /// otherwise the error says why. A failure to send abandons the generation.
-    async fn send_connection_offer<S>(
+    pub(in crate::swarm) async fn send_connection_offer<S>(
         &self,
         attempt: PendingConnectionAttempt,
         offer: ConnectNodeSend,
@@ -209,12 +211,24 @@ impl SwarmTransport {
             sdp_bytes = offer.sdp.len(),
             "connection offer send start"
         );
-        let mut payload = sender
+        let mut payload = match sender
             .originate(Message::ConnectNodeSend(offer.clone()), peer, None)
-            .await?;
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                return Err(self
+                    .classify_step_failure(attempt, error, "originating connection offer")
+                    .await?);
+            }
+        };
         payload.relay = payload.relay.with_signaling_path(SignalingPath::outbound());
         let tx_id = payload.transaction.tx_id;
-        self.mark_offer_sent(attempt, &offer, tx_id)?;
+        if let Err(error) = self.mark_offer_sent(attempt, &offer, tx_id) {
+            return Err(self
+                .classify_step_failure(attempt, error, "marking connection offer sent")
+                .await?);
+        }
         let send = async {
             sender.send_payload(payload).await.inspect_err(|error| {
                 tracing::warn!(

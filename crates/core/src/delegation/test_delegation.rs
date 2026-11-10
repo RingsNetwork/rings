@@ -259,6 +259,96 @@ fn test_an_established_authorization_still_checks_expiry_and_the_delegatee_signa
     ));
 }
 
+#[test]
+fn test_delegatee_key_rejects_mismatched_private_key_and_preserves_bound_historical_decryption() {
+    let delegator = SecretKey::random();
+    let valid = DelegateeKey::new_with_seckey(&delegator).unwrap();
+    let unrelated_secret = SecretKey::random();
+    assert_ne!(
+        Did::from(unrelated_secret.address()),
+        valid.delegation().delegatee_did()
+    );
+
+    let mismatched_json = serde_json::to_string(&serde_json::json!({
+        "delegation": valid.delegation(),
+        "delegatee_secret_key": unrelated_secret,
+    }))
+    .unwrap();
+    assert!(serde_json::from_str::<DelegateeKey>(&mismatched_json).is_err());
+
+    let mismatched_dump = base58_monero::encode_check(mismatched_json.as_bytes()).unwrap();
+    assert!(DelegateeKey::from_str(&mismatched_dump).is_err());
+    assert!(matches!(
+        DelegateeKey::try_from_parts(valid.delegation(), unrelated_secret),
+        Err(crate::error::Error::DelegateeKeyMismatch { .. })
+    ));
+
+    // A genuinely bound historical key whose TTL has elapsed still restores for decryption,
+    // while `verify_at` past expiry rejects it for signing.
+    let historical_ts: u128 = 1_700_000_000_000;
+    let historical_ttl: u64 = 60_000;
+    let historical =
+        DelegateeKey::new_with_seckey_at(&delegator, historical_ttl, historical_ts).unwrap();
+    let historical_dump = historical.dump().unwrap();
+    let restored = DelegateeKey::from_str(&historical_dump).unwrap();
+    assert_eq!(restored, historical);
+    assert!(restored.verify_binding().is_ok());
+    assert!(matches!(
+        restored.verify_at(historical_ts + u128::from(historical_ttl) + 1),
+        Err(crate::error::Error::DelegationExpired)
+    ));
+}
+
+#[test]
+fn test_delegation_validity_lower_bound_enforced_with_skew_under_verify_and_established() {
+    use crate::consts::TS_OFFSET_TOLERANCE_MS;
+    use crate::message::DomainTag;
+    use crate::message::MessageSigner;
+    use crate::message::SigningDomain;
+
+    let delegator = SecretKey::random();
+    let ts_ms: u128 = 1_800_000_000_000;
+    let ttl_ms: u64 = 600_000;
+    let delegatee_key = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, ts_ms).unwrap();
+    let delegation = delegatee_key.delegation();
+    let msg = b"validity lower bound witness";
+    let sig = delegatee_key.sign(msg).unwrap();
+
+    let skew_edge = ts_ms - TS_OFFSET_TOLERANCE_MS;
+    let before_skew = skew_edge - 1;
+    let one_day_early = ts_ms - 86_400_000;
+
+    assert!(delegation
+        .verify_delegator_authorization_at(skew_edge)
+        .is_ok());
+    for auth in [
+        DelegatorAuthorization::Verify,
+        DelegatorAuthorization::Established,
+    ] {
+        assert!(delegation.verify_under(msg, &sig, skew_edge, auth).is_ok());
+        for early in [before_skew, one_day_early] {
+            assert!(matches!(
+                delegation.verify_under(msg, &sig, early, auth),
+                Err(crate::error::Error::DelegationNotYetValid)
+            ));
+        }
+    }
+    assert!(matches!(
+        delegation.verify_delegator_authorization_at(before_skew),
+        Err(crate::error::Error::DelegationNotYetValid)
+    ));
+
+    // A message stamped at `one_day_early` under a delegation dated `ts_ms` (one day ahead) must
+    // fail `MessageVerification::verify_live_at(..., one_day_early)`.
+    let tag = DomainTag::new("test-delegation-lower-bound");
+    let domain = SigningDomain::new(tag, 1);
+    let proof = MessageSigner::new(&delegatee_key, 1)
+        .sign_at(tag, msg, one_day_early)
+        .unwrap();
+    assert!(proof.is_live_at(one_day_early));
+    assert!(!proof.verify_live_at(domain, msg, one_day_early));
+}
+
 /// The cost of verifying one message proof's delegation, with the delegator's signature
 /// recovered (`Verify`) and established (`Established`). Run with
 /// `--release -- --ignored --nocapture`.

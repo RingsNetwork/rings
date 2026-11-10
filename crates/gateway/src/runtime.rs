@@ -596,7 +596,11 @@ impl GatewayRuntime {
                 .ok_or(TcpStackError::UnknownFlow(flow))?
                 .try_send(BridgeCommand::Data(buffer));
             match send {
-                Ok(()) => self.tcp.commit_application_read(flow, length)?,
+                Ok(()) => {
+                    self.tcp.commit_application_read(flow, length)?;
+                    self.tcp.poll(elapsed);
+                    return Ok(());
+                }
                 Err(mpsc::error::TrySendError::Full(command)) => match command {
                     BridgeCommand::Data(mut buffer) => {
                         buffer.resize(self.chunk_bytes(), 0);

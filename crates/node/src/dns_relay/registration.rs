@@ -12,7 +12,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::ecc::VerificationPublicKey;
-use rings_core::utils::get_epoch_ms;
 use rings_dns_relay::AnnouncementError;
 use rings_dns_relay::ProxyProtocol;
 
@@ -151,7 +150,7 @@ impl RegistrationTask for ServiceRegistration {
 
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
         self.publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, context.now_ms(), |terms| {
                 self.descriptor_at(context, terms)
                     .map(|descriptor| [descriptor])
             })

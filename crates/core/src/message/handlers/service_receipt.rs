@@ -30,7 +30,6 @@ use crate::message::ProvisionalServiceClaim;
 use crate::message::ProvisionalServiceReceipt;
 use crate::message::ServiceReceiptError;
 use crate::message::Transaction;
-use crate::utils::get_epoch_ms;
 
 enum ProbeEffect<'payload> {
     Forward {
@@ -181,11 +180,12 @@ fn validate_acknowledgement_roles(
 
 struct ProbeEffectInterpreter<'handler> {
     handler: &'handler MessageHandler,
+    now_ms: u128,
 }
 
 impl<'handler> ProbeEffectInterpreter<'handler> {
-    const fn new(handler: &'handler MessageHandler) -> Self {
-        Self { handler }
+    const fn new(handler: &'handler MessageHandler, now_ms: u128) -> Self {
+        Self { handler, now_ms }
     }
 
     async fn run(&self, effect: ProbeEffect<'_>) -> Result<()> {
@@ -212,7 +212,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             request,
             self.handler.dht.did,
             self.handler.transport.network_id,
-            get_epoch_ms(),
+            self.now_ms,
         )?;
         let completion_sequence = *self
             .handler
@@ -244,11 +244,12 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             ctx,
             self.handler.transport.network_id,
             beneficiary,
-            get_epoch_ms(),
+            self.now_ms,
         )?;
+        let now_ms_i64 = i64::try_from(self.now_ms).unwrap_or(i64::MAX);
         self.handler
             .transport
-            .answer_liveness_probe(provider, request)?
+            .answer_liveness_probe_at(provider, request, now_ms_i64)?
             .then_some(())
             .ok_or_else(|| {
                 Error::InvalidMessage("probe offer has no matching outstanding request".to_string())
@@ -275,7 +276,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
         )?;
         self.handler
             .transport
-            .admit_provisional_receipt(receipt, get_epoch_ms())
+            .admit_provisional_receipt(receipt, self.now_ms)
             .await
     }
 }
@@ -286,7 +287,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
 impl HandleMsg<ProbeRequest> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeRequest) -> Result<()> {
         let ctx = context.payload();
-        ProbeEffectInterpreter::new(self)
+        ProbeEffectInterpreter::new(self, context.now_ms())
             .run(ProbeEffect::request(self.dht.did, ctx, msg))
             .await
     }
@@ -298,7 +299,7 @@ impl HandleMsg<ProbeRequest> for MessageHandler {
 impl HandleMsg<ProbeOffer> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeOffer) -> Result<()> {
         let ctx = context.payload();
-        ProbeEffectInterpreter::new(self)
+        ProbeEffectInterpreter::new(self, context.now_ms())
             .run(ProbeEffect::offer(self.dht.did, ctx, msg))
             .await
     }
@@ -310,7 +311,7 @@ impl HandleMsg<ProbeOffer> for MessageHandler {
 impl HandleMsg<ProbeAcknowledgement> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &ProbeAcknowledgement) -> Result<()> {
         let ctx = context.payload();
-        ProbeEffectInterpreter::new(self)
+        ProbeEffectInterpreter::new(self, context.now_ms())
             .run(ProbeEffect::acknowledgement(self.dht.did, ctx, msg))
             .await
     }

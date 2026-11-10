@@ -184,27 +184,34 @@ table.
 `rings init` writes the configuration and a delegatee signing key (`~/.rings/delegatee_key` unless
 `-s, --delegatee-key` says otherwise). `rings new-delegation` writes a fresh delegatee key. Those two
 delegation-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
-RPC client commands do not. A native node stores the resulting delegatee key in plain
-text, so never derive it from a key that holds assets.
+RPC client commands do not take `-k` on the command line. A native node stores its delegatee key in
+plain text (mode `0600` on Unix), so never derive it from a key that holds assets.
 
-A delegation bounds the life of the process that uses it (#1063). Every frame a node sends
-carries its own delegation, and from 25 s before the delegation expires (one delivery bound,
-the margin that keeps a frame from expiring in flight) every frame is refused. The node can
-send nothing from then on, and the delegation cannot be replaced without a restart. So
-`rings run`:
+Every frame a node sends carries its own delegation, and from 25 s before the delegation expires
+(the signing horizon `h = e - 25 s`, one delivery bound keeping a frame from expiring in flight)
+every outbound frame is refused (#1063). At startup `rings run` refuses any delegatee key already at
+or past `h` (`DelegationHorizonReached`, error code `1003`) or whose private scalar does not match
+the authorized delegatee DID. The horizon is checked at least once every 60 s against the wall
+clock, so a host suspended across it still reacts within a minute of resuming.
 
-- refuses to start with a delegatee key that has less than those 25 s left
-  (`DelegationHorizonReached`, error code 1003);
-- logs a warning once the end is less than a day away, giving the end in Unix milliseconds;
-- exits with a non-zero status at that end, with the same error, instead of running on mute.
+Operators choose between two rotation modes (#1153):
 
-`--ttl` of `rings init` and `rings new-delegation` (default 30 days) therefore sets how long a
-node can run. Run it under a supervisor that restarts it (`Restart=always` under systemd,
-`--restart unless-stopped` under Docker), and write a fresh delegatee key before the restart,
-with `rings new-delegation`. A restart with the old key fails at startup with that error, so
-the outage is explicit rather than silent. A plain `Restart=always` alone only repeats that
-error: the restart needs its re-mint step, for example `ExecStartPre=` running
-`rings new-delegation` for the node's key.
-
-The deadline is checked at least once a minute against the wall clock, so a host suspended
-across it still exits within a minute of resuming.
+1. **Online in-process renewal (`delegator_key` configured in `config.yaml`).** Set `delegator_key`
+   to an owner-only (`0600`) ECDSA secret key file whose DID matches the node's DID (relative paths
+   resolve next to `config.yaml`). At `max(h - 24 h, c + floor((h - c) / 2))` (24 hours before `h`
+   for standard multi-day TTLs, or at the half-life for short TTLs), `rings run` reads
+   `delegator_key`, mints a fresh `DelegateeKey` with the current delegation's `ttl_ms`, writes it
+   atomically (`0600` sibling temporary file + `fsync` + `rename`) to `delegatee_key`, swaps it
+   into the live node without restarting, retains the displaced key in memory until its expiry `e`
+   so sealed mail and onion hops still open while peers learn the new descriptor, and immediately
+   republishes its descriptors. If reading, minting, or persisting fails, the node logs a warning,
+   increments `session_key.rotation_failed_total`, keeps the active key, and falls back to exiting
+   at `h`.
+2. **Offline issuance (no `delegator_key` on the daemon host).** Leave `delegator_key` unset so the
+   account private key never resides on the node. `rings run` logs a one-time warning once `h` is
+   within 24 hours and exits non-zero at `h` (`DelegationHorizonReached`). Before `h` (or in a
+   pre-start hook before the supervisor restarts the daemon), mint and install a fresh
+   `delegatee_key` with `rings new-delegation --key-file <FILE> --delegatee-key <PATH>` and restart
+   `rings run`. A plain `Restart=always` supervisor without either `delegator_key` or a fresh
+   `delegatee_key` cannot renew an expired key on its own and will fail fast at startup with
+   `DelegationHorizonReached`.

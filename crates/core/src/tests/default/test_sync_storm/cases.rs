@@ -253,7 +253,19 @@ const PR_MATRIX_LARGEST: usize = 50;
 #[tokio::test(start_paused = true)]
 #[ignore = "nightly extended N=50 seed matrix"]
 async fn test_nightly_extended_seed_matrix() {
-    for seed in nightly_seeds() {
+    let seeds = nightly_seeds();
+    let count = std::env::var("SYNC_STORM_EXTENDED_SEED_COUNT")
+        .ok()
+        .map(|raw| raw.trim().to_owned())
+        .filter(|trimmed| !trimmed.is_empty())
+        .map(|trimmed| {
+            trimmed
+                .parse::<usize>()
+                .expect("SYNC_STORM_EXTENDED_SEED_COUNT must parse as usize")
+                .clamp(1, seeds.len())
+        })
+        .unwrap_or(seeds.len());
+    for seed in seeds.into_iter().take(count) {
         for topology in [ScenarioTopology::Ring, ScenarioTopology::Hotspot] {
             assert_and_report_enabled(
                 run_scenario(

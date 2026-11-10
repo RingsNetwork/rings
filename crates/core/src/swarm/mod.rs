@@ -71,6 +71,8 @@ use crate::swarm::transport::OfferOwner;
 pub use crate::swarm::transport::OfferReply;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
 
 /// How a successor lookup was decided: from the local topology, or routed, with the handle its
 /// report resolves.
@@ -137,6 +139,16 @@ impl Swarm {
     /// Get this swarm's network id.
     pub fn network_id(&self) -> u32 {
         self.transport.network_id
+    }
+
+    /// Return the [`SharedClock`] capability bound to this swarm.
+    pub fn clock(&self) -> &SharedClock {
+        self.transport.clock()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this swarm.
+    pub fn rng(&self) -> &SharedRng {
+        self.transport.rng()
     }
 
     /// Get the storage redundancy for this swarm's DHT protocol mode.
@@ -524,8 +536,8 @@ impl Swarm {
 }
 
 impl Swarm {
-    /// Create new connection and its answer. This function will wrap the offer inside a payload
-    /// with verification.
+    /// Create an outbound WebRTC connection offer for `peer`, wrapped in a signed
+    /// [`MessagePayload`].
     pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
         self.offer_connection(peer)
             .await
@@ -564,8 +576,15 @@ impl Swarm {
                 ),
             )
             .await?;
-        self.transport
-            .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)?;
+        if let Err(error) =
+            self.transport
+                .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)
+        {
+            return Err(self
+                .transport
+                .classify_step_failure(attempt, error, "marking connection offer sent")
+                .await?);
+        }
 
         Ok((ConnectionAttempt(attempt), payload))
     }
@@ -638,8 +657,8 @@ impl Swarm {
         }
     }
 
-    /// Accept the answer of remote connection. This function will verify the answer payload and
-    /// will return its did with the connection.
+    /// Verify a remote connection answer payload and apply it to the pending handshake, returning
+    /// `Ok(())` once the session description is accepted.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
         self.accept_answer_with(None, answer_payload).await
     }

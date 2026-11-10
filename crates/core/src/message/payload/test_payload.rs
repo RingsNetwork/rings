@@ -614,3 +614,97 @@ fn test_the_frame_header_names_the_wire_version_before_any_decoding() -> Result<
     }
     Ok(())
 }
+
+/// Only messages that may legitimately undergo `CoreEffect::reset_destination`
+/// (`FindSuccessorSend`, `FindRelayHolder`, `SearchEntry`, and non-relay-inbox `OperateEntry`)
+/// may verify when `relay.destination != transaction.destination`; every other message variant
+/// (and relay-inbox `OperateEntry`) must keep `relay.destination == transaction.destination`.
+#[test]
+fn test_relay_destination_is_bound_to_transaction_destination_except_for_redirectable_requests(
+) -> Result<()> {
+    use crate::dht::entry::Entry;
+    use crate::dht::entry::EntryKind;
+    use crate::dht::entry::EntryOperation;
+    use crate::dht::entry::PlacedEntryOperation;
+
+    let origin = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin_signer = MessageSigner::new(&origin, TEST_NETWORK_ID);
+    let hop_signer = MessageSigner::new(&hop, TEST_NETWORK_ID);
+    let tx_destination: Did = SecretKey::random().address().into();
+    let redirected_destination: Did = SecretKey::random().address().into();
+
+    for message in Message::test_variants()? {
+        let kind = message.kind();
+        let expected_redirectable = message.permits_destination_reset();
+        let transaction = Transaction::new(
+            tx_destination,
+            uuid::Uuid::new_v4(),
+            1,
+            None,
+            message,
+            origin_signer,
+        )?;
+        let matching_relay = MessageRelay::new(
+            NextHop::toward(tx_destination),
+            tx_destination,
+            HopBudget::MAX,
+        );
+        let matching_payload =
+            MessagePayload::new(transaction.clone(), hop_signer, matching_relay)?;
+        assert!(
+            matching_payload.verify_transaction_and_payload(TEST_NETWORK_ID),
+            "matching relay.destination must verify for {kind:?}"
+        );
+
+        let redirected_relay = MessageRelay::new(
+            NextHop::toward(redirected_destination),
+            redirected_destination,
+            HopBudget::MAX,
+        );
+        let redirected_payload = MessagePayload::new(transaction, hop_signer, redirected_relay)?;
+        assert_eq!(
+            redirected_payload.verify_transaction_and_payload(TEST_NETWORK_ID),
+            expected_redirectable,
+            "unexpected redirect verification outcome for {kind:?}"
+        );
+    }
+
+    // Relay-inbox OperateEntry (`EntryKind::RelayMessage`) must also reject destination reset.
+    let relay_inbox_entry = crate::tests::live_entry(
+        tx_destination,
+        vec![Bytes::from_static(b"inbox-element")],
+        EntryKind::RelayMessage,
+    );
+    let relay_inbox_op = Message::OperateEntry(PlacedEntryOperation {
+        placement: tx_destination,
+        op: EntryOperation::Extend(Entry {
+            kind: EntryKind::RelayMessage,
+            ..relay_inbox_entry
+        }),
+        report: false,
+    });
+    assert!(!relay_inbox_op.permits_destination_reset());
+    let relay_inbox_tx = Transaction::new(
+        tx_destination,
+        uuid::Uuid::new_v4(),
+        1,
+        None,
+        relay_inbox_op,
+        origin_signer,
+    )?;
+    let redirected_inbox_payload = MessagePayload::new(
+        relay_inbox_tx,
+        hop_signer,
+        MessageRelay::new(
+            NextHop::toward(redirected_destination),
+            redirected_destination,
+            HopBudget::MAX,
+        ),
+    )?;
+    assert!(
+        !redirected_inbox_payload.verify_transaction_and_payload(TEST_NETWORK_ID),
+        "relay-inbox OperateEntry must not permit relay.destination != transaction.destination"
+    );
+    Ok(())
+}

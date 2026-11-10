@@ -225,10 +225,15 @@ pub struct QueryForTopoInfoReport {
 impl QueryForTopoInfoSend {
     /// Create a successor-sync query with a fresh correlation id.
     pub fn new_for_sync(did: Did) -> Self {
+        Self::new_for_sync_with_id(did, crate::utils::new_uuid())
+    }
+
+    /// Create a successor-sync query with a caller-supplied correlation id.
+    pub fn new_for_sync_with_id(did: Did, request_id: uuid::Uuid) -> Self {
         Self {
             did,
             then: QueryFor::SyncSuccessor,
-            request_id: crate::utils::new_uuid(),
+            request_id,
         }
     }
 
@@ -549,6 +554,22 @@ macro_rules! define_message_model {
                 matches!(self, Self::ConnectNodeSend | Self::ConnectNodeReport)
             }
 
+            /// Whether a hop along the route may re-aim the relay carrier with
+            /// [`MessageRelay::reset_destination`](crate::message::MessageRelay::reset_destination).
+            ///
+            /// Only owner-lookup and storage-lookup/write requests whose origin may not know the
+            /// authoritative owner may have their carrier destination reset in flight; every other
+            /// message's `relay.destination` is bound to its signed `transaction.destination`.
+            pub(crate) const fn permits_destination_reset(self) -> bool {
+                matches!(
+                    self,
+                    Self::FindSuccessorSend
+                        | Self::FindRelayHolder
+                        | Self::OperateEntry
+                        | Self::SearchEntry
+                )
+            }
+
             pub(crate) const fn requires_storage_route(self) -> bool {
                 match self {
                     $(Self::$variant => message_requires_storage_route!($storage_route)),+
@@ -657,6 +678,19 @@ impl Message {
     /// request into a large report aimed at a third party.
     pub(crate) const fn returns_through_reply_via(&self) -> bool {
         matches!(self, Self::FindSuccessorReport(_))
+    }
+
+    /// Whether a hop along the route may re-aim the relay carrier of this message with
+    /// [`MessageRelay::reset_destination`](crate::message::MessageRelay::reset_destination).
+    ///
+    /// Relay-inbox entry operations (`EntryKind::RelayMessage`) are addressed directly to the
+    /// holder the writer's view names and are never redirected in flight.
+    pub(crate) fn permits_destination_reset(&self) -> bool {
+        match self {
+            Self::FindSuccessorSend(_) | Self::FindRelayHolder(_) | Self::SearchEntry(_) => true,
+            Self::OperateEntry(msg) => !msg.op.kind().is_relay_inbox(),
+            _ => false,
+        }
     }
 }
 

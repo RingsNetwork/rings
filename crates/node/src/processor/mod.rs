@@ -1,5 +1,6 @@
 //! Processor of rings-node rpc server.
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -31,7 +32,10 @@ use rings_core::swarm::storage_api::StoreQuorum;
 use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
+#[cfg(all(test, feature = "node"))]
 use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
@@ -182,6 +186,16 @@ impl Processor {
         self.swarm.did()
     }
 
+    /// Return the [`SharedClock`] capability bound to this processor.
+    pub fn clock(&self) -> &SharedClock {
+        self.swarm.clock()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this processor.
+    pub fn rng(&self) -> &SharedRng {
+        self.swarm.rng()
+    }
+
     pub(crate) fn delegatee_key(&self) -> DelegateeKey {
         self.session_keys.current()
     }
@@ -205,10 +219,12 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
-        let (next, horizon) = self.session_keys.renew_with(now_ms, mint, persist)?;
-        self.swarm
-            .set_delegatee_key(next)
-            .map_err(Error::CoreError)?;
+        let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
+            persist(next)?;
+            self.swarm
+                .set_delegatee_key(next.clone())
+                .map_err(Error::CoreError)
+        })?;
         Ok(horizon)
     }
 
@@ -286,7 +302,7 @@ impl Processor {
 
     /// The registry entry under `topic` whose elements are `descriptors`.
     #[cfg(all(test, feature = "node"))]
-    fn registry_entry<D: RegistryElement>(
+    pub(crate) fn registry_entry<D: RegistryElement>(
         topic: &str,
         descriptors: Vec<D>,
     ) -> Result<entry::Entry> {
@@ -331,7 +347,7 @@ impl Processor {
 
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,
-            get_epoch_ms(),
+            self.clock().now_ms(),
             self.swarm.network_id(),
             include_expired,
         ))
@@ -357,6 +373,41 @@ impl Processor {
         Ok(self.select_onion_exits_from_entry(&entry, service, include_expired))
     }
 
+    /// List signed intermediate `invoke` descriptors from [`crate::onion::ONION_INVOKES_TOPIC`],
+    /// optionally filtered by `shape` and/or canonical `backend` name.
+    pub async fn lookup_onion_invokes(
+        &self,
+        shape: Option<crate::onion::OnionInvokeShape>,
+        backend: &str,
+        include_expired: bool,
+    ) -> Result<Vec<crate::onion::OnionInvokeDescriptor>> {
+        let entry_key = entry::Entry::gen_did(crate::onion::ONION_INVOKES_TOPIC)?;
+        let backend = backend.trim();
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+        Ok(
+            crate::onion::OnionInvokeDescriptor::latest_valid_by_symbol_did(
+                crate::onion::OnionInvokeRegistration::descriptors_from_entry(&entry),
+                self.clock().now_ms(),
+                self.swarm.network_id(),
+                include_expired,
+            )
+            .into_iter()
+            .filter(|desc| shape.is_none_or(|wanted| desc.shape == wanted))
+            .filter(|desc| backend.is_empty() || desc.backend.as_str() == backend)
+            .collect(),
+        )
+    }
+
+    /// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline.
+    pub async fn build_onion_pipeline_route(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
+    }
+
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
     /// `service` (every service when empty).
     fn select_onion_exits_from_entry(
@@ -367,7 +418,7 @@ impl Processor {
     ) -> Vec<OnionExitDescriptor> {
         OnionExitDescriptor::latest_valid_by_service_did(
             OnionExitRegistration::descriptors_from_entry(entry),
-            get_epoch_ms(),
+            self.clock().now_ms(),
             self.swarm.network_id(),
             include_expired,
         )
@@ -430,7 +481,11 @@ impl Processor {
             if answered || is_final_lookup_poll(attempt) {
                 break;
             }
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            if !sleep_unless_stopped(DHT_LOOKUP_CACHE_POLL_INTERVAL, stop, &StopToken::never())
+                .await?
+            {
+                return Err(Error::RegistrationStopped);
+            }
         }
         Ok(self.storage_check_cache(entry_key).await)
     }
@@ -553,10 +608,13 @@ impl Processor {
 
     /// Flush all applied measurement updates with the graceful-shutdown deadline.
     pub async fn flush_measurements(&self) -> Result<()> {
+        self.flush_measurements_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn flush_measurements_with_timeout(&self, timeout: Duration) -> Result<()> {
         if let Some(measure) = &self.measure {
-            measure
-                .flush_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
-                .await?;
+            measure.flush_with_timeout(timeout).await?;
         }
         Ok(())
     }
@@ -608,13 +666,34 @@ impl Processor {
     ///
     /// Both steps run even if the first fails; the first failure is returned.
     pub async fn close(&self) -> Result<()> {
-        let _ = self.leave().await;
+        self.close_with_timeout(MEASUREMENT_FLUSH_TIMEOUT).await
+    }
+
+    pub(crate) async fn close_with_timeout(&self, timeout: Duration) -> Result<()> {
+        {
+            let leave = self.leave();
+            let deadline = rings_runtime::sleep(timeout);
+            futures::pin_mut!(leave, deadline);
+            if let futures::future::Either::Right((timer, _)) =
+                futures::future::select(leave, deadline).await
+            {
+                match timer {
+                    Ok(()) => tracing::warn!(
+                        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                        "best-effort departure timed out during processor close"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(?error, "departure timer unavailable during processor close")
+                    }
+                }
+            }
+        }
         let closed = self
             .swarm
             .close()
             .await
             .map_err(Error::CloseConnectionError);
-        let flushed = self.flush_measurements().await;
+        let flushed = self.flush_measurements_with_timeout(timeout).await;
         closed.and(flushed)
     }
 
@@ -802,7 +881,7 @@ impl Processor {
 
     /// Assemble the documented v1 operator snapshot without serializing stored entry payloads.
     pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
-        let generated_at_ms = get_epoch_ms();
+        let generated_at_ms = self.clock().now_ms();
         let runtime = self.observability.runtime_snapshot(generated_at_ms);
         let delegation = self.delegatee_key().delegation();
         let expires_at_ms = delegation.expires_at_ms();
@@ -901,6 +980,10 @@ impl OnionDirectoryReader for Processor {
         self.lookup_onion_exits(service, false).await
     }
 
+    async fn live_onion_invokes(&self) -> Result<Vec<crate::onion::OnionInvokeDescriptor>> {
+        self.lookup_onion_invokes(None, "", false).await
+    }
+
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
         self.peer_measurements()
             .await
@@ -909,8 +992,25 @@ impl OnionDirectoryReader for Processor {
             .collect()
     }
 
+    fn direct_peer_dids(&self) -> BTreeSet<Did> {
+        let local = self.did();
+        self.swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|did| *did != local)
+            .collect()
+    }
+
     fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
+    }
+
+    fn now_ms(&self) -> u128 {
+        self.clock().now_ms()
+    }
+
+    fn route_rng(&self) -> SharedRng {
+        self.rng().clone()
     }
 }
 

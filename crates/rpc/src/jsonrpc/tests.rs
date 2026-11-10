@@ -77,6 +77,31 @@ fn endpoint_errors_do_not_disclose_input() {
     }
 }
 
+/// Compile-time witness tying every public `Client` method's request DTO to its matching
+/// response DTO (#1215).
+#[cfg_attr(not(target_family = "wasm"), test)]
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+fn client_method_response_types_match_request_dtos() {
+    use super::Client;
+    use crate::protos::rings_node::*;
+
+    async fn witness(
+        client: &Client,
+        connect_http: &ConnectPeerViaHttpRequest,
+        connect_did: &ConnectWithDidRequest,
+        connect_seed: &ConnectWithSeedRequest,
+    ) {
+        let _: Result<ConnectPeerViaHttpResponse, RpcError> =
+            client.connect_peer_via_http(connect_http).await;
+        let _: Result<ConnectWithDidResponse, RpcError> =
+            client.connect_with_did(connect_did).await;
+        let _: Result<ConnectWithSeedResponse, RpcError> =
+            client.connect_with_seed(connect_seed).await;
+    }
+
+    let _ = witness;
+}
+
 /// Native listeners witness actual requests, rather than just constructor behavior.
 #[cfg(not(target_family = "wasm"))]
 mod native;

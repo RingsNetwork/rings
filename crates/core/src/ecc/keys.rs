@@ -18,11 +18,7 @@
 //! `algorithm || 0x00 || raw_public_key`. This prevents equal raw bytes under
 //! different algorithms from resolving to the same account DID.
 
-use std::cell::RefCell;
-
 use rand::RngCore;
-use rand::SeedableRng;
-use rand_hc::Hc128Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use zeroize::Zeroize;
@@ -35,10 +31,7 @@ use super::SecretKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-
-thread_local! {
-    static KEY_RNG: RefCell<Hc128Rng> = RefCell::new(Hc128Rng::from_entropy());
-}
+use crate::utils::SystemEntropy;
 
 fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
     let mut out = algorithm.as_bytes().to_vec();
@@ -400,7 +393,7 @@ impl Ed25519SecretKey {
 
     /// Generate a random Ed25519 signing seed.
     pub fn random() -> Self {
-        with_key_rng(Self::random_with_rng)
+        Self::random_with_rng(&mut SystemEntropy)
     }
 
     /// Build an Ed25519 signing seed from exact bytes.
@@ -460,9 +453,14 @@ impl SigningSecretKey {
         Self::Ed25519(Ed25519SecretKey::random())
     }
 
+    /// Generate a BLS12-381 signing secret key from an explicit RNG.
+    pub fn random_bls12381_with_rng(rng: &mut impl RngCore) -> Result<Self> {
+        signers::bls::random_sk_with_rng(rng).map(Self::Bls12381)
+    }
+
     /// Generate a BLS12-381 signing secret key.
     pub fn random_bls12381() -> Result<Self> {
-        signers::bls::random_sk().map(Self::Bls12381)
+        Self::random_bls12381_with_rng(&mut SystemEntropy)
     }
 
     /// Build a BLS12-381 signing key after validating that the scalar is usable.
@@ -507,13 +505,6 @@ fn secp256r1_public_key(secret_key: &SecretKey) -> Result<PublicKey<33>> {
         .get(1..)
         .ok_or(Error::PublicKeyBadFormat)?;
     PublicKey::from_u8(uncompressed)
-}
-
-fn with_key_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
-    KEY_RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        f(&mut rng)
-    })
 }
 
 fn public_key_from_b58m_exact<const SIZE: usize>(value: &str) -> Result<PublicKey<SIZE>> {

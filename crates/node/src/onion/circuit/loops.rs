@@ -2,21 +2,27 @@
 //! table, their first cells on the link to the guard (#834 D4, D6′, D8).
 //!
 //! ```text
-//! send(route, (f, ā), b, v, s):  x ← ⌈now / Q⌉·Q + X₀
-//!                                (cell, t_⋄, k) ← build_loop(route, (f, ā), me, b, x, v)
-//!                                T ← T ∪ {t_⋄ ↦ (k, x, s)};  guard ← cell   (awaited)
-//! enqueue(…):                    the same, with the cell queued on the guard's lane
-//! surbs(route, b, n, s):         n × (υ, t, k) ← build_surb(return path, me, b, x)
-//!                                T ← T ∪ {t ↦ (k, x, s)};  return υ₁ … υₙ
+//! send(route, (f, ā), b, v, s):      x ← ⌈now / Q⌉·Q + X₀
+//!                                    (cell, t_⋄, k) ← build_loop(route, (f, ā), me, b, x, v)
+//!                                    T ← T ∪ {t_⋄ ↦ (k, x, s)};  guard ← cell   (awaited)
+//! send_pipeline(route, P, b, v₀):    (cell, t_⋄, k) ← build_loop(route, P, me, b, x, v₀)
+//!                                    T ← T ∪ {t_⋄ ↦ (k, x, oneshot(W(fₙ)))};  guard ← cell
+//! enqueue(…):                        the same, with the cell queued on the guard's lane
+//! surbs(route, b, n, s):             n × (υ, t, k) ← build_surb(return path, me, b, x)
+//!                                    T ← T ∪ {t ↦ (k, x, s)};  return υ₁ … υₙ
 //! ```
 //!
 //! Law: every loop and reply block leaves its reply key in `T` before its cell leaves the node,
 //! so a reply can never arrive before its entry.
 
 use std::slice;
+use std::sync::Arc;
 
+use futures::channel::oneshot;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 
 use super::OnionClientTags;
 use super::OnionExpiry;
@@ -26,11 +32,15 @@ use super::OnionReplySink;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::onion::pipeline::ensure_pipeline_input_width;
+use crate::onion::pipeline::OnionInvokePipeline;
+use crate::onion::route::OnionPipelineRoute;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -44,31 +54,60 @@ pub(crate) struct OnionLoopClient {
     tags: OnionClientTags,
     /// The link emitter the first cells leave through.
     link_sender: OnionLinkSender,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
+    /// Injected cryptographic RNG capability.
+    rng: SharedRng,
 }
 
 impl OnionLoopClient {
     /// The loop client of the node `local`.
-    pub(crate) const fn new(
+    #[allow(dead_code)]
+    pub(crate) fn new(local: Did, tags: OnionClientTags, link_sender: OnionLinkSender) -> Self {
+        Self::new_with_capabilities(
+            local,
+            tags,
+            link_sender,
+            Arc::new(SystemClock),
+            SharedRng::system(),
+        )
+    }
+
+    /// The loop client of the node `local` with explicit `clock` and `rng` capabilities.
+    pub(crate) const fn new_with_capabilities(
         local: Did,
         tags: OnionClientTags,
         link_sender: OnionLinkSender,
+        clock: SharedClock,
+        rng: SharedRng,
     ) -> Self {
         Self {
             local,
             tags,
             link_sender,
+            clock,
+            rng,
         }
+    }
+
+    /// Remove an unspent tag entry (used on local timeout/drop of a one-shot pipeline).
+    pub(crate) fn remove_tag(&self, tag: &OnionLoopTag) {
+        self.tags.remove(tag);
+    }
+
+    /// Return the epoch [`SharedClock`] capability bound to this loop client.
+    pub(crate) fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Return the [`SharedRng`] capability bound to this loop client.
+    pub(crate) fn rng(&self) -> &SharedRng {
+        &self.rng
     }
 
     /// Send `value` into a fresh loop of `route` that applies `application` at its symbol hop,
     /// in class `class`, awaiting its reply at `sink`; returns the loop's expiry `x` once the
-    /// first cell has left for the guard. The caller waits for the link: this is the departure
-    /// of stream data, whose waiting is the upload's backpressure.
-    ///
-    /// # Errors
-    ///
-    /// A build failure (a value too wide for the class, or a negligible key failure), or the
-    /// link send's error.
+    /// first cell has left for the guard.
     pub(crate) async fn send(
         &self,
         scope: &Scope,
@@ -78,18 +117,15 @@ impl OnionLoopClient {
         value: &[u8],
         sink: &OnionReplySink,
     ) -> Result<OnionExpiry> {
-        let (link, cell, expiry) = self.prepare(route, application, class, value, sink)?;
-        self.link_sender.send(scope.clone(), link, cell).await?;
+        let (link, cell, expiry, tag) = self.prepare(route, application, class, value, sink)?;
+        if let Err(error) = self.link_sender.send(scope.clone(), link, cell).await {
+            self.tags.unregister_all([tag]);
+            return Err(error);
+        }
         Ok(expiry)
     }
 
-    /// [`Self::send`] without waiting for the link: the loop is queued on the guard's lane. This
-    /// is the departure of a session's control loops (its open, credit and keep-alive), which
-    /// must never hold up the session's replies.
-    ///
-    /// # Errors
-    ///
-    /// A build failure, or a full lane.
+    /// [`Self::send`] without waiting for the link: the loop is queued on the guard's lane.
     pub(crate) fn enqueue(
         &self,
         scope: &Scope,
@@ -99,13 +135,75 @@ impl OnionLoopClient {
         value: &[u8],
         sink: &OnionReplySink,
     ) -> Result<OnionExpiry> {
-        let (link, cell, expiry) = self.prepare(route, application, class, value, sink)?;
-        self.link_sender.enqueue_local(scope.clone(), link, cell)?;
+        let (link, cell, expiry, tag) = self.prepare(route, application, class, value, sink)?;
+        if let Err(error) = self.link_sender.enqueue_local(scope.clone(), link, cell) {
+            self.tags.unregister_all([tag]);
+            return Err(error);
+        }
         Ok(expiry)
     }
 
+    /// Build and dispatch a multi-stage one-shot Kleisli `pipeline` over `route` in `class`,
+    /// registering its one-shot reply tag before sending the first cell to the guard (#834 D4, L3).
+    pub(crate) async fn send_pipeline(
+        &self,
+        scope: &Scope,
+        route: &OnionPipelineRoute,
+        pipeline: &OnionInvokePipeline,
+        class: OnionLoopClass,
+        input: &[u8],
+    ) -> Result<(oneshot::Receiver<Vec<u8>>, OnionLoopTag, OnionExpiry)> {
+        if !route.matches_pipeline(pipeline) {
+            return Err(Error::OnionRouteError(
+                OnionRouteError::PipelineRouteMismatch,
+            ));
+        }
+        ensure_pipeline_input_width(pipeline, input)?;
+        let min_class = pipeline.loop_class();
+        if class < min_class {
+            return Err(Error::OnionRouteError(OnionRouteError::LoopBuild(format!(
+                "loop class {class:?} is narrower than required {min_class:?}"
+            ))));
+        }
+        let now_ms = self.clock.now_ms();
+        let expiry = OnionExpiry::of_build(now_ms);
+        let applications = pipeline.applications();
+        let built = {
+            let mut rng = self.rng.lock_rng();
+            build_loop(
+                route.hops(),
+                applications.as_slice(),
+                self.local,
+                class,
+                expiry,
+                input,
+                &mut rng,
+            )
+        }
+        .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
+        let tag = built.reply.tag;
+        let (sender, receiver) = oneshot::channel();
+        self.tags.register_oneshot(
+            now_ms,
+            built.guard,
+            built.reply,
+            pipeline.output_bytes(),
+            sender,
+        )?;
+        if let Err(error) = self
+            .link_sender
+            .send(scope.clone(), OnionLink::new(built.guard), built.cell)
+            .await
+        {
+            self.tags.remove(&tag);
+            return Err(error);
+        }
+        Ok((receiver, tag, expiry))
+    }
+
     /// Build one loop and register its reply key in `T` (the module law: before its cell
-    /// leaves); return the guard's link, the first cell and the loop's expiry.
+    /// leaves); return the guard's link, the first cell, the loop's expiry and the registered
+    /// loop tag.
     fn prepare(
         &self,
         route: &OnionRoute,
@@ -113,8 +211,8 @@ impl OnionLoopClient {
         class: OnionLoopClass,
         value: &[u8],
         sink: &OnionReplySink,
-    ) -> Result<(OnionLink, OnionCell, OnionExpiry)> {
-        let now_ms = get_epoch_ms();
+    ) -> Result<(OnionLink, OnionCell, OnionExpiry, OnionLoopTag)> {
+        let now_ms = self.clock.now_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let built = build_loop(
             route.hops(),
@@ -123,16 +221,18 @@ impl OnionLoopClient {
             class,
             expiry,
             value,
-            &mut rand::thread_rng(),
+            &mut self.rng.lock_rng(),
         )
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
+        let tag = built.reply.tag;
         self.tags
             .register(now_ms, built.guard, built.reply, sink.clone())?;
-        Ok((OnionLink::new(built.guard), built.cell, expiry))
+        Ok((OnionLink::new(built.guard), built.cell, expiry, tag))
     }
 
     /// Build `count` reply blocks over `route`'s return path in class `class`, registering each
-    /// block's reply key for `sink`; returns the blocks and their common expiry.
+    /// block's reply key for `sink`; returns the blocks, their registered tags, and their common
+    /// expiry.
     ///
     /// # Errors
     ///
@@ -143,28 +243,44 @@ impl OnionLoopClient {
         class: OnionLoopClass,
         count: usize,
         sink: &OnionReplySink,
-    ) -> Result<(Vec<OnionSurb>, OnionExpiry)> {
-        let now_ms = get_epoch_ms();
+    ) -> Result<(Vec<OnionSurb>, Vec<OnionLoopTag>, OnionExpiry)> {
+        let now_ms = self.clock.now_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let guard = route.hops().guard().did;
-        let mut rng = rand::thread_rng();
+        let mut rng = self.rng.lock_rng();
         // Sized once: a growing vector would leave copies of the blocks' seeds in the buffers
         // it frees.
         let mut surbs = Vec::with_capacity(count);
+        let mut registered_tags = Vec::with_capacity(count);
         for _ in 0..count {
-            let (surb, reply) = build_surb(
+            let (surb, reply) = match build_surb(
                 route.hops().return_path(),
                 self.local,
                 class,
                 expiry,
                 &mut rng,
-            )
-            .map_err(|error| {
-                Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string()))
-            })?;
-            self.tags.register(now_ms, guard, reply, sink.clone())?;
+            ) {
+                Ok(built) => built,
+                Err(error) => {
+                    self.tags.unregister_all(registered_tags);
+                    return Err(Error::OnionRouteError(OnionRouteError::LoopBuild(
+                        error.to_string(),
+                    )));
+                }
+            };
+            let tag = reply.tag;
+            if let Err(error) = self.tags.register(now_ms, guard, reply, sink.clone()) {
+                self.tags.unregister_all(registered_tags);
+                return Err(error);
+            }
+            registered_tags.push(tag);
             surbs.push(surb);
         }
-        Ok((surbs, expiry))
+        Ok((surbs, registered_tags, expiry))
+    }
+
+    /// Roll back registered reply tags whose carrying loop failed to leave this node.
+    pub(crate) fn unregister_tags(&self, tags: impl IntoIterator<Item = OnionLoopTag>) {
+        self.tags.unregister_all(tags);
     }
 }

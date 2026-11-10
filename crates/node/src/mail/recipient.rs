@@ -63,6 +63,8 @@ use crate::processor::Processor;
 
 /// The default interval between two polls of the mail topic.
 pub const DEFAULT_MAIL_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// Default upper bound on a single recipient poll before a stalled fetch or store is aborted.
+pub const DEFAULT_MAIL_POLL_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest interval between two polls, `H / 2` (the schedule law).
 pub const MAX_MAIL_POLL_INTERVAL: Duration = Duration::from_millis(MAX_TTL_MS / 2);
 /// How long an opened mail id is kept: `H + σ`, after which no owner on a
@@ -217,6 +219,18 @@ pub enum RecipientError<E> {
     /// The inbox did not file a mail.
     #[error("cannot file a mail: {0}")]
     Inbox(#[source] E),
+    /// A cooperative stop ended the poll before completion.
+    #[error("mail recipient stopped")]
+    Stopped,
+    /// A single poll exceeded its time budget (e.g. stalled storage or network fetch).
+    #[error("mail poll timed out after {timeout:?}")]
+    PollTimeout {
+        /// The configured per-poll timeout that elapsed.
+        timeout: Duration,
+    },
+    /// The runtime could not arm the poll timeout timer.
+    #[error("mail poll timer failed: {0}")]
+    Timer(#[source] rings_runtime::TimerError),
 }
 
 /// Pure decision ADT classifying one `(Opening, Option<PublicKey<33>>)` against the current
@@ -317,6 +331,7 @@ pub struct Recipient<I, K> {
     inbox: I,
     records: K,
     interval: Duration,
+    poll_timeout: Duration,
     /// Serializes this recipient's polls so each observes the previous poll's filing records.
     poll_lock: Mutex<()>,
 }
@@ -342,8 +357,15 @@ where
             inbox,
             records,
             interval,
+            poll_timeout: DEFAULT_MAIL_POLL_TIMEOUT,
             poll_lock: Mutex::new(()),
         })
+    }
+
+    /// Override the per-poll timeout bounding a stalled fetch or store operation.
+    pub fn with_poll_timeout(mut self, poll_timeout: Duration) -> Self {
+        self.poll_timeout = poll_timeout;
+        self
     }
 
     /// The inbox mail is filed in.
@@ -351,16 +373,71 @@ where
         &self.inbox
     }
 
-    /// Read the mail topic once, file what opens, and remember it (the poll of this module).
+    /// Read the mail topic once, file what opens, and remember it (the poll of this module),
+    /// bounded by this recipient's poll timeout and the node's cooperative stop token.
     pub async fn poll(&self) -> Result<PollReport, RecipientError<I::Error>> {
-        let _poll_guard = self.poll_lock.lock().await;
+        let stop = self.processor.tasks().stop_token();
+        self.poll_with_stop(&stop).await
+    }
+
+    /// Read the mail topic once, aborting promptly when `stop` or the node's stop fires, or when
+    /// this recipient's poll timeout elapses.
+    pub async fn poll_with_stop(
+        &self,
+        stop: &StopToken,
+    ) -> Result<PollReport, RecipientError<I::Error>> {
+        let node_stop = self.processor.tasks().stop_token();
+        if stop.should_stop() || node_stop.should_stop() {
+            return Err(RecipientError::Stopped);
+        }
+        let work = self.poll_inner(stop);
+        let caller_stopped = stop.stopped();
+        let node_stopped = node_stop.stopped();
+        let deadline = rings_runtime::sleep(self.poll_timeout);
+        futures::pin_mut!(work, caller_stopped, node_stopped, deadline);
+        let any_stop = futures::future::select(caller_stopped, node_stopped);
+        match futures::future::select(work, futures::future::select(any_stop, deadline)).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right((futures::future::Either::Left(_), _)) => {
+                Err(RecipientError::Stopped)
+            }
+            futures::future::Either::Right((
+                futures::future::Either::Right((timer_result, _)),
+                _,
+            )) => match timer_result {
+                Ok(()) => {
+                    tracing::warn!(
+                        timeout = ?self.poll_timeout,
+                        "mail: recipient poll timed out on stalled fetch or storage"
+                    );
+                    Err(RecipientError::PollTimeout {
+                        timeout: self.poll_timeout,
+                    })
+                }
+                Err(error) => Err(RecipientError::Timer(error)),
+            },
+        }
+    }
+
+    async fn poll_inner(&self, stop: &StopToken) -> Result<PollReport, RecipientError<I::Error>> {
+        let _poll_guard = rings_core::utils::SlowLockGuard::acquire(
+            "Recipient::poll_lock",
+            self.poll_lock.lock(),
+        )
+        .await;
         let did = self.processor.did();
         let key = Entry::gen_did(&mail_topic(did)).map_err(RecipientError::Key)?;
-        let entry = self
+        let entry = match self
             .processor
-            .fetch_storage_entry(key)
+            .fetch_storage_entry_with_stop(key, stop)
             .await
-            .map_err(RecipientError::Fetch)?;
+        {
+            Ok(entry) => entry,
+            Err(crate::error::Error::RegistrationStopped) => {
+                return Err(RecipientError::Stopped);
+            }
+            Err(error) => return Err(RecipientError::Fetch(error)),
+        };
         let now_ms = get_epoch_ms();
         let mut records = self.retained_records(now_ms).await?;
         let Some(entry) = entry else {
@@ -467,15 +544,18 @@ where
 
     /// Poll now and then every interval until `stop`, logging a failed poll and polling again.
     pub async fn run(&self, stop: StopToken) {
+        let node_stop = self.processor.tasks().stop_token();
         loop {
-            match self.poll().await {
+            match self.poll_with_stop(&stop).await {
                 Ok(report) if report.filed > 0 => {
                     tracing::info!(filed = report.filed, "mail: filed new mail");
                 }
                 Ok(_) => {}
+                Err(RecipientError::Stopped) => return,
+                Err(_) if stop.should_stop() || node_stop.should_stop() => return,
                 Err(error) => tracing::warn!("mail: poll failed: {error}"),
             }
-            match sleep_unless_stopped(self.interval, &stop, &StopToken::never()).await {
+            match sleep_unless_stopped(self.interval, &stop, &node_stop).await {
                 Ok(true) => {}
                 Ok(false) => return,
                 Err(error) => {

@@ -47,6 +47,13 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
 
+mod pipeline;
+
+pub(crate) use pipeline::select_onion_pipeline_route_from_candidates;
+pub use pipeline::OnionPipelineRoute;
+pub(crate) use pipeline::OnionPipelineRouteCandidates;
+pub use pipeline::OnionPipelineRouteRequest;
+
 /// Route-building request for an onion loop.
 ///
 /// The request names one world-facing symbol, which stands alone in its pipeline (#834 D4a), so
@@ -175,11 +182,12 @@ pub(crate) trait RouteEntropy {
     fn next_u64(&mut self) -> u64;
 }
 
-/// Route entropy drawn from the thread-local CSPRNG.
+/// Route entropy drawn from the system entropy source.
 pub(crate) struct SystemRouteEntropy;
 
 impl SystemRouteEntropy {
     /// Build the system entropy source.
+    #[allow(dead_code)]
     pub(crate) const fn new() -> Self {
         Self
     }
@@ -187,7 +195,13 @@ impl SystemRouteEntropy {
 
 impl RouteEntropy for SystemRouteEntropy {
     fn next_u64(&mut self) -> u64 {
-        rand::random()
+        rand::RngCore::next_u64(&mut rings_core::utils::SystemEntropy)
+    }
+}
+
+impl RouteEntropy for rings_core::utils::SharedRng {
+    fn next_u64(&mut self) -> u64 {
+        rand::RngCore::next_u64(&mut self.lock_rng())
     }
 }
 

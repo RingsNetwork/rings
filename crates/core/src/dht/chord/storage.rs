@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 
@@ -27,13 +29,13 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::fair_admission::Principal;
-use crate::utils::get_epoch_ms;
+use crate::utils::SlowLockGuard;
 
 /// A lookup placement settled here.
 #[derive(Debug)]
 pub(crate) enum LookupSettlement {
     /// A live value is stored here.
-    Found(Entry),
+    Found(Box<Entry>),
     /// This node owns the placement and stores nothing for it.
     Missed(PlacementMiss),
 }
@@ -70,7 +72,7 @@ pub(crate) enum OperateRoute {
 /// placement, so values written by earlier builds stay addressable.
 ///
 /// Law: `StorageKey::from_str(&key.to_string()) == Ok(key)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct StorageKey {
     kind: EntryKind,
     placement: Did,
@@ -171,11 +173,13 @@ async fn live_entry(
 /// The counts a projection can change: elements, element dots, co-dots, removes, and whether a
 /// register is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops,
 /// so a projection with the same shape is the same value.
-fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, bool) {
+fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, usize, usize, bool) {
     (
         entry.data.len(),
         entry.crdt.dots.len(),
         entry.crdt.co_dots.len(),
+        entry.crdt.co_registers.len(),
+        entry.crdt.proofs.len(),
         entry.crdt.tombstones.len(),
         entry.crdt.register.is_some(),
     )
@@ -262,7 +266,7 @@ async fn operate_live_entry(
     actor: Did,
     introducer: Principal,
     now_ms: u128,
-) -> Result<()> {
+) -> Result<bool> {
     let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
     store
         .enforces_data_provenance(op.kind())
@@ -275,9 +279,13 @@ async fn operate_live_entry(
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
         Some(value) => {
             value.check_tombstone_bound()?;
-            store.put(key, &value, introducer, now_ms).await
+            store.put(key, &value, introducer, now_ms).await?;
+            Ok(true)
         }
-        None => store.remove(key).await,
+        None => {
+            store.remove(key).await?;
+            Ok(false)
+        }
     }
 }
 
@@ -323,8 +331,16 @@ impl PeerRing {
         let Some(store) = self.carrier_storage(key.kind()) else {
             return Ok(None);
         };
-        let _transition = self.storage_transition.lock().await;
-        live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
+        let live = live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?;
+        if live.is_none() {
+            self.advance_storage_custody_incarnation(key)?;
+        }
+        Ok(live)
     }
 
     /// Every live entry of both namespaces with its key, retiring the rest. Each store yields
@@ -337,7 +353,11 @@ impl PeerRing {
         &self,
         now_ms: u128,
     ) -> Result<Vec<(StorageKey, Entry)>> {
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let mut live = Vec::new();
         for kind in [EntryKind::Data, EntryKind::RelayMessage] {
             let Some(store) = self.carrier_storage(kind) else {
@@ -355,15 +375,65 @@ impl PeerRing {
                 }
             }
         }
+        let live_keys = live.iter().map(|(slot, _)| *slot).collect::<BTreeSet<_>>();
+        self.storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .retain(|slot, _| live_keys.contains(slot));
         Ok(live)
     }
 
+    /// Current local custody incarnation for `key` (`0` when no active hand-off incarnation is
+    /// registered for `key`).
+    pub(crate) fn storage_custody_incarnation(&self, key: StorageKey) -> Result<u64> {
+        let incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(incarnations.get(&key).copied().unwrap_or(0))
+    }
+
+    /// Record that an outgoing hand-off has observed the current custody incarnation of `key`,
+    /// returning that incarnation so the resulting acknowledgement can be bound to it (#1207).
+    pub(crate) fn observe_storage_handoff_incarnation(&self, key: StorageKey) -> Result<u64> {
+        let mut incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        let incarnation = *incarnations.entry(key).or_insert_with(|| {
+            self.next_storage_custody_incarnation
+                .fetch_add(1, Ordering::Relaxed)
+        });
+        Ok(incarnation)
+    }
+
+    /// Clear any active hand-off custody incarnation of `key` after its local custody epoch ends,
+    /// invalidating any still-in-flight hand-off acknowledgements from the retired epoch (#1207).
+    pub(crate) fn advance_storage_custody_incarnation(&self, key: StorageKey) -> Result<()> {
+        let mut incarnations = self
+            .storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        incarnations.remove(&key);
+        Ok(())
+    }
+
+    /// Record a local write or inbound join at `key`. Clearing any active hand-off incarnation
+    /// invalidates that hand-off's cleanup authority so a delayed acknowledgement cannot delete
+    /// the newly written or re-acquired custody state, while keeping untracked keys out of the map
+    /// (#1207).
+    pub(crate) fn note_storage_custody_write(&self, key: StorageKey) -> Result<()> {
+        self.advance_storage_custody_incarnation(key)
+    }
+
     /// Remove the value stored at `key` iff `ack` proves the receiver holds exactly that
-    /// value: the ack-gated local cleanup of an ownership hand-off.
+    /// value and is bound to the current local custody incarnation: the ack-gated local cleanup
+    /// of an ownership hand-off (#1207).
     ///
-    /// Post: a value written after the hand-off copy was taken differs from the acked one and
-    /// stays; the comparison and the removal are one storage transition, so a write landing
-    /// between them cannot be removed by an ack for an older value.
+    /// Post: a value written or re-acquired after the hand-off copy was taken either differs from
+    /// the acked one or sits at a newer custody incarnation and stays; the comparison and the
+    /// removal are one storage transition, so a write landing between them cannot be removed by
+    /// an ack for an older value or an earlier custody incarnation.
     pub(crate) async fn remove_storage_entry_confirmed_by(
         &self,
         key: StorageKey,
@@ -373,14 +443,22 @@ impl PeerRing {
         let Some(store) = self.carrier_storage(key.kind()) else {
             return Ok(());
         };
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let Some(local) =
             live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
+            self.advance_storage_custody_incarnation(key)?;
             return Ok(());
         };
-        if ack.confirms_local_value(&local, now_ms) {
+        if self.storage_custody_incarnation(key)? == ack.custody_incarnation()
+            && ack.confirms_local_value(&local, now_ms)
+        {
             store.remove(&key.to_string()).await?;
+            self.advance_storage_custody_incarnation(key)?;
         }
         Ok(())
     }
@@ -407,8 +485,13 @@ impl PeerRing {
     ) -> Result<Entry> {
         incoming.check_admissible_at(now_ms, self.network_id())?;
         let store = self.carrier_store_for_write(incoming.kind)?;
-        let key = StorageKey::new(incoming.kind, key).to_string();
-        let _transition = self.storage_transition.lock().await;
+        let slot = StorageKey::new(incoming.kind, key);
+        let key = slot.to_string();
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
@@ -426,6 +509,7 @@ impl PeerRing {
         .retired_at(now_ms);
         stored.check_tombstone_bound()?;
         store.put(&key, &stored, introducer, now_ms).await?;
+        self.note_storage_custody_write(slot)?;
         Ok(stored)
     }
 
@@ -446,9 +530,16 @@ impl PeerRing {
         introducer: Principal,
     ) -> Result<Entry> {
         let store = self.carrier_store_for_write(admitted.kind())?;
-        let key = StorageKey::new(admitted.kind(), key).to_string();
-        let _transition = self.storage_transition.lock().await;
-        join_live_entry(&store, &key, admitted, introducer, now_ms).await
+        let slot = StorageKey::new(admitted.kind(), key);
+        let key = slot.to_string();
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
+        let stored = join_live_entry(&store, &key, admitted, introducer, now_ms).await?;
+        self.note_storage_custody_write(slot)?;
+        Ok(stored)
     }
 
     /// Apply a stamped operation issued by `writer`, delivered by `introducer`, to the value
@@ -490,9 +581,19 @@ impl PeerRing {
             }
         }
         let store = self.carrier_store_for_write(op.kind())?;
-        let key = StorageKey::new(op.kind(), placement).to_string();
-        let _transition = self.storage_transition.lock().await;
-        operate_live_entry(&store, &key, op, writer, introducer, now_ms).await
+        let slot = StorageKey::new(op.kind(), placement);
+        let key = slot.to_string();
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
+        if operate_live_entry(&store, &key, op, writer, introducer, now_ms).await? {
+            self.note_storage_custody_write(slot)?;
+        } else {
+            self.advance_storage_custody_incarnation(slot)?;
+        }
+        Ok(())
     }
 
     /// The step one placement of a lookup takes under the topology and local storage at
@@ -529,7 +630,9 @@ impl PeerRing {
                     .await?
                     .filter(|value| value.bound_live_at(now_ms));
                 if let Some(value) = served {
-                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(value)));
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(Box::new(
+                        value,
+                    ))));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
                 if owner != self.did {
@@ -567,7 +670,7 @@ impl PeerRing {
         fallback_on_local_virtual_miss: bool,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let mut ret = vec![];
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
@@ -578,7 +681,7 @@ impl PeerRing {
             {
                 PlacementLookup::Settled(LookupSettlement::Found(value)) => {
                     return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                        value, misses,
+                        *value, misses,
                     )));
                 }
                 PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
@@ -753,7 +856,7 @@ impl PeerRing {
         op: EntryOperation,
         member: Did,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let op = self.stamp_operation(op, now_ms, None).await?;
         let placement = op.did()?;
         if member == self.did {
@@ -798,7 +901,7 @@ impl PeerRing {
         redundancy: u16,
         report: bool,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let op = self.stamp_operation(op, now_ms, None).await?;
         let entry_key = op.did()?;
         let kind = op.entry().kind;
@@ -888,6 +991,34 @@ impl PeerRing {
             false => Ok(()),
         }
     }
+    /// Join a fetched entry into the cache at `now_ms`.
+    pub(crate) async fn local_cache_put_at(&self, entry: Entry, now_ms: u128) -> Result<()> {
+        if entry.kind.is_relay_inbox() {
+            return Err(Error::RelayInboxOperationNotAllowed);
+        }
+        let key = entry.did.to_string();
+        let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
+        let _transition = self.cache_transition.lock().await;
+        join_live_entry(
+            &CarrierStore::Whole(&self.cache),
+            &key,
+            admitted,
+            Principal::Local,
+            now_ms,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Read a cached entry at `now_ms`, as a lookup serves it.
+    pub(crate) async fn local_cache_get_at(
+        &self,
+        entry_key: Did,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
+        let held = self.local_cache_held(entry_key, now_ms).await?;
+        Ok(held.filter(|entry| entry.bound_live_at(now_ms)))
+    }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -905,22 +1036,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// The read-join-write is one cache transition, so two concurrent replies cannot lose one
     /// side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
-        if entry.kind.is_relay_inbox() {
-            return Err(Error::RelayInboxOperationNotAllowed);
-        }
-        let now_ms = get_epoch_ms();
-        let key = entry.did.to_string();
-        let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
-        let _transition = self.cache_transition.lock().await;
-        join_live_entry(
-            &CarrierStore::Whole(&self.cache),
-            &key,
-            admitted,
-            Principal::Local,
-            now_ms,
-        )
-        .await
-        .map(drop)
+        self.local_cache_put_at(entry, self.epoch_ms()).await
     }
 
     /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,
@@ -934,7 +1050,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// dots this writer observed and asked to remove. An operation the admission law refuses,
     /// which no owner applies, and a relay inbox, which no lookup reads, are not observed.
     async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         if op.kind().is_relay_inbox()
             || op
                 .validate_data_write(now_ms, self.network_id(), self.did, Principal::Local)
@@ -944,7 +1060,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         }
         let key = op.entry().did.to_string();
         let _transition = self.cache_transition.lock().await;
-        operate_live_entry(
+        match operate_live_entry(
             &CarrierStore::Whole(&self.cache),
             &key,
             op,
@@ -953,6 +1069,10 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             now_ms,
         )
         .await
+        {
+            Ok(_) | Err(Error::DataEntryWriteUnauthorized) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Read a cached entry, as a lookup serves it.
@@ -961,8 +1081,6 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// register, is served as absent, as a replica serves it: a cache entry that serves no
     /// element must not answer a fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        let now_ms = get_epoch_ms();
-        let held = self.local_cache_held(entry_key, now_ms).await?;
-        Ok(held.filter(|entry| entry.bound_live_at(now_ms)))
+        self.local_cache_get_at(entry_key, self.epoch_ms()).await
     }
 }

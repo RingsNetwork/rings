@@ -42,7 +42,8 @@ use rings_core::message::ChordStorageInterface;
 use rings_core::message::MessageSigner;
 use rings_core::message::ScopedStorage;
 use rings_core::swarm::storage_api::StoreReceipt;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
 
 use crate::descriptor::heard_descriptors;
@@ -272,6 +273,11 @@ impl<'a> RegistrationContext<'a> {
         self.processor.did()
     }
 
+    /// Return the current Unix epoch timestamp in milliseconds from the processor's clock.
+    pub(crate) fn now_ms(&self) -> u128 {
+        self.processor.clock().now_ms()
+    }
+
     /// Return the local network id.
     pub(crate) fn network_id(&self) -> u32 {
         self.processor.swarm.network_id()
@@ -427,7 +433,8 @@ pub(crate) struct DhtRegistrationPublisher<S> {
     renewal_margin_ms: u128,
     /// The freshness window `T` this registration signs.
     fresh_for_ms: u64,
-    /// The lease held, if any; its lock also serializes the heartbeats.
+    /// The lease held, if any; its lock serializes only the synchronous lease state transition
+    /// and is released before appending descriptor elements over the DHT (`publish_lease`).
     held: Arc<AsyncMutex<Option<HeldLease<S>>>>,
 }
 
@@ -458,28 +465,34 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
         now_ms: u128,
         descriptors_for: impl Fn(LeaseTerms) -> Result<S>,
     ) -> Result<S> {
-        let mut held = self.held.lock().await;
-        context.ensure_running()?;
-        let delegatee_public_key = context.delegatee_key().delegatee_public_key();
-        let kept = match held.as_ref() {
-            Some(lease)
-                if lease.delegatee_public_key == delegatee_public_key
-                    && now_ms.saturating_add(self.renewal_margin_ms)
-                        < lease.terms.expires_at_ms =>
-            {
-                let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
-                (bodies == lease.bodies).then(|| lease.clone())
-            }
-            _ => None,
-        };
-        let lease = match kept {
-            Some(lease) => lease,
-            None => {
-                let nominal_expires_at_ms = now_ms.saturating_add(registry_lease().as_millis());
-                let max_admissible_expires_at_ms = nominal_expires_at_ms
-                    .saturating_add(rings_core::consts::TS_OFFSET_TOLERANCE_MS);
-                let terms =
-                    LeaseTerms {
+        // Scope `held` strictly around the synchronous lease transition; network/DHT appends run
+        // outside the lock so a slow placement never stalls concurrent heartbeat state checks.
+        let lease = {
+            let mut held = rings_core::utils::SlowLockGuard::acquire(
+                "DhtRegistrationPublisher::held",
+                self.held.lock(),
+            )
+            .await;
+            context.ensure_running()?;
+            let delegatee_public_key = context.delegatee_key().delegatee_public_key();
+            let kept = match held.as_ref() {
+                Some(lease)
+                    if lease.delegatee_public_key == delegatee_public_key
+                        && now_ms.saturating_add(self.renewal_margin_ms)
+                            < lease.terms.expires_at_ms =>
+                {
+                    let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
+                    (bodies == lease.bodies).then(|| lease.clone())
+                }
+                _ => None,
+            };
+            match kept {
+                Some(lease) => lease,
+                None => {
+                    let nominal_expires_at_ms = now_ms.saturating_add(registry_lease().as_millis());
+                    let max_admissible_expires_at_ms = nominal_expires_at_ms
+                        .saturating_add(rings_core::consts::TS_OFFSET_TOLERANCE_MS);
+                    let terms = LeaseTerms {
                         fresh_for_ms: self.fresh_for_ms,
                         expires_at_ms: nominal_expires_at_ms
                             .max(held.as_ref().map_or(0, |previous| {
@@ -487,20 +500,21 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
                             }))
                             .min(max_admissible_expires_at_ms),
                     };
-                let descriptors = descriptors_for(terms)?;
-                let lease = HeldLease {
-                    terms,
-                    delegatee_public_key,
-                    bodies: signing_data(descriptors.as_slice())?,
-                    elements: descriptors
-                        .as_slice()
-                        .iter()
-                        .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
-                        .collect::<Result<_>>()?,
-                    descriptors,
-                };
-                *held = Some(lease.clone());
-                lease
+                    let descriptors = descriptors_for(terms)?;
+                    let lease = HeldLease {
+                        terms,
+                        delegatee_public_key,
+                        bodies: signing_data(descriptors.as_slice())?,
+                        elements: descriptors
+                            .as_slice()
+                            .iter()
+                            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
+                            .collect::<Result<_>>()?,
+                        descriptors,
+                    };
+                    **held = Some(lease.clone());
+                    lease
+                }
             }
         };
         for element in &lease.elements {
@@ -542,6 +556,7 @@ pub(crate) trait RegistrationTask: MaybeSendSync {
 pub struct OnlineNodeRegistration {
     heartbeat_interval: Duration,
     node_type: OnlineNodeType,
+    clock: SharedClock,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
     /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
@@ -559,10 +574,31 @@ impl OnlineNodeRegistration {
         endpoint_hint: Option<String>,
         onion_relay: Option<OnionProcessEpochCell>,
     ) -> Self {
+        Self::new_with_clock(
+            heartbeat_interval,
+            ttl,
+            node_type,
+            endpoint_hint,
+            onion_relay,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Create an online-node registration task bound to an explicit [`SharedClock`].
+    pub fn new_with_clock(
+        heartbeat_interval: Duration,
+        ttl: Duration,
+        node_type: OnlineNodeType,
+        endpoint_hint: Option<String>,
+        onion_relay: Option<OnionProcessEpochCell>,
+        clock: SharedClock,
+    ) -> Self {
+        let started_at_ms = clock.now_ms();
         Self {
             heartbeat_interval,
             node_type,
-            started_at_ms: get_epoch_ms(),
+            clock,
+            started_at_ms,
             endpoint_hint,
             onion_relay,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC, heartbeat_interval, ttl),
@@ -607,7 +643,7 @@ impl OnlineNodeRegistration {
     ) -> Result<OnlineNodeDescriptor> {
         let [descriptor] = self
             .publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, self.clock.now_ms(), |terms| {
                 self.descriptor_at(context, terms)
                     .map(|descriptor| [descriptor])
             })
@@ -645,3 +681,5 @@ pub(crate) use readiness::RegistrationReadiness;
 
 #[cfg(test)]
 mod test_first_edge;
+#[cfg(all(test, rings_native))]
+mod test_lease_and_readiness_model;

@@ -70,8 +70,8 @@ use futures::future::FusedFuture;
 use futures::FutureExt;
 use futures::StreamExt;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
-use rings_runtime::sleep;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSend;
 use rings_runtime::MaybeSendSync;
 
@@ -81,6 +81,7 @@ use super::exit::OnionExitEffect;
 use super::exit::OnionExitSession;
 use super::exit::OnionWorldRead;
 use super::frame::OnionFrame;
+use super::session_sleep;
 use super::OnionSessionArguments;
 use super::OnionSessionId;
 use super::OnionTargetDigest;
@@ -107,6 +108,10 @@ const ONION_EXIT_SESSION_INBOUND: usize = 256;
 
 /// The period of a session's tick: its idle and gap checks run at least this often.
 const ONION_EXIT_SESSION_TICK: Duration = Duration::from_secs(10);
+
+/// Maximum duration one exit world write or shutdown operation may stay pending before failing
+/// the session closed.
+const ONION_EXIT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The world one symbol's sessions talk to: sockets for `tcp`, a fetch for `https`.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
@@ -262,8 +267,19 @@ struct OnionExitShared<W> {
     accounting: OnionExitAccounting,
     /// The link emitter replies leave through.
     link_sender: OnionLinkSender,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
     /// The sessions.
     sessions: Mutex<OnionExitTable>,
+    /// Test-only clock override (milliseconds since epoch) for deterministic expiry tests.
+    #[cfg(all(test, rings_native))]
+    clock_ms: Option<Arc<std::sync::atomic::AtomicU64>>,
+    /// Test-only tick period override for deterministic expiry tests.
+    #[cfg(all(test, rings_native))]
+    tick_period: Duration,
+    /// Test-only per-write timeout override for deterministic stalled-write tests.
+    #[cfg(all(test, rings_native))]
+    write_timeout: Duration,
 }
 
 /// The interpretation of one world-facing session symbol over the world `W`; see the module
@@ -275,11 +291,29 @@ pub(crate) struct OnionExitSessions<W> {
 impl<W: OnionWorld> OnionExitSessions<W> {
     /// The sessions of one symbol over `world`, under `policy` and the node's `accounting`,
     /// replying through `link_sender`.
+    #[allow(dead_code)]
     pub(crate) fn new(
         world: W,
         policy: OnionExitPolicy,
         accounting: OnionExitAccounting,
         link_sender: OnionLinkSender,
+    ) -> Self {
+        Self::new_with_clock(
+            world,
+            policy,
+            accounting,
+            link_sender,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// [`Self::new`] driven by an explicit `clock` capability.
+    pub(crate) fn new_with_clock(
+        world: W,
+        policy: OnionExitPolicy,
+        accounting: OnionExitAccounting,
+        link_sender: OnionLinkSender,
+        clock: SharedClock,
     ) -> Self {
         Self {
             shared: Arc::new(OnionExitShared {
@@ -287,7 +321,14 @@ impl<W: OnionWorld> OnionExitSessions<W> {
                 policy,
                 accounting,
                 link_sender,
+                clock,
                 sessions: Mutex::new(OnionExitTable::default()),
+                #[cfg(all(test, rings_native))]
+                clock_ms: None,
+                #[cfg(all(test, rings_native))]
+                tick_period: ONION_EXIT_SESSION_TICK,
+                #[cfg(all(test, rings_native))]
+                write_timeout: ONION_EXIT_WRITE_TIMEOUT,
             }),
         }
     }
@@ -335,7 +376,7 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
                 let (inbound, received) = mpsc::channel(ONION_EXIT_SESSION_INBOUND);
                 scope.tasks().spawn(drive(
                     Arc::clone(&self.shared),
-                    scope.clone(),
+                    Some(scope.clone()),
                     arguments,
                     lease,
                     received,
@@ -382,7 +423,7 @@ impl<W: OnionWorld> OnionInterpretation for OnionExitSessions<W> {
 
     fn lose(&self, peer: Did) {
         match lock(&self.shared.sessions) {
-            Ok(mut sessions) => sessions.lose(peer, get_epoch_ms()),
+            Ok(mut sessions) => sessions.lose(peer, now_ms(&self.shared)),
             Err(error) => tracing::debug!(%peer, %error, "onion exit sessions are unreadable"),
         }
     }
@@ -416,19 +457,45 @@ impl<W: OnionWorld> OnionExitSessions<W> {
 type WorldRead<R> =
     Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = (R, Result<Option<Bytes>>)>)>>;
 
+/// One ordered write-side operation on the session's world.
+enum WorldWriteOp {
+    /// Write stream bytes to the world.
+    Write(Bytes),
+    /// Close the world's write half (`fin`).
+    Shutdown,
+}
+
+/// A write or shutdown of the world in flight: it owns the writer and hands it back with
+/// whether the operation succeeded (`Shutdown` errors are ignored, matching the shell law).
+type WorldWrite<W> = Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = (W, bool)>)>>;
+
 /// The halves of a session's open world.
 struct OnionOpenWorld<W: OnionWorld> {
     /// The read half, while no read is in flight.
     reader: Option<W::Reader>,
-    /// The write half.
-    writer: W::Writer,
+    /// The write half, while no write or shutdown is in flight.
+    writer: Option<W::Writer>,
+    /// Ordered write and shutdown operations waiting for `writer`.
+    pending_writes: VecDeque<WorldWriteOp>,
+}
+
+/// What the driver does after performing a batch of machine effects.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PerformOutcome {
+    /// Keep driving the session.
+    Open,
+    /// Both directions closed cleanly (`fin` both ways): finish any queued writes/shutdown before
+    /// ending, while still polling abort, channel closure, and session expiry.
+    DrainWritesThenClose,
+    /// The session aborted, failed, or expired: stop immediately and drop any in-flight IO.
+    CloseNow,
 }
 
 /// The driver of one session (see the module diagram). It holds the session's lease until it
 /// ends, and buries the session when it does.
 async fn drive<W: OnionWorld>(
     shared: Arc<OnionExitShared<W>>,
-    scope: Scope,
+    scope: Option<Scope>,
     arguments: OnionSessionArguments,
     lease: OnionExitLease,
     mut inbound: mpsc::Receiver<OnionExitInput>,
@@ -437,43 +504,32 @@ async fn drive<W: OnionWorld>(
     let mut machine = OnionExitSession::new(arguments.digest, created_at_ms);
     let mut world: Option<OnionOpenWorld<W>> = None;
     let mut reading: Fuse<WorldRead<W::Reader>> = Fuse::terminated();
-    let mut tick = Box::pin(sleep(ONION_EXIT_SESSION_TICK).fuse());
+    let mut writing: Fuse<WorldWrite<W::Writer>> = Fuse::terminated();
+    let mut closing_after_writes = false;
+    let mut tick = Box::pin(session_sleep(tick_period(&shared)).fuse());
     loop {
-        let effects = futures::select! {
-            input = inbound.next() => match input {
-                Some(input) => machine.forward(input.received_at_ms, input.frame, *input.surb),
-                // Buried (a fate, or a full queue): fail closed, so `abort` leaves under a block
-                // the session holds, then end whatever the machine answers.
-                None => {
-                    let effects = machine.fail(get_epoch_ms());
-                    perform(&shared, &scope, &mut machine, &mut world, effects).await;
-                    break;
-                }
-            },
-            (reader, read) = reading => {
-                if let Some(open) = world.as_mut() {
-                    open.reader = Some(reader);
-                }
-                let now_ms = get_epoch_ms();
-                match read {
-                    Ok(Some(bytes)) => machine.world(now_ms, OnionWorldRead::Bytes(bytes)),
-                    Ok(None) => machine.world(now_ms, OnionWorldRead::Eof),
-                    Err(_) => machine.fail(now_ms),
-                }
-            },
-            _ = tick => {
-                tick = Box::pin(sleep(ONION_EXIT_SESSION_TICK).fuse());
-                machine.tick(get_epoch_ms())
-            },
-        };
-        let open = perform(&shared, &scope, &mut machine, &mut world, effects).await;
-        if !open {
+        if writing.is_terminated() {
+            let started = world.as_mut().and_then(|open| {
+                let op = open.pending_writes.pop_front()?;
+                let writer = open.writer.take()?;
+                Some(write_world(writer, op, write_timeout(&shared)))
+            });
+            if let Some(write) = started {
+                writing = write.fuse();
+            }
+        }
+        if closing_after_writes
+            && writing.is_terminated()
+            && world
+                .as_ref()
+                .is_none_or(|open| open.pending_writes.is_empty())
+        {
             break;
         }
         // The reader leaves the world only for a read that starts: taken with no capacity, it
         // would be dropped, and the world with it.
-        if reading.is_terminated() {
-            let started = machine.reply_capacity(get_epoch_ms()).and_then(|max| {
+        if !closing_after_writes && reading.is_terminated() {
+            let started = machine.reply_capacity(now_ms(&shared)).and_then(|max| {
                 world
                     .as_mut()
                     .and_then(|open| open.reader.take())
@@ -483,10 +539,77 @@ async fn drive<W: OnionWorld>(
                 reading = read.fuse();
             }
         }
+        let effects = futures::select! {
+            input = inbound.next() => match input {
+                Some(input) if closing_after_writes => {
+                    if matches!(input.frame, OnionFrame::Abort { .. }) {
+                        break;
+                    }
+                    Vec::new()
+                }
+                Some(input) => machine.forward(input.received_at_ms, input.frame, *input.surb),
+                // Buried (a fate, or a full queue): fail closed, so `abort` leaves under a block
+                // the session holds, then end whatever the machine answers.
+                None => {
+                    if !closing_after_writes {
+                        let effects = machine.fail(now_ms(&shared));
+                        let _ =
+                            perform(&shared, scope.as_ref(), &mut machine, &mut world, effects)
+                                .await;
+                    }
+                    break;
+                }
+            },
+            (reader, read) = reading => {
+                if let Some(open) = world.as_mut() {
+                    open.reader = Some(reader);
+                }
+                let now = now_ms(&shared);
+                match read {
+                    Ok(Some(bytes)) => machine.world(now, OnionWorldRead::Bytes(bytes)),
+                    Ok(None) => machine.world(now, OnionWorldRead::Eof),
+                    Err(_) => machine.fail(now),
+                }
+            },
+            (writer, ok) = writing => {
+                if let Some(open) = world.as_mut() {
+                    open.writer = Some(writer);
+                }
+                if ok {
+                    Vec::new()
+                } else if closing_after_writes {
+                    break;
+                } else {
+                    if let Some(open) = world.as_mut() {
+                        open.pending_writes.clear();
+                    }
+                    machine.fail(now_ms(&shared))
+                }
+            },
+            _ = tick => {
+                tick = Box::pin(session_sleep(tick_period(&shared)).fuse());
+                let now = now_ms(&shared);
+                if closing_after_writes {
+                    if machine.is_expired_at(now) {
+                        break;
+                    }
+                    Vec::new()
+                } else {
+                    machine.tick(now)
+                }
+            },
+        };
+        match perform(&shared, scope.as_ref(), &mut machine, &mut world, effects).await {
+            PerformOutcome::Open => {}
+            PerformOutcome::DrainWritesThenClose => {
+                closing_after_writes = true;
+            }
+            PerformOutcome::CloseNow => break,
+        }
     }
     drop(lease);
     if let Ok(mut sessions) = lock(&shared.sessions) {
-        sessions.bury(arguments.session, get_epoch_ms());
+        sessions.bury(arguments.session, now_ms(&shared));
     }
 }
 
@@ -498,38 +621,83 @@ fn read_world<R: OnionWorldReader>(mut reader: R, max: usize) -> WorldRead<R> {
     })
 }
 
-/// Perform `effects` in order, feeding the machine's answers to `Open` back into the queue;
-/// return whether the session is still open.
+/// Start one write or shutdown on `writer`, owning the writer until it resolves or `timeout`
+/// elapses.
+fn write_world<W: OnionWorldWriter>(
+    mut writer: W,
+    op: WorldWriteOp,
+    timeout: Duration,
+) -> WorldWrite<W> {
+    Box::pin(async move {
+        let ok = {
+            let op_fut = async {
+                match op {
+                    WorldWriteOp::Write(bytes) => writer.write(bytes).await.is_ok(),
+                    WorldWriteOp::Shutdown => {
+                        let _ = writer.shutdown().await;
+                        true
+                    }
+                }
+            }
+            .fuse();
+            let timeout_fut = session_sleep(timeout).fuse();
+            futures::pin_mut!(op_fut, timeout_fut);
+            futures::select! {
+                ok = op_fut => ok,
+                _ = timeout_fut => false,
+            }
+        };
+        (writer, ok)
+    })
+}
+
+/// Perform `effects` in order, feeding the machine's answers to `Open` back into the queue and
+/// enqueuing world writes for `drive` to poll concurrently with session events.
 async fn perform<W: OnionWorld>(
     shared: &OnionExitShared<W>,
-    scope: &Scope,
+    scope: Option<&Scope>,
     machine: &mut OnionExitSession,
     world: &mut Option<OnionOpenWorld<W>>,
     effects: Vec<OnionExitEffect>,
-) -> bool {
+) -> PerformOutcome {
     let mut queue = VecDeque::from(effects);
+    let mut failed = false;
     while let Some(effect) = queue.pop_front() {
         match effect {
             OnionExitEffect::Open { target } => {
                 let opened = open(shared, &target).await;
                 let accepted = opened.is_some();
                 *world = opened;
-                queue.extend(machine.opened(get_epoch_ms(), accepted));
+                queue.extend(machine.opened(now_ms(shared), accepted));
             }
             OnionExitEffect::Write(bytes) => {
-                let written = match world.as_mut() {
-                    Some(open) if record(shared, bytes.len(), get_epoch_ms()) => {
-                        open.writer.write(bytes).await.is_ok()
+                let queued = match world.as_mut() {
+                    Some(open)
+                        if open.pending_writes.len() < ONION_EXIT_SESSION_INBOUND
+                            && record(shared, bytes.len(), now_ms(shared)) =>
+                    {
+                        open.pending_writes.push_back(WorldWriteOp::Write(bytes));
+                        true
                     }
                     _ => false,
                 };
-                if !written {
-                    fail(machine, &mut queue);
+                if !queued {
+                    failed = true;
+                    if let Some(open) = world.as_mut() {
+                        open.pending_writes.clear();
+                    }
+                    fail_at(now_ms(shared), machine, &mut queue);
                 }
             }
             OnionExitEffect::ShutdownWrite => {
                 if let Some(open) = world.as_mut() {
-                    let _ = open.writer.shutdown().await;
+                    if open.pending_writes.len() < ONION_EXIT_SESSION_INBOUND {
+                        open.pending_writes.push_back(WorldWriteOp::Shutdown);
+                    } else {
+                        failed = true;
+                        open.pending_writes.clear();
+                        fail_at(now_ms(shared), machine, &mut queue);
+                    }
                 }
             }
             // The driver waits for its reply to leave, so the world is read no faster than the
@@ -538,28 +706,85 @@ async fn perform<W: OnionWorld>(
             OnionExitEffect::Reply { frame, surb } => {
                 let Some((next, cell)) = seal(&frame, *surb) else {
                     tracing::debug!("an onion reply could not be sealed");
-                    fail(machine, &mut queue);
+                    failed = true;
+                    if let Some(open) = world.as_mut() {
+                        open.pending_writes.clear();
+                    }
+                    fail_at(now_ms(shared), machine, &mut queue);
                     continue;
                 };
-                let sent = shared
-                    .link_sender
-                    .send(scope.clone(), OnionLink::new(next), cell)
-                    .await;
-                if let Err(error) = sent {
-                    tracing::debug!(%next, %error, "an onion reply did not leave");
-                    fail(machine, &mut queue);
+                if let Some(scope) = scope {
+                    let sent = shared
+                        .link_sender
+                        .send(scope.clone(), OnionLink::new(next), cell)
+                        .await;
+                    if let Err(error) = sent {
+                        tracing::debug!(%next, %error, "an onion reply did not leave");
+                        failed = true;
+                        if let Some(open) = world.as_mut() {
+                            open.pending_writes.clear();
+                        }
+                        fail_at(now_ms(shared), machine, &mut queue);
+                    }
                 }
             }
-            OnionExitEffect::Close => return false,
+            OnionExitEffect::Close => {
+                return if !failed && machine.completed_cleanly() {
+                    PerformOutcome::DrainWritesThenClose
+                } else {
+                    PerformOutcome::CloseNow
+                };
+            }
         }
     }
-    true
+    PerformOutcome::Open
 }
 
 /// The session failed while performing its effects: the failure's effects replace the ones still
 /// queued, which would otherwise run against a failed world or send after its `abort`.
+#[cfg(all(test, rings_native))]
 fn fail(machine: &mut OnionExitSession, queue: &mut VecDeque<OnionExitEffect>) {
-    *queue = VecDeque::from(machine.fail(get_epoch_ms()));
+    fail_at(rings_core::utils::get_epoch_ms(), machine, queue);
+}
+
+/// [`fail`] at `now_ms`.
+fn fail_at(now_ms: u128, machine: &mut OnionExitSession, queue: &mut VecDeque<OnionExitEffect>) {
+    *queue = VecDeque::from(machine.fail(now_ms));
+}
+
+/// Current epoch milliseconds for `shared` (or its test clock override).
+fn now_ms<W>(shared: &OnionExitShared<W>) -> u128 {
+    #[cfg(all(test, rings_native))]
+    if let Some(clock) = &shared.clock_ms {
+        return u128::from(clock.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    shared.clock.now_ms()
+}
+
+/// Tick period for `shared` (or its test override).
+fn tick_period<W>(shared: &OnionExitShared<W>) -> Duration {
+    #[cfg(all(test, rings_native))]
+    {
+        shared.tick_period
+    }
+    #[cfg(not(all(test, rings_native)))]
+    {
+        let _ = shared;
+        ONION_EXIT_SESSION_TICK
+    }
+}
+
+/// Per-operation write timeout for `shared` (or its test override).
+fn write_timeout<W>(shared: &OnionExitShared<W>) -> Duration {
+    #[cfg(all(test, rings_native))]
+    {
+        shared.write_timeout
+    }
+    #[cfg(not(all(test, rings_native)))]
+    {
+        let _ = shared;
+        ONION_EXIT_WRITE_TIMEOUT
+    }
 }
 
 /// Admit and open the world at `target`: its authority must parse and the policy must allow
@@ -578,7 +803,8 @@ async fn open<W: OnionWorld>(
     match shared.world.open(&target).await {
         Ok((reader, writer)) => Some(OnionOpenWorld {
             reader: Some(reader),
-            writer,
+            writer: Some(writer),
+            pending_writes: VecDeque::new(),
         }),
         Err(error) => {
             tracing::debug!(target = %target.authority(), %error, "onion exit world refused");
@@ -673,7 +899,11 @@ mod tests {
             policy,
             accounting: OnionExitAccounting::default(),
             link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
             sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: None,
+            tick_period: super::ONION_EXIT_SESSION_TICK,
+            write_timeout: super::ONION_EXIT_WRITE_TIMEOUT,
         }
     }
 
@@ -848,5 +1078,575 @@ mod tests {
             OnionExitEffect::Write(_) | OnionExitEffect::ShutdownWrite
         )));
         assert!(matches!(queue.back(), Some(OnionExitEffect::Close)));
+    }
+
+    /// A fixture reply block admissible at `60_000` (`2Q`), expiring at `90_000` (`3Q`).
+    fn fixture_surb(seed: u64) -> crate::onion::sphinx::cell::OnionSurb {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rings_core::delegation::DelegateeKey;
+        use rings_core::ecc::SecretKey;
+
+        use crate::onion::circuit::OnionExpiry;
+        use crate::onion::sphinx::builder::build_surb;
+        use crate::onion::sphinx::class::OnionLoopClass;
+        use crate::onion::OnionProcessEpoch;
+        use crate::onion::OnionRouteHop;
+
+        let path = [1_u8, 2].map(|byte| {
+            let secret = SecretKey::try_from(format!("{byte:02x}").repeat(32).as_str())
+                .expect("fixture scalar");
+            let key = DelegateeKey::new_with_seckey(&secret).expect("fixture delegation");
+            OnionRouteHop::new(
+                key.delegator_did(),
+                key.delegatee_public_key(),
+                OnionProcessEpoch::new([1; 16]),
+            )
+        });
+        let mut rng = StdRng::seed_from_u64(seed);
+        let expiry = OnionExpiry::from_ms(90_000).expect("on the grid");
+        build_surb(
+            path.iter(),
+            Did::from(9_u32),
+            OnionLoopClass::DEFAULT,
+            expiry,
+            &mut rng,
+        )
+        .expect("a reply block")
+        .0
+    }
+
+    /// A world whose writer enters `write` and stays `Poll::Pending` forever, recording when the
+    /// write starts and when the writer is dropped.
+    #[derive(Clone)]
+    struct PendingWriteWorld {
+        write_started: std::sync::Arc<tokio::sync::Notify>,
+        writer_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct PendingWriter {
+        write_started: std::sync::Arc<tokio::sync::Notify>,
+        writer_dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for PendingWriter {
+        fn drop(&mut self) {
+            self.writer_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OnionWorld for PendingWriteWorld {
+        type Reader = Empty;
+        type Writer = PendingWriter;
+
+        async fn open(&self, _: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)> {
+            Ok((Empty, PendingWriter {
+                write_started: std::sync::Arc::clone(&self.write_started),
+                writer_dropped: std::sync::Arc::clone(&self.writer_dropped),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl OnionWorldWriter for PendingWriter {
+        async fn write(&mut self, _: Bytes) -> Result<()> {
+            self.write_started.notify_one();
+            std::future::pending::<Result<()>>().await
+        }
+
+        async fn shutdown(&mut self) -> Result<()> {
+            self.write_started.notify_one();
+            std::future::pending::<Result<()>>().await
+        }
+    }
+
+    /// Regression (#1211): when an exit world write is blocked indefinitely, a client `Abort`
+    /// frame cancels the in-flight write immediately, drops the writer, buries the session, and
+    /// releases its `OnionExitLease`.
+    #[tokio::test]
+    async fn test_stalled_exit_write_is_cancelled_by_client_abort_and_releases_lease() {
+        let now_ms = 60_000_u128;
+        let peer = Did::from(11_u32);
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![crate::onion::OnionExitTarget::parse("*:443").expect("pattern")],
+            max_sessions: 1,
+            ..OnionExitPolicy::default()
+        };
+        let write_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let writer_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+        let shared = std::sync::Arc::new(OnionExitShared {
+            world: PendingWriteWorld {
+                write_started: std::sync::Arc::clone(&write_started),
+                writer_dropped: std::sync::Arc::clone(&writer_dropped),
+            },
+            policy: policy.clone(),
+            accounting: OnionExitAccounting::default(),
+            link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
+            sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: Some(clock),
+            tick_period: std::time::Duration::from_millis(5),
+            write_timeout: super::ONION_EXIT_WRITE_TIMEOUT,
+        });
+        let lease = shared
+            .accounting
+            .admit(&policy, peer)
+            .expect("initial lease admitted");
+        assert!(
+            shared.accounting.admit(&policy, peer).is_err(),
+            "session cap of 1 is held by the active session"
+        );
+
+        let arguments = OnionSessionArguments {
+            session: OnionSessionId::new([0x11; 16]),
+            digest: OnionTargetDigest::of(b"example.com:443"),
+        };
+        let (mut inbound_tx, inbound_rx) =
+            futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
+        let driver = crate::test_support::TestTask::spawn(super::drive(
+            std::sync::Arc::clone(&shared),
+            None,
+            arguments,
+            lease,
+            inbound_rx,
+            now_ms,
+        ));
+
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Data {
+                    sequence: crate::onion::session::frame::OnionSequence::FIRST,
+                    target: Some(Bytes::from_static(b"example.com:443")),
+                    payload: Bytes::from_static(b"stalled-upload"),
+                },
+                surb: Box::new(fixture_surb(1)),
+                received_at_ms: now_ms,
+            })
+            .expect("enqueue opening data");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), write_started.notified())
+            .await
+            .expect("world write started");
+        assert!(!writer_dropped.load(Ordering::SeqCst));
+
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Abort {
+                    sequence: crate::onion::session::frame::OnionSequence::new(1),
+                },
+                surb: Box::new(fixture_surb(2)),
+                received_at_ms: now_ms + 1,
+            })
+            .expect("enqueue abort");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver)
+            .await
+            .expect("driver exits promptly on abort while write is blocked")
+            .expect("driver join");
+
+        assert!(writer_dropped.load(Ordering::SeqCst));
+        assert!(
+            shared.accounting.admit(&policy, peer).is_ok(),
+            "lease released after abort"
+        );
+        assert!(shared
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .is_buried(&arguments.session, now_ms + 1));
+    }
+
+    /// Regression (#1211): when an exit world write is blocked indefinitely, losing the link
+    /// (`sessions.lose(peer, ...)`) closes the inbound channel, cancels the blocked write, and
+    /// releases the session lease.
+    #[tokio::test]
+    async fn test_stalled_exit_write_is_cancelled_by_lost_link_and_releases_lease() {
+        let now_ms = 60_000_u128;
+        let peer = Did::from(12_u32);
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![crate::onion::OnionExitTarget::parse("*:443").expect("pattern")],
+            max_sessions: 1,
+            ..OnionExitPolicy::default()
+        };
+        let write_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let writer_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+        let shared = std::sync::Arc::new(OnionExitShared {
+            world: PendingWriteWorld {
+                write_started: std::sync::Arc::clone(&write_started),
+                writer_dropped: std::sync::Arc::clone(&writer_dropped),
+            },
+            policy: policy.clone(),
+            accounting: OnionExitAccounting::default(),
+            link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
+            sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: Some(clock),
+            tick_period: std::time::Duration::from_millis(5),
+            write_timeout: super::ONION_EXIT_WRITE_TIMEOUT,
+        });
+        let lease = shared
+            .accounting
+            .admit(&policy, peer)
+            .expect("initial lease admitted");
+
+        let arguments = OnionSessionArguments {
+            session: OnionSessionId::new([0x22; 16]),
+            digest: OnionTargetDigest::of(b"example.com:443"),
+        };
+        let (mut inbound_tx, inbound_rx) =
+            futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Data {
+                    sequence: crate::onion::session::frame::OnionSequence::FIRST,
+                    target: Some(Bytes::from_static(b"example.com:443")),
+                    payload: Bytes::from_static(b"stalled-upload"),
+                },
+                surb: Box::new(fixture_surb(3)),
+                received_at_ms: now_ms,
+            })
+            .expect("enqueue opening data");
+        shared.sessions.lock().expect("sessions lock").live.insert(
+            arguments.session,
+            OnionExitSessionHandle {
+                digest: arguments.digest,
+                from: peer,
+                inbound: inbound_tx,
+            },
+        );
+
+        let driver = crate::test_support::TestTask::spawn(super::drive(
+            std::sync::Arc::clone(&shared),
+            None,
+            arguments,
+            lease,
+            inbound_rx,
+            now_ms,
+        ));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), write_started.notified())
+            .await
+            .expect("world write started");
+
+        shared
+            .sessions
+            .lock()
+            .expect("sessions lock")
+            .lose(peer, now_ms + 1);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver)
+            .await
+            .expect("driver exits promptly on link loss while write is blocked")
+            .expect("driver join");
+
+        assert!(writer_dropped.load(Ordering::SeqCst));
+        assert!(
+            shared.accounting.admit(&policy, peer).is_ok(),
+            "lease released after link loss"
+        );
+    }
+
+    /// Regression (#1211): when an exit world write is blocked indefinitely and no forward loops
+    /// arrive for `V` (`ONION_ADMISSION_WINDOW_MS`), the periodic tick still runs, expires the
+    /// session, drops the stalled writer, and releases its `OnionExitLease`.
+    #[tokio::test]
+    async fn test_stalled_exit_write_is_cancelled_by_session_expiry_and_releases_lease() {
+        let now_ms = 60_000_u128;
+        let peer = Did::from(13_u32);
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![crate::onion::OnionExitTarget::parse("*:443").expect("pattern")],
+            max_sessions: 1,
+            ..OnionExitPolicy::default()
+        };
+        let write_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let writer_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+        let shared = std::sync::Arc::new(OnionExitShared {
+            world: PendingWriteWorld {
+                write_started: std::sync::Arc::clone(&write_started),
+                writer_dropped: std::sync::Arc::clone(&writer_dropped),
+            },
+            policy: policy.clone(),
+            accounting: OnionExitAccounting::default(),
+            link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
+            sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: Some(std::sync::Arc::clone(&clock)),
+            tick_period: std::time::Duration::from_millis(5),
+            write_timeout: super::ONION_EXIT_WRITE_TIMEOUT,
+        });
+        let lease = shared
+            .accounting
+            .admit(&policy, peer)
+            .expect("initial lease admitted");
+
+        let arguments = OnionSessionArguments {
+            session: OnionSessionId::new([0x33; 16]),
+            digest: OnionTargetDigest::of(b"example.com:443"),
+        };
+        let (mut inbound_tx, inbound_rx) =
+            futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
+        let driver = crate::test_support::TestTask::spawn(super::drive(
+            std::sync::Arc::clone(&shared),
+            None,
+            arguments,
+            lease,
+            inbound_rx,
+            now_ms,
+        ));
+
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Data {
+                    sequence: crate::onion::session::frame::OnionSequence::FIRST,
+                    target: Some(Bytes::from_static(b"example.com:443")),
+                    payload: Bytes::from_static(b"stalled-upload"),
+                },
+                surb: Box::new(fixture_surb(4)),
+                received_at_ms: now_ms,
+            })
+            .expect("enqueue opening data");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), write_started.notified())
+            .await
+            .expect("world write started");
+
+        let expired_ms = u64::try_from(now_ms + ONION_ADMISSION_WINDOW_MS).expect("u64");
+        clock.store(expired_ms, Ordering::SeqCst);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver)
+            .await
+            .expect("driver expires promptly even while world write is blocked")
+            .expect("driver join");
+
+        assert!(writer_dropped.load(Ordering::SeqCst));
+        assert!(
+            shared.accounting.admit(&policy, peer).is_ok(),
+            "lease released after session expiry"
+        );
+    }
+
+    /// Regression (#1211): a real TCP exit socket (`OnionTcpWriter`) whose upstream peer never
+    /// reads and whose OS send buffer is completely full does not wedge session expiry or lease
+    /// release.
+    #[tokio::test]
+    async fn test_stalled_tcp_exit_socket_write_releases_lease_on_expiry() {
+        use crate::onion::tcp::OnionTcpReader;
+        use crate::onion::tcp::OnionTcpWriter;
+
+        struct StalledSocketWorld {
+            stream: Mutex<Option<tokio::net::TcpStream>>,
+            policy: OnionExitPolicy,
+            accounting: OnionExitAccounting,
+        }
+
+        #[async_trait::async_trait]
+        impl OnionWorld for StalledSocketWorld {
+            type Reader = OnionTcpReader;
+            type Writer = OnionTcpWriter;
+
+            async fn open(&self, _: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)> {
+                let stream = self
+                    .stream
+                    .lock()
+                    .expect("stream lock")
+                    .take()
+                    .expect("single open");
+                let (read, write) = stream.into_split();
+                Ok((
+                    OnionTcpReader::from_split(read, self.policy.clone(), self.accounting.clone()),
+                    OnionTcpWriter::from_split(write),
+                ))
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let (client_res, accept_res) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let client_stream = client_res.expect("connect");
+        let (_stalled_upstream_peer, _) = accept_res.expect("accept");
+
+        // Pre-fill the socket's kernel send buffer until a non-blocking try_write reports
+        // WouldBlock so the very first `OnionTcpWriter::write` blocks inside `write_all`.
+        let fill_buf = vec![0x5a_u8; 64 * 1024];
+        loop {
+            match client_stream.try_write(&fill_buf) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(err) => panic!("unexpected try_write error: {err}"),
+            }
+        }
+
+        let now_ms = 60_000_u128;
+        let peer = Did::from(14_u32);
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![crate::onion::OnionExitTarget::parse("*:443").expect("pattern")],
+            max_sessions: 1,
+            ..OnionExitPolicy::default()
+        };
+        let accounting = OnionExitAccounting::default();
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+        let shared = std::sync::Arc::new(OnionExitShared {
+            world: StalledSocketWorld {
+                stream: Mutex::new(Some(client_stream)),
+                policy: policy.clone(),
+                accounting: accounting.clone(),
+            },
+            policy: policy.clone(),
+            accounting,
+            link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
+            sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: Some(std::sync::Arc::clone(&clock)),
+            tick_period: std::time::Duration::from_millis(5),
+            write_timeout: super::ONION_EXIT_WRITE_TIMEOUT,
+        });
+        let lease = shared
+            .accounting
+            .admit(&policy, peer)
+            .expect("initial lease admitted");
+
+        let arguments = OnionSessionArguments {
+            session: OnionSessionId::new([0x44; 16]),
+            digest: OnionTargetDigest::of(b"example.com:443"),
+        };
+        let (mut inbound_tx, inbound_rx) =
+            futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
+        let driver = crate::test_support::TestTask::spawn(super::drive(
+            std::sync::Arc::clone(&shared),
+            None,
+            arguments,
+            lease,
+            inbound_rx,
+            now_ms,
+        ));
+
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Data {
+                    sequence: crate::onion::session::frame::OnionSequence::FIRST,
+                    target: Some(Bytes::from_static(b"example.com:443")),
+                    payload: Bytes::from(vec![0x7f_u8; 256 * 1024]),
+                },
+                surb: Box::new(fixture_surb(5)),
+                received_at_ms: now_ms,
+            })
+            .expect("enqueue opening data");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            shared.accounting.admit(&policy, peer).is_err(),
+            "lease still held while socket write is blocked"
+        );
+
+        let expired_ms = u64::try_from(now_ms + ONION_ADMISSION_WINDOW_MS).expect("u64");
+        clock.store(expired_ms, Ordering::SeqCst);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver)
+            .await
+            .expect("driver terminates on expiry despite blocked TCP socket write")
+            .expect("driver join");
+
+        assert!(
+            shared.accounting.admit(&policy, peer).is_ok(),
+            "lease released after blocked TCP socket session expires"
+        );
+    }
+
+    /// Regression (#1211): even when a client sends periodic keep-alive `Credit` loops so `V`
+    /// never elapses without a forward loop, a wedged exit world write times out after
+    /// `write_timeout`, fails the session closed, drops the writer, and releases the lease.
+    #[tokio::test]
+    async fn test_stalled_exit_write_times_out_despite_keep_alive_credits_and_releases_lease() {
+        let now_ms = 60_000_u128;
+        let peer = Did::from(15_u32);
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![crate::onion::OnionExitTarget::parse("*:443").expect("pattern")],
+            max_sessions: 1,
+            ..OnionExitPolicy::default()
+        };
+        let write_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let writer_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(60_000));
+        let shared = std::sync::Arc::new(OnionExitShared {
+            world: PendingWriteWorld {
+                write_started: std::sync::Arc::clone(&write_started),
+                writer_dropped: std::sync::Arc::clone(&writer_dropped),
+            },
+            policy: policy.clone(),
+            accounting: OnionExitAccounting::default(),
+            link_sender: OnionLinkSender::default(),
+            clock: std::sync::Arc::new(rings_core::utils::SystemClock),
+            sessions: Mutex::new(OnionExitTable::default()),
+            clock_ms: Some(std::sync::Arc::clone(&clock)),
+            tick_period: std::time::Duration::from_secs(10),
+            write_timeout: std::time::Duration::from_millis(25),
+        });
+        let lease = shared
+            .accounting
+            .admit(&policy, peer)
+            .expect("initial lease admitted");
+
+        let arguments = OnionSessionArguments {
+            session: OnionSessionId::new([0x55; 16]),
+            digest: OnionTargetDigest::of(b"example.com:443"),
+        };
+        let (mut inbound_tx, inbound_rx) =
+            futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
+        let driver = crate::test_support::TestTask::spawn(super::drive(
+            std::sync::Arc::clone(&shared),
+            None,
+            arguments,
+            lease,
+            inbound_rx,
+            now_ms,
+        ));
+
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Data {
+                    sequence: crate::onion::session::frame::OnionSequence::FIRST,
+                    target: Some(Bytes::from_static(b"example.com:443")),
+                    payload: Bytes::from_static(b"stalled-upload"),
+                },
+                surb: Box::new(fixture_surb(6)),
+                received_at_ms: now_ms,
+            })
+            .expect("enqueue opening data");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), write_started.notified())
+            .await
+            .expect("world write started");
+
+        // Send a keep-alive credit loop well before `V` elapses; the per-write timeout still
+        // terminates the wedged write and releases the lease.
+        inbound_tx
+            .try_send(super::OnionExitInput {
+                frame: crate::onion::session::frame::OnionFrame::Credit {
+                    mark: crate::onion::session::frame::OnionSequence::new(1),
+                    surbs: vec![fixture_surb(7)],
+                },
+                surb: Box::new(fixture_surb(8)),
+                received_at_ms: now_ms + 1_000,
+            })
+            .expect("enqueue keep-alive credit");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), driver)
+            .await
+            .expect("driver terminates on write timeout despite keep-alive credit")
+            .expect("driver join");
+
+        assert!(writer_dropped.load(Ordering::SeqCst));
+        assert!(
+            shared.accounting.admit(&policy, peer).is_ok(),
+            "lease released after write timeout"
+        );
     }
 }

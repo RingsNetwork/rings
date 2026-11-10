@@ -86,7 +86,7 @@ pub(crate) fn live(entry: Entry) -> Entry {
 /// has only the synthesized dot at the epoch, which is past the element horizon of any clock.
 fn dotted_now(mut entry: Entry) -> Entry {
     if entry.kind == EntryKind::Data && entry.crdt.dots.is_empty() {
-        let version = EntryVersion::new(get_epoch_ms(), Did::default(), Did::default());
+        let version = EntryVersion::new(get_epoch_ms(), Did::from(1u32), Did::default());
         entry.crdt.dots = (0..entry.data.len())
             .map(|index| EntryDot {
                 version,
@@ -150,14 +150,14 @@ pub(crate) fn stamped_delta(
         .clone())
 }
 
-/// A removes-only data carrier of `count` removes of distinct values tagged `salt`, issued at
-/// `issued_at_ms`, live for an hour from now.
+/// A removes-only data carrier of `count` removes of distinct values tagged `item_prefix`, issued
+/// at `issued_at_ms`, live for an hour from now.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) fn removes_only_carrier(
     did: Did,
     count: usize,
     issued_at_ms: u128,
-    salt: &str,
+    item_prefix: &str,
 ) -> Result<Entry> {
     let version = EntryVersion::new(issued_at_ms, Did::from(1u32), Did::from(2u32));
     let mut entry = live_entry(did, Vec::new(), EntryKind::Data);
@@ -165,7 +165,7 @@ pub(crate) fn removes_only_carrier(
         .map(|index| {
             let index =
                 u32::try_from(index).map_err(|_| crate::error::Error::MessageSizeOverflow)?;
-            let value = Bytes::from(format!("{salt}-{index}"));
+            let value = Bytes::from(format!("{item_prefix}-{index}"));
             Ok(crate::dht::entry::EntryTombstone::of(&value, EntryDot {
                 version,
                 index,

@@ -242,6 +242,8 @@ fn data_actor_value_range(
             register: None,
             dots,
             co_dots: Vec::new(),
+            co_registers: Vec::new(),
+            proofs: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -261,6 +263,8 @@ fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) ->
             register: Some(version),
             dots: vec![storage_dot(version, 0)],
             co_dots: Vec::new(),
+            co_registers: Vec::new(),
+            proofs: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -276,6 +280,8 @@ fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
             register: None,
             dots: vec![dot],
             co_dots: Vec::new(),
+            co_registers: Vec::new(),
+            proofs: Vec::new(),
             tombstones: Vec::new(),
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -292,6 +298,8 @@ fn relay_remove_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
             register: None,
             dots: Vec::new(),
             co_dots: Vec::new(),
+            co_registers: Vec::new(),
+            proofs: Vec::new(),
             tombstones: vec![EntryTombstone::of(&storage_element(label), dot)],
         },
         expires_at_ms: MODEL_RETENTION_BOUND_MS,
@@ -552,31 +560,41 @@ pub(super) fn reachable_storage_join_states(
 }
 
 // ===================================================================
-// Stage 4: storage hand-off cleanup safety for one placement key.
+// Stage 4: storage hand-off cleanup safety and ABA custody conservation
+// for one placement key (#614, #1207).
 //
-// SCOPE: this is the #614 S2' cleanup model, not the storage convergence
-// theorem. Convergence is Stage 3's join-semilattice fact. This stage abstracts
-// exactly one placement key, the copy -> ack -> delete hand-off, and arbitrary
-// local writes over a finite representative value domain while a copy or ack is
-// in flight:
+// SCOPE: this is the #614 S2' / #1207 ABA cleanup model, not the storage
+// convergence theorem. Convergence is Stage 3's join-semilattice fact. This
+// stage abstracts one placement key across two concurrent hand-off slots
+// (modeling duplicate/retried hand-off transactions T1, T2), arbitrary local
+// writes, and a return hand-off from successor back to local over a finite
+// representative value domain:
 //
-//   local(v) --SendCopy(v)--> copy_in_flight(v)
-//   copy_in_flight(v) --DeliverCopy--> successor(v) + ack_in_flight(v)
-//   local(v) --LocalWrite(w)--> local(w)
-//   ack_in_flight(v) --DeliverAckDelete--> delete local only if local == v
+//   local(v, g) --SendCopy(slot)--> copy_in_flight[slot](v, g), handoff_observed = true
+//   copy_in_flight[slot](v, g) --DeliverCopy(slot)--> successor(v) + ack_in_flight[slot](v, g)
+//   local(_, g) --LocalWrite(w)--> local(w, g' = g + if handoff_observed { 1 } else { 0 })
+//   successor(v), local = None --ReturnCustodyToLocal--> local(v, g), successor = None
+//   ack_in_flight[slot](v, g_ack) --DeliverAckDelete(slot)-->
+//       delete local and advance g := g + 1 iff local == Some(v) && g == g_ack
 //
-// Property checked below:
+// Properties checked below:
 //
-//   Always S2': local(k) is removed only if successor(k) contains the same
-//   value at the moment of removal.
+//   Always S2': local(k) is removed only if successor(k) >= removed at the
+//   moment of removal (successor holds at least the removed join state).
+//   Always Custody Conservation (#1207): local.is_some() || successor.is_some()
+//   in every reachable state (a delayed duplicate ack after return hand-off
+//   never eliminates every live copy).
 // ===================================================================
+
+const MAX_MODEL_INCARNATION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) enum StorageSyncStep {
-    SendCopy,
-    DeliverCopy,
+    SendCopy(usize),
+    DeliverCopy(usize),
     LocalWrite(StorageValue),
-    DeliverAckDelete,
+    ReturnCustodyToLocal,
+    DeliverAckDelete(usize),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -588,54 +606,113 @@ pub(super) enum StorageValue {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct StorageSyncState {
-    local: Option<StorageValue>,
+    pub(super) local: Option<StorageValue>,
+    pub(super) local_incarnation: u8,
+    pub(super) handoff_observed: bool,
     pub(super) successor: Option<StorageValue>,
-    copy_in_flight: Option<StorageValue>,
-    ack_in_flight: Option<StorageValue>,
+    pub(super) copy_in_flight: [Option<(StorageValue, u8)>; 2],
+    pub(super) ack_in_flight: [Option<(StorageValue, u8)>; 2],
 }
 
 impl StorageSyncState {
     pub(super) fn initial() -> Self {
         Self {
             local: Some(StorageValue::V0),
+            local_incarnation: 0,
+            handoff_observed: false,
             successor: None,
-            copy_in_flight: None,
-            ack_in_flight: None,
+            copy_in_flight: [None, None],
+            ack_in_flight: [None, None],
         }
+    }
+
+    fn has_in_flight(&self) -> bool {
+        self.copy_in_flight.iter().any(Option::is_some)
+            || self.ack_in_flight.iter().any(Option::is_some)
     }
 
     pub(super) fn step(self, step: StorageSyncStep) -> Option<Self> {
         match step {
-            StorageSyncStep::SendCopy => Some(Self {
-                copy_in_flight: Some(self.local?),
-                ..self
-            }),
-            StorageSyncStep::DeliverCopy => {
-                let copied = self.copy_in_flight?;
+            StorageSyncStep::SendCopy(slot) if slot < 2 => {
+                if self.copy_in_flight[slot].is_some()
+                    || self.ack_in_flight[slot].is_some()
+                    || self.local_incarnation >= MAX_MODEL_INCARNATION
+                {
+                    return None;
+                }
+                let value = self.local?;
+                let mut copy_in_flight = self.copy_in_flight;
+                copy_in_flight[slot] = Some((value, self.local_incarnation));
                 Some(Self {
-                    successor: Some(copied),
-                    copy_in_flight: None,
-                    ack_in_flight: Some(copied),
+                    handoff_observed: true,
+                    copy_in_flight,
+                    ..self
+                })
+            }
+            StorageSyncStep::DeliverCopy(slot) if slot < 2 => {
+                let (copied, inc) = self.copy_in_flight[slot]?;
+                let mut copy_in_flight = self.copy_in_flight;
+                let mut ack_in_flight = self.ack_in_flight;
+                copy_in_flight[slot] = None;
+                ack_in_flight[slot] = Some((copied, inc));
+                let successor = Some(
+                    self.successor
+                        .map_or(copied, |existing| existing.max(copied)),
+                );
+                Some(Self {
+                    successor,
+                    copy_in_flight,
+                    ack_in_flight,
                     ..self
                 })
             }
             StorageSyncStep::LocalWrite(value)
-                if self.copy_in_flight.is_some() || self.ack_in_flight.is_some() =>
+                if self.has_in_flight() && self.local_incarnation < MAX_MODEL_INCARNATION =>
             {
+                let (local_incarnation, handoff_observed) = if self.handoff_observed {
+                    (self.local_incarnation.saturating_add(1), false)
+                } else {
+                    (self.local_incarnation, false)
+                };
                 Some(Self {
                     local: Some(value),
+                    local_incarnation,
+                    handoff_observed,
                     ..self
                 })
             }
-            StorageSyncStep::DeliverAckDelete => {
-                let acked = self.ack_in_flight?;
-                let local = match self.local {
-                    Some(current) if current == acked => None,
-                    current => current,
+            StorageSyncStep::ReturnCustodyToLocal
+                if self.local.is_none() && self.local_incarnation < MAX_MODEL_INCARNATION =>
+            {
+                let returned = self.successor?;
+                let (local_incarnation, handoff_observed) = if self.handoff_observed {
+                    (self.local_incarnation.saturating_add(1), false)
+                } else {
+                    (self.local_incarnation, false)
+                };
+                Some(Self {
+                    local: Some(returned),
+                    local_incarnation,
+                    handoff_observed,
+                    successor: None,
+                    ..self
+                })
+            }
+            StorageSyncStep::DeliverAckDelete(slot) if slot < 2 => {
+                let (acked, ack_inc) = self.ack_in_flight[slot]?;
+                let mut ack_in_flight = self.ack_in_flight;
+                ack_in_flight[slot] = None;
+                let (local, local_incarnation, handoff_observed) = match self.local {
+                    Some(current) if current == acked && self.local_incarnation == ack_inc => {
+                        (None, self.local_incarnation.saturating_add(1), false)
+                    }
+                    current => (current, self.local_incarnation, self.handoff_observed),
                 };
                 Some(Self {
                     local,
-                    ack_in_flight: None,
+                    local_incarnation,
+                    handoff_observed,
+                    ack_in_flight,
                     ..self
                 })
             }

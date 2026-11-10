@@ -16,13 +16,20 @@ use crate::onion::https::encode_request;
 use crate::onion::https::OnionHttpsOutcome;
 use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsResponse;
+use crate::onion::pipeline::OnionInvokeArguments;
 use crate::onion::session::frame::OnionFrame;
 use crate::onion::session::frame::OnionSequence;
 use crate::onion::session::OnionSessionArguments;
 use crate::onion::session::OnionSessionId;
 use crate::onion::session::OnionTargetDigest;
+use crate::onion::signature::OnionBackendName;
+use crate::onion::signature::OnionInputType;
+use crate::onion::signature::OnionInvokeShape;
+use crate::onion::signature::OnionLatencyClass;
 use crate::onion::signature::OnionServiceName;
+use crate::onion::signature::OnionShape;
 use crate::onion::signature::OnionSymbol;
+use crate::onion::signature::OnionWidthClass;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::carry;
@@ -122,10 +129,9 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         );
         out.push((format!("onion/class/{class:?}"), spec.into_bytes()));
     }
-    let symbols = std::iter::once((OnionSymbol::Relay, "relay"))
+    let symbols = std::iter::once((OnionSymbol::Relay, "relay".to_string()))
         .chain(
-            OnionServiceName::world_facing()
-                .map(|service| (OnionSymbol::WorldFacing(service.clone()), service.as_str())),
+            OnionShape::all().map(|shape| (OnionSymbol::Shape(shape.clone()), shape.to_string())),
         )
         .collect::<Vec<_>>();
     for (symbol, name) in symbols {
@@ -175,13 +181,33 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
     };
     let relay_layer_bytes = make_layer(OnionLayerApplication::Relay).encode(&mac);
     let tcp_layer_bytes = make_layer(OnionLayerApplication::Apply(OnionApplication {
-        symbol: OnionServiceName::tcp(),
+        symbol: OnionServiceName::tcp().into(),
         arguments: encoded_args_authority,
     }))
     .encode(&mac);
     let https_layer_bytes = make_layer(OnionLayerApplication::Apply(OnionApplication {
-        symbol: OnionServiceName::https(),
+        symbol: OnionServiceName::https().into(),
         arguments: encoded_args_ipv6,
+    }))
+    .encode(&mac);
+    let invoke_shape = OnionInvokeShape::new(
+        OnionInputType::Fixed(OnionWidthClass::B32),
+        OnionWidthClass::B64,
+        OnionLatencyClass::Ms500,
+    );
+    let invoke_args = OnionInvokeArguments::new(
+        OnionBackendName::parse("jev.typesafe").unwrap(),
+        b"const-bytes".to_vec(),
+    )
+    .unwrap();
+    let encoded_invoke_args = invoke_args.encode();
+    assert_eq!(
+        OnionInvokeArguments::decode(&encoded_invoke_args),
+        Some(invoke_args)
+    );
+    let invoke_layer_bytes = make_layer(OnionLayerApplication::Apply(OnionApplication {
+        symbol: OnionShape::Invoke(invoke_shape),
+        arguments: encoded_invoke_args,
     }))
     .encode(&mac);
     let (decoded_layer, decoded_mac) = OnionLayer::decode(tcp_layer_bytes.as_slice()).unwrap();
@@ -189,7 +215,15 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         decoded_layer.encode(&decoded_mac).as_slice(),
         tcp_layer_bytes.as_slice()
     );
+    out.push((
+        "onion/invoke_arguments/jev.typesafe".to_string(),
+        encoded_invoke_args.as_bytes().to_vec(),
+    ));
     out.push(("onion/layer/Relay".to_string(), relay_layer_bytes.to_vec()));
+    out.push((
+        "onion/layer/Apply_invoke".to_string(),
+        invoke_layer_bytes.to_vec(),
+    ));
     out.push((
         "onion/layer/Apply_tcp".to_string(),
         tcp_layer_bytes.to_vec(),
@@ -270,7 +304,7 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
     let built_loop = build_loop(
         &loop_hops,
         &[OnionApplication {
-            symbol: OnionServiceName::tcp(),
+            symbol: OnionServiceName::tcp().into(),
             arguments: encoded_args_authority,
         }],
         Did::from(99_u32),

@@ -20,7 +20,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
-use crate::utils::get_epoch_ms;
 
 /// Maximum wire budget for one `SyncEntriesWithSuccessor` hand-off batch.
 ///
@@ -118,7 +117,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let all_items = self.live_storage_entries(now_ms).await?;
         // Relay inboxes go to their holder in every storage mode (see `dht::relay_holder`);
         // data topics follow the configured mode.
@@ -147,7 +146,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // Preservation #614: a write racing between copy and ack is still live at this
         // clock, so it changes the projected local value, confirms_local_value is false,
         // and delete is skipped.
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         for ack in acks {
             let key = StorageKey::new(ack.entry.kind, ack.key);
             self.remove_storage_entry_confirmed_by(key, now_ms, ack)
@@ -179,11 +178,15 @@ impl PeerRing {
         new_successor: Did,
         items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
-        let data = items
-            .into_iter()
-            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
-            .map(|(key, entry)| PlacedEntry::new(key.placement(), entry))
-            .collect::<Vec<_>>();
+        let mut data = Vec::new();
+        for (key, entry) in items {
+            if self.placed_beyond(key.placement(), new_successor) {
+                let incarnation = self.observe_storage_handoff_incarnation(key)?;
+                data.push(
+                    PlacedEntry::new(key.placement(), entry).with_custody_incarnation(incarnation),
+                );
+            }
+        }
 
         // The wire batching happens once, in
         // `PeerRingAction::coalesced_storage_sync_deliveries`.
@@ -238,7 +241,7 @@ impl PeerRing {
     /// Offer every live relay carrier this node keeps as an ownership hand-off before leaving
     /// (#1057), computing membership under a view where this node holds no relay mail.
     pub(crate) async fn hand_off_relay_carriers_for_leave(&self) -> Result<PeerRingAction> {
-        self.with_non_empty_relay_and_then(get_epoch_ms(), |relay| {
+        self.with_non_empty_relay_and_then(self.epoch_ms(), |relay| {
             let segment = self.relay_segment_for_leave()?;
             let (previous, next) = self.relay_chain_neighbours()?;
             let fallback = next
@@ -258,29 +261,32 @@ impl PeerRing {
         fallback_targets: &[Did],
     ) -> Result<PeerRingAction> {
         let hints = self.relay_holder_hints()?;
-        Ok(items
-            .into_iter()
-            .flat_map(|(key, entry)| {
-                let named = hints.get(&key.placement()).copied();
-                // A member's copies go through chain repair, one offer per neighbour (`Law
-                // (Chain repair)`); a keeper that is no member hands its carrier off here.
-                let targets = relay_carrier_offer(
-                    segment,
-                    key.placement(),
-                    self.did,
-                    named,
-                    self.relay_replicas(),
-                )
-                .into_handoff_targets(fallback_targets);
-                targets.into_iter().map(move |target| {
-                    PeerRingAction::sync_entries_for_handoff(
-                        StorageSyncDestination::PhysicalOwner(target),
-                        vec![PlacedEntry::new(key.placement(), entry.clone())],
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .into())
+        let mut actions = Vec::new();
+        for (key, entry) in items {
+            let named = hints.get(&key.placement()).copied();
+            // A member's copies go through chain repair, one offer per neighbour (`Law
+            // (Chain repair)`); a keeper that is no member hands its carrier off here.
+            let targets = relay_carrier_offer(
+                segment,
+                key.placement(),
+                self.did,
+                named,
+                self.relay_replicas(),
+            )
+            .into_handoff_targets(fallback_targets);
+            if targets.is_empty() {
+                continue;
+            }
+            let incarnation = self.observe_storage_handoff_incarnation(key)?;
+            for target in targets {
+                actions.push(PeerRingAction::sync_entries_for_handoff(
+                    StorageSyncDestination::PhysicalOwner(target),
+                    vec![PlacedEntry::new(key.placement(), entry.clone())
+                        .with_custody_incarnation(incarnation)],
+                ));
+            }
+        }
+        Ok(actions.into())
     }
 
     /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so

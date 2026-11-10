@@ -25,7 +25,6 @@ use bytes::BytesMut;
 use futures::future::select;
 use futures::future::Either;
 use futures::pin_mut;
-use rings_core::utils::get_epoch_ms;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
@@ -127,6 +126,31 @@ pub(crate) struct OnionTcpReader {
 /// The write half of a connected target.
 pub(crate) struct OnionTcpWriter(OwnedWriteHalf);
 
+#[cfg(all(test, rings_native))]
+impl OnionTcpReader {
+    /// Wrap an already-split read half for unit tests.
+    pub(crate) fn from_split(
+        half: OwnedReadHalf,
+        policy: OnionExitPolicy,
+        accounting: OnionExitAccounting,
+    ) -> Self {
+        Self {
+            half,
+            policy,
+            accounting,
+            buffer: BytesMut::new(),
+        }
+    }
+}
+
+#[cfg(all(test, rings_native))]
+impl OnionTcpWriter {
+    /// Wrap an already-split write half for unit tests.
+    pub(crate) const fn from_split(half: OwnedWriteHalf) -> Self {
+        Self(half)
+    }
+}
+
 #[async_trait::async_trait]
 impl OnionWorld for OnionTcpWorld {
     type Reader = OnionTcpReader;
@@ -173,7 +197,7 @@ impl OnionWorldReader for OnionTcpReader {
         let buffer = self.buffer.split();
         let bytes = u64::try_from(read).map_err(|_| Error::InvalidData)?;
         self.accounting
-            .record_bytes(&self.policy, bytes, get_epoch_ms())?;
+            .record_bytes(&self.policy, bytes, self.accounting.now_ms())?;
         Ok(Some(buffer.freeze()))
     }
 }

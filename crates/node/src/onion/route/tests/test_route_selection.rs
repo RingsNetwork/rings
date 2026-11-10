@@ -43,7 +43,7 @@ const EXPIRES_MS: u128 = 100;
 fn node_key(seed: u8) -> Result<DelegateeKey> {
     let secret =
         SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).map_err(Error::CoreError)?;
-    DelegateeKey::new_with_seckey(&secret).map_err(Error::CoreError)
+    DelegateeKey::new_with_seckey_at(&secret, u64::MAX, 0).map_err(Error::CoreError)
 }
 
 /// The nodes of `seeds`.
@@ -847,5 +847,132 @@ fn test_registrants_keep_one_registration_per_did() -> Result<()> {
         vec![(relay, (relay, 'a'))],
         "the first registration of a DID is kept, a stale hop is not admitted"
     );
+    Ok(())
+}
+
+/// Multi-stage `invoke` pipeline route selection (#834 Phase 2b, D2, D5, L7): selects pairwise
+/// distinct registrants per `(shape, backend)` stage at their current relay epoch, closes the
+/// `H = 8` loop through one guard, and reports missing/stale/relay-less `invoke` registrants.
+#[test]
+fn test_pipeline_route_selection_places_multi_stage_invoke_symbols() -> Result<()> {
+    use crate::onion::route::OnionPipelineRouteCandidates;
+    use crate::onion::OnionBackendName;
+    use crate::onion::OnionInputType;
+    use crate::onion::OnionInvokeDescriptor;
+    use crate::onion::OnionInvokeDescriptorBody;
+    use crate::onion::OnionInvokePolicy;
+    use crate::onion::OnionInvokeShape;
+    use crate::onion::OnionLatencyClass;
+    use crate::onion::OnionPipelineRouteRequest;
+    use crate::onion::OnionWidthClass;
+
+    let local = node_key(1)?.delegator_did();
+    let relays = node_keys(2..=6)?;
+    let stage1_host = node_key(7)?;
+    let stage2_host = node_key(8)?;
+    let shape1 = OnionInvokeShape::new(
+        OnionInputType::Fixed(OnionWidthClass::B32),
+        OnionWidthClass::B64,
+        OnionLatencyClass::Ms10,
+    );
+    let shape2 = OnionInvokeShape::new(
+        OnionInputType::Fixed(OnionWidthClass::B64),
+        OnionWidthClass::B32,
+        OnionLatencyClass::Ms100,
+    );
+    let backend1 = OnionBackendName::parse("add.v1")?;
+    let backend2 = OnionBackendName::parse("jev.typesafe")?;
+
+    let sign_invoke = |key: &DelegateeKey,
+                       epoch: OnionProcessEpoch,
+                       shape: OnionInvokeShape,
+                       backend: OnionBackendName|
+     -> Result<OnionInvokeDescriptor> {
+        OnionInvokeDescriptor::new_signed(
+            OnionInvokeDescriptorBody {
+                did: key.delegator_did(),
+                public_key: key
+                    .delegation()
+                    .delegator_verification_pubkey()
+                    .map_err(Error::CoreError)?,
+                delegatee_public_key: key.delegatee_public_key(),
+                process_epoch: epoch,
+                node_type: OnlineNodeType::Native,
+                network_id: TEST_NETWORK_ID,
+                shape,
+                backend,
+                policy: OnionInvokePolicy::default(),
+                started_at_ms: 1,
+                fresh_for_ms: 90,
+                expires_at_ms: EXPIRES_MS,
+                version: "test".to_string(),
+            },
+            MessageSigner::new(key, TEST_NETWORK_ID),
+        )
+        .map(|desc| desc.heard_at(HEARTBEAT_MS))
+        .map_err(Error::CoreError)
+    };
+
+    let online = relays
+        .iter()
+        .chain([&stage1_host, &stage2_host])
+        .map(live_relay)
+        .collect::<Result<Vec<_>>>()?;
+    let invokes = vec![
+        sign_invoke(&stage1_host, TEST_PROCESS_EPOCH, shape1, backend1.clone())?,
+        sign_invoke(&stage2_host, TEST_PROCESS_EPOCH, shape2, backend2.clone())?,
+    ];
+    let request =
+        OnionPipelineRouteRequest::new([(shape1, backend1.clone()), (shape2, backend2.clone())])?;
+    let candidates = OnionPipelineRouteCandidates::from_validated_descriptors(
+        local,
+        test_dht_protocol(),
+        NOW_MS,
+        online.clone(),
+        invokes,
+    );
+
+    let route = select_onion_pipeline_route_from_candidates(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut FixedEntropy::new([]),
+        |_| true,
+    )?;
+    assert_eq!(route.hops().positions().count(), 8);
+    assert!(!has_duplicate_dids(route.hops()));
+    assert_eq!(
+        route.hops().symbol(1).map(|hop| hop.did),
+        Some(stage1_host.delegator_did())
+    );
+    assert_eq!(
+        route.hops().symbol(2).map(|hop| hop.did),
+        Some(stage2_host.delegator_did())
+    );
+    assert_eq!(route.descriptors().len(), 2);
+
+    // Stale invoke epoch on stage 2 fails closed with SymbolRelayRegistrationMismatch.
+    let stale_candidates = OnionPipelineRouteCandidates::from_validated_descriptors(
+        local,
+        test_dht_protocol(),
+        NOW_MS,
+        online,
+        [
+            sign_invoke(&stage1_host, TEST_PROCESS_EPOCH, shape1, backend1)?,
+            sign_invoke(&stage2_host, STALE_PROCESS_EPOCH, shape2, backend2)?,
+        ],
+    );
+    assert!(matches!(
+        select_onion_pipeline_route_from_candidates(
+            &request,
+            stale_candidates,
+            Vec::new(),
+            &mut FixedEntropy::new([]),
+            |_| true,
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::SymbolRelayRegistrationMismatch { ref backend, .. }
+        )) if backend == "jev.typesafe"
+    ));
     Ok(())
 }

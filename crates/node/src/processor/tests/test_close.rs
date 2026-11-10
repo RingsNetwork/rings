@@ -190,3 +190,195 @@ async fn test_a_handshake_in_flight_across_the_close_holds_no_store() {
         .await
         .expect("the stores open again with the handshake abandoned");
 }
+
+/// A storage backend that stalls every operation once armed, modeling a wedged disk or IndexedDB
+/// transaction during shutdown (#1231).
+struct StalledEntryStorage {
+    stalled: std::sync::atomic::AtomicBool,
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl rings_core::storage::KvStorageInterface<rings_core::dht::entry::Entry>
+    for StalledEntryStorage
+{
+    async fn get(
+        &self,
+        _: &str,
+    ) -> rings_core::error::Result<Option<rings_core::dht::entry::Entry>> {
+        if self.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_waiters();
+            futures::future::pending().await
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn put(
+        &self,
+        _: &str,
+        _: &rings_core::dht::entry::Entry,
+    ) -> rings_core::error::Result<()> {
+        if self.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_waiters();
+            futures::future::pending().await
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn get_all(
+        &self,
+    ) -> rings_core::error::Result<Vec<(String, rings_core::dht::entry::Entry)>> {
+        if self.stalled.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_waiters();
+            futures::future::pending().await
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn remove(&self, _: &str) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn count(&self) -> rings_core::error::Result<u32> {
+        Ok(0)
+    }
+}
+
+/// Law (#1231): `Provider::close` resolves within a bounded time even when storage I/O stalls
+/// indefinitely during mail recipient polling, departure handoff, and winding-down node tasks.
+#[tokio::test]
+async fn test_close_returns_within_bounded_time_when_storage_stalls() {
+    use crate::mail::recipient::KvInbox;
+    use crate::mail::recipient::Recipient;
+    use crate::mail::recipient::DEFAULT_MAIL_POLL_INTERVAL;
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let config = test_processor_config(&SecretKey::random(), 0);
+    let data_entered = Arc::clone(&entered);
+    let relay_entered = Arc::clone(&entered);
+    let processor = Arc::new(
+        test_processor_builder(&config)
+            .dht_virtual_nodes(0)
+            .storage(Box::new(StalledEntryStorage {
+                stalled: std::sync::atomic::AtomicBool::new(true),
+                entered: data_entered,
+            }))
+            .relay_storage(Box::new(StalledEntryStorage {
+                stalled: std::sync::atomic::AtomicBool::new(true),
+                entered: relay_entered,
+            }))
+            .build()
+            .expect("processor with stalled storage builds"),
+    );
+    let provider = Provider::from_processor(Arc::clone(&processor));
+
+    // Spawn a mail recipient loop on the node's task set whose `fetch_storage_entry` stalls on
+    // local cache / storage, plus a winding-down task that stalls across `stop`.
+    let spawner = processor.tasks().spawner().expect("runtime current");
+    let recipient = Arc::new(
+        Recipient::start(
+            Arc::clone(&processor),
+            KvInbox::new(rings_core::storage::MemStorage::new()),
+            rings_core::storage::MemStorage::new(),
+            DEFAULT_MAIL_POLL_INTERVAL,
+        )
+        .expect("recipient starts"),
+    );
+    let stop = processor.tasks().stop_token();
+    let mail_entered = entered.notified();
+    spawner.spawn(async move {
+        recipient.run(stop).await;
+    });
+    spawner.spawn_winding_down(|_stop| async move {
+        futures::future::pending::<()>().await;
+    });
+    drop(processor);
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), mail_entered)
+        .await
+        .expect("mail recipient must reach stalled storage fetch");
+
+    let close_result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.close_with_drain_timeout(std::time::Duration::from_millis(50)),
+    )
+    .await
+    .expect("Provider::close must return within bounded time when storage stalls");
+    close_result.expect("close over unwedged measurement store succeeds");
+}
+
+/// Law (#1231): when the last `Provider` handle drops `Processor` during close, but a detached
+/// store handle (`Arc<FileStore>`) remains held past `drain_timeout`, `close_with_drain_timeout`
+/// reports `Err(Error::ProviderStillShared { released })` instead of `Ok(())`, and `released`
+/// resolves once that store holder drops.
+#[tokio::test]
+async fn test_close_reports_provider_still_shared_when_store_release_times_out() {
+    use rings_core::storage::file::FileStorage;
+    use rings_core::storage::RecordAuthority;
+
+    use crate::release::StoresReleased;
+
+    let root = tempfile::tempdir().unwrap();
+    let held_store_path = root.path().join("held-store");
+    let held_store = FileStorage::new_with_cap_path_and_authority(
+        64 * 1024,
+        held_store_path.to_string_lossy().to_string(),
+        RecordAuthority::Disposable,
+    )
+    .await
+    .expect("held file store opens");
+    let released_witness = StoresReleased::of([held_store.released()]);
+
+    let config = test_processor_config(&SecretKey::random(), 0);
+    let processor = Arc::new(
+        test_processor_builder(&config)
+            .dht_virtual_nodes(0)
+            .stores_released(released_witness)
+            .build()
+            .expect("processor builds"),
+    );
+    let provider = Provider::from_processor(processor);
+
+    let close_result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.close_with_drain_timeout(std::time::Duration::from_millis(50)),
+    )
+    .await
+    .expect("close_with_drain_timeout must return after drain_timeout");
+    let Err(Error::ProviderStillShared { released }) = close_result else {
+        panic!("expected ProviderStillShared when a store remains held past drain_timeout");
+    };
+
+    let mut released_fut = released.into_future();
+    assert!(
+        (&mut released_fut).now_or_never().is_none(),
+        "the held store keeps the release witness pending"
+    );
+    assert!(
+        FileStorage::new_with_cap_path_and_authority(
+            64 * 1024,
+            held_store_path.to_string_lossy().to_string(),
+            RecordAuthority::Disposable,
+        )
+        .await
+        .is_err(),
+        "the directory remains locked while held_store lives"
+    );
+
+    drop(held_store);
+    released_fut.await;
+    FileStorage::new_with_cap_path_and_authority(
+        64 * 1024,
+        held_store_path.to_string_lossy().to_string(),
+        RecordAuthority::Disposable,
+    )
+    .await
+    .expect("the store reopens once the held store drops");
+}

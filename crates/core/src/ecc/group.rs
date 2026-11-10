@@ -24,7 +24,6 @@
 //! therefore a matter of implementing the point and scalar adapter boundaries
 //! once; algorithms such as ElGamal do not need per-curve branches.
 
-use std::cell::RefCell;
 use std::convert::TryFrom;
 use std::ops::Add;
 use std::ops::Mul;
@@ -56,8 +55,6 @@ use k256::Scalar as K256Scalar;
 use p256::ProjectivePoint as Secp256r1ProjectivePoint;
 use p256::Scalar as Secp256r1ScalarField;
 use rand::RngCore;
-use rand::SeedableRng;
-use rand_hc::Hc128Rng;
 use zeroize::Zeroize;
 
 use crate::algebra::AbelianGroup;
@@ -70,6 +67,7 @@ use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::utils::SystemEntropy;
 
 /// Sample `Z_n^*` of curve `C` uniformly by rejection over canonical scalar encodings.
 ///
@@ -184,9 +182,9 @@ pub trait CurveScalarField: CurveGroup {
     /// Generate a fresh non-zero random scalar from an explicit RNG.
     fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar;
 
-    /// Generate a fresh non-zero random scalar from the default thread-local RNG.
+    /// Generate a fresh non-zero random scalar from the default system entropy source.
     fn random_scalar() -> Self::Scalar {
-        with_group_rng(|rng| Self::random_scalar_with_rng(rng))
+        Self::random_scalar_with_rng(&mut SystemEntropy)
     }
 }
 
@@ -223,9 +221,9 @@ pub trait CyclicModule: AbelianGroup + Sized {
     /// Generate a fresh non-zero random scalar from an explicit RNG.
     fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar;
 
-    /// Generate a fresh non-zero random scalar from the default thread-local RNG.
+    /// Generate a fresh non-zero random scalar from the default system entropy source.
     fn random_scalar() -> Self::Scalar {
-        with_group_rng(|rng| Self::random_scalar_with_rng(rng))
+        Self::random_scalar_with_rng(&mut SystemEntropy)
     }
 }
 
@@ -257,10 +255,6 @@ pub struct Bls12381G1;
 #[cfg(feature = "curve-ristretto255")]
 #[derive(Debug)]
 pub struct Ristretto255;
-
-thread_local! {
-    static GROUP_RNG: RefCell<Hc128Rng> = RefCell::new(Hc128Rng::from_entropy());
-}
 
 impl<C: CurveGroup> Point<C> {
     /// Build a group element from the curve-native point type.
@@ -771,13 +765,6 @@ where C::Scalar: Zeroize
     fn zeroize(&mut self) {
         self.inner.zeroize();
     }
-}
-
-fn with_group_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
-    GROUP_RNG.with(|rng| {
-        let mut rng = rng.borrow_mut();
-        f(&mut rng)
-    })
 }
 
 #[cfg(test)]

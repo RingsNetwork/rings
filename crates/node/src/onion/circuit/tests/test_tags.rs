@@ -225,3 +225,91 @@ fn test_a_full_session_is_closed_not_left_with_a_gap() {
     assert!(replies.try_recv().is_ok(), "what the queue held is read");
     assert!(replies.try_recv().is_err_and(|error| error.is_closed()));
 }
+
+/// Regression (#1224): when `OnionLoopClient::enqueue`, `send`, or a `surbs` credit loop fails to
+/// depart on its guard link, every reply tag registered for that loop or credit batch is rolled
+/// back from `OnionClientTags` instead of remaining orphaned until expiry.
+#[tokio::test]
+async fn test_failed_loop_enqueue_and_credit_rollback_leave_no_orphaned_tags() {
+    use std::sync::Arc;
+
+    use crate::extension::ext::Extensions;
+    use crate::extension::ext::Scope;
+    use crate::onion::circuit::OnionLinkSender;
+    use crate::onion::circuit::OnionLoopClient;
+    use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+    use crate::onion::sphinx::layer::OnionApplication;
+    use crate::onion::tests::fixture::session_loop;
+    use crate::onion::OnionExitPolicy;
+    use crate::onion::OnionRoute;
+    use crate::onion::OnionServiceName;
+    use crate::online::OnlineNodeType;
+    use crate::tests::exit_descriptor::ExitDescriptorFixture;
+
+    let processor = Arc::new(crate::tests::native::prepare_processor().await);
+    let exit_proc = crate::tests::native::prepare_processor().await;
+    let extensions = Extensions::new(Arc::clone(&processor));
+    let policy = OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], vec![])
+        .expect("policy");
+    let descriptor = ExitDescriptorFixture {
+        node_type: OnlineNodeType::Native,
+        ..ExitDescriptorFixture::live(&exit_proc, OnionServiceName::tcp(), policy, NOW_MS)
+    }
+    .sign()
+    .expect("signed descriptor");
+    let fixture = Fixture::new();
+    let mut hops = fixture.hops.each_ref().map(super::Hop::route_hop);
+    hops[2] = crate::onion::tests::fixture::fixture_route_hop(
+        &exit_proc.delegatee_key(),
+        exit_proc.onion_process_epoch().get(),
+    );
+    let route = OnionRoute::new(OnionServiceName::tcp(), session_loop(hops), descriptor);
+
+    let tags = OnionClientTags::default();
+    let link_sender = OnionLinkSender::default();
+    let loops = OnionLoopClient::new(processor.did(), tags.clone(), link_sender);
+    let scope = Scope::new(
+        extensions.core().clone(),
+        ONION_CIRCUIT_NAMESPACE.to_string(),
+    );
+    let application = OnionApplication {
+        symbol: crate::onion::signature::OnionShape::WorldFacing(OnionServiceName::tcp()),
+        arguments: super::arguments().encode(),
+    };
+    let (sink, _replies) = mpsc::channel(8);
+
+    // Guard lane is not open (`LinkDown`): `enqueue` and `send` must roll back their loop tag.
+    assert!(loops
+        .enqueue(
+            &scope,
+            &route,
+            &application,
+            OnionLoopClass::DEFAULT,
+            b"hi",
+            &sink
+        )
+        .is_err());
+    assert_eq!(tags.len(), 0);
+
+    assert!(loops
+        .send(
+            &scope,
+            &route,
+            &application,
+            OnionLoopClass::DEFAULT,
+            b"hi",
+            &sink
+        )
+        .await
+        .is_err());
+    assert_eq!(tags.len(), 0);
+
+    // Minting SURBs registers their tags, and rolling back when the carrying credit loop fails to
+    // enqueue clears all of them immediately.
+    let (_surbs, surb_tags, _expiry) = loops
+        .surbs(&route, OnionLoopClass::DEFAULT, 4, &sink)
+        .expect("mint 4 surbs");
+    assert_eq!(tags.len(), 4);
+    loops.unregister_tags(surb_tags);
+    assert_eq!(tags.len(), 0);
+}

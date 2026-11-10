@@ -41,8 +41,40 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::release::StoresReleased;
 
+const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
+
+async fn await_close_phase<F>(
+    phase_fut: F,
+    timeout: std::time::Duration,
+    phase: &'static str,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
+    let deadline = rings_runtime::sleep(timeout);
+    futures::pin_mut!(phase_fut, deadline);
+    match futures::future::select(phase_fut, deadline).await {
+        futures::future::Either::Left(((), _)) => true,
+        futures::future::Either::Right((timer, _)) => {
+            match timer {
+                Ok(()) => tracing::warn!(
+                    phase,
+                    timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    "provider close timed out waiting for shutdown phase"
+                ),
+                Err(error) => tracing::warn!(
+                    phase,
+                    ?error,
+                    "provider close timer unavailable while waiting for shutdown phase"
+                ),
+            }
+            false
+        }
+    }
+}
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
@@ -182,6 +214,13 @@ impl Provider {
         }
     }
 
+    /// Cross-platform handle for registering intermediate `invoke` backends and evaluating
+    /// multi-stage Kleisli pipelines on this provider's onion runtime (#834 Phase 2b).
+    pub fn onion_pipeline(&self) -> Result<crate::onion::OnionPipelineHandle> {
+        self.onion_runtime()
+            .map(crate::onion::OnionPipelineHandle::new)
+    }
+
     /// The drop counters the [`Backend`] serving this provider's application inbox records in.
     pub(crate) fn dispatch_drops(&self) -> Arc<DispatchDrops> {
         Arc::clone(&self.dispatch_drops)
@@ -314,12 +353,24 @@ impl Provider {
     /// handshake, a payload send), or is a replay transition or flush, which ends after its
     /// write.
     pub async fn close(self) -> Result<()> {
+        self.close_with_drain_timeout(CLOSE_DRAIN_TIMEOUT).await
+    }
+
+    pub(crate) async fn close_with_drain_timeout(
+        self,
+        drain_timeout: std::time::Duration,
+    ) -> Result<()> {
         let tasks = self.processor.tasks().clone();
         tasks.stop();
-        self.processor.await_listener_generations().await;
-        tasks.drained().await;
-        let closed = self.processor.close().await;
-        tasks.drained().await;
+        await_close_phase(
+            self.processor.await_listener_generations(),
+            drain_timeout,
+            "listener_generations",
+        )
+        .await;
+        await_close_phase(tasks.drained(), drain_timeout, "tasks_before_network_close").await;
+        let closed = self.processor.close_with_timeout(drain_timeout).await;
+        await_close_phase(tasks.drained(), drain_timeout, "tasks_after_network_close").await;
         let released = self.processor.stores_released();
         let Self {
             processor,
@@ -341,7 +392,18 @@ impl Provider {
         match Arc::into_inner(processor) {
             Some(processor) => {
                 drop(processor);
-                released.await;
+                if !await_close_phase(
+                    std::future::IntoFuture::into_future(released.clone()),
+                    drain_timeout,
+                    "stores_released",
+                )
+                .await
+                {
+                    if let Err(error) = closed {
+                        tracing::warn!(%error, "a closing node whose stores are still held failed to close its network");
+                    }
+                    return Err(Error::ProviderStillShared { released });
+                }
                 closed
             }
             None => {
@@ -420,24 +482,7 @@ impl Provider {
 
         let processor = Arc::new(processor_builder.build()?);
 
-        let extensions = crate::extension::ext::Extensions::new(processor.clone());
-        #[cfg(all(feature = "browser", target_family = "wasm"))]
-        let pagehide = browser::provider::listener::PagehideListener::register(&processor)
-            .map(std::rc::Rc::new);
-
-        Ok(Provider {
-            processor,
-            handler: InternalRpcHandler,
-            extensions,
-            dispatch_drops: Arc::default(),
-            onion_runtime: Arc::new(Mutex::new(None)),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            onion_directory_endpoint: Arc::new(Mutex::new(None)),
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            browser_mail: None,
-            #[cfg(all(feature = "browser", target_family = "wasm"))]
-            pagehide,
-        })
+        Ok(Self::from_processor(processor))
     }
 
     /// Create a new provider instanice with everything in detail

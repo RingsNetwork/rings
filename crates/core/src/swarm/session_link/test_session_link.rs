@@ -395,8 +395,10 @@ fn test_a_disclaimed_session_travels_inline_until_leased_again() -> Result<()> {
     Ok(())
 }
 
-/// Law (expiry, sending end): a frame is never sent with a session that expires within `Δ`,
-/// leased or not, whichever slot it fills. Every instant derives from the session's own expiry.
+/// Law (expiry, sending end): a frame is refused when `delegations.hop` expires within `Δ` or
+/// `delegations.origin` has reached its expiry (`expires_at_ms <= now_ms`); while a relayed
+/// `delegations.origin` is inside `(expires_at_ms - Δ, expires_at_ms)`, `encode_slot` falls back
+/// to inline (`DelegationRef::Inline`) even when the peer granted a longer lease (#1223).
 #[test]
 fn test_sender_refuses_a_session_that_expires_within_the_margin() -> Result<()> {
     let (origin, hop) = (delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?, session()?);
@@ -411,8 +413,29 @@ fn test_sender_refuses_a_session_that_expires_within_the_margin() -> Result<()> 
         ORIGIN_REFERENCED
     );
 
+    // Relay forwarding during `[e_O - Δ, e_O)`: `origin` falls back to inline while `hop` is
+    // well before its horizon, and is refused once `now_ms >= e_O`.
+    assert_eq!(
+        sent_encoding(&mut sender, &payload, last_ms + 1)?,
+        BOTH_INLINE
+    );
+    assert_eq!(
+        sent_encoding(&mut sender, &payload, expires_at_ms - 1)?,
+        BOTH_INLINE
+    );
     assert!(matches!(
-        sender.encode(GENERATION, &payload, last_ms + 1),
+        sender.encode(GENERATION, &payload, expires_at_ms),
+        Err(Error::DelegationExpiresWithinMargin)
+    ));
+
+    // A hop delegation expiring within `Δ` is refused at `e_H - Δ`.
+    let expiring_hop = delegatee_key_with_ttl(SHORT_SESSION_TTL_MS)?;
+    let hop_expires_ms = expiring_hop.delegation().expires_at_ms();
+    let hop_payload = relayed_payload(&hop, &expiring_hop, 0)?;
+    let hop_last_ms = hop_expires_ms - LEASE_MARGIN_MS - 1;
+    sent(&mut sender, &hop_payload, hop_last_ms)?;
+    assert!(matches!(
+        sender.encode(GENERATION, &hop_payload, hop_last_ms + 1),
         Err(Error::DelegationExpiresWithinMargin)
     ));
     Ok(())

@@ -37,9 +37,10 @@
 //! rounds, successor-list synchronization, and test hooks.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -51,6 +52,7 @@ use super::carrier_store::CarrierStore;
 use super::carrier_store::RemovalIndex;
 use super::carrier_store::RemovalStorage;
 use super::carrier_store::REMOVAL_SHARES;
+use super::storage::StorageKey;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
@@ -88,8 +90,10 @@ use crate::lifecycle::epoch::Epoch;
 use crate::message::RelayHoldDigest;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
-use crate::utils::new_uuid;
 use crate::utils::Instant;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
+use crate::utils::SystemClock;
 
 mod relay_custody;
 use relay_custody::KeptRelayHold;
@@ -130,7 +134,7 @@ pub struct PeerRing {
     /// refuses and never evicts, given by [`Self::with_removal_storage`]; an in-memory one until
     /// then, whose loss at a restart makes this node a fresh replica (removal-stability paper,
     /// Section IV).
-    pub(crate) removal_storage: RemovalStorage,
+    pub(crate) removal_storage: Arc<RemovalStorage>,
     /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
     removal_index: RemovalIndex,
     /// The connection slots of this node, which every table under slot accounting charges
@@ -175,6 +179,10 @@ pub struct PeerRing {
     /// Timestamps are elapsed milliseconds from this instant, so a wall-clock
     /// change can neither extend nor prematurely expire an in-flight lookup.
     clock_origin: Instant,
+    /// Injectable epoch clock capability used by storage and carrier retention decisions.
+    clock: SharedClock,
+    /// Injectable cryptographic RNG capability used for request tokens and finger jitter.
+    rng: SharedRng,
     /// Lazily initialized entropy used to phase automatic finger maintenance.
     ///
     /// Stable for the lifetime of this ring, including browser listener
@@ -183,6 +191,10 @@ pub struct PeerRing {
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
+    /// Monotonic allocator of non-zero local custody incarnation tokens (#1207).
+    pub(super) next_storage_custody_incarnation: AtomicU64,
+    /// Active outgoing hand-off custody incarnation tokens by slot (#1207).
+    pub(crate) storage_custody_incarnations: Mutex<BTreeMap<StorageKey, u64>>,
     /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
     pub(super) cache_transition: FuturesMutex<()>,
     /// Count of committed transitions that changed the routes (`Law (Epoch)`).
@@ -202,8 +214,12 @@ pub struct PeerRing {
     relay_replications: Mutex<RelayReplications>,
     /// How relay custody is replicated: `r` and the age gate (see `relay_replicas`).
     relay_replication: RelayReplication,
-    /// The peers this node declared to that it holds relay mail, once its age gate opened.
-    relay_custody_declared: Mutex<BTreeSet<Did>>,
+    /// Effective age-gate threshold in milliseconds (mirrors `relay_replication.age_gate_ms` in
+    /// production; deterministically openable in tests).
+    relay_age_gate_ms: AtomicU64,
+    /// The peers this node declared to that it holds relay mail, once its age gate opened,
+    /// keyed by the transaction ID of the outstanding or admitted declaration.
+    relay_custody_declared: Mutex<BTreeMap<Did, uuid::Uuid>>,
     /// The first holder after this node past its successor list (see `relay_replicas`).
     relay_next_holder: Mutex<NextHolder>,
     /// Whether a chain neighbour was lost and the chain exchange has not run since (`Law
@@ -260,7 +276,7 @@ impl PeerRing {
             bridged: Mutex::new(BTreeMap::new()),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
-            removal_storage: Box::new(MemStorage::new()),
+            removal_storage: Arc::new(Box::new(MemStorage::new())),
             removal_index: RemovalIndex::new(TableAccounting::new(REMOVAL_SHARES)),
             edges,
             relay_storage: None,
@@ -271,8 +287,12 @@ impl PeerRing {
             pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
             pending_connect_lookup: Mutex::new(VecDeque::new()),
             clock_origin: Instant::now(),
+            clock: Arc::new(SystemClock),
+            rng: SharedRng::system(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
+            next_storage_custody_incarnation: AtomicU64::new(1),
+            storage_custody_incarnations: Mutex::new(BTreeMap::new()),
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
             relay_neighborhood: Mutex::new(RelayNeighborhood::default()),
@@ -280,13 +300,41 @@ impl PeerRing {
             last_stamped: Mutex::new(None),
             relay_holder_hints: Mutex::new(RelayHolderHints::default()),
             relay_replications: Mutex::new(BTreeMap::new()),
+            relay_age_gate_ms: AtomicU64::new(RelayReplication::default().age_gate_ms),
             relay_replication: RelayReplication::default(),
-            relay_custody_declared: Mutex::new(BTreeSet::new()),
+            relay_custody_declared: Mutex::new(BTreeMap::new()),
             relay_next_holder: Mutex::new(NextHolder::default()),
             relay_chain_repair_due: AtomicBool::new(false),
             relay_chain_losses: Epoch::default(),
             did,
         }
+    }
+
+    /// Configure the epoch [`SharedClock`] capability read by this ring's storage decisions.
+    pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Configure the [`SharedRng`] capability used by this ring's topology tokens and jitter.
+    pub fn with_rng(mut self, rng: SharedRng) -> Self {
+        self.rng = rng;
+        self
+    }
+
+    /// Return the epoch [`SharedClock`] capability bound to this ring.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds from this ring's [`SharedClock`].
+    pub fn epoch_ms(&self) -> u128 {
+        self.clock.now_ms()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this ring.
+    pub fn rng(&self) -> &SharedRng {
+        &self.rng
     }
 
     /// This ring with `storage` as the store of its relay-inbox namespace (see
@@ -301,7 +349,7 @@ impl PeerRing {
     /// [`Self::removal_storage`](PeerRing#structfield.removal_storage)): a retained store, which
     /// refuses and never evicts (#920).
     pub fn with_removal_storage(mut self, storage: RemovalStorage) -> Self {
-        self.removal_storage = storage;
+        self.removal_storage = Arc::new(storage);
         self
     }
 
@@ -324,12 +372,20 @@ impl PeerRing {
         self.removal_index.floor_use_at(now_ms)
     }
 
+    /// The number of items held by `principal` in the removal store's accounting.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn removal_held(&self, principal: crate::fair_admission::Principal) -> usize {
+        self.removal_index.held(principal)
+    }
+
     /// This ring replicating relay custody as `replication` says (#777).
     pub fn with_relay_replication(mut self, replication: RelayReplication) -> Self {
         let replication = RelayReplication {
             replicas: replication.replicas.max(1),
             ..replication
         };
+        self.relay_age_gate_ms
+            .store(replication.age_gate_ms, Ordering::Relaxed);
         self.relay_replication = replication;
         self.relay_neighborhood =
             Mutex::new(RelayNeighborhood::with_replicas(replication.replicas));
@@ -653,7 +709,6 @@ impl PeerRing {
             .then(|| {
                 let (previous, next) = self.relay_chain_neighbours()?;
                 let chain_neighbour = previous == Some(sender) || next == Some(sender);
-                let capacity = self.successor_seq.capacity();
                 let (_, acted) = self.transition(|state, _| {
                     match (
                         state.predecessor == Some(sender) || state.predecessors.contains(&sender),
@@ -667,12 +722,8 @@ impl PeerRing {
                             false,
                         ),
                         (_, held_as_successor) => {
-                            let mut step = self.step(state, TopologyEvent::Remove {
-                                peer: sender,
-                                successor: SuccessorRemoval::Preserve,
-                            });
-                            if held_as_successor {
-                                step.state.successors = successor_list
+                            let replacements = if held_as_successor {
+                                successor_list
                                     .iter()
                                     .copied()
                                     .filter(|&candidate| {
@@ -680,20 +731,14 @@ impl PeerRing {
                                             && candidate != sender
                                             && is_routable(candidate)
                                     })
-                                    .fold(step.state.successors, |successors, candidate| {
-                                        match successors.len() < capacity
-                                            && !successors.contains(&candidate)
-                                        {
-                                            true => topology::update_successors(
-                                                state.local,
-                                                &successors,
-                                                candidate,
-                                                capacity,
-                                            ),
-                                            false => successors,
-                                        }
-                                    });
-                            }
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let step = self.step(state, TopologyEvent::Remove {
+                                peer: sender,
+                                successor: SuccessorRemoval::PromoteReplacements(replacements),
+                            });
                             (step, true)
                         }
                     }
@@ -736,7 +781,9 @@ impl PeerRing {
     /// Initialized at most once, so concurrent callers and browser listener
     /// restarts all observe the same phase.
     pub(crate) fn finger_jitter_entropy(&self) -> uuid::Uuid {
-        *self.finger_jitter_entropy.get_or_init(new_uuid)
+        *self
+            .finger_jitter_entropy
+            .get_or_init(|| self.rng.next_uuid())
     }
 
     /// The scheduler's view of finger convergence: the current phase and the
@@ -779,11 +826,10 @@ impl PeerRing {
     ///
     /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
-        let next =
-            self.transition_topology_at(|now_ms| TopologyEvent::AdvanceFingerConvergence {
-                now_ms,
-                request_id: new_uuid(),
-            })?;
+        let request_id = self.rng.next_uuid();
+        let next = self.transition_topology_at(|now_ms| {
+            TopologyEvent::AdvanceFingerConvergence { now_ms, request_id }
+        })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -966,7 +1012,7 @@ impl PeerRing {
     /// The returned action carries the correlation token the head's report
     /// must echo.
     pub fn pre_stabilize(&self) -> Result<PeerRingAction> {
-        self.begin_stabilization(new_uuid())
+        self.begin_stabilization(self.rng.next_uuid())
     }
 }
 

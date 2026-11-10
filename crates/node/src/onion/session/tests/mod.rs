@@ -3,8 +3,11 @@
 //! Reply blocks are built by the client's builder over a fixture return path, so the pool and the
 //! machines handle real `OnionSurb`s; nothing here touches a network or a clock.
 
+mod test_deterministic_driver;
 mod test_liveness;
 mod test_mark;
+#[cfg(rings_native)]
+mod test_session_order_model;
 mod test_witness;
 
 use bytes::Bytes;
@@ -379,6 +382,56 @@ fn test_exit_session_opens_acks_replies_and_closes() {
         "fin only after the world's end"
     );
     assert!(session.is_closed());
+}
+
+/// Symmetry of close order and post-fin write rejection: when the world's `Eof` is replied before
+/// the client's `Fin`, applying the client's `Fin` emits `Close` immediately without waiting for
+/// a tick, and any `Data` after `Fin` is ignored.
+#[test]
+fn test_exit_session_closes_immediately_on_client_fin_after_world_eof_and_ignores_data_after_fin() {
+    let mut blocks = surbs(400, 6, 0).into_iter();
+    let mut session = acked(&mut blocks);
+    let mut next = || blocks.next().expect("a fixture block");
+
+    assert_eq!(
+        kinds(&session.world(NOW_MS, OnionWorldRead::Eof)),
+        ["fin 1"],
+        "world eof replied first while client write direction is still open"
+    );
+    assert!(!session.is_closed());
+
+    let fin = OnionFrame::Fin {
+        sequence: OnionSequence::new(1),
+        target: None,
+    };
+    assert_eq!(
+        kinds(&session.forward(NOW_MS, fin, next())),
+        ["shutdown", "close"],
+        "client fin after world eof closes immediately"
+    );
+    assert!(session.is_closed());
+
+    // Also verify that if a session opens with `Fin` and a subsequent `Data` arrives before world
+    // `Eof`, the post-`Fin` data frame produces no `Write` effect.
+    let mut half_closed = OnionExitSession::new(arguments().digest, NOW_MS);
+    let open_fin = OnionFrame::Fin {
+        sequence: OnionSequence::FIRST,
+        target: Some(Bytes::from_static(TARGET)),
+    };
+    assert_eq!(kinds(&half_closed.forward(NOW_MS, open_fin, next())), [
+        "open example.com:443",
+        "shutdown"
+    ]);
+    assert_eq!(kinds(&half_closed.opened(NOW_MS, true)), ["data 0 0"]);
+    let late_data = OnionFrame::Data {
+        sequence: OnionSequence::new(1),
+        target: None,
+        payload: Bytes::from_static(b"after-fin"),
+    };
+    assert!(
+        kinds(&half_closed.forward(NOW_MS, late_data, next())).is_empty(),
+        "data after client fin is ignored"
+    );
 }
 
 /// An opened and acked session over `blocks`: the `T` loop and a credit loop of one block leave
@@ -974,4 +1027,61 @@ fn test_credit_ledger_saturates_at_the_pool_bound() {
     }
     assert_eq!(credit.count(NOW_MS), 0);
     assert!(OnionCreditWindow::DEFAULT.credit_loops(credit.count(NOW_MS), CLASS) > 0);
+}
+
+/// Regression (#1224): `credit_blocks` caps per-frame SURB minting at `min(W, Q_max)`, and
+/// `credit_loops` triggers refills at session open and throughout steady multi-frame downloads
+/// across every loop class (`KiB16..MiB12`), preventing both `credit_loops == 0` starvation and
+/// wasteful over-minting beyond `ONION_SURB_POOL_CAPACITY`.
+#[test]
+fn test_credit_window_caps_blocks_and_refills_every_loop_class() {
+    let default_window = OnionCreditWindow::DEFAULT;
+    let wide_window = OnionCreditWindow::new(500);
+    let x = OnionExpiry::from_ms(150_000).expect("on the grid");
+
+    for class in [
+        OnionLoopClass::KiB16,
+        OnionLoopClass::KiB64,
+        OnionLoopClass::KiB256,
+        OnionLoopClass::MiB1,
+        OnionLoopClass::MiB4,
+        OnionLoopClass::MiB12,
+    ] {
+        let blocks = default_window.credit_blocks(class);
+        assert!(blocks >= 1);
+        assert!(blocks <= 64, "{class:?} minted {blocks} > 64");
+        assert!(
+            wide_window.credit_blocks(class) <= ONION_SURB_POOL_CAPACITY,
+            "{class:?} exceeded pool bound"
+        );
+
+        assert!(
+            default_window.credit_loops(0, class) >= 1,
+            "{class:?} starved at 0 outstanding"
+        );
+        assert!(
+            default_window.credit_loops(1, class) >= 1,
+            "{class:?} starved after open loop (+1 outstanding)"
+        );
+
+        let mut credit = OnionClientCredit::default();
+        // Open loop contributes 1 implicit reply block, then Refill runs.
+        credit.sent(NOW_MS, x, 0);
+        for _ in 0..default_window.credit_loops(credit.count(NOW_MS), class) {
+            credit.sent(NOW_MS, x, blocks);
+        }
+        assert!(credit.count(NOW_MS) > 1, "{class:?} failed to top up pool");
+
+        // Stream 200 replies in `class` without credit ever dropping to 0.
+        for step in 0..200_usize {
+            assert!(
+                credit.count(NOW_MS) > 0,
+                "{class:?} starved at reply {step}"
+            );
+            credit.replied(NOW_MS);
+            for _ in 0..default_window.credit_loops(credit.count(NOW_MS), class) {
+                credit.sent(NOW_MS, x, blocks);
+            }
+        }
+    }
 }

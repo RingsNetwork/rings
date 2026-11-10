@@ -126,6 +126,14 @@ impl OnionLoopClass {
             .into_iter()
             .find(|class| class.cell_bytes() == length)
     }
+
+    /// The least class `b` whose padded value slot admits `value_bytes` (`value_bytes < C₀`,
+    /// #834 L3), or `None` above `MiB12`'s capacity.
+    pub fn least_for_value_bytes(value_bytes: usize) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|class| value_bytes <= class.value_capacity())
+    }
 }
 
 // `DEFAULT` is the least class, `KiB16`; it leaves an

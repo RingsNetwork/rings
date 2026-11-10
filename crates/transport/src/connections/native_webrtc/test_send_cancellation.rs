@@ -696,3 +696,303 @@ async fn test_failed_irrevocable_send_retires_before_preserving_its_error() {
         Err(Error::NativeSendCompletionTimeout { timeout_ms: 1 })
     ));
 }
+
+/// Model `webrtc 0.17.1`'s `RTCPeerConnection::close()`: the first invocation sets `is_closed`
+/// and waits on `release`; any second invocation returns `Ok(())` immediately without waiting.
+async fn webrtc_like_close(
+    invocations: Arc<AtomicUsize>,
+    started: Arc<AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+) -> Result<()> {
+    if invocations.fetch_add(1, Ordering::AcqRel) == 0 {
+        started.store(true, Ordering::Release);
+        release.notified().await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_concurrent_native_closes_wait_for_original_cleanup_before_publishing_witness() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let physical_close_completed = PhysicalCloseCompletion::new();
+    let witness = physical_close_completed.witness();
+    let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+
+    let first_close = tokio::spawn({
+        let runtime = runtime.clone();
+        let close = webrtc_like_close(
+            Arc::clone(&invocations),
+            Arc::clone(&started),
+            Arc::clone(&release),
+        );
+        let physical_close_completed = physical_close_completed.clone();
+        async move { run_native_close_with_witness(&runtime, close, physical_close_completed).await }
+    });
+    wait_for_flag(&started, "first physical close start").await;
+    assert!(!witness.is_complete());
+
+    let second_finished = Arc::new(AtomicBool::new(false));
+    let second_close = tokio::spawn({
+        let runtime = runtime.clone();
+        let close = webrtc_like_close(
+            Arc::clone(&invocations),
+            Arc::clone(&started),
+            Arc::clone(&release),
+        );
+        let physical_close_completed = physical_close_completed.clone();
+        let second_finished = Arc::clone(&second_finished);
+        async move {
+            let result =
+                run_native_close_with_witness(&runtime, close, physical_close_completed).await;
+            second_finished.store(true, Ordering::Release);
+            result
+        }
+    });
+
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        invocations.load(Ordering::Acquire),
+        1,
+        "overlapping close must coalesce onto the in-flight physical close"
+    );
+    assert!(
+        !second_finished.load(Ordering::Acquire),
+        "second close caller must wait for original physical cleanup"
+    );
+    assert!(
+        !witness.is_complete(),
+        "witness must remain incomplete until original cleanup finishes"
+    );
+
+    release.notify_one();
+    assert!(first_close.await.expect("first close task").is_ok());
+    assert!(second_close.await.expect("second close task").is_ok());
+    assert_eq!(invocations.load(Ordering::Acquire), 1);
+    assert!(witness.is_complete());
+    assert!(witness.completed().await);
+}
+
+#[tokio::test]
+async fn test_explicit_close_and_failed_send_retirement_share_one_physical_close_in_both_orders() {
+    for failed_send_first in [true, false] {
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let physical_close_completed = PhysicalCloseCompletion::new();
+        let witness = physical_close_completed.witness();
+        let connection_state = ConnectionStateCell::new();
+        let cancellation = CancellationToken::new();
+        let retirement_fence =
+            NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
+        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let proof = permit
+            .try_mark_irrevocable()
+            .expect("live permit must become irrevocable");
+        let fail_send = Arc::new(tokio::sync::Notify::new());
+        let send_failed = Arc::clone(&fail_send);
+        let send = async move {
+            let _proof = proof;
+            send_failed.notified().await;
+            Err::<(), _>(Error::NativeSendCompletionTimeout { timeout_ms: 5 })
+        };
+
+        let send_done = Arc::new(AtomicBool::new(false));
+        let send_task = tokio::spawn({
+            let runtime = runtime.clone();
+            let retirement_fence = retirement_fence.clone();
+            let close = webrtc_like_close(
+                Arc::clone(&invocations),
+                Arc::clone(&started),
+                Arc::clone(&release),
+            );
+            let physical_close_completed = physical_close_completed.clone();
+            let send_done = Arc::clone(&send_done);
+            async move {
+                let retirement_runtime = runtime.clone();
+                let result = run_send_with_retirement(
+                    &runtime,
+                    acceptance,
+                    retirement_fence,
+                    |_| send,
+                    async move {
+                        close_failed_native_send_with_witness(
+                            &retirement_runtime,
+                            close,
+                            physical_close_completed,
+                        )
+                        .await
+                    },
+                )
+                .await;
+                send_done.store(true, Ordering::Release);
+                result
+            }
+        });
+
+        let explicit_done = Arc::new(AtomicBool::new(false));
+        let explicit_task = if failed_send_first {
+            fail_send.notify_one();
+            wait_for_flag(&started, "failed-send physical close start").await;
+            let task = tokio::spawn({
+                let runtime = runtime.clone();
+                let retirement_fence = retirement_fence.clone();
+                let close = webrtc_like_close(
+                    Arc::clone(&invocations),
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                );
+                let physical_close_completed = physical_close_completed.clone();
+                let explicit_done = Arc::clone(&explicit_done);
+                async move {
+                    retirement_fence.request();
+                    let result =
+                        run_native_close_with_witness(&runtime, close, physical_close_completed)
+                            .await;
+                    explicit_done.store(true, Ordering::Release);
+                    result
+                }
+            });
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            task
+        } else {
+            let task = tokio::spawn({
+                let runtime = runtime.clone();
+                let retirement_fence = retirement_fence.clone();
+                let close = webrtc_like_close(
+                    Arc::clone(&invocations),
+                    Arc::clone(&started),
+                    Arc::clone(&release),
+                );
+                let physical_close_completed = physical_close_completed.clone();
+                let explicit_done = Arc::clone(&explicit_done);
+                async move {
+                    retirement_fence.request();
+                    let result =
+                        run_native_close_with_witness(&runtime, close, physical_close_completed)
+                            .await;
+                    explicit_done.store(true, Ordering::Release);
+                    result
+                }
+            });
+            wait_for_flag(&started, "explicit physical close start").await;
+            fail_send.notify_one();
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            task
+        };
+
+        assert_eq!(invocations.load(Ordering::Acquire), 1);
+        assert!(!send_done.load(Ordering::Acquire));
+        assert!(!explicit_done.load(Ordering::Acquire));
+        assert!(!witness.is_complete());
+
+        release.notify_one();
+        let send_result = send_task.await.expect("send task");
+        let explicit_result = explicit_task.await.expect("explicit close task");
+        assert!(matches!(
+            send_result,
+            Err(Error::NativeSendCompletionTimeout { timeout_ms: 5 })
+        ));
+        assert!(explicit_result.is_ok());
+        assert_eq!(invocations.load(Ordering::Acquire), 1);
+        assert!(witness.is_complete());
+        assert!(witness.completed().await);
+    }
+}
+
+#[tokio::test]
+async fn test_two_simultaneous_failed_sends_coalesce_onto_one_physical_close_and_witness() {
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let physical_close_completed = PhysicalCloseCompletion::new();
+    let witness = physical_close_completed.witness();
+    let connection_state = ConnectionStateCell::new();
+    let cancellation = CancellationToken::new();
+    let retirement_fence =
+        NativeRetirementFence::new(connection_state.clone(), cancellation.clone());
+    let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+
+    let mut tasks = Vec::new();
+    let mut done_flags = Vec::new();
+    let fail_trigger = CancellationToken::new();
+
+    for index in 0..2 {
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let proof = permit
+            .try_mark_irrevocable()
+            .expect("live permit must become irrevocable");
+        let fail_trigger = fail_trigger.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        done_flags.push(Arc::clone(&done));
+        let runtime = runtime.clone();
+        let retirement_fence = retirement_fence.clone();
+        let close = webrtc_like_close(
+            Arc::clone(&invocations),
+            Arc::clone(&started),
+            Arc::clone(&release),
+        );
+        let physical_close_completed = physical_close_completed.clone();
+        tasks.push(tokio::spawn(async move {
+            let retirement_runtime = runtime.clone();
+            let result = run_send_with_retirement(
+                &runtime,
+                acceptance,
+                retirement_fence,
+                |_| async move {
+                    let _proof = proof;
+                    fail_trigger.cancelled().await;
+                    Err::<(), _>(Error::NativeSendCompletionTimeout {
+                        timeout_ms: (index + 1) as u128,
+                    })
+                },
+                async move {
+                    close_failed_native_send_with_witness(
+                        &retirement_runtime,
+                        close,
+                        physical_close_completed,
+                    )
+                    .await
+                },
+            )
+            .await;
+            done.store(true, Ordering::Release);
+            result
+        }));
+    }
+
+    fail_trigger.cancel();
+    wait_for_flag(&started, "coalesced failed-send physical close start").await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(invocations.load(Ordering::Acquire), 1);
+    assert!(done_flags.iter().all(|done| !done.load(Ordering::Acquire)));
+    assert!(!witness.is_complete());
+
+    release.notify_one();
+    for (index, task) in tasks.into_iter().enumerate() {
+        let expected_timeout = (index + 1) as u128;
+        let result = task.await.expect("send task");
+        assert!(matches!(
+            result,
+            Err(Error::NativeSendCompletionTimeout { timeout_ms })
+                if timeout_ms == expected_timeout
+        ));
+    }
+    assert_eq!(invocations.load(Ordering::Acquire), 1);
+    assert!(witness.is_complete());
+    assert!(witness.completed().await);
+}

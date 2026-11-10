@@ -48,7 +48,9 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
-use crate::utils::get_epoch_ms;
+use crate::utils::SharedClock;
+#[cfg(all(test, not(target_family = "wasm")))]
+use crate::utils::SystemClock;
 
 mod admission;
 mod capacity;
@@ -112,7 +114,7 @@ pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use queue::OUTBOUND_LANE_WINDOW;
 pub(super) use sender_bounded::SenderBound;
-use sender_bounded::SenderBounded;
+pub(super) use sender_bounded::SenderBounded;
 use session_encoding::SharedDelegationLessee;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
@@ -294,6 +296,7 @@ pub(super) struct OutboundSchedulers {
     registry: Mutex<OutboundRegistry>,
     global_capacity: Arc<GlobalTransferCapacity>,
     measure: Option<MeasureImpl>,
+    clock: SharedClock,
     /// Transfers their sender bounds, which hold no shared capacity.
     sender_bounded: SenderBounded,
 }
@@ -326,11 +329,17 @@ impl OutboundRegistry {
 }
 
 impl OutboundSchedulers {
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(super) fn new(measure: Option<MeasureImpl>) -> Self {
+        Self::new_with_clock(measure, Arc::new(SystemClock))
+    }
+
+    pub(super) fn new_with_clock(measure: Option<MeasureImpl>, clock: SharedClock) -> Self {
         Self {
             registry: Mutex::new(OutboundRegistry::default()),
             global_capacity: Arc::new(GlobalTransferCapacity::new()),
             measure,
+            clock,
             sender_bounded: SenderBounded::default(),
         }
     }
@@ -353,7 +362,7 @@ impl OutboundSchedulers {
                 stopped.shutdown();
                 link
             }
-            None => PeerLinkState::new(),
+            None => PeerLinkState::new_with_clock(self.clock.clone()),
         };
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
@@ -495,6 +504,7 @@ struct OutboundWorker {
     ready: TransferQueues<QueuedTransfer>,
     active: Option<RunnableTransfer<QueuedTransfer>>,
     lessee: SharedDelegationLessee,
+    clock: SharedClock,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     /// The transport credit of each class's lane.
     credits: PerClass<ClassCredit>,
@@ -531,6 +541,7 @@ impl OutboundWorker {
             ready: TransferQueues::default(),
             active: None,
             lessee: link.lessee,
+            clock: link.clock,
             deliveries: FuturesUnordered::new(),
             credits: PerClass::from_fn(|_| ClassCredit::Idle),
             credit_waits: FuturesUnordered::new(),
@@ -776,11 +787,12 @@ impl OutboundWorker {
         let before_first_frame = transfer.is_before_first_frame();
         let generation = transfer.admitted.attempt().generation();
         let lessee = &self.lessee;
+        let now_ms = self.clock.now_ms();
         let encoded = transfer.next_frame().and_then(|frame| {
             frame
                 .map(|(payload, context)| {
                     lessee
-                        .encode(generation, payload.as_ref(), get_epoch_ms())
+                        .encode(generation, payload.as_ref(), now_ms)
                         .map(|bytes| (bytes, context))
                 })
                 .transpose()

@@ -79,6 +79,13 @@ impl OnionReplayFilterKey {
     pub(crate) const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
+
+    /// Sample a fresh 32-byte replay-filter key from `rng`.
+    pub(crate) fn from_rng(rng: &mut impl rand::RngCore) -> Self {
+        let mut bytes = [0_u8; 32];
+        rng.fill_bytes(&mut bytes);
+        Self::new(bytes)
+    }
 }
 
 impl Drop for OnionReplayFilterKey {

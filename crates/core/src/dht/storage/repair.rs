@@ -84,7 +84,6 @@ use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::fair_admission::Principal;
-use crate::utils::get_epoch_ms;
 
 fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
     match action {
@@ -208,7 +207,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // Post S4: for every local entry e, each key in place(id(e),
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let mut actions = Vec::new();
         for (_, entry) in self.live_storage_entries(now_ms).await? {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
@@ -236,7 +235,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // used only to validate observed misses, never to synthesize targets.
         // Preservation S1/S3: this transition never removes and duplicate copy
         // actions are duplicate Entry::join deliveries.
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
             let action = self

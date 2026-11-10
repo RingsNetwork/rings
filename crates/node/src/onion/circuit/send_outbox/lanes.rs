@@ -364,10 +364,6 @@ impl<T> OrderedSendState<T> {
                 if waiter.send(()).is_ok() {
                     return;
                 }
-                // A waiter that is gone abandoned its place.
-                if let Entry::Occupied(mut count) = self.waiting.entry(candidate) {
-                    *count.get_mut() = count.get().saturating_sub(1);
-                }
             }
             self.space.remove(&candidate);
         }

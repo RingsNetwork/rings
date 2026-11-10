@@ -22,21 +22,19 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["node_default"]
-ffi = [
-    "node",
-    "cbindgen",
-]
+ffi = ["node"]
+# Compatibility alias retained so existing browser build invocations resolve cleanly.
+console_error_panic_hook = []
 node_default = ["node"]
 node = [
     "tokio",
     "tokio-util",
     "tower-http",
     "clap",
+    "dep:dotenvy",
     "dep:reqwest",
     "reqwest/json",
     "reqwest/rustls-tls",
-    "form_urlencoded",
-    "pin-project",
     "async-stream",
     "backtrace",
     "lazy_static",
@@ -86,9 +84,6 @@ base58 = "0.2"
 base64 = { version = "0.13.0" }
 bytes = { version = "1.2.1", features = ["serde"] }
 chacha20 = { version = "0.9.1", features = ["zeroize"] }
-chrono = "0.4.23"
-dashmap = "5"
-dotenvy = "0.15.7"
 futures = { version = "0.3.21", features = ["alloc"] }
 # The Sphinx key schedule (#852): with `zeroize`, sha2's block cores wipe their state on drop, so
 # the HMAC states inside `Hkdf` and `Hmac` (the PRK's and the MAC key's ipad/opad chaining values)
@@ -111,7 +106,6 @@ serde = { version = "1.0.136", features = ["derive"] }
 serde-saphyr = "1.3.0"
 serde_json = "1.0.70"
 sha2 = { version = "0.11.1", features = ["zeroize"] }
-strum = "0.25.0"
 subtle = "2.4.1"
 thiserror = "1"
 tracing = "0.1.37"
@@ -127,17 +121,15 @@ async-stream = { version = "0.3.2", optional = true }
 axum = { version = "0.8.9", optional = true }
 backtrace = { version = "0.3.6", optional = true }
 clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
-form_urlencoded = { version = "1.0.1", optional = true }
+dotenvy = { version = "0.15.7", optional = true }
 home = { version = "0.5.5", optional = true }
 lazy_static = { version = "1.4.0", optional = true }
-pin-project = { version = "1", optional = true }
 reqwest = { version = "0.12.22", optional = true, default-features = false }
 tokio = { version = "1.50.0", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"], optional = true }
 tokio-util = { version = "0.7.8", optional = true }
 tower-http = { version = "0.6.11", features = ["cors"], optional = true }
 
 # browser
-console_error_panic_hook = { version = "0.1.1", optional = true }
 js-sys = { workspace = true, optional = true }
 serde-wasm-bindgen = { workspace = true, optional = true }
 tracing-wasm = { version = "0.2.1", optional = true }
@@ -172,14 +164,12 @@ ppp = "2.3.0"
 rings-gateway = { workspace = true, features = ["test-support"] }
 # Format reflection for the wire golden vectors (#1141).
 serde-reflection = "0.6.0"
+stateright = "0.31.0"
 tempfile = "3"
 tokio = { version = "1.50.0", features = ["test-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
-
-[build-dependencies]
-cbindgen = { version = "0.29.4", optional = true }
 
 [[bin]]
 name = "rings"

@@ -218,6 +218,17 @@ impl OnionExitSession {
         self.phase == OnionExitPhase::Closed
     }
 
+    /// Whether both directions of the session's stream ended cleanly (`fin` from the client and
+    /// `fin` replied for the world's `eof`).
+    pub(crate) const fn completed_cleanly(&self) -> bool {
+        self.read_closed && self.write_closed
+    }
+
+    /// Whether the session has gone `V` without a forward loop at `now`.
+    pub(crate) const fn is_expired_at(&self, now_ms: u128) -> bool {
+        now_ms.saturating_sub(self.last_forward_ms) >= ONION_ADMISSION_WINDOW_MS
+    }
+
     /// One forward loop at `now`: its reply block and its frame.
     pub(crate) fn forward(
         &mut self,
@@ -402,10 +413,16 @@ impl OnionExitSession {
                     target: Some(target),
                 },
             ) if OnionTargetDigest::of(&target) != self.digest => self.abort(now_ms, effects),
-            (_, OnionStreamFrame::Data { payload, .. }) => Self::write(payload, effects),
+            (_, OnionStreamFrame::Data { payload, .. }) if !self.write_closed => {
+                Self::write(payload, effects);
+            }
+            (_, OnionStreamFrame::Data { .. }) => {}
             (_, OnionStreamFrame::Fin { .. }) => {
                 self.write_closed = true;
                 effects.push(OnionExitEffect::ShutdownWrite);
+                if self.read_closed {
+                    self.close(effects);
+                }
             }
         }
     }

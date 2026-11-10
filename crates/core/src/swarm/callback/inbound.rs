@@ -55,9 +55,23 @@ use self::barrier::UnfinishedReassembly;
 use self::capacity::memory_reservation;
 pub(super) use self::capacity::HeldCharge;
 pub(crate) use self::capacity::InboundCapacity;
-pub(super) use self::capacity::InboundCapacityPermit;
+pub(crate) use self::capacity::InboundCapacityPermit;
 use self::capacity::InboundCharge;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use self::capacity::InboundRequest;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use self::capacity::InboundResource;
 pub(crate) use self::lane::InboundLane;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_LANES: usize = INBOUND_LANE_COUNT;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_MAILBOX_BYTES: usize = INBOUND_MAILBOX_BYTE_CAPACITY;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_RESERVED_BYTES_PER_LANE: usize = INBOUND_RESERVED_BYTES_PER_LANE;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_PEER_BYTES: usize = INBOUND_PEER_BYTE_CAPACITY;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_PEER_EVENTS: usize = INBOUND_PEER_CAPACITY;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyClock;
@@ -141,6 +155,8 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
+    /// Whether final transaction admission was already committed before entering the lane.
+    admitted_final: bool,
     /// The transport lane the frame arrived on; a chunk's carrier is checked against its
     /// message once reassembled.
     carrier: Option<ChannelLane>,
@@ -278,7 +294,7 @@ impl InboundMailbox {
                 },
         } = submission;
         let lane = prepared.lane;
-        if !prepared.kind.is_chunk() {
+        let admitted_final = if !prepared.kind.is_chunk() {
             if !processor.pending_connection_admits(peer).await? {
                 finish_completion(completion, Ok(()));
                 return Ok(());
@@ -289,8 +305,10 @@ impl InboundMailbox {
             };
             processor
                 .admit_final_transaction(&prepared.payload, &prepared.message, lane, arrival)
-                .await?;
-        }
+                .await?
+        } else {
+            false
+        };
         // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
         // the actor's ordering never waits on it.
         let introducer = Arrival {
@@ -337,6 +355,7 @@ impl InboundMailbox {
             payload,
             prepared_message: Some(message),
             lane,
+            admitted_final,
             carrier,
             wire_bytes,
             permit,
@@ -815,16 +834,43 @@ async fn process_event(
     }
 
     processor.logical.pass_tapped_lane(lane).await;
-    let introducer = Arrival {
+    let arrival = Arrival {
         peer: event.peer,
         authentication: event.authentication,
+    };
+    let message = match event.prepared_message {
+        Some(message) => message,
+        None => match event.payload.transaction.data() {
+            Ok(message) => message,
+            Err(error) => {
+                finish_completion(event.completion, Err(error));
+                return InboundTaskCompletion {
+                    lane,
+                    sequence,
+                    next: None,
+                };
+            }
+        },
+    };
+    if !event.admitted_final {
+        if let Err(error) = processor
+            .admit_final_transaction(&event.payload, &message, lane, arrival)
+            .await
+        {
+            finish_completion(event.completion, Err(error));
+            return InboundTaskCompletion {
+                lane,
+                sequence,
+                next: None,
+            };
+        }
     }
-    .introducer(processor.logical.transport.dht.edges());
+    let introducer = arrival.introducer(processor.logical.transport.dht.edges());
     let result = process_logical_message(
         &processor.logical,
         &event.payload,
         introducer,
-        event.prepared_message,
+        Some(message),
     )
     .await;
     finish_completion(event.completion, result);

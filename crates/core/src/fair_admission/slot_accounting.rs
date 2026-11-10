@@ -258,6 +258,11 @@ impl SlotAccounting {
         }
     }
 
+    /// The table's configured shares.
+    pub(crate) const fn shares(&self) -> Shares {
+        self.shares
+    }
+
     /// `|T|`, the items held.
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {

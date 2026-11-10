@@ -103,3 +103,42 @@ fn test_repeated_waits_from_one_task_register_one_waker() {
 
     assert_eq!(notifier.state().wakers.len(), 1);
 }
+
+/// Law: `Notifier::wake` drops its internal mutex before invoking registered wakers, so an
+/// inline waker that synchronously re-enters `Notifier::poll` and `Notifier::wake` on the same
+/// thread completes without self-deadlocking.
+#[test]
+fn test_wake_invokes_inline_reentrant_waker_outside_lock() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+
+    struct ReentrantInlineWaker {
+        notifier: Notifier,
+        polled_ready: AtomicBool,
+    }
+
+    impl futures::task::ArcWake for ReentrantInlineWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            let noop = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&noop);
+            let mut waiter = Box::pin(arc_self.notifier.clone());
+            if matches!(waiter.as_mut().poll(&mut cx), Poll::Ready(())) {
+                arc_self.polled_ready.store(true, Ordering::SeqCst);
+            }
+            arc_self.notifier.wake();
+        }
+    }
+
+    let notifier = Notifier::default();
+    let inline = Arc::new(ReentrantInlineWaker {
+        notifier: notifier.clone(),
+        polled_ready: AtomicBool::new(false),
+    });
+    let waker = futures::task::waker_ref(&inline);
+    let mut cx = Context::from_waker(&waker);
+    let mut waiter = Box::pin(notifier.clone());
+
+    assert!(matches!(waiter.as_mut().poll(&mut cx), Poll::Pending));
+    notifier.wake();
+    assert!(inline.polled_ready.load(Ordering::SeqCst));
+}

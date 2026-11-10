@@ -6,5 +6,7 @@
 pub mod echo;
 #[cfg(rings_browser)]
 pub mod js;
+#[cfg(any(rings_browser, test))]
+pub(crate) mod outbox;
 #[cfg(rings_native)]
 pub mod relay;

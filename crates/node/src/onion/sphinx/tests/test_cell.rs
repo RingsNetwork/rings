@@ -85,7 +85,7 @@ fn test_loop_carries_each_segment_value_to_its_consumer() {
         layer(
             2,
             OnionLayerApplication::Apply(OnionApplication {
-                symbol: OnionServiceName::tcp(),
+                symbol: OnionServiceName::tcp().into(),
                 arguments: OnionArguments::new([3; 64]),
             }),
             first.seeds().consumer,

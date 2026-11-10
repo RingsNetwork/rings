@@ -9,9 +9,16 @@ on:
     branches:
       - master
       - develop
+    tags:
+      - "v*"
   schedule:
     - cron: "23 19 * * *"
   workflow_dispatch:
+    inputs:
+      extended_seed_count:
+        description: Number of extended N=50 seeds to run (1..16; default 16).
+        required: false
+        type: string
 
 # This is the sole owner of the storm suite for PRs and for pushes to develop and master. Do
 # not path-filter it: Cargo features, workspace dependencies, and helper changes can affect
@@ -64,6 +71,15 @@ jobs:
           --inventory target/ci-evidence/scale-inventory.json
           --ignored --exact --nocapture
           --filter tests::default::test_sync_storm::cases::test_pr_ring_and_hotspot_size_matrix
+      - name: Run release-tag extended N=50 seed smoke slice
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          SYNC_STORM_EXTENDED_SEED_COUNT: "2"
+        run: >-
+          python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl
+          --inventory target/ci-evidence/release-seeds-inventory.json
+          --ignored --exact --nocapture
+          --filter tests::default::test_sync_storm::cases::test_nightly_extended_seed_matrix
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         name: Upload PR sync-storm traces
@@ -100,6 +116,8 @@ jobs:
       - name: Reject simulation system-time leaks
         run: bash scripts/check-sync-storm-time-leaks.sh
       - name: Run nightly size and seed matrices
+        env:
+          SYNC_STORM_EXTENDED_SEED_COUNT: ${{ inputs.extended_seed_count }}
         run: |
           python3 scripts/run-ci-tests.py target/ci-evidence/storm.jsonl \
             --inventory target/ci-evidence/scale-inventory.json --ignored --exact --nocapture \

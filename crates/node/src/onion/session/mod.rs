@@ -63,9 +63,17 @@ const _: () = assert!(ONION_SESSION_ID_BYTES + ONION_TARGET_DIGEST_BYTES <= ONIO
 pub(crate) struct OnionSessionId([u8; ONION_SESSION_ID_BYTES]);
 
 impl OnionSessionId {
-    /// A uniform session id.
+    /// Sample a uniform session id from `rng`.
+    pub(crate) fn from_rng(rng: &mut impl rand::RngCore) -> Self {
+        let mut bytes = [0_u8; ONION_SESSION_ID_BYTES];
+        rng.fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    /// A uniform session id drawn from the system entropy source.
+    #[allow(dead_code)]
     pub(crate) fn random() -> Self {
-        Self(rand::random())
+        Self::from_rng(&mut rings_core::utils::SystemEntropy)
     }
 
     /// The session id with `bytes`.
@@ -73,6 +81,18 @@ impl OnionSessionId {
     pub(crate) const fn new(bytes: [u8; ONION_SESSION_ID_BYTES]) -> Self {
         Self(bytes)
     }
+}
+
+/// Wait for `duration`, delegating to Tokio's timer wheel when a `dummy_simulation` guard is
+/// active on native `dummy` builds so session ticks and open timeouts can be driven deterministically
+/// without wall-clock sleeps.
+pub(super) async fn session_sleep(duration: std::time::Duration) {
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    if rings_core::dummy_simulation::epoch_ms_override().is_some() {
+        tokio::time::sleep(duration).await;
+        return;
+    }
+    let _ = rings_runtime::sleep(duration).await;
 }
 
 /// The digest `d = SHA-256(t)` of a session target, by which `ā` names the target whatever its

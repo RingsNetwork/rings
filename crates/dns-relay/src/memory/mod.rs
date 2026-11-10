@@ -24,12 +24,16 @@
 //!     r = Err e                                      ↦ μ without a stale Present,  answer Err e
 //! ```
 //!
-//! Only `Present` entries outlive a restart: the caller persists the [`MemoryChange`]s each
-//! observation returns. A sighting is persisted again once it moved more than an eighth of the
-//! grace period, so a restarted relay grants at least seven eighths of it. A full memory first
-//! forgets what is past its window, then the entry checked longest ago, absent ones first.
+//! Only `Present` entries outlive a restart: each observation returns the [`MemoryChange`]s owed
+//! to the persisted form `π`, and [`AnnouncementMemory::mark_persisted`] (or
+//! [`AnnouncementMemory::mark_compacted`]) records a change only after its journal write succeeds.
+//! Unpersisted changes, removals included, stay dirty and are re-emitted until persisted. A
+//! sighting is persisted again once it moved more than an eighth of the grace period, so a
+//! restarted relay grants at least seven eighths of it. A full memory first forgets what is past
+//! its window, then the entry checked longest ago, absent ones first.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use crate::announcement::Announcement;
 use crate::owner::Owner;
@@ -46,18 +50,24 @@ pub struct MemoryWindows {
 /// What the memory knows of an owner.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Known {
-    /// The owner announced `announcement`, last seen at `seen_at_ms`; `persisted_at_ms` is the
-    /// sighting its persisted form holds.
+    /// The owner announced `announcement`, last seen at `seen_at_ms`.
     Present {
         /// The last non-empty announcement.
         announcement: Announcement,
         /// When the directory last returned it, in milliseconds since the Unix epoch.
         seen_at_ms: u64,
-        /// The sighting time persisted for it.
-        persisted_at_ms: u64,
     },
     /// The owner announces nothing.
     Absent,
+}
+
+/// What the persisted journal is known to hold for one owner (`π`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PersistedEntry {
+    /// The persisted non-empty announcement.
+    announcement: Announcement,
+    /// The sighting time persisted for it, in milliseconds since the Unix epoch.
+    seen_at_ms: u64,
 }
 
 /// One owner's entry: what is known, and when the directory was last asked.
@@ -113,10 +123,15 @@ pub struct Observation<O, E> {
     pub changes: Vec<MemoryChange<O>>,
 }
 
-/// The memory `μ` in the module doc.
+/// The memory `μ` in the module doc, with its persisted shadow `π` and dirty owner set.
+///
+/// Invariant (`dirty`): `o ∈ dirty` iff `μ(o)` is `Present(a, s)` without a matching entry in
+/// `π` within the refresh window, or `μ(o)` is not `Present` while `o ∈ dom π`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnouncementMemory<O> {
     entries: BTreeMap<O, Entry>,
+    persisted: BTreeMap<O, PersistedEntry>,
+    dirty: BTreeSet<O>,
     windows: MemoryWindows,
     capacity: usize,
 }
@@ -128,6 +143,8 @@ where O: Owner
     pub fn new(windows: MemoryWindows, capacity: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
+            persisted: BTreeMap::new(),
+            dirty: BTreeSet::new(),
             windows,
             capacity,
         }
@@ -149,15 +166,24 @@ where O: Owner
         remembered.sort_unstable_by_key(|(_owner, _announcement, seen_at_ms)| {
             std::cmp::Reverse(*seen_at_ms)
         });
-        for (owner, announcement, seen_at_ms) in remembered.into_iter().take(capacity) {
-            memory.entries.insert(owner, Entry {
-                known: Known::Present {
-                    announcement,
-                    seen_at_ms,
-                    persisted_at_ms: seen_at_ms,
-                },
-                checked_at_ms: seen_at_ms,
+        for (owner, announcement, seen_at_ms) in remembered {
+            if memory.persisted.contains_key(&owner) {
+                continue;
+            }
+            memory.persisted.insert(owner, PersistedEntry {
+                announcement: announcement.clone(),
+                seen_at_ms,
             });
+            if memory.entries.len() < capacity {
+                memory.entries.insert(owner, Entry {
+                    known: Known::Present {
+                        announcement,
+                        seen_at_ms,
+                    },
+                    checked_at_ms: seen_at_ms,
+                });
+            }
+            memory.sync_dirty(owner);
         }
         memory
     }
@@ -177,6 +203,111 @@ where O: Owner
         now_ms.saturating_sub(seen_at_ms) <= self.windows.grace_ms
     }
 
+    /// Maintain the dirty-set invariant for `owner`.
+    fn sync_dirty(&mut self, owner: O) {
+        let refresh = self.refresh_ms();
+        let needs_sync = match self.entries.get(&owner).map(|entry| &entry.known) {
+            Some(Known::Present {
+                announcement,
+                seen_at_ms,
+            }) => !matches!(
+                self.persisted.get(&owner),
+                Some(persisted)
+                    if persisted.announcement == *announcement
+                        && seen_at_ms.saturating_sub(persisted.seen_at_ms) <= refresh
+            ),
+            Some(Known::Absent) | None => self.persisted.contains_key(&owner),
+        };
+        if needs_sync {
+            self.dirty.insert(owner);
+        } else {
+            self.dirty.remove(&owner);
+        }
+    }
+
+    /// Whether any [`MemoryChange`] remains unpersisted.
+    pub fn has_pending_changes(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
+    /// The changes owed to the persisted form, removals before keeps.
+    pub fn pending_changes(&self) -> Vec<MemoryChange<O>> {
+        if self.dirty.is_empty() {
+            return Vec::new();
+        }
+        let mut changes = Vec::with_capacity(self.dirty.len());
+        for owner in &self.dirty {
+            let is_present = matches!(
+                self.entries.get(owner),
+                Some(Entry {
+                    known: Known::Present { .. },
+                    ..
+                })
+            );
+            if !is_present && self.persisted.contains_key(owner) {
+                changes.push(MemoryChange::Forget(*owner));
+            }
+        }
+        for owner in &self.dirty {
+            if let Some(Entry {
+                known:
+                    Known::Present {
+                        announcement,
+                        seen_at_ms,
+                    },
+                ..
+            }) = self.entries.get(owner)
+            {
+                changes.push(MemoryChange::Keep {
+                    owner: *owner,
+                    announcement: announcement.clone(),
+                    seen_at_ms: *seen_at_ms,
+                });
+            }
+        }
+        changes
+    }
+
+    /// Record that `change` has been durably written to the journal.
+    pub fn mark_persisted(&mut self, change: &MemoryChange<O>) {
+        match change {
+            MemoryChange::Keep {
+                owner,
+                announcement,
+                seen_at_ms,
+            } => {
+                self.persisted.insert(*owner, PersistedEntry {
+                    announcement: announcement.clone(),
+                    seen_at_ms: *seen_at_ms,
+                });
+                self.sync_dirty(*owner);
+            }
+            MemoryChange::Forget(owner) => {
+                self.persisted.remove(owner);
+                self.sync_dirty(*owner);
+            }
+        }
+    }
+
+    /// Record that the journal has been atomically compacted to [`Self::remembered`].
+    pub fn mark_compacted(&mut self) {
+        self.persisted = self
+            .entries
+            .iter()
+            .filter_map(|(owner, entry)| match &entry.known {
+                Known::Present {
+                    announcement,
+                    seen_at_ms,
+                } => Some((*owner, PersistedEntry {
+                    announcement: announcement.clone(),
+                    seen_at_ms: *seen_at_ms,
+                })),
+                Known::Absent => None,
+            })
+            .collect();
+        self.dirty.clear();
+    }
+
     /// What the memory recalls of `owner` at `now_ms` (`recall` in the module doc).
     pub fn recall(&self, owner: &O, now_ms: u64) -> Recalled {
         match self.entries.get(owner) {
@@ -194,14 +325,14 @@ where O: Owner
             Some(Known::Present {
                 announcement,
                 seen_at_ms,
-                ..
             }) if self.is_graced(*seen_at_ms, now_ms) => Some(announcement.clone()),
             _ => None,
         }
     }
 
     /// Fold the directory's answer `observed` for `owner` at `now_ms` into the memory (`observe`
-    /// in the module doc).
+    /// in the module doc). Emitted changes remain pending until [`Self::mark_persisted`] or
+    /// [`Self::mark_compacted`] confirms they reached disk.
     pub fn observe<E>(
         &mut self,
         owner: O,
@@ -220,15 +351,18 @@ where O: Owner
                     }
                     return Observation {
                         answer: Ok(Some(graced)),
-                        changes: Vec::new(),
+                        changes: self.pending_changes(),
                     };
                 }
                 match unseen {
                     Ok(_none) => self.absent(owner, now_ms),
-                    Err(error) => Observation {
-                        answer: Err(error),
-                        changes: self.forget_ungraced(&owner),
-                    },
+                    Err(error) => {
+                        self.forget_ungraced(&owner);
+                        Observation {
+                            answer: Err(error),
+                            changes: self.pending_changes(),
+                        }
+                    }
                 }
             }
         }
@@ -241,53 +375,32 @@ where O: Owner
         announcement: Announcement,
         now_ms: u64,
     ) -> Observation<O, E> {
-        let refresh = self.refresh_ms();
-        let persisted = match self.entries.get(&owner).map(|entry| &entry.known) {
-            Some(Known::Present {
-                announcement: known,
-                persisted_at_ms,
-                ..
-            }) if *known == announcement && now_ms.saturating_sub(*persisted_at_ms) <= refresh => {
-                Some(*persisted_at_ms)
-            }
-            _ => None,
-        };
-        let mut changes = self.make_room_for(&owner, now_ms);
-        if persisted.is_none() {
-            changes.push(MemoryChange::Keep {
-                owner,
-                announcement: announcement.clone(),
-                seen_at_ms: now_ms,
-            });
-        }
+        self.make_room_for(&owner, now_ms);
         self.entries.insert(owner, Entry {
             known: Known::Present {
                 announcement: announcement.clone(),
                 seen_at_ms: now_ms,
-                persisted_at_ms: persisted.unwrap_or(now_ms),
             },
             checked_at_ms: now_ms,
         });
+        self.sync_dirty(owner);
         Observation {
             answer: Ok(Some(announcement)),
-            changes,
+            changes: self.pending_changes(),
         }
     }
 
     /// Record that `owner` announces nothing, checked at `now_ms`.
     fn absent<E>(&mut self, owner: O, now_ms: u64) -> Observation<O, E> {
-        let mut changes = match self.entries.get(&owner).map(|entry| &entry.known) {
-            Some(Known::Present { .. }) => vec![MemoryChange::Forget(owner)],
-            _ => Vec::new(),
-        };
-        changes.extend(self.make_room_for(&owner, now_ms));
+        self.make_room_for(&owner, now_ms);
         self.entries.insert(owner, Entry {
             known: Known::Absent,
             checked_at_ms: now_ms,
         });
+        self.sync_dirty(owner);
         Observation {
             answer: Ok(None),
-            changes,
+            changes: self.pending_changes(),
         }
     }
 
@@ -295,23 +408,23 @@ where O: Owner
     /// more. An `Absent` entry stays, unchecked, so the next use asks the directory again.
     ///
     /// Pre: `graced(owner, now)` is `None`, so a `Present` entry here is past its grace.
-    fn forget_ungraced(&mut self, owner: &O) -> Vec<MemoryChange<O>> {
-        match self.entries.get(owner).map(|entry| &entry.known) {
-            Some(Known::Present { .. }) => {
-                self.entries.remove(owner);
-                vec![MemoryChange::Forget(*owner)]
-            }
-            _ => Vec::new(),
+    fn forget_ungraced(&mut self, owner: &O) {
+        if matches!(
+            self.entries.get(owner).map(|entry| &entry.known),
+            Some(Known::Present { .. })
+        ) {
+            self.entries.remove(owner);
         }
+        self.sync_dirty(*owner);
     }
 
     /// Make room for `owner` at `now_ms`, if it is not held yet: forget what is past its window,
     /// then, while the memory is full, the entry checked longest ago, absent entries first.
     ///
     /// Post: `owner ∈ dom μ ∨ |μ| < capacity`, unless the capacity is 0.
-    fn make_room_for(&mut self, owner: &O, now_ms: u64) -> Vec<MemoryChange<O>> {
+    fn make_room_for(&mut self, owner: &O, now_ms: u64) {
         if self.entries.contains_key(owner) || self.entries.len() < self.capacity {
-            return Vec::new();
+            return;
         }
         let windows = self.windows;
         let expired = self
@@ -325,10 +438,9 @@ where O: Owner
             })
             .map(|(owner, _entry)| *owner)
             .collect::<Vec<_>>();
-        let mut changes = expired
-            .into_iter()
-            .filter_map(|owner| self.evict(&owner))
-            .collect::<Vec<_>>();
+        for expired_owner in expired {
+            self.evict(&expired_owner);
+        }
         while !self.entries.is_empty() && self.entries.len() >= self.capacity {
             let victim = self
                 .entries
@@ -343,16 +455,14 @@ where O: Owner
             let Some(victim) = victim else {
                 break;
             };
-            changes.extend(self.evict(&victim));
+            self.evict(&victim);
         }
-        changes
     }
 
-    /// Remove `owner`'s entry; the change to persist when it was a `Present` one.
-    fn evict(&mut self, owner: &O) -> Option<MemoryChange<O>> {
-        match self.entries.remove(owner)?.known {
-            Known::Present { .. } => Some(MemoryChange::Forget(*owner)),
-            Known::Absent => None,
+    /// Remove `owner`'s entry and update its dirty state when it was persisted.
+    fn evict(&mut self, owner: &O) {
+        if self.entries.remove(owner).is_some() {
+            self.sync_dirty(*owner);
         }
     }
 
@@ -365,7 +475,6 @@ where O: Owner
                 Known::Present {
                     announcement,
                     seen_at_ms,
-                    ..
                 } => Some((*owner, announcement, *seen_at_ms)),
                 Known::Absent => None,
             })

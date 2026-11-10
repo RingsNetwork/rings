@@ -109,6 +109,11 @@ pub(crate) trait SignedDescriptor: Sized {
     /// binding of the signer, and that the body states that same overlay, so a verified
     /// descriptor's stated overlay is the overlay it was signed for.
     fn descriptor_verify_signature(&self, network_id: u32) -> bool {
+        self.descriptor_verify_signature_at(network_id, rings_core::utils::get_epoch_ms())
+    }
+
+    /// Verify the descriptor's signature, stated overlay, and delegation liveness at `at_ms`.
+    fn descriptor_verify_signature_at(&self, network_id: u32, at_ms: u128) -> bool {
         if self.descriptor_network_id() != network_id {
             return false;
         }
@@ -131,7 +136,7 @@ pub(crate) trait SignedDescriptor: Sized {
         };
         let domain =
             SigningDomain::new(<Self::Body as SignedDescriptorBody>::DOMAIN_TAG, network_id);
-        signature.verify(domain, &data)
+        signature.verify_at(domain, &data, at_ms)
     }
 
     /// The last instant a reader holds this descriptor live: `min(ℓ, τ* + T + σ)`.
@@ -164,7 +169,7 @@ pub(crate) trait SignedDescriptor: Sized {
     /// Whether a reader at `now_ms` in overlay `network_id` lists this descriptor: it verifies,
     /// its terms are admissible, and it is not expired (the lease law).
     fn descriptor_is_live_at(&self, now_ms: u128, network_id: u32) -> bool {
-        self.descriptor_verify_signature(network_id)
+        self.descriptor_verify_signature_at(network_id, now_ms)
             && self.descriptor_terms_admissible_at(now_ms)
             && !self.descriptor_is_expired_at(now_ms)
     }
@@ -233,7 +238,7 @@ where
     let mut latest = BTreeMap::<K, D>::new();
     for descriptor in descriptors {
         if include_expired {
-            if !descriptor.descriptor_verify_signature(network_id) {
+            if !descriptor.descriptor_verify_signature_at(network_id, now_ms) {
                 continue;
             }
         } else if !descriptor.descriptor_is_live_at(now_ms, network_id) {

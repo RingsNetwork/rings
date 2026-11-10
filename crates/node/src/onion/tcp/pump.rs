@@ -119,6 +119,48 @@ where
     (read.unsplit(write), OnionPumpEnd::of(state))
 }
 
+/// A command read from the local stream and waiting for room in the session's command queue.
+enum PendingCommand {
+    /// Stream bytes to send.
+    Data(bytes::Bytes),
+    /// Local EOF: close the client-to-world direction.
+    Fin,
+}
+
+/// Progress of one incremental write or shutdown step on the local stream's write half.
+enum LocalWriteStep {
+    /// At least one byte was written from `pending_write`.
+    Wrote,
+    /// `write.shutdown()` completed cleanly.
+    ShutDown,
+    /// The write half returned `Ok(0)` or an I/O error.
+    Failed,
+}
+
+/// Perform one cancel-safe write or shutdown step on `write`.
+async fn step_local_write<S>(
+    write: &mut WriteHalf<S>,
+    pending_write: &mut bytes::Bytes,
+    pending_shutdown: bool,
+) -> LocalWriteStep
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if !pending_write.is_empty() {
+        match write.write_buf(pending_write).await {
+            Ok(0) | Err(_) => LocalWriteStep::Failed,
+            Ok(_) => LocalWriteStep::Wrote,
+        }
+    } else if pending_shutdown {
+        match write.shutdown().await {
+            Ok(()) => LocalWriteStep::ShutDown,
+            Err(_) => LocalWriteStep::Failed,
+        }
+    } else {
+        pending().await
+    }
+}
+
 /// The select loop of [`pump_tcp_duplex`]: returns when both halves close, on the first
 /// failure, or once `idle` expires without traffic, leaving the reached halves in `state`.
 async fn pump_halves<S>(
@@ -132,24 +174,23 @@ async fn pump_halves<S>(
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buffer = vec![0_u8; TCP_BUF];
+    let mut pending_command: Option<PendingCommand> = None;
+    let mut pending_write = bytes::Bytes::new();
+    let mut pending_shutdown = false;
     while !state.is_closed() {
+        let can_step_write = state.can_write() && (!pending_write.is_empty() || pending_shutdown);
         tokio::select! {
-            read_result = read.read(buffer.as_mut_slice()), if state.can_read() => {
+            read_result = read.read(buffer.as_mut_slice()), if state.can_read() && pending_command.is_none() => {
                 idle.touch();
                 match read_result {
                     Ok(0) => {
-                        if sender.fin().await.is_err() {
-                            return;
-                        }
-                        state.close_read();
+                        pending_command = Some(PendingCommand::Fin);
                     }
                     Ok(n) => {
                         let Some(chunk) = buffer.get(..n) else {
                             return;
                         };
-                        if sender.send(bytes::Bytes::copy_from_slice(chunk)).await.is_err() {
-                            return;
-                        }
+                        pending_command = Some(PendingCommand::Data(bytes::Bytes::copy_from_slice(chunk)));
                     }
                     Err(error) => {
                         tracing::debug!(%error, "onion TCP local read failed");
@@ -157,23 +198,50 @@ async fn pump_halves<S>(
                     }
                 }
             }
-            event = receiver.next() => {
+            ready = sender.ready(), if pending_command.is_some() => {
+                if ready.is_err() {
+                    return;
+                }
+                match pending_command.take() {
+                    Some(PendingCommand::Data(bytes)) => {
+                        if sender.start_send(bytes).is_err() {
+                            return;
+                        }
+                    }
+                    Some(PendingCommand::Fin) => {
+                        if sender.start_fin().is_err() {
+                            return;
+                        }
+                        state.close_read();
+                    }
+                    None => {}
+                }
+            }
+            event = receiver.next(), if pending_write.is_empty() && !pending_shutdown => {
                 idle.touch();
                 match event {
                     Some(OnionStreamEvent::Data(bytes)) => {
-                        if state.can_write() && write.write_all(&bytes).await.is_err() {
-                            return;
+                        if state.can_write() && !bytes.is_empty() {
+                            pending_write = bytes;
                         }
                     }
                     Some(OnionStreamEvent::Fin) => {
                         if state.can_write() {
-                            if write.shutdown().await.is_err() {
-                                return;
-                            }
-                            state.close_write();
+                            pending_shutdown = true;
                         }
                     }
                     Some(OnionStreamEvent::Failed) | None => return,
+                }
+            }
+            write_step = step_local_write(write, &mut pending_write, pending_shutdown), if can_step_write => {
+                match write_step {
+                    LocalWriteStep::Wrote => idle.touch(),
+                    LocalWriteStep::ShutDown => {
+                        idle.touch();
+                        pending_shutdown = false;
+                        state.close_write();
+                    }
+                    LocalWriteStep::Failed => return,
                 }
             }
             () = idle.expired() => return,

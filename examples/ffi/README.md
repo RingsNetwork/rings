@@ -24,8 +24,9 @@ also verify dynamic loading, every required symbol, and a call into the Rust log
 bash examples/ffi/swift/test.sh target/debug/librings_node.dylib
 ```
 
-Use `RingsRuntime(libraryPath:)` with `target/debug/librings_node.dylib` (macOS) and supply an
-EIP-191 signer returning exactly 65 bytes. The fixed trampoline pool supports eight simultaneous
+Use `RingsRuntime(libraryPath:)` with `target/debug/librings_node.dylib` (macOS) and supply a
+signer returning the exact byte length of the chosen `accountType` (65 for `eip191`/`secp256k1`/`bip137`,
+64 for `ed25519`/`secp256r1`, 96 for `bls12-381`). The fixed trampoline pool supports eight simultaneous
 Swift providers because the current C callback has no context pointer.
 
 The Kotlin wrapper uses JNA and retains one callback object per provider, so it does not need a

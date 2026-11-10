@@ -641,29 +641,39 @@ impl SwarmTransport {
         admission: QueueAdmission,
         deadline: Option<Duration>,
     ) -> Result<()> {
+        let tx_id = payload.transaction.tx_id;
         let timeout_budget = deadline.unwrap_or_else(first_frame_deadline);
         let mut deadline = Box::pin(sleep(timeout_budget).fuse());
         let Some(enqueued) = self
             .enqueue_detached(did, payload, admission, timeout_budget, &mut deadline)
             .await?
         else {
+            let _ = self.dht.clear_relay_custody_declaration(did, tx_id);
             return Ok(());
         };
         let local = self.dht.did;
+        let dht = self.dht.clone();
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         rings_transport::hot_path::record(rings_transport::hot_path::HotPath::ProtocolSend, 0);
         // The node's watcher watches the admission; an abandoned watch would leave the transfer
         // waiting for credit with no deadline, so it runs inline when no runtime can take it.
         self.admission_watcher
             .watch(Box::pin(async move {
-                if let Err(error) = enqueued.await_admission(deadline).await {
-                    tracing::warn!(
-                        local = %local,
-                        peer = %did,
-                        error = ?error,
-                        "transport backpressure: a queued protocol payload was dropped before its \
-                         first frame was admitted"
-                    );
+                match enqueued.await_admission(deadline).await {
+                    Ok(SendCompletionOutcome::Succeeded) => {}
+                    Ok(SendCompletionOutcome::Cancelled) => {
+                        let _ = dht.clear_relay_custody_declaration(did, tx_id);
+                    }
+                    Err(error) => {
+                        let _ = dht.clear_relay_custody_declaration(did, tx_id);
+                        tracing::warn!(
+                            local = %local,
+                            peer = %did,
+                            error = ?error,
+                            "transport backpressure: a queued protocol payload was dropped before \
+                             its first frame was admitted"
+                        );
+                    }
                 }
             }))
             .await;

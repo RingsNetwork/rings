@@ -216,7 +216,7 @@ async fn test_writer_reads_its_write_in_every_schedule_of_the_race() -> Result<(
 async fn test_writer_reads_its_own_removal() -> Result<()> {
     let now_ms = get_epoch_ms();
     let writer = reader();
-    let held = stamped(EntryOperation::Extend, &["a", "b"], now_ms - 1, OTHER)?;
+    let held = stamped(EntryOperation::Extend, &["a", "b"], now_ms - 1, WRITER)?;
     writer.local_cache_put(held.entry().clone()).await?;
 
     writer

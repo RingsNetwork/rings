@@ -28,6 +28,14 @@
     "textContent"
   );
   const nativeNodeAppendChild = globalThis.Node?.prototype?.appendChild;
+  const initialBootstrapElement = globalThis.document?.currentScript?.hasAttribute?.("data-rings-webview-bootstrap")
+    ? globalThis.document.currentScript
+    : globalThis.document?.querySelector?.("script[data-rings-webview-bootstrap]");
+  const bootstrapScriptSource = initialBootstrapElement
+    ? (nativeNodeTextContent?.get
+      ? nativeNodeTextContent.get.call(initialBootstrapElement)
+      : initialBootstrapElement.textContent)
+    : undefined;
   if (globalThis[marker]) {
     globalThis[marker].targetBase = targetBase;
     return;
@@ -147,11 +155,14 @@
       container.insertBefore?.(base, anchor);
       anchor = base.nextSibling || null;
     }
-    const source = doc.querySelector?.("script[data-rings-webview-bootstrap]")?.textContent;
-    if (source) {
+    if (bootstrapScriptSource) {
       const script = doc.createElement("script");
       setRawAttribute(script, "data-rings-webview-bootstrap", "");
-      script.textContent = source;
+      if (nativeNodeTextContent?.set) {
+        nativeNodeTextContent.set.call(script, bootstrapScriptSource);
+      } else {
+        script.textContent = bootstrapScriptSource;
+      }
       container.insertBefore?.(script, anchor);
     }
   }

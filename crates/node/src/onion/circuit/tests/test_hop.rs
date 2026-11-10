@@ -106,7 +106,7 @@ fn test_a_relay_layer_at_a_non_relay_is_dropped() {
     assert!(matches!(
         hop(
             &mut guard.admission,
-            &guard.key,
+            std::slice::from_ref(&guard.key),
             false,
             |_| false,
             Did::from(CLIENT),
@@ -135,7 +135,7 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
     else {
         panic!("h consumes");
     };
-    assert_eq!(symbol, OnionServiceName::tcp());
+    assert_eq!(symbol, OnionServiceName::tcp().into());
     assert_eq!(OnionSessionArguments::decode(&consumed), Some(arguments()));
     assert_eq!(value.as_slice(), b"client value");
 
@@ -150,7 +150,7 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
     let guard = fixture.hops[0].did();
     let OnionHopOutcome::Returned { tag, cell } = hop(
         &mut client.admission,
-        &client.key,
+        std::slice::from_ref(&client.key),
         true,
         is_tag(built.reply.tag),
         guard,
@@ -181,5 +181,77 @@ fn test_a_relay_layer_to_a_peer_with_no_link_is_dropped() {
     assert!(matches!(
         guard.step(Did::from(CLIENT), built.cell),
         OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive)
+    ));
+}
+
+/// In-process delegation renewal (#1153, #1223): a hop whose key ring holds `[current, retained]`
+/// peels cells sealed to the retained pre-renewal key as well as cells sealed to `current`, and
+/// drops cells sealed to the pre-renewal key once it is no longer in the ring.
+#[test]
+fn test_hop_peels_cells_sealed_to_retained_pre_renewal_key() {
+    let mut fixture = Fixture::new();
+    let built_pre_renewal = fixture.build(6, b"pre-renewal");
+    let pre_renewal_bytes = built_pre_renewal.cell.into_bytes();
+
+    // Rotate guard's delegatee key for the same account DID.
+    let guard_secret = crate::onion::tests::fixture::fixture_secret(1);
+    let renewed_key = rings_core::delegation::DelegateeKey::new_with_seckey_at(
+        &guard_secret,
+        600_000,
+        NOW_MS + 1,
+    )
+    .expect("renewed guard delegation");
+    assert_eq!(renewed_key.delegator_did(), fixture.hops[0].did());
+    assert_ne!(
+        renewed_key.delegatee_public_key(),
+        fixture.hops[0].key.delegatee_public_key()
+    );
+
+    let retained_key = std::mem::replace(&mut fixture.hops[0].key, renewed_key.clone());
+    let built_post_renewal = fixture.build(7, b"post-renewal");
+
+    // With only `current` (`[renewed_key]`), the pre-renewal cell fails HMAC verification.
+    assert!(matches!(
+        hop(
+            &mut fixture.hops[0].admission,
+            std::slice::from_ref(&renewed_key),
+            true,
+            |_| false,
+            Did::from(CLIENT),
+            NOW_MS,
+            OnionCell::parse(&pre_renewal_bytes).expect("width"),
+        ),
+        OnionHopOutcome::Dropped(OnionHopDrop::Peel(
+            crate::onion::sphinx::header::OnionPeelError::Invalid
+        ))
+    ));
+
+    // With `[renewed_key, retained_key]`, both pre-renewal and post-renewal cells peel and relay.
+    let keys = [renewed_key, retained_key];
+    let r02 = fixture.hops[1].did();
+    let guard = &mut fixture.hops[0];
+    assert!(matches!(
+        hop(
+            &mut guard.admission,
+            &keys,
+            true,
+            |_| false,
+            Did::from(CLIENT),
+            NOW_MS,
+            OnionCell::parse(&pre_renewal_bytes).expect("width"),
+        ),
+        OnionHopOutcome::Stepped(OnionStep::Relayed { next, .. }) if next == r02
+    ));
+    assert!(matches!(
+        hop(
+            &mut guard.admission,
+            &keys,
+            true,
+            |_| false,
+            Did::from(CLIENT),
+            NOW_MS,
+            built_post_renewal.cell,
+        ),
+        OnionHopOutcome::Stepped(OnionStep::Relayed { next, .. }) if next == r02
     ));
 }

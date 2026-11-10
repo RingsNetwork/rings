@@ -19,7 +19,6 @@
 
 use bytes::Bytes;
 use futures::channel::oneshot;
-use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -32,7 +31,15 @@ pub use self::client::OnionHttpsClientRequest;
 pub(crate) use self::client::ONION_HTTPS_RESPONSE_TIMEOUT;
 #[cfg(all(test, rings_native))]
 use self::limits::checked_status_code;
+#[cfg(all(test, rings_native))]
+use self::limits::drive_cancellable_https_fetch;
 use self::limits::https_response_body_limit;
+#[cfg(all(test, rings_native))]
+use self::limits::CancellableHttpsFetch;
+#[cfg(all(test, rings_native))]
+use self::limits::FetchCancelTarget;
+#[cfg(all(test, rings_native))]
+use self::limits::FetchCancellationGuard;
 #[cfg(rings_native)]
 use self::native::execute_https_request;
 #[cfg(all(test, rings_native))]
@@ -265,7 +272,8 @@ async fn fetch(
     policy: &OnionExitPolicy,
     accounting: &OnionExitAccounting,
 ) -> Result<OnionHttpsResponse> {
-    let body_limit = https_response_body_limit(accounting.remaining_bytes(policy, get_epoch_ms())?);
+    let body_limit =
+        https_response_body_limit(accounting.remaining_bytes(policy, accounting.now_ms())?);
     if body_limit == 0 {
         return Err(Error::NoPermission);
     }
@@ -275,7 +283,7 @@ async fn fetch(
         normalize_path(&request.path)?
     );
     execute_https_request(&url, target, request, body_limit, |bytes| {
-        accounting.record_bytes(policy, bytes, get_epoch_ms())
+        accounting.record_bytes(policy, bytes, accounting.now_ms())
     })
     .await
 }

@@ -171,5 +171,43 @@ fn deliberate_failure() { panic!("propagate test failure"); }
             self.assertNotEqual(failed.returncode, 0)
 
 
+class PublishGraphGuards(unittest.TestCase):
+    """Verify cargo-publish-crates.sh validates completeness and topological order (#1206)."""
+
+    def run_publish_check(self, **overrides):
+        import os
+
+        repo_root = Path(__file__).resolve().parent.parent
+        script = repo_root / "scripts" / "cargo-publish-crates.sh"
+        env = os.environ.copy()
+        env.update(overrides)
+        return subprocess.run(
+            ["bash", str(script), "check"],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_default_publish_graph_passes(self):
+        result = self.run_publish_check()
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn("ok publish graph", result.stdout)
+
+    def test_missing_publishable_crate_fails(self):
+        result = self.run_publish_check(
+            RINGS_PUBLISH_CRATES="rings-derive rings-codec rings-measure rings-gateway rings-webview rings-transport rings-core rings-rpc rings-node"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("publishable workspace crates missing from CRATES", result.stderr)
+
+    def test_out_of_order_publish_list_fails(self):
+        result = self.run_publish_check(
+            RINGS_PUBLISH_CRATES="rings-node rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-rpc"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("publish order violation", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

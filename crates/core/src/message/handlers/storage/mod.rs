@@ -12,9 +12,9 @@ use rerouted::OperatePlacement;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::relay_holder::is_unplaced_hold;
-use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -55,7 +55,6 @@ use crate::swarm::transport::store_reports::StoreReceipt;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
 /// Join the results of an operation's placements, which all ran to completion.
 ///
@@ -129,9 +128,53 @@ async fn cache_lookup_reply(
     redundancy: u16,
     entry: Entry,
 ) -> Result<()> {
-    transport.dht.local_cache_put(entry).await?;
-    if transport.dht.local_cache_get(resource).await?.is_some() {
+    cache_lookup_reply_at(transport, resource, redundancy, entry, transport.now_ms()).await
+}
+
+async fn cache_lookup_reply_at(
+    transport: &SwarmTransport,
+    resource: Did,
+    redundancy: u16,
+    entry: Entry,
+    now_ms: u128,
+) -> Result<()> {
+    transport.dht.local_cache_put_at(entry, now_ms).await?;
+    if transport
+        .dht
+        .local_cache_get_at(resource, now_ms)
+        .await?
+        .is_some()
+    {
         transport.answer_storage_lookup(resource, redundancy)?;
+    }
+    Ok(())
+}
+
+/// Apply the local cache, miss-observation, and read-repair effects of an inbound `FoundEntry`
+/// reply at `now_ms`.
+pub(crate) async fn admit_storage_lookup_reply(
+    transport: Arc<SwarmTransport>,
+    resource: Did,
+    redundancy: u16,
+    found_entry: Option<Entry>,
+    misses: Vec<PlacementMiss>,
+    introducer: Principal,
+    now_ms: u128,
+) -> Result<()> {
+    transport.ensure_storage_lookup_active(resource, redundancy)?;
+    transport.observe_storage_misses(resource, redundancy, misses.iter().copied())?;
+    if let Some(data) = found_entry {
+        if data.did != resource || data.kind.is_relay_inbox() {
+            return Err(Error::InvalidMessage(
+                "found entry does not match lookup resource or data kind".to_string(),
+            ));
+        }
+        cache_lookup_reply_at(&transport, resource, redundancy, data.clone(), now_ms).await?;
+        repair_observed_storage_misses(transport, data, introducer, redundancy).await?;
+    } else if !misses.is_empty() {
+        if let Some(entry) = transport.dht.local_cache_held(resource, now_ms).await? {
+            repair_observed_storage_misses(transport, entry, introducer, redundancy).await?;
+        }
     }
     Ok(())
 }
@@ -260,6 +303,11 @@ async fn handle_placed_entry_operation(
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
     let ctx = context.payload();
+    if msg.op.kind().is_relay_inbox() && ctx.should_forward_from(handler.dht.did) {
+        return handler
+            .run_effects([CoreEffect::forward_payload(ctx, None)])
+            .await;
+    }
     let result = place_entry_operation(handler, context, msg).await;
     let is_hold = matches!(&msg.op, EntryOperation::Extend(entry) if entry.kind.is_relay_inbox());
     if is_hold && ctx.transaction.origin() != handler.dht.did {
@@ -310,7 +358,7 @@ async fn place_entry_operation(
     };
     match route {
         OperateRoute::Owned => {
-            let now_ms = get_epoch_ms();
+            let now_ms = context.now_ms();
             let writer = ctx.transaction.origin();
             let applied = match dht
                 .stamp_operation_by(msg.op.clone(), now_ms, writer, Some(msg.placement))
@@ -613,39 +661,16 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         // Pre: this node started a local lookup for (resource, redundancy).
         // Preservation: all remote-controlled FoundEntry fields are validated
         // before local_cache_put or read-repair can write storage state.
-        let found_entry = msg.single_entry()?;
-        self.transport
-            .ensure_storage_lookup_active(msg.resource, msg.redundancy)?;
-        self.transport.observe_storage_misses(
+        let found_entry = msg.single_entry()?.cloned();
+        self.run_effects([CoreEffect::admit_storage_lookup_reply(
             msg.resource,
             msg.redundancy,
-            msg.misses.iter().copied(),
-        )?;
-        if let Some(data) = found_entry {
-            cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
-            repair_observed_storage_misses(
-                self.transport.clone(),
-                data.clone(),
-                context.introducer(),
-                msg.redundancy,
-            )
-            .await?;
-        } else if !msg.misses.is_empty() {
-            if let Some(entry) = self
-                .dht
-                .local_cache_held(msg.resource, crate::utils::get_epoch_ms())
-                .await?
-            {
-                repair_observed_storage_misses(
-                    self.transport.clone(),
-                    entry,
-                    context.introducer(),
-                    msg.redundancy,
-                )
-                .await?;
-            }
-        }
-        Ok(())
+            found_entry,
+            msg.misses.clone(),
+            context.introducer(),
+            context.now_ms(),
+        )])
+        .await
     }
 }
 
@@ -665,15 +690,12 @@ impl HandleMsg<EntryStoreReport> for MessageHandler {
     /// this node does not await changes nothing.
     async fn handle(&self, context: &HandlerContext<'_>, msg: &EntryStoreReport) -> Result<()> {
         let ctx = context.payload();
-        if ctx.should_forward_from(self.dht.did) {
-            return self
-                .run_effects([CoreEffect::forward_payload(ctx, None)])
-                .await;
-        }
-        self.transport
-            .store_reports
-            .report(msg.operation, msg.placement, msg.outcome);
-        Ok(())
+        let effect = if ctx.should_forward_from(self.dht.did) {
+            CoreEffect::forward_payload(ctx, None)
+        } else {
+            CoreEffect::record_store_report(msg.operation, msg.placement, msg.outcome)
+        };
+        self.run_effects([effect]).await
     }
 }
 

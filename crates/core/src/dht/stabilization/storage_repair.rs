@@ -26,7 +26,6 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::StorageSyncOutcome;
 use crate::swarm::transport::TransportReadiness;
 use crate::swarm::transport::CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS;
-use crate::utils::get_epoch_ms;
 use crate::utils::try_sleep;
 use crate::utils::Instant;
 
@@ -296,7 +295,7 @@ impl Stabilizer {
         }
         self.dht.forget_stale_relay_custody(&stale)?;
         self.declare_opened_relay_custody().await?;
-        self.dht.prune_relay_replications(get_epoch_ms())?;
+        self.dht.prune_relay_replications(self.transport.now_ms())?;
         self.resend_unacknowledged_relay_holds().await?;
         self.repair_relay_chain().await?;
         self.ask_owners_of_unplaced_relay_keys().await?;
@@ -393,19 +392,20 @@ impl Stabilizer {
 
     /// Declare to every connected peer not declared to yet that this node holds relay mail, once
     /// its age gate opened (`Law (Age gate)`, #777): those peers may have read its handshake while
-    /// it held none. A peer is recorded once its declaration is queued, so a declaration that is
-    /// not queued is sent again on the next pass to that peer alone.
+    /// it held none. A peer is recorded with the declaration's transaction ID before queueing and
+    /// cleared if the transfer fails or is dropped before first-frame admission, so a lost
+    /// declaration is sent again on the next pass to that peer alone.
     async fn declare_opened_relay_custody(&self) -> Result<()> {
         let custody = self.dht.relay_custody();
         let connected = self.transport.get_connection_ids();
+        let egress = self.transport.protocol_egress();
         for peer in self.dht.undeclared_relay_custody_peers(connected)? {
             let declaration = Message::DeclareRelayCustody(DeclareRelayCustody { custody });
-            if let Err(error) = self
-                .transport
-                .protocol_egress()
-                .send_message(declaration, peer)
-                .await
-            {
+            let payload = egress.originate(declaration, peer, None).await?;
+            let tx_id = payload.transaction.tx_id;
+            self.dht.record_relay_custody_declaration(peer, tx_id)?;
+            if let Err(error) = egress.send_payload(payload).await {
+                self.dht.clear_relay_custody_declaration(peer, tx_id)?;
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -413,9 +413,7 @@ impl Stabilizer {
                     error = ?error,
                     "STABILIZATION relay custody declaration not queued; sent again next pass"
                 );
-                continue;
             }
-            self.dht.record_relay_custody_declared(peer)?;
         }
         Ok(())
     }
@@ -424,7 +422,7 @@ impl Stabilizer {
     /// (`Law (Acknowledged)`, `Law (Convergence)`). A hold whose sender proof has expired, which
     /// no holder admits any longer, is forgotten and logged at `warn`.
     async fn resend_unacknowledged_relay_holds(&self) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.transport.now_ms();
         for (digest, hold) in self.dht.unacknowledged_relay_holds()? {
             if !hold.hold_is_live_at(now_ms) {
                 self.dht.forget_relay_hold(digest)?;
@@ -452,15 +450,29 @@ impl Stabilizer {
     /// next pass offers the carrier to. A query that is not queued is asked again next pass.
     /// Bound: at most one query per kept key whose owner this view does not place, per pass.
     async fn ask_owners_of_unplaced_relay_keys(&self) -> Result<()> {
-        for key in self.dht.unplaced_relay_keys(get_epoch_ms()).await? {
-            let PeerRingAction::RemoteAction(next, _) = self.dht.find_successor(key)? else {
+        let excluded = self.dht.relay_excluded_holders()?;
+        for carrier_key in self
+            .dht
+            .unplaced_relay_keys(self.transport.now_ms())
+            .await?
+        {
+            let mut query_key = self.dht.relay_holder_query_key(carrier_key)?;
+            let mut action = self.dht.find_successor(query_key)?;
+            if !matches!(action, PeerRingAction::RemoteAction(_, _)) {
+                self.dht.reset_relay_holder_query(carrier_key)?;
+                if query_key != carrier_key {
+                    query_key = carrier_key;
+                    action = self.dht.find_successor(query_key)?;
+                }
+            }
+            let PeerRingAction::RemoteAction(next, _) = action else {
                 continue;
             };
-            let request_id = self.dht.ask_relay_holder(key)?;
+            let (query_key, request_id) = self.dht.ask_relay_holder_query(carrier_key)?;
             let query = Message::FindRelayHolder(FindRelayHolder {
-                key,
+                key: query_key,
                 request_id,
-                excluded: Vec::new(),
+                excluded: excluded.clone(),
             });
             if let Err(error) = self
                 .transport
@@ -471,7 +483,8 @@ impl Stabilizer {
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
-                    %key,
+                    %carrier_key,
+                    %query_key,
                     error = ?error,
                     "STABILIZATION relay holder query not queued; asked again next pass"
                 );

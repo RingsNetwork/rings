@@ -29,7 +29,6 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
 use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
-use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
@@ -432,7 +431,7 @@ impl Stabilizer {
         // dangling DHT slot or an unreferenced broken connection can be cleaned.
         let mut candidates = self.dht.topology_state()?.referenced_peers();
         candidates.extend(self.transport.admitted_connection_ids());
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.transport.now_ms_i64();
 
         for did in candidates {
             if let Some(removal) = self

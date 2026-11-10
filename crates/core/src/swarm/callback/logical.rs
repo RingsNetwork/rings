@@ -6,6 +6,7 @@ use super::InboundLane;
 use super::LocalDelivery;
 use super::LogicalInbound;
 use super::WeakLogical;
+use crate::dht::types::Chord;
 use crate::dht::Did;
 use crate::fair_admission::SlotRoster;
 use crate::measure::Authentication;
@@ -64,13 +65,15 @@ impl LocalDelivery {
         let pipeline = &self.pipeline;
         let message = payload.transaction.data::<Message>()?;
         let lane = InboundLane::from_kind(MessageKind::from_message(&message));
-        let Some(application) = pipeline.application_message(payload, message) else {
+        let Some(application) = pipeline.application_message(payload, message.clone()) else {
             // Core's own body. Stored mail is application data by its witness, so the inbox
             // drain never comes here; the body is decoded again for its handler.
             pipeline.tap_inbound(payload);
-            pipeline.admit_local_transaction(payload, lane).await?;
             pipeline
-                .handle_payload(payload, Principal::Local, None)
+                .admit_local_transaction(payload, &message, lane)
+                .await?;
+            pipeline
+                .handle_payload(payload, Principal::Local, Some(message))
                 .await?;
             return Ok(LocalDelivered::Handled);
         };
@@ -170,7 +173,8 @@ impl LogicalInbound {
         introducer: Principal,
         prepared_message: Option<Message>,
     ) -> crate::error::Result<Message> {
-        let context = HandlerContext::new(payload, introducer);
+        let context =
+            HandlerContext::new_with_clock(payload, introducer, self.transport.clock().as_ref());
         let message = match prepared_message {
             Some(message) => message,
             None => payload.transaction.data()?,
@@ -229,7 +233,11 @@ impl LogicalInbound {
         payload: &MessagePayload,
         data: &ApplicationData,
     ) -> crate::error::Result<()> {
-        let context = HandlerContext::new(payload, Principal::Inbox);
+        let context = HandlerContext::new_with_clock(
+            payload,
+            Principal::Inbox,
+            self.transport.clock().as_ref(),
+        );
         let (kind, result) = match data {
             ApplicationData::Custom(message) => (
                 MessageKind::CustomMessage,
@@ -292,22 +300,95 @@ impl LogicalInbound {
         payload.transaction.destination == self.transport.dht.did
     }
 
-    /// Commit replay and origin-quota admission of a transaction addressed to this node.
+    /// Whether `payload` carrying `message` terminates locally at this node rather than being
+    /// forwarded on:
+    /// 1. DHT key ownership settles a lookup, storage operation, or placement sync locally,
+    /// 2. `hold_for_offline_destination` intercepts a `CustomMessage` for an offline peer, or
+    /// 3. `payload.relay.destination == local_did` on a non-redirecting message.
+    async fn terminates_locally(
+        &self,
+        payload: &MessagePayload,
+        message: &Message,
+    ) -> crate::error::Result<bool> {
+        let local = self.transport.dht.did;
+        match message {
+            Message::FindSuccessorSend(msg) => Ok(matches!(
+                self.transport.dht.find_successor(msg.did)?,
+                crate::dht::PeerRingAction::Some(did)
+                    if msg.accepts_local_successor(local)
+                        || did == local
+                        || self
+                            .transport
+                            .dht
+                            .successors()
+                            .list()?
+                            .into_iter()
+                            .all(|peer| peer == local)
+            )),
+            Message::FindRelayHolder(msg) => Ok(payload.is_relay_destination_for(local)
+                && matches!(
+                    self.transport.dht.find_successor(msg.key)?,
+                    crate::dht::PeerRingAction::Some(_)
+                )),
+            Message::OperateEntry(msg) => {
+                if msg.op.kind().is_relay_inbox() {
+                    return Ok(payload.is_relay_destination_for(local));
+                }
+                Ok(msg
+                    .validate_placement(self.transport.storage_redundancy())
+                    .is_err()
+                    || matches!(
+                        self.transport
+                            .dht
+                            .operate_route(msg.placement, msg.op.kind())?,
+                        crate::dht::OperateRoute::Owned
+                    ))
+            }
+            Message::SearchEntry(msg) => {
+                let query = crate::dht::entry::EntryLookupKey::new(msg.placement, msg.placement);
+                let lookup = self
+                    .transport
+                    .dht
+                    .lookup_placement(query, false, crate::utils::get_epoch_ms())
+                    .await?;
+                Ok(!matches!(
+                    lookup,
+                    crate::dht::PlacementLookup::Remote { .. }
+                ))
+            }
+            Message::SyncEntriesWithSuccessor(msg) => Ok(payload.is_relay_destination_for(local)
+                || msg.destination.did() != payload.relay.destination
+                || self
+                    .transport
+                    .dht
+                    .next_hop_for_storage_sync(msg.destination)?
+                    .is_none()),
+            Message::CustomMessage(_) => Ok(payload.is_relay_destination_for(local)
+                || matches!(
+                    self.message_handler
+                        .destination_reachability(payload.transaction.destination)?,
+                    crate::message::handlers::custom::Reachability::Offline
+                )),
+            _ => Ok(payload.is_relay_destination_for(local)),
+        }
+    }
+
+    /// Commit replay and origin-quota admission of a transaction terminating at this node.
     ///
     /// The charge is the message's class record, with its message limit skipped only when
     /// `edge` is [`EdgeRelation::Neighbour`] and the namespace delegated its admission (see
     /// [`OriginQuotaCharge::select`]); a new stream is introduced by the edge `arrival` names.
-    /// Transactions for other destinations are not admitted here.
+    /// Transactions forwarded on to other nodes are not admitted here.
     pub(super) async fn admit_final_transaction(
         &self,
         payload: &MessagePayload,
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
         arrival: Arrival,
-    ) -> crate::error::Result<()> {
+    ) -> crate::error::Result<bool> {
         let edge = arrival.edge_relation(payload);
         let introducer = arrival.introducer(self.transport.dht.edges());
-        self.admit_charged(payload, lane, introducer, |class| {
+        self.admit_charged(payload, message, lane, introducer, |class| {
             OriginQuotaCharge::select(class, edge, || self.delegates_admission(message))
         })
         .await
@@ -319,10 +400,17 @@ impl LogicalInbound {
     async fn admit_local_transaction(
         &self,
         payload: &MessagePayload,
+        message: &Message,
         lane: crate::swarm::callback::InboundLane,
-    ) -> crate::error::Result<()> {
-        self.admit_charged(payload, lane, Principal::Local, OriginQuotaCharge::from)
-            .await
+    ) -> crate::error::Result<bool> {
+        self.admit_charged(
+            payload,
+            message,
+            lane,
+            Principal::Local,
+            OriginQuotaCharge::from,
+        )
+        .await
     }
 
     /// [`Self::admit_local_transaction`] for a payload a relay inbox delivered: the admission
@@ -342,23 +430,26 @@ impl LogicalInbound {
     }
 
     /// Commit admission of `payload`, delivered by `introducer`, under the charge `charge`
-    /// selects for its class, if it is addressed to this node.
+    /// selects for its class, if it terminates at this node. Returns whether final admission
+    /// was committed.
     async fn admit_charged(
         &self,
         payload: &MessagePayload,
+        message: &Message,
         lane: crate::swarm::callback::InboundLane,
         introducer: Principal,
         charge: impl FnOnce(MessageCategory) -> OriginQuotaCharge,
-    ) -> crate::error::Result<()> {
-        if self.is_local_destination(payload) {
+    ) -> crate::error::Result<bool> {
+        if self.terminates_locally(payload, message).await? {
             let class = lane
                 .class()
                 .ok_or(crate::error::Error::InboundActorInvariantViolation)?;
             self.transport
                 .admit_final_transaction(&payload.transaction, charge(class), introducer)
                 .await?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     /// Whether the namespace of an application message delegated its admission, as the
@@ -399,9 +490,9 @@ impl LogicalInbound {
         message: &Message,
         lane: crate::swarm::callback::InboundLane,
         arrival: Arrival,
-    ) -> crate::error::Result<()> {
-        if !self.is_local_destination(payload) {
-            return Ok(());
+    ) -> crate::error::Result<bool> {
+        if !self.terminates_locally(payload, message).await? {
+            return Ok(false);
         }
         let class = lane
             .class()
@@ -412,7 +503,8 @@ impl LogicalInbound {
         let mut windows = windows.lock().await;
         self.transport
             .admit_link_transaction(&mut windows, &payload.transaction, charge, introducer)
-            .await
+            .await?;
+        Ok(true)
     }
 
     /// The application message `payload` carries for this node: `None` when it is addressed
@@ -710,6 +802,11 @@ mod tests {
             .build();
         let logical = LogicalInbound::new(swarm.transport.clone());
         let remote_destination = SecretKey::random().address().into();
+        swarm
+            .dht()
+            .successors()
+            .update(remote_destination)
+            .expect("successor");
         let payload = payload(remote_destination, 0).expect("payload");
         let message = payload.transaction.data::<Message>().expect("message");
 

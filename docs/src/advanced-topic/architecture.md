@@ -30,10 +30,19 @@ The network layer is the communication layer: it routes by DID and, once two pee
 
 Privacy is provided by the privacy layer, the onion loops in `crates/node/src/onion`: client-sealed loops of fixed-width Sphinx cells over direct edges, constant-rate link emission with real cells substituted for cover, paid admission, and fixed cell size classes. Each position peels one layer and learns only its predecessor and its successor; the exit sees the application payload but not the client, and its reply returns through the loop to the client. The contract of each layer, including what loops do not hide, is drawn in the [security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts).
 
-#### Protocol Layer
+#### Protocol and Identity Layer
 
-In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field. It is comprised of a set of elements with two binary operations, addition and multiplication, which satisfy a set of axioms such as associativity, commutativity, and distributivity. The ring is deemed finite due to its having a finite number of elements. Finite rings are widely employed in various domains of mathematics and computer science, including cryptography and coding theory.
+Nodes address one another by 160-bit Decentralized Identifiers (DIDs) placed around the modular
+ring `Z / 2^160 Z` (a finite commutative ring and cyclic additive group of order `2^160`, used for
+Chord clockwise distance `(b - a) mod 2^160` and power-of-two finger offsets `(n + 2^k) mod 2^160`).
+Account identities authorize short-lived secp256k1 delegatee session keys (`DelegateeKey`) through
+signed `Delegation` proofs over secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, or BLS12-381
+accounts without exposing the account's long-term private key to the node.
 
-#### Application Layer
+#### Application Extension Layer
 
-The nucleus of Rings Network is similar to the Actor Model, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
+Upper-layer protocols are registered on a `Provider` as pure state machines (`Protocol::step`)
+paired with namespace-isolated effect interpreters (`Interpret`). Inbound custom envelopes are
+authenticated and replay-checked by `rings-core`, dispatched to their registered namespace, stepped
+synchronously to produce `Effect` values, and interpreted over a namespace-scoped `Scope` capability
+(overlay `send` and bounded self-feedback) with no cross-namespace state access.

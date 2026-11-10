@@ -87,7 +87,7 @@ use crate::onion::circuit::OnionAdmissionLayer;
 use crate::onion::circuit::OnionAdmissionRejection;
 use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::OnionServiceName;
+use crate::onion::signature::OnionShape;
 
 /// `|υ| = |next| + |χ| + |σ| + |x| = 20 + 2919 + 32 + 8 = 2979`, the encoded width of a reply block
 /// in a `credit` frame (#834 D8).
@@ -148,8 +148,8 @@ pub(crate) enum OnionStep {
     /// A symbol hop received its input: the application, its value and the reply block of its
     /// output.
     Consumed {
-        /// `f_i`.
-        symbol: OnionServiceName,
+        /// `f_i ∈ Σ_I ⊎ Σ_W`.
+        symbol: OnionShape,
         /// `ā_i`.
         arguments: OnionArguments,
         /// `v`, a view into the received buffer, zeroized on drop.
@@ -323,14 +323,14 @@ impl OnionCell {
         carry::open(key, self.bytes, ONION_HEADER_BYTES..end)
     }
 
-    /// Peel `χ_i` in place under the hop's key, with the class the cell arrived in. Private: the
+    /// Peel `χ_i` in place under the hop's keys, with the class the cell arrived in. Private: the
     /// only caller is [`Charged::peel`], so an uncharged cell is never peeled.
-    fn peel(mut self, key: &DelegateeKey) -> Result<OnionPeeledCell, OnionPeelError> {
+    fn peel(mut self, keys: &[DelegateeKey]) -> Result<OnionPeeledCell, OnionPeelError> {
         let header = self
             .bytes
             .first_chunk_mut::<ONION_HEADER_BYTES>()
             .ok_or(OnionPeelError::Invalid)?;
-        let layer = peel_in_place(header, self.class, key)?;
+        let layer = peel_in_place(header, self.class, keys)?;
         Ok(OnionPeeledCell {
             class: self.class,
             layer,
@@ -371,19 +371,19 @@ impl Charged<OnionCell> {
         self.value
     }
 
-    /// Peel the charged cell's header under the hop's key; the token stays with the peeled
-    /// cell. A failed peel drops the token, which settles the charge (#834 L9: an invalid `α` or
-    /// `γ` is paid for).
+    /// Peel the charged cell's header under the hop's keys (`current` followed by unexpired
+    /// `retained` keys); the token stays with the peeled cell. A failed peel drops the token,
+    /// which settles the charge (#834 L9: an invalid `α` or `γ` is paid for).
     ///
     /// # Errors
     ///
     /// The [`OnionPeelError`] of the header.
     pub(crate) fn peel(
         self,
-        key: &DelegateeKey,
+        keys: &[DelegateeKey],
     ) -> Result<Charged<OnionPeeledCell>, OnionPeelError> {
         let Self { value, charge } = self;
-        value.peel(key).map(|peeled| Charged::new(peeled, charge))
+        value.peel(keys).map(|peeled| Charged::new(peeled, charge))
     }
 }
 

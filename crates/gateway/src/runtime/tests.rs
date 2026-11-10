@@ -681,6 +681,122 @@ async fn runtime_bridges_tcp_payload_and_both_half_closes() {
     );
 }
 
+struct DrainCaptureConnector {
+    opened: mpsc::Sender<FlowId>,
+    captured: mpsc::Sender<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl OnionStreamConnector for DrainCaptureConnector {
+    async fn open_stream(
+        &self,
+        flow: FlowId,
+        mut stream: BoxGatewayDuplex,
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
+        self.opened
+            .send(flow)
+            .await
+            .map_err(|error| GatewayError::OnionUnavailable {
+                target: flow.target,
+                message: error.to_string(),
+            })?;
+        let captured = self.captured.clone();
+        tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes).await;
+            let _ = stream.shutdown().await;
+            let _ = captured.send(bytes).await;
+        });
+        Ok(unobserved_stream())
+    }
+}
+
+#[tokio::test]
+async fn runtime_drains_buffered_client_bytes_exceeding_bridge_chunk_before_close_write() {
+    let mut cfg = config();
+    cfg.tcp_buffer_bytes = 32 * 1_024;
+    let (ingress_tx, ingress_rx) = mpsc::channel(64);
+    let (egress_tx, mut egress_rx) = mpsc::channel(64);
+    let (opened_tx, mut opened_rx) = mpsc::channel(1);
+    let (captured_tx, mut captured_rx) = mpsc::channel(1);
+    let connector = Arc::new(DrainCaptureConnector {
+        opened: opened_tx,
+        captured: captured_tx,
+    });
+    let mut runtime = GatewayRuntime::new(cfg, connector, 17).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    runtime.set_exit_availability(ExitObservation::Available);
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        let mut device = ChannelPacketIo {
+            ingress: ingress_rx,
+            egress: egress_tx,
+        };
+        let result = runtime
+            .run(&mut device, || task_stop.load(Ordering::Acquire))
+            .await;
+        (runtime, result)
+    });
+
+    ingress_tx
+        .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
+        .await
+        .expect("send SYN");
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
+        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
+    })
+    .await;
+    let server_next = syn_ack.sequence + 1;
+    ingress_tx
+        .send(handshake_ack_from_observation(&syn_ack))
+        .await
+        .expect("send handshake ACK");
+    tokio::time::timeout(Duration::from_secs(1), opened_rx.recv())
+        .await
+        .expect("Onion open deadline")
+        .expect("Onion open event");
+
+    // 20 KiB exceeds BRIDGE_IO_CHUNK_BYTES (16 KiB) and fits in the 32 KiB TCP receive window.
+    let expected: Vec<u8> = (0..(20 * 1_024)).map(|i| (i % 251) as u8).collect();
+    let segment_len = 1_024;
+    let mut seq = TcpSeqNumber(8);
+    let chunks: Vec<&[u8]> = expected.chunks(segment_len).collect();
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let is_last = idx + 1 == chunks.len();
+        let control = if is_last {
+            TcpControl::Fin
+        } else {
+            TcpControl::None
+        };
+        ingress_tx
+            .send(
+                UNIT_CLIENT
+                    .packet(control, seq, Some(server_next), chunk)
+                    .expect("client payload segment"),
+            )
+            .await
+            .expect("send client payload segment");
+        seq += chunk.len();
+    }
+
+    let received = tokio::time::timeout(Duration::from_secs(2), captured_rx.recv())
+        .await
+        .expect("Onion stream EOF deadline")
+        .expect("captured Onion stream payload");
+    assert_eq!(received.len(), expected.len());
+    assert_eq!(received, expected);
+
+    stop.store(true, Ordering::Release);
+    let (_runtime, result) = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("runtime stop deadline")
+        .expect("runtime task");
+    result.expect("clean runtime stop");
+}
+
 #[tokio::test]
 async fn onion_open_failure_resets_captured_flow_without_fallback() {
     let (ingress_tx, ingress_rx) = mpsc::channel(8);

@@ -777,6 +777,7 @@ impl TransactionReplay {
     ) -> Result<SequenceVerdict> {
         let Admission {
             key,
+            quota_destination,
             sequence,
             digest,
             charge,
@@ -802,7 +803,7 @@ impl TransactionReplay {
         let quota_key = OriginQuotaKey::new(
             key.network_id,
             key.origin_account,
-            key.destination,
+            quota_destination,
             charge.lane,
         );
         let reservation = ledger.quota.reserve(
@@ -892,6 +893,7 @@ impl TransactionReplay {
     ) -> Result<SequenceVerdict> {
         let Admission {
             key,
+            quota_destination,
             sequence,
             digest,
             charge,
@@ -907,7 +909,7 @@ impl TransactionReplay {
         let quota_key = OriginQuotaKey::new(
             key.network_id,
             key.origin_account,
-            key.destination,
+            quota_destination,
             charge.lane,
         );
         let reservation = quota

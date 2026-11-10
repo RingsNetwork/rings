@@ -611,6 +611,7 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 /// topology reducer directly instead of duplicating transition semantics.
 mod finger_retry_model;
 mod relay_custody_model;
+mod repair_model;
 mod storage_model;
 
 #[cfg(test)]
@@ -940,34 +941,56 @@ mod tests {
         }
     }
 
-    /// Stage 4 — storage S2'. Exhaustively explores the finite state graph for
-    /// one placement hand-off and checks the cleanup safety predicate:
-    /// deleting the local placement key is allowed only when the successor has
-    /// durably stored the same value.
+    /// Stage 4 — storage S2' and same-value ABA custody conservation (#614, #1207).
+    /// Exhaustively explores the finite state graph for one placement hand-off across two
+    /// concurrent hand-off slots, local writes, and return hand-offs, checking:
+    /// 1. S2': deleting the local placement key is allowed only when the successor has durably
+    ///    stored the same value;
+    /// 2. Custody Conservation (#1207): in every reachable state, at least one of `local` or
+    ///    `successor` holds a live copy (`local.is_some() || successor.is_some()`), including
+    ///    across the same-value ABA sequence where `A` sends two hand-offs of `V0`, loses custody
+    ///    on the first ack, receives `V0` back from `B`, and then receives the delayed second ack.
     #[test]
     fn test_storage_sync_model_preserves_no_update_loss() {
         let mut seen = BTreeSet::new();
         let mut frontier = vec![StorageSyncState::initial()];
+        let mut saw_same_value_aba = false;
         while let Some(state) = frontier.pop() {
             if !seen.insert(state) {
                 continue;
             }
+            assert!(
+                state.local.is_some() || state.successor.is_some(),
+                "custody conservation violated (every live copy eliminated): {state:?}"
+            );
             let steps = [
-                StorageSyncStep::SendCopy,
-                StorageSyncStep::DeliverCopy,
+                StorageSyncStep::SendCopy(0),
+                StorageSyncStep::SendCopy(1),
+                StorageSyncStep::DeliverCopy(0),
+                StorageSyncStep::DeliverCopy(1),
                 StorageSyncStep::LocalWrite(StorageValue::V0),
                 StorageSyncStep::LocalWrite(StorageValue::V1),
                 StorageSyncStep::LocalWrite(StorageValue::V2),
-                StorageSyncStep::DeliverAckDelete,
+                StorageSyncStep::ReturnCustodyToLocal,
+                StorageSyncStep::DeliverAckDelete(0),
+                StorageSyncStep::DeliverAckDelete(1),
             ];
             for step in steps {
                 if let Some(next) = state.step(step) {
                     if let Some(removed) = state.removed_local_value(next) {
-                        assert_eq!(
-                            next.successor,
-                            Some(removed),
+                        assert!(
+                            next.successor.is_some_and(|stored| stored >= removed),
                             "S2' violated by {step:?}: {state:?} -> {next:?}"
                         );
+                    }
+                    if matches!(step, StorageSyncStep::DeliverAckDelete(1))
+                        && state.local == Some(StorageValue::V0)
+                        && state.local_incarnation == 1
+                        && state.successor.is_none()
+                        && state.ack_in_flight[1] == Some((StorageValue::V0, 0))
+                    {
+                        assert_eq!(next.local, Some(StorageValue::V0));
+                        saw_same_value_aba = true;
                     }
                     if !seen.contains(&next) {
                         frontier.push(next);
@@ -975,5 +998,9 @@ mod tests {
                 }
             }
         }
+        assert!(
+            saw_same_value_aba,
+            "BFS must cover the same-value ABA sequence (#1207)"
+        );
     }
 }

@@ -112,12 +112,12 @@ fn test_relabelled_cell_dies_at_the_next_honest_hop() {
     assert_eq!(relabelled.value().class(), large);
     assert_eq!(
         relabelled
-            .peel(&keys[1])
+            .peel(std::slice::from_ref(&keys[1]))
             .err()
             .map(|error| error.to_string()),
         Some(OnionPeelError::Invalid.to_string())
     );
-    assert!(charged(honest).peel(&keys[1]).is_ok());
+    assert!(charged(honest).peel(std::slice::from_ref(&keys[1])).is_ok());
 }
 
 /// A string whose length is no class is no cell, and `into_bytes ∘ parse = id` on cells.

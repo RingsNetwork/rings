@@ -22,7 +22,7 @@ use crate::tests::default::TEST_HANG_GUARD;
 use crate::tests::TEST_NETWORK_ID;
 
 /// The number of [`CoreEffect`] variants [`variant`] enumerates.
-const VARIANTS: usize = 9;
+const VARIANTS: usize = 14;
 
 /// The index of `effect`'s variant. The match is exhaustive, so a new variant fails to compile
 /// until it is given an index here, and then fails the witness below until it is exercised.
@@ -37,6 +37,11 @@ fn variant(effect: &CoreEffect<'_>) -> usize {
         CoreEffect::ConnectDhtPeer { .. } => 6,
         CoreEffect::HoldForOfflineDestination { .. } => 7,
         CoreEffect::RequestStorageRepair => 8,
+        CoreEffect::AdmitStorageLookupReply(_) => 9,
+        CoreEffect::RecordStoreReport { .. } => 10,
+        CoreEffect::AdmitFingerCandidate { .. } => 11,
+        CoreEffect::ClaimConnectCandidate { .. } => 12,
+        CoreEffect::AnswerApplicationLookup { .. } => 13,
     }
 }
 
@@ -77,6 +82,29 @@ async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_
         )
         .await?;
     let unconnected = SecretKey::random().address().into();
+    let lookup_resource = SecretKey::random().address().into();
+    let redundancy = node1.swarm.transport.storage_redundancy();
+    node1
+        .swarm
+        .transport
+        .start_storage_lookup(lookup_resource, redundancy)?;
+    let stamped_op = node1
+        .dht()
+        .stamp_operation(
+            crate::dht::entry::EntryOperation::Overwrite(crate::dht::entry::Entry::new(
+                lookup_resource,
+                Vec::new(),
+                crate::dht::entry::EntryKind::Data,
+            )),
+            node1.swarm.transport.now_ms(),
+            None,
+        )
+        .await?;
+    let report_digest = crate::message::types::OperationDigest::of(&stamped_op)?;
+    let finger_request = crate::dht::FingerFixRequest::new(1, uuid::Uuid::from_u128(1))
+        .ok_or_else(|| Error::InvalidMessage("valid finger request".to_string()))?;
+    let connect_request_id = uuid::Uuid::from_u128(2);
+    node1.dht().begin_connect_lookup(peer, connect_request_id)?;
     let effects = [
         CoreEffect::forward_payload(&forwarded, None),
         CoreEffect::send_report_message(&request, Message::custom(b"its report")?),
@@ -88,8 +116,27 @@ async fn test_every_effect_returns_without_waiting_while_its_next_hop_withholds_
         CoreEffect::send_direct_message(Message::custom(b"a direct message")?, peer),
         CoreEffect::send_successor_query(QueryForTopoInfoSend::new_for_sync(peer), peer),
         CoreEffect::connect_dht_peer(unconnected),
-        CoreEffect::hold_for_offline_destination(&held_for_offline),
+        CoreEffect::hold_for_offline_destination_at(
+            &held_for_offline,
+            node1.swarm.transport.now_ms(),
+        ),
         CoreEffect::RequestStorageRepair,
+        CoreEffect::admit_storage_lookup_reply(
+            lookup_resource,
+            redundancy,
+            None,
+            Vec::new(),
+            crate::message::Principal::Local,
+            node1.swarm.transport.now_ms(),
+        ),
+        CoreEffect::record_store_report(
+            report_digest,
+            peer,
+            crate::message::types::StoreOutcome::Stored,
+        ),
+        CoreEffect::admit_finger_candidate(unconnected, finger_request, true),
+        CoreEffect::claim_connect_candidate(unconnected, connect_request_id, true),
+        CoreEffect::answer_application_lookup(uuid::Uuid::from_u128(3), peer),
     ];
     let exercised: std::collections::BTreeSet<usize> = effects.iter().map(variant).collect();
     assert_eq!(

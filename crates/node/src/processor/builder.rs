@@ -1,4 +1,7 @@
 use rings_core::dht::RemovalStorage;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
@@ -19,7 +22,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) external_address: Option<String>,
     pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     pub(in crate::processor) delegatee_key: DelegateeKey,
-    pub(in crate::processor) onion_process_epoch: OnionProcessEpoch,
+    pub(in crate::processor) onion_process_epoch: Option<OnionProcessEpoch>,
+    pub(in crate::processor) clock: SharedClock,
+    pub(in crate::processor) rng: SharedRng,
     pub(in crate::processor) storage: Option<EntryStorage>,
     pub(in crate::processor) relay_storage: Option<EntryStorage>,
     pub(in crate::processor) removal_storage: Option<RemovalStorage>,
@@ -68,7 +73,9 @@ impl ProcessorBuilder {
             external_address: config.external_address.clone(),
             webrtc_udp_port_range: config.webrtc_udp_port_range()?,
             delegatee_key: config.delegatee_key.clone(),
-            onion_process_epoch: OnionProcessEpoch::random(),
+            onion_process_epoch: None,
+            clock: Arc::new(SystemClock),
+            rng: SharedRng::system(),
             storage: None,
             relay_storage: None,
             removal_storage: None,
@@ -250,6 +257,24 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Override the initial onion process epoch instead of drawing one from the builder's RNG.
+    pub fn onion_process_epoch(mut self, epoch: OnionProcessEpoch) -> Self {
+        self.onion_process_epoch = Some(epoch);
+        self
+    }
+
+    /// Inject a custom [`SharedClock`] capability for deterministic protocol and session time.
+    pub fn clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Inject a custom [`SharedRng`] capability for deterministic protocol and session randomness.
+    pub fn rng(mut self, rng: SharedRng) -> Self {
+        self.rng = rng;
+        self
+    }
+
     /// Route native remote JSON-RPC requests (`nodeDid`, `answerOffer`, `acceptAnswer`) through
     /// `proxy` instead of connecting directly.
     pub fn remote_rpc_proxy(mut self, proxy: crate::remote_endpoint::RemoteRpcProxy) -> Self {
@@ -259,22 +284,31 @@ impl ProcessorBuilder {
 
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
+        let now_ms = self.clock.now_ms();
+        self.build_at(now_ms)
+    }
+
+    /// Build the [Processor] validating delegation liveness and signing horizon at `now_ms`.
+    pub(crate) fn build_at(self, now_ms: u128) -> Result<Processor> {
         self.validate()?;
-        let delegation = self.delegatee_key.delegation();
-        delegation
-            .verify_delegator_authorization()
+        self.delegatee_key
+            .verify_at(now_ms)
             .map_err(|e| Error::VerifyError(e.to_string()))?;
+        let delegation = self.delegatee_key.delegation();
         // A process that could not send its first frame is refused, not started mute (#1063).
-        DelegationHorizon::of(&delegation).admitted_at(get_epoch_ms())?;
+        DelegationHorizon::of(&delegation).admitted_at(now_ms)?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
-        let onion_process_epoch = OnionProcessEpochCell::new(self.onion_process_epoch);
+        let initial_epoch = self
+            .onion_process_epoch
+            .unwrap_or_else(|| OnionProcessEpoch::from_rng(&mut self.rng.lock_rng()));
+        let onion_process_epoch = OnionProcessEpochCell::new(initial_epoch);
         let delegatee_key = self.delegatee_key.clone();
-        let online_node_registration = OnlineNodeRegistration::new(
+        let online_node_registration = OnlineNodeRegistration::new_with_clock(
             self.online_node_heartbeat_interval,
             self.online_node_ttl,
             self.online_node_type.clone(),
@@ -282,20 +316,32 @@ impl ProcessorBuilder {
             self.onion_role
                 .registers_relay()
                 .then(|| onion_process_epoch.clone()),
+            self.clock.clone(),
         );
         let mut registration_tasks: Vec<Arc<dyn RegistrationTask>> = Vec::new();
         if self.advertise_presence {
             registration_tasks.push(Arc::new(online_node_registration.clone()));
         }
         if let Some(offer) = self.onion_role.exit() {
-            let onion_exit_registration = OnionExitRegistration::new(
+            let onion_exit_registration = OnionExitRegistration::new_with_clock(
+                self.onion_exit_heartbeat_interval,
+                self.onion_exit_ttl,
+                self.online_node_type.clone(),
+                offer.clone(),
+                onion_process_epoch.clone(),
+                self.clock.clone(),
+            );
+            registration_tasks.push(Arc::new(onion_exit_registration));
+        }
+        if let Some(offer) = self.onion_role.invoke() {
+            let onion_invoke_registration = crate::onion::OnionInvokeRegistration::new(
                 self.onion_exit_heartbeat_interval,
                 self.onion_exit_ttl,
                 self.online_node_type,
                 offer.clone(),
                 onion_process_epoch.clone(),
             );
-            registration_tasks.push(Arc::new(onion_exit_registration));
+            registration_tasks.push(Arc::new(onion_invoke_registration));
         }
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);
@@ -310,6 +356,8 @@ impl ProcessorBuilder {
             self.delegatee_key,
         );
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
+        swarm_builder = swarm_builder.clock(self.clock);
+        swarm_builder = swarm_builder.rng(self.rng);
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
         swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);

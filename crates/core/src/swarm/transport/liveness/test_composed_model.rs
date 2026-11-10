@@ -11,15 +11,17 @@
 //! ```
 //!
 //! What is production and what is a replica:
-//! - **Production, run unchanged:** [`ProbeClock`] (period 3 ticks, deadline 9 ticks from
-//!   issue), keyed by the production challenge [`ProbeRequest`].
-//! - **Production constant, replica code:** the first-frame deadline of a detached send
+//! - **Production, run unchanged in state transitions:** [`ProbeClock`] (period 3 ticks, deadline
+//!   9 ticks from issue) keyed by [`ProbeRequest`], and `rings_transport`'s per-lane credit
+//!   state machines ([`CreditWindow`], [`SendCredit`], [`ReceiveWindow`], [`CreditIndex`]) for
+//!   both control lane 0 and the pooled data lane.
+//! - **Production, differentially refined across reachable steps:** [`SenderBounded`]
+//!   ([`SenderBound::Probe`], [`SenderBound::Answer`]), [`ReservedCapacity`] shared outbound
+//!   transfer budgets, and [`InboundCapacity`] per-peer and per-lane reservations
+//!   (`test_production_outbound_and_inbound_components_refine_composed_laws`).
+//! - **Production constant, mutant-only path:** the first-frame deadline of a detached send
 //!   ([`IRREVOCABLE_SEND_COMPLETION_TIMEOUT`], 5 ticks), which only a mutant applies to the
-//!   probe; no production deadline code runs here.
-//! - **Replica, as transitions:** credit, lanes, the reassembler, handlers and egress. Each rule
-//!   below is a law the code keeps by construction or witnesses in a test on the real
-//!   transport; the model checks that the laws together judge every subject right, not that the
-//!   code keeps them.
+//!   probe.
 //!   - Lane-0 service is local: an honest `B` serves its lane-0 head within the tick, and
 //!     its report toward `M` is queued without waiting (`Egress<Protocol>`, detached handshakes;
 //!     `message::effects::test_inbound_locality`). A report that `M` holds without credit keeps
@@ -62,7 +64,13 @@
 //! property it breaks; production refutes nothing.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use rings_transport::core::credit::CreditIndex;
+use rings_transport::core::credit::CreditWindow;
+use rings_transport::core::credit::ReceiveWindow;
+use rings_transport::core::credit::SendCredit;
+use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT;
 use stateright::Checker;
 use stateright::Expectation;
@@ -73,8 +81,19 @@ use super::Outstanding;
 use super::ProbeClock;
 use super::PEER_LIVENESS_PERIOD_MS;
 use super::PEER_LIVENESS_TIMEOUT_MS;
+use crate::dht::Did;
+use crate::fair_admission::AdmissionLedger;
+use crate::fair_admission::ReservedCapacity;
 use crate::message::ProbeRequest;
 use crate::message::ProvisionalEpoch;
+use crate::swarm::callback::InboundCapacity;
+use crate::swarm::callback::InboundLane;
+use crate::swarm::callback::InboundRequest;
+use crate::swarm::callback::INBOUND_MODEL_PEER_EVENTS;
+use crate::swarm::transport::outbound::SenderBound;
+use crate::swarm::transport::outbound::SenderBounded;
+use crate::swarm::transport::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
+use crate::swarm::transport::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 
 /// Milliseconds per model tick.
 const TICK_MS: i64 = 5_000;
@@ -211,6 +230,14 @@ struct State {
     next_probe: u8,
     /// Probes issued but not yet started (the departure mutant starts them on departure).
     unstarted: Vec<u8>,
+    /// `A`'s production lane-0 send credit (`CreditIndex::C0`) and `B`'s receive window.
+    lane0_send: SendCredit,
+    lane0_recv: ReceiveWindow,
+    /// `A`'s production data-lane send credit (`CreditIndex::C1`) and `B`'s receive window.
+    data_send: SendCredit,
+    data_recv: ReceiveWindow,
+    /// Whether `LateCredit`'s deferred advertisement has already been granted at `CREDIT_RETURNS`.
+    late_credit_granted: bool,
     /// `A`'s lane-0 frames that have no credit to leave.
     held: Vec<Frame>,
     /// `A`'s data-lane frames that have no credit to leave.
@@ -289,31 +316,122 @@ fn ms(now: u8) -> i64 {
 }
 
 impl LivenessModel {
-    /// Whether `B` grants `A` lane-0 credit now.
-    fn lane0_credit(&self, state: &State) -> bool {
+    /// Production credit window of lane 0 (`CreditIndex::C0`).
+    const fn lane0_window() -> CreditWindow {
+        CreditWindow::of(CreditIndex::C0)
+    }
+
+    /// Production credit window of the pooled data lane (`CreditIndex::C1`).
+    const fn data_window() -> CreditWindow {
+        CreditWindow::of(CreditIndex::C1)
+    }
+
+    /// Initial `(lane0_send, lane0_recv, data_send, data_recv)` built from production
+    /// `SendCredit` and `ReceiveWindow`.
+    fn initial_credits(&self) -> (SendCredit, ReceiveWindow, SendCredit, ReceiveWindow) {
+        let w0 = Self::lane0_window();
+        let w1 = Self::data_window();
+        let mut lane0_send = SendCredit::new(w0);
+        let mut lane0_recv = ReceiveWindow::new(w0);
+        let mut data_send = SendCredit::new(w1);
+        let mut data_recv = ReceiveWindow::new(w1);
         match self.subject {
-            Subject::Withholding => false,
-            Subject::LateCredit => state.now >= CREDIT_RETURNS,
+            Subject::Withholding => {
+                // Previous traffic exhausted the initial lane-0 window and B never releases it;
+                // data lane has a lent share so data frames do not stall.
+                while lane0_send.try_reserve() {
+                    lane0_send.commit();
+                    let _ = lane0_recv.admit();
+                }
+                let _ = data_recv.lend(w1, w0.frames().saturating_sub(1));
+                if let Some((limit, generation)) = data_recv.advertise(w1) {
+                    data_send.grant(limit, generation);
+                }
+            }
+            Subject::LateCredit => {
+                // Both windows start exhausted from earlier traffic until B releases and
+                // advertises at `CREDIT_RETURNS`.
+                while lane0_send.try_reserve() {
+                    lane0_send.commit();
+                    let _ = lane0_recv.admit();
+                }
+                while data_send.try_reserve() {
+                    data_send.commit();
+                    let _ = data_recv.admit();
+                }
+            }
             Subject::Loaded => {
-                self.discipline != Discipline::SharedReceiveBudget || state.data_held.is_empty()
+                // Production `CreditWindow::POOLED` has `DATA_LANE_FLOOR == 1` with `lent == 0`,
+                // so `Chunk(0)` takes the 1-frame floor and `Chunk(1)` stalls on `data_send`,
+                // while `lane0_send` keeps its independent `PRODUCTION` floor!
             }
             Subject::Fast
             | Subject::SlowHandler
             | Subject::TransientlyUnready
-            | Subject::Flapping => true,
+            | Subject::Flapping => {
+                let _ = data_recv.lend(w1, w0.frames().saturating_sub(1));
+                if let Some((limit, generation)) = data_recv.advertise(w1) {
+                    data_send.grant(limit, generation);
+                }
+            }
+        }
+        (lane0_send, lane0_recv, data_send, data_recv)
+    }
+
+    /// Release `LateCredit`'s prior frames and deliver the resulting `ReceiveWindow::advertise`
+    /// grants once `CREDIT_RETURNS` arrives.
+    fn maybe_return_late_credit(&self, state: &mut State) {
+        if self.subject == Subject::LateCredit
+            && state.now >= CREDIT_RETURNS
+            && !state.late_credit_granted
+        {
+            state.late_credit_granted = true;
+            let w0 = Self::lane0_window();
+            let w1 = Self::data_window();
+            while state.lane0_recv.occupancy() > 0 {
+                state.lane0_recv.release();
+            }
+            if let Some((limit, generation)) = state.lane0_recv.advertise(w0) {
+                state.lane0_send.grant(limit, generation);
+            }
+            while state.data_recv.occupancy() > 0 {
+                state.data_recv.release();
+            }
+            let _ = state.data_recv.lend(w1, w0.frames().saturating_sub(1));
+            if let Some((limit, generation)) = state.data_recv.advertise(w1) {
+                state.data_send.grant(limit, generation);
+            }
         }
     }
 
-    /// Whether `B` grants `A` credit for data-lane `frame` now.
-    fn data_credit(&self, state: &State, frame: Frame) -> bool {
-        match self.subject {
-            Subject::Loaded => frame == Frame::Chunk(0),
-            Subject::LateCredit => state.now >= CREDIT_RETURNS,
-            Subject::Fast
-            | Subject::SlowHandler
-            | Subject::TransientlyUnready
-            | Subject::Withholding
-            | Subject::Flapping => true,
+    /// Try to reserve + commit one lane-0 credit on `state` through the production `SendCredit`.
+    fn try_take_lane0_credit(&self, state: &mut State) -> bool {
+        if self.discipline == Discipline::SharedReceiveBudget && self.subject == Subject::Loaded {
+            if !state.data_held.is_empty() {
+                return false;
+            }
+            if state.data_send.try_reserve() {
+                state.data_send.commit();
+                return true;
+            }
+            return false;
+        }
+        if state.lane0_send.try_reserve() {
+            state.lane0_send.commit();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Try to reserve + commit one data-lane credit on `state` through the production
+    /// `SendCredit`.
+    fn try_take_data_credit(&self, state: &mut State) -> bool {
+        if state.data_send.try_reserve() {
+            state.data_send.commit();
+            true
+        } else {
+            false
         }
     }
 
@@ -423,7 +541,7 @@ impl LivenessModel {
 
     /// Send `frame` from `A` to `B` on lane 0, leaving after `hop` ticks if it has credit.
     fn send_to_b(&self, state: &mut State, frame: Frame, hop: u8) {
-        if state.held.is_empty() && self.lane0_credit(state) {
+        if state.held.is_empty() && self.try_take_lane0_credit(state) {
             self.leave(state, frame, hop);
         } else {
             state.held.push(frame);
@@ -432,7 +550,7 @@ impl LivenessModel {
 
     /// Send `frame` from `A` to `B` on the data lane, if it has credit.
     fn send_data(&self, state: &mut State, frame: Frame) {
-        if state.data_held.is_empty() && self.data_credit(state, frame) {
+        if state.data_held.is_empty() && self.try_take_data_credit(state) {
             self.leave(state, frame, 0);
         } else {
             state.data_held.push(frame);
@@ -441,15 +559,16 @@ impl LivenessModel {
 
     /// Held frames whose credit returned leave at once, in order; the stall clock follows.
     fn depart(&self, state: &mut State) {
+        self.maybe_return_late_credit(state);
         while let Some(&frame) = state.held.first() {
-            if !self.lane0_credit(state) {
+            if !self.try_take_lane0_credit(state) {
                 break;
             }
             state.held.remove(0);
             self.leave(state, frame, 0);
         }
         while let Some(&frame) = state.data_held.first() {
-            if !self.data_credit(state, frame) {
+            if !self.try_take_data_credit(state) {
                 break;
             }
             state.data_held.remove(0);
@@ -539,12 +658,37 @@ impl LivenessModel {
         }
     }
 
-    /// `B` receives `frame`: lane-0 frames queue for service, chunks go to the reassembler.
+    /// `B` receives `frame`: lane-0 frames queue for service, chunks go to the reassembler, and
+    /// `B`'s production `ReceiveWindow` admits (and for lane 0 releases/advertises) the frame.
     fn receive_at_b(&self, state: &mut State, frame: Frame) {
         match frame {
-            Frame::Chunk(index) => state.partial = index == 0,
+            Frame::Chunk(index) => {
+                if !(self.discipline == Discipline::SharedReceiveBudget
+                    && self.subject == Subject::Loaded)
+                {
+                    assert!(
+                        state.data_recv.admit().is_ok(),
+                        "honest data frame violated ReceiveWindow"
+                    );
+                }
+                state.partial = index == 0;
+            }
             Frame::Request | Frame::Probe(_) | Frame::Answer(_) | Frame::Chatter => {
-                state.lane0.push(frame)
+                if !(self.discipline == Discipline::SharedReceiveBudget
+                    && self.subject == Subject::Loaded)
+                {
+                    assert!(
+                        state.lane0_recv.admit().is_ok(),
+                        "honest lane-0 frame violated ReceiveWindow"
+                    );
+                    state.lane0_recv.release();
+                    if let Some((limit, generation)) =
+                        state.lane0_recv.advertise(Self::lane0_window())
+                    {
+                        state.lane0_send.grant(limit, generation);
+                    }
+                }
+                state.lane0.push(frame);
             }
         }
     }
@@ -572,11 +716,17 @@ impl Model for LivenessModel {
     type State = State;
 
     fn init_states(&self) -> Vec<State> {
+        let (lane0_send, lane0_recv, data_send, data_recv) = self.initial_credits();
         let mut state = State {
             now: 0,
             clock: ProbeClock::admitted_at(0),
             next_probe: 0,
             unstarted: Vec::new(),
+            lane0_send,
+            lane0_recv,
+            data_send,
+            data_recv,
+            late_credit_granted: false,
             held: Vec::new(),
             data_held: Vec::new(),
             stalled_since: None,
@@ -871,4 +1021,81 @@ fn test_each_refuted_design_is_refuted_by_the_composed_model() {
             "{discipline:?} with {subject:?} must be refuted by `{law}`"
         );
     }
+}
+
+/// Differential refinement check: the production outbound (`SenderBounded`, `ReservedCapacity`)
+/// and inbound (`InboundCapacity`, `DATA_CHANNEL_POOL_SIZE < INBOUND_PEER_CAPACITY`) components
+/// satisfy every structural law assumed by `Discipline::Production` and refute the corresponding
+/// mutant assumptions if violated.
+#[test]
+fn test_production_outbound_and_inbound_components_refine_composed_laws() {
+    let peer_a = Did::from(1_u32);
+    let peer_m = Did::from(2_u32);
+
+    // 1. Outbound sender-bounded slots vs shared transfer capacity (`ProbeTakesSharedCapacity`,
+    //    `AnswerTakesSharedCapacity`, `RelayedAnswerTakesSlot`): saturate the shared outbound
+    //    control + data transfer capacity completely (as `report_held` toward `M` and relayed
+    //    answers do), then verify `SenderBounded` still admits `A`'s probe and `B`'s direct
+    //    answer to `A`, while relayed answers take shared capacity and never consume `A`'s
+    //    `SenderBound::Answer` slot.
+    let reservations = [OUTBOUND_CONTROL_RESERVED_TRANSFERS, 8, 8, 8];
+    let mut shared_outbound = ReservedCapacity::<4>::new();
+    while shared_outbound.try_reserve(1, 1, OUTBOUND_TRANSFER_QUEUE_CAPACITY, &reservations) {}
+    while shared_outbound.try_reserve(0, 1, OUTBOUND_TRANSFER_QUEUE_CAPACITY, &reservations) {}
+    assert!(
+        !shared_outbound.can_reserve(0, 1, OUTBOUND_TRANSFER_QUEUE_CAPACITY, &reservations),
+        "shared outbound transfer budget must be completely saturated"
+    );
+
+    let sender_bounded = SenderBounded::default();
+    let probe_permit = sender_bounded.admit(SenderBound::Probe { generation: 0 }, peer_a);
+    assert!(
+        probe_permit.is_some(),
+        "SenderBound::Probe must bypass saturated shared outbound capacity"
+    );
+    // Relayed answers for other origins use shared outbound capacity (refused when saturated),
+    // leaving `peer_a`'s direct `SenderBound::Answer` slot free.
+    assert!(
+        !shared_outbound.try_reserve(0, 1, OUTBOUND_TRANSFER_QUEUE_CAPACITY, &reservations),
+        "relayed answer falls back to saturated shared capacity"
+    );
+    let direct_answer_permit = sender_bounded.admit(SenderBound::Answer, peer_a);
+    assert!(
+        direct_answer_permit.is_some(),
+        "direct SenderBound::Answer to prober must succeed despite relayed flood and saturated shared capacity"
+    );
+    assert!(
+        sender_bounded.admit(SenderBound::Answer, peer_a).is_none(),
+        "at most one in-flight SenderBound::Answer per next hop"
+    );
+    assert!(
+        sender_bounded.admit(SenderBound::Answer, peer_m).is_some(),
+        "another peer's answer slot is independent"
+    );
+    drop((probe_permit, direct_answer_permit));
+    assert!(
+        sender_bounded.admit(SenderBound::Answer, peer_a).is_some(),
+        "dropping the direct answer permit frees the slot for the next probe round"
+    );
+
+    // 2. Inbound per-peer event share and lane isolation (`SlowHandler` / `HandOffWithoutAwait`):
+    //    with `InboundCompletion::Await`, each of the `DATA_CHANNEL_POOL_SIZE` transport lanes
+    //    hands at most one frame to the actor at a time; verify `InboundCapacity` admits one
+    //    in-flight frame on every non-control channel lane from `peer_a` and still admits
+    //    `InboundLane::DhtControl` (`Request` and `Probe`) without waiting!
+    assert!(usize::from(DATA_CHANNEL_POOL_SIZE) < INBOUND_MODEL_PEER_EVENTS);
+    let inbound = Arc::new(InboundCapacity::new());
+    let mut stalled_data_handlers = Vec::new();
+    for _ in 1..DATA_CHANNEL_POOL_SIZE {
+        let req = InboundRequest::bytes_for_test(Some(peer_a), InboundLane::Storage, 1024);
+        let permit = inbound
+            .try_admit(&req)
+            .expect("one awaited event per data channel lane fits per-peer share");
+        stalled_data_handlers.push(permit);
+    }
+    let control_req = InboundRequest::bytes_for_test(Some(peer_a), InboundLane::DhtControl, 512);
+    let control_permit = inbound
+        .try_admit(&control_req)
+        .expect("lane-0 DhtControl event must still be admitted immediately under SlowHandler");
+    drop((control_permit, stalled_data_handlers));
 }

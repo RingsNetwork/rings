@@ -361,11 +361,11 @@ impl DelegationLessee {
     /// Decide how each slot of `payload` travels on `generation` at `now_ms`, and remember
     /// what was sent inline.
     ///
-    /// A slot whose delegation the peer leased, with more than `Δ` of the lease left, travels by
-    /// digest; every other slot travels inline, and the delegation enters the table, unleased,
-    /// if it was not held. Refused with [`Error::DelegationExpiresWithinMargin`] when a slot's
-    /// delegation expires within `Δ`: such a frame could need its delegation past its expiry in
-    /// flight.
+    /// A slot whose delegation the peer leased, with more than `Δ` of the lease and of its own
+    /// lifetime left, travels by digest; every other slot travels inline, and the delegation
+    /// enters the table, unleased, if it was not held. Refused with
+    /// [`Error::DelegationExpiresWithinMargin`] when `delegations.hop` expires within `Δ` or
+    /// `delegations.origin` has already reached its expiry (`expires_at_ms() <= now_ms`).
     pub(crate) fn encode<'a>(
         &mut self,
         generation: u64,
@@ -373,11 +373,9 @@ impl DelegationLessee {
         now_ms: u128,
     ) -> Result<PerSlot<DelegationRef<'a>>> {
         let delegations = payload.delegations();
-        let expiring = delegations
-            .into_array()
-            .into_iter()
-            .any(|delegation| within_margin(delegation.expires_at_ms(), now_ms));
-        if expiring {
+        if within_margin(delegations.hop.expires_at_ms(), now_ms)
+            || delegations.origin.expires_at_ms() <= now_ms
+        {
             return Err(Error::DelegationExpiresWithinMargin);
         }
         if !self.enter(generation) {
@@ -400,9 +398,10 @@ impl DelegationLessee {
         let digest = delegation.digest()?;
         match self.sent.touch(digest) {
             Some(entry)
-                if entry
-                    .annotation
-                    .is_some_and(|lease| lease.references_at(now_ms)) =>
+                if !within_margin(delegation.expires_at_ms(), now_ms)
+                    && entry
+                        .annotation
+                        .is_some_and(|lease| lease.references_at(now_ms)) =>
             {
                 Ok(DelegationRef::Digest(digest))
             }

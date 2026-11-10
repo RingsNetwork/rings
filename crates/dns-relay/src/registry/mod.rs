@@ -44,7 +44,7 @@ pub enum AddressError {
     /// Its address is bound to another owner.
     #[error(transparent)]
     Collision(#[from] AddressCollision),
-    /// The book's change could not be journaled; the binding is kept in memory.
+    /// The book's change could not be journaled; the book is unchanged.
     #[error(transparent)]
     State(#[from] StateError),
 }
@@ -111,26 +111,37 @@ where O: Owner
 
     /// `owner`'s address, bound in the book as answered at `now_ms`.
     ///
-    /// Post: on `Ok(a)`, `a = addr(owner)` and `owner_at(a) = Some(owner)`.
+    /// Post: on `Ok(a)`, `a = addr(owner)` and `owner_at(a) = Some(owner)`; on `Err`, the book is
+    /// unchanged.
     pub async fn address_for(&self, owner: O, now_ms: u64) -> Result<Ipv6Addr, AddressError> {
         let address = self.plan.address_of(&owner);
         let mut persisted = self.persisted.lock().await;
-        let changes = persisted.book.bind(address, owner, now_ms)?;
-        persisted.journal_changes(changes).await?;
+        let planned = persisted.book.plan_bind(address, owner, now_ms)?;
+        persisted.journal_changes(planned.changes()).await?;
+        persisted.book.commit(planned);
+        persisted.journal.confirm_append();
+        if let Err(error) = persisted.compact_if_needed().await {
+            tracing::warn!("dns relay: address book not compacted: {error}");
+        }
         Ok(address)
     }
 
     /// The owner `address` is bound to, if any.
     pub async fn owner_at(&self, address: &Ipv6Addr) -> Option<O> {
-        self.persisted.lock().await.book.owner_at(address)
+        let mut persisted = self.persisted.lock().await;
+        if let Err(error) = persisted.journal.settle_pending_truncate().await {
+            tracing::warn!("dns relay: address book not settled: {error}");
+        }
+        persisted.book.owner_at(address)
     }
 }
 
 impl<O> Persisted<O>
 where O: Owner
 {
-    /// Journal `changes`, then compact the journal when it has outgrown the book.
-    async fn journal_changes(&mut self, changes: Vec<BookChange<O>>) -> Result<(), StateError> {
+    /// Append and flush `changes` to the journal before the staged book change is committed.
+    async fn journal_changes(&mut self, changes: &[BookChange<O>]) -> Result<(), StateError> {
+        let mut batch = self.journal.batch();
         for change in changes {
             match change {
                 BookChange::Bind {
@@ -140,13 +151,20 @@ where O: Owner
                 } => {
                     let record = BookRecord {
                         owner: owner.label(),
-                        answered_at_ms,
+                        answered_at_ms: *answered_at_ms,
                     };
-                    self.journal.put(&address, &record).await?;
+                    self.journal.batch_put(&mut batch, address, &record)?;
                 }
-                BookChange::Unbind(address) => self.journal.remove(&address).await?,
+                BookChange::Unbind(address) => {
+                    self.journal.batch_remove(&mut batch, address)?;
+                }
             }
         }
+        self.journal.append_batch(batch).await
+    }
+
+    /// Compact the journal when it has outgrown the committed book.
+    async fn compact_if_needed(&mut self) -> Result<(), StateError> {
         if self.journal.needs_compaction(self.book.len()) {
             let snapshot = self
                 .book

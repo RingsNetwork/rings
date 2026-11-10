@@ -7,7 +7,6 @@ use super::SwarmConnection;
 use super::SwarmTransport;
 use super::PENDING_CONNECTION_TIMEOUT_MS;
 use crate::error::Result;
-use crate::utils::get_epoch_ms_i64;
 
 /// Which unadmitted phases a cancellation may release, in the registry's vocabulary.
 enum CancellationScope {
@@ -19,6 +18,8 @@ enum CancellationScope {
 }
 
 struct RetiredPendingConnection {
+    /// Whether the retired record owned a pending slot in [`Handshake::Offering`].
+    was_offering: bool,
     /// Raw transport released by retirement, if it still exists in the backend.
     connection: Option<SwarmConnection>,
 }
@@ -26,12 +27,30 @@ struct RetiredPendingConnection {
 impl SwarmTransport {
     /// Release the record of `attempt` iff it is still pending, leaving its transport object,
     /// if any, in place: the `Pending` arm of the one cancellation transition without the close.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(in crate::swarm::transport) fn retire_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
         self.retire_pending_connection_for_close(attempt, CancellationScope::Pending)
             .map(|retired| retired.is_some())
+    }
+
+    /// Release the record of `attempt` on a local transport creation failure iff it is still
+    /// pending, recording candidate dial backoff when it owned an outbound offering slot.
+    pub(in crate::swarm::transport) fn fail_pending_connection_without_close(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        let Some(retired) =
+            self.retire_pending_connection_for_close(attempt, CancellationScope::Pending)?
+        else {
+            return Ok(false);
+        };
+        if retired.was_offering {
+            self.record_candidate_dial_failure(attempt.peer);
+        }
+        Ok(true)
     }
 
     /// Cancel a current pending or admitting handshake and release its transport object.
@@ -41,6 +60,25 @@ impl SwarmTransport {
     ) -> Result<bool> {
         self.cancel_connection(attempt, CancellationScope::Unadmitted)
             .await
+    }
+
+    /// Cancel a current pending or admitting handshake on failure, recording candidate dial
+    /// backoff when `attempt` still owned an outbound offering slot, and release its transport
+    /// object.
+    pub(crate) async fn fail_unadmitted_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        let Some(retired) =
+            self.retire_pending_connection_for_close(attempt, CancellationScope::Unadmitted)?
+        else {
+            return Ok(false);
+        };
+        if retired.was_offering {
+            self.record_candidate_dial_failure(attempt.peer);
+        }
+        self.finish_cancelled_connection(attempt, retired).await?;
+        Ok(true)
     }
 
     /// Yield `attempt` to a crossing offer iff its signaling state is still `observed`, the
@@ -58,12 +96,12 @@ impl SwarmTransport {
             let answering = self.peer_lifecycles()?.replace_pending_in(
                 attempt,
                 &observed,
-                get_epoch_ms_i64(),
+                self.now_ms_i64(),
             )?;
             let Some(answering) = answering else {
                 return Ok(None);
             };
-            self.cancel_pending_finger_updates(attempt)?;
+            self.rebind_pending_finger_updates(attempt, answering)?;
             (answering, self.get_raw_connection(attempt.peer))
         };
         tracing::debug!(
@@ -102,6 +140,15 @@ impl SwarmTransport {
         let Some(retired) = self.retire_pending_connection_for_close(attempt, scope)? else {
             return Ok(false);
         };
+        self.finish_cancelled_connection(attempt, retired).await?;
+        Ok(true)
+    }
+
+    async fn finish_cancelled_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+        retired: RetiredPendingConnection,
+    ) -> Result<()> {
         tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -112,7 +159,7 @@ impl SwarmTransport {
         if let Some(connection) = retired.connection {
             self.close_if_current(&connection).await?;
         }
-        Ok(true)
+        Ok(())
     }
 
     fn retire_pending_connection_for_close(
@@ -121,18 +168,24 @@ impl SwarmTransport {
         scope: CancellationScope,
     ) -> Result<Option<RetiredPendingConnection>> {
         let _lifecycle = self.connection_lifecycle()?;
-        let removed = {
+        let (removed, was_offering) = {
             let mut lifecycles = self.peer_lifecycles()?;
-            match scope {
+            let was_offering = matches!(
+                lifecycles.handshake(attempt),
+                Some(Handshake::Offering { .. })
+            );
+            let removed = match scope {
                 CancellationScope::Pending => lifecycles.remove_pending(attempt),
                 CancellationScope::Unadmitted => lifecycles.remove_unadmitted(attempt),
-            }
+            };
+            (removed, was_offering)
         };
         if !removed {
             return Ok(None);
         }
         self.cancel_pending_finger_updates(attempt)?;
         Ok(Some(RetiredPendingConnection {
+            was_offering,
             connection: self.get_raw_connection(attempt.peer),
         }))
     }
@@ -142,8 +195,7 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         operation: &str,
     ) {
-        self.record_candidate_dial_failure(attempt.peer);
-        if let Err(error) = self.cancel_unadmitted_connection(attempt).await {
+        if let Err(error) = self.fail_unadmitted_connection(attempt).await {
             tracing::warn!(
                 "failed to cancel pending connection to {} after {operation}: {error}",
                 attempt.peer
@@ -158,7 +210,7 @@ impl SwarmTransport {
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
         let expired = {
             let _lifecycle = self.connection_lifecycle()?;
-            let expired = self.peer_lifecycles()?.expire(get_epoch_ms_i64());
+            let expired = self.peer_lifecycles()?.expire(self.now_ms_i64());
             expired
                 .into_iter()
                 .map(|expired| {
@@ -170,7 +222,9 @@ impl SwarmTransport {
         };
         for (expired, connection) in expired {
             let attempt = expired.attempt;
-            self.record_candidate_dial_failure(attempt.peer);
+            if expired.was_offering {
+                self.record_candidate_dial_failure(attempt.peer);
+            }
             let state = connection
                 .as_ref()
                 .map(|connection| connection.webrtc_connection_state());

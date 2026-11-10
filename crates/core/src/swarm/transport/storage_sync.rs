@@ -11,8 +11,10 @@ use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::dht::StorageKey;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
@@ -23,8 +25,6 @@ use crate::message::PayloadSender;
 use crate::message::Principal;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
-use crate::utils::get_epoch_ms;
-use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
 
@@ -80,17 +80,20 @@ fn expected_storage_sync_receiver(destination: StorageSyncDestination, route_nex
     }
 }
 
-fn storage_sync_ack_now_ms() -> i64 {
-    get_epoch_ms_i64()
-}
-
-fn expected_sync_acks(data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {
+fn expected_sync_acks(dht: &PeerRing, data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {
     data.iter()
         .map(|placed| {
-            Ok(SyncedEntryAck::new(
-                placed.key,
-                placed.entry.clone().try_into_storage_entry()?,
-            ))
+            let incarnation = match placed.custody_incarnation() {
+                Some(incarnation) => incarnation,
+                None => dht.observe_storage_handoff_incarnation(StorageKey::new(
+                    placed.entry.kind,
+                    placed.key,
+                ))?,
+            };
+            Ok(
+                SyncedEntryAck::new(placed.key, placed.entry.clone().try_into_storage_entry()?)
+                    .with_custody_incarnation(incarnation),
+            )
         })
         .collect()
 }
@@ -98,8 +101,9 @@ fn expected_sync_acks(data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {
 fn validate_report_acks(
     expected_acks: &[SyncedEntryAck],
     reported_acks: &[SyncedEntryAck],
-) -> Result<()> {
+) -> Result<Vec<SyncedEntryAck>> {
     let mut unmatched = expected_acks.to_vec();
+    let mut matched = Vec::with_capacity(reported_acks.len());
     for reported_ack in reported_acks {
         let Some(position) = unmatched
             .iter()
@@ -109,9 +113,9 @@ fn validate_report_acks(
                 "storage sync report ack was not pending".to_string(),
             ));
         };
-        unmatched.swap_remove(position);
+        matched.push(unmatched.swap_remove(position));
     }
-    Ok(())
+    Ok(matched)
 }
 
 fn storage_sync_destination_accepts_placement(
@@ -461,7 +465,7 @@ impl SwarmTransport {
             true => Principal::Custody,
             false => introducer,
         };
-        StorageSyncBatch::new(msg, sender, introducer, get_epoch_ms())
+        StorageSyncBatch::new(msg, sender, introducer, self.now_ms())
             .run(self)
             .await
     }
@@ -490,11 +494,11 @@ impl SwarmTransport {
             ));
         }
         let capability = StorageSyncAckCapability {
-            recorded_at_ms: storage_sync_ack_now_ms(),
+            recorded_at_ms: self.now_ms_i64(),
             purpose,
             destination,
             expected_receiver: expected_storage_sync_receiver(destination, route_next_hop),
-            expected_acks: expected_sync_acks(data)?,
+            expected_acks: expected_sync_acks(&self.dht, data)?,
         };
         let mut pending = self
             .pending_storage_sync_acks
@@ -559,9 +563,7 @@ impl SwarmTransport {
                 "storage sync report receiver does not match pending sync".to_string(),
             ));
         }
-        validate_report_acks(&capability.expected_acks, &report.acks)?;
-
-        let acks = report.acks.clone();
+        let acks = validate_report_acks(&capability.expected_acks, &report.acks)?;
         pending.remove(&tx_id);
         Ok(acks)
     }

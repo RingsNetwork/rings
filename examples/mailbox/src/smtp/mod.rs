@@ -78,6 +78,9 @@ pub enum ConnectionError {
 /// Why a transaction could not be committed.
 #[derive(Debug, Error)]
 pub enum CommitError {
+    /// The message, with any prepended trace headers, exceeds the listener's size bound.
+    #[error("a message of {0} bytes is too large")]
+    TooLarge(usize),
     /// The store did not file it.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -90,10 +93,15 @@ pub enum CommitError {
 }
 
 impl CommitError {
-    /// The reply to a transaction that failed so: `552` for a message the gateway cannot carry,
-    /// `451` for every other failure, which a later attempt may not meet.
+    /// The reply to a transaction that failed so: `552` for a message exceeding the store or
+    /// gateway bound, `451` for every other failure, which a later attempt may not meet.
     fn reply(&self) -> Reply {
         match self {
+            Self::TooLarge(_) | Self::Store(StoreError::TooLarge(_)) => Reply {
+                code: 552,
+                status: "5.3.4",
+                lines: vec!["Message too big".to_owned()],
+            },
             Self::Gateway(MailGatewayError::Seal(SealError::TooLarge { .. })) => Reply {
                 code: 552,
                 status: "5.3.4",
@@ -120,6 +128,11 @@ pub enum Sink {
 }
 
 impl Sink {
+    /// Whether committing to this sink prepends `Return-Path` and `Received` trace headers.
+    fn traces(&self) -> bool {
+        matches!(self, Self::Inbox(_) | Self::Gateway(_))
+    }
+
     /// What this sink's directory says of `address`, which a [`Role::Directory`] session asked
     /// about. Only the gateway serves that role; the inbox and the outbound queue serve roles
     /// that decide in the session, and refuse what they would be asked.
@@ -135,10 +148,11 @@ impl Sink {
         &self,
         host: &str,
         client: SocketAddr,
+        max_size: usize,
         transaction: Transaction,
         ok: Reply,
     ) -> Reply {
-        match self.file(host, client, transaction).await {
+        match self.file(host, client, max_size, transaction).await {
             Ok(()) => ok,
             Err(error) => {
                 tracing::warn!("smtp: transaction not committed: {error}");
@@ -152,11 +166,15 @@ impl Sink {
         &self,
         host: &str,
         client: SocketAddr,
+        max_size: usize,
         transaction: Transaction,
     ) -> Result<(), CommitError> {
         match self {
             Self::Inbox(store) => {
                 let message = with_trace(host, client, &transaction);
+                if message.len() > max_size {
+                    return Err(CommitError::Store(StoreError::TooLarge(message.len())));
+                }
                 let now = chrono::Utc::now().timestamp();
                 store
                     .append(INBOX, &message, Default::default(), now)
@@ -166,6 +184,9 @@ impl Sink {
                 let Transaction {
                     from, to, message, ..
                 } = &transaction;
+                if message.len() > max_size {
+                    return Err(CommitError::TooLarge(message.len()));
+                }
                 let to = to
                     .iter()
                     .map(|recipient| recipient.address.clone())
@@ -174,6 +195,9 @@ impl Sink {
             }
             Self::Gateway(gateway) => {
                 let message = with_trace(host, client, &transaction);
+                if message.len() > max_size {
+                    return Err(CommitError::TooLarge(message.len()));
+                }
                 gateway.deliver(&transaction.to, &message).await?;
             }
         }
@@ -189,17 +213,20 @@ pub fn address_literal(client: SocketAddr) -> String {
     }
 }
 
+/// The `Return-Path` and `Received` trace header prefix added at final/gateway ingress.
+pub fn trace_header(host: &str, client_addr: SocketAddr, client: &str, from: &str) -> String {
+    let date = chrono::Utc::now().to_rfc2822();
+    format!(
+        "Return-Path: <{from}>\r\nReceived: from {client} ({}) by {host} with ESMTP; {date}\r\n",
+        address_literal(client_addr)
+    )
+}
+
 /// `transaction`'s message with its trace headers prepended: the reverse path, and the hop
 /// from `client` to `host`.
 pub fn with_trace(host: &str, client: SocketAddr, transaction: &Transaction) -> Vec<u8> {
-    let date = chrono::Utc::now().to_rfc2822();
-    let mut message = format!(
-        "Return-Path: <{}>\r\nReceived: from {} ({}) by {host} with ESMTP; {date}\r\n",
-        transaction.from,
-        transaction.client,
-        address_literal(client)
-    )
-    .into_bytes();
+    let mut message =
+        trace_header(host, client, &transaction.client, &transaction.from).into_bytes();
     message.extend_from_slice(&transaction.message);
     message
 }
@@ -313,11 +340,13 @@ impl SmtpService {
     }
 }
 
-/// A message body being read: its receiver, what it holds so far, and whether it grew past the
-/// session's bound, in which case it holds nothing.
+/// A message body being read: its receiver, what it holds so far, the byte length of any trace
+/// headers the sink will prepend, and whether it grew past the session's bound, in which case it
+/// holds nothing.
 struct Body {
     receiver: DataReceiver,
     bytes: Vec<u8>,
+    trace_bytes: usize,
     oversize: bool,
 }
 
@@ -372,7 +401,7 @@ impl Conversation {
         while !bytes.as_slice().is_empty() {
             if let Some(body) = self.body.as_mut() {
                 let complete = body.receiver.ingest(bytes, &mut body.bytes);
-                if body.bytes.len() > self.session.max_size() {
+                if body.trace_bytes.saturating_add(body.bytes.len()) > self.session.max_size() {
                     // Keep reading to the end of the body, but keep none of it.
                     body.oversize = true;
                     body.bytes.clear();
@@ -384,7 +413,20 @@ impl Conversation {
                 continue;
             }
             let next = match self.requests.ingest(bytes) {
-                Ok(request) => self.session.step(request.into_owned()),
+                Ok(request) => {
+                    let mut request = request.into_owned();
+                    if let smtp_proto::Request::Mail { ref mut from } = request {
+                        if from.size > 0 && service.sink.traces() {
+                            if let Some(helo) = self.session.client() {
+                                let trace_len =
+                                    trace_header(&service.host, self.client, helo, &from.address)
+                                        .len();
+                                from.size = from.size.saturating_add(trace_len);
+                            }
+                        }
+                    }
+                    self.session.step(request)
+                }
                 Err(smtp_proto::Error::NeedsMoreData { .. }) => break,
                 Err(_) => self.session.unparsable(),
             };
@@ -392,9 +434,20 @@ impl Conversation {
                 Next::Reply(reply) => stream.write_all(&reply.encode()).await?,
                 Next::ReadData(reply) => {
                     stream.write_all(&reply.encode()).await?;
+                    let trace_bytes = if service.sink.traces() {
+                        self.session
+                            .data_envelope()
+                            .map(|(helo, from)| {
+                                trace_header(&service.host, self.client, helo, from).len()
+                            })
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
                     self.body = Some(Body {
                         receiver: DataReceiver::new(),
                         bytes: Vec::new(),
+                        trace_bytes,
                         oversize: false,
                     });
                 }
@@ -424,8 +477,14 @@ impl Conversation {
         match self.session.data(body.bytes) {
             (Some(transaction), ok) => {
                 let sink = &service.sink;
-                sink.commit(&service.host, self.client, transaction, ok)
-                    .await
+                sink.commit(
+                    &service.host,
+                    self.client,
+                    service.max_size,
+                    transaction,
+                    ok,
+                )
+                .await
             }
             (None, refused) => refused,
         }

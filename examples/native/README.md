@@ -17,10 +17,14 @@ cargo run -p rings-node --bin rings -- run \
   --config /tmp/rings-seed/config.yaml \
   --external-api-addr 127.0.0.1:50001 \
   --internal-api-port 50000 \
+  --api-allowed-origin http://127.0.0.1:8080 \
   --storage-path /tmp/rings-seed/storage
 ```
 
-Open the browser frontend, start its provider, connect it to `http://127.0.0.1:50001`, then copy
+Pass the exact origin serving the browser frontend to `--api-allowed-origin` (repeat the flag if
+needed): default CORS origins are empty, and browsers treat `http://localhost:8080` and
+`http://127.0.0.1:8080` as distinct origins. Open the browser frontend at that origin, start its
+provider, connect it to `http://127.0.0.1:50001`, then copy
 the browser DID. The frontend registers the `example` namespace by default for native interop.
 
 Run the native example:

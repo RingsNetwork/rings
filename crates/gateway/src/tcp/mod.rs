@@ -309,20 +309,22 @@ impl TcpStack {
         Ok(())
     }
 
-    /// Return whether the captured client finished its byte stream with a FIN.
+    /// Return whether the captured client finished its byte stream with a FIN and every buffered
+    /// client byte has been consumed.
     ///
-    /// Exactly the states entered by receiving the client's FIN qualify. A closed endpoint does
-    /// not: it closed by reset or idle timeout, so its missing bytes are a reset, not an EOF to
-    /// forward as a graceful half-close.
+    /// Exactly the states entered by receiving the client's FIN qualify once `recv_queue() == 0`.
+    /// A closed endpoint does not: it closed by reset or idle timeout, so its missing bytes are a
+    /// reset, not an EOF to forward as a graceful half-close.
     pub fn client_finished(&self, flow: FlowId) -> Result<bool, TcpStackError> {
         self.socket(flow).map(|socket| {
-            matches!(
-                socket.state(),
-                tcp::State::CloseWait
-                    | tcp::State::LastAck
-                    | tcp::State::Closing
-                    | tcp::State::TimeWait
-            )
+            socket.recv_queue() == 0
+                && matches!(
+                    socket.state(),
+                    tcp::State::CloseWait
+                        | tcp::State::LastAck
+                        | tcp::State::Closing
+                        | tcp::State::TimeWait
+                )
         })
     }
 
@@ -775,5 +777,44 @@ mod tests {
             stack.endpoint_closure(flow, Duration::from_secs(5)),
             Ok(EndpointClosure::ClientReset)
         );
+    }
+
+    #[test]
+    fn client_finished_waits_until_buffered_bytes_drain() {
+        let mut stack = TcpStack::new(&config(), 7).expect("valid TCP stack");
+        let (flow, server_sequence) = establish(&mut stack);
+        let payload = b"buffered-before-fin";
+
+        ingest_tcp(
+            &mut stack,
+            tcp_packet_with_payload(
+                TcpControl::Fin,
+                TcpSeqNumber(8),
+                Some(server_sequence + 1),
+                payload,
+            ),
+            Duration::from_millis(3),
+        );
+        assert_eq!(stack.client_finished(flow), Ok(false));
+
+        let mut head = [0_u8; 8];
+        let peeked = stack
+            .peek_application_data(flow, &mut head)
+            .expect("peek first slice");
+        assert_eq!(peeked, head.len());
+        stack
+            .commit_application_read(flow, peeked)
+            .expect("commit first slice");
+        assert_eq!(stack.client_finished(flow), Ok(false));
+
+        let mut tail = [0_u8; 32];
+        let remaining = stack
+            .peek_application_data(flow, &mut tail)
+            .expect("peek remaining slice");
+        assert_eq!(&tail[..remaining], &payload[head.len()..]);
+        stack
+            .commit_application_read(flow, remaining)
+            .expect("commit remaining slice");
+        assert_eq!(stack.client_finished(flow), Ok(true));
     }
 }

@@ -95,7 +95,7 @@ fn admitted(bytes: Vec<u8>, key: &DelegateeKey) -> OnionAdmittedCell {
             OnionCell::parse(&bytes).expect("a cell"),
         )
         .expect("the fixture link has budget")
-        .peel(key)
+        .peel(std::slice::from_ref(key))
         .expect("peel")
         .admit(&mut admission, FIXTURE_ARRIVAL_MS)
         .expect("a fixture layer is admissible")
@@ -122,7 +122,7 @@ fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
         let mut arguments = [0; ONION_ARGUMENT_BYTES];
         rng.fill_bytes(&mut arguments);
         OnionLayerApplication::Apply(OnionApplication {
-            symbol: OnionServiceName::tcp(),
+            symbol: OnionServiceName::tcp().into(),
             arguments: OnionArguments::new(arguments),
         })
     } else {

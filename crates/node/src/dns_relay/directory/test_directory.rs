@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use rings_core::consts::DEFAULT_DELEGATION_TTL_MS;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry::EntryKind;
 use rings_core::ecc::SecretKey;
@@ -118,9 +119,14 @@ async fn test_a_descriptor_signed_for_another_did_does_not_speak_for_the_owner()
 
 #[test]
 fn test_an_expired_descriptor_announces_nothing() {
-    let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
-    let owner = key.delegator_did();
     let now_ms = get_epoch_ms();
+    let key = DelegateeKey::new_with_seckey_at(
+        &SecretKey::random(),
+        DEFAULT_DELEGATION_TTL_MS,
+        now_ms - 200_000,
+    )
+    .unwrap();
+    let owner = key.delegator_did();
     let expired = ServiceDescriptor::new_signed(
         ServiceDescriptorBody {
             did: owner,

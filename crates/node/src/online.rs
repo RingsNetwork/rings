@@ -383,6 +383,12 @@ mod tests {
     use super::*;
     use crate::tests::TEST_NETWORK_ID;
 
+    /// Mint a test delegatee key valid across both synthetic `[0, ...)` timestamps and wall-clock
+    /// signature checks.
+    fn test_delegatee_key(secret: &SecretKey) -> Result<DelegateeKey> {
+        DelegateeKey::new_with_seckey_at(secret, u64::MAX, 0)
+    }
+
     /// A descriptor of a fresh account, fresh for `fresh_for_ms` until the lease end
     /// `expires_at_ms`, heard at `heartbeat_at_ms`.
     fn descriptor_at(
@@ -391,7 +397,7 @@ mod tests {
         expires_at_ms: u128,
     ) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+        let delegatee_key = test_delegatee_key(&key)?;
         Ok(
             descriptor_of(&delegatee_key, "test", fresh_for_ms, expires_at_ms)?
                 .heard_at(heartbeat_at_ms),
@@ -433,8 +439,8 @@ mod tests {
     #[test]
     fn test_latest_valid_by_did_breaks_an_equal_lease_by_content() -> Result<()> {
         let account = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&account)?;
-        let other_delegatee_key = DelegateeKey::new_with_seckey(&account)?;
+        let delegatee_key = test_delegatee_key(&account)?;
+        let other_delegatee_key = test_delegatee_key(&account)?;
         let one = descriptor_of(&delegatee_key, "test", 100, 200)?.heard_at(20);
         let other_process = descriptor_of(&other_delegatee_key, "test", 100, 200)?.heard_at(20);
         assert_eq!(other_process.did, one.did);
@@ -542,12 +548,31 @@ mod tests {
         Ok(())
     }
 
+    /// Delegation validity law: `is_live_at` judges the signing delegation at `now_ms`, so a
+    /// descriptor whose delegation is not yet valid beyond `TS_OFFSET_TOLERANCE_MS` or has
+    /// already expired at `now_ms` is rejected even while its own lease terms are live.
+    #[test]
+    fn test_a_descriptor_requires_its_delegation_to_be_live_at_now() -> Result<()> {
+        let skew = TS_OFFSET_TOLERANCE_MS;
+        let issued_at = 10_000;
+        let delegation_ttl = 1_000;
+        let key = SecretKey::random();
+        let delegatee_key = DelegateeKey::new_with_seckey_at(&key, delegation_ttl, issued_at)?;
+        let descriptor = descriptor_of(&delegatee_key, "test", 20_000, 25_000)?.heard_at(5_000);
+
+        assert!(!descriptor.is_live_at(issued_at - skew - 1, TEST_NETWORK_ID));
+        assert!(descriptor.is_live_at(issued_at - skew, TEST_NETWORK_ID));
+        assert!(descriptor.is_live_at(issued_at + u128::from(delegation_ttl), TEST_NETWORK_ID));
+        assert!(!descriptor.is_live_at(issued_at + u128::from(delegation_ttl) + 1, TEST_NETWORK_ID));
+        Ok(())
+    }
+
     /// The newest lease of a DID wins even when an older lease was heard later, as a replayed
     /// older lease is; expired descriptors are kept only on request.
     #[test]
     fn test_latest_valid_by_did_filters_expired_and_keeps_the_newest_lease() -> Result<()> {
         let key = SecretKey::random();
-        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+        let delegatee_key = test_delegatee_key(&key)?;
         let older = descriptor_of(&delegatee_key, "old", 100, 90)?.heard_at(45);
         let newer = descriptor_of(&delegatee_key, "new", 100, 100)?.heard_at(40);
         let other_live = descriptor_at(25, 100, 100)?;

@@ -10,11 +10,13 @@
 //! There are three phases when node A connects to node B. So-called join a DHT Ring.
 //!
 //! 1. Handshake
-//! - Node A create a new transport via `swarm.new_transport()` and generate the handshake SDP
-//!   with `transport.get_handshake_info(delegatee_key, offer)` and send it to node B.
-//! - Node B accept the offer with `transport.register_remote_info(offer)` and response with Answer via
-//!   `transport.get_handshake_info(delegatee_key, offer)`.
-//! - Node A accept the answer and wait until the connection creation.
+//! - Node A creates a signed connection offer for node B via [`Swarm::create_offer`](crate::swarm::Swarm::create_offer)
+//!   (or [`Swarm::offer_connection`](crate::swarm::Swarm::offer_connection) to retain the generation token) and sends it to node B.
+//! - Node B processes the offer with [`Swarm::answer_offer`](crate::swarm::Swarm::answer_offer), returning an
+//!   [`OfferReply`](crate::swarm::OfferReply) (`OfferReply::Answer` carrying the signed answer payload, or
+//!   `OfferReply::CounterOffer` when a crossing offer prevails).
+//! - Node A completes the handshake with [`Swarm::accept_answer`](crate::swarm::Swarm::accept_answer)
+//!   (or [`Swarm::accept_answer_for`](crate::swarm::Swarm::accept_answer_for)) and awaits datachannel establishment.
 //! 2. Join Ring
 //! - After the connection creation, node A will ask node B for a successor.
 //!   (A successor is the closest node on the Ring for node A.)
@@ -71,6 +73,8 @@ pub mod algebra;
 mod base58_check;
 pub mod delegation;
 pub mod dht;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub mod dummy_simulation;
 pub mod ecc;
 pub mod error;
 mod fair_admission;

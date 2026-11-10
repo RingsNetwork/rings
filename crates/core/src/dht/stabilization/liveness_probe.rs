@@ -29,7 +29,6 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::ProbePass;
 use crate::swarm::transport::ProbeScope;
 use crate::swarm::transport::ProbeWork;
-use crate::utils::get_epoch_ms_i64;
 
 impl Stabilizer {
     /// Probe every admitted peer that is due one.
@@ -50,7 +49,7 @@ impl Stabilizer {
         self.run_probe_pass(ProbeScope::ChainNeighbours).await?;
         for peer in self
             .transport
-            .unanswering_chain_neighbours(get_epoch_ms_i64())?
+            .unanswering_chain_neighbours(self.transport.now_ms_i64())?
         {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
@@ -67,7 +66,7 @@ impl Stabilizer {
     async fn run_probe_pass(&self, scope: ProbeScope) -> Result<()> {
         let Some(pass) = self
             .transport
-            .liveness_probe_pass(get_epoch_ms_i64(), scope)?
+            .liveness_probe_pass(self.transport.now_ms_i64(), scope)?
         else {
             return Ok(());
         };
@@ -100,11 +99,13 @@ impl Stabilizer {
         pass: &ProbePass<'_>,
         attempt: PendingConnectionAttempt,
     ) -> Result<Option<IssuedProbe>> {
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.transport.now_ms_i64();
         // Probe epochs use wall-clock seconds; topology deadlines use the monotonic ring clock.
         let unix_seconds = u64::try_from(now_ms).unwrap_or(0) / 1_000;
-        let request =
-            ProbeRequest::random_for_epoch(ProvisionalEpoch::from_unix_seconds(unix_seconds));
+        let request = ProbeRequest::from_rng(
+            ProvisionalEpoch::from_unix_seconds(unix_seconds),
+            &mut self.transport.rng().lock_rng(),
+        );
         let payload = self.sign_probe(attempt, request).await?;
         self.transport
             .issue_liveness_probe(pass, attempt, payload, request, now_ms)
@@ -119,8 +120,13 @@ impl Stabilizer {
         request: ProbeRequest,
     ) -> Result<Option<IssuedProbe>> {
         let payload = self.sign_probe(attempt, request).await?;
-        self.transport
-            .resend_liveness_probe(pass, attempt, payload, request, get_epoch_ms_i64())
+        self.transport.resend_liveness_probe(
+            pass,
+            attempt,
+            payload,
+            request,
+            self.transport.now_ms_i64(),
+        )
     }
 
     /// The signed payload of the probe of challenge `request` to `attempt`'s peer.

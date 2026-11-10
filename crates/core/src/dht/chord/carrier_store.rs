@@ -16,11 +16,12 @@
 //!   the remove side. Under the removal store's durability, every crash leaves an element side
 //!   no newer than the remove side it is glued to, which the recovery pass normalizes.
 //! - Glue: at runtime an element side is always written from the same normalized carrier as its
-//!   remove side, after it, so it holds no add that remove side covers or floors, and a read
-//!   glues the two without hashing. Only a crash that rolls a cached element side back can break
-//!   that; the first operation on the store after it is opened normalizes every element side that
-//!   has a remove side (the recovery pass), and a whole carrier written before the factoring,
-//!   whose element side still holds removes, is joined in full.
+//!   remove side, after it, so once both sides commit it holds no add that remove side covers or
+//!   floors, and a read glues the two without hashing. A crash that rolls a cached element side
+//!   back is normalized by the recovery pass on first use; a cross-store write that is still in
+//!   flight or failed/cancelled before its element-side write completed leaves the key marked
+//!   dirty so reads join in full (and repair the element side when idle); and a whole carrier
+//!   written before the factoring, whose element side still holds removes, is joined in full.
 //! - Shares (load-bounds paper, Sec. V, re-keying Law 6 of the removal-stability paper): each
 //!   unstable remove, and the register, is an item charged to the principal that delivered the
 //!   transition raising it: the connection slot of the edge an operation or a sync arrived on,
@@ -40,9 +41,19 @@
 //!   callers hold, which is what keeps `R` before `E` per key.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
+use std::sync::PoisonError;
+use std::task::Poll;
 
+use futures::future::poll_fn;
 use futures::lock::Mutex as FuturesMutex;
 use serde::Deserialize;
 use serde::Serialize;
@@ -51,8 +62,10 @@ use super::EntryStorage;
 #[cfg(doc)]
 use crate::consts::REMOVAL_STORE_MAX_REMOVES;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::dht::entry::ElementDigest;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryCrdt;
+use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryTombstone;
 use crate::dht::entry::EntryVersion;
@@ -124,6 +137,9 @@ fn stable_at(version: &EntryVersion) -> u128 {
         .saturating_add(TS_OFFSET_TOLERANCE_MS)
 }
 
+const CO_REGISTER_DIGEST: ElementDigest = ElementDigest(*b"rings-core:co-register-floor\0\0\0\0");
+const PROOF_BUNDLE_DIGEST: ElementDigest = ElementDigest(*b"rings-core:data-proof-bundle\0\0\0\0");
+
 impl RemovalRecord {
     /// The remove side of the normalized carrier `value`, charging `charge` with what it raised
     /// over `previous` and keeping the earlier charge of the rest; `None` when `value` holds no
@@ -138,7 +154,7 @@ impl RemovalRecord {
                     .map(|held| held.charge)
             })
         };
-        let removes = value
+        let mut removes = value
             .crdt
             .tombstones
             .iter()
@@ -147,6 +163,19 @@ impl RemovalRecord {
                 charge: held(tombstone).unwrap_or(charge),
             })
             .collect::<Vec<_>>();
+        for &version in &value.crdt.co_registers {
+            let encoded = EntryTombstone {
+                element: CO_REGISTER_DIGEST,
+                dot: EntryDot {
+                    version,
+                    index: u32::MAX,
+                },
+            };
+            removes.push(ChargedRemove {
+                tombstone: encoded,
+                charge: held(&encoded).unwrap_or(charge),
+            });
+        }
         let register = value.crdt.register.map(|version| ChargedRegister {
             version,
             charge: previous
@@ -158,6 +187,23 @@ impl RemovalRecord {
         if removes.is_empty() && register.is_none() {
             return None;
         }
+        let remove_proofs = value
+            .crdt
+            .proofs
+            .iter()
+            .filter(|proof| !proof.key.is_element_add())
+            .cloned()
+            .collect::<Vec<_>>();
+        for dot in EntryCrdt::encode_proof_dots(&remove_proofs) {
+            let encoded = EntryTombstone {
+                element: PROOF_BUNDLE_DIGEST,
+                dot,
+            };
+            removes.push(ChargedRemove {
+                tombstone: encoded,
+                charge: held(&encoded).unwrap_or(charge),
+            });
+        }
         let record = Self {
             did: value.did,
             register,
@@ -168,6 +214,22 @@ impl RemovalRecord {
 
     /// `R(x)`: the remove side as a carrier, with no element and the least stamped bound.
     fn as_entry(&self) -> Entry {
+        let mut tombstones = Vec::with_capacity(self.removes.len());
+        let mut co_registers = Vec::new();
+        let mut proof_dots = Vec::new();
+        for remove in &self.removes {
+            if remove.tombstone.element == CO_REGISTER_DIGEST
+                && remove.tombstone.dot.index == u32::MAX
+            {
+                co_registers.push(remove.tombstone.dot.version);
+            } else if remove.tombstone.element == PROOF_BUNDLE_DIGEST {
+                proof_dots.push(remove.tombstone.dot);
+            } else {
+                tombstones.push(remove.tombstone);
+            }
+        }
+        co_registers.sort();
+        let proofs = EntryCrdt::decode_proof_dots(proof_dots);
         Entry {
             did: self.did,
             data: Vec::new(),
@@ -176,7 +238,9 @@ impl RemovalRecord {
                 register: self.register.map(|register| register.version),
                 dots: Vec::new(),
                 co_dots: Vec::new(),
-                tombstones: self.removes.iter().map(|remove| remove.tombstone).collect(),
+                co_registers,
+                proofs,
+                tombstones,
             },
             expires_at_ms: Some(0),
         }
@@ -186,6 +250,7 @@ impl RemovalRecord {
     fn items(&self) -> impl Iterator<Item = (Principal, u128)> + '_ {
         self.removes
             .iter()
+            .filter(|remove| remove.tombstone.element != PROOF_BUNDLE_DIGEST)
             .map(|remove| (remove.charge, stable_at(&remove.tombstone.dot.version)))
             .chain(
                 self.register
@@ -197,35 +262,61 @@ impl RemovalRecord {
 
 /// `E(x)`: the carrier `value` without its remove side.
 fn element_side(value: &Entry) -> Entry {
+    let proofs = value
+        .crdt
+        .proofs
+        .iter()
+        .filter(|proof| proof.key.is_element_add())
+        .cloned()
+        .collect();
     Entry {
+        did: value.did,
+        data: value.data.clone(),
+        kind: value.kind,
         crdt: EntryCrdt {
             register: None,
             dots: value.crdt.dots.clone(),
             co_dots: value.crdt.co_dots.clone(),
+            co_registers: Vec::new(),
+            proofs,
             tombstones: Vec::new(),
         },
-        ..value.clone()
+        expires_at_ms: value.expires_at_ms,
     }
 }
 
-/// `E ⊔ R` by the glue law: concatenation when the element side holds no remove side of its own,
-/// and the full join for a whole carrier written before the factoring.
-fn glue(elements: Option<Entry>, removals: Option<&RemovalRecord>) -> Result<Option<Entry>> {
+/// `E ⊔ R` by the glue law: concatenation when the element side is known to come from the same
+/// normalized generation as `removals` and holds no remove side of its own, and the full join
+/// otherwise.
+fn glue(
+    elements: Option<Entry>,
+    removals: Option<&RemovalRecord>,
+    dirty: bool,
+) -> Result<Option<Entry>> {
     let Some(removals) = removals else {
         return Ok(elements);
     };
     let Some(elements) = elements else {
         return Ok(Some(removals.as_entry()));
     };
-    if !elements.crdt.tombstones.is_empty() || elements.crdt.register.is_some() {
+    if dirty
+        || !elements.crdt.tombstones.is_empty()
+        || elements.crdt.register.is_some()
+        || !elements.crdt.co_registers.is_empty()
+    {
         return elements.join(removals.as_entry()).map(Some);
     }
     let remove_side = removals.as_entry();
+    let mut proofs = elements.crdt.proofs;
+    proofs.extend(remove_side.crdt.proofs);
+    proofs.sort_by_key(|p| p.key);
     Ok(Some(Entry {
         crdt: EntryCrdt {
             register: remove_side.crdt.register,
             dots: elements.crdt.dots,
             co_dots: elements.crdt.co_dots,
+            co_registers: remove_side.crdt.co_registers,
+            proofs,
             tombstones: remove_side.crdt.tombstones,
         },
         expires_at_ms: elements.expires_at_ms.max(remove_side.expires_at_ms),
@@ -317,32 +408,327 @@ impl ItemChanges {
     }
 }
 
-/// The accounting of a removal store, filled by the recovery pass on first use (the lock law of
-/// the module documentation).
+/// An in-flight removal-store operation stored inside [`RemovalIndex::writes`] so a subsequent
+/// recovery or write can await its completion if the original caller was cancelled mid-await.
+type InFlightRemovalOp = Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = ()> + 'static)>>;
+
+/// Tracks keys whose remove side may be newer than their element side because a two-stage write
+/// touched `removals` and its matching `elements` write has not yet finished.
+#[derive(Debug, Default)]
+struct DirtyElements {
+    /// Keys whose stored element side is not known to match the stored remove side's generation.
+    dirty: BTreeSet<String>,
+    /// Active `CarrierStore::put` or `CarrierStore::remove` calls per key.
+    in_flight: BTreeMap<String, usize>,
+}
+
+/// Shared state of [`RemovalIndex`], cloned into in-flight removal-store futures so a cancelled
+/// caller leaves the operation inside `writes` for the next operation or recovery pass to finish.
 #[derive(Debug)]
-pub(crate) struct RemovalIndex {
+struct RemovalIndexInner {
     /// Whether the recovery pass has run: read without the lock once set.
     recovered: AtomicBool,
-    /// The write lock: taken by the recovery pass and by a write that changes a remove side.
-    writes: FuturesMutex<()>,
     /// The items, under edge accounting with [`REMOVAL_SHARES`].
     accounting: TableAccounting,
+    /// Keys with an in-flight or incomplete cross-store (`R` then `E`) write.
+    dirty_elements: Mutex<DirtyElements>,
+}
+
+/// The accounting of a removal store, filled by the recovery pass on first use (the lock law of
+/// the module documentation).
+pub(crate) struct RemovalIndex {
+    /// Shared recovery flag, accounting table, and dirty-key state.
+    inner: Arc<RemovalIndexInner>,
+    /// The write lock: taken by the recovery pass and by a write that changes a remove side,
+    /// holding any in-flight removal-store future across caller cancellation.
+    writes: FuturesMutex<Option<InFlightRemovalOp>>,
+}
+
+impl fmt::Debug for RemovalIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemovalIndex")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
 }
 
 impl RemovalIndex {
     /// The floor use of every slot in the removal store at `now_ms` (load-bounds paper, Def. 1).
     pub(crate) fn floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
-        self.accounting.floor_use_at(now_ms)
+        self.inner.accounting.floor_use_at(now_ms)
+    }
+
+    /// The number of items held by `principal`.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn held(&self, principal: Principal) -> usize {
+        self.inner.accounting.lock().held(principal)
     }
 
     /// An index not yet recovered, accounting in `accounting`.
     pub(crate) fn new(accounting: TableAccounting) -> Self {
         Self {
-            recovered: AtomicBool::new(false),
-            writes: FuturesMutex::new(()),
-            accounting,
+            inner: Arc::new(RemovalIndexInner {
+                recovered: AtomicBool::new(false),
+                accounting,
+                dirty_elements: Mutex::new(DirtyElements::default()),
+            }),
+            writes: FuturesMutex::new(None),
         }
     }
+
+    /// Lock `dirty_elements` for one pure step.
+    fn dirty_guard(&self) -> MutexGuard<'_, DirtyElements> {
+        self.inner
+            .dirty_elements
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Return `(dirty, in_flight)` for `key`.
+    fn dirty_state(&self, key: &str) -> (bool, bool) {
+        let state = self.dirty_guard();
+        (state.dirty.contains(key), state.in_flight.contains_key(key))
+    }
+
+    /// Snapshot `(dirty_keys, in_flight_keys)` across all keys.
+    fn dirty_snapshot(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let state = self.dirty_guard();
+        (
+            state.dirty.clone(),
+            state.in_flight.keys().cloned().collect(),
+        )
+    }
+
+    /// Clear `key` from `dirty` if no `put` or `remove` is currently in flight on `key`.
+    fn clear_dirty_if_idle(&self, key: &str) {
+        let mut state = self.dirty_guard();
+        if !state.in_flight.contains_key(key) {
+            state.dirty.remove(key);
+        }
+    }
+}
+
+/// Tracks a `CarrierStore::put` or `CarrierStore::remove` across its remove-side and element-side
+/// writes so a failure or cancellation after `removals` changes leaves `key` marked dirty until
+/// normalized.
+struct ElementSyncGuard<'a> {
+    /// The index tracking dirty keys.
+    index: &'a RemovalIndex,
+    /// The carrier key being written.
+    key: String,
+    /// Whether `key` was already dirty before this operation began.
+    was_dirty: bool,
+    /// Shared flag indicating whether `key` must remain dirty if this guard drops before
+    /// [`Self::complete`].
+    dirty_on_drop: Arc<AtomicBool>,
+    /// Whether the element-side write completed.
+    completed: bool,
+}
+
+impl<'a> ElementSyncGuard<'a> {
+    /// Register an in-flight `put` or `remove` on `key`.
+    fn new(index: &'a RemovalIndex, key: &str) -> Self {
+        let mut state = index.dirty_guard();
+        let was_dirty = state.dirty.contains(key);
+        *state.in_flight.entry(key.to_owned()).or_default() += 1;
+        Self {
+            index,
+            key: key.to_owned(),
+            was_dirty,
+            dirty_on_drop: Arc::new(AtomicBool::new(was_dirty)),
+            completed: false,
+        }
+    }
+
+    /// Mark `key` dirty immediately before mutating `removals`.
+    fn mark_removal_write(&mut self) {
+        self.index.dirty_guard().dirty.insert(self.key.clone());
+        self.dirty_on_drop.store(true, Ordering::Release);
+    }
+
+    /// Mark the element-side write complete and clear `dirty` when no other operation on `key` is
+    /// active.
+    fn complete(mut self) {
+        self.completed = true;
+        let mut state = self.index.dirty_guard();
+        let still_in_flight = match state.in_flight.get_mut(&self.key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                true
+            }
+            Some(_) => {
+                state.in_flight.remove(&self.key);
+                false
+            }
+            None => false,
+        };
+        if !still_in_flight {
+            state.dirty.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for ElementSyncGuard<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let mut state = self.index.dirty_guard();
+        let still_in_flight = match state.in_flight.get_mut(&self.key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                true
+            }
+            Some(_) => {
+                state.in_flight.remove(&self.key);
+                false
+            }
+            None => false,
+        };
+        if self.dirty_on_drop.load(Ordering::Acquire) {
+            state.dirty.insert(self.key.clone());
+        } else if !still_in_flight {
+            state.dirty.remove(&self.key);
+        }
+    }
+}
+
+/// Guard for an admitted removal-store write whose backend outcome is not yet reconciled.
+///
+/// Dropping this guard before [`Self::complete`] or [`Self::reconcile`] means the write future
+/// itself was dropped or read-back reconciliation failed, so the optimistic accounting delta is
+/// reverted and `recovered` is cleared to force a full scan on the next operation.
+struct UnfinishedRemovalWrite<'a> {
+    /// The shared index state whose accounting was optimistically updated.
+    inner: &'a RemovalIndexInner,
+    /// The applied delta from `previous` to `next`.
+    changes: &'a ItemChanges,
+    /// Whether the backend outcome was confirmed or reconciled.
+    completed: bool,
+}
+
+impl<'a> UnfinishedRemovalWrite<'a> {
+    /// Arm a guard for `changes` applied to `inner`.
+    const fn new(inner: &'a RemovalIndexInner, changes: &'a ItemChanges) -> Self {
+        Self {
+            inner,
+            changes,
+            completed: false,
+        }
+    }
+
+    /// Disarm after `removals` confirmed `next` was stored.
+    fn complete(mut self) {
+        self.completed = true;
+    }
+
+    /// Reconcile `inner.accounting` against the `actual` record read back from `removals` after a
+    /// write error (such as a post-commit directory-sync failure).
+    fn reconcile(
+        mut self,
+        previous: Option<&RemovalRecord>,
+        next: Option<&RemovalRecord>,
+        actual: Option<&RemovalRecord>,
+        now_ms: u128,
+    ) {
+        self.completed = true;
+        if actual == next {
+            return;
+        }
+        let mut accounting = self.inner.accounting.lock();
+        self.changes.revert(&mut accounting);
+        if actual != previous {
+            let actual_changes = ItemChanges::of(previous, actual, now_ms);
+            for (principal, at) in actual_changes.left {
+                accounting.discharge(principal, at);
+            }
+            for (principal, at) in actual_changes.raised {
+                accounting.charge(principal, at);
+            }
+        }
+    }
+}
+
+impl Drop for UnfinishedRemovalWrite<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.changes.revert(&mut self.inner.accounting.lock());
+            self.inner.recovered.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Guard for an in-flight removal-store delete whose backend outcome is not yet reconciled.
+struct UnfinishedRemovalDelete<'a> {
+    /// The shared index state whose accounting must match `removals`.
+    inner: &'a RemovalIndexInner,
+    /// Whether the delete outcome was confirmed or reconciled.
+    completed: bool,
+}
+
+impl<'a> UnfinishedRemovalDelete<'a> {
+    /// Arm a guard before calling `removals.remove`.
+    const fn new(inner: &'a RemovalIndexInner) -> Self {
+        Self {
+            inner,
+            completed: false,
+        }
+    }
+
+    /// Disarm after `removals.remove` succeeded and discharge `previous`.
+    fn complete(mut self, previous: &RemovalRecord) {
+        self.completed = true;
+        let mut accounting = self.inner.accounting.lock();
+        for (principal, at) in previous.items() {
+            accounting.discharge(principal, at);
+        }
+    }
+
+    /// Reconcile `inner.accounting` against `actual` read back after `removals.remove` errored.
+    fn reconcile(mut self, previous: &RemovalRecord, actual: Option<&RemovalRecord>) {
+        self.completed = true;
+        if actual == Some(previous) {
+            return;
+        }
+        let mut accounting = self.inner.accounting.lock();
+        for (principal, at) in previous.items() {
+            accounting.discharge(principal, at);
+        }
+        if let Some(actual) = actual {
+            for (principal, at) in actual.items() {
+                accounting.charge(principal, at);
+            }
+        }
+    }
+}
+
+impl Drop for UnfinishedRemovalDelete<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.inner.recovered.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Poll `op_fut` inside `writes` so that if the caller is cancelled while `op_fut` is pending,
+/// `op_fut` remains stored in `writes` for the next lock holder to await to completion before
+/// scanning or mutating `removals`.
+async fn run_in_flight_removal_op(
+    writes: &mut Option<InFlightRemovalOp>,
+    op_fut: InFlightRemovalOp,
+) {
+    *writes = Some(op_fut);
+    poll_fn(|cx| match writes.as_mut() {
+        Some(fut) => {
+            let poll = fut.as_mut().poll(cx);
+            if poll.is_ready() {
+                *writes = None;
+            }
+            poll
+        }
+        None => Poll::Ready(()),
+    })
+    .await;
 }
 
 /// The store of one carrier kind: a whole store (relay inboxes, the fetch cache), or the data
@@ -355,17 +741,17 @@ pub(crate) enum CarrierStore<'a> {
         /// The element sides.
         elements: &'a EntryStorage,
         /// The remove sides.
-        removals: &'a RemovalStorage,
+        removals: &'a Arc<RemovalStorage>,
         /// The charge index of `removals`.
         index: &'a RemovalIndex,
     },
 }
 
 impl CarrierStore<'_> {
-    /// Whether this store is the factored replicated data store, where per-actor provenance is
-    /// enforced (the fetch cache uses [`Self::Whole`]).
+    /// Whether this store enforces per-actor data provenance (`true` for all [`EntryKind::Data`]
+    /// stores, including the [`Self::Whole`] local lookup cache, #1220).
     pub(crate) const fn enforces_data_provenance(&self, kind: EntryKind) -> bool {
-        matches!(self, Self::Factored { .. }) && matches!(kind, EntryKind::Data)
+        matches!(kind, EntryKind::Data)
     }
 
     /// Return `local` with cross-actor tombstones targeting `incoming` evicted when this store
@@ -389,34 +775,80 @@ impl CarrierStore<'_> {
         removals: &RemovalStorage,
         index: &RemovalIndex,
     ) -> Result<()> {
-        if index.recovered.load(Ordering::Acquire) {
+        if index.inner.recovered.load(Ordering::Acquire) {
             return Ok(());
         }
-        let _writes = index.writes.lock().await;
-        if index.recovered.load(Ordering::Acquire) {
+        let mut writes = index.writes.lock().await;
+        if let Some(in_flight) = writes.take() {
+            in_flight.await;
+        }
+        Self::recover_locked(elements, removals, index).await
+    }
+
+    /// Rebuild `index.inner.accounting` in a staging table and normalize every element side
+    /// against its remove side while holding `index.writes`, publishing the accounting and
+    /// `recovered = true` together only after the full scan succeeds.
+    async fn recover_locked(
+        elements: &EntryStorage,
+        removals: &RemovalStorage,
+        index: &RemovalIndex,
+    ) -> Result<()> {
+        if index.inner.recovered.load(Ordering::Acquire) {
             return Ok(());
         }
+        let shares = index.inner.accounting.lock().shares();
+        let mut rebuilt = SlotAccounting::new(shares);
         for (key, record) in removals.get_all().await? {
-            {
-                let mut accounting = index.accounting.lock();
-                for (principal, at) in record.items() {
-                    accounting.charge(principal, at);
-                }
+            for (principal, at) in record.items() {
+                rebuilt.charge(principal, at);
             }
             let Some(held) = elements.get(&key).await? else {
+                index.clear_dirty_if_idle(&key);
                 continue;
             };
-            let whole = !held.crdt.tombstones.is_empty() || held.crdt.register.is_some();
             let normalized = held.join(record.as_entry())?;
-            if whole
-                || normalized.data.len() != held.data.len()
-                || normalized.crdt.co_dots.len() != held.crdt.co_dots.len()
-            {
-                elements.put(&key, &element_side(&normalized)).await?;
+            let repaired = element_side(&normalized);
+            if repaired != held {
+                elements.put(&key, &repaired).await?;
             }
+            index.clear_dirty_if_idle(&key);
         }
-        index.recovered.store(true, Ordering::Release);
+        *index.inner.accounting.lock() = rebuilt;
+        index.inner.recovered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Glue `elements_entry` and `removals_record` at `key`, forcing a full normalizing join
+    /// whenever `dirty` indicates a cross-store write may have left `elements` older than
+    /// `removals`.
+    fn resolve_read(
+        index: &RemovalIndex,
+        key: &str,
+        elements_entry: Option<Entry>,
+        removals_record: Option<&RemovalRecord>,
+        dirty: bool,
+        can_clear_dirty: bool,
+    ) -> Result<Option<Entry>> {
+        if !dirty {
+            return glue(elements_entry, removals_record, false);
+        }
+        let Some(removals_record) = removals_record else {
+            if can_clear_dirty {
+                index.clear_dirty_if_idle(key);
+            }
+            return Ok(elements_entry);
+        };
+        let Some(held) = elements_entry else {
+            if can_clear_dirty {
+                index.clear_dirty_if_idle(key);
+            }
+            return Ok(Some(removals_record.as_entry()));
+        };
+        let normalized = held.join(removals_record.as_entry())?;
+        if can_clear_dirty && element_side(&normalized) == held {
+            index.clear_dirty_if_idle(key);
+        }
+        Ok(Some(normalized))
     }
 
     /// The carrier stored at `key`. Takes no lock once recovered.
@@ -429,8 +861,13 @@ impl CarrierStore<'_> {
                 index,
             } => {
                 Self::ensure_recovered(elements, removals, index).await?;
+                let (dirty_before, in_flight_before) = index.dirty_state(key);
                 let record = removals.get(key).await?;
-                glue(elements.get(key).await?, record.as_ref())
+                let held = elements.get(key).await?;
+                let (dirty_after, in_flight_after) = index.dirty_state(key);
+                let dirty = dirty_before || dirty_after;
+                let can_clear_dirty = dirty && !in_flight_before && !in_flight_after;
+                Self::resolve_read(index, key, held, record.as_ref(), dirty, can_clear_dirty)
             }
         }
     }
@@ -457,24 +894,74 @@ impl CarrierStore<'_> {
             } => (elements, removals, index),
         };
         Self::ensure_recovered(elements, removals, index).await?;
-        let previous = removals.get(key).await?;
-        let next = RemovalRecord::of(value, previous.as_ref(), introducer);
+        let mut previous = removals.get(key).await?;
+        let mut next = RemovalRecord::of(value, previous.as_ref(), introducer);
+        let mut element_sync = ElementSyncGuard::new(index, key);
         if next != previous {
-            let _writes = index.writes.lock().await;
-            let changes = ItemChanges::of(previous.as_ref(), next.as_ref(), now_ms);
-            changes.apply(&mut index.accounting.lock(), now_ms)?;
-            let written = match &next {
-                Some(record) => removals.put(key, record).await,
-                None => removals.remove(key).await,
-            };
-            if written.is_err() {
-                // The store still holds `previous`, or a value the next start's recovery pass
-                // counts afresh.
-                changes.revert(&mut index.accounting.lock());
+            let mut writes = index.writes.lock().await;
+            if let Some(in_flight) = writes.take() {
+                in_flight.await;
+                previous = removals.get(key).await?;
+                next = RemovalRecord::of(value, previous.as_ref(), introducer);
             }
-            written?;
+            if !index.inner.recovered.load(Ordering::Acquire) {
+                Self::recover_locked(elements, removals, index).await?;
+                previous = removals.get(key).await?;
+                next = RemovalRecord::of(value, previous.as_ref(), introducer);
+            }
+            if next != previous {
+                let changes = ItemChanges::of(previous.as_ref(), next.as_ref(), now_ms);
+                changes.apply(&mut index.inner.accounting.lock(), now_ms)?;
+                let write_guard = UnfinishedRemovalWrite::new(&index.inner, &changes);
+                element_sync.mark_removal_write();
+                let removals_cloned = Arc::clone(removals);
+                let inner = Arc::clone(&index.inner);
+                let key_owned = key.to_owned();
+                let next_owned = next.clone();
+                let outcome = Arc::new(Mutex::new(None::<Result<()>>));
+                let outcome_out = Arc::clone(&outcome);
+                let op_fut: InFlightRemovalOp = Box::pin(async move {
+                    let written = match &next_owned {
+                        Some(record) => removals_cloned.put(&key_owned, record).await,
+                        None => removals_cloned.remove(&key_owned).await,
+                    };
+                    if outcome_out
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .replace(written)
+                        .is_some()
+                    {
+                        inner.recovered.store(false, Ordering::Release);
+                    }
+                });
+                run_in_flight_removal_op(&mut writes, op_fut).await;
+                let written = outcome
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take()
+                    .unwrap_or(Ok(()));
+                if let Err(error) = written {
+                    if let Ok(actual) = removals.get(key).await {
+                        write_guard.reconcile(
+                            previous.as_ref(),
+                            next.as_ref(),
+                            actual.as_ref(),
+                            now_ms,
+                        );
+                        if actual == previous {
+                            element_sync
+                                .dirty_on_drop
+                                .store(element_sync.was_dirty, Ordering::Release);
+                        }
+                    }
+                    return Err(error);
+                }
+                write_guard.complete();
+            }
         }
-        elements.put(key, &element_side(value)).await
+        elements.put(key, &element_side(value)).await?;
+        element_sync.complete();
+        Ok(())
     }
 
     /// Remove the carrier stored at `key`: its element side, then its remove side.
@@ -489,14 +976,55 @@ impl CarrierStore<'_> {
                 index,
             } => {
                 Self::ensure_recovered(elements, removals, index).await?;
+                let element_sync = ElementSyncGuard::new(index, key);
                 elements.remove(key).await?;
-                if let Some(record) = removals.get(key).await? {
-                    let _writes = index.writes.lock().await;
-                    removals.remove(key).await?;
-                    let mut accounting = index.accounting.lock();
-                    for (principal, at) in record.items() {
-                        accounting.discharge(principal, at);
+                element_sync.complete();
+                if let Some(mut record) = removals.get(key).await? {
+                    let mut writes = index.writes.lock().await;
+                    if let Some(in_flight) = writes.take() {
+                        in_flight.await;
+                        let Some(refreshed) = removals.get(key).await? else {
+                            return Ok(());
+                        };
+                        record = refreshed;
                     }
+                    if !index.inner.recovered.load(Ordering::Acquire) {
+                        Self::recover_locked(elements, removals, index).await?;
+                        let Some(refreshed) = removals.get(key).await? else {
+                            return Ok(());
+                        };
+                        record = refreshed;
+                    }
+                    let delete_guard = UnfinishedRemovalDelete::new(&index.inner);
+                    let removals_cloned = Arc::clone(removals);
+                    let inner = Arc::clone(&index.inner);
+                    let key_owned = key.to_owned();
+                    let outcome = Arc::new(Mutex::new(None::<Result<()>>));
+                    let outcome_out = Arc::clone(&outcome);
+                    let op_fut: InFlightRemovalOp = Box::pin(async move {
+                        let removed = removals_cloned.remove(&key_owned).await;
+                        if outcome_out
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .replace(removed)
+                            .is_some()
+                        {
+                            inner.recovered.store(false, Ordering::Release);
+                        }
+                    });
+                    run_in_flight_removal_op(&mut writes, op_fut).await;
+                    let removed = outcome
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .take()
+                        .unwrap_or(Ok(()));
+                    if let Err(error) = removed {
+                        if let Ok(actual) = removals.get(key).await {
+                            delete_guard.reconcile(&record, actual.as_ref());
+                        }
+                        return Err(error);
+                    }
+                    delete_guard.complete(&record);
                 }
                 Ok(())
             }
@@ -515,19 +1043,38 @@ impl CarrierStore<'_> {
             } => (elements, removals, index),
         };
         Self::ensure_recovered(elements, removals, index).await?;
+        let (dirty_before, in_flight_before) = index.dirty_snapshot();
         let mut records = removals
             .get_all()
             .await?
             .into_iter()
             .collect::<BTreeMap<_, _>>();
+        let held_entries = elements.get_all().await?;
+        let (dirty_after, in_flight_after) = index.dirty_snapshot();
         let mut carriers = Vec::new();
-        for (key, held) in elements.get_all().await? {
+        for (key, held) in held_entries {
             let record = records.remove(&key);
-            if let Some(carrier) = glue(Some(held), record.as_ref())? {
+            let dirty = dirty_before.contains(&key) || dirty_after.contains(&key);
+            let can_clear_dirty =
+                dirty && !in_flight_before.contains(&key) && !in_flight_after.contains(&key);
+            if let Some(carrier) = Self::resolve_read(
+                index,
+                &key,
+                Some(held),
+                record.as_ref(),
+                dirty,
+                can_clear_dirty,
+            )? {
                 carriers.push((key, carrier));
             }
         }
         for (key, record) in records {
+            if (dirty_before.contains(&key) || dirty_after.contains(&key))
+                && !in_flight_before.contains(&key)
+                && !in_flight_after.contains(&key)
+            {
+                index.clear_dirty_if_idle(&key);
+            }
             carriers.push((key, record.as_entry()));
         }
         Ok(carriers)

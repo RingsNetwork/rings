@@ -10,9 +10,15 @@
 //! erased to the internal `Handler`) while each extension's shell is its own. Extension authors
 //! see only `Protocol` / `Interpret` / `Scope` / `Transition` / `Extensions`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::future::poll_fn;
+use std::future::Future;
 use std::ops::Deref;
+use std::pin::pin;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -41,6 +47,50 @@ use crate::tasks::NodeTasks;
 
 /// Upper bound on synchronous feedback iterations within one protocol turn.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
+
+static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_runner_id() -> u64 {
+    NEXT_RUNNER_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+thread_local! {
+    /// Stack of `Runner::runner_id`s whose `transition_gate` is owned by the future currently
+    /// being polled on this thread. Populated per-`poll` so a suspended turn never marks an
+    /// unrelated or spawned task on the same executor thread as re-entrant.
+    static ACTIVE_RUNNERS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveRunnerGuard(u64);
+
+impl Drop for ActiveRunnerGuard {
+    fn drop(&mut self) {
+        ACTIVE_RUNNERS.with(|active| {
+            let mut active = active.borrow_mut();
+            if let Some(pos) = active.iter().rposition(|&id| id == self.0) {
+                active.remove(pos);
+            }
+        });
+    }
+}
+
+fn enter_active_runner(runner_id: u64) -> ActiveRunnerGuard {
+    ACTIVE_RUNNERS.with(|active| active.borrow_mut().push(runner_id));
+    ActiveRunnerGuard(runner_id)
+}
+
+fn is_runner_active(runner_id: u64) -> bool {
+    ACTIVE_RUNNERS.with(|active| active.borrow().contains(&runner_id))
+}
+
+async fn with_active_runner<F: Future>(runner_id: u64, fut: F) -> F::Output {
+    let mut fut = pin!(fut);
+    poll_fn(|cx| {
+        let _guard = enter_active_runner(runner_id);
+        fut.as_mut().poll(cx)
+    })
+    .await
+}
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
 pub(crate) type DynHandler = rings_runtime::maybe_send_sync!(dyn Handler);
@@ -116,9 +166,13 @@ impl Core {
         Arc::clone(self.processor.swarm.dht().edges())
     }
 
-    /// This node's delegatee key.
-    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
-        self.processor.delegatee_key()
+    /// This node's active session key followed by any retained unexpired previous keys at
+    /// `now_ms` (#1153, #1223).
+    pub(crate) fn decryption_keys_at(
+        &self,
+        now_ms: u128,
+    ) -> Vec<rings_core::delegation::DelegateeKey> {
+        self.processor.decryption_keys_at(now_ms)
     }
 
     /// This process's onion role (#834 D2).
@@ -134,6 +188,16 @@ impl Core {
     /// The onion process epoch cell of this node (#834 D2).
     pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpochCell {
         self.processor.onion_process_epoch()
+    }
+
+    /// The injected [`SharedClock`](rings_core::utils::SharedClock) of this node.
+    pub(crate) fn clock(&self) -> &rings_core::utils::SharedClock {
+        self.processor.clock()
+    }
+
+    /// The injected [`SharedRng`](rings_core::utils::SharedRng) of this node.
+    pub(crate) fn rng(&self) -> &rings_core::utils::SharedRng {
+        self.processor.rng()
     }
 
     /// Put a message on the overlay to `to` under `namespace`.
@@ -299,9 +363,13 @@ impl Scope {
         self.core.application_credit(peer)
     }
 
-    /// This node's current delegatee key.
-    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
-        self.core.delegatee_key()
+    /// This node's active session key followed by any retained unexpired previous keys at
+    /// `now_ms` (#1153, #1223).
+    pub(crate) fn decryption_keys_at(
+        &self,
+        now_ms: u128,
+    ) -> Vec<rings_core::delegation::DelegateeKey> {
+        self.core.decryption_keys_at(now_ms)
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).
@@ -352,7 +420,9 @@ impl EffectScope {
     /// Hand the lifecycle capability to an explicitly long-lived engine task.
     ///
     /// The interpreter itself must return same-turn feedback from [`Interpret::run`], rather
-    /// than await [`Scope::inject`] while the ordered effect turn is active.
+    /// than await [`Scope::inject`] while the ordered effect turn is active; a same-task
+    /// re-entrant [`Scope::inject`] fails fast instead of deadlocking on `transition_gate`
+    /// (`Law (Lock order): transition_gate ≺ state`, non-reentrant `transition_gate`).
     pub(crate) fn lifecycle(&self) -> Scope {
         self.scope.clone()
     }
@@ -360,10 +430,17 @@ impl EffectScope {
 
 /// Adapter binding a pure [`Protocol`] to its [`Interpret`] shell and owned state; erased to
 /// [`Handler`]. Protocol authors never write this.
+///
+/// Law (Lock order): `transition_gate ≺ state`. `transition_gate` is non-reentrant and spans the
+/// turn's effect application and synchronous feedback fixpoint; `state` is a synchronous leaf
+/// mutex held only across [`Protocol::step`] and never across an `.await`.
 struct Runner<P: Protocol, I> {
+    runner_id: u64,
     protocol: P,
     interpret: I,
+    /// Synchronous protocol state (`Law (Lock order): transition_gate ≺ state`, leaf).
     state: Mutex<P::State>,
+    /// Non-reentrant per-runner turn linearization gate (`Law (Lock order): transition_gate ≺ state`).
     transition_gate: AsyncMutex<()>,
     #[cfg(all(test, rings_native))]
     after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -383,6 +460,7 @@ where
     I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
 {
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<()> {
+        self.ensure_not_reentrant()?;
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
         // explicit drop here, not a silent `Transition::pure` deep in `step`.
         let event = match self.protocol.decode(Wire {
@@ -419,9 +497,23 @@ where
     P::Effect: MaybeSendSync,
     I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
 {
+    fn ensure_not_reentrant(&self) -> Result<()> {
+        if is_runner_active(self.runner_id) {
+            return Err(Error::ExtensionError(format!(
+                "re-entrant transition on {:?} while its transition_gate is held by the current task; return synchronous feedback from Interpret::run or spawn a task",
+                self.protocol.namespace()
+            )));
+        }
+        Ok(())
+    }
+
     /// One turn of `event`: under the transition gate, step it, then run its effects and the
     /// synchronous feedback fixpoint they produce.
+    ///
+    /// Law (Lock order): `transition_gate ≺ state`; `transition_gate` is non-reentrant and
+    /// same-task re-entry fails fast before awaiting the gate.
     async fn run_turn(&self, core: &Core, event: P::Event) -> Result<()> {
+        self.ensure_not_reentrant()?;
         // The transition gate establishes the protocol's linearization order for state commit
         // and its resulting effect trace. Decode remains outside that order: it has no state or
         // effects by contract. Holding the gate through interpretation preserves:
@@ -433,62 +525,72 @@ where
             // the gate immediately; true means another transition owns it at this exact point.
             observe(self.transition_gate.try_lock().is_none());
         }
-        let _transition_turn = self.transition_gate.lock().await;
+        let _transition_turn = rings_core::utils::SlowLockGuard::acquire(
+            "Runner::transition_gate",
+            self.transition_gate.lock(),
+        )
+        .await;
 
-        // Impure region: the state lock is released, while the transition gate keeps this
-        // protocol's effect trace and synchronous feedback fixpoint in commit order. Returned
-        // payloads are reduced before this turn releases the gate, so a later inbound cannot
-        // observe state that predates an effect's own feedback.
-        let namespace = self.protocol.namespace().to_string();
-        let scope = EffectScope::new(Scope::new(core.clone(), namespace.clone()));
-        let mut feedback = VecDeque::new();
-        feedback.push_back(event);
-        let mut feedback_budget = MAX_FIXPOINT_STEPS;
-        while let Some(event) = feedback.pop_front() {
-            if feedback_budget == 0 {
-                return Err(Error::ExtensionError(format!(
-                    "feedback fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted on {namespace:?}"
-                )));
-            }
-            feedback_budget -= 1;
+        with_active_runner(self.runner_id, async {
+            // Impure region: the state lock is released, while the transition gate keeps this
+            // protocol's effect trace and synchronous feedback fixpoint in commit order. Returned
+            // payloads are reduced before this turn releases the gate, so a later inbound cannot
+            // observe state that predates an effect's own feedback.
+            let namespace = self.protocol.namespace().to_string();
+            let scope = EffectScope::new(Scope::new(core.clone(), namespace.clone()));
+            let mut feedback = VecDeque::new();
+            feedback.push_back(event);
+            let mut feedback_budget = MAX_FIXPOINT_STEPS;
+            while let Some(event) = feedback.pop_front() {
+                if feedback_budget == 0 {
+                    return Err(Error::ExtensionError(format!(
+                        "feedback fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted on {namespace:?}"
+                    )));
+                }
+                feedback_budget -= 1;
 
-            // Pure region: a brief synchronous state fold. No await crosses `state`; the
-            // feedback queue makes every same-turn effect result part of this fold before a
-            // competing inbound can begin its own transition.
-            let effects = {
-                let mut guard = lock(&self.state)?;
-                let Transition { state, effects } = self.protocol.step(
-                    Ctx {
-                        did: core.did(),
-                        state: guard.deref(),
-                    },
-                    event,
-                );
-                *guard = state;
-                effects
-            };
+                // Pure region: a brief synchronous state fold. No await crosses `state`; the
+                // feedback queue makes every same-turn effect result part of this fold before a
+                // competing inbound can begin its own transition.
+                let effects = {
+                    let mut guard = lock(&self.state)?;
+                    let Transition { state, effects } = self.protocol.step(
+                        Ctx {
+                            did: core.did(),
+                            state: guard.deref(),
+                        },
+                        event,
+                    );
+                    *guard = state;
+                    effects
+                };
 
-            #[cfg(all(test, rings_native))]
-            if let Some(observe) = self.after_commit_for_test.as_ref() {
-                observe();
-            }
+                #[cfg(all(test, rings_native))]
+                if let Some(observe) = self.after_commit_for_test.as_ref() {
+                    observe();
+                }
 
-            for effect in effects {
-                for payload in self.interpret.run(&scope, effect).await? {
-                    match self.protocol.decode(Wire {
-                        from: core.did(),
-                        me: core.did(),
-                        payload: payload.as_ref(),
-                    }) {
-                        Ok(event) => feedback.push_back(event),
-                        Err(Reject(why)) => {
-                            tracing::debug!("drop feedback on {}: {why}", self.protocol.namespace())
+                for effect in effects {
+                    for payload in self.interpret.run(&scope, effect).await? {
+                        match self.protocol.decode(Wire {
+                            from: core.did(),
+                            me: core.did(),
+                            payload: payload.as_ref(),
+                        }) {
+                            Ok(event) => feedback.push_back(event),
+                            Err(Reject(why)) => {
+                                tracing::debug!(
+                                    "drop feedback on {}: {why}",
+                                    self.protocol.namespace()
+                                )
+                            }
                         }
                     }
                 }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -547,6 +649,35 @@ impl Extensions {
         self.insert(protocol, interpret, true)
     }
 
+    /// Prepare one `(namespace, delegation, runner)` tuple before acquiring the registry write
+    /// lock so `protocol.init()` runs outside the lock and both single and batch registration
+    /// construct `Runner` identically (#1217).
+    fn prepare_runner<P, I>(protocol: P, interpret: I) -> (String, Delegation, Arc<DynHandler>)
+    where
+        P: Protocol + MaybeSendSync + 'static,
+        P::State: MaybeSendSync + 'static,
+        P::Effect: MaybeSendSync,
+        I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
+    {
+        let namespace = protocol.namespace().to_string();
+        let delegates = Delegation::of(&protocol);
+        let state = Mutex::new(protocol.init());
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            runner_id: next_runner_id(),
+            protocol,
+            interpret,
+            state,
+            transition_gate: AsyncMutex::new(()),
+            #[cfg(all(test, rings_native))]
+            after_decode_for_test: None,
+            #[cfg(all(test, rings_native))]
+            after_commit_for_test: None,
+            #[cfg(all(test, rings_native))]
+            before_gate_wait_for_test: None,
+        });
+        (namespace, delegates, runner)
+    }
+
     /// Register several protocols **atomically**: build every runner, then under a single write
     /// lock verify that none of their namespaces is taken (by an existing registration or by a
     /// duplicate within the batch) and insert them all — or change nothing and return `Err`. The
@@ -562,24 +693,7 @@ impl Extensions {
         // Build (namespace, runner) outside the lock.
         let prepared: Vec<(String, Delegation, Arc<DynHandler>)> = items
             .into_iter()
-            .map(|(protocol, interpret)| {
-                let namespace = protocol.namespace().to_string();
-                let delegates = Delegation::of(&protocol);
-                let state = Mutex::new(protocol.init());
-                let runner: Arc<DynHandler> = Arc::new(Runner {
-                    protocol,
-                    interpret,
-                    state,
-                    transition_gate: AsyncMutex::new(()),
-                    #[cfg(all(test, rings_native))]
-                    after_decode_for_test: None,
-                    #[cfg(all(test, rings_native))]
-                    after_commit_for_test: None,
-                    #[cfg(all(test, rings_native))]
-                    before_gate_wait_for_test: None,
-                });
-                (namespace, delegates, runner)
-            })
+            .map(|(protocol, interpret)| Self::prepare_runner(protocol, interpret))
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
@@ -615,21 +729,7 @@ impl Extensions {
         P::Effect: MaybeSendSync,
         I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
     {
-        let namespace = protocol.namespace().to_string();
-        let delegates = Delegation::of(&protocol);
-        let state = Mutex::new(protocol.init());
-        let runner: Arc<DynHandler> = Arc::new(Runner {
-            protocol,
-            interpret,
-            state,
-            transition_gate: AsyncMutex::new(()),
-            #[cfg(all(test, rings_native))]
-            after_decode_for_test: None,
-            #[cfg(all(test, rings_native))]
-            after_commit_for_test: None,
-            #[cfg(all(test, rings_native))]
-            before_gate_wait_for_test: None,
-        });
+        let (namespace, delegates, runner) = Self::prepare_runner(protocol, interpret);
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
             return Err(Error::ExtensionError(format!(

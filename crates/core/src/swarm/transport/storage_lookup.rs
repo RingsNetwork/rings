@@ -10,7 +10,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
-use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
 /// Maximum number of read-repair miss observation buckets retained per transport.
@@ -58,10 +57,6 @@ impl StorageAnswerClock {
     fn tick(&self) -> u64 {
         self.0.fetch_add(1, Ordering::AcqRel).saturating_add(1)
     }
-}
-
-fn storage_lookup_observation_now_ms() -> i64 {
-    get_epoch_ms_i64()
 }
 
 fn oldest_storage_lookup_observation_key(
@@ -127,7 +122,7 @@ impl SwarmTransport {
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let now = storage_lookup_observation_now_ms();
+        let now = self.now_ms_i64();
         evict_storage_lookup_observations(
             &mut observations,
             now,
@@ -188,7 +183,7 @@ impl SwarmTransport {
             .map_err(|_| Error::LockPoisoned)?;
         evict_storage_lookup_observations(
             &mut observations,
-            storage_lookup_observation_now_ms(),
+            self.now_ms_i64(),
             STORAGE_LOOKUP_OBSERVATION_CAPACITY,
         );
         Ok(observations
@@ -209,7 +204,7 @@ impl SwarmTransport {
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let now = storage_lookup_observation_now_ms();
+        let now = self.now_ms_i64();
         evict_storage_lookup_observations(
             &mut observations,
             now,
@@ -245,7 +240,7 @@ impl SwarmTransport {
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let now = storage_lookup_observation_now_ms();
+        let now = self.now_ms_i64();
         evict_storage_lookup_observations(
             &mut observations,
             now,
@@ -284,7 +279,7 @@ impl SwarmTransport {
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let now = storage_lookup_observation_now_ms();
+        let now = self.now_ms_i64();
         evict_storage_lookup_observations(
             &mut observations,
             now,
@@ -313,7 +308,8 @@ impl SwarmTransport {
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
         if let Some(observation) = observations.get_mut(&key) {
-            observation.observed_at_ms = storage_lookup_observation_now_ms()
+            observation.observed_at_ms = self
+                .now_ms_i64()
                 .saturating_sub(STORAGE_LOOKUP_OBSERVATION_TTL_MS + 1);
         }
         Ok(())

@@ -946,6 +946,172 @@ async fn test_candidate_dial_backoff_records_failure_and_clears_on_reset() -> Re
     Ok(())
 }
 
+/// Candidate dial backoff (#1195, #1222) is recorded only for outbound (`Handshake::Offering`)
+/// attempts that still own their pending slot: inbound `Handshake::Answering` failures/timeouts,
+/// yielded offers, and local capacity refusals must not penalize the peer.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_candidate_dial_backoff_ignores_inbound_yielded_and_capacity_refusals() -> Result<()> {
+    let transport = default_transport()?;
+    let inbound_peer: Did = SecretKey::random().address().into();
+
+    // 1. Inbound Answering failure via abandon_pending_connection does not record dial backoff.
+    let answering = transport
+        .reserve_pending_connection_for(
+            inbound_peer,
+            crate::swarm::transport::pending::Handshake::Answering,
+        )
+        .await?;
+    transport
+        .abandon_pending_connection(answering, "sending connection answer")
+        .await;
+    assert!(
+        !transport.is_candidate_dial_backed_off(inbound_peer),
+        "inbound answering failure must not record candidate dial backoff"
+    );
+
+    // 2. Inbound Answering timeout via expire_pending_connections does not record dial backoff.
+    {
+        let mut lifecycles = transport.peer_lifecycles()?;
+        let expired_time = crate::utils::get_epoch_ms_i64()
+            - crate::swarm::transport::pending::PENDING_CONNECTION_TIMEOUT_MS
+            - 1;
+        lifecycles.reserve_for(
+            inbound_peer,
+            expired_time,
+            crate::swarm::transport::pending::Handshake::Answering,
+        )?;
+    }
+    transport.expire_pending_connections().await?;
+    assert!(
+        !transport.is_candidate_dial_backed_off(inbound_peer),
+        "inbound answering expiry must not record candidate dial backoff"
+    );
+
+    // 3. An outbound attempt that already yielded to a crossing offer does not record dial
+    // backoff when its superseded task later calls abandon_pending_connection.
+    let glare_peer: Did = SecretKey::random().address().into();
+    let offering = transport
+        .reserve_pending_connection_for(
+            glare_peer,
+            crate::swarm::transport::pending::Handshake::offering(
+                crate::swarm::transport::pending::OfferOwner::Overlay,
+            ),
+        )
+        .await?;
+    let yielded_to = transport
+        .yield_pending_in(
+            offering,
+            crate::swarm::transport::pending::Handshake::offering(
+                crate::swarm::transport::pending::OfferOwner::Overlay,
+            ),
+        )
+        .await?;
+    assert!(yielded_to.is_some());
+    transport
+        .abandon_pending_connection(offering, "superseded offer step")
+        .await;
+    assert!(
+        !transport.is_candidate_dial_backed_off(glare_peer),
+        "superseded outbound attempt must not penalize peer that won glare"
+    );
+    if let Some(answering) = yielded_to {
+        transport.cancel_unadmitted_connection(answering).await?;
+    }
+
+    // 4. Local pending capacity exhaustion does not record candidate dial backoff.
+    let cap_transport = default_transport()?;
+    {
+        let mut lifecycles = cap_transport.peer_lifecycles()?;
+        lifecycles
+            .set_bounds_for_test(crate::swarm::transport::pending::LifecycleBounds::new(1, 2));
+    }
+    let holder: Did = SecretKey::random().address().into();
+    let _held = cap_transport.reserve_pending_connection(holder).await?;
+    let blocked_peer: Did = SecretKey::random().address().into();
+    let blocked_cb = SwarmTransportCallback::new(Arc::clone(&cap_transport));
+    let res = cap_transport.connect(blocked_peer, blocked_cb).await;
+    assert!(matches!(
+        res,
+        Err(Error::PendingConnectionCapacityExceeded { capacity: 1 })
+    ));
+    assert!(
+        !cap_transport.is_candidate_dial_backed_off(blocked_peer),
+        "local pending capacity refusal must not record candidate dial backoff"
+    );
+    Ok(())
+}
+
+/// `SwarmTransport::set_delegatee_key` enforces delegator DID match, delegator signature
+/// validity, and strictly monotone signing horizon (#1223).
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_set_delegatee_key_enforces_signature_and_monotone_horizon() -> Result<()> {
+    let key = SecretKey::random();
+    let t0: u128 = 1_800_000_000_000;
+    let ttl_ms: u64 = 600_000;
+    let initial = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0)?;
+    let swarm = crate::swarm::SwarmBuilder::new(
+        crate::tests::TEST_NETWORK_ID,
+        crate::tests::default::TEST_ICE_SERVERS,
+        Box::new(crate::storage::MemStorage::new()),
+        initial.clone(),
+    )
+    .build();
+
+    // Same horizon is refused.
+    let same_horizon = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0)?;
+    assert!(matches!(
+        swarm.set_delegatee_key(same_horizon),
+        Err(Error::DelegationExpiresWithinMargin)
+    ));
+    assert_eq!(
+        swarm.transport.delegatee_key().delegatee_public_key(),
+        initial.delegatee_public_key()
+    );
+
+    // Earlier horizon is refused.
+    let earlier_horizon =
+        crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0 - 1_000)?;
+    assert!(matches!(
+        swarm.set_delegatee_key(earlier_horizon),
+        Err(Error::DelegationExpiresWithinMargin)
+    ));
+
+    // Later horizon with tampered delegator signature is refused at deserialization (#1199),
+    // and a valid delegation from a different delegator is refused by set_delegatee_key (#1223).
+    let valid_next = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0 + 1_000)?;
+    let mut dumped: serde_json::Value =
+        serde_json::to_value(&valid_next).map_err(|e| Error::InvalidMessage(e.to_string()))?;
+    dumped["delegation"]["delegator_signature"] = serde_json::json!(vec![0u8; 65]);
+    assert!(
+        serde_json::from_value::<crate::delegation::DelegateeKey>(dumped).is_err(),
+        "DelegateeKey deserialization must reject a tampered delegator signature"
+    );
+    let wrong_delegator = crate::delegation::DelegateeKey::new_with_seckey_at(
+        &SecretKey::random(),
+        ttl_ms,
+        t0 + 1_000,
+    )?;
+    assert!(matches!(
+        swarm.set_delegatee_key(wrong_delegator),
+        Err(Error::VerifySignatureFailed)
+    ));
+    assert_eq!(
+        swarm.transport.delegatee_key().delegatee_public_key(),
+        initial.delegatee_public_key()
+    );
+
+    // Valid key with strictly later horizon succeeds.
+    let next_pubkey = valid_next.delegatee_public_key();
+    swarm.set_delegatee_key(valid_next)?;
+    assert_eq!(
+        swarm.transport.delegatee_key().delegatee_public_key(),
+        next_pubkey
+    );
+    Ok(())
+}
+
 /// The detached boundary under worker loss: a `Cancelled` published after the claim.
 #[cfg(feature = "dummy")]
 mod detached;

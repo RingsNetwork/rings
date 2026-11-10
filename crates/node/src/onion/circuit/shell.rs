@@ -50,7 +50,9 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::message::SlotRoster;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
 
 use super::admission::OnionAdmissionLink;
@@ -59,6 +61,7 @@ use super::admission::OnionReplayFilterKey;
 use super::codec::OnionLinkFact;
 use super::hop::hop;
 use super::hop::OnionHopOutcome;
+use super::invoke::OnionInvokeRegistry;
 use super::OnionCircuitInput;
 use super::OnionClientTags;
 use super::OnionLink;
@@ -68,6 +71,7 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
+use crate::onion::signature::OnionShape;
 use crate::onion::sphinx::carry::OnionCarryValue;
 use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionSurb;
@@ -109,34 +113,33 @@ pub(crate) trait OnionInterpretation: MaybeSendSync {
     fn lose(&self, peer: Did);
 }
 
-/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_n ⇀ Kl(M)`, `Σ_n ⊆ Σ_W`.
+/// The partial Σ-algebra of one node: `⟦−⟧ : Reg_n ⇀ Kl(M)` (#834 D2).
 ///
-/// A node registers symbols, never applications (#834 D2): each entry maps one world-facing
-/// symbol it serves to its interpretation, so the registered keys are exactly `Σ_n`. `relay` is
-/// not a service name and is interpreted by the hop step itself.
-///
-/// ```text
-/// Consumed(f, …) ──table(f)──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, input)
-///                          └──▶ None     ──▶ dropped (f ∉ Σ_n)
-/// ```
-///
-/// Law: registering a symbol again replaces its interpretation.
+/// Maps each registered world-facing symbol `f ∈ Σ_W` to its session interpretation, and
+/// delegates intermediate `(shape, backend)` pairs in `Σ_I × Ω` to [`OnionInvokeRegistry`].
 #[derive(Default)]
 pub(crate) struct OnionAlgebra {
     interpretations:
         BTreeMap<OnionServiceName, Box<rings_runtime::maybe_send_sync!(dyn OnionInterpretation)>>,
+    invokes: OnionInvokeRegistry,
 }
 
 impl OnionAlgebra {
-    /// `⟦−⟧.lose(peer)`: every interpretation fails closed its sessions that ride the link to
-    /// `peer`.
+    /// Attach the shared intermediate `invoke` registry to this algebra.
+    pub(crate) fn with_invokes(mut self, invokes: OnionInvokeRegistry) -> Self {
+        self.invokes = invokes;
+        self
+    }
+
+    /// `⟦−⟧.lose(peer)`: every world-facing interpretation fails closed its sessions that ride
+    /// the link to `peer` (intermediate `invoke` symbols are stateless one-shot evaluations).
     fn lose(&self, peer: Did) {
         self.interpretations
             .values()
             .for_each(|interpretation| interpretation.lose(peer));
     }
 
-    /// Register `interpretation` as `⟦symbol⟧`.
+    /// Register `interpretation` as `⟦symbol⟧` for a world-facing symbol.
     pub(crate) fn register(
         mut self,
         symbol: OnionServiceName,
@@ -147,7 +150,7 @@ impl OnionAlgebra {
         self
     }
 
-    /// Return `Σ_n`, the symbols this algebra interprets, in name order.
+    /// Return `Σ_W,n`, the world-facing symbols this algebra interprets, in name order.
     #[cfg(all(test, rings_native))]
     pub(crate) fn symbols(&self) -> impl Iterator<Item = &OnionServiceName> {
         self.interpretations.keys()
@@ -157,18 +160,21 @@ impl OnionAlgebra {
     async fn evaluate(
         &self,
         scope: &Scope,
-        symbol: &OnionServiceName,
+        symbol: &OnionShape,
         input: OnionApplicationInput,
     ) -> Result<()> {
-        match self.interpretations.get(symbol) {
-            Some(interpretation) => interpretation.evaluate(scope, input).await,
-            None => {
-                tracing::debug!(
-                    symbol = symbol.as_str(),
-                    "drop an onion application of an unregistered symbol"
-                );
-                Ok(())
-            }
+        match symbol {
+            OnionShape::WorldFacing(service) => match self.interpretations.get(service) {
+                Some(interpretation) => interpretation.evaluate(scope, input).await,
+                None => {
+                    tracing::debug!(
+                        symbol = service.as_str(),
+                        "drop an onion application of an unregistered symbol"
+                    );
+                    Ok(())
+                }
+            },
+            OnionShape::Invoke(shape) => self.invokes.evaluate(scope, *shape, input),
         }
     }
 }
@@ -189,6 +195,10 @@ pub(crate) struct OnionCircuitShell {
     algebra: OnionAlgebra,
     /// The generation of the next admission the table opens (`OnionAdmissionLink`).
     generations: AtomicU64,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
+    /// Injected cryptographic RNG capability.
+    rng: SharedRng,
     /// The waiters of [`OnionLinkWitness::live`], woken after every link fact.
     #[cfg(all(test, rings_native))]
     link_waiters: OnionLinkWaiters,
@@ -235,6 +245,7 @@ impl OnionCircuitShell {
     /// A shell over the node's epoch, with a link table of `2·𝓡` for the connection
     /// registry capacity `registry_capacity`, sharing `slot_roster` with the node's `PeerRing`
     /// and `tags` and `link_sender` with the node's sessions.
+    #[allow(dead_code)]
     pub(crate) fn new(
         relays: bool,
         epoch: OnionProcessEpochCell,
@@ -244,12 +255,35 @@ impl OnionCircuitShell {
         link_sender: OnionLinkSender,
         algebra: OnionAlgebra,
     ) -> Self {
-        let admission = OnionAdmissionState::new(
-            epoch.get(),
-            OnionReplayFilterKey::new(rand::random()),
+        Self::new_with_capabilities(
+            relays,
+            epoch,
             registry_capacity,
+            slot_roster,
+            tags,
+            link_sender,
+            algebra,
+            Arc::new(SystemClock),
+            SharedRng::system(),
         )
-        .with_slot_roster(slot_roster);
+    }
+
+    /// [`Self::new`] with explicit `clock` and `rng` capabilities for deterministic replay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_capabilities(
+        relays: bool,
+        epoch: OnionProcessEpochCell,
+        registry_capacity: NonZeroUsize,
+        slot_roster: Arc<SlotRoster>,
+        tags: OnionClientTags,
+        link_sender: OnionLinkSender,
+        algebra: OnionAlgebra,
+        clock: SharedClock,
+        rng: SharedRng,
+    ) -> Self {
+        let filter_key = OnionReplayFilterKey::from_rng(&mut rng.lock_rng());
+        let admission = OnionAdmissionState::new(epoch.get(), filter_key, registry_capacity)
+            .with_slot_roster(slot_roster);
         Self {
             relays,
             admission: Arc::new(Mutex::new(admission)),
@@ -258,6 +292,8 @@ impl OnionCircuitShell {
             link_sender,
             algebra,
             generations: AtomicU64::new(0),
+            clock,
+            rng,
             #[cfg(all(test, rings_native))]
             link_waiters: OnionLinkWaiters::default(),
         }
@@ -272,6 +308,14 @@ impl OnionCircuitShell {
         }
     }
 
+    /// The symbols registered in this shell's exit algebra, for tests of [`OnionRuntime::install`].
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn registered_services(
+        &self,
+    ) -> std::collections::BTreeSet<crate::onion::OnionServiceName> {
+        self.algebra.symbols().cloned().collect()
+    }
+
     /// `Cell(from, cell)` of the module diagram.
     async fn hop(
         &self,
@@ -279,14 +323,14 @@ impl OnionCircuitShell {
         from: Did,
         cell: crate::onion::sphinx::cell::OnionCell,
     ) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         self.renew_if_rolled_back(now_ms)?;
-        let key = scope.lifecycle().delegatee_key();
+        let keys = scope.lifecycle().decryption_keys_at(now_ms);
         let outcome = {
             let mut admission = lock(&self.admission)?;
             hop(
                 &mut admission,
-                &key,
+                &keys,
                 self.relays,
                 |tag| self.tags.expects(from, tag),
                 from,
@@ -343,7 +387,7 @@ impl OnionCircuitShell {
     /// link emitter, whose lanes follow the links the table holds live, then to the sessions
     /// that ride the link (`Law (Circuit fate)`).
     async fn link(&self, scope: &EffectScope, fact: OnionLinkFact) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let lifecycle = scope.lifecycle();
         let (refused, lanes) = match fact {
             OnionLinkFact::Opened(peer) => self.open_link(now_ms, peer)?,
@@ -437,8 +481,10 @@ impl OnionCircuitShell {
             return Ok(());
         }
         loop {
-            let epoch = OnionProcessEpoch::random();
-            let key = OnionReplayFilterKey::new(rand::random());
+            let mut rng = self.rng.lock_rng();
+            let epoch = OnionProcessEpoch::from_rng(&mut rng);
+            let key = OnionReplayFilterKey::from_rng(&mut rng);
+            drop(rng);
             if admission.renew(epoch, key).is_ok() {
                 self.epoch.renew(epoch);
                 tracing::warn!("onion admission renewed its epoch after a clock rollback");
