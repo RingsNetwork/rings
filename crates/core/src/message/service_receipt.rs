@@ -351,10 +351,16 @@ pub struct ProbeRequest {
 }
 
 impl ProbeRequest {
-    pub(crate) fn random_for_epoch(epoch: ProvisionalEpoch) -> Self {
+    /// Draw a fresh challenge nonce for `epoch` from `rng`.
+    pub(crate) fn from_rng(epoch: ProvisionalEpoch, rng: &mut impl rand::RngCore) -> Self {
         let mut nonce = [0_u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+        rng.fill_bytes(&mut nonce);
         Self { epoch, nonce }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn random_for_epoch(epoch: ProvisionalEpoch) -> Self {
+        Self::from_rng(epoch, &mut crate::utils::SystemEntropy)
     }
 }
 
@@ -408,7 +414,8 @@ impl ProbeOffer {
         )
     }
 
-    fn verify_transcript_at(
+    /// [`Self::verify_transcript`] evaluated at an explicit `observed_at_ms` timestamp.
+    pub fn verify_transcript_at(
         &self,
         outer: &MessagePayload,
         receiver_network_id: u32,

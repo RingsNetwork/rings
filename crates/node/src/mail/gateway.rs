@@ -32,13 +32,13 @@ use async_trait::async_trait;
 use futures::future::select;
 use futures::future::Either;
 use futures::pin_mut;
-use rand::rngs::OsRng;
 use rings_core::consts::MAX_TTL_MS;
 use rings_core::dht::entry::Entry;
 use rings_core::lifecycle::StopSource;
 use rings_core::swarm::storage_api::StoreQuorum;
 use rings_core::swarm::storage_api::StoreUnconfirmed;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
 use rings_runtime::sleep;
 use rings_runtime::MaybeSendSync;
 use thiserror::Error;
@@ -131,12 +131,34 @@ pub trait MailDrop: MaybeSendSync {
 /// The gateway over a node's DHT, signing manifests with the node's authority.
 pub struct MailGateway {
     processor: Arc<Processor>,
+    clock: SharedClock,
+    rng: SharedRng,
 }
 
 impl MailGateway {
-    /// The gateway writing through `processor`.
+    /// The gateway writing through `processor`, inheriting its clock and RNG capabilities.
     pub fn new(processor: Arc<Processor>) -> Self {
-        Self { processor }
+        let clock = processor.clock().clone();
+        let rng = processor.rng().clone();
+        Self {
+            processor,
+            clock,
+            rng,
+        }
+    }
+
+    /// Construct a gateway over `processor` with explicit `clock` and `rng` capabilities for
+    /// deterministic seal and descriptor-liveness replay.
+    pub fn new_with_capabilities(
+        processor: Arc<Processor>,
+        clock: SharedClock,
+        rng: SharedRng,
+    ) -> Self {
+        Self {
+            processor,
+            clock,
+            rng,
+        }
     }
 }
 
@@ -151,7 +173,7 @@ impl MailDrop for MailGateway {
             .fetch_storage_entry(key)
             .await
             .map_err(|source| MailGatewayError::Fetch { did, source })?;
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let network_id = self.processor.swarm.network_id();
         Ok(entry.and_then(|entry| {
             MailDescriptor::live_recipient(heard_descriptors(&entry), did, now_ms, network_id)
@@ -163,7 +185,7 @@ impl MailDrop for MailGateway {
         recipient: &MailRecipient,
         message: &[u8],
     ) -> Result<MailDigest, MailGatewayError> {
-        let SealedMail { mail_id, elements } = seal(message, recipient, &mut OsRng)?;
+        let SealedMail { mail_id, elements } = seal(message, recipient, &mut self.rng.lock_rng())?;
         let did = recipient.did;
         let deadline = StopSource::new();
         let stop = deadline.token();

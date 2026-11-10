@@ -59,7 +59,6 @@ use crate::message::MessagePayload;
 use crate::message::ProbeRequest;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms_i64;
 
 /// Interval between two probes of one peer, counted from the earlier probe's issue.
 pub(crate) const PEER_LIVENESS_PERIOD_MS: i64 = 15_000;
@@ -436,7 +435,7 @@ impl SwarmTransport {
         observation: PeerLivenessObservation,
         before_update: impl FnOnce(),
     ) -> Result<()> {
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.now_ms_i64();
         self.with_active_slot(attempt, || {
             before_update();
             let mut liveness = self.peer_liveness()?;
@@ -589,12 +588,21 @@ impl SwarmTransport {
     /// answer toward clearing a suspicion of `provider` for relay custody, on time iff it came
     /// within the chain timeout (#1070, `Law (Clearing)`). Returns whether that probe was the
     /// outstanding one.
+    #[allow(dead_code)]
     pub(crate) fn answer_liveness_probe(
         &self,
         provider: Did,
         request: ProbeRequest,
     ) -> Result<bool> {
-        let now_ms = get_epoch_ms_i64();
+        self.answer_liveness_probe_at(provider, request, self.now_ms_i64())
+    }
+
+    pub(crate) fn answer_liveness_probe_at(
+        &self,
+        provider: Did,
+        request: ProbeRequest,
+        now_ms: i64,
+    ) -> Result<bool> {
         let answered = self.with_connection_lifecycle(|| {
             let Some(attempt) = self.active_attempt(provider)? else {
                 return Ok(None);
@@ -706,7 +714,7 @@ impl SwarmTransport {
     /// Whether a probe of `peer` is due now.
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn peer_liveness_probe_due_for_test(&self, peer: Did) -> Result<bool> {
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.now_ms_i64();
         self.edit_peer_liveness_for_test(peer, |liveness| {
             liveness.clock.due(now_ms, PEER_LIVENESS_PERIOD_MS)
         })
@@ -753,7 +761,7 @@ impl SwarmTransport {
         peer: Did,
         ago_ms: i64,
     ) -> Result<()> {
-        let issued_ms = get_epoch_ms_i64() - ago_ms;
+        let issued_ms = self.now_ms_i64() - ago_ms;
         self.edit_peer_liveness_for_test(peer, |liveness| {
             liveness.clock = ProbeClock::admitted_at(issued_ms);
         })

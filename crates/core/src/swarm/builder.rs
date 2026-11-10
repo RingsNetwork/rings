@@ -28,6 +28,9 @@ use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
 use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::swarm::Swarm;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
+use crate::utils::SystemClock;
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
@@ -51,6 +54,10 @@ pub struct SwarmBuilder {
     measure: Option<MeasureImpl>,
     /// Optional bounded sink for privacy-safe operational observations.
     observer: Option<SharedSwarmObserver>,
+    /// Injectable epoch clock capability.
+    clock: SharedClock,
+    /// Injectable cryptographic RNG capability.
+    rng: SharedRng,
 }
 
 impl SwarmBuilder {
@@ -81,6 +88,8 @@ impl SwarmBuilder {
             session_ttl: None,
             measure: None,
             observer: None,
+            clock: Arc::new(SystemClock),
+            rng: SharedRng::system(),
         }
     }
 
@@ -200,6 +209,18 @@ impl SwarmBuilder {
         self
     }
 
+    /// Inject a custom [`SharedClock`] capability for deterministic protocol time.
+    pub fn clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Inject a custom [`SharedRng`] capability for deterministic protocol randomness.
+    pub fn rng(mut self, rng: SharedRng) -> Self {
+        self.rng = rng;
+        self
+    }
+
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.delegatee_key.delegator_did();
@@ -212,7 +233,9 @@ impl SwarmBuilder {
             self.dht_storage,
             self.dht_finger_table_size,
             storage_virtual_node_config,
-        );
+        )
+        .with_clock(self.clock.clone())
+        .with_rng(self.rng.clone());
         let ring = match self.removal_storage {
             Some(storage) => ring.with_removal_storage(storage),
             None => ring,
@@ -245,6 +268,8 @@ impl SwarmBuilder {
                 self.reassembly_limits,
             ),
             observer,
+            clock: self.clock,
+            rng: self.rng,
         }));
 
         Swarm { dht, transport }

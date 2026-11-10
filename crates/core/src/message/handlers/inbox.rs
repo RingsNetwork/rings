@@ -24,9 +24,8 @@ use crate::message::MessagePayload;
 use crate::message::RelayHoldDigest;
 use crate::swarm::transport::Attempts;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
-/// Hold `payload` in the relay inbox of its destination under this node's signature.
+/// Hold `payload` in the relay inbox of its destination under this node's signature at `now_ms`.
 ///
 /// Pre: this node is responsible for the destination's ring position and the destination has
 /// no connection; `payload` was verified live on arrival.
@@ -39,8 +38,8 @@ use crate::utils::get_epoch_ms;
 pub(crate) async fn hold_for_offline_destination(
     transport: Arc<SwarmTransport>,
     payload: &MessagePayload,
+    now_ms: u128,
 ) -> Result<()> {
-    let now_ms = get_epoch_ms();
     let signer = transport.message_signer();
     let held = HeldMessage::hold(payload.clone(), signer.by_ref(), now_ms)?;
     let hold = transport

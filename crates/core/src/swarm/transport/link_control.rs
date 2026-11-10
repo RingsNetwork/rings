@@ -60,7 +60,6 @@ use crate::error::Result;
 use crate::lifecycle::StopToken;
 use crate::message::LinkControl;
 use crate::swarm::detached::spawn_detached;
-use crate::utils::get_epoch_ms;
 use crate::utils::sleep;
 
 /// The send context every link-control frame is logged and judged under.
@@ -185,7 +184,7 @@ impl SwarmTransport {
             attempt.peer(),
             attempt.generation(),
             control,
-            get_epoch_ms(),
+            self.now_ms(),
         );
     }
 }

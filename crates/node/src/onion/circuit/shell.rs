@@ -50,7 +50,9 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::message::SlotRoster;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
 
 use super::admission::OnionAdmissionLink;
@@ -193,6 +195,10 @@ pub(crate) struct OnionCircuitShell {
     algebra: OnionAlgebra,
     /// The generation of the next admission the table opens (`OnionAdmissionLink`).
     generations: AtomicU64,
+    /// Injected epoch clock capability.
+    clock: SharedClock,
+    /// Injected cryptographic RNG capability.
+    rng: SharedRng,
     /// The waiters of [`OnionLinkWitness::live`], woken after every link fact.
     #[cfg(all(test, rings_native))]
     link_waiters: OnionLinkWaiters,
@@ -239,6 +245,7 @@ impl OnionCircuitShell {
     /// A shell over the node's epoch, with a link table of `2·𝓡` for the connection
     /// registry capacity `registry_capacity`, sharing `slot_roster` with the node's `PeerRing`
     /// and `tags` and `link_sender` with the node's sessions.
+    #[allow(dead_code)]
     pub(crate) fn new(
         relays: bool,
         epoch: OnionProcessEpochCell,
@@ -248,12 +255,35 @@ impl OnionCircuitShell {
         link_sender: OnionLinkSender,
         algebra: OnionAlgebra,
     ) -> Self {
-        let admission = OnionAdmissionState::new(
-            epoch.get(),
-            OnionReplayFilterKey::new(rand::random()),
+        Self::new_with_capabilities(
+            relays,
+            epoch,
             registry_capacity,
+            slot_roster,
+            tags,
+            link_sender,
+            algebra,
+            Arc::new(SystemClock),
+            SharedRng::system(),
         )
-        .with_slot_roster(slot_roster);
+    }
+
+    /// [`Self::new`] with explicit `clock` and `rng` capabilities for deterministic replay.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_capabilities(
+        relays: bool,
+        epoch: OnionProcessEpochCell,
+        registry_capacity: NonZeroUsize,
+        slot_roster: Arc<SlotRoster>,
+        tags: OnionClientTags,
+        link_sender: OnionLinkSender,
+        algebra: OnionAlgebra,
+        clock: SharedClock,
+        rng: SharedRng,
+    ) -> Self {
+        let filter_key = OnionReplayFilterKey::from_rng(&mut rng.lock_rng());
+        let admission = OnionAdmissionState::new(epoch.get(), filter_key, registry_capacity)
+            .with_slot_roster(slot_roster);
         Self {
             relays,
             admission: Arc::new(Mutex::new(admission)),
@@ -262,6 +292,8 @@ impl OnionCircuitShell {
             link_sender,
             algebra,
             generations: AtomicU64::new(0),
+            clock,
+            rng,
             #[cfg(all(test, rings_native))]
             link_waiters: OnionLinkWaiters::default(),
         }
@@ -291,7 +323,7 @@ impl OnionCircuitShell {
         from: Did,
         cell: crate::onion::sphinx::cell::OnionCell,
     ) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         self.renew_if_rolled_back(now_ms)?;
         let keys = scope.lifecycle().decryption_keys_at(now_ms);
         let outcome = {
@@ -355,7 +387,7 @@ impl OnionCircuitShell {
     /// link emitter, whose lanes follow the links the table holds live, then to the sessions
     /// that ride the link (`Law (Circuit fate)`).
     async fn link(&self, scope: &EffectScope, fact: OnionLinkFact) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.clock.now_ms();
         let lifecycle = scope.lifecycle();
         let (refused, lanes) = match fact {
             OnionLinkFact::Opened(peer) => self.open_link(now_ms, peer)?,
@@ -449,8 +481,10 @@ impl OnionCircuitShell {
             return Ok(());
         }
         loop {
-            let epoch = OnionProcessEpoch::random();
-            let key = OnionReplayFilterKey::new(rand::random());
+            let mut rng = self.rng.lock_rng();
+            let epoch = OnionProcessEpoch::from_rng(&mut rng);
+            let key = OnionReplayFilterKey::from_rng(&mut rng);
+            drop(rng);
             if admission.renew(epoch, key).is_ok() {
                 self.epoch.renew(epoch);
                 tracing::warn!("onion admission renewed its epoch after a clock rollback");

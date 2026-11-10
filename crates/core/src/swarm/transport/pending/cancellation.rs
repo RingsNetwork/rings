@@ -7,7 +7,6 @@ use super::SwarmConnection;
 use super::SwarmTransport;
 use super::PENDING_CONNECTION_TIMEOUT_MS;
 use crate::error::Result;
-use crate::utils::get_epoch_ms_i64;
 
 /// Which unadmitted phases a cancellation may release, in the registry's vocabulary.
 enum CancellationScope {
@@ -97,7 +96,7 @@ impl SwarmTransport {
             let answering = self.peer_lifecycles()?.replace_pending_in(
                 attempt,
                 &observed,
-                get_epoch_ms_i64(),
+                self.now_ms_i64(),
             )?;
             let Some(answering) = answering else {
                 return Ok(None);
@@ -211,7 +210,7 @@ impl SwarmTransport {
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
         let expired = {
             let _lifecycle = self.connection_lifecycle()?;
-            let expired = self.peer_lifecycles()?.expire(get_epoch_ms_i64());
+            let expired = self.peer_lifecycles()?.expire(self.now_ms_i64());
             expired
                 .into_iter()
                 .map(|expired| {

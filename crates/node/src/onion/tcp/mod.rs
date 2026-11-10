@@ -25,7 +25,6 @@ use bytes::BytesMut;
 use futures::future::select;
 use futures::future::Either;
 use futures::pin_mut;
-use rings_core::utils::get_epoch_ms;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedReadHalf;
@@ -198,7 +197,7 @@ impl OnionWorldReader for OnionTcpReader {
         let buffer = self.buffer.split();
         let bytes = u64::try_from(read).map_err(|_| Error::InvalidData)?;
         self.accounting
-            .record_bytes(&self.policy, bytes, get_epoch_ms())?;
+            .record_bytes(&self.policy, bytes, self.accounting.now_ms())?;
         Ok(Some(buffer.freeze()))
     }
 }

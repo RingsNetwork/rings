@@ -27,12 +27,13 @@ pub(crate) fn custom_message_effects<'payload>(
     local: Did,
     ctx: &'payload MessagePayload,
     destination: Reachability,
+    now_ms: u128,
 ) -> Option<CoreEffect<'payload>> {
     if !ctx.should_forward_from(local) {
         None
     } else {
         Some(match destination {
-            Reachability::Offline => CoreEffect::hold_for_offline_destination(ctx),
+            Reachability::Offline => CoreEffect::hold_for_offline_destination_at(ctx, now_ms),
             Reachability::Reachable => CoreEffect::forward_payload(ctx, None),
         })
     }
@@ -44,8 +45,13 @@ impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, _: &CustomMessage) -> Result<()> {
         let ctx = context.payload();
         let destination = self.destination_reachability(ctx.transaction.destination)?;
-        self.run_effects(custom_message_effects(self.dht.did, ctx, destination))
-            .await
+        self.run_effects(custom_message_effects(
+            self.dht.did,
+            ctx,
+            destination,
+            context.now_ms(),
+        ))
+        .await
     }
 }
 

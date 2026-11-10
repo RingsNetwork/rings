@@ -56,7 +56,8 @@ use crate::message::TransactionReplay;
 use crate::swarm::application::ApplicationPort;
 use crate::swarm::observer::MessageObservation;
 use crate::swarm::observer::SharedSwarmObserver;
-use crate::utils::get_epoch_ms_i64;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
 
 mod connection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -190,6 +191,10 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) settings: SwarmTransportSettings,
     /// Bounded synchronous sink for privacy-safe operational observations.
     pub(crate) observer: SharedSwarmObserver,
+    /// Injectable epoch clock capability.
+    pub(crate) clock: SharedClock,
+    /// Injectable cryptographic RNG capability.
+    pub(crate) rng: SharedRng,
 }
 
 pub struct SwarmTransport {
@@ -233,6 +238,10 @@ pub struct SwarmTransport {
     transaction_replay: Arc<TransactionReplay>,
     /// Synchronous bounded sink for semantic message and lookup activity.
     observer: SharedSwarmObserver,
+    /// Injectable epoch clock capability.
+    clock: SharedClock,
+    /// Injectable cryptographic RNG capability.
+    rng: SharedRng,
 }
 
 type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
@@ -336,6 +345,8 @@ impl SwarmTransport {
             transaction_replay,
             settings,
             observer,
+            clock,
+            rng,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
         Self {
@@ -370,14 +381,37 @@ impl SwarmTransport {
             #[cfg(test)]
             inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
-            outbound_schedulers: OutboundSchedulers::new(measure.clone()),
+            outbound_schedulers: OutboundSchedulers::new_with_clock(measure.clone(), clock.clone()),
             admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             candidate_dial_backoff: Mutex::new(BTreeMap::new()),
             measure,
             transaction_replay,
             observer,
+            clock,
+            rng,
         }
+    }
+
+    /// Return the epoch [`SharedClock`] capability bound to this transport.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds from this transport's [`SharedClock`].
+    pub fn now_ms(&self) -> u128 {
+        self.clock.now_ms()
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds as `i64` from this transport's
+    /// [`SharedClock`].
+    pub(crate) fn now_ms_i64(&self) -> i64 {
+        self.clock.now_ms_i64()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this transport.
+    pub fn rng(&self) -> &SharedRng {
+        &self.rng
     }
 
     /// Record that an unadmitted candidate dial attempt to `peer` failed or timed out before
@@ -386,7 +420,7 @@ impl SwarmTransport {
         if peer == self.dht.did {
             return;
         }
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.now_ms_i64();
         let Ok(mut map) = self.candidate_dial_backoff.lock() else {
             return;
         };
@@ -421,7 +455,7 @@ impl SwarmTransport {
 
     /// Return whether automatic topology-report dials to `peer` are currently in backoff.
     pub(crate) fn is_candidate_dial_backed_off(&self, peer: Did) -> bool {
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.now_ms_i64();
         let Ok(map) = self.candidate_dial_backoff.lock() else {
             return false;
         };
@@ -642,7 +676,7 @@ impl SwarmTransport {
     /// Invariant: for one connection epoch, at most one `Disconnected` counter is
     /// recorded. `record_peer_connected` starts a new epoch by clearing the marker.
     pub(crate) async fn record_peer_disconnected(&self, attempt: PendingConnectionAttempt) {
-        let now_ms = get_epoch_ms_i64();
+        let now_ms = self.now_ms_i64();
         let should_record = match self.with_active_slot(attempt, || {
             let previous = self
                 .measured_disconnects()?

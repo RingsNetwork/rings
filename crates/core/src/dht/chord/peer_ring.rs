@@ -90,8 +90,10 @@ use crate::lifecycle::epoch::Epoch;
 use crate::message::RelayHoldDigest;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
-use crate::utils::new_uuid;
 use crate::utils::Instant;
+use crate::utils::SharedClock;
+use crate::utils::SharedRng;
+use crate::utils::SystemClock;
 
 mod relay_custody;
 use relay_custody::KeptRelayHold;
@@ -177,6 +179,10 @@ pub struct PeerRing {
     /// Timestamps are elapsed milliseconds from this instant, so a wall-clock
     /// change can neither extend nor prematurely expire an in-flight lookup.
     clock_origin: Instant,
+    /// Injectable epoch clock capability used by storage and carrier retention decisions.
+    clock: SharedClock,
+    /// Injectable cryptographic RNG capability used for request tokens and finger jitter.
+    rng: SharedRng,
     /// Lazily initialized entropy used to phase automatic finger maintenance.
     ///
     /// Stable for the lifetime of this ring, including browser listener
@@ -281,6 +287,8 @@ impl PeerRing {
             pending_successor_sync: Mutex::new(topology::SuccessorSyncState::default()),
             pending_connect_lookup: Mutex::new(VecDeque::new()),
             clock_origin: Instant::now(),
+            clock: Arc::new(SystemClock),
+            rng: SharedRng::system(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
             next_storage_custody_incarnation: AtomicU64::new(1),
@@ -300,6 +308,33 @@ impl PeerRing {
             relay_chain_losses: Epoch::default(),
             did,
         }
+    }
+
+    /// Configure the epoch [`SharedClock`] capability read by this ring's storage decisions.
+    pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
+    }
+
+    /// Configure the [`SharedRng`] capability used by this ring's topology tokens and jitter.
+    pub fn with_rng(mut self, rng: SharedRng) -> Self {
+        self.rng = rng;
+        self
+    }
+
+    /// Return the epoch [`SharedClock`] capability bound to this ring.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds from this ring's [`SharedClock`].
+    pub fn epoch_ms(&self) -> u128 {
+        self.clock.now_ms()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this ring.
+    pub fn rng(&self) -> &SharedRng {
+        &self.rng
     }
 
     /// This ring with `storage` as the store of its relay-inbox namespace (see
@@ -746,7 +781,9 @@ impl PeerRing {
     /// Initialized at most once, so concurrent callers and browser listener
     /// restarts all observe the same phase.
     pub(crate) fn finger_jitter_entropy(&self) -> uuid::Uuid {
-        *self.finger_jitter_entropy.get_or_init(new_uuid)
+        *self
+            .finger_jitter_entropy
+            .get_or_init(|| self.rng.next_uuid())
     }
 
     /// The scheduler's view of finger convergence: the current phase and the
@@ -789,11 +826,10 @@ impl PeerRing {
     ///
     /// Returns an error when topology state cannot be read or committed.
     pub(crate) fn advance_finger_convergence(&self) -> Result<PeerRingAction> {
-        let next =
-            self.transition_topology_at(|now_ms| TopologyEvent::AdvanceFingerConvergence {
-                now_ms,
-                request_id: new_uuid(),
-            })?;
+        let request_id = self.rng.next_uuid();
+        let next = self.transition_topology_at(|now_ms| {
+            TopologyEvent::AdvanceFingerConvergence { now_ms, request_id }
+        })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -976,7 +1012,7 @@ impl PeerRing {
     /// The returned action carries the correlation token the head's report
     /// must echo.
     pub fn pre_stabilize(&self) -> Result<PeerRingAction> {
-        self.begin_stabilization(new_uuid())
+        self.begin_stabilization(self.rng.next_uuid())
     }
 }
 

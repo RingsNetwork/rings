@@ -15,6 +15,7 @@ use std::collections::BTreeSet;
 use rings_core::dht::Did;
 use rings_core::measure::PeerQuality;
 use rings_core::storage::KvStorageInterface;
+#[cfg(all(test, not(target_family = "wasm")))]
 use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
@@ -150,6 +151,7 @@ impl OnionEntryGuards {
         }
     }
 
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) async fn select_relay_guards(
         &self,
         network_id: u32,

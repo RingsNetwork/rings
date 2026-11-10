@@ -29,7 +29,6 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::fair_admission::Principal;
-use crate::utils::get_epoch_ms;
 use crate::utils::SlowLockGuard;
 
 /// A lookup placement settled here.
@@ -671,7 +670,7 @@ impl PeerRing {
         fallback_on_local_virtual_miss: bool,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let mut ret = vec![];
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
@@ -857,7 +856,7 @@ impl PeerRing {
         op: EntryOperation,
         member: Did,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let op = self.stamp_operation(op, now_ms, None).await?;
         let placement = op.did()?;
         if member == self.did {
@@ -902,7 +901,7 @@ impl PeerRing {
         redundancy: u16,
         report: bool,
     ) -> Result<PeerRingAction> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         let op = self.stamp_operation(op, now_ms, None).await?;
         let entry_key = op.did()?;
         let kind = op.entry().kind;
@@ -992,6 +991,34 @@ impl PeerRing {
             false => Ok(()),
         }
     }
+    /// Join a fetched entry into the cache at `now_ms`.
+    pub(crate) async fn local_cache_put_at(&self, entry: Entry, now_ms: u128) -> Result<()> {
+        if entry.kind.is_relay_inbox() {
+            return Err(Error::RelayInboxOperationNotAllowed);
+        }
+        let key = entry.did.to_string();
+        let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
+        let _transition = self.cache_transition.lock().await;
+        join_live_entry(
+            &CarrierStore::Whole(&self.cache),
+            &key,
+            admitted,
+            Principal::Local,
+            now_ms,
+        )
+        .await
+        .map(drop)
+    }
+
+    /// Read a cached entry at `now_ms`, as a lookup serves it.
+    pub(crate) async fn local_cache_get_at(
+        &self,
+        entry_key: Did,
+        now_ms: u128,
+    ) -> Result<Option<Entry>> {
+        let held = self.local_cache_held(entry_key, now_ms).await?;
+        Ok(held.filter(|entry| entry.bound_live_at(now_ms)))
+    }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -1009,22 +1036,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// The read-join-write is one cache transition, so two concurrent replies cannot lose one
     /// side.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
-        if entry.kind.is_relay_inbox() {
-            return Err(Error::RelayInboxOperationNotAllowed);
-        }
-        let now_ms = get_epoch_ms();
-        let key = entry.did.to_string();
-        let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
-        let _transition = self.cache_transition.lock().await;
-        join_live_entry(
-            &CarrierStore::Whole(&self.cache),
-            &key,
-            admitted,
-            Principal::Local,
-            now_ms,
-        )
-        .await
-        .map(drop)
+        self.local_cache_put_at(entry, self.epoch_ms()).await
     }
 
     /// Observe this node's own write `op` in the cache: `cache[k] ← (cache[k] or ⊥).operate(op)`,
@@ -1038,7 +1050,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// dots this writer observed and asked to remove. An operation the admission law refuses,
     /// which no owner applies, and a relay inbox, which no lookup reads, are not observed.
     async fn local_cache_observe_write(&self, op: EntryOperation) -> Result<()> {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.epoch_ms();
         if op.kind().is_relay_inbox()
             || op
                 .validate_data_write(now_ms, self.network_id(), self.did, Principal::Local)
@@ -1069,8 +1081,6 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// register, is served as absent, as a replica serves it: a cache entry that serves no
     /// element must not answer a fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        let now_ms = get_epoch_ms();
-        let held = self.local_cache_held(entry_key, now_ms).await?;
-        Ok(held.filter(|entry| entry.bound_live_at(now_ms)))
+        self.local_cache_get_at(entry_key, self.epoch_ms()).await
     }
 }

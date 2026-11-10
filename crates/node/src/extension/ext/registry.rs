@@ -190,6 +190,16 @@ impl Core {
         self.processor.onion_process_epoch()
     }
 
+    /// The injected [`SharedClock`](rings_core::utils::SharedClock) of this node.
+    pub(crate) fn clock(&self) -> &rings_core::utils::SharedClock {
+        self.processor.clock()
+    }
+
+    /// The injected [`SharedRng`](rings_core::utils::SharedRng) of this node.
+    pub(crate) fn rng(&self) -> &rings_core::utils::SharedRng {
+        self.processor.rng()
+    }
+
     /// Put a message on the overlay to `to` under `namespace`.
     pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
         let envelope = Envelope::new(namespace, payload);

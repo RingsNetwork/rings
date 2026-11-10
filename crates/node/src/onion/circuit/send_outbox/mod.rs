@@ -89,6 +89,7 @@ use futures::FutureExt;
 use rand::RngCore;
 use rings_core::dht::Did;
 use rings_core::swarm::LaneCreditView;
+use rings_core::utils::SharedRng;
 use rings_runtime::sleep;
 use web_time::Instant;
 
@@ -179,6 +180,8 @@ pub(crate) struct OnionLinkSender {
     floor: OnionIdleFloor,
     /// The origin of the emission clock.
     origin: Instant,
+    /// Injected RNG capability used to fill link cover cells.
+    rng: SharedRng,
 }
 
 impl Default for OnionLinkSender {
@@ -190,10 +193,16 @@ impl Default for OnionLinkSender {
 impl OnionLinkSender {
     /// A sender whose idle links emit at `floor`.
     pub(crate) fn new(floor: OnionIdleFloor) -> Self {
+        Self::new_with_rng(floor, SharedRng::system())
+    }
+
+    /// A sender whose idle links emit at `floor`, drawing cover bytes from `rng`.
+    pub(crate) fn new_with_rng(floor: OnionIdleFloor, rng: SharedRng) -> Self {
         Self {
             state: Arc::default(),
             floor,
             origin: Instant::now(),
+            rng,
         }
     }
 
@@ -521,7 +530,7 @@ async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
             }
             EmitterStep::Emit(Emission::Cover(class)) => {
                 let mut cover = vec![0; class.cell_bytes()];
-                rand::thread_rng().fill_bytes(&mut cover);
+                sender.rng.lock_rng().fill_bytes(&mut cover);
                 if let Err(error) = scope.send_direct(peer, Bytes::from(cover)).await {
                     tracing::debug!(%peer, ?error, "onion link cover send failed");
                 }

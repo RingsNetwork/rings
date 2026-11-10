@@ -46,6 +46,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::REORDER_DEADLINE;
 use crate::message::REORDER_WINDOW;
+use crate::utils::SystemEntropy;
 
 /// Plaintext bytes carried by one ElGamal body block.
 pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
@@ -501,21 +502,21 @@ pub fn encrypt_stream_frames_with_rng<R: RngCore>(
     })
 }
 
-/// Encrypt a byte slice lazily with the default thread-local RNG.
+/// Encrypt a byte slice lazily with the default system entropy source.
 pub fn encrypt_stream_frames(
     plaintext: &[u8],
     stream_id: E2eStreamId,
     sender_public_key: PublicKey<33>,
     recipient_public_key: PublicKey<33>,
     max_plaintext_frame_len: usize,
-) -> Result<E2eStreamFrames<'_, rand::rngs::ThreadRng>> {
+) -> Result<E2eStreamFrames<'_, SystemEntropy>> {
     encrypt_stream_frames_with_rng(
         plaintext,
         stream_id,
         sender_public_key,
         recipient_public_key,
         max_plaintext_frame_len,
-        rand::thread_rng(),
+        SystemEntropy,
     )
 }
 

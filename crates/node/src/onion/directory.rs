@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use rings_core::dht::Did;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::Clock;
+use rings_core::utils::SharedRng;
+use rings_core::utils::SystemClock;
 
 use super::invoke_descriptor::OnionInvokeDescriptor;
 use super::pipeline::OnionInvokePipeline;
@@ -20,7 +22,6 @@ use super::OnionRoute;
 use super::OnionRouteCandidates;
 use super::OnionRouteError;
 use super::OnionRouteRequest;
-use super::SystemRouteEntropy;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyProtocol;
@@ -57,6 +58,16 @@ pub(crate) trait OnionDirectoryReader: rings_runtime::MaybeSendSync {
 
     /// Return the local entry-guard manager for this client.
     fn onion_entry_guards(&self) -> &OnionEntryGuards;
+
+    /// Return the current Unix epoch timestamp in milliseconds for directory validation.
+    fn now_ms(&self) -> u128 {
+        SystemClock.now_ms()
+    }
+
+    /// Return the cryptographic RNG capability used to sample entry guards and route hops.
+    fn route_rng(&self) -> SharedRng {
+        SharedRng::system()
+    }
 }
 
 /// Build an onion proxy route for a concrete target whose first hop is a directly connected peer.
@@ -86,7 +97,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
 ) -> Result<OnionProxyRoute> {
     let service_name = proxy.exit_service_name();
     let service = service_name.as_str().to_string();
-    let now_ms = get_epoch_ms();
+    let now_ms = reader.now_ms();
     let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
         reader.live_onion_exits("").await?,
         now_ms,
@@ -160,7 +171,7 @@ pub(crate) async fn build_onion_pipeline_route_with_first_hop(
     let request = OnionPipelineRouteRequest::from_pipeline(pipeline);
     let online_nodes = reader.live_online_nodes().await?;
     let invokes = reader.live_onion_invokes().await?;
-    let now_ms = get_epoch_ms();
+    let now_ms = reader.now_ms();
     let candidates = OnionPipelineRouteCandidates::from_validated_descriptors(
         reader.local_did(),
         reader.dht_protocol_mode(),
@@ -169,14 +180,15 @@ pub(crate) async fn build_onion_pipeline_route_with_first_hop(
         invokes,
     );
     let qualities = reader.peer_qualities().await;
-    let mut entropy = SystemRouteEntropy::new();
+    let mut entropy = reader.route_rng();
     let first_hop_permitted = &first_hop_permitted;
     let guard_set = reader
         .onion_entry_guards()
-        .select_relay_guards(
+        .select_relay_guards_at(
             reader.dht_protocol_mode().network_id,
             &candidates.relays,
             &qualities,
+            now_ms,
             &mut entropy,
             first_hop_permitted,
         )
@@ -197,7 +209,7 @@ async fn build_onion_route_from_exits(
     first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionRoute> {
     let online_nodes = reader.live_online_nodes().await?;
-    let now_ms = get_epoch_ms();
+    let now_ms = reader.now_ms();
     let candidates = OnionRouteCandidates::from_validated_descriptors(
         reader.local_did(),
         reader.dht_protocol_mode(),
@@ -207,14 +219,15 @@ async fn build_onion_route_from_exits(
         exits,
     );
     let qualities = reader.peer_qualities().await;
-    let mut entropy = SystemRouteEntropy::new();
+    let mut entropy = reader.route_rng();
     let first_hop_permitted = &first_hop_permitted;
     let guard_set = reader
         .onion_entry_guards()
-        .select_relay_guards(
+        .select_relay_guards_at(
             reader.dht_protocol_mode().network_id,
             &candidates.relays,
             &qualities,
+            now_ms,
             &mut entropy,
             first_hop_permitted,
         )

@@ -42,7 +42,8 @@ use rings_core::message::ChordStorageInterface;
 use rings_core::message::MessageSigner;
 use rings_core::message::ScopedStorage;
 use rings_core::swarm::storage_api::StoreReceipt;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
 
 use crate::descriptor::heard_descriptors;
@@ -270,6 +271,11 @@ impl<'a> RegistrationContext<'a> {
     /// Return the local node DID.
     pub(crate) fn did(&self) -> Did {
         self.processor.did()
+    }
+
+    /// Return the current Unix epoch timestamp in milliseconds from the processor's clock.
+    pub(crate) fn now_ms(&self) -> u128 {
+        self.processor.clock().now_ms()
     }
 
     /// Return the local network id.
@@ -550,6 +556,7 @@ pub(crate) trait RegistrationTask: MaybeSendSync {
 pub struct OnlineNodeRegistration {
     heartbeat_interval: Duration,
     node_type: OnlineNodeType,
+    clock: SharedClock,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
     /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
@@ -567,10 +574,31 @@ impl OnlineNodeRegistration {
         endpoint_hint: Option<String>,
         onion_relay: Option<OnionProcessEpochCell>,
     ) -> Self {
+        Self::new_with_clock(
+            heartbeat_interval,
+            ttl,
+            node_type,
+            endpoint_hint,
+            onion_relay,
+            Arc::new(SystemClock),
+        )
+    }
+
+    /// Create an online-node registration task bound to an explicit [`SharedClock`].
+    pub fn new_with_clock(
+        heartbeat_interval: Duration,
+        ttl: Duration,
+        node_type: OnlineNodeType,
+        endpoint_hint: Option<String>,
+        onion_relay: Option<OnionProcessEpochCell>,
+        clock: SharedClock,
+    ) -> Self {
+        let started_at_ms = clock.now_ms();
         Self {
             heartbeat_interval,
             node_type,
-            started_at_ms: get_epoch_ms(),
+            clock,
+            started_at_ms,
             endpoint_hint,
             onion_relay,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC, heartbeat_interval, ttl),
@@ -615,7 +643,7 @@ impl OnlineNodeRegistration {
     ) -> Result<OnlineNodeDescriptor> {
         let [descriptor] = self
             .publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, self.clock.now_ms(), |terms| {
                 self.descriptor_at(context, terms)
                     .map(|descriptor| [descriptor])
             })

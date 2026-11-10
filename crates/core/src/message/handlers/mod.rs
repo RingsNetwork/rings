@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::effects::core_actor_steps;
-use super::effects::lower_dht_action;
+use super::effects::lower_dht_action_with_id;
 use super::effects::yield_core_actor_step;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
@@ -21,6 +21,8 @@ use crate::error::Result;
 use crate::swarm::callback::SwarmTransportCallback;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::Clock;
+use crate::utils::SYSTEM_CLOCK;
 
 /// Operator and Handler for Connection
 pub mod connection;
@@ -51,24 +53,49 @@ pub struct MessageHandler {
     dht: Arc<PeerRing>,
 }
 
-/// One payload as the logical stage hands it to a handler: the payload, and the principal that
+/// One payload as the logical stage hands it to a handler: the payload, the principal that
 /// delivered it to this node (load-bounds paper, Law 1), which every table a handler grows is
-/// charged to.
+/// charged to, and the injected [`Clock`] capability used by time-sensitive protocol decisions.
 #[derive(Clone, Copy, Debug)]
 pub struct HandlerContext<'a> {
     /// The payload.
     payload: &'a MessagePayload,
     /// The edge that delivered it, or this node for a payload out of its own stores.
     introducer: Principal,
+    /// Injected clock capability read by handler decisions.
+    clock: &'a dyn Clock,
 }
 
+/// Alias for [`HandlerContext`].
+pub type HandlerCtx<'a> = HandlerContext<'a>;
+
 impl<'a> HandlerContext<'a> {
-    /// `payload`, delivered by `introducer`.
-    pub(crate) const fn new(payload: &'a MessagePayload, introducer: Principal) -> Self {
+    /// `payload`, delivered by `introducer`, using the default [`SystemClock`](crate::utils::SystemClock).
+    pub const fn new(payload: &'a MessagePayload, introducer: Principal) -> Self {
         Self {
             payload,
             introducer,
+            clock: &SYSTEM_CLOCK,
         }
+    }
+
+    /// `payload`, delivered by `introducer`, reading protocol time from `clock`.
+    pub fn new_with_clock(
+        payload: &'a MessagePayload,
+        introducer: Principal,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self {
+            payload,
+            introducer,
+            clock,
+        }
+    }
+
+    /// Return a copy of this context bound to `clock`.
+    pub fn with_clock(mut self, clock: &'a dyn Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// The principal that delivered the payload: a node-local accounting index, meaningless
@@ -82,10 +109,36 @@ impl<'a> HandlerContext<'a> {
         self.payload
     }
 
+    /// The injected [`Clock`] capability for this handler invocation.
+    pub fn clock(&self) -> &'a dyn Clock {
+        self.clock
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds from this context's [`Clock`].
+    pub fn now_ms(&self) -> u128 {
+        self.clock.now_ms()
+    }
+
+    /// Read the current Unix epoch timestamp in milliseconds as `i64` from this context's
+    /// [`Clock`].
+    pub fn now_ms_i64(&self) -> i64 {
+        self.clock.now_ms_i64()
+    }
+
     /// Test builds: `payload` as delivered on no slot.
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(crate) fn unbound_for_test(payload: &'a MessagePayload) -> Self {
         Self::new(payload, Principal::Unbound)
+    }
+
+    /// Test builds: `payload` as delivered on no slot with an explicit `clock`.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    #[allow(dead_code)]
+    pub(crate) fn unbound_with_clock_for_test(
+        payload: &'a MessagePayload,
+        clock: &'a dyn Clock,
+    ) -> Self {
+        Self::new_with_clock(payload, Principal::Unbound, clock)
     }
 }
 
@@ -198,9 +251,11 @@ impl MessageHandler {
                 Ok(())
             }
             act => {
-                if let Some(effect) =
-                    lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?
-                {
+                if let Some(effect) = lower_dht_action_with_id(
+                    act,
+                    |did| self.transport.get_connection(did).is_some(),
+                    || self.transport.rng().next_uuid(),
+                )? {
                     effects.push(effect);
                 }
                 Ok(())
@@ -263,9 +318,15 @@ impl MessageHandler {
             self.collect_dht_effects(act, &mut effects)?;
             self.run_prioritized_dht_effects(effects).await
         } else {
-            let effects =
-                lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?;
+            let effects = lower_dht_action_with_id(
+                act,
+                |did| self.transport.get_connection(did).is_some(),
+                || self.transport.rng().next_uuid(),
+            )?;
             self.run_effects(effects).await
         }
     }
 }
+
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+mod test_capabilities;

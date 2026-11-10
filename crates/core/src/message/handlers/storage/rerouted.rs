@@ -34,7 +34,6 @@ use crate::message::Principal;
 use crate::swarm::transport::Placement;
 use crate::swarm::transport::Route;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
 /// One placement of `storage_fetch`: a `SearchEntry` for `query`.
 pub(super) struct LookupPlacement {
@@ -61,7 +60,7 @@ impl Placement for LookupPlacement {
     async fn route(&self, dht: &PeerRing) -> Result<Route<LookupSettlement>> {
         Ok(
             match dht
-                .lookup_placement(self.query, true, get_epoch_ms())
+                .lookup_placement(self.query, true, dht.epoch_ms())
                 .await?
             {
                 PlacementLookup::Settled(settlement) => Route::Local(settlement),
@@ -132,7 +131,7 @@ impl Placement for OperatePlacement {
         let op = self.0.op.clone();
         let applied = dht
             .operate_storage_entry(
-                get_epoch_ms(),
+                transport.now_ms(),
                 self.0.placement,
                 op,
                 dht.did,

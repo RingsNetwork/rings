@@ -32,7 +32,10 @@ use rings_core::swarm::storage_api::StoreQuorum;
 use rings_core::swarm::storage_api::StoreReceipt;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
+#[cfg(all(test, feature = "node"))]
 use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
@@ -181,6 +184,16 @@ impl Processor {
     /// Get current did
     pub fn did(&self) -> Did {
         self.swarm.did()
+    }
+
+    /// Return the [`SharedClock`] capability bound to this processor.
+    pub fn clock(&self) -> &SharedClock {
+        self.swarm.clock()
+    }
+
+    /// Return the [`SharedRng`] capability bound to this processor.
+    pub fn rng(&self) -> &SharedRng {
+        self.swarm.rng()
     }
 
     pub(crate) fn delegatee_key(&self) -> DelegateeKey {
@@ -334,7 +347,7 @@ impl Processor {
 
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,
-            get_epoch_ms(),
+            self.clock().now_ms(),
             self.swarm.network_id(),
             include_expired,
         ))
@@ -376,7 +389,7 @@ impl Processor {
         Ok(
             crate::onion::OnionInvokeDescriptor::latest_valid_by_symbol_did(
                 crate::onion::OnionInvokeRegistration::descriptors_from_entry(&entry),
-                get_epoch_ms(),
+                self.clock().now_ms(),
                 self.swarm.network_id(),
                 include_expired,
             )
@@ -405,7 +418,7 @@ impl Processor {
     ) -> Vec<OnionExitDescriptor> {
         OnionExitDescriptor::latest_valid_by_service_did(
             OnionExitRegistration::descriptors_from_entry(entry),
-            get_epoch_ms(),
+            self.clock().now_ms(),
             self.swarm.network_id(),
             include_expired,
         )
@@ -868,7 +881,7 @@ impl Processor {
 
     /// Assemble the documented v1 operator snapshot without serializing stored entry payloads.
     pub async fn operator_snapshot(&self) -> Result<OperatorSnapshot> {
-        let generated_at_ms = get_epoch_ms();
+        let generated_at_ms = self.clock().now_ms();
         let runtime = self.observability.runtime_snapshot(generated_at_ms);
         let delegation = self.delegatee_key().delegation();
         let expires_at_ms = delegation.expires_at_ms();
@@ -990,6 +1003,14 @@ impl OnionDirectoryReader for Processor {
 
     fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
+    }
+
+    fn now_ms(&self) -> u128 {
+        self.clock().now_ms()
+    }
+
+    fn route_rng(&self) -> SharedRng {
+        self.rng().clone()
     }
 }
 

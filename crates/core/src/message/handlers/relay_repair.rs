@@ -21,12 +21,15 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::PayloadSender;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::get_epoch_ms;
 
 /// Send this pass's repair offers: one digest set to each chain neighbour (`Law (Chain
 /// repair)`), best effort, as the next pass offers again.
 pub(crate) async fn offer_relay_repair(transport: &Arc<SwarmTransport>) -> Result<()> {
-    for (neighbour, carriers) in transport.dht.relay_repair_offers(get_epoch_ms()).await? {
+    for (neighbour, carriers) in transport
+        .dht
+        .relay_repair_offers(transport.now_ms())
+        .await?
+    {
         let offer = Message::RelayCarrierDigests(RelayCarrierDigests { carriers });
         if let Err(error) = transport
             .protocol_egress()
@@ -58,7 +61,7 @@ impl HandleMsg<RelayCarrierDigests> for MessageHandler {
         }
         let keys = self
             .dht
-            .wanted_relay_carriers(ctx.transaction.origin(), &msg.carriers, get_epoch_ms())
+            .wanted_relay_carriers(ctx.transaction.origin(), &msg.carriers, context.now_ms())
             .await?;
         if keys.is_empty() {
             return Ok(());
@@ -87,7 +90,7 @@ impl HandleMsg<RelayCarriersWanted> for MessageHandler {
         let requester = ctx.transaction.origin();
         let carriers = self
             .dht
-            .relay_carriers_wanted_by(requester, &msg.keys, get_epoch_ms())
+            .relay_carriers_wanted_by(requester, &msg.keys, context.now_ms())
             .await?;
         if carriers.is_empty() {
             return Ok(());

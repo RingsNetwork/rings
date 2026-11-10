@@ -12,8 +12,7 @@ use k256::AffinePoint as K256AffinePoint;
 use k256::PublicKey as K256PublicKey;
 use k256::Scalar as K256Scalar;
 use k256::SecretKey as K256SecretKey;
-use rand::SeedableRng;
-use rand_hc::Hc128Rng;
+use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
@@ -23,6 +22,7 @@ use zeroize::Zeroizing;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::utils::SystemEntropy;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
@@ -263,10 +263,14 @@ impl SecretKey {
         *self.0.to_nonzero_scalar()
     }
 
+    /// Generate a random secp256k1 secret key from an explicit RNG.
+    pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
+        Self(K256SecretKey::from(uniform_nonzero_scalar(rng)))
+    }
+
     /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
-        let mut rng = Hc128Rng::from_entropy();
-        Self(K256SecretKey::from(uniform_nonzero_scalar(&mut rng)))
+        Self::random_with_rng(&mut SystemEntropy)
     }
 
     /// Derive the Ethereum-style address for this secret key.

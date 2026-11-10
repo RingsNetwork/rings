@@ -12,6 +12,9 @@ use rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY;
 use super::session_encoding::SharedDelegationLessee;
 use super::OutboundSchedulers;
 use crate::dht::Did;
+use crate::utils::SharedClock;
+#[cfg(test)]
+use crate::utils::SystemClock;
 
 /// Link-control sends this end keeps in flight to one peer at most: two per frame the peer may
 /// have in flight at this end's transport, since each inbound frame causes at most one per
@@ -26,14 +29,23 @@ pub(super) struct PeerLinkState {
     pub(super) lessee: SharedDelegationLessee,
     /// The link-control sends in flight to the peer.
     pub(super) control_budget: LinkControlBudget,
+    /// Injectable epoch clock capability for inline session lease encoding.
+    pub(super) clock: SharedClock,
 }
 
 impl PeerLinkState {
     /// The link state of a peer nothing has been sent to.
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::new_with_clock(Arc::new(SystemClock))
+    }
+
+    /// The link state of a peer nothing has been sent to, bound to `clock`.
+    pub(super) fn new_with_clock(clock: SharedClock) -> Self {
         Self {
             lessee: SharedDelegationLessee::new(),
             control_budget: LinkControlBudget::new(),
+            clock,
         }
     }
 

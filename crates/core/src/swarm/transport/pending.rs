@@ -41,8 +41,6 @@ use crate::fair_admission::SlotFloorUse;
 use crate::lifecycle::epoch::Epoch;
 use crate::swarm::application::SwarmEvent;
 use crate::swarm::callback::SwarmTransportCallback;
-use crate::utils::get_epoch_ms;
-use crate::utils::get_epoch_ms_i64;
 
 /// Maximum number of peers that may be handshaking before a data channel opens.
 pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
@@ -399,7 +397,7 @@ impl SwarmTransport {
         self.validate_pending_reservation(peer)?;
         self.expire_pending_connections().await?;
         if self.reservation_needs_eviction(peer)? {
-            self.evict_unreferenced_connection(get_epoch_ms_i64())
+            self.evict_unreferenced_connection(self.now_ms_i64())
                 .await?;
         }
         Ok(())
@@ -422,7 +420,7 @@ impl SwarmTransport {
         let _lifecycle = self.connection_lifecycle()?;
         let attempt = self
             .peer_lifecycles()?
-            .reserve_for(peer, get_epoch_ms_i64(), handshake)?;
+            .reserve_for(peer, self.now_ms_i64(), handshake)?;
         tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -645,7 +643,7 @@ impl SwarmTransport {
             });
         }
         self.announce(&lifecycle, SwarmEvent::PeerRetired { peer });
-        let replacement = lifecycles.reserve(peer, get_epoch_ms_i64())?;
+        let replacement = lifecycles.reserve(peer, self.now_ms_i64())?;
         if !lifecycles.activate_for_test(replacement) {
             return Err(Error::ConnectionAttemptSuperseded {
                 peer,
@@ -719,7 +717,7 @@ impl SwarmTransport {
     /// replay streams, the removal store and the open messages (load-bounds paper, Def. 1). Each
     /// table is read in its own pure step, and none is held while the roster is.
     fn slot_floor_use(&self) -> SlotFloorUse {
-        let now_ms = get_epoch_ms();
+        let now_ms = self.now_ms();
         self.transaction_replay
             .floor_use_at(now_ms)
             .join(self.dht.removal_floor_use_at(now_ms))

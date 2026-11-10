@@ -165,6 +165,11 @@ impl OnionClientSession {
         }
     }
 
+    /// Construct a session to `target` stamped from the injected `clock` capability.
+    pub(crate) fn with_clock(target: Bytes, clock: &dyn rings_core::utils::Clock) -> Self {
+        Self::new(target, clock.now_ms())
+    }
+
     /// The most stream bytes the next `data` frame can carry in `class`: less the target while
     /// `T` is still set.
     pub(crate) fn data_capacity(&self, class: OnionLoopClass) -> usize {

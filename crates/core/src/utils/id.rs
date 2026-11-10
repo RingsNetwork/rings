@@ -7,5 +7,9 @@ pub(crate) fn new_uuid() -> uuid::Uuid {
     if let Some(uuid) = crate::simulation::next_uuid_override() {
         return uuid;
     }
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    if let Some(uuid) = crate::dummy_simulation::next_uuid_override() {
+        return uuid;
+    }
     uuid::Uuid::new_v4()
 }

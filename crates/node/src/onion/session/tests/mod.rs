@@ -3,6 +3,7 @@
 //! Reply blocks are built by the client's builder over a fixture return path, so the pool and the
 //! machines handle real `OnionSurb`s; nothing here touches a network or a clock.
 
+mod test_deterministic_driver;
 mod test_liveness;
 mod test_mark;
 #[cfg(rings_native)]

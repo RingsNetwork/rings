@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 
 use super::OnionExitPolicy;
 use crate::error::Error;
@@ -42,10 +44,18 @@ const HARD_MAX_SESSIONS_PER_PREVIOUS_HOP: u32 = 64;
 /// - `session_quota.peer_total(p)` is the number of live leases of previous hop `p`, at most
 ///   [`HARD_MAX_SESSIONS_PER_PREVIOUS_HOP`];
 /// - `bytes_this_window ≤ policy.max_bytes_per_minute` whenever that field is non-zero.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct OnionExitAccounting {
     /// The counters, shared by every lease.
     limiter: Arc<Mutex<ExitLimiter>>,
+    /// Injected epoch clock capability for byte-window accounting.
+    clock: SharedClock,
+}
+
+impl Default for OnionExitAccounting {
+    fn default() -> Self {
+        Self::new_with_clock(Arc::new(SystemClock))
+    }
 }
 
 /// The counters of an exit's accounting.
@@ -89,6 +99,19 @@ impl Drop for OnionExitLease {
 }
 
 impl OnionExitAccounting {
+    /// Construct an exit accounting gate driven by `clock`.
+    pub(crate) fn new_with_clock(clock: SharedClock) -> Self {
+        Self {
+            limiter: Arc::new(Mutex::new(ExitLimiter::default())),
+            clock,
+        }
+    }
+
+    /// Current Unix epoch timestamp in milliseconds on the accounting gate's clock.
+    pub(crate) fn now_ms(&self) -> u128 {
+        self.clock.now_ms()
+    }
+
     /// Admit one session whose first loop arrived from `previous_hop`, under `policy`.
     ///
     /// # Errors

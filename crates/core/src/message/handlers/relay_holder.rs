@@ -38,7 +38,6 @@ use crate::message::MessageHandler;
 use crate::message::PayloadSender;
 use crate::message::RelayHoldDigest;
 use crate::swarm::inbox::SwarmInboxDelivery;
-use crate::utils::get_epoch_ms;
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
@@ -96,7 +95,7 @@ impl HandleMsg<FetchRelayInbox> for MessageHandler {
         }
         let inbox = self
             .dht
-            .live_storage_entry(StorageKey::inbox_of(recipient), get_epoch_ms())
+            .live_storage_entry(StorageKey::inbox_of(recipient), context.now_ms())
             .await?;
         self.run_effects([CoreEffect::send_report_message(
             ctx,
@@ -203,7 +202,7 @@ impl HandleMsg<ReplicateRelayHold> for MessageHandler {
             return Err(Error::RelayCarrierNotHeldHere);
         }
         if fresh {
-            let now_ms = get_epoch_ms();
+            let now_ms = context.now_ms();
             let admitted = entry
                 .clone()
                 .validate_admissible_at(now_ms, self.transport.network_id)?;

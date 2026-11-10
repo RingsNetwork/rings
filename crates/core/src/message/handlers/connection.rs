@@ -374,53 +374,25 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &FindSuccessorReport) -> Result<()> {
         let ctx = context.payload();
-        if ctx.should_forward_from(self.dht.did) {
-            return self
-                .run_effects([CoreEffect::forward_payload(ctx, None)])
-                .await;
-        }
-
-        match &msg.handler {
-            FindSuccessorReportHandler::FixFingerTable { request } => {
-                // First classify the reported successor against the current
-                // transport generation. This may apply the finger immediately,
-                // queue it behind an existing handshake, or retain an
-                // admission proof while the missing connection is opened below.
-                let disposition = self.transport.record_finger_candidate(msg.did, *request)?;
-                if disposition.proof_awaits_owner() && msg.reports_remote_successor(self.dht.did) {
-                    if let Err(error) = self.connect_dht_peer(msg.did).await {
-                        self.dht.cancel_finger_lookup(*request)?;
-                        return Err(error);
-                    }
-                    // The async connect may have admitted the same peer,
-                    // replaced the pending slot, or failed after a partial
-                    // lifecycle transition. Re-run admission with the same
-                    // request id so the deferred proof either gains an owner or
-                    // is explicitly released.
-                    let admitted = self.transport.record_finger_candidate(msg.did, *request)?;
-                    if admitted.proof_awaits_owner() {
-                        self.dht.cancel_finger_lookup(*request)?;
-                    }
+        let effect = if ctx.should_forward_from(self.dht.did) {
+            CoreEffect::forward_payload(ctx, None)
+        } else {
+            let reports_remote = msg.reports_remote_successor(self.dht.did);
+            match &msg.handler {
+                FindSuccessorReportHandler::FixFingerTable { request } => {
+                    CoreEffect::admit_finger_candidate(msg.did, *request, reports_remote)
+                }
+                FindSuccessorReportHandler::Connect { request_id } => {
+                    CoreEffect::claim_connect_candidate(msg.did, *request_id, reports_remote)
+                }
+                // An application lookup: resolve the handle the application awaits. A report no
+                // live lookup awaits is unsolicited and dropped here; the application never sees it.
+                FindSuccessorReportHandler::None => {
+                    CoreEffect::answer_application_lookup(ctx.transaction.tx_id, msg.did)
                 }
             }
-            FindSuccessorReportHandler::Connect { request_id }
-                if self.dht.claim_connect_lookup(*request_id)?
-                    && msg.reports_remote_successor(self.dht.did) =>
-            {
-                self.connect_dht_peer(msg.did).await?;
-            }
-            FindSuccessorReportHandler::Connect { .. } => {}
-            // An application lookup: resolve the handle the application awaits. A report no
-            // live lookup awaits is unsolicited and dropped here; the application never sees it.
-            FindSuccessorReportHandler::None => {
-                self.transport
-                    .application()
-                    .lookups
-                    .answer(ctx.transaction.tx_id, msg.did);
-            }
-        }
-
-        Ok(())
+        };
+        self.run_effects([effect]).await
     }
 }
 
