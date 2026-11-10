@@ -178,9 +178,12 @@ impl SwarmInboxDelivery {
         match delivery.deliver(&element.held.payload).await {
             Ok(LocalDelivered::Handled) => Offered::Retire,
             Ok(LocalDelivered::Queued(taken)) => {
+                let Some(relay_id) = element.relay_id(self.transport.network_id) else {
+                    return Offered::Keep;
+                };
                 let released = self.release_on_take(element, taken);
                 self.transport.application().relay_in_flight.queued(
-                    tx_id,
+                    relay_id,
                     released,
                     element.spent_at_ms(),
                 );
@@ -268,14 +271,24 @@ impl SwarmInboxDelivery {
             return Ok(());
         };
         let now_ms = get_epoch_ms();
+        let network_id = self.transport.network_id;
         let stored = inbox.stored_inbox_elements();
         let relay = &self.transport.application().relay_in_flight;
-        relay.retain(&stored.iter().map(InboxElement::tx_id).collect(), now_ms);
+        relay.retain(
+            &stored
+                .iter()
+                .filter_map(|element| element.relay_id(network_id))
+                .collect(),
+            now_ms,
+        );
         let delivery = LocalDelivery::new(self.transport.clone());
         let mut retired: Vec<EntryDot> = Vec::new();
         let mut spent = BTreeSet::new();
         for element in stored {
-            let offered = match relay.poll(element.tx_id()) {
+            let consumption = element
+                .relay_id(network_id)
+                .map_or(RelayConsumption::Unknown, |relay_id| relay.poll(relay_id));
+            let offered = match consumption {
                 RelayConsumption::Consumed => Offered::Retire,
                 RelayConsumption::Untaken => Offered::Keep,
                 RelayConsumption::Unknown => {

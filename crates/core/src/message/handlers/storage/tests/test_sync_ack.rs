@@ -418,3 +418,130 @@ async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() 
     );
     Ok(())
 }
+
+/// Production-path regression test for the same-value ABA hand-off race (#1207):
+/// 1. Node A holds `V` at incarnation 0 and emits two distinct hand-off transactions `T1` and `T2`
+///    for `V` to Node B before `ACK1` arrives.
+/// 2. `ACK1` (for `T1`) arrives at Node A and deletes `V`, advancing `placement_key` to custody
+///    incarnation 1.
+/// 3. Node B hands `V` back to Node A (`join_storage_entry`), re-establishing local custody of the
+///    exact same value `V` at incarnation 1.
+/// 4. Delayed `ACK2` (for `T2`, arriving in FIFO order `ACK1 -> return handoff -> ACK2`) is
+///    handled by Node A: the pending capability for `T2` is retired, and because `ACK2` is bound
+///    to incarnation 0, Node A's re-acquired copy of `V` is preserved.
+#[tokio::test]
+async fn test_delayed_duplicate_handoff_report_does_not_delete_reacquired_same_value_entry(
+) -> Result<()> {
+    use crate::fair_admission::Principal;
+    use crate::utils::get_epoch_ms;
+
+    let node_a = prepare_node(SecretKey::random()).await;
+    let node_b = prepare_node(SecretKey::random()).await;
+    let handler_a = MessageHandler::new(node_a.swarm.transport.clone());
+
+    let placement_key = Did::from(100u32);
+    let value = live_entry(Did::from(10u32), vec![], EntryKind::Data);
+    let storage_value = value.clone().try_into_storage_entry()?;
+    node_a
+        .dht()
+        .join_storage_entry(
+            get_epoch_ms(),
+            placement_key,
+            value.clone(),
+            Principal::Local,
+        )
+        .await?;
+
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node_b.did()),
+        data: vec![PlacedEntry::new(placement_key, storage_value.clone())],
+    };
+
+    // Node A originates two distinct hand-off transactions T1 and T2 during incarnation 0.
+    let request_t1 = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+        node_a.swarm.transport.message_signer(),
+        node_b.did(),
+        node_b.did(),
+    )?;
+    node_a.swarm.transport.record_pending_storage_sync_ack(
+        request_t1.transaction.tx_id,
+        sync_msg.purpose,
+        sync_msg.destination,
+        node_b.did(),
+        &sync_msg.data,
+    )?;
+
+    let request_t2 = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+        node_a.swarm.transport.message_signer(),
+        node_b.did(),
+        node_b.did(),
+    )?;
+    assert_ne!(request_t1.transaction.tx_id, request_t2.transaction.tx_id);
+    node_a.swarm.transport.record_pending_storage_sync_ack(
+        request_t2.transaction.tx_id,
+        sync_msg.purpose,
+        sync_msg.destination,
+        node_b.did(),
+        &sync_msg.data,
+    )?;
+
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        node_b.did(),
+        vec![SyncedEntryAck::new(placement_key, storage_value.clone())],
+    );
+
+    // Step 1: ACK1 for T1 arrives and deletes V at incarnation 0.
+    let report_t1 = storage_sync_report_payload(
+        &request_t1,
+        report.clone(),
+        node_b.swarm.transport.message_signer(),
+        node_a.did(),
+        node_a.did(),
+    )?;
+    handler_a
+        .handle(&HandlerContext::unbound_for_test(&report_t1), &report)
+        .await?;
+    assert_eq!(
+        node_a.dht().storage.get(&placement_key.to_string()).await?,
+        None
+    );
+
+    // Step 2: Node B returns custody of the exact same value V to Node A (incarnation 1).
+    node_a
+        .dht()
+        .join_storage_entry(
+            get_epoch_ms(),
+            placement_key,
+            storage_value.clone(),
+            Principal::Local,
+        )
+        .await?;
+    assert_eq!(
+        node_a.dht().storage.get(&placement_key.to_string()).await?,
+        Some(storage_value.clone())
+    );
+
+    // Step 3: Delayed ACK2 for T2 arrives (FIFO order on B -> A: ACK1 -> return handoff -> ACK2).
+    let report_t2 = storage_sync_report_payload(
+        &request_t2,
+        report.clone(),
+        node_b.swarm.transport.message_signer(),
+        node_a.did(),
+        node_a.did(),
+    )?;
+    handler_a
+        .handle(&HandlerContext::unbound_for_test(&report_t2), &report)
+        .await?;
+
+    // Re-acquired value V at incarnation 1 is retained!
+    assert_eq!(
+        node_a.dht().storage.get(&placement_key.to_string()).await?,
+        Some(storage_value)
+    );
+    Ok(())
+}

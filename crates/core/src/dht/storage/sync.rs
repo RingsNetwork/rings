@@ -179,11 +179,15 @@ impl PeerRing {
         new_successor: Did,
         items: Vec<(StorageKey, Entry)>,
     ) -> Result<PeerRingAction> {
-        let data = items
-            .into_iter()
-            .filter(|(key, _)| self.placed_beyond(key.placement(), new_successor))
-            .map(|(key, entry)| PlacedEntry::new(key.placement(), entry))
-            .collect::<Vec<_>>();
+        let mut data = Vec::new();
+        for (key, entry) in items {
+            if self.placed_beyond(key.placement(), new_successor) {
+                let incarnation = self.observe_storage_handoff_incarnation(key)?;
+                data.push(
+                    PlacedEntry::new(key.placement(), entry).with_custody_incarnation(incarnation),
+                );
+            }
+        }
 
         // The wire batching happens once, in
         // `PeerRingAction::coalesced_storage_sync_deliveries`.
@@ -258,29 +262,32 @@ impl PeerRing {
         fallback_targets: &[Did],
     ) -> Result<PeerRingAction> {
         let hints = self.relay_holder_hints()?;
-        Ok(items
-            .into_iter()
-            .flat_map(|(key, entry)| {
-                let named = hints.get(&key.placement()).copied();
-                // A member's copies go through chain repair, one offer per neighbour (`Law
-                // (Chain repair)`); a keeper that is no member hands its carrier off here.
-                let targets = relay_carrier_offer(
-                    segment,
-                    key.placement(),
-                    self.did,
-                    named,
-                    self.relay_replicas(),
-                )
-                .into_handoff_targets(fallback_targets);
-                targets.into_iter().map(move |target| {
-                    PeerRingAction::sync_entries_for_handoff(
-                        StorageSyncDestination::PhysicalOwner(target),
-                        vec![PlacedEntry::new(key.placement(), entry.clone())],
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .into())
+        let mut actions = Vec::new();
+        for (key, entry) in items {
+            let named = hints.get(&key.placement()).copied();
+            // A member's copies go through chain repair, one offer per neighbour (`Law
+            // (Chain repair)`); a keeper that is no member hands its carrier off here.
+            let targets = relay_carrier_offer(
+                segment,
+                key.placement(),
+                self.did,
+                named,
+                self.relay_replicas(),
+            )
+            .into_handoff_targets(fallback_targets);
+            if targets.is_empty() {
+                continue;
+            }
+            let incarnation = self.observe_storage_handoff_incarnation(key)?;
+            for target in targets {
+                actions.push(PeerRingAction::sync_entries_for_handoff(
+                    StorageSyncDestination::PhysicalOwner(target),
+                    vec![PlacedEntry::new(key.placement(), entry.clone())
+                        .with_custody_incarnation(incarnation)],
+                ));
+            }
+        }
+        Ok(actions.into())
     }
 
     /// `key ∉ (self, head]`: the placement lies beyond this node's interval up to `head`, so

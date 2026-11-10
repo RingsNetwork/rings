@@ -361,9 +361,22 @@ pub(crate) struct InboxElement {
 }
 
 impl InboxElement {
-    /// The transaction of the held payload, which names the element across passes.
+    /// The transaction UUID of the held payload (for diagnostic logging).
     pub(crate) fn tx_id(&self) -> uuid::Uuid {
         self.held.payload.transaction.tx_id
+    }
+
+    /// Complete signed transaction identity of the held payload, which names the element across
+    /// drain passes (#1208).
+    pub(crate) fn relay_id(
+        &self,
+        network_id: u32,
+    ) -> Option<crate::swarm::application::RelayTransactionId> {
+        crate::swarm::application::RelayTransactionId::of(
+            &self.held.payload.transaction,
+            network_id,
+        )
+        .ok()
     }
 
     /// The instant from which no carrier delivers this element's transaction again (pure): its

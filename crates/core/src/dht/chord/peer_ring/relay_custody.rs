@@ -12,7 +12,6 @@
 //! unacknowledged holds and of the holder hints, which no other lock is held across.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::MutexGuard;
 
 use super::PeerRing;
@@ -129,13 +128,26 @@ impl PeerRing {
     /// for the age gate (`Law (Age gate)`, #777), so a node that leaves within its first minutes
     /// never pays a member's copies.
     pub fn holds_relay_mail(&self) -> bool {
-        self.relay_storage.is_some() && self.now_ms() >= self.relay_replication.age_gate_ms
+        self.relay_storage.is_some()
+            && self.now_ms()
+                >= self
+                    .relay_age_gate_ms
+                    .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Deterministically open this node's relay age gate in tests without wall-clock sleeps.
+    #[cfg(all(test, feature = "dummy"))]
+    pub(crate) fn open_relay_age_gate_for_test(&self) {
+        self.relay_age_gate_ms
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The peers of `connected` this node has not declared to yet that it holds relay mail;
-    /// empty while its age gate is closed (`Law (Age gate)`). A peer is declared to once: each
-    /// is recorded when its declaration is queued ([`Self::record_relay_custody_declared`]), and
-    /// a peer it lost is forgotten with it, so the set is bounded by the peers it knows.
+    /// empty while its age gate is closed (`Law (Age gate)`). A peer is declared to once its
+    /// declaration is admitted: each is recorded with its transaction ID when queued
+    /// ([`Self::record_relay_custody_declaration`]), cleared if that transfer fails or is
+    /// cancelled before admission ([`Self::clear_relay_custody_declaration`]), and forgotten when
+    /// the peer leaves, so the map is bounded by the peers it knows.
     pub(crate) fn undeclared_relay_custody_peers(&self, connected: Vec<Did>) -> Result<Vec<Did>> {
         if !self.holds_relay_mail() {
             return Ok(Vec::new());
@@ -143,18 +155,37 @@ impl PeerRing {
         let declared = self.lock_relay_custody_declared()?;
         Ok(connected
             .into_iter()
-            .filter(|peer| !declared.contains(peer))
+            .filter(|peer| !declared.contains_key(peer))
             .collect())
     }
 
-    /// Record that this node's declaration to `peer` was queued.
-    pub(crate) fn record_relay_custody_declared(&self, peer: Did) -> Result<()> {
-        self.lock_relay_custody_declared()?.insert(peer);
+    /// Record that this node's declaration `tx_id` to `peer` was queued.
+    pub(crate) fn record_relay_custody_declaration(
+        &self,
+        peer: Did,
+        tx_id: uuid::Uuid,
+    ) -> Result<()> {
+        self.lock_relay_custody_declared()?.insert(peer, tx_id);
         Ok(())
     }
 
-    /// Lock the declared-to set, a leaf of `Law (Lock order)`.
-    fn lock_relay_custody_declared(&self) -> Result<MutexGuard<'_, BTreeSet<Did>>> {
+    /// Clear `peer`'s declaration record iff it still points to `tx_id`, so a declaration dropped
+    /// or cancelled before first-frame admission is retried on the next pass without clearing a
+    /// newer declaration.
+    pub(crate) fn clear_relay_custody_declaration(
+        &self,
+        peer: Did,
+        tx_id: uuid::Uuid,
+    ) -> Result<()> {
+        let mut declared = self.lock_relay_custody_declared()?;
+        if declared.get(&peer) == Some(&tx_id) {
+            declared.remove(&peer);
+        }
+        Ok(())
+    }
+
+    /// Lock the declared-to map, a leaf of `Law (Lock order)`.
+    fn lock_relay_custody_declared(&self) -> Result<MutexGuard<'_, BTreeMap<Did, uuid::Uuid>>> {
         self.relay_custody_declared
             .lock()
             .map_err(|_| Error::LockPoisoned)

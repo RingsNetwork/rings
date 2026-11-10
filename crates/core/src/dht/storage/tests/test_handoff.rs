@@ -59,10 +59,16 @@ async fn test_sync_ack_deletes_local_entry_after_copy() -> Result<()> {
     node.storage.put(&placement_key.to_string(), &entry).await?;
 
     let action = node.sync_entries_with_successor(new_successor).await?;
-    assert_eq!(collect_sync_batches(action)?.len(), 1);
+    let batches = collect_sync_batches(action)?;
+    assert_eq!(batches.len(), 1);
+    let incarnation = batches[0].1[0]
+        .custody_incarnation()
+        .ok_or_else(|| Error::InvalidMessage("expected custody incarnation".to_string()))?;
 
     let ack_action = node
-        .acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, entry)])
+        .acknowledge_synced_entries(&[
+            SyncedEntryAck::new(placement_key, entry).with_custody_incarnation(incarnation)
+        ])
         .await?;
 
     assert_eq!(ack_action, PeerRingAction::None);
@@ -111,9 +117,14 @@ async fn test_sync_partial_ack_retains_unacked_entries() -> Result<()> {
     node.storage
         .put(&pending_key.to_string(), &pending_entry)
         .await?;
+    let acked_incarnation = node.observe_storage_handoff_incarnation(
+        crate::dht::StorageKey::new(acked_entry.kind, acked_key),
+    )?;
 
-    node.acknowledge_synced_entries(&[SyncedEntryAck::new(acked_key, acked_entry)])
-        .await?;
+    node.acknowledge_synced_entries(&[
+        SyncedEntryAck::new(acked_key, acked_entry).with_custody_incarnation(acked_incarnation)
+    ])
+    .await?;
 
     assert_eq!(node.storage.get(&acked_key.to_string()).await?, None);
     assert_eq!(
@@ -136,8 +147,12 @@ async fn test_sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> 
     node.storage
         .put(&resource_id.to_string(), &identity_entry)
         .await?;
+    let placed_incarnation = node.observe_storage_handoff_incarnation(
+        crate::dht::StorageKey::new(placed_entry.kind, placement_key),
+    )?;
 
-    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, placed_entry)])
+    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, placed_entry)
+        .with_custody_incarnation(placed_incarnation)])
         .await?;
 
     assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
@@ -296,7 +311,14 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
     let acks = acked_batch
         .iter()
         .cloned()
-        .map(|placed| SyncedEntryAck::new(placed.key, placed.entry))
+        .map(|placed| {
+            let incarnation = placed.custody_incarnation();
+            let mut ack = SyncedEntryAck::new(placed.key, placed.entry);
+            if let Some(incarnation) = incarnation {
+                ack = ack.with_custody_incarnation(incarnation);
+            }
+            ack
+        })
         .collect::<Vec<_>>();
 
     node.acknowledge_synced_entries(&acks).await?;
@@ -313,5 +335,98 @@ async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -
             .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
     );
     assert_eq!(retried_entries, expected_remaining);
+    Ok(())
+}
+
+/// A delayed hand-off acknowledgement from an earlier custody incarnation must not delete a
+/// re-acquired entry of the exact same value, while a fresh hand-off acknowledgement from the new
+/// custody incarnation still cleans up normally (#1207).
+#[tokio::test]
+async fn test_stale_sync_ack_from_prior_custody_incarnation_retains_reacquired_same_value(
+) -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let new_successor = Did::from(50u32);
+    let key = Did::from(100u32);
+    let value = data_entry(Did::from(10u32));
+
+    // Incarnation 1: store `value`, hand off, acknowledge hand-off, and verify local cleanup.
+    node.storage.put(&key.to_string(), &value).await?;
+    let first_batches =
+        collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+    assert_eq!(first_batches.len(), 1);
+    assert_eq!(first_batches[0].1[0].custody_incarnation(), Some(1));
+    let old_ack = SyncedEntryAck::new(key, value.clone()).with_custody_incarnation(1);
+    node.acknowledge_synced_entries(std::slice::from_ref(&old_ack))
+        .await?;
+    assert!(node.storage.get(&key.to_string()).await?.is_none());
+
+    // Re-acquire the exact same `value`; a delayed `old_ack` from incarnation 1 must not delete
+    // it.
+    node.storage.put(&key.to_string(), &value).await?;
+    node.acknowledge_synced_entries(&[old_ack]).await?;
+    assert_eq!(
+        node.storage.get(&key.to_string()).await?.as_ref(),
+        Some(&value)
+    );
+
+    // A new hand-off in the next incarnation stamps its `PlacedEntry` with incarnation 2, and an
+    // ack bound to incarnation 2 deletes the second custody epoch cleanly.
+    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+    assert_eq!(batches.len(), 1);
+    let fresh_placed = &batches[0].1[0];
+    assert_eq!(fresh_placed.custody_incarnation(), Some(2));
+    let fresh_ack = SyncedEntryAck::new(key, value.clone()).with_custody_incarnation(2);
+    node.acknowledge_synced_entries(&[fresh_ack]).await?;
+    assert!(node.storage.get(&key.to_string()).await?.is_none());
+    Ok(())
+}
+
+/// Custody incarnation metadata stays bounded by currently resident keys even when bounded storage
+/// evicts older keys across repeated writes and hand-offs (#1207).
+#[tokio::test]
+async fn test_custody_metadata_stays_bounded_when_elements_are_evicted() -> Result<()> {
+    use std::num::NonZeroU32;
+
+    use crate::fair_admission::Principal;
+    use crate::utils::get_epoch_ms;
+
+    let node = PeerRing::new_with_storage(
+        Did::from(0u32),
+        3,
+        Box::new(MemStorage::bounded(NonZeroU32::MIN)),
+    );
+    let new_successor = Did::from(50u32);
+    let now_ms = get_epoch_ms();
+
+    for i in 0..100u32 {
+        let key = Did::from(100u32 + i);
+        let value = data_entry(key);
+        node.join_storage_entry(now_ms, key, value, Principal::Local)
+            .await?;
+    }
+    assert_eq!(node.storage.count().await?, 1);
+    assert!(
+        node.storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .len()
+            <= 1
+    );
+
+    for i in 100..200u32 {
+        let key = Did::from(100u32 + i);
+        let value = data_entry(key);
+        node.join_storage_entry(now_ms, key, value, Principal::Local)
+            .await?;
+        let _ = node.sync_entries_with_successor(new_successor).await?;
+    }
+    assert_eq!(node.storage.count().await?, 1);
+    assert!(
+        node.storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .len()
+            <= 1
+    );
     Ok(())
 }

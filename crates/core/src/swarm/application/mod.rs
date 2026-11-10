@@ -46,6 +46,7 @@ use lookup::ApplicationLookups;
 pub use lookup::SuccessorReport;
 pub(crate) use relay::RelayConsumption;
 use relay::RelayInFlight;
+pub(crate) use relay::RelayTransactionId;
 
 use crate::dht::Did;
 use crate::message::e2e::E2eHandshakeRequest;

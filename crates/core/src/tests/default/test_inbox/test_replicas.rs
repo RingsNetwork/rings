@@ -212,13 +212,27 @@ fn test_the_age_gate_closes_custody_and_declares_it_once_per_peer() -> Result<()
         first, second
     ]);
     // Only the declaration to `first` was queued: `second` alone is declared to again.
-    open.record_relay_custody_declared(first)?;
+    open.record_relay_custody_declaration(first, uuid::Uuid::new_v4())?;
     assert_eq!(open.undeclared_relay_custody_peers(vec![first, second])?, [
         second
     ]);
     // A peer that was lost is declared to again when it returns.
     open.forget_relay_custody(first)?;
     assert_eq!(open.undeclared_relay_custody_peers(vec![first])?, [first]);
+
+    // A declaration recorded with its transaction ID is cleared only by a matching `tx_id`,
+    // so a dropped/cancelled declaration is retried while a newer declaration is preserved (#1202).
+    let tx1 = uuid::Uuid::new_v4();
+    let tx2 = uuid::Uuid::new_v4();
+    open.record_relay_custody_declaration(first, tx1)?;
+    assert!(open.undeclared_relay_custody_peers(vec![first])?.is_empty());
+    open.clear_relay_custody_declaration(first, tx2)?;
+    assert!(open.undeclared_relay_custody_peers(vec![first])?.is_empty());
+    open.clear_relay_custody_declaration(first, tx1)?;
+    assert_eq!(open.undeclared_relay_custody_peers(vec![first])?, [first]);
+    open.record_relay_custody_declaration(first, tx2)?;
+    open.clear_relay_custody_declaration(first, tx1)?;
+    assert!(open.undeclared_relay_custody_peers(vec![first])?.is_empty());
     Ok(())
 }
 
@@ -695,4 +709,123 @@ async fn test_chain_neighbour_past_a_storage_less_run_is_directly_probed_and_fai
         "h0 establishes a direct connection to the newly resolved n2"
     );
     Ok(())
+}
+
+/// If a young peer's `DeclareRelayCustody(Holds)` declaration is dropped under Storage-lane
+/// backpressure after its age gate opens while Control-lane probes stay healthy, the peer clears
+/// its declaration record and retries on a subsequent repair pass once Storage credit returns,
+/// converging neighbour custody views and relay replication without reconnecting (#1202).
+#[tokio::test]
+async fn test_lost_relay_custody_declaration_under_storage_lane_backpressure_is_retried_and_replicates(
+) -> Result<()> {
+    use crate::message::MessageCategory;
+    use crate::tests::activity::probe_on_activity;
+    use crate::tests::default::prepare_node_with_relay_replication;
+    use crate::tests::default::wait_for_storage_absence;
+    use crate::tests::default::TEST_HANG_GUARD;
+
+    let [key1, key2, key3, key4] = gen_ordered_keys::<4>();
+    let two_replicas = RelayReplication {
+        replicas: 2,
+        age_gate_ms: 0,
+    };
+    let young_replicas = RelayReplication {
+        replicas: 2,
+        age_gate_ms: u64::MAX,
+    };
+    let node1 = prepare_node_with_relay_replication(key1, two_replicas)?;
+    let node3 = prepare_node_with_relay_replication(key3, two_replicas)?;
+    let node4 = prepare_node_with_relay_replication(key4, young_replicas)?;
+    let offline: Did = key2.address().into();
+
+    // Establish the 3-node ring while `node4`'s age gate is still closed (`HoldsNone`).
+    ring_of_three(&node1, &node3, &node4).await?;
+    let ring = [&node1, &node3, &node4];
+    settle_previous_holders(&ring, &ring).await?;
+    assert!(!node4.dht().holds_relay_mail());
+    assert_eq!(node1.dht().relay_storage_less_peers()?, vec![node4.did()]);
+    assert_eq!(node3.dht().relay_storage_less_peers()?, vec![node4.did()]);
+
+    // Hold a message for `offline` (`key2 ∈ (node1, node3]`); only `node1` and `node3` hold relay
+    // mail so far, and `node4` holds nothing.
+    node1
+        .swarm
+        .send_message(ApplicationData::custom(HELD_MESSAGE), offline)
+        .await?;
+    wait_for_msgs(ring).await;
+    let inbox = StorageKey::inbox_of(offline);
+    assert_every_member_holds(&[&node1, &node3], inbox).await?;
+    wait_for_storage_absence(&node4, inbox).await?;
+
+    // Withhold all Storage-lane credit at `node4` toward `node1` and `node3` while leaving the
+    // Control lane unstarved.
+    let storage_lane = MessageCategory::Storage.channel_lane();
+    let held_to_node1 = node4
+        .swarm
+        .transport
+        .hold_lane_credit_for_test(node1.did(), storage_lane)?;
+    let held_to_node3 = node4
+        .swarm
+        .transport
+        .hold_lane_credit_for_test(node3.did(), storage_lane)?;
+
+    // Deterministically open `node4`'s age gate and trigger a stabilization/repair pass on `node4`.
+    node4.dht().open_relay_age_gate_for_test();
+    assert!(node4.dht().holds_relay_mail());
+    node4.swarm.stabilizer().stabilize().await?;
+
+    // Wait for the detached Storage-lane transfers of `DeclareRelayCustody(Holds)` to time out on
+    // first-frame admission and clear `node4`'s declared map.
+    probe_on_activity(
+        "timed-out DeclareRelayCustody clears declared peers for retry",
+        TEST_HANG_GUARD,
+        || {
+            let undeclared = node4
+                .dht()
+                .undeclared_relay_custody_peers(vec![node1.did(), node3.did()]);
+            async move { undeclared.map(|peers| (peers.len() == 2).then_some(())) }
+        },
+    )
+    .await?;
+
+    // Control-lane liveness remains healthy and neither neighbour has observed `Holds` yet.
+    assert!(node4.swarm.transport.has_active_connection(node1.did()));
+    assert!(node4.swarm.transport.has_active_connection(node3.did()));
+    assert_eq!(node1.dht().relay_storage_less_peers()?, vec![node4.did()]);
+    assert_eq!(node3.dht().relay_storage_less_peers()?, vec![node4.did()]);
+
+    // Release Storage-lane credit and run a repair pass without reconnecting.
+    drop(held_to_node1);
+    drop(held_to_node3);
+    node4.swarm.stabilizer().stabilize().await?;
+    wait_for_msgs(ring).await;
+
+    assert!(
+        node1.dht().relay_storage_less_peers()?.is_empty(),
+        "node1 observed node4's retried DeclareRelayCustody(Holds)"
+    );
+    assert!(
+        node3.dht().relay_storage_less_peers()?.is_empty(),
+        "node3 observed node4's retried DeclareRelayCustody(Holds)"
+    );
+    assert!(
+        node4
+            .dht()
+            .undeclared_relay_custody_peers(vec![node1.did(), node3.did()])?
+            .is_empty(),
+        "node4 keeps peers marked declared once admitted"
+    );
+
+    // Settle previous-holder announcements now that `node4` holds relay mail, then hold a message
+    // for a recipient in `(node3, node4]` whose `r = 2` members are `[node3, node4]`, proving that
+    // `node3` now replicates relay custody to `node4` without reconnecting.
+    settle_previous_holders(&ring, &ring).await?;
+    let offline_for_node4 =
+        Did::from(num_bigint::BigUint::from(node3.did()) + num_bigint::BigUint::from(1u8));
+    node1
+        .swarm
+        .send_message(ApplicationData::custom(HELD_MESSAGE), offline_for_node4)
+        .await?;
+    wait_for_msgs(ring).await;
+    assert_every_member_holds(&[&node3, &node4], StorageKey::inbox_of(offline_for_node4)).await
 }
