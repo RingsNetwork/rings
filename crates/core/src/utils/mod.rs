@@ -1,9 +1,14 @@
 //! Utils for ring-core.
 
 mod id;
+mod slow_lock;
 mod time;
 
 pub(crate) use id::new_uuid;
+pub use slow_lock::slow_lock_hold_count;
+pub use slow_lock::slow_lock_wait_count;
+pub use slow_lock::SlowLockGuard;
+pub use slow_lock::SLOW_ASYNC_LOCK_THRESHOLD;
 pub use time::get_epoch_ms;
 pub(crate) use time::get_epoch_ms_i64;
 pub(crate) use time::sleep;

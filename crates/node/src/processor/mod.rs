@@ -468,7 +468,11 @@ impl Processor {
             if answered || is_final_lookup_poll(attempt) {
                 break;
             }
-            sleep(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            if !sleep_unless_stopped(DHT_LOOKUP_CACHE_POLL_INTERVAL, stop, &StopToken::never())
+                .await?
+            {
+                return Err(Error::RegistrationStopped);
+            }
         }
         Ok(self.storage_check_cache(entry_key).await)
     }
@@ -591,10 +595,13 @@ impl Processor {
 
     /// Flush all applied measurement updates with the graceful-shutdown deadline.
     pub async fn flush_measurements(&self) -> Result<()> {
+        self.flush_measurements_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn flush_measurements_with_timeout(&self, timeout: Duration) -> Result<()> {
         if let Some(measure) = &self.measure {
-            measure
-                .flush_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
-                .await?;
+            measure.flush_with_timeout(timeout).await?;
         }
         Ok(())
     }
@@ -646,13 +653,34 @@ impl Processor {
     ///
     /// Both steps run even if the first fails; the first failure is returned.
     pub async fn close(&self) -> Result<()> {
-        let _ = self.leave().await;
+        self.close_with_timeout(MEASUREMENT_FLUSH_TIMEOUT).await
+    }
+
+    pub(crate) async fn close_with_timeout(&self, timeout: Duration) -> Result<()> {
+        {
+            let leave = self.leave();
+            let deadline = rings_runtime::sleep(timeout);
+            futures::pin_mut!(leave, deadline);
+            if let futures::future::Either::Right((timer, _)) =
+                futures::future::select(leave, deadline).await
+            {
+                match timer {
+                    Ok(()) => tracing::warn!(
+                        timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                        "best-effort departure timed out during processor close"
+                    ),
+                    Err(error) => {
+                        tracing::warn!(?error, "departure timer unavailable during processor close")
+                    }
+                }
+            }
+        }
         let closed = self
             .swarm
             .close()
             .await
             .map_err(Error::CloseConnectionError);
-        let flushed = self.flush_measurements().await;
+        let flushed = self.flush_measurements_with_timeout(timeout).await;
         closed.and(flushed)
     }
 

@@ -264,6 +264,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
         }) as Arc<dyn Fn() + Send + Sync>
     };
     let runner: Arc<DynHandler> = Arc::new(Runner {
+        runner_id: super::next_runner_id(),
         protocol: OrderedProtocol,
         interpret: Arc::clone(&interpreter),
         state: Mutex::new(0),
@@ -379,6 +380,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
         )
         .state;
     let runner: Arc<DynHandler> = Arc::new(Runner {
+        runner_id: super::next_runner_id(),
         protocol,
         interpret: Arc::clone(&interpreter),
         state: Mutex::new(state),
@@ -727,5 +729,207 @@ async fn test_a_link_fact_steps_only_protocols_that_map_it() -> Result<()> {
     }
 
     assert_eq!(*lock(&observed)?, facts);
+    Ok(())
+}
+
+#[derive(Default)]
+struct ReentrantInjectInterpreter {
+    observed: Mutex<Vec<u8>>,
+}
+
+#[async_trait]
+impl Interpret for Arc<ReentrantInjectInterpreter> {
+    type Effect = u8;
+
+    async fn run(&self, scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+        lock(&self.observed)?.push(effect);
+        match effect {
+            // Immediate same-task re-entrant inject.
+            1 => {
+                scope.lifecycle().inject(Bytes::from_static(&[99])).await?;
+            }
+            // Same-task re-entrant inject after yielding across an await boundary.
+            2 => {
+                tokio::task::yield_now().await;
+                scope.lifecycle().inject(Bytes::from_static(&[99])).await?;
+            }
+            // Spawned engine task: owns its own task stack and must wait for the gate cleanly.
+            3 => {
+                let lifecycle = scope.lifecycle();
+                let spawner = lifecycle.tasks().spawner()?;
+                spawner.spawn(async move {
+                    let _ = lifecycle.inject(Bytes::from_static(&[4])).await;
+                });
+                tokio::task::yield_now().await;
+            }
+            _ => {}
+        }
+        Ok(Vec::new())
+    }
+}
+
+/// Law (#1231): calling `scope.lifecycle().inject(...)` on the same task while `transition_gate`
+/// is owned fails fast with `Error::ExtensionError` (both immediately and after `.await`
+/// suspensions) instead of self-deadlocking, and releases the gate so subsequent turns proceed.
+#[tokio::test]
+async fn test_reentrant_inject_from_effect_fails_fast_and_releases_gate() -> Result<()> {
+    let extensions = extensions()?;
+    let interpreter = Arc::new(ReentrantInjectInterpreter::default());
+    extensions.register(OrderedProtocol, Arc::clone(&interpreter))?;
+    let from = extensions.core().did();
+    let bound = std::time::Duration::from_secs(1);
+
+    let direct = tokio::time::timeout(
+        bound,
+        extensions.core().dispatch(
+            from,
+            Envelope::new("ordered-effects", Bytes::from_static(&[1])),
+        ),
+    )
+    .await
+    .map_err(|_| Error::ExtensionError("direct re-entrant inject deadlocked".to_string()))?;
+    assert!(matches!(direct, Err(Error::ExtensionError(_))));
+
+    let after_yield = tokio::time::timeout(
+        bound,
+        extensions.core().dispatch(
+            from,
+            Envelope::new("ordered-effects", Bytes::from_static(&[2])),
+        ),
+    )
+    .await
+    .map_err(|_| Error::ExtensionError("post-yield re-entrant inject deadlocked".to_string()))?;
+    assert!(matches!(after_yield, Err(Error::ExtensionError(_))));
+
+    // Spawned task from effect 3 is NOT re-entrant: it waits on transition_gate and runs effect 4.
+    tokio::time::timeout(
+        bound,
+        extensions.core().dispatch(
+            from,
+            Envelope::new("ordered-effects", Bytes::from_static(&[3])),
+        ),
+    )
+    .await
+    .map_err(|_| Error::ExtensionError("turn spawning lifecycle task timed out".to_string()))??;
+
+    tokio::time::timeout(bound, async {
+        while lock(&interpreter.observed)
+            .map(|seen| seen.len() < 4)
+            .unwrap_or(true)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::ExtensionError("spawned lifecycle inject did not complete".to_string()))?;
+
+    assert_eq!(*lock(&interpreter.observed)?, vec![1, 2, 3, 4]);
+    Ok(())
+}
+
+/// Law (#1231): a protocol shell backed by `OverlayOutbox` (such as `JsShell`) releases
+/// `transition_gate` without awaiting outbound network I/O, so a stalled peer cannot block
+/// subsequent inbound transitions or sends to healthy peers on that namespace.
+#[tokio::test]
+async fn test_outbox_shell_does_not_hold_transition_gate_across_stalled_send() -> Result<()> {
+    use crate::extension::protocols::outbox::OverlayOutbox;
+    use crate::extension::protocols::outbox::OverlayOutboxTestHook;
+
+    struct OutboxProtocol;
+
+    impl Protocol for OutboxProtocol {
+        type State = u32;
+        type Event = (Did, Bytes);
+        type Effect = (Did, Bytes);
+
+        fn namespace(&self) -> &str {
+            "js-like"
+        }
+
+        fn init(&self) -> Self::State {
+            0
+        }
+
+        fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+            Ok((wire.from, Bytes::copy_from_slice(wire.payload)))
+        }
+
+        fn step(
+            &self,
+            ctx: Ctx<'_, Self::State>,
+            event: Self::Event,
+        ) -> Transition<Self::State, Self::Effect> {
+            Transition::with(ctx.state.saturating_add(1), vec![event])
+        }
+    }
+
+    struct OutboxShell {
+        outbox: OverlayOutbox,
+        commits: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<OutboxShell> {
+        type Effect = (Did, Bytes);
+
+        async fn run(&self, scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            *lock(&self.commits)? += 1;
+            self.outbox.enqueue(scope.lifecycle(), effect.0, effect.1)?;
+            Ok(Vec::new())
+        }
+    }
+
+    let extensions = extensions()?;
+    let hook = Arc::new(OverlayOutboxTestHook::default());
+    let shell = Arc::new(OutboxShell {
+        outbox: OverlayOutbox::with_test_hook(16, 4, Arc::clone(&hook)),
+        commits: Mutex::new(0),
+    });
+    extensions.register(OutboxProtocol, Arc::clone(&shell))?;
+
+    let stalled_peer: Did = SecretKey::random().address().into();
+    let healthy_peer: Did = SecretKey::random().address().into();
+    let bound = std::time::Duration::from_secs(1);
+
+    // First inbound targets stalled_peer; dispatch must return before the send finishes.
+    tokio::time::timeout(
+        bound,
+        extensions.core().dispatch(
+            stalled_peer,
+            Envelope::new("js-like", Bytes::from_static(b"slow")),
+        ),
+    )
+    .await
+    .map_err(|_| Error::ExtensionError("first dispatch blocked on network send".to_string()))??;
+
+    tokio::time::timeout(bound, hook.wait_until_blocked())
+        .await
+        .map_err(|_| {
+            Error::ExtensionError("outbox worker did not reach stalled send".to_string())
+        })?;
+
+    // While stalled_peer's send is still blocked, a second inbound on the same namespace commits
+    // and completes its send to healthy_peer without waiting.
+    tokio::time::timeout(
+        bound,
+        extensions.core().dispatch(
+            healthy_peer,
+            Envelope::new("js-like", Bytes::from_static(b"fast")),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        Error::ExtensionError("second dispatch stalled behind first peer".to_string())
+    })??;
+
+    assert_eq!(*lock(&shell.commits)?, 2);
+    tokio::time::timeout(bound, hook.wait_until_completed(healthy_peer))
+        .await
+        .map_err(|_| Error::ExtensionError("healthy peer send did not complete".to_string()))??;
+
+    hook.release();
+    tokio::time::timeout(bound, hook.wait_until_completed(stalled_peer))
+        .await
+        .map_err(|_| Error::ExtensionError("stalled peer send did not resume".to_string()))??;
     Ok(())
 }
