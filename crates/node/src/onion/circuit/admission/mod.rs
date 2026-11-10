@@ -569,8 +569,25 @@ impl OnionAdmissionState {
         slot.live.entry(did).or_default().insert(link.generation());
         if let Some(previous_slot_id) = self.peer_slots.insert(did, slot_id) {
             if previous_slot_id != slot_id {
-                if let Some(previous_slot) = self.slots.get_mut(&previous_slot_id) {
-                    previous_slot.retained.remove(&did);
+                let transferred = self
+                    .slots
+                    .get_mut(&previous_slot_id)
+                    .and_then(|previous_slot| {
+                        let retired_quantum = previous_slot.retained.remove(&did)?;
+                        QuantumLedger::in_window(retired_quantum, quantum)
+                            .then_some((retired_quantum, previous_slot.ledger))
+                    });
+                if let Some((retired_quantum, previous_ledger)) = transferred {
+                    if let Some(slot) = self.slots.get_mut(&slot_id) {
+                        slot.ledger = slot.ledger.merge_in_window(
+                            quantum,
+                            &previous_ledger,
+                            ONION_ADMISSION_SENDER_UNITS,
+                        );
+                        slot.retained.entry(did).or_insert(retired_quantum);
+                    }
+                    self.slot_roster
+                        .set_extra_floor_use(self.floor_use_at(quantum));
                 }
             }
         }
@@ -823,11 +840,20 @@ impl OnionAdmissionState {
         Some(slot_id)
     }
 
-    fn acquire_roster_slot(&mut self, did: Did, floor_use: &SlotFloorUse) -> Option<OnionSlotId> {
+    fn acquire_roster_slot(
+        &mut self,
+        did: Did,
+        preferred: Option<OnionSlotId>,
+        floor_use: &SlotFloorUse,
+    ) -> Option<OnionSlotId> {
         if !self.owns_slot_roster {
             return None;
         }
-        self.slot_roster.arrive(did, floor_use);
+        self.slot_roster.arrive_preferring(
+            did,
+            preferred.and_then(|slot_id| u16::try_from(slot_id.index()).ok()),
+            floor_use,
+        );
         self.roster_slot_of(did)
             .filter(|slot_id| self.slots.get(slot_id).is_none_or(SlotLedger::is_free))
     }
@@ -842,32 +868,32 @@ impl OnionAdmissionState {
             return Ok(slot_id);
         }
         let floor_use = self.floor_use_at(quantum);
+        let cleanest = self.cleanest_free_slot(&floor_use, quantum);
         if let Some(slot_id) = self.roster_slot_of(did).filter(|slot_id| {
             self.slots.get(slot_id).is_none_or(SlotLedger::is_free)
-                && self.is_cleanest_free_roster_slot(*slot_id, &floor_use)
+                && self.is_cleanest_free_roster_slot(*slot_id, cleanest, &floor_use, quantum)
         }) {
             return Ok(slot_id);
         }
-        if let Some(slot_id) = self.acquire_roster_slot(did, &floor_use) {
+        if let Some(slot_id) = self.acquire_roster_slot(did, cleanest, &floor_use) {
             return Ok(slot_id);
         }
-        self.cleanest_free_slot(&floor_use)
-            .ok_or(OnionLinkTableFull)
+        cleanest.ok_or(OnionLinkTableFull)
     }
 
     fn is_cleanest_free_roster_slot(
         &self,
         assigned: OnionSlotId,
+        cleanest: Option<OnionSlotId>,
         floor_use: &SlotFloorUse,
+        quantum: u128,
     ) -> bool {
-        let assigned_use = u16::try_from(assigned.index())
-            .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
-        assigned_use == FloorUse::CLEAN
-            || self.cleanest_free_slot(floor_use).is_none_or(|cleanest| {
-                let cleanest_use = u16::try_from(cleanest.index())
-                    .map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
-                assigned_use <= cleanest_use
-            })
+        let assigned_rank = self.slot_rank(assigned.index(), floor_use, quantum);
+        cleanest.is_none_or(|cleanest| {
+            let cleanest_rank = self.slot_rank(cleanest.index(), floor_use, quantum);
+            (assigned_rank.0, assigned_rank.1, assigned_rank.2)
+                <= (cleanest_rank.0, cleanest_rank.1, cleanest_rank.2)
+        })
     }
 
     /// The floor use `min(load(κ), f) / f` of every charged slot at `quantum` (paper, Def. 1).
@@ -880,19 +906,32 @@ impl OnionAdmissionState {
         }))
     }
 
+    fn slot_rank(
+        &self,
+        index: usize,
+        floor_use: &SlotFloorUse,
+        quantum: u128,
+    ) -> (FloorUse, bool, u32, usize) {
+        let use_at =
+            u16::try_from(index).map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
+        let (has_retained, load) = self
+            .slots
+            .get(&OnionSlotId::new(index))
+            .map_or((false, 0), |slot| {
+                (!slot.retained.is_empty(), slot.ledger.load(quantum))
+            });
+        (use_at, has_retained, load, index)
+    }
+
     /// Cleanest-first slot selection over `0..slot_capacity`.
-    fn cleanest_free_slot(&self, floor_use: &SlotFloorUse) -> Option<OnionSlotId> {
+    fn cleanest_free_slot(&self, floor_use: &SlotFloorUse, quantum: u128) -> Option<OnionSlotId> {
         (0..self.slot_capacity)
             .filter(|&index| {
                 self.slots
                     .get(&OnionSlotId::new(index))
                     .is_none_or(SlotLedger::is_free)
             })
-            .min_by_key(|&index| {
-                let use_at =
-                    u16::try_from(index).map_or(FloorUse::CLEAN, |slot_u16| floor_use.of(slot_u16));
-                (use_at, index)
-            })
+            .min_by_key(|&index| self.slot_rank(index, floor_use, quantum))
             .map(OnionSlotId::new)
     }
 

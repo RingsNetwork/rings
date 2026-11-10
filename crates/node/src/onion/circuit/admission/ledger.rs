@@ -84,7 +84,8 @@ impl QuantumLedger {
         // the fold from its head is total.
         let [head, tail @ ..] = &mut next.charges;
         let cell = tail.iter_mut().fold(head, |best, charge| {
-            if (charge.quantum != quantum, charge.quantum) < (best.quantum != quantum, best.quantum)
+            if (charge.quantum != quantum, charge.quantum, charge.units)
+                < (best.quantum != quantum, best.quantum, best.units)
             {
                 charge
             } else {
@@ -103,6 +104,44 @@ impl QuantumLedger {
             units: charged,
         };
         Some(next)
+    }
+
+    /// Merge the in-window charges of `other` at `quantum` into `self`, saturating at `cap` over
+    /// the window `(quantum − N, quantum]`.
+    pub(super) fn merge_in_window(mut self, quantum: u128, other: &Self, cap: u32) -> Self {
+        for charge in &other.charges {
+            if charge.units == 0 || !Self::in_window(charge.quantum, quantum) {
+                continue;
+            }
+            let headroom = cap.saturating_sub(self.load(quantum));
+            let added = charge.units.min(headroom);
+            if added == 0 {
+                continue;
+            }
+            let [head, tail @ ..] = &mut self.charges;
+            let cell = tail.iter_mut().fold(head, |best, current| {
+                if (
+                    current.quantum != charge.quantum,
+                    current.quantum,
+                    current.units,
+                ) < (best.quantum != charge.quantum, best.quantum, best.units)
+                {
+                    current
+                } else {
+                    best
+                }
+            });
+            let units = if cell.quantum == charge.quantum {
+                cell.units.saturating_add(added)
+            } else {
+                added
+            };
+            *cell = QuantumCharge {
+                quantum: charge.quantum,
+                units,
+            };
+        }
+        self
     }
 
     /// Whether quantum `r` lies in the window `(s − N, s]`. Quanta after `s` are counted as well,

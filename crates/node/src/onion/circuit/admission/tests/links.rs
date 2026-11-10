@@ -1025,7 +1025,7 @@ fn test_reconnecting_peer_does_not_colocate_onto_occupied_live_slot() {
     assert_ne!(attacker_slot, OnionSlotId::new(0));
     assert_eq!(attacker_slot, OnionSlotId::new(1));
 
-    let attacker_remaining = ONION_ADMISSION_SENDER_UNITS - 2;
+    let attacker_remaining = ONION_ADMISSION_SENDER_UNITS - 3;
     assert_eq!(
         send_on(
             &mut admission,
@@ -1166,6 +1166,93 @@ fn test_reconnect_with_zero_new_charges_retains_prior_charge_until_window_expire
             generation(1, 2),
             1,
             layer(x, 2)
+        ),
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
+    );
+}
+
+/// Regression (#1224): cleanest-first free-slot selection prefers unretained and lower-total-load
+/// slots over exhausted grace-period slots whose `FloorUse` saturates at `f`, and a peer forced
+/// onto a new slot during its grace period retains its spent window charge.
+#[test]
+fn test_grace_period_slot_ranking_and_relocated_peer_charge_preservation() {
+    const R: usize = 1;
+    let mut rng = StdRng::seed_from_u64(0x1224_0004);
+    let mut admission = state_with(&mut rng, EPOCH, R, 0..0);
+    let x = latest_expiry(ORIGIN_MS);
+
+    // Peer 1 on slot 0 spends its entire sender budget `B` and disconnects into its grace period.
+    open(&mut admission, ORIGIN_MS, generation(1, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(1_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(1, 0),
+            ONION_ADMISSION_SENDER_UNITS,
+            layer(x, 1)
+        ),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(1, 0));
+
+    // Peer 2 on slot 1 spends exactly the floor `f` (`FloorUse = 1.0`, matching slot 0's saturated
+    // `FloorUse`), then we clear `retained` on slot 1 to model an unretained residual slot at `f`.
+    open(&mut admission, ORIGIN_MS, generation(2, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(2_u32)),
+        Some(OnionSlotId::new(1))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(2, 0),
+            ONION_ADMISSION_SLOT_FLOOR_UNITS,
+            layer(x, 2)
+        ),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(2, 0));
+    if let Some(slot1) = admission.slots.get_mut(&OnionSlotId::new(1)) {
+        slot1.retained.clear();
+    }
+    admission.peer_slots.remove(&Did::from(2_u32));
+
+    // Both slots 0 and 1 are free and have `FloorUse == 1.0`, but slot 0 is a retained
+    // grace-period slot at `load = B` whereas slot 1 is unretained at `load = f`. An arriving
+    // honest peer `10` must be assigned to slot 1, not slot 0.
+    open(&mut admission, ORIGIN_MS + 1, generation(10, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(10_u32)),
+        Some(OnionSlotId::new(1))
+    );
+
+    // Now honest peer `11` takes the only remaining free slot (slot 0), occupying peer `1`'s
+    // grace-period slot. When peer `1` reconnects after `10` closes slot 1, peer `1` is relocated
+    // onto slot 1 and must retain its spent window charge `B`.
+    open(&mut admission, ORIGIN_MS + 2, generation(11, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(11_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    admission.link_closed(ORIGIN_MS + 2, generation(10, 0));
+
+    open(&mut admission, ORIGIN_MS + 3, generation(1, 1));
+    assert_eq!(
+        admission.slot_of(Did::from(1_u32)),
+        Some(OnionSlotId::new(1))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 3,
+            generation(1, 1),
+            1,
+            layer(x, 3)
         ),
         Verdict::Unpaid(OnionChargeRejection::SenderBudget)
     );
