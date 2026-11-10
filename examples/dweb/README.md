@@ -34,7 +34,7 @@ cargo install trunk          # one-time
 trunk serve                  # → http://localhost:8080
 ```
 
-Open two instances, paste one node's DID into the other's "peer DID" box, and fetch `/`.
+Note that `examples/dweb` intentionally omits SDP/peer-connection UI controls and focuses on the `dweb` protocol handler (`build_node` initializes and listens on a browser `Provider` and installs `window.rings` via `provider.set_backend()`). Before fetching `/` from a second browser instance by DID, connect the two peers through the `rings-node` browser `Provider` APIs in the DevTools console (for example `window.rings.request("createOffer" / "answerOffer" / "acceptAnswer", ...)` or `connectPeerViaHttp`, as shown in `tests::connect` in `src/lib.rs`), then paste the peer's DID into the "peer DID" box and click `fetch`.
 
 ## Test
 
