@@ -87,7 +87,7 @@ use crate::onion::circuit::OnionAdmissionLayer;
 use crate::onion::circuit::OnionAdmissionRejection;
 use crate::onion::circuit::OnionAdmissionState;
 use crate::onion::circuit::OnionExpiry;
-use crate::onion::OnionServiceName;
+use crate::onion::signature::OnionShape;
 
 /// `|υ| = |next| + |χ| + |σ| + |x| = 20 + 2919 + 32 + 8 = 2979`, the encoded width of a reply block
 /// in a `credit` frame (#834 D8).
@@ -148,8 +148,8 @@ pub(crate) enum OnionStep {
     /// A symbol hop received its input: the application, its value and the reply block of its
     /// output.
     Consumed {
-        /// `f_i`.
-        symbol: OnionServiceName,
+        /// `f_i ∈ Σ_I ⊎ Σ_W`.
+        symbol: OnionShape,
         /// `ā_i`.
         arguments: OnionArguments,
         /// `v`, a view into the received buffer, zeroized on drop.

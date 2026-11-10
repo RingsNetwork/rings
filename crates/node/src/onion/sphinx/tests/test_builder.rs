@@ -34,6 +34,7 @@ use crate::onion::OnionLoop;
 use crate::onion::OnionLoopRelay;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
+use crate::onion::OnionShape;
 
 /// The DID the client of the fixture loop receives at.
 fn client() -> Did {
@@ -77,7 +78,7 @@ fn test_built_loop_runs_through_paid_hops() {
     rng.fill_bytes(&mut arguments);
     let arguments = OnionArguments::new(arguments);
     let application = OnionApplication {
-        symbol: OnionServiceName::tcp(),
+        symbol: OnionServiceName::tcp().into(),
         arguments,
     };
     let input = rng.gen::<[u8; 32]>();
@@ -174,7 +175,7 @@ fn test_credit_surb_reaches_the_client_under_its_own_key() {
 fn test_applications_must_match_the_symbol_positions() {
     let mut rng = fixture_rng(72);
     let application = OnionApplication {
-        symbol: OnionServiceName::https(),
+        symbol: OnionServiceName::https().into(),
         arguments: OnionArguments::new([0; 64]),
     };
     for applications in [Vec::new(), vec![application.clone(), application]] {
@@ -213,7 +214,7 @@ fn two_symbol_loop(keys: &[DelegateeKey; 7]) -> OnionLoop<OnionRouteHop> {
 /// The applications `tcp(ā₁)` at `h₁` and `tcp(ā₂)` at `h₂`.
 fn two_applications(first: [u8; 64], second: [u8; 64]) -> [OnionApplication; 2] {
     [first, second].map(|arguments| OnionApplication {
-        symbol: OnionServiceName::tcp(),
+        symbol: OnionServiceName::tcp().into(),
         arguments: OnionArguments::new(arguments),
     })
 }
@@ -243,7 +244,7 @@ fn consume(
     bytes: Vec<u8>,
     key: &DelegateeKey,
 ) -> (
-    OnionServiceName,
+    OnionShape,
     OnionArguments,
     Vec<u8>,
     Box<crate::onion::sphinx::cell::OnionSurb>,

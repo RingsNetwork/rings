@@ -59,6 +59,7 @@ use super::admission::OnionReplayFilterKey;
 use super::codec::OnionLinkFact;
 use super::hop::hop;
 use super::hop::OnionHopOutcome;
+use super::invoke::OnionInvokeRegistry;
 use super::OnionCircuitInput;
 use super::OnionClientTags;
 use super::OnionLink;
@@ -68,6 +69,7 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
+use crate::onion::signature::OnionShape;
 use crate::onion::sphinx::carry::OnionCarryValue;
 use crate::onion::sphinx::cell::OnionStep;
 use crate::onion::sphinx::cell::OnionSurb;
@@ -109,34 +111,33 @@ pub(crate) trait OnionInterpretation: MaybeSendSync {
     fn lose(&self, peer: Did);
 }
 
-/// The partial Σ-algebra of one node: `⟦−⟧ : Σ_n ⇀ Kl(M)`, `Σ_n ⊆ Σ_W`.
+/// The partial Σ-algebra of one node: `⟦−⟧ : Reg_n ⇀ Kl(M)` (#834 D2).
 ///
-/// A node registers symbols, never applications (#834 D2): each entry maps one world-facing
-/// symbol it serves to its interpretation, so the registered keys are exactly `Σ_n`. `relay` is
-/// not a service name and is interpreted by the hop step itself.
-///
-/// ```text
-/// Consumed(f, …) ──table(f)──▶ Some ⟦f⟧ ──▶ ⟦f⟧(scope, input)
-///                          └──▶ None     ──▶ dropped (f ∉ Σ_n)
-/// ```
-///
-/// Law: registering a symbol again replaces its interpretation.
+/// Maps each registered world-facing symbol `f ∈ Σ_W` to its session interpretation, and
+/// delegates intermediate `(shape, backend)` pairs in `Σ_I × Ω` to [`OnionInvokeRegistry`].
 #[derive(Default)]
 pub(crate) struct OnionAlgebra {
     interpretations:
         BTreeMap<OnionServiceName, Box<rings_runtime::maybe_send_sync!(dyn OnionInterpretation)>>,
+    invokes: OnionInvokeRegistry,
 }
 
 impl OnionAlgebra {
-    /// `⟦−⟧.lose(peer)`: every interpretation fails closed its sessions that ride the link to
-    /// `peer`.
+    /// Attach the shared intermediate `invoke` registry to this algebra.
+    pub(crate) fn with_invokes(mut self, invokes: OnionInvokeRegistry) -> Self {
+        self.invokes = invokes;
+        self
+    }
+
+    /// `⟦−⟧.lose(peer)`: every world-facing interpretation fails closed its sessions that ride
+    /// the link to `peer` (intermediate `invoke` symbols are stateless one-shot evaluations).
     fn lose(&self, peer: Did) {
         self.interpretations
             .values()
             .for_each(|interpretation| interpretation.lose(peer));
     }
 
-    /// Register `interpretation` as `⟦symbol⟧`.
+    /// Register `interpretation` as `⟦symbol⟧` for a world-facing symbol.
     pub(crate) fn register(
         mut self,
         symbol: OnionServiceName,
@@ -147,7 +148,7 @@ impl OnionAlgebra {
         self
     }
 
-    /// Return `Σ_n`, the symbols this algebra interprets, in name order.
+    /// Return `Σ_W,n`, the world-facing symbols this algebra interprets, in name order.
     #[cfg(all(test, rings_native))]
     pub(crate) fn symbols(&self) -> impl Iterator<Item = &OnionServiceName> {
         self.interpretations.keys()
@@ -157,18 +158,21 @@ impl OnionAlgebra {
     async fn evaluate(
         &self,
         scope: &Scope,
-        symbol: &OnionServiceName,
+        symbol: &OnionShape,
         input: OnionApplicationInput,
     ) -> Result<()> {
-        match self.interpretations.get(symbol) {
-            Some(interpretation) => interpretation.evaluate(scope, input).await,
-            None => {
-                tracing::debug!(
-                    symbol = symbol.as_str(),
-                    "drop an onion application of an unregistered symbol"
-                );
-                Ok(())
-            }
+        match symbol {
+            OnionShape::WorldFacing(service) => match self.interpretations.get(service) {
+                Some(interpretation) => interpretation.evaluate(scope, input).await,
+                None => {
+                    tracing::debug!(
+                        symbol = service.as_str(),
+                        "drop an onion application of an unregistered symbol"
+                    );
+                    Ok(())
+                }
+            },
+            OnionShape::Invoke(shape) => self.invokes.evaluate(scope, *shape, input),
         }
     }
 }

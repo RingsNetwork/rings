@@ -47,6 +47,13 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
 
+mod pipeline;
+
+pub(crate) use pipeline::select_onion_pipeline_route_from_candidates;
+pub use pipeline::OnionPipelineRoute;
+pub(crate) use pipeline::OnionPipelineRouteCandidates;
+pub use pipeline::OnionPipelineRouteRequest;
+
 /// Route-building request for an onion loop.
 ///
 /// The request names one world-facing symbol, which stands alone in its pipeline (#834 D4a), so

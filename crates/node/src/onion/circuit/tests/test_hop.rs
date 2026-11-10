@@ -135,7 +135,7 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
     else {
         panic!("h consumes");
     };
-    assert_eq!(symbol, OnionServiceName::tcp());
+    assert_eq!(symbol, OnionServiceName::tcp().into());
     assert_eq!(OnionSessionArguments::decode(&consumed), Some(arguments()));
     assert_eq!(value.as_slice(), b"client value");
 

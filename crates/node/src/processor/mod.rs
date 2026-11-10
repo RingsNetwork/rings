@@ -289,7 +289,7 @@ impl Processor {
 
     /// The registry entry under `topic` whose elements are `descriptors`.
     #[cfg(all(test, feature = "node"))]
-    fn registry_entry<D: RegistryElement>(
+    pub(crate) fn registry_entry<D: RegistryElement>(
         topic: &str,
         descriptors: Vec<D>,
     ) -> Result<entry::Entry> {
@@ -358,6 +358,41 @@ impl Processor {
         };
 
         Ok(self.select_onion_exits_from_entry(&entry, service, include_expired))
+    }
+
+    /// List signed intermediate `invoke` descriptors from [`crate::onion::ONION_INVOKES_TOPIC`],
+    /// optionally filtered by `shape` and/or canonical `backend` name.
+    pub async fn lookup_onion_invokes(
+        &self,
+        shape: Option<crate::onion::OnionInvokeShape>,
+        backend: &str,
+        include_expired: bool,
+    ) -> Result<Vec<crate::onion::OnionInvokeDescriptor>> {
+        let entry_key = entry::Entry::gen_did(crate::onion::ONION_INVOKES_TOPIC)?;
+        let backend = backend.trim();
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+        Ok(
+            crate::onion::OnionInvokeDescriptor::latest_valid_by_symbol_did(
+                crate::onion::OnionInvokeRegistration::descriptors_from_entry(&entry),
+                get_epoch_ms(),
+                self.swarm.network_id(),
+                include_expired,
+            )
+            .into_iter()
+            .filter(|desc| shape.is_none_or(|wanted| desc.shape == wanted))
+            .filter(|desc| backend.is_empty() || desc.backend.as_str() == backend)
+            .collect(),
+        )
+    }
+
+    /// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline.
+    pub async fn build_onion_pipeline_route(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
     }
 
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
@@ -902,6 +937,10 @@ impl OnionDirectoryReader for Processor {
 
     async fn live_onion_exits(&self, service: &str) -> Result<Vec<OnionExitDescriptor>> {
         self.lookup_onion_exits(service, false).await
+    }
+
+    async fn live_onion_invokes(&self) -> Result<Vec<crate::onion::OnionInvokeDescriptor>> {
+        self.lookup_onion_invokes(None, "", false).await
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {

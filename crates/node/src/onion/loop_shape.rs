@@ -123,9 +123,7 @@ impl<'s, S> OnionPipelineSymbols<'s, S> {
         }
     }
 
-    /// The pipeline `symbols`, or `None` when it is empty. Multi-symbol pipelines are drawn only in
-    /// tests until Phase 2b registers intermediate symbols.
-    #[cfg(test)]
+    /// The pipeline `symbols`, or `None` when it is empty.
     pub(crate) fn new(symbols: &'s [S]) -> Option<Self> {
         symbols.split_last().map(|(terminal, intermediate)| Self {
             all: symbols,
@@ -278,6 +276,32 @@ impl<P, T> OnionLoop<P, T> {
                 tail: self.tail,
             },
             self.terminal,
+        )
+    }
+    /// Relabel every symbol position by `project` and return all `n` symbol labels in pipeline
+    /// order beside the relabelled loop: `OnionLoop<P, T> → OnionLoop<P> × Vec<T>`.
+    pub(crate) fn project_all_symbols(self, project: impl Fn(&T) -> P) -> (OnionLoop<P>, Vec<T>) {
+        let mut symbols = Vec::with_capacity(self.stages.len() + 1);
+        let stages = self
+            .stages
+            .into_iter()
+            .map(|(symbol, relays)| {
+                let mapped = project(&symbol);
+                symbols.push(symbol);
+                (mapped, relays)
+            })
+            .collect();
+        let terminal = project(&self.terminal);
+        symbols.push(self.terminal);
+        (
+            OnionLoop {
+                guard: self.guard,
+                lead: self.lead,
+                stages,
+                terminal,
+                tail: self.tail,
+            },
+            symbols,
         )
     }
 }

@@ -2,12 +2,14 @@
 //! table, their first cells on the link to the guard (#834 D4, D6′, D8).
 //!
 //! ```text
-//! send(route, (f, ā), b, v, s):  x ← ⌈now / Q⌉·Q + X₀
-//!                                (cell, t_⋄, k) ← build_loop(route, (f, ā), me, b, x, v)
-//!                                T ← T ∪ {t_⋄ ↦ (k, x, s)};  guard ← cell   (awaited)
-//! enqueue(…):                    the same, with the cell queued on the guard's lane
-//! surbs(route, b, n, s):         n × (υ, t, k) ← build_surb(return path, me, b, x)
-//!                                T ← T ∪ {t ↦ (k, x, s)};  return υ₁ … υₙ
+//! send(route, (f, ā), b, v, s):      x ← ⌈now / Q⌉·Q + X₀
+//!                                    (cell, t_⋄, k) ← build_loop(route, (f, ā), me, b, x, v)
+//!                                    T ← T ∪ {t_⋄ ↦ (k, x, s)};  guard ← cell   (awaited)
+//! send_pipeline(route, P, b, v₀):    (cell, t_⋄, k) ← build_loop(route, P, me, b, x, v₀)
+//!                                    T ← T ∪ {t_⋄ ↦ (k, x, oneshot(W(fₙ)))};  guard ← cell
+//! enqueue(…):                        the same, with the cell queued on the guard's lane
+//! surbs(route, b, n, s):             n × (υ, t, k) ← build_surb(return path, me, b, x)
+//!                                    T ← T ∪ {t ↦ (k, x, s)};  return υ₁ … υₙ
 //! ```
 //!
 //! Law: every loop and reply block leaves its reply key in `T` before its cell leaves the node,
@@ -15,6 +17,7 @@
 
 use std::slice;
 
+use futures::channel::oneshot;
 use rings_core::dht::Did;
 use rings_core::utils::get_epoch_ms;
 
@@ -26,6 +29,9 @@ use super::OnionReplySink;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::onion::pipeline::ensure_pipeline_input_width;
+use crate::onion::pipeline::OnionInvokePipeline;
+use crate::onion::route::OnionPipelineRoute;
 use crate::onion::sphinx::builder::build_loop;
 use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::cell::OnionCell;
@@ -61,15 +67,14 @@ impl OnionLoopClient {
         }
     }
 
+    /// Remove an unspent tag entry (used on local timeout/drop of a one-shot pipeline).
+    pub(crate) fn remove_tag(&self, tag: &OnionLoopTag) {
+        self.tags.remove(tag);
+    }
+
     /// Send `value` into a fresh loop of `route` that applies `application` at its symbol hop,
     /// in class `class`, awaiting its reply at `sink`; returns the loop's expiry `x` once the
-    /// first cell has left for the guard. The caller waits for the link: this is the departure
-    /// of stream data, whose waiting is the upload's backpressure.
-    ///
-    /// # Errors
-    ///
-    /// A build failure (a value too wide for the class, or a negligible key failure), or the
-    /// link send's error.
+    /// first cell has left for the guard.
     pub(crate) async fn send(
         &self,
         scope: &Scope,
@@ -87,13 +92,7 @@ impl OnionLoopClient {
         Ok(expiry)
     }
 
-    /// [`Self::send`] without waiting for the link: the loop is queued on the guard's lane. This
-    /// is the departure of a session's control loops (its open, credit and keep-alive), which
-    /// must never hold up the session's replies.
-    ///
-    /// # Errors
-    ///
-    /// A build failure, or a full lane.
+    /// [`Self::send`] without waiting for the link: the loop is queued on the guard's lane.
     pub(crate) fn enqueue(
         &self,
         scope: &Scope,
@@ -109,6 +108,61 @@ impl OnionLoopClient {
             return Err(error);
         }
         Ok(expiry)
+    }
+
+    /// Build and dispatch a multi-stage one-shot Kleisli `pipeline` over `route` in `class`,
+    /// registering its one-shot reply tag before sending the first cell to the guard (#834 D4, L3).
+    pub(crate) async fn send_pipeline(
+        &self,
+        scope: &Scope,
+        route: &OnionPipelineRoute,
+        pipeline: &OnionInvokePipeline,
+        class: OnionLoopClass,
+        input: &[u8],
+    ) -> Result<(oneshot::Receiver<Vec<u8>>, OnionLoopTag, OnionExpiry)> {
+        if !route.matches_pipeline(pipeline) {
+            return Err(Error::OnionRouteError(
+                OnionRouteError::PipelineRouteMismatch,
+            ));
+        }
+        ensure_pipeline_input_width(pipeline, input)?;
+        let min_class = pipeline.loop_class();
+        if class < min_class {
+            return Err(Error::OnionRouteError(OnionRouteError::LoopBuild(format!(
+                "loop class {class:?} is narrower than required {min_class:?}"
+            ))));
+        }
+        let now_ms = get_epoch_ms();
+        let expiry = OnionExpiry::of_build(now_ms);
+        let applications = pipeline.applications();
+        let built = build_loop(
+            route.hops(),
+            applications.as_slice(),
+            self.local,
+            class,
+            expiry,
+            input,
+            &mut rand::thread_rng(),
+        )
+        .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
+        let tag = built.reply.tag;
+        let (sender, receiver) = oneshot::channel();
+        self.tags.register_oneshot(
+            now_ms,
+            built.guard,
+            built.reply,
+            pipeline.output_bytes(),
+            sender,
+        )?;
+        if let Err(error) = self
+            .link_sender
+            .send(scope.clone(), OnionLink::new(built.guard), built.cell)
+            .await
+        {
+            self.tags.remove(&tag);
+            return Err(error);
+        }
+        Ok((receiver, tag, expiry))
     }
 
     /// Build one loop and register its reply key in `T` (the module law: before its cell

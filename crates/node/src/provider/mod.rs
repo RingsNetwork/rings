@@ -182,6 +182,13 @@ impl Provider {
         }
     }
 
+    /// Cross-platform handle for registering intermediate `invoke` backends and evaluating
+    /// multi-stage Kleisli pipelines on this provider's onion runtime (#834 Phase 2b).
+    pub fn onion_pipeline(&self) -> Result<crate::onion::OnionPipelineHandle> {
+        self.onion_runtime()
+            .map(crate::onion::OnionPipelineHandle::new)
+    }
+
     /// The drop counters the [`Backend`] serving this provider's application inbox records in.
     pub(crate) fn dispatch_drops(&self) -> Arc<DispatchDrops> {
         Arc::clone(&self.dispatch_drops)

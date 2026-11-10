@@ -273,7 +273,7 @@ async fn test_failed_loop_enqueue_and_credit_rollback_leave_no_orphaned_tags() {
         ONION_CIRCUIT_NAMESPACE.to_string(),
     );
     let application = OnionApplication {
-        symbol: OnionServiceName::tcp(),
+        symbol: crate::onion::signature::OnionShape::WorldFacing(OnionServiceName::tcp()),
         arguments: super::arguments().encode(),
     };
     let (sink, _replies) = mpsc::channel(8);
