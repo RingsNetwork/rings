@@ -132,7 +132,7 @@ pub struct PeerRing {
     /// refuses and never evicts, given by [`Self::with_removal_storage`]; an in-memory one until
     /// then, whose loss at a restart makes this node a fresh replica (removal-stability paper,
     /// Section IV).
-    pub(crate) removal_storage: RemovalStorage,
+    pub(crate) removal_storage: Arc<RemovalStorage>,
     /// The charge index of [`Self::removal_storage`](PeerRing#structfield.removal_storage).
     removal_index: RemovalIndex,
     /// The connection slots of this node, which every table under slot accounting charges
@@ -270,7 +270,7 @@ impl PeerRing {
             bridged: Mutex::new(BTreeMap::new()),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
-            removal_storage: Box::new(MemStorage::new()),
+            removal_storage: Arc::new(Box::new(MemStorage::new())),
             removal_index: RemovalIndex::new(TableAccounting::new(REMOVAL_SHARES)),
             edges,
             relay_storage: None,
@@ -314,7 +314,7 @@ impl PeerRing {
     /// [`Self::removal_storage`](PeerRing#structfield.removal_storage)): a retained store, which
     /// refuses and never evicts (#920).
     pub fn with_removal_storage(mut self, storage: RemovalStorage) -> Self {
-        self.removal_storage = storage;
+        self.removal_storage = Arc::new(storage);
         self
     }
 
@@ -335,6 +335,12 @@ impl PeerRing {
     /// The floor use of every slot in the removal store at `now_ms` (load-bounds paper, Def. 1).
     pub(crate) fn removal_floor_use_at(&self, now_ms: u128) -> SlotFloorUse {
         self.removal_index.floor_use_at(now_ms)
+    }
+
+    /// The number of items held by `principal` in the removal store's accounting.
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn removal_held(&self, principal: crate::fair_admission::Principal) -> usize {
+        self.removal_index.held(principal)
     }
 
     /// This ring replicating relay custody as `replication` says (#777).
