@@ -699,18 +699,16 @@ async fn test_failed_irrevocable_send_retires_before_preserving_its_error() {
 
 /// Model `webrtc 0.17.1`'s `RTCPeerConnection::close()`: the first invocation sets `is_closed`
 /// and waits on `release`; any second invocation returns `Ok(())` immediately without waiting.
-fn webrtc_like_close(
+async fn webrtc_like_close(
     invocations: Arc<AtomicUsize>,
     started: Arc<AtomicBool>,
     release: Arc<tokio::sync::Notify>,
-) -> impl Future<Output = Result<()>> + Send + 'static {
-    async move {
-        if invocations.fetch_add(1, Ordering::AcqRel) == 0 {
-            started.store(true, Ordering::Release);
-            release.notified().await;
-        }
-        Ok(())
+) -> Result<()> {
+    if invocations.fetch_add(1, Ordering::AcqRel) == 0 {
+        started.store(true, Ordering::Release);
+        release.notified().await;
     }
+    Ok(())
 }
 
 #[tokio::test]
