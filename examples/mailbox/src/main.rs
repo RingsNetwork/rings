@@ -15,7 +15,6 @@ use rings_mailbox_example::node::EmbeddedNode;
 use rings_mailbox_example::outbound::DnsExchangers;
 use rings_mailbox_example::receive;
 use rings_node::mail::registration::MailOffer;
-use rings_node::prelude::rings_core::lifecycle::StopToken;
 
 /// The mailbox `me@<did>.<zone>`: SMTP in, IMAP out, served through a Rings DNS relay; or, with
 /// `--rings-config`, the mailbox `<did>@<domain>` of the node it runs, through mail gateways.
@@ -94,6 +93,7 @@ async fn main() -> ExitCode {
         Ok(exchangers) => Arc::new(exchangers),
         Err(error) => {
             eprintln!("cannot read the system's DNS configuration: {error}");
+            let _ = close_optional_node(node).await;
             return ExitCode::FAILURE;
         }
     };
@@ -111,21 +111,25 @@ async fn main() -> ExitCode {
         Ok(running) => running,
         Err(error) => {
             eprintln!("{error}");
+            let _ = close_optional_node(node).await;
             return ExitCode::FAILURE;
         }
     };
-    if let Some(node) = &node {
+    if let Some(embedded) = &node {
         let records = config.dir.join("recipient");
         let store = Arc::clone(&running.store);
-        match receive::recipient(Arc::clone(&node.processor), store, &records).await {
+        let recipient_stop = embedded.stop_token();
+        match receive::recipient(Arc::clone(&embedded.processor), store, &records).await {
             Ok(recipient) => {
                 running
                     .tasks
-                    .spawn(async move { recipient.run(StopToken::never()).await });
+                    .spawn(async move { recipient.run(recipient_stop).await });
                 println!("mailbox:     {label}@<any gateway domain>");
             }
             Err(error) => {
                 eprintln!("{error}");
+                drop(running);
+                let _ = close_optional_node(node).await;
                 return ExitCode::FAILURE;
             }
         }
@@ -145,10 +149,34 @@ async fn main() -> ExitCode {
         running.user,
         config.dir.join("password").display()
     );
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => ExitCode::SUCCESS,
+    let exit = tokio::select! {
+        signal = node::shutdown_signal() => match signal {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("shutdown signal failed: {error}");
+                ExitCode::FAILURE
+            }
+        },
         _ = running.tasks.join_next() => ExitCode::FAILURE,
         () = node_ended(node.as_mut()) => ExitCode::FAILURE,
+    };
+    drop(running);
+    if !close_optional_node(node).await {
+        return ExitCode::FAILURE;
+    }
+    exit
+}
+
+async fn close_optional_node(node: Option<EmbeddedNode>) -> bool {
+    let Some(node) = node else {
+        return true;
+    };
+    match node.close().await {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("{error}");
+            false
+        }
     }
 }
 

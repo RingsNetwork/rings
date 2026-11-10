@@ -342,3 +342,45 @@ async fn test_browser_provider_storage_lock_enforces_one_node_per_storage_name()
     )
     .await;
 }
+
+/// JS-exported `provider.close()` stops background tasks and listener generations, closes peer
+/// connections, and releases the Web Lock (#1055, #1226) so JS callers can reopen the same
+/// `storage_name` immediately.
+#[wasm_bindgen_test]
+async fn test_js_exported_provider_close_releases_storage_lock() {
+    with_hang_guard(
+        "test_js_exported_provider_close_releases_storage_lock",
+        TEST_HANG_GUARD,
+        async {
+            let storage_name = format!("rings-js-close-test-{}", uuid::Uuid::new_v4());
+            let js_provider = JsFuture::from(Provider::new_provider_with_storage(
+                storage_lock_config(),
+                storage_name.clone(),
+            ))
+            .await
+            .expect("JS provider constructs");
+
+            let start_and_close = js_sys::Function::new_with_args(
+                "provider",
+                r#"
+                const listener = provider.listen();
+                return listener.started().then(() => provider.close()).then(() => listener.task());
+                "#,
+            );
+            let close_promise: js_sys::Promise = start_and_close
+                .call1(&wasm_bindgen::JsValue::NULL, &js_provider)
+                .expect("JS close() returns a promise")
+                .into();
+            JsFuture::from(close_promise)
+                .await
+                .expect("JS close() resolves cleanly");
+
+            let reopened =
+                Provider::new_browser_provider_with_storage(storage_lock_config(), storage_name)
+                    .await
+                    .expect("same storage_name reopens after JS provider.close()");
+            reopened.close().await.unwrap();
+        },
+    )
+    .await;
+}
