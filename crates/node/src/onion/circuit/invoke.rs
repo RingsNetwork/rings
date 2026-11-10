@@ -112,7 +112,7 @@ pub(crate) enum OnionInvokeDrop {
         completed_at_ms: u128,
         release_at_ms: u128,
     },
-    /// Output length did not match `W(f)` (L3: fail closed, never truncate or mis-pad).
+    /// Output length did not match `W(f)` (L3: fail closed, never truncate or improperly pad).
     #[error("invoke output of {actual} bytes does not match W(f) = {expected} bytes")]
     OutputWidth { actual: usize, expected: usize },
     /// SURB expired at or before `release_at_ms`.
