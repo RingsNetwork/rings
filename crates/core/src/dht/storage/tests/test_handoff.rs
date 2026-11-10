@@ -330,7 +330,8 @@ async fn test_stale_sync_ack_from_prior_custody_incarnation_retains_reacquired_s
     // Incarnation 0: store `value`, acknowledge hand-off, and verify local cleanup.
     node.storage.put(&key.to_string(), &value).await?;
     let old_ack = SyncedEntryAck::new(key, value.clone());
-    node.acknowledge_synced_entries(&[old_ack.clone()]).await?;
+    node.acknowledge_synced_entries(std::slice::from_ref(&old_ack))
+        .await?;
     assert!(node.storage.get(&key.to_string()).await?.is_none());
 
     // Re-acquire the exact same `value` at incarnation 1; a delayed `old_ack` from incarnation 0
