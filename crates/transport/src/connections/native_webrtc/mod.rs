@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
@@ -64,6 +65,7 @@ use crate::ice_server::IceServer;
 use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
+use crate::sync_utils::lock_recover;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod close_actor;
@@ -87,11 +89,11 @@ use host_candidates::sdp_extra_host_candidates;
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
 use send_operation::prepare_native;
+use send_runtime::native_close_task_stopped;
 use send_runtime::native_send_runtime;
 use send_runtime::run_irrevocable_send;
 #[cfg(test)]
 use send_runtime::run_irrevocable_send_with_timeout;
-use send_runtime::run_native_close_task;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
 
@@ -256,30 +258,145 @@ pub struct WebrtcConnection {
     callback: Arc<InnerTransportCallback>,
 }
 
-/// Write side of [`NativePhysicalCloseWitness`]: the fact "`RTCPeerConnection::close()`
-/// succeeded", published at most once and never retracted.
+/// Shared error representation for coalesced native physical-close waiters.
 ///
-/// The cell is a watch channel, so the fact is a stored state rather than a pulse: a witness
-/// subscribed before or after the publication observes it alike, and the channel closes when the
-/// last holder (the connection or a detached close task) drops without publishing.
+/// The first waiter takes the original [`Error`] directly when available; any concurrent or
+/// later waiter reconstructs an equivalent typed [`Error`] without requiring [`Error`] to be
+/// globally `Clone`.
 #[derive(Clone)]
-struct PhysicalCloseCompletion(Arc<watch::Sender<bool>>);
+struct SharedCloseFailure {
+    primary: Arc<std::sync::Mutex<Option<Error>>>,
+    webrtc_error: Option<String>,
+    timeout_ms: Option<u128>,
+    fallback_message: String,
+}
 
-impl PhysicalCloseCompletion {
-    /// A cell that has not observed a successful close.
-    fn new() -> Self {
-        Self(Arc::new(watch::channel(false).0))
+impl SharedCloseFailure {
+    fn from_error(error: Error) -> Self {
+        let webrtc_error = match &error {
+            Error::Webrtc(err) => Some(err.to_string()),
+            _ => None,
+        };
+        let timeout_ms = match &error {
+            Error::NativeConnectionRetirementTimeout { timeout_ms } => Some(*timeout_ms),
+            _ => None,
+        };
+        let fallback_message = error.to_string();
+        Self {
+            primary: Arc::new(std::sync::Mutex::new(Some(error))),
+            webrtc_error,
+            timeout_ms,
+            fallback_message,
+        }
     }
 
-    /// Record that the physical close succeeded; idempotent.
-    fn publish(&self) {
-        self.0.send_replace(true);
+    fn into_error(self) -> Error {
+        if let Some(error) = lock_recover(&self.primary).take() {
+            return error;
+        }
+        if let Some(error) = self.webrtc_error {
+            return Error::Webrtc(webrtc::error::Error::new(error));
+        }
+        if let Some(timeout_ms) = self.timeout_ms {
+            return Error::NativeConnectionRetirementTimeout { timeout_ms };
+        }
+        Error::MessageNotDelivered(self.fallback_message)
+    }
+}
+
+struct SharedCloseTask {
+    outcome_rx: watch::Receiver<Option<std::result::Result<(), SharedCloseFailure>>>,
+    join_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+struct PhysicalCloseState {
+    completed: Arc<watch::Sender<bool>>,
+    task: std::sync::Mutex<Option<SharedCloseTask>>,
+}
+
+/// Write side of [`NativePhysicalCloseWitness`] and single-flight coordinator for one native
+/// connection generation's physical close.
+///
+/// The cell owns both:
+/// - a watch channel storing the monotone fact "`RTCPeerConnection::close()` succeeded", so a
+///   witness subscribed before or after publication observes it alike and the channel closes
+///   when the last holder (the connection or the detached close task) drops without publishing;
+/// - at most one detached physical-close task per connection generation, shared by explicit
+///   `close()` and failed-send retirement callers so concurrent closes never invoke
+///   `RTCPeerConnection::close()` a second time or publish completion before the original
+///   cleanup finishes.
+#[derive(Clone)]
+struct PhysicalCloseCompletion(Arc<PhysicalCloseState>);
+
+impl PhysicalCloseCompletion {
+    /// A cell that has not observed or started a physical close.
+    fn new() -> Self {
+        Self(Arc::new(PhysicalCloseState {
+            completed: Arc::new(watch::channel(false).0),
+            task: std::sync::Mutex::new(None),
+        }))
     }
 
     /// Subscribe a read-only witness to this cell.
     fn witness(&self) -> NativePhysicalCloseWitness {
         NativePhysicalCloseWitness {
-            completed: self.0.subscribe(),
+            completed: self.0.completed.subscribe(),
+        }
+    }
+
+    /// Run `close` at most once for this connection generation and await the shared outcome.
+    ///
+    /// Law (single physical close): the first caller spawns one detached close task on `runtime`;
+    /// concurrent or later callers drop their candidate close future without polling it and join
+    /// the original task's outcome. [`NativePhysicalCloseWitness`] is published only by that
+    /// task after the original close future returns `Ok(())`, before waking waiters.
+    async fn run_close(
+        self,
+        runtime: &tokio::runtime::Handle,
+        close: impl Future<Output = Result<()>> + Send + 'static,
+    ) -> Result<()> {
+        let mut unused_close = None;
+        let (mut outcome_rx, join_handle) = {
+            let mut task_slot = lock_recover(&self.0.task);
+            if let Some(existing) = task_slot.as_ref() {
+                unused_close = Some(close);
+                (
+                    existing.outcome_rx.clone(),
+                    Arc::clone(&existing.join_handle),
+                )
+            } else {
+                let (outcome_tx, outcome_rx) = watch::channel(None);
+                let completed = Arc::clone(&self.0.completed);
+                let join_handle = runtime.spawn(async move {
+                    let outcome = match close.await {
+                        Ok(()) => {
+                            completed.send_replace(true);
+                            Ok(())
+                        }
+                        Err(error) => Err(SharedCloseFailure::from_error(error)),
+                    };
+                    outcome_tx.send_replace(Some(outcome));
+                });
+                let join_handle = Arc::new(std::sync::Mutex::new(Some(join_handle)));
+                *task_slot = Some(SharedCloseTask {
+                    outcome_rx: outcome_rx.clone(),
+                    join_handle: Arc::clone(&join_handle),
+                });
+                (outcome_rx, join_handle)
+            }
+        };
+        drop(unused_close);
+        drop(self);
+
+        let _ = outcome_rx.wait_for(Option::is_some).await;
+        let maybe_outcome = outcome_rx.borrow().clone();
+        match maybe_outcome {
+            Some(Ok(())) => Ok(()),
+            Some(Err(failure)) => Err(failure.into_error()),
+            None => {
+                let handle = lock_recover(&join_handle).take();
+                Err(native_close_task_stopped(runtime, handle).await)
+            }
         }
     }
 }
@@ -356,6 +473,7 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
+        self.callback.close_link_credit();
     }
 
     async fn webrtc_gather(
@@ -609,14 +727,7 @@ async fn run_native_close_with_witness(
     close: impl Future<Output = Result<()>> + Send + 'static,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
-    run_native_close_task(runtime, async move {
-        let result = close.await;
-        if result.is_ok() {
-            physical_close_completed.publish();
-        }
-        result
-    })
-    .await
+    physical_close_completed.run_close(runtime, close).await
 }
 
 /// Close a generation already fenced by its send lifecycle, with bounded waiting.
@@ -625,9 +736,23 @@ async fn close_failed_native_send(
     connection: Arc<RTCPeerConnection>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
+    let runtime = native_send_runtime()?;
+    close_failed_native_send_with_witness(
+        &runtime,
+        async move { connection.close().await.map_err(Into::into) },
+        physical_close_completed,
+    )
+    .await
+}
+
+async fn close_failed_native_send_with_witness(
+    runtime: &tokio::runtime::Handle,
+    close: impl Future<Output = Result<()>> + Send + 'static,
+    physical_close_completed: PhysicalCloseCompletion,
+) -> Result<()> {
     tokio::time::timeout(
         NATIVE_CONNECTION_RETIRE_TIMEOUT,
-        close_native_connection(connection, physical_close_completed),
+        run_native_close_with_witness(runtime, close, physical_close_completed),
     )
     .await
     .map_err(|_| Error::NativeConnectionRetirementTimeout {
@@ -679,17 +804,114 @@ fn wire_received_data_channels(
     }));
 }
 
+/// Queued peer-connection state transitions for one native connection, drained in arrival order
+/// off the `webrtc-rs` callback task so reentrant `close()` calls never deadlock on the
+/// upstream state-handler mutex.
+#[derive(Default)]
+struct PeerStateQueue {
+    /// State transitions in arrival order.
+    states: VecDeque<WebrtcConnectionState>,
+    /// Whether a drainer task currently owns the queue.
+    draining: bool,
+}
+
+/// Exclusive claim of a running drainer task over [`PeerStateQueue`].
+struct PeerStateDrainer<'a> {
+    queue: &'a std::sync::Mutex<PeerStateQueue>,
+    callback: &'a InnerTransportCallback,
+    finished: bool,
+}
+
+impl PeerStateDrainer<'_> {
+    fn next(&mut self) -> Option<WebrtcConnectionState> {
+        let mut queue = lock_recover(self.queue);
+        let next = queue.states.pop_front();
+        if next.is_none() {
+            queue.draining = false;
+            self.finished = true;
+        }
+        next
+    }
+}
+
+impl Drop for PeerStateDrainer<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let abandoned = {
+            let mut queue = lock_recover(self.queue);
+            queue.draining = false;
+            std::mem::take(&mut queue.states)
+        };
+        tracing::warn!(
+            peer = %self.callback.cid(),
+            states = abandoned.len(),
+            "a peer-connection state drainer ended mid-dispatch; queued state changes were dropped"
+        );
+    }
+}
+
+fn enqueue_peer_connection_state(
+    queue: &std::sync::Mutex<PeerStateQueue>,
+    state: WebrtcConnectionState,
+) -> bool {
+    let mut queue = lock_recover(queue);
+    queue.states.push_back(state);
+    !std::mem::replace(&mut queue.draining, true)
+}
+
+async fn drain_peer_connection_states(
+    queue: Arc<std::sync::Mutex<PeerStateQueue>>,
+    inner_cb: Arc<InnerTransportCallback>,
+) {
+    let mut drainer = PeerStateDrainer {
+        queue: &queue,
+        callback: &inner_cb,
+        finished: false,
+    };
+    while let Some(state) = drainer.next() {
+        inner_cb.on_peer_connection_state_change(state).await;
+    }
+}
+
+fn dispatch_peer_connection_state(
+    queue: &Arc<std::sync::Mutex<PeerStateQueue>>,
+    inner_cb: &Arc<InnerTransportCallback>,
+    connection_state: &ConnectionStateCell,
+    state: RTCPeerConnectionState,
+) {
+    tracing::debug!("Peer Connection State has changed: {state:?}");
+    let state_change: WebrtcConnectionState = state.into();
+    connection_state.observe_webrtc(state_change);
+    if state_change.is_terminal() {
+        inner_cb.close_link_credit();
+    }
+    if !enqueue_peer_connection_state(queue, state_change) {
+        return;
+    }
+    let queue_clone = Arc::clone(queue);
+    let cb = Arc::clone(inner_cb);
+    if rings_runtime::spawn_detached(drain_peer_connection_states(queue_clone, cb)).is_err() {
+        let mut guard = lock_recover(queue);
+        guard.draining = false;
+        guard.states.clear();
+        tracing::error!(
+            peer = %inner_cb.cid(),
+            "peer-connection state dispatch requires a runtime; queued state changes were dropped"
+        );
+    }
+}
+
 fn wire_peer_connection_state(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
     connection_state: ConnectionStateCell,
 ) {
+    let queue = Arc::new(std::sync::Mutex::new(PeerStateQueue::default()));
     webrtc_conn.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-        tracing::debug!("Peer Connection State has changed: {state:?}");
-        let cb = Arc::clone(&inner_cb);
-        let state_change = state.into();
-        connection_state.observe_webrtc(state_change);
-        Box::pin(async move { cb.on_peer_connection_state_change(state_change).await })
+        dispatch_peer_connection_state(&queue, &inner_cb, &connection_state, state);
+        Box::pin(async {})
     }));
 }
 
