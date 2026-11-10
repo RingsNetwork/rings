@@ -627,6 +627,11 @@ impl HandleMsg<FoundEntry> for MessageHandler {
             msg.misses.iter().copied(),
         )?;
         if let Some(data) = found_entry {
+            if data.did != msg.resource || data.kind.is_relay_inbox() {
+                return Err(Error::InvalidMessage(
+                    "found entry does not match lookup resource or data kind".to_string(),
+                ));
+            }
             cache_lookup_reply(&self.transport, msg.resource, msg.redundancy, data.clone()).await?;
             repair_observed_storage_misses(
                 self.transport.clone(),

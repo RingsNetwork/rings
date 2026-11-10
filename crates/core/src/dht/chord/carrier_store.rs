@@ -62,8 +62,10 @@ use super::EntryStorage;
 #[cfg(doc)]
 use crate::consts::REMOVAL_STORE_MAX_REMOVES;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::dht::entry::ElementDigest;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryCrdt;
+use crate::dht::entry::EntryDot;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryTombstone;
 use crate::dht::entry::EntryVersion;
@@ -135,6 +137,8 @@ fn stable_at(version: &EntryVersion) -> u128 {
         .saturating_add(TS_OFFSET_TOLERANCE_MS)
 }
 
+const CO_REGISTER_DIGEST: ElementDigest = ElementDigest(*b"rings-core:co-register-floor\0\0\0\0");
+
 impl RemovalRecord {
     /// The remove side of the normalized carrier `value`, charging `charge` with what it raised
     /// over `previous` and keeping the earlier charge of the rest; `None` when `value` holds no
@@ -149,7 +153,7 @@ impl RemovalRecord {
                     .map(|held| held.charge)
             })
         };
-        let removes = value
+        let mut removes = value
             .crdt
             .tombstones
             .iter()
@@ -158,6 +162,19 @@ impl RemovalRecord {
                 charge: held(tombstone).unwrap_or(charge),
             })
             .collect::<Vec<_>>();
+        for &version in &value.crdt.co_registers {
+            let encoded = EntryTombstone {
+                element: CO_REGISTER_DIGEST,
+                dot: EntryDot {
+                    version,
+                    index: u32::MAX,
+                },
+            };
+            removes.push(ChargedRemove {
+                tombstone: encoded,
+                charge: held(&encoded).unwrap_or(charge),
+            });
+        }
         let register = value.crdt.register.map(|version| ChargedRegister {
             version,
             charge: previous
@@ -179,6 +196,18 @@ impl RemovalRecord {
 
     /// `R(x)`: the remove side as a carrier, with no element and the least stamped bound.
     fn as_entry(&self) -> Entry {
+        let mut tombstones = Vec::with_capacity(self.removes.len());
+        let mut co_registers = Vec::new();
+        for remove in &self.removes {
+            if remove.tombstone.element == CO_REGISTER_DIGEST
+                && remove.tombstone.dot.index == u32::MAX
+            {
+                co_registers.push(remove.tombstone.dot.version);
+            } else {
+                tombstones.push(remove.tombstone);
+            }
+        }
+        co_registers.sort();
         Entry {
             did: self.did,
             data: Vec::new(),
@@ -187,7 +216,9 @@ impl RemovalRecord {
                 register: self.register.map(|register| register.version),
                 dots: Vec::new(),
                 co_dots: Vec::new(),
-                tombstones: self.removes.iter().map(|remove| remove.tombstone).collect(),
+                co_registers,
+                proofs: Vec::new(),
+                tombstones,
             },
             expires_at_ms: Some(0),
         }
@@ -216,6 +247,8 @@ fn element_side(value: &Entry) -> Entry {
             register: None,
             dots: value.crdt.dots.clone(),
             co_dots: value.crdt.co_dots.clone(),
+            co_registers: Vec::new(),
+            proofs: value.crdt.proofs.clone(),
             tombstones: Vec::new(),
         },
         expires_at_ms: value.expires_at_ms,
@@ -236,7 +269,11 @@ fn glue(
     let Some(elements) = elements else {
         return Ok(Some(removals.as_entry()));
     };
-    if dirty || !elements.crdt.tombstones.is_empty() || elements.crdt.register.is_some() {
+    if dirty
+        || !elements.crdt.tombstones.is_empty()
+        || elements.crdt.register.is_some()
+        || !elements.crdt.co_registers.is_empty()
+    {
         return elements.join(removals.as_entry()).map(Some);
     }
     let remove_side = removals.as_entry();
@@ -245,6 +282,8 @@ fn glue(
             register: remove_side.crdt.register,
             dots: elements.crdt.dots,
             co_dots: elements.crdt.co_dots,
+            co_registers: remove_side.crdt.co_registers,
+            proofs: elements.crdt.proofs,
             tombstones: remove_side.crdt.tombstones,
         },
         expires_at_ms: elements.expires_at_ms.max(remove_side.expires_at_ms),
@@ -676,10 +715,10 @@ pub(crate) enum CarrierStore<'a> {
 }
 
 impl CarrierStore<'_> {
-    /// Whether this store is the factored replicated data store, where per-actor provenance is
-    /// enforced (the fetch cache uses [`Self::Whole`]).
+    /// Whether this store enforces per-actor data provenance (`true` for all [`EntryKind::Data`]
+    /// stores, including the [`Self::Whole`] local lookup cache, #1220).
     pub(crate) const fn enforces_data_provenance(&self, kind: EntryKind) -> bool {
-        matches!(self, Self::Factored { .. }) && matches!(kind, EntryKind::Data)
+        matches!(kind, EntryKind::Data)
     }
 
     /// Return `local` with cross-actor tombstones targeting `incoming` evicted when this store

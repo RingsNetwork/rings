@@ -1,25 +1,396 @@
-//! Data-topic write provenance and fair per-writer element retention (#1179).
+//! Data-topic write provenance and fair per-writer element retention (#1179, #1220).
 //!
 //! Write operations and replicated sync states on [`EntryKind::Data`](super::EntryKind::Data)
-//! carriers are classified through algebraic sum types ([`DataProvenance`], [`RetractionWitness`])
-//! and higher-order continuation combinators (`with_live_and_then`, `and_then`, `then_some`),
-//! isolating per-actor provenance proofs from storage transitions.
+//! carriers are classified through algebraic sum types ([`DataProvenance`], [`RetractionWitness`],
+//! [`SignedDataMutation`]) and higher-order continuation combinators (`with_live_and_then`,
+//! `and_then`, `then_some`), isolating per-actor provenance proofs from storage transitions.
 
+use std::borrow::Borrow;
+use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use bytes::Bytes;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::ElementDigest;
 use super::Entry;
 use super::EntryDot;
+use super::EntryKind;
 use super::EntryOperation;
 use super::EntryVersion;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
+use crate::delegation::DelegateeKey;
 use crate::dht::Did;
+use crate::ecc::keccak256;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::DomainTag;
+use crate::message::MessageSigner;
+use crate::message::MessageVerification;
 use crate::message::Principal;
+use crate::message::SigningDomain;
+
+/// Domain separation tag for per-author Swarm data mutation signatures (#1220).
+pub(crate) const DATA_MUTATION_DOMAIN_TAG: DomainTag =
+    crate::domain_tag!("rings-core:data-entry:mutation");
+
+/// Key identifying which per-actor CRDT slot a [`SignedDataMutation`] attests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum DataProofKey {
+    /// Attests the reset floor `co_registers[actor]`.
+    Register(Did),
+    /// Attests the element add `co_values[value][actor]` where `digest = keccak256(value)`.
+    Add(ElementDigest, Did),
+    /// Attests the element removal `co_removes[digest][actor]`.
+    Remove(ElementDigest, Did),
+}
+
+impl DataProofKey {
+    pub(crate) const fn actor(self) -> Did {
+        match self {
+            Self::Register(actor) | Self::Add(_, actor) | Self::Remove(_, actor) => actor,
+        }
+    }
+
+    pub(crate) const fn is_element_add(self) -> bool {
+        matches!(self, Self::Add(_, _))
+    }
+}
+
+/// Operation kind attested by a [`DataMutationClaim`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) enum DataMutationOpKind {
+    Reset,
+    Append,
+    Retract,
+}
+
+/// Fixed-size Merkle batch claim signed inside a [`SignedDataMutation`] (#1220).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub(crate) struct DataMutationClaim {
+    pub(crate) did: Did,
+    pub(crate) kind: DataMutationOpKind,
+    pub(crate) version: EntryVersion,
+    pub(crate) leaf_count: u32,
+    pub(crate) merkle_root: [u8; 32],
+}
+
+fn merkle_leaf_element(digest: [u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 33];
+    buf[0] = 0x01;
+    buf[1..33].copy_from_slice(&digest);
+    keccak256(&buf)
+}
+
+fn merkle_leaf_dot(dot: EntryDot) -> [u8; 32] {
+    let mut buf = [0u8; 65];
+    buf[0] = 0x02;
+    buf[1..17].copy_from_slice(&dot.version.logical_time_ms.to_be_bytes());
+    buf[17..21].copy_from_slice(&dot.version.counter.to_be_bytes());
+    buf[21..41].copy_from_slice(dot.version.actor.as_bytes());
+    buf[41..61].copy_from_slice(dot.version.operation.as_bytes());
+    buf[61..65].copy_from_slice(&dot.index.to_be_bytes());
+    keccak256(&buf)
+}
+
+fn merkle_parent_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
+    let mut buf = [0u8; 65];
+    buf[0] = 0x03;
+    buf[1..33].copy_from_slice(&left);
+    buf[33..65].copy_from_slice(&right);
+    keccak256(&buf)
+}
+
+fn compute_merkle_tree(leaves: &[[u8; 32]]) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
+    if leaves.is_empty() {
+        return ([0u8; 32], Vec::new());
+    }
+    let mut layers = vec![leaves.to_vec()];
+    while let Some(curr) = layers.last() {
+        if curr.len() <= 1 {
+            break;
+        }
+        let mut next = Vec::with_capacity(curr.len().div_ceil(2));
+        let mut i = 0;
+        while i < curr.len() {
+            if i + 1 < curr.len() {
+                next.push(merkle_parent_hash(curr[i], curr[i + 1]));
+            } else {
+                next.push(curr[i]);
+            }
+            i += 2;
+        }
+        layers.push(next);
+    }
+    let root = layers
+        .last()
+        .and_then(|top| top.first().copied())
+        .unwrap_or([0u8; 32]);
+    let mut branches = Vec::with_capacity(leaves.len());
+    for leaf_idx in 0..leaves.len() {
+        let mut idx = leaf_idx;
+        let mut siblings = Vec::with_capacity(layers.len().saturating_sub(1));
+        for layer in &layers[..layers.len().saturating_sub(1)] {
+            let sibling_idx = idx ^ 1;
+            if sibling_idx < layer.len() {
+                siblings.push(layer[sibling_idx]);
+            }
+            idx /= 2;
+        }
+        branches.push(siblings);
+    }
+    (root, branches)
+}
+
+fn verify_merkle_inclusion(
+    leaf_hash: [u8; 32],
+    leaf_index: u32,
+    leaf_count: u32,
+    siblings: &[[u8; 32]],
+    expected_root: [u8; 32],
+) -> bool {
+    if leaf_count == 0 || leaf_index >= leaf_count {
+        return false;
+    }
+    let mut idx = leaf_index as usize;
+    let mut len = leaf_count as usize;
+    let mut current = leaf_hash;
+    let mut sib_iter = siblings.iter().copied();
+    while len > 1 {
+        let sibling_idx = idx ^ 1;
+        if sibling_idx < len {
+            let Some(sibling) = sib_iter.next() else {
+                return false;
+            };
+            current = if idx & 1 == 0 {
+                merkle_parent_hash(current, sibling)
+            } else {
+                merkle_parent_hash(sibling, current)
+            };
+        }
+        idx /= 2;
+        len = len.div_ceil(2);
+    }
+    sib_iter.next().is_none() && current == expected_root
+}
+
+/// Cryptographic author attestation over a Swarm-originated [`EntryKind::Data`] mutation (#1220).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedDataMutation {
+    pub(crate) key: DataProofKey,
+    pub(crate) claim: DataMutationClaim,
+    pub(crate) leaf_index: u32,
+    pub(crate) witness_dot: Option<EntryDot>,
+    pub(crate) merkle_siblings: Vec<[u8; 32]>,
+    pub(crate) proof: Option<MessageVerification>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireProofBundle {
+    batches: Vec<(DataMutationClaim, Option<MessageVerification>)>,
+    items: Vec<WireProofItem>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireProofItem {
+    key: DataProofKey,
+    batch_index: u32,
+    leaf_index: u32,
+    witness_dot: Option<EntryDot>,
+    merkle_siblings: Vec<[u8; 32]>,
+}
+
+pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u8>> {
+    let mut batches: Vec<(DataMutationClaim, Option<MessageVerification>)> = Vec::new();
+    let mut items = Vec::with_capacity(proofs.len());
+    for mutation in proofs {
+        let batch_pos = batches
+            .iter()
+            .position(|(c, p)| *c == mutation.claim && *p == mutation.proof)
+            .unwrap_or_else(|| {
+                let idx = batches.len();
+                batches.push((mutation.claim, mutation.proof.clone()));
+                idx
+            });
+        let batch_index = u32::try_from(batch_pos).unwrap_or(u32::MAX);
+        items.push(WireProofItem {
+            key: mutation.key,
+            batch_index,
+            leaf_index: mutation.leaf_index,
+            witness_dot: mutation.witness_dot,
+            merkle_siblings: mutation.merkle_siblings.clone(),
+        });
+    }
+    rings_codec::serialize(&WireProofBundle { batches, items }).map_err(Error::CodecSerialize)
+}
+
+pub(super) fn decode_proof_bundle(raw: &[u8]) -> Vec<SignedDataMutation> {
+    let Ok(bundle) = rings_codec::deserialize::<WireProofBundle>(raw) else {
+        return vec![SignedDataMutation::corrupted()];
+    };
+    let mut out = Vec::with_capacity(bundle.items.len());
+    for item in bundle.items {
+        let Some((claim, proof)) = bundle.batches.get(item.batch_index as usize) else {
+            return vec![SignedDataMutation::corrupted()];
+        };
+        out.push(SignedDataMutation {
+            key: item.key,
+            claim: *claim,
+            leaf_index: item.leaf_index,
+            witness_dot: item.witness_dot,
+            merkle_siblings: item.merkle_siblings,
+            proof: proof.clone(),
+        });
+    }
+    out
+}
+
+impl PartialOrd for SignedDataMutation {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SignedDataMutation {
+    fn cmp(&self, other: &Self) -> Ordering {
+        if self == other {
+            return Ordering::Equal;
+        }
+        self.key
+            .cmp(&other.key)
+            .then_with(|| self.proof.is_some().cmp(&other.proof.is_some()))
+            .then_with(|| {
+                self.proof
+                    .as_ref()
+                    .map(|p| p.ts_ms)
+                    .cmp(&other.proof.as_ref().map(|p| p.ts_ms))
+            })
+            .then_with(|| self.claim.cmp(&other.claim))
+            .then_with(|| self.leaf_index.cmp(&other.leaf_index))
+            .then_with(|| self.witness_dot.cmp(&other.witness_dot))
+            .then_with(|| self.merkle_siblings.cmp(&other.merkle_siblings))
+    }
+}
+
+impl SignedDataMutation {
+    pub(crate) fn is_corrupted(&self) -> bool {
+        self.proof.is_none()
+    }
+
+    pub(crate) fn corrupted() -> Self {
+        Self {
+            key: DataProofKey::Register(Did::default()),
+            claim: DataMutationClaim {
+                did: Did::default(),
+                kind: DataMutationOpKind::Reset,
+                version: EntryVersion::default(),
+                leaf_count: 0,
+                merkle_root: [0u8; 32],
+            },
+            leaf_index: 0,
+            witness_dot: None,
+            merkle_siblings: Vec::new(),
+            proof: None,
+        }
+    }
+
+    pub(crate) fn matches_register(&self, floor: EntryVersion) -> bool {
+        self.proof.is_some()
+            && self.key == DataProofKey::Register(floor.actor)
+            && self.claim.kind == DataMutationOpKind::Reset
+            && self.claim.version == floor
+    }
+
+    pub(crate) fn matches_remove(&self, digest: ElementDigest, remove_dot: EntryDot) -> bool {
+        let actor = remove_dot.version.actor;
+        if self.proof.is_none()
+            || self.key != DataProofKey::Remove(digest, actor)
+            || self.claim.kind != DataMutationOpKind::Retract
+        {
+            return false;
+        }
+        match self.witness_dot {
+            Some(dot) => {
+                dot == remove_dot
+                    && verify_merkle_inclusion(
+                        merkle_leaf_dot(dot),
+                        self.leaf_index,
+                        self.claim.leaf_count,
+                        &self.merkle_siblings,
+                        self.claim.merkle_root,
+                    )
+            }
+            None => verify_merkle_inclusion(
+                merkle_leaf_element(digest.0),
+                self.leaf_index,
+                self.claim.leaf_count,
+                &self.merkle_siblings,
+                self.claim.merkle_root,
+            ),
+        }
+    }
+
+    fn verify_claim_structure(&self, carrier: &Entry) -> Result<()> {
+        if self.claim.did != carrier.did {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        let actor = self.key.actor();
+        if actor.is_default() {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        let claim_matches = match (&self.key, self.claim.kind) {
+            (DataProofKey::Register(key_actor), DataMutationOpKind::Reset) => {
+                *key_actor == self.claim.version.actor
+                    && self.witness_dot.is_none()
+                    && self.merkle_siblings.is_empty()
+                    && (self.claim.leaf_count > 0 || self.claim.merkle_root == [0u8; 32])
+                    && carrier.register_floors().any(|f| f == self.claim.version)
+            }
+            (
+                DataProofKey::Add(digest, key_actor),
+                DataMutationOpKind::Reset | DataMutationOpKind::Append,
+            ) => {
+                *key_actor == self.claim.version.actor
+                    && self.witness_dot.is_none()
+                    && verify_merkle_inclusion(
+                        merkle_leaf_element(digest.0),
+                        self.leaf_index,
+                        self.claim.leaf_count,
+                        &self.merkle_siblings,
+                        self.claim.merkle_root,
+                    )
+            }
+            (DataProofKey::Remove(digest, _), DataMutationOpKind::Retract) => {
+                match self.witness_dot {
+                    Some(dot) => {
+                        dot.version.actor == actor
+                            && verify_merkle_inclusion(
+                                merkle_leaf_dot(dot),
+                                self.leaf_index,
+                                self.claim.leaf_count,
+                                &self.merkle_siblings,
+                                self.claim.merkle_root,
+                            )
+                    }
+                    None => verify_merkle_inclusion(
+                        merkle_leaf_element(digest.0),
+                        self.leaf_index,
+                        self.claim.leaf_count,
+                        &self.merkle_siblings,
+                        self.claim.merkle_root,
+                    ),
+                }
+            }
+            _ => false,
+        };
+        claim_matches
+            .then_some(())
+            .ok_or(Error::DataEntryWriteUnauthorized)
+    }
+}
 
 /// The selector by which a [`EntryOperation::Tombstone`] names the elements to retract from a
 /// carrier: either explicit CRDT add dots (`Dots`) when a write witness is present, or raw payload
@@ -71,27 +442,30 @@ impl<'a> DataProvenance<'a> {
     /// Construct a provenance proof for `(op, writer, introducer)`, or reject with
     /// [`Error::DataEntryWriteUnauthorized`].
     fn try_new(op: &'a EntryOperation, writer: Did, introducer: Principal) -> Result<Self> {
-        op.entry()
-            .is_exclusively_authored_by(writer)
-            .then_some(())
-            .ok_or(Error::DataEntryWriteUnauthorized)
-            .and_then(|()| match op {
-                EntryOperation::Overwrite(entry) => entry
-                    .permits_reset_envelope_from(introducer)
-                    .then_some(Self::Reset { entry, writer })
-                    .ok_or(Error::DataEntryWriteUnauthorized),
-                EntryOperation::Extend(entry) => entry
-                    .has_delta_envelope()
-                    .then_some(Self::Append { entry, writer })
-                    .ok_or(Error::DataEntryWriteUnauthorized),
-                EntryOperation::Tombstone(entry) => entry
-                    .has_delta_envelope()
-                    .then(|| Self::Retract {
-                        witness: RetractionWitness::of(entry),
-                        writer,
-                    })
-                    .ok_or(Error::DataEntryWriteUnauthorized),
-            })
+        (!writer.is_default()
+            && op.entry().is_exclusively_authored_by(writer)
+            && op.entry().crdt.co_dots.is_empty()
+            && op.entry().crdt.co_registers.is_empty())
+        .then_some(())
+        .ok_or(Error::DataEntryWriteUnauthorized)
+        .and_then(|()| match op {
+            EntryOperation::Overwrite(entry) => (entry.crdt.register.is_some()
+                && entry.crdt.dots.len() == entry.data.len()
+                && entry.permits_reset_envelope_from(introducer))
+            .then_some(Self::Reset { entry, writer })
+            .ok_or(Error::DataEntryWriteUnauthorized),
+            EntryOperation::Extend(entry) => (entry.crdt.dots.len() == entry.data.len()
+                && entry.has_delta_envelope())
+            .then_some(Self::Append { entry, writer })
+            .ok_or(Error::DataEntryWriteUnauthorized),
+            EntryOperation::Tombstone(entry) => entry
+                .has_delta_envelope()
+                .then(|| Self::Retract {
+                    witness: RetractionWitness::of(entry),
+                    writer,
+                })
+                .ok_or(Error::DataEntryWriteUnauthorized),
+        })
     }
 
     /// Construct a provenance claim for validating `op` against a live local carrier.
@@ -117,9 +491,9 @@ impl<'a> DataProvenance<'a> {
 }
 
 impl EntryVersion {
-    /// Whether this version is either unattributed (`actor.is_default()`) or authored by `writer`.
+    /// Whether this version is explicitly attributed to `writer` (`!actor.is_default() && actor == writer`).
     pub(super) fn is_authored_by(self, writer: Did) -> bool {
-        self.actor.is_default() || self.actor == writer
+        !self.actor.is_default() && self.actor == writer
     }
 }
 
@@ -136,15 +510,189 @@ impl EntryDot {
 }
 
 impl EntryOperation {
+    /// Attach cryptographic author proofs signed by `signer` (`actor`) to a stamped `Data`
+    /// operation before it is sent or applied by `Swarm` (#1220).
+    pub(crate) fn with_author_proofs(
+        self,
+        actor: Did,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
+        now_ms: u128,
+    ) -> Result<Self> {
+        if self.kind() != EntryKind::Data || actor.is_default() {
+            return Ok(self);
+        }
+        match self {
+            EntryOperation::Overwrite(mut entry) => {
+                if let Some(version) = entry.crdt.register {
+                    let elements = entry
+                        .data
+                        .iter()
+                        .map(|value| keccak256(value.as_ref()))
+                        .collect::<Vec<_>>();
+                    let leaves = elements
+                        .iter()
+                        .map(|&elem| merkle_leaf_element(elem))
+                        .collect::<Vec<_>>();
+                    let (merkle_root, branches) = compute_merkle_tree(&leaves);
+                    let leaf_count = u32::try_from(elements.len()).map_err(|_| {
+                        Error::EntryDotIndexOutOfBounds {
+                            index: elements.len(),
+                        }
+                    })?;
+                    let claim = DataMutationClaim {
+                        did: entry.did,
+                        kind: DataMutationOpKind::Reset,
+                        version,
+                        leaf_count,
+                        merkle_root,
+                    };
+                    let bytes = rings_codec::serialize(&claim).map_err(Error::CodecSerialize)?;
+                    let sig = signer.sign_at(DATA_MUTATION_DOMAIN_TAG, &bytes, now_ms)?;
+                    let mut proofs = Vec::with_capacity(elements.len().saturating_add(1));
+                    proofs.push(SignedDataMutation {
+                        key: DataProofKey::Register(actor),
+                        claim,
+                        leaf_index: 0,
+                        witness_dot: None,
+                        merkle_siblings: Vec::new(),
+                        proof: Some(sig.clone()),
+                    });
+                    for (idx, (elem, merkle_siblings)) in
+                        elements.into_iter().zip(branches).enumerate()
+                    {
+                        proofs.push(SignedDataMutation {
+                            key: DataProofKey::Add(ElementDigest(elem), actor),
+                            claim,
+                            leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
+                            witness_dot: None,
+                            merkle_siblings,
+                            proof: Some(sig.clone()),
+                        });
+                    }
+                    entry.crdt.proofs = proofs;
+                }
+                Ok(EntryOperation::Overwrite(entry))
+            }
+            EntryOperation::Extend(mut entry) => {
+                if let Some(first_dot) = entry.crdt.dots.first().copied() {
+                    let elements = entry
+                        .data
+                        .iter()
+                        .map(|value| keccak256(value.as_ref()))
+                        .collect::<Vec<_>>();
+                    let leaves = elements
+                        .iter()
+                        .map(|&elem| merkle_leaf_element(elem))
+                        .collect::<Vec<_>>();
+                    let (merkle_root, branches) = compute_merkle_tree(&leaves);
+                    let leaf_count = u32::try_from(elements.len()).map_err(|_| {
+                        Error::EntryDotIndexOutOfBounds {
+                            index: elements.len(),
+                        }
+                    })?;
+                    let claim = DataMutationClaim {
+                        did: entry.did,
+                        kind: DataMutationOpKind::Append,
+                        version: first_dot.version,
+                        leaf_count,
+                        merkle_root,
+                    };
+                    let bytes = rings_codec::serialize(&claim).map_err(Error::CodecSerialize)?;
+                    let sig = signer.sign_at(DATA_MUTATION_DOMAIN_TAG, &bytes, now_ms)?;
+                    entry.crdt.proofs = elements
+                        .into_iter()
+                        .zip(branches)
+                        .enumerate()
+                        .map(|(idx, (elem, merkle_siblings))| SignedDataMutation {
+                            key: DataProofKey::Add(ElementDigest(elem), actor),
+                            claim,
+                            leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
+                            witness_dot: None,
+                            merkle_siblings,
+                            proof: Some(sig.clone()),
+                        })
+                        .collect();
+                }
+                Ok(EntryOperation::Extend(entry))
+            }
+            EntryOperation::Tombstone(mut entry) => {
+                if entry.data.is_empty() {
+                    let dots = entry.crdt.dots.clone();
+                    let leaves = dots
+                        .iter()
+                        .map(|&dot| merkle_leaf_dot(dot))
+                        .collect::<Vec<_>>();
+                    let (merkle_root, branches) = compute_merkle_tree(&leaves);
+                    let leaf_count = u32::try_from(dots.len())
+                        .map_err(|_| Error::EntryDotIndexOutOfBounds { index: dots.len() })?;
+                    let claim = DataMutationClaim {
+                        did: entry.did,
+                        kind: DataMutationOpKind::Retract,
+                        version: EntryVersion::default(),
+                        leaf_count,
+                        merkle_root,
+                    };
+                    let bytes = rings_codec::serialize(&claim).map_err(Error::CodecSerialize)?;
+                    let sig = signer.sign_at(DATA_MUTATION_DOMAIN_TAG, &bytes, now_ms)?;
+                    entry.crdt.proofs = dots
+                        .into_iter()
+                        .zip(branches)
+                        .enumerate()
+                        .map(|(idx, (dot, merkle_siblings))| SignedDataMutation {
+                            key: DataProofKey::Remove(ElementDigest([0u8; 32]), actor),
+                            claim,
+                            leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
+                            witness_dot: Some(dot),
+                            merkle_siblings,
+                            proof: Some(sig.clone()),
+                        })
+                        .collect();
+                } else {
+                    let elements = entry
+                        .data
+                        .iter()
+                        .map(|value| keccak256(value.as_ref()))
+                        .collect::<Vec<_>>();
+                    let leaves = elements
+                        .iter()
+                        .map(|&elem| merkle_leaf_element(elem))
+                        .collect::<Vec<_>>();
+                    let (merkle_root, branches) = compute_merkle_tree(&leaves);
+                    let leaf_count = u32::try_from(elements.len()).map_err(|_| {
+                        Error::EntryDotIndexOutOfBounds {
+                            index: elements.len(),
+                        }
+                    })?;
+                    let claim = DataMutationClaim {
+                        did: entry.did,
+                        kind: DataMutationOpKind::Retract,
+                        version: EntryVersion::default(),
+                        leaf_count,
+                        merkle_root,
+                    };
+                    let bytes = rings_codec::serialize(&claim).map_err(Error::CodecSerialize)?;
+                    let sig = signer.sign_at(DATA_MUTATION_DOMAIN_TAG, &bytes, now_ms)?;
+                    entry.crdt.proofs = elements
+                        .into_iter()
+                        .zip(branches)
+                        .enumerate()
+                        .map(|(idx, (elem, merkle_siblings))| SignedDataMutation {
+                            key: DataProofKey::Remove(ElementDigest(elem), actor),
+                            claim,
+                            leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
+                            witness_dot: None,
+                            merkle_siblings,
+                            proof: Some(sig.clone()),
+                        })
+                        .collect();
+                }
+                Ok(EntryOperation::Tombstone(entry))
+            }
+        }
+    }
+
     /// Validate a data-topic write operation `self` issued by `writer` and introduced by
-    /// `introducer` at `now_ms` inside `network_id` (#1179).
-    ///
-    /// Enforces:
-    /// - Bounds and liveness (`validate_admissible_at`).
-    /// - Provenance construction ([`DataProvenance::try_new`]): every non-default version carried
-    ///   by the operation was authored by `writer`, `Overwrite` carries no raw tombstones and is
-    ///   non-empty when remote, and `Extend`/`Tombstone` carry neither a reset register nor raw
-    ///   tombstones.
+    /// `introducer` at `now_ms` inside `network_id` (#1179, #1220).
     pub(crate) fn validate_data_write(
         &self,
         now_ms: u128,
@@ -157,17 +705,15 @@ impl EntryOperation {
     }
 
     /// Validate a data-topic operation `self` issued by `writer` against the live carrier
-    /// `local` currently held at the storage slot (#1179).
-    ///
-    /// - `Overwrite`: rejected when `entry.data` is empty against a live carrier, or when `local`
-    ///   holds any live element, remove, or reset floor authored by another writer.
-    /// - `Tombstone`: rejected when any matched element in `local` (by [`RetractionWitness`]) was
-    ///   authored by another writer.
+    /// `local` currently held at the storage slot (#1179, #1220).
     pub(crate) fn validate_data_write_on_local(
         &self,
         local: Option<&Entry>,
         writer: Did,
     ) -> Result<()> {
+        if writer.is_default() {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
         Entry::with_live_and_then(local, |live| {
             DataProvenance::for_local(self, writer).verify_on_live(live)
         })
@@ -184,10 +730,81 @@ impl Entry {
         local.map_or(Ok(()), then)
     }
 
-    /// Whether every version carried by `self` is unattributed or authored by `writer`.
+    /// Iterate over all reset floors carried by `self` (`register` and `co_registers`).
+    pub(super) fn register_floors(&self) -> impl Iterator<Item = EntryVersion> + '_ {
+        self.crdt
+            .register
+            .into_iter()
+            .chain(self.crdt.co_registers.iter().copied())
+    }
+
+    /// Verify any cryptographic [`SignedDataMutation`] proofs carried on `self`, deduplicating
+    /// signature checks across shared Merkle batch claims (#1220).
+    pub(super) fn validate_data_proofs(&self, now_ms: u128, network_id: u32) -> Result<()> {
+        if self.crdt.proofs.is_empty() {
+            return Ok(());
+        }
+        let domain = SigningDomain::new(DATA_MUTATION_DOMAIN_TAG, network_id);
+        let max_ts = now_ms.saturating_add(TS_OFFSET_TOLERANCE_MS);
+        let mut verified_batches: Vec<(Did, DataMutationClaim, MessageVerification)> = Vec::new();
+        for item in &self.crdt.proofs {
+            let Some(proof) = &item.proof else {
+                return Err(Error::DataEntryWriteUnauthorized);
+            };
+            if proof.ts_ms > max_ts {
+                return Err(Error::EntryVersionAheadOfClock);
+            }
+            let actor = item.key.actor();
+            item.verify_claim_structure(self)?;
+            let already_verified = verified_batches
+                .iter()
+                .any(|(a, c, p)| *a == actor && *c == item.claim && p == proof);
+            if !already_verified {
+                let data = rings_codec::serialize(&item.claim).map_err(Error::CodecSerialize)?;
+                if !proof.verify_live_at(domain, &data, proof.ts_ms)
+                    || proof.delegation.delegator_did() != actor
+                {
+                    return Err(Error::DataEntryWriteUnauthorized);
+                }
+                verified_batches.push((actor, item.claim, proof.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `self` carries at least one verified cryptographic proof for `actor`.
+    fn has_signed_proof_for(&self, actor: Did) -> bool {
+        self.crdt
+            .proofs
+            .iter()
+            .any(|proof| !proof.is_corrupted() && proof.key.actor() == actor)
+    }
+
+    fn has_signed_register_proof(&self, floor: EntryVersion) -> bool {
+        self.crdt
+            .proofs
+            .iter()
+            .any(|proof| proof.matches_register(floor))
+    }
+
+    fn has_signed_remove_proof(&self, element: ElementDigest, remove_dot: EntryDot) -> bool {
+        self.crdt
+            .proofs
+            .iter()
+            .any(|proof| proof.matches_remove(element, remove_dot))
+    }
+
+    /// Whether every version and proof carried by `self` is explicitly authored by `writer`.
     pub(super) fn is_exclusively_authored_by(&self, writer: Did) -> bool {
-        self.versions()
-            .all(|version| version.is_authored_by(writer))
+        !writer.is_default()
+            && self
+                .versions()
+                .all(|version| version.is_authored_by(writer))
+            && self
+                .crdt
+                .proofs
+                .iter()
+                .all(|proof| !proof.is_corrupted() && proof.key.actor() == writer)
     }
 
     /// Whether an `Overwrite` carrier satisfies the reset envelope invariant for `introducer`:
@@ -199,7 +816,9 @@ impl Entry {
     /// Whether an `Extend` or `Tombstone` carrier satisfies the delta envelope invariant: carries
     /// neither a reset register nor raw tombstones.
     fn has_delta_envelope(&self) -> bool {
-        self.crdt.register.is_none() && self.crdt.tombstones.is_empty()
+        self.crdt.register.is_none()
+            && self.crdt.co_registers.is_empty()
+            && self.crdt.tombstones.is_empty()
     }
 
     /// Verify that `incoming` may reset this live carrier on behalf of `writer`.
@@ -209,121 +828,206 @@ impl Entry {
             .ok_or(Error::DataEntryWriteUnauthorized)
     }
 
-    /// Verify that `incoming` does not overwrite any live element in `self` authored by a peer
-    /// other than `writer`.
+    /// Verify that `incoming` may append elements on behalf of `writer`, checking authorship
+    /// against `writer`'s own actor slot in `co_values[value]` so co-authors are never locked out
+    /// (#1220).
     fn permits_append_by(&self, incoming: &Self, writer: Did) -> Result<()> {
         self.topic_buffer().and_then(|buffer| {
             incoming
                 .data
                 .iter()
                 .all(|value| {
-                    buffer
-                        .dots_for(value)
-                        .all(|held_dot| held_dot.version.is_authored_by(writer))
+                    let unattributed_only = buffer
+                        .values
+                        .get(value)
+                        .is_some_and(|dot| !dot.is_attributed())
+                        && !buffer.co_values.contains_key(value);
+                    !unattributed_only
+                        && buffer
+                            .co_values
+                            .get(value)
+                            .and_then(|actors| actors.get(&writer))
+                            .is_none_or(|held_dot| held_dot.version.is_authored_by(writer))
                 })
                 .then_some(())
                 .ok_or(Error::DataEntryWriteUnauthorized)
         })
     }
 
-    /// Verify that `witness` retracts no element of this live carrier authored by a peer other
-    /// than `writer`.
+    /// Verify that `witness` retracts only `writer`'s own actor slot in `co_values[value]`
+    /// (#1220).
     fn permits_retraction_by(&self, witness: &RetractionWitness<'_>, writer: Did) -> Result<()> {
         self.topic_buffer().and_then(|buffer| {
-            buffer
-                .values
-                .iter()
-                .all(|(value, dot)| {
-                    !witness.matches(value, dot)
+            let permitted = match witness {
+                RetractionWitness::Values(values) => values.iter().all(|value| {
+                    !buffer.values.contains_key(*value)
                         || buffer
-                            .dots_for(value)
-                            .all(|held_dot| held_dot.version.is_authored_by(writer))
-                })
+                            .co_values
+                            .get(*value)
+                            .and_then(|actors| actors.get(&writer))
+                            .is_some_and(|held_dot| held_dot.version.is_authored_by(writer))
+                }),
+                RetractionWitness::Dots(dots) => {
+                    dots.iter().all(|dot| dot.version.is_authored_by(writer))
+                        && buffer.values.keys().all(|value| {
+                            buffer
+                                .dots_for(value)
+                                .filter(|held_dot| dots.contains(held_dot))
+                                .all(|held_dot| held_dot.version.is_authored_by(writer))
+                        })
+                }
+            };
+            permitted
                 .then_some(())
                 .ok_or(Error::DataEntryWriteUnauthorized)
         })
     }
 
-    /// Validate a synced data carrier `self` against the live carrier `local` currently held at
-    /// the storage slot (#1179).
+    /// Validate a synced or fetched data carrier `self` against the live carrier `local` currently
+    /// held at the slot (#1179, #1220).
     ///
-    /// Rejects:
-    /// - A synced reset floor `register` with versions below `floor`, or whose versions at or
-    ///   below `floor` span another writer, or that would overwrite a live carrier holding
-    ///   versions at or below `floor` from another writer (`actor != floor.actor`).
-    /// - A synced remove covering a live element in `local` authored by a different writer
-    ///   (`held_dot.version.actor != remove_dot.version.actor`).
+    /// Enforces:
+    /// - Every version in `self` is explicitly attributed (`!actor.is_default() && !operation.is_default()`),
+    ///   `dots.len() == data.len()`, `co_dots` indices are in bounds, and no active element dot is
+    ///   reused in `tombstones`.
+    /// - Per-actor reset floors are self-consistent (`v.actor == floor.actor => v >= floor`).
+    /// - Cross-actor floors and tombstones merge commutatively without rejection because
+    ///   `DataTopicBuffer` scopes floors and tombstones by `actor`.
+    /// - Same-actor floors and tombstones retiring `live`'s state must carry `actor`'s
+    ///   [`SignedDataMutation`] whenever `live` holds Swarm-signed state for `actor`, and must
+    ///   carry a consistent operation witness otherwise.
     pub(crate) fn validate_data_sync_on_local(&self, local: Option<&Self>) -> Result<()> {
-        self.permits_synced_register_on(local).and_then(|()| {
-            Self::with_live_and_then(local, |live| self.permits_synced_tombstones_on(live))
-        })
+        self.validate_data_sync_structure()
+            .and_then(|()| self.permits_synced_register_on(local))
+            .and_then(|()| {
+                Self::with_live_and_then(local, |live| self.permits_synced_tombstones_on(live))
+            })
     }
 
-    /// Whether every version in `self` at or below `floor` was authored by `floor.actor`.
-    fn versions_through_floor_authored_by(&self, floor: EntryVersion) -> bool {
-        self.versions()
-            .filter(|&version| version <= floor)
-            .all(|version| version.is_authored_by(floor.actor))
+    fn validate_data_sync_structure(&self) -> Result<()> {
+        if self.crdt.dots.len() != self.data.len() {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        if self.versions().any(|version| version.actor.is_default()) {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        if self
+            .crdt
+            .co_dots
+            .iter()
+            .any(|&(index, _)| (index as usize) >= self.data.len())
+        {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        if self.crdt.register.is_none() && !self.crdt.co_registers.is_empty() {
+            return Err(Error::DataEntryWriteUnauthorized);
+        }
+        if let Some(max_reg) = self.crdt.register {
+            if self.crdt.co_registers.iter().any(|&reg| reg >= max_reg) {
+                return Err(Error::DataEntryWriteUnauthorized);
+            }
+        }
+        let mut seen_floor_actors = BTreeSet::new();
+        for floor in self.register_floors() {
+            if !seen_floor_actors.insert(floor.actor) {
+                return Err(Error::DataEntryWriteUnauthorized);
+            }
+        }
+        Ok(())
     }
 
-    /// Verify that any reset floor on `self` or `local` is self-consistent and compatible across
-    /// the two carriers.
+    fn floor_witness_valid_on_live(&self, floor: EntryVersion, live: &Self) -> bool {
+        let retires_live_same_actor = live
+            .versions()
+            .any(|version| version.actor == floor.actor && version < floor);
+        if !retires_live_same_actor {
+            return true;
+        }
+        if live.has_signed_proof_for(floor.actor) {
+            return self.has_signed_register_proof(floor);
+        }
+        let floor_elements = self
+            .data
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| {
+                self.crdt
+                    .dots
+                    .get(index)
+                    .is_some_and(|d| d.version == floor)
+                    || self
+                        .crdt
+                        .co_dots
+                        .iter()
+                        .any(|&(co_idx, d)| co_idx as usize == index && d.version == floor)
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        if floor_elements.is_empty() {
+            floor.operation != floor.actor
+        } else {
+            let live_uses_synthetic_op = live
+                .versions()
+                .any(|v| v.actor == floor.actor && v.operation == floor.actor);
+            live_uses_synthetic_op
+                || self
+                    .operation_digest_for(floor.actor, &floor_elements)
+                    .is_ok_and(|digest| floor.operation == digest)
+        }
+    }
+
+    /// Verify that every per-actor reset floor on `self` is self-consistent and authenticated
+    /// against `local`.
     fn permits_synced_register_on(&self, local: Option<&Self>) -> Result<()> {
-        let valid_self = self.crdt.register.is_none_or(|floor| {
-            self.versions().all(|version| version >= floor)
-                && self.versions_through_floor_authored_by(floor)
-                && local.is_none_or(|live| live.versions_through_floor_authored_by(floor))
+        let valid = self.register_floors().all(|floor| {
+            self.versions()
+                .filter(|version| version.actor == floor.actor)
+                .all(|version| version >= floor)
+                && local.is_none_or(|live| self.floor_witness_valid_on_live(floor, live))
         });
-        let valid_local = local
-            .and_then(|live| live.crdt.register)
-            .is_none_or(|live_floor| self.versions_through_floor_authored_by(live_floor));
-        (valid_self && valid_local)
+        valid.then_some(()).ok_or(Error::DataEntryWriteUnauthorized)
+    }
+
+    /// Verify that any same-actor tombstone on `self` covering a live element in `live` carries an
+    /// authentic removal witness for that actor.
+    fn permits_synced_tombstones_on(&self, live: &Self) -> Result<()> {
+        if self.crdt.tombstones.is_empty() {
+            return Ok(());
+        }
+        let mut by_element_actor = BTreeMap::<(ElementDigest, Did), EntryDot>::new();
+        for tombstone in &self.crdt.tombstones {
+            let key = (tombstone.element, tombstone.dot.version.actor);
+            if by_element_actor
+                .get(&key)
+                .is_none_or(|current| current < &tombstone.dot)
+            {
+                by_element_actor.insert(key, tombstone.dot);
+            }
+        }
+        live.attributed_elements()
+            .all(|(value, held_dot)| {
+                let actor = held_dot.version.actor;
+                let digest = ElementDigest(keccak256(value.as_ref()));
+                let Some(&remove_dot) = by_element_actor.get(&(digest, actor)) else {
+                    return true;
+                };
+                if held_dot > remove_dot {
+                    return true;
+                }
+                if live.has_signed_proof_for(actor) {
+                    return self.has_signed_remove_proof(digest, remove_dot);
+                }
+                if remove_dot == held_dot {
+                    return true;
+                }
+                let live_uses_synthetic_op = held_dot.version.operation == actor;
+                live_uses_synthetic_op
+                    || self
+                        .operation_digest_for(actor, std::slice::from_ref(value))
+                        .is_ok_and(|expected| remove_dot.version.operation == expected)
+            })
             .then_some(())
             .ok_or(Error::DataEntryWriteUnauthorized)
-    }
-
-    /// Verify that no tombstone on `self` covers a live element in `live` authored by a different
-    /// writer.
-    fn permits_synced_tombstones_on(&self, live: &Self) -> Result<()> {
-        self.crdt.tombstones.first().map_or(Ok(()), |_| {
-            let uniform_actor = self.uniform_tombstone_actor();
-            let incoming_removes = self.tombstone_dots_by_element();
-            live.attributed_elements()
-                .all(|(value, held_dot)| {
-                    Some(held_dot.version.actor) == uniform_actor
-                        || incoming_removes.get(&ElementDigest::of(value)).is_none_or(
-                            |remove_dot| {
-                                held_dot > *remove_dot
-                                    || remove_dot.version.actor == held_dot.version.actor
-                            },
-                        )
-                })
-                .then_some(())
-                .ok_or(Error::DataEntryWriteUnauthorized)
-        })
-    }
-
-    /// Return `Some(actor)` when every attributed tombstone in `self` shares the same `actor`.
-    fn uniform_tombstone_actor(&self) -> Option<Did> {
-        self.crdt
-            .tombstones
-            .iter()
-            .map(|tombstone| tombstone.dot.version.actor)
-            .filter(|actor| !actor.is_default())
-            .try_fold(None, |acc, actor| match acc {
-                None => Some(Some(actor)),
-                Some(first) => (first == actor).then_some(Some(first)),
-            })
-            .flatten()
-    }
-
-    /// Map each tombstone's element digest to its covering dot.
-    fn tombstone_dots_by_element(&self) -> BTreeMap<ElementDigest, EntryDot> {
-        self.crdt
-            .tombstones
-            .iter()
-            .map(|tombstone| (tombstone.element, tombstone.dot))
-            .collect()
     }
 
     /// Iterate over `(value, dot)` pairs in `self` (both primary and co-author dots) whose dot
@@ -338,136 +1042,82 @@ impl Entry {
             .filter(|(_, dot)| dot.is_attributed())
     }
 
-    /// Resolve the authors of element `index` in `self`, falling back to `fallback_actor` when
-    /// the element's dot is absent or unattributed.
-    fn element_actors_at<'a>(
-        &'a self,
-        index: usize,
-        fallback_actor: Did,
-    ) -> impl Iterator<Item = Did> + 'a {
-        let primary = self
-            .crdt
-            .dots
-            .get(index)
-            .map(|dot| dot.version.actor)
-            .filter(|actor| !actor.is_default())
-            .unwrap_or(fallback_actor);
-        let co_actors = self
-            .crdt
-            .co_dots
-            .iter()
-            .filter(move |&&(co_index, _)| co_index as usize == index)
-            .map(|(_, dot)| dot.version.actor)
-            .filter(|actor| !actor.is_default());
-        (!primary.is_default())
-            .then_some(primary)
-            .into_iter()
-            .chain(co_actors)
-    }
-
-    /// Map each attributed element digest in `self` to `Some(actor)` when exclusively authored by
-    /// `actor`, or `None` when co-authored by multiple distinct writers.
-    fn element_actors_by_digest(
-        &self,
-        fallback_actor: Did,
-    ) -> BTreeMap<ElementDigest, Option<Did>> {
-        let mut by_digest = BTreeMap::<ElementDigest, Option<Did>>::new();
-        for (index, value) in self.data.iter().enumerate() {
-            let mut actors = self.element_actors_at(index, fallback_actor).peekable();
-            if actors.peek().is_some() {
-                let digest = ElementDigest::of(value);
-                for actor in actors {
-                    by_digest
-                        .entry(digest)
-                        .and_modify(|current| {
-                            if *current != Some(actor) {
-                                *current = None;
-                            }
-                        })
-                        .or_insert(Some(actor));
-                }
-            }
-        }
-        by_digest
-    }
-
-    /// Whether every element in `self` is either unattributed or authored by `writer` under
-    /// `fallback_actor`.
-    fn all_elements_authored_by(&self, writer: Did, fallback_actor: Did) -> bool {
-        (0..self.data.len()).all(|index| {
-            self.element_actors_at(index, fallback_actor)
-                .all(|actor| actor == writer)
-        })
-    }
-
-    /// Return `self` with any pre-planted remove in `self.crdt.tombstones` evicted when it
-    /// targets an element in `incoming` authored by a different non-default writer (#1179).
+    /// Return `self` unchanged: tombstones on `EntryKind::Data` are actor-scoped in
+    /// [`DataTopicBuffer`](super::DataTopicBuffer), so cross-actor tombstones never cover another
+    /// writer's dots and are never evicted (#1220).
     pub(crate) fn without_cross_actor_tombstones_for(
-        mut self,
-        incoming: &Self,
-        fallback_actor: Did,
+        self,
+        _incoming: &Self,
+        _fallback_actor: Did,
     ) -> Self {
-        let needs_filtering = !incoming.data.is_empty()
-            && self
-                .crdt
-                .tombstones
-                .iter()
-                .any(|tombstone| tombstone.dot.is_attributed())
-            && !self
-                .uniform_tombstone_actor()
-                .is_some_and(|actor| incoming.all_elements_authored_by(actor, fallback_actor));
-        needs_filtering.then(|| {
-            let incoming_actors = incoming.element_actors_by_digest(fallback_actor);
-            self.crdt.tombstones.retain(|tombstone| {
-                !tombstone.dot.is_attributed()
-                    || incoming_actors
-                        .get(&tombstone.element)
-                        .is_none_or(|actor| *actor == Some(tombstone.dot.version.actor))
-            });
-        });
         self
     }
 }
 
 /// Materialize normalized data-topic elements under the fair per-writer cap `max_len`,
-/// returning `(data, dots, co_dots)`.
+/// returning `(data, dots, co_dots)` (#1179, #1220).
 ///
-/// Each `(value, actor)` attribution is ranked independently by [`retain_fair_data_elements`];
-/// surviving attributions for the same `Bytes` payload are then grouped so `data` and `dots`
-/// hold each unique payload once at its greatest surviving dot while `co_dots` preserves any
-/// surviving co-author dots `(element_index, dot)` for future merges and retraction checks.
+/// Eviction ([`retain_fair_data_elements`]) triggers only when unique `Bytes` values exceed
+/// `max_len`, and advances water-filling until `max_len` unique `Bytes` values are admitted so
+/// co-author dots neither consume extra `max_len` slots nor regress a value's primary timestamp
+/// at or below capacity, while preserving semilattice associativity across co-authored floods.
 pub(super) fn materialize_data_elements(
     values: BTreeMap<Bytes, EntryDot>,
     mut co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
     max_len: usize,
 ) -> (Vec<Bytes>, Vec<EntryDot>, Vec<(u32, EntryDot)>) {
-    let mut visible = Vec::with_capacity(values.len());
+    if max_len == 0 {
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    if values.len() <= max_len {
+        let mut visible = values.into_iter().collect::<Vec<_>>();
+        visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+            left_dot
+                .cmp(right_dot)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        let mut data = Vec::with_capacity(visible.len());
+        let mut dots = Vec::with_capacity(visible.len());
+        let mut co_dots = Vec::new();
+        for (index, (value, primary_dot)) in visible.into_iter().enumerate() {
+            if let Some(actors) = co_values.remove(&value) {
+                if let Ok(index_u32) = u32::try_from(index) {
+                    let mut extra_dots = actors
+                        .into_values()
+                        .filter(|&dot| dot != primary_dot)
+                        .collect::<Vec<_>>();
+                    extra_dots.sort();
+                    co_dots.extend(extra_dots.into_iter().map(|dot| (index_u32, dot)));
+                }
+            }
+            data.push(value);
+            dots.push(primary_dot);
+        }
+        return (data, dots, co_dots);
+    }
+
+    let mut attributions = Vec::with_capacity(values.len());
     for (value, primary_dot) in values {
         match co_values.remove(&value) {
             Some(actors) if !actors.is_empty() => {
                 if !primary_dot.is_attributed() {
-                    visible.push((value.clone(), primary_dot));
+                    attributions.push((value.clone(), primary_dot));
                 }
-                visible.extend(actors.into_values().map(|dot| (value.clone(), dot)));
+                attributions.extend(actors.into_values().map(|dot| (value.clone(), dot)));
             }
-            _ => visible.push((value, primary_dot)),
+            _ => attributions.push((value, primary_dot)),
         }
     }
-    visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+    attributions.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
         left_dot
             .cmp(right_dot)
             .then_with(|| left_value.cmp(right_value))
     });
-    if visible.len() > max_len {
-        visible = retain_fair_data_elements(visible, max_len);
-    }
-    let mut by_value = BTreeMap::<Bytes, Vec<EntryDot>>::new();
-    for (value, dot) in visible {
-        by_value.entry(value).or_default().push(dot);
-    }
+    let by_value = retain_fair_data_elements(attributions, max_len);
     let mut primary = by_value
         .into_iter()
         .filter_map(|(value, mut actor_dots)| {
+            actor_dots.sort();
             actor_dots
                 .pop()
                 .map(|primary_dot| (value, primary_dot, actor_dots))
@@ -491,23 +1141,14 @@ pub(super) fn materialize_data_elements(
     (data, dots, co_dots)
 }
 
-/// Retain `max_len` elements from `visible` (already sorted ascending by `(dot, value)`),
-/// bounding each authenticated writer (`!dot.version.actor.is_default()`) by water-filling
-/// recency rank so a single writer flooding elements cannot evict other writers' newest
-/// elements (#1179).
-///
-/// For each element `(v, d)`, its per-actor recency rank `r` is the count of elements in
-/// `visible` with the same `d.version.actor` that are strictly newer in `(dot, value)` order
-/// (`r = 0` for each actor's newest element, `r = 1` for its second-newest, and `usize::MAX`
-/// for unattributed legacy elements with `d.version.actor.is_default()`). Keeping the top
-/// `max_len` elements under `(Reverse(r), dot, value)` and restoring canonical `(dot, value)`
-/// order is a join-semilattice homomorphism: adding elements can only tighten the rank
-/// threshold `r`, and reduces to standard newest-`max_len` truncation when all elements share
-/// one actor or when each actor has one element.
+/// Retain up to `max_len` unique `Bytes` values from `visible` (already sorted ascending by
+/// `(dot, value)`), bounding each authenticated writer (`!dot.version.actor.is_default()`) by
+/// water-filling recency rank so neither single-writer floods nor multi-writer co-dot amplification
+/// can evict honest writers' newest elements (#1179, #1220).
 pub(super) fn retain_fair_data_elements(
     visible: Vec<(Bytes, EntryDot)>,
     max_len: usize,
-) -> Vec<(Bytes, EntryDot)> {
+) -> BTreeMap<Bytes, Vec<EntryDot>> {
     let total = visible.len();
     let (_, mut ranked) = visible.into_iter().rev().fold(
         (BTreeMap::<Did, usize>::new(), Vec::with_capacity(total)),
@@ -522,22 +1163,18 @@ pub(super) fn retain_fair_data_elements(
     );
     ranked.sort_by(
         |(left_rank, left_value, left_dot), (right_rank, right_value, right_dot)| {
-            Reverse(*left_rank)
-                .cmp(&Reverse(*right_rank))
-                .then_with(|| left_dot.cmp(right_dot))
-                .then_with(|| left_value.cmp(right_value))
+            left_rank
+                .cmp(right_rank)
+                .then_with(|| Reverse(*left_dot).cmp(&Reverse(*right_dot)))
+                .then_with(|| Reverse(left_value).cmp(&Reverse(right_value)))
         },
     );
-    let skip_count = ranked.len().saturating_sub(max_len);
-    let mut kept = ranked
-        .into_iter()
-        .skip(skip_count)
-        .map(|(_, value, dot)| (value, dot))
-        .collect::<Vec<_>>();
-    kept.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
-        left_dot
-            .cmp(right_dot)
-            .then_with(|| left_value.cmp(right_value))
-    });
-    kept
+    let mut by_value = BTreeMap::<Bytes, Vec<EntryDot>>::new();
+    for (_, value, dot) in ranked {
+        by_value.entry(value).or_default().push(dot);
+        if by_value.len() == max_len {
+            break;
+        }
+    }
+    by_value
 }

@@ -271,11 +271,18 @@ impl Entry {
 
     /// This entry with its element side emptied and its remove side, register and bound kept.
     fn without_elements(self) -> Self {
+        let proofs = self
+            .crdt
+            .proofs
+            .into_iter()
+            .filter(|proof| !proof.key.is_element_add())
+            .collect();
         Self {
             data: Vec::new(),
             crdt: EntryCrdt {
                 dots: Vec::new(),
                 co_dots: Vec::new(),
+                proofs,
                 ..self.crdt
             },
             ..self
@@ -299,7 +306,8 @@ impl Entry {
                 .tombstones
                 .iter()
                 .any(|tombstone| retires_remove(&tombstone.dot.version))
-            || self.crdt.register.as_ref().is_some_and(retires_remove);
+            || self.crdt.register.as_ref().is_some_and(retires_remove)
+            || self.crdt.co_registers.iter().any(retires_remove);
         if !crossed {
             return self;
         }
@@ -330,22 +338,65 @@ impl Entry {
                     .flatten()
                     .map(|new_index| (new_index, dot))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let mut surviving_floors = self
+            .crdt
+            .register
+            .into_iter()
+            .chain(self.crdt.co_registers)
+            .filter(|version| !retires_remove(version))
+            .collect::<Vec<_>>();
+        surviving_floors.sort();
+        let register = surviving_floors.pop();
+        let tombstones = self
+            .crdt
+            .tombstones
+            .into_iter()
+            .filter(|tombstone| !retires_remove(&tombstone.dot.version))
+            .collect::<Vec<_>>();
+        let proofs = if self.crdt.proofs.is_empty() {
+            Vec::new()
+        } else {
+            let mut surviving_adds = std::collections::BTreeSet::new();
+            for (index, value) in data.iter().enumerate() {
+                let digest = super::ElementDigest(crate::ecc::keccak256(value.as_ref()));
+                if let Some(dot) = dots.get(index) {
+                    if !dot.version.actor.is_default() {
+                        surviving_adds.insert((digest, dot.version.actor));
+                    }
+                }
+                for &(co_idx, dot) in &co_dots {
+                    if co_idx as usize == index && !dot.version.actor.is_default() {
+                        surviving_adds.insert((digest, dot.version.actor));
+                    }
+                }
+            }
+            self.crdt
+                .proofs
+                .into_iter()
+                .filter(|proof| match proof.key {
+                    super::provenance::DataProofKey::Register(_) => register
+                        .into_iter()
+                        .chain(surviving_floors.iter().copied())
+                        .any(|floor| proof.matches_register(floor)),
+                    super::provenance::DataProofKey::Add(digest, actor) => {
+                        surviving_adds.contains(&(digest, actor))
+                    }
+                    super::provenance::DataProofKey::Remove(_, _) => tombstones
+                        .iter()
+                        .any(|t| proof.matches_remove(t.element, t.dot)),
+                })
+                .collect()
+        };
         Self {
             data,
             crdt: EntryCrdt {
-                register: self
-                    .crdt
-                    .register
-                    .filter(|version| !retires_remove(version)),
+                register,
                 dots,
                 co_dots,
-                tombstones: self
-                    .crdt
-                    .tombstones
-                    .into_iter()
-                    .filter(|tombstone| !retires_remove(&tombstone.dot.version))
-                    .collect(),
+                co_registers: surviving_floors,
+                proofs,
+                tombstones,
             },
             ..self
         }
@@ -392,6 +443,7 @@ impl Entry {
             .iter()
             .map(|tombstone| tombstone.dot.version)
             .chain(self.crdt.register)
+            .chain(self.crdt.co_registers.iter().copied())
             .map(|version| retention.stable_at(&version))
             .max()
     }
@@ -420,7 +472,7 @@ impl Entry {
     pub(crate) fn check_admissible_at(&self, now_ms: u128, network_id: u32) -> Result<()> {
         self.validate_bounds_at(now_ms)?;
         match self.kind {
-            EntryKind::Data => Ok(()),
+            EntryKind::Data => self.validate_data_proofs(now_ms, network_id),
             EntryKind::RelayMessage => self.validate_inbox_witness(now_ms, network_id),
         }
     }

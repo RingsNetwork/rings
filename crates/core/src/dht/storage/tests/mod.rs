@@ -939,8 +939,10 @@ async fn test_operate_storage_entry_rejects_cross_origin_data_overwrite() -> Res
         Err(Error::DataEntryWriteUnauthorized)
     ));
 
-    // 3. Synced entry carrying an attacker register floor against honest writer's live entry is rejected.
-    let forged_sync = owner
+    // 3. Synced entry forging a synthetic floor claiming `actor = honest` is rejected (#1220),
+    //    while a legitimate cross-actor overwrite floor on another replica merges commutatively
+    //    without wiping `honest-record`.
+    let mut forged_sync = owner
         .stamp_operation_by(
             EntryOperation::Overwrite(data_entry_with_data(topic, "attacker-sync")),
             now_ms + 3,
@@ -950,6 +952,9 @@ async fn test_operate_storage_entry_rejects_cross_origin_data_overwrite() -> Res
         .await?
         .entry()
         .clone();
+    let forged_floor = crate::dht::entry::EntryVersion::new(now_ms + 3, honest, Did::from(9999u32));
+    forged_sync.crdt.register = Some(forged_floor);
+    forged_sync.crdt.dots[0].version = forged_floor;
     assert!(matches!(
         owner
             .join_storage_entry(now_ms + 3, topic, forged_sync, Principal::Unbound)
@@ -1057,7 +1062,8 @@ async fn test_operate_storage_entry_rejects_cross_origin_data_tombstone() -> Res
         Err(Error::DataEntryWriteUnauthorized)
     ));
 
-    // 3. Forged synced tombstone covering honest writer's live dot is rejected.
+    // 3. Synced tombstone impersonating `actor = honest` with an unauthenticated version is
+    //    rejected (#1220).
     let mut forged_sync = owner
         .stamp_operation_by(
             EntryOperation::Extend(data_entry_with_data(topic, "attacker-item")),
@@ -1068,13 +1074,16 @@ async fn test_operate_storage_entry_rejects_cross_origin_data_tombstone() -> Res
         .await?
         .entry()
         .clone();
-    let attacker_dot = forged_sync.crdt.dots[0];
+    let forged_honest_dot = crate::dht::entry::EntryDot {
+        version: EntryVersion::new(now_ms + 3, honest, Did::from(9999u32)),
+        index: 0,
+    };
     forged_sync
         .crdt
         .tombstones
         .push(crate::dht::entry::EntryTombstone::of(
             &Bytes::from("honest-record"),
-            attacker_dot,
+            forged_honest_dot,
         ));
     assert!(matches!(
         owner
@@ -1254,5 +1263,352 @@ async fn test_operate_storage_entry_bounded_per_origin_extend_preserves_other_wr
         stored.data.contains(&Bytes::from("honest-b")),
         "honest_b must survive the flood"
     );
+    Ok(())
+}
+
+/// Issue #1220 Defect 2: actor-scoped `co_registers` and `co_removes` make bidirectional storage
+/// sync unconditionally commutative (no `OwnershipHandoff` refusal or cross-actor data loss) and
+/// survive element-side eviction in `CarrierStore::Factored` (`RemovalRecord`).
+#[tokio::test]
+async fn test_issue_1220_actor_scoped_floors_and_tombstones_commute_and_survive_factored_eviction(
+) -> Result<()> {
+    let owner_1 = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let owner_2 = PeerRing::new_with_storage(Did::from(2u32), 3, Box::new(MemStorage::new()));
+    let topic = Did::from(1220u32);
+    let actor_a = Did::from(10u32);
+    let actor_b = Did::from(20u32);
+    let actor_c = Did::from(30u32);
+    let now_ms = get_epoch_ms();
+
+    // owner_1: actor_a overwrites "a-v1" at t+10 then "a-v2" at t+200 (floor_a = t+200).
+    for (offset, val) in [(10u128, "a-v1"), (200u128, "a-v2")] {
+        let op = owner_1
+            .stamp_operation_by(
+                EntryOperation::Overwrite(data_entry_with_data(topic, val)),
+                now_ms + offset,
+                actor_a,
+                Some(topic),
+            )
+            .await?;
+        owner_1
+            .operate_storage_entry(now_ms + offset, topic, op, actor_a, Principal::Unbound)
+            .await?;
+    }
+
+    // owner_2: actor_c overwrites "c-v1" at t+180 (floor_c = t+180), then actor_b extends "b-v1"
+    // at t+150 (an older timestamp from a different actor!).
+    let op_c = owner_2
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "c-v1")),
+            now_ms + 180,
+            actor_c,
+            Some(topic),
+        )
+        .await?;
+    owner_2
+        .operate_storage_entry(now_ms + 180, topic, op_c, actor_c, Principal::Unbound)
+        .await?;
+
+    let mut b_delta = data_entry_with_data(topic, "b-v1");
+    b_delta.crdt.dots = vec![crate::dht::entry::EntryDot {
+        version: EntryVersion::new(now_ms + 150, actor_b, actor_b),
+        index: 0,
+    }];
+    owner_2
+        .join_storage_entry(now_ms + 181, topic, b_delta, Principal::Unbound)
+        .await?;
+
+    let state_1 = owner_1
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 201)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("state_1 missing".to_string()))?;
+    let state_2 = owner_2
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 201)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("state_2 missing".to_string()))?;
+
+    // Bidirectional OwnershipHandoff / SyncEntriesWithSuccessor succeeds in BOTH orders and
+    // converges to the exact same state!
+    let merged_on_1 = owner_1
+        .join_storage_entry(now_ms + 202, topic, state_2, Principal::Unbound)
+        .await?;
+    let merged_on_2 = owner_2
+        .join_storage_entry(now_ms + 202, topic, state_1, Principal::Unbound)
+        .await?;
+    assert_eq!(merged_on_1, merged_on_2);
+    assert!(merged_on_1.data.contains(&Bytes::from("a-v2")));
+    assert!(merged_on_1.data.contains(&Bytes::from("b-v1")));
+    assert!(merged_on_1.data.contains(&Bytes::from("c-v1")));
+    assert!(!merged_on_1.data.contains(&Bytes::from("a-v1")));
+    assert_eq!(merged_on_1.crdt.co_registers.len(), 1);
+
+    // Wire round-trip (bincode/rings_codec and JSON) preserves both `register` and `co_registers`.
+    let wire_bytes = rings_codec::serialize(&merged_on_1).map_err(Error::CodecSerialize)?;
+    let wire_decoded: Entry =
+        rings_codec::deserialize(&wire_bytes).map_err(Error::CodecDeserialize)?;
+    assert_eq!(wire_decoded, merged_on_1);
+
+    // Simulate byte-budget eviction of the element side in `CarrierStore::Factored`: both
+    // `register` (`actor_a`) and `co_registers` (`actor_c`) remain in `RemovalRecord` and suppress
+    // stale replays from `actor_a` and `actor_c` while admitting `actor_b`!
+    owner_1.storage.remove(&topic.to_string()).await?;
+    let stale_c = crate::tests::stamped_delta(
+        EntryOperation::Extend,
+        topic,
+        &["c-stale"],
+        now_ms + 50,
+        actor_c,
+    )?;
+    let stale_a = crate::tests::stamped_delta(
+        EntryOperation::Extend,
+        topic,
+        &["a-stale"],
+        now_ms + 50,
+        actor_a,
+    )?;
+    let fresh_b = crate::tests::stamped_delta(
+        EntryOperation::Extend,
+        topic,
+        &["b-survives"],
+        now_ms + 60,
+        actor_b,
+    )?;
+    owner_1
+        .join_storage_entry(now_ms + 205, topic, stale_c, Principal::Unbound)
+        .await?;
+    owner_1
+        .join_storage_entry(now_ms + 205, topic, stale_a, Principal::Unbound)
+        .await?;
+    let after_eviction = owner_1
+        .join_storage_entry(now_ms + 205, topic, fresh_b, Principal::Unbound)
+        .await?;
+    assert_eq!(after_eviction.data, vec![Bytes::from("b-survives")]);
+    Ok(())
+}
+
+/// Issue #1220 Defects 3 & 5b: `SignedDataMutation` cryptographically authenticates Swarm-originated
+/// per-actor mutations across `SyncEntriesWithSuccessor` (`join_storage_entry`) and `FoundEntry`
+/// (`local_cache_put` on `CarrierStore::Whole`), rejecting forged `held_dot` tombstones,
+/// cross-element dot-retraction replays, forged `OperationDigest` floors, and corrupted wire proofs.
+#[tokio::test]
+async fn test_issue_1220_signed_data_mutation_authenticates_swarm_sync_and_local_cache(
+) -> Result<()> {
+    use crate::dht::ChordStorageCache;
+    use crate::message::MessageSigner;
+    use crate::tests::TEST_NETWORK_ID;
+
+    let owner = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
+    let reader = PeerRing::new_with_storage(Did::from(2u32), 3, Box::new(MemStorage::new()));
+    let replica = PeerRing::new_with_storage(Did::from(3u32), 3, Box::new(MemStorage::new()));
+
+    let victim_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let attacker_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let victim = victim_key.delegator_did();
+    let attacker = attacker_key.delegator_did();
+    let victim_signer = MessageSigner::new(&victim_key, TEST_NETWORK_ID);
+    let attacker_signer = MessageSigner::new(&attacker_key, TEST_NETWORK_ID);
+
+    let topic = Did::from(1221u32);
+    let now_ms = get_epoch_ms();
+
+    // Victim issues two Swarm-signed Extend operations ("v-keep" and "v-other").
+    for (offset, label) in [(0u128, "v-keep"), (1u128, "v-other")] {
+        let op = owner
+            .stamp_operation_by(
+                EntryOperation::Extend(data_entry_with_data(topic, label)),
+                now_ms + offset,
+                victim,
+                Some(topic),
+            )
+            .await?
+            .with_author_proofs(victim, victim_signer, now_ms + offset)?;
+        owner
+            .operate_storage_entry(
+                now_ms + offset,
+                topic,
+                op.clone(),
+                victim,
+                Principal::Unbound,
+            )
+            .await?;
+        replica
+            .operate_storage_entry(now_ms + offset, topic, op, victim, Principal::Unbound)
+            .await?;
+    }
+
+    let held = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 2)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("victim topic missing".to_string()))?;
+    assert_eq!(held.crdt.proofs.len(), 2);
+    reader.local_cache_put(held.clone()).await?;
+
+    let keep_dot = held.crdt.dots[0];
+    let other_dot = held.crdt.dots[1];
+
+    // 1. Forged synced tombstone copying `victim`'s exact `keep_dot` (without `victim`'s signature,
+    //    or signed by `attacker_signer`) is rejected on BOTH replicated storage and `Whole` cache!
+    let mut forged_copied_dot = replica
+        .stamp_operation_by(
+            EntryOperation::Extend(data_entry_with_data(topic, "attacker-noise")),
+            now_ms + 5,
+            attacker,
+            Some(topic),
+        )
+        .await?
+        .with_author_proofs(attacker, attacker_signer, now_ms + 5)?
+        .entry()
+        .clone();
+    forged_copied_dot
+        .crdt
+        .tombstones
+        .push(crate::dht::entry::EntryTombstone::of(
+            &Bytes::from("v-keep"),
+            keep_dot,
+        ));
+    assert!(matches!(
+        owner
+            .join_storage_entry(
+                now_ms + 5,
+                topic,
+                forged_copied_dot.clone(),
+                Principal::Unbound
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+    assert!(matches!(
+        reader.local_cache_put(forged_copied_dot).await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 2. Cross-element dot-retraction replay: victim legitimately retracts `other_dot` ("v-other")
+    //    by dot witness on `replica`, and attacker transplants that signature onto `keep_dot`
+    //    ("v-keep"). Must be rejected!
+    let mut dot_removal = Entry::new(topic, vec![], EntryKind::Data);
+    dot_removal.crdt.dots = vec![other_dot];
+    let legit_other_tomb = EntryOperation::Tombstone(dot_removal)
+        .stamped(now_ms + 6, victim)?
+        .with_author_proofs(victim, victim_signer, now_ms + 6)?;
+    replica
+        .operate_storage_entry(
+            now_ms + 6,
+            topic,
+            legit_other_tomb,
+            victim,
+            Principal::Unbound,
+        )
+        .await?;
+    let replica_after_other_tomb = replica
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 6)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("replica missing".to_string()))?;
+
+    let mut replayed_proof_attack = replica_after_other_tomb.clone();
+    replayed_proof_attack.data.clear();
+    replayed_proof_attack.crdt.dots.clear();
+    replayed_proof_attack.crdt.tombstones = vec![crate::dht::entry::EntryTombstone::of(
+        &Bytes::from("v-keep"),
+        keep_dot,
+    )];
+    if let Some(proof) = replayed_proof_attack.crdt.proofs.first_mut() {
+        proof.key = crate::dht::entry::DataProofKey::Remove(
+            crate::dht::entry::ElementDigest::of(&Bytes::from("v-keep")),
+            victim,
+        );
+    }
+    assert!(matches!(
+        owner
+            .join_storage_entry(now_ms + 7, topic, replayed_proof_attack, Principal::Unbound)
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 3. Legitimate sync of `replica_after_other_tomb` succeeds on both `owner` and `reader` cache!
+    owner
+        .join_storage_entry(
+            now_ms + 8,
+            topic,
+            replica_after_other_tomb.clone(),
+            Principal::Unbound,
+        )
+        .await?;
+    reader.local_cache_put(replica_after_other_tomb).await?;
+    let owner_after = owner
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 8)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("owner_after missing".to_string()))?;
+    assert_eq!(owner_after.data, vec![Bytes::from("v-keep")]);
+
+    // 4. Forged synced `Overwrite` claiming `actor = victim` with valid `OperationDigest` but
+    //    lacking `victim`'s `SignedDataMutation` is rejected!
+    let unsigned_victim_overwrite = owner
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "forged-reset")),
+            now_ms + 10,
+            victim,
+            Some(topic),
+        )
+        .await?
+        .entry()
+        .clone();
+    assert!(matches!(
+        owner
+            .join_storage_entry(
+                now_ms + 10,
+                topic,
+                unsigned_victim_overwrite,
+                Principal::Unbound
+            )
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    // 5. Legitimate Swarm-signed `Overwrite` by `victim` syncs cleanly and wire-roundtrips;
+    //    truncating a proof chunk on the wire is rejected as corrupted.
+    let signed_victim_overwrite = replica
+        .stamp_operation_by(
+            EntryOperation::Overwrite(data_entry_with_data(topic, "v-reset")),
+            now_ms + 12,
+            victim,
+            Some(topic),
+        )
+        .await?
+        .with_author_proofs(victim, victim_signer, now_ms + 12)?;
+    replica
+        .operate_storage_entry(
+            now_ms + 12,
+            topic,
+            signed_victim_overwrite,
+            victim,
+            Principal::Unbound,
+        )
+        .await?;
+    let signed_reset_state = replica
+        .live_storage_entry(StorageKey::new(EntryKind::Data, topic), now_ms + 12)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("signed_reset_state missing".to_string()))?;
+
+    let mut wire_json =
+        serde_json::to_value(&signed_reset_state).map_err(|_| Error::SerializeToString)?;
+    if let Some(dots_arr) = wire_json
+        .get_mut("crdt")
+        .and_then(|crdt| crdt.get_mut("dots"))
+        .and_then(|dots| dots.as_array_mut())
+    {
+        dots_arr.pop();
+    }
+    let truncated_entry: Entry = serde_json::from_value(wire_json).map_err(Error::Deserialize)?;
+    assert!(matches!(
+        owner
+            .join_storage_entry(now_ms + 13, topic, truncated_entry, Principal::Unbound)
+            .await,
+        Err(Error::DataEntryWriteUnauthorized)
+    ));
+
+    let final_owner = owner
+        .join_storage_entry(now_ms + 14, topic, signed_reset_state, Principal::Unbound)
+        .await?;
+    assert_eq!(final_owner.data, vec![Bytes::from("v-reset")]);
     Ok(())
 }

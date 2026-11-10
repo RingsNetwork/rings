@@ -32,7 +32,9 @@ pub use crdt::EntryDot;
 pub use crdt::EntryTombstone;
 pub use crdt::EntryVersion;
 use provenance::materialize_data_elements;
+pub(crate) use provenance::DataProofKey;
 use provenance::RetractionWitness;
+pub use provenance::SignedDataMutation;
 pub(crate) use retention::AdmittedEntry;
 
 /// DHT storage entry categories.
@@ -123,6 +125,7 @@ enum EntryStampKind {
 struct OperationDigest<'a> {
     kind: EntryKind,
     did: Did,
+    actor: Did,
     data: &'a [Bytes],
 }
 
@@ -471,7 +474,13 @@ impl EntryOperation {
             let entry = entry.ensure_lifetime_from(now_ms);
             match stamp {
                 Some(kind) => entry.ensure_stamp_after(now_ms, actor, floor, kind),
-                None => Ok(entry),
+                None => {
+                    let mut entry = entry;
+                    if !entry.crdt.has_write_witness() {
+                        entry.crdt.dots.clear();
+                    }
+                    Ok(entry)
+                }
             }
         })
     }
@@ -550,6 +559,8 @@ impl Entry {
             .map(|(index, _)| EntryDot::for_index(version, index))
             .collect::<Result<Vec<_>>>()?;
         self.crdt.co_dots.clear();
+        self.crdt.co_registers.clear();
+        self.crdt.proofs.clear();
         Ok(self)
     }
 
@@ -569,14 +580,19 @@ impl Entry {
         }
     }
 
-    fn operation_digest(&self) -> Result<Did> {
+    pub(super) fn operation_digest_for(&self, actor: Did, data: &[Bytes]) -> Result<Did> {
         let digest = OperationDigest {
             kind: self.kind,
             did: self.did,
-            data: &self.data,
+            actor,
+            data,
         };
         let bytes = rings_codec::serialize(&digest).map_err(Error::CodecSerialize)?;
         Did::try_from(HashStr::from_bytes(&bytes))
+    }
+
+    fn operation_digest(&self, actor: Did) -> Result<Did> {
+        self.operation_digest_for(actor, &self.data)
     }
 
     fn issue_version_after(
@@ -585,27 +601,66 @@ impl Entry {
         actor: Did,
         floor: Option<EntryVersion>,
     ) -> Result<EntryVersion> {
-        EntryVersion::new(now_ms, actor, self.operation_digest()?).after(floor)
+        EntryVersion::new(now_ms, actor, self.operation_digest(actor)?).after(floor)
+    }
+
+    fn attribute_unattributed_versions(&mut self, actor: Did) {
+        if actor.is_default() {
+            return;
+        }
+        if let Some(reg) = &mut self.crdt.register {
+            if reg.actor.is_default() {
+                reg.actor = actor;
+            }
+        }
+        for reg in &mut self.crdt.co_registers {
+            if reg.actor.is_default() {
+                reg.actor = actor;
+            }
+        }
+        for dot in &mut self.crdt.dots {
+            if dot.version.actor.is_default() {
+                dot.version.actor = actor;
+            }
+        }
+        for (_, dot) in &mut self.crdt.co_dots {
+            if dot.version.actor.is_default() {
+                dot.version.actor = actor;
+            }
+        }
     }
 
     fn ensure_stamp_after(
-        self,
+        mut self,
         now_ms: u128,
         actor: Did,
         floor: Option<EntryVersion>,
         kind: EntryStampKind,
     ) -> Result<Self> {
         match self.crdt.has_write_witness() {
-            true => Ok(self),
+            true => {
+                self.attribute_unattributed_versions(actor);
+                Ok(self)
+            }
             false => {
+                let stray_register = (kind == EntryStampKind::Delta)
+                    .then_some(self.crdt.register)
+                    .flatten();
                 let version = self.issue_version_after(now_ms, actor, floor)?;
-                self.stamp(version, kind)
+                let mut stamped = self.stamp(version, kind)?;
+                if let Some(mut reg) = stray_register {
+                    if !actor.is_default() && reg.actor.is_default() {
+                        reg.actor = actor;
+                    }
+                    stamped.crdt.register = Some(reg);
+                }
+                Ok(stamped)
             }
         }
     }
 
-    /// Every version this entry carries: element dots, co-author dots, tombstones, and the reset
-    /// floor.
+    /// Every version this entry carries: element dots, co-author dots, tombstones, and reset
+    /// floors.
     pub(super) fn versions(&self) -> impl Iterator<Item = EntryVersion> + '_ {
         self.crdt
             .dots
@@ -619,9 +674,10 @@ impl Entry {
                     .map(|tombstone| tombstone.dot.version),
             )
             .chain(self.crdt.register)
+            .chain(self.crdt.co_registers.iter().copied())
     }
 
-    /// The greatest version this carrier holds: of a dot, a remove, or the register.
+    /// The greatest version this carrier holds: of a dot, a remove, or a register floor.
     pub(crate) fn max_observed_version(&self) -> Option<EntryVersion> {
         self.versions().max()
     }
@@ -644,8 +700,16 @@ impl Entry {
     }
 
     /// This entry's carrier state before normalization: every element with its dot and every
-    /// remove, each keyed by its greatest dot, and the register.
+    /// remove, each keyed by its greatest dot, and the reset floors.
     fn raw_buffer(&self) -> Result<DataTopicBuffer> {
+        let mut register = None;
+        let mut co_registers = BTreeMap::new();
+        if let Some(floor) = self.crdt.register {
+            DataTopicBuffer::insert_register(&mut register, &mut co_registers, floor);
+        }
+        for &floor in &self.crdt.co_registers {
+            DataTopicBuffer::insert_register(&mut register, &mut co_registers, floor);
+        }
         let mut values = BTreeMap::new();
         let mut co_values = BTreeMap::new();
         for (index, value) in self.data.iter().cloned().enumerate() {
@@ -662,33 +726,49 @@ impl Entry {
             }
         }
         let mut removes = BTreeMap::new();
+        let mut co_removes = BTreeMap::new();
         for tombstone in self.crdt.tombstones.iter() {
-            insert_max(&mut removes, tombstone.element, tombstone.dot);
+            DataTopicBuffer::insert_remove(
+                &mut removes,
+                &mut co_removes,
+                tombstone.element,
+                tombstone.dot,
+            );
+        }
+        let mut proofs = BTreeMap::new();
+        for proof in &self.crdt.proofs {
+            insert_max(&mut proofs, proof.key, proof.clone());
         }
         Ok(DataTopicBuffer {
-            register: self.crdt.register,
+            register,
+            co_registers,
             values,
             co_values,
             removes,
+            co_removes,
+            proofs,
         })
     }
 
-    /// This entry's normalized carrier state (see [`DataTopicBuffer::with_co_values`]).
+    /// This entry's normalized carrier state (see [`DataTopicBuffer::normalize`]).
     pub(super) fn topic_buffer(&self) -> Result<DataTopicBuffer> {
         let raw = self.raw_buffer()?;
-        Ok(DataTopicBuffer::with_co_values(
+        Ok(DataTopicBuffer::normalize(
             raw.register,
+            raw.co_registers,
             raw.values,
             raw.co_values,
             raw.removes,
+            raw.co_removes,
+            raw.proofs,
         ))
     }
 
     /// Materialize a normalized buffer as an entry: elements in dot order under the count cap,
     /// removes in dot order, truncated only under a truncating tombstone bound.
     ///
-    /// Pre: `buffer` is normalized, so no element is below the register or covered by a remove,
-    /// and no digest is computed here.
+    /// Pre: `buffer` is normalized, so no element is below its actor's register floor or covered
+    /// by a matching remove, and no digest is computed here unless `proofs` is non-empty.
     fn materialize_topic_buffer(
         &self,
         buffer: DataTopicBuffer,
@@ -697,10 +777,18 @@ impl Entry {
         let kind = self.kind;
         let DataTopicBuffer {
             register,
+            co_registers,
             values,
             co_values,
             removes,
+            co_removes,
+            mut proofs,
         } = buffer;
+        let mut co_registers = co_registers
+            .into_values()
+            .filter(|&version| Some(version) != register)
+            .collect::<Vec<_>>();
+        co_registers.sort();
         let (data, dots, co_dots) = match kind {
             EntryKind::Data => materialize_data_elements(values, co_values, kind.max_data_len()),
             EntryKind::RelayMessage => {
@@ -715,16 +803,54 @@ impl Entry {
                 (data, dots, Vec::new())
             }
         };
-        let mut tombstones = removes
-            .into_iter()
-            .map(|(element, dot)| EntryTombstone { element, dot })
-            .collect::<Vec<_>>();
+        let mut tombstones = match kind {
+            EntryKind::Data => co_removes
+                .into_iter()
+                .flat_map(|(element, actors)| {
+                    actors
+                        .into_values()
+                        .map(move |dot| EntryTombstone { element, dot })
+                })
+                .collect::<Vec<_>>(),
+            EntryKind::RelayMessage => removes
+                .into_iter()
+                .map(|(element, dot)| EntryTombstone { element, dot })
+                .collect::<Vec<_>>(),
+        };
         tombstones.sort_by(|left, right| {
             left.dot
                 .cmp(&right.dot)
                 .then_with(|| left.element.cmp(&right.element))
         });
         let tombstone_skip = kind.tombstone_bound().truncated(tombstones.len());
+        let tombstones: Vec<EntryTombstone> = tombstones.into_iter().skip(tombstone_skip).collect();
+
+        if !proofs.is_empty() {
+            let mut surviving_adds = std::collections::BTreeSet::new();
+            for (index, value) in data.iter().enumerate() {
+                let digest = ElementDigest(crate::ecc::keccak256(value.as_ref()));
+                if let Some(dot) = dots.get(index) {
+                    if !dot.version.actor.is_default() {
+                        surviving_adds.insert((digest, dot.version.actor));
+                    }
+                }
+                for &(co_idx, dot) in &co_dots {
+                    if co_idx as usize == index && !dot.version.actor.is_default() {
+                        surviving_adds.insert((digest, dot.version.actor));
+                    }
+                }
+            }
+            proofs.retain(|key, proof| match *key {
+                DataProofKey::Add(digest, actor) => surviving_adds.contains(&(digest, actor)),
+                DataProofKey::Register(_) => register
+                    .into_iter()
+                    .chain(co_registers.iter().copied())
+                    .any(|floor| proof.matches_register(floor)),
+                DataProofKey::Remove(_, _) => tombstones
+                    .iter()
+                    .any(|t| proof.matches_remove(t.element, t.dot)),
+            });
+        }
 
         Self {
             did: self.did,
@@ -733,24 +859,16 @@ impl Entry {
             crdt: EntryCrdt {
                 register,
                 dots,
-                tombstones: tombstones.into_iter().skip(tombstone_skip).collect(),
+                tombstones,
                 co_dots,
+                co_registers,
+                proofs: proofs.into_values().collect(),
             },
             expires_at_ms,
         }
     }
 
     /// Merge two entries from the same replicated carrier.
-    ///
-    /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
-    /// join. Data entries are bounded LWW element sets with an LWW overwrite
-    /// register; relay entries are two-phase sets whose remove side is carried
-    /// by tombstones. The retention bound joins by `max`, so the product of the
-    /// payload lattice and the bound lattice is again a join-semilattice.
-    ///
-    /// Both sides enter the join unnormalized and the result is normalized once: normalization
-    /// only drops what the joined register and removes still drop, so this equals the join of
-    /// the normalized sides, and each payload digest is computed once.
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
         let expires_at_ms = self.joined_lifetime(&other);
@@ -771,13 +889,6 @@ impl Entry {
     }
 
     /// Normalize an entry immediately before it is persisted.
-    ///
-    /// Post: normalization uses the same carrier materialization as
-    /// [`Self::join`]; there is no second cap strategy outside the CRDT.
-    /// Post: `result.data.len() <= kind.max_data_len()`; when the cap binds, the oldest payloads
-    /// are the ones dropped.
-    /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
-    /// RelayMessage entries.
     pub fn try_into_storage_entry(self) -> Result<Self> {
         let buffer = self.topic_buffer()?;
         Ok(self.materialize_topic_buffer(buffer, self.expires_at_ms))
@@ -790,18 +901,14 @@ impl Entry {
         match op {
             EntryOperation::Overwrite(entry) => self.overwrite(now_ms, entry, actor),
             EntryOperation::Extend(entry) => self.extend(now_ms, entry, actor),
-            EntryOperation::Tombstone(entry) => self.tombstone(entry),
+            EntryOperation::Tombstone(entry) => match self.kind {
+                EntryKind::Data if !actor.is_default() => self.tombstone_by(entry, actor),
+                EntryKind::Data | EntryKind::RelayMessage => self.tombstone(entry),
+            },
         }
     }
 
     /// Overwrite current data with new data.
-    ///
-    /// Preservation: the replacement is represented as a CRDT join. A newly
-    /// stamped overwrite carries a reset floor, and materialization keeps only
-    /// dots at or after that floor, so older payload dots are removed without a
-    /// non-monotone assignment.
-    ///
-    /// The handler of [EntryOperation::Overwrite].
     pub fn overwrite(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
@@ -814,9 +921,7 @@ impl Entry {
         )?)
     }
 
-    /// Add `other`'s payloads to this carrier: the element-set join for a data topic and for
-    /// a relay inbox alike, so holding a message for an offline peer is one ordinary write.
-    /// The handler of [EntryOperation::Extend].
+    /// Add `other`'s payloads to this carrier.
     pub fn extend(&self, now_ms: u128, other: Self, actor: Did) -> Result<Self> {
         self.join(other.ensure_stamp_after(
             now_ms,
@@ -826,15 +931,58 @@ impl Entry {
         )?)
     }
 
+    /// Remove observed data payloads authored by `actor`, leaving other co-authors' attributions
+    /// intact (#1220).
+    pub fn tombstone_by(&self, other: Self, actor: Did) -> Result<Self> {
+        if actor.is_default() || !self.is_data_entry() {
+            return self.tombstone(other);
+        }
+        self.validate_same_carrier(&other)?;
+        let expires_at_ms = self.expires_at_ms;
+        let witness = RetractionWitness::of(&other);
+        let mut buffer = self.topic_buffer()?;
+        let removed = buffer
+            .values
+            .iter()
+            .filter_map(|(value, primary_dot)| match buffer.co_values.get(value) {
+                Some(actors) => actors
+                    .get(&actor)
+                    .copied()
+                    .filter(|actor_dot| witness.matches(value, actor_dot))
+                    .map(|dot| (value.clone(), Some(dot))),
+                None => (primary_dot.version.actor.is_default()
+                    && witness.matches(value, primary_dot))
+                .then(|| (value.clone(), None)),
+            })
+            .collect::<Vec<_>>();
+        for (value, removed_dot) in removed {
+            buffer.remove_by(&value, actor);
+            if !other.crdt.proofs.is_empty() {
+                let digest = ElementDigest(crate::ecc::keccak256(value.as_ref()));
+                let key = DataProofKey::Remove(digest, actor);
+                if let Some(exact) = other.crdt.proofs.iter().find(|p| p.key == key) {
+                    insert_max(&mut buffer.proofs, key, exact.clone());
+                } else if let Some(dot) = removed_dot {
+                    if let Some(mut dot_proof) = other
+                        .crdt
+                        .proofs
+                        .iter()
+                        .find(|p| {
+                            p.key == DataProofKey::Remove(ElementDigest([0u8; 32]), actor)
+                                && p.witness_dot == Some(dot)
+                        })
+                        .cloned()
+                    {
+                        dot_proof.key = key;
+                        insert_max(&mut buffer.proofs, key, dot_proof);
+                    }
+                }
+            }
+        }
+        Ok(self.materialize_topic_buffer(buffer, expires_at_ms))
+    }
+
     /// Remove observed data or relay-message payloads.
-    ///
-    /// Pre: `self` and `other` are the same data or relay-message carrier.
-    /// Post: every removed payload is represented by a covering remove at the dot this carrier
-    /// holds for it, which also covers every earlier dot of the payload, including dots the
-    /// carrier has already forgotten under a later one; so no future join with a stale add
-    /// replica can resurrect it (#874). The carrier keeps its own retention bound: retention is
-    /// refreshed by what is held, never by a removal, so a drained carrier expires when its last
-    /// hold would have.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
 
@@ -845,7 +993,13 @@ impl Entry {
         let removed = buffer
             .values
             .iter()
-            .filter(|(value, dot)| witness.matches(value, dot))
+            .filter(|(value, dot)| {
+                witness.matches(value, dot)
+                    || buffer
+                        .co_values
+                        .get(*value)
+                        .is_some_and(|actors| actors.values().any(|d| witness.matches(value, d)))
+            })
             .map(|(value, _)| value.clone())
             .collect::<Vec<_>>();
         removed.iter().for_each(|value| {

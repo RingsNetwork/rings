@@ -94,6 +94,7 @@
 //! is structural rather than a law parameter; `test_remove_covers_superseded_dot_of_same_payload`
 //! is its directed witness.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use bytes::Bytes;
@@ -241,10 +242,10 @@ struct Replica {
     carrier: Option<Entry>,
     /// Every add delivered here while visible at its sender.
     received: BTreeSet<Add>,
-    /// Every remove observed here, as the payload and the dot the remove covers up to.
+    /// Every remove observed here, as the payload and the actor-scoped dot the remove covers up to.
     killed: BTreeSet<(Bytes, EntryDot)>,
-    /// The greatest overwrite register observed here.
-    floor: Option<EntryVersion>,
+    /// The greatest overwrite register observed here per actor (#1220).
+    floors: BTreeMap<Did, EntryVersion>,
 }
 
 /// What holds a carrier live past its retention bound: under the production law, every unstable
@@ -274,7 +275,7 @@ impl Holders {
             .map(|tombstone| tombstone.dot.version)
             .filter(|_| removes_hold);
         let held_until = removes
-            .chain(carrier.crdt.register.filter(|_| register_holds))
+            .chain(carrier.register_floors().filter(|_| register_holds))
             .map(|version| law.stable_at(&version))
             .max();
         carrier.expires_at_ms.is_some()
@@ -414,13 +415,28 @@ impl World {
         Ok(())
     }
 
-    /// The dot `entry` holds for `value`, if it holds `value`.
-    fn held_dot(entry: &Entry, value: &Bytes) -> Option<EntryDot> {
+    /// Every `(value, dot)` attribution `entry` holds (primary and co-author dots).
+    fn held_attributions(entry: &Entry) -> Vec<(Bytes, EntryDot)> {
         entry
             .data
             .iter()
+            .cloned()
             .zip(entry.crdt.dots.iter().copied())
-            .find_map(|(held, dot)| (held == value).then_some(dot))
+            .chain(entry.crdt.co_dots.iter().filter_map(|&(index, dot)| {
+                entry
+                    .data
+                    .get(index as usize)
+                    .cloned()
+                    .map(|value| (value, dot))
+            }))
+            .collect()
+    }
+
+    /// The dot `entry` holds for `(value, writer)`, if `writer` is an author of `value` in `entry`.
+    fn held_actor_dot(entry: &Entry, value: &Bytes, writer: Did) -> Option<EntryDot> {
+        Self::held_attributions(entry)
+            .into_iter()
+            .find_map(|(held, dot)| (held == *value && dot.version.actor == writer).then_some(dot))
     }
 
     /// Apply one action; an action whose precondition fails is a no-op.
@@ -455,6 +471,7 @@ impl World {
         let local = self.read(owner).unwrap_or_else(|| self.empty());
         self.store(owner, local.operate(now_ms, op, actor(owner))?)?;
         let expires_at_ms = written.expires_at_ms.unwrap_or(now_ms);
+        let floors = written.register_floors().collect::<Vec<_>>();
         let adds = written
             .data
             .into_iter()
@@ -468,7 +485,13 @@ impl World {
         self.issued.extend(adds.iter().cloned());
         let replica = self.replica_mut(owner)?;
         replica.received.extend(adds);
-        replica.floor = replica.floor.max(written.crdt.register);
+        for floor in floors {
+            replica
+                .floors
+                .entry(floor.actor)
+                .and_modify(|current| *current = (*current).max(floor))
+                .or_insert(floor);
+        }
         Ok(())
     }
 
@@ -496,8 +519,9 @@ impl World {
         self.write(owner, EntryOperation::Overwrite(replacement))
     }
 
-    /// `Remove(o, p, v, w)`: `o` removes a value it sees, applied at `p`'s storage, which
-    /// removes the dot it holds itself (a value witness) or the issuer's dot if it holds it.
+    /// `Remove(o, p, v, w)`: `o` removes its attribution on `v` as seen at `o`, applied at `p`'s
+    /// storage, which retracts `o`'s slot (a value witness) or `o`'s exact dot if `p` holds it
+    /// (#1220).
     fn remove(
         &mut self,
         issuer: usize,
@@ -506,18 +530,17 @@ impl World {
         witness: Witness,
     ) -> Result<()> {
         let value = self.encoded(value)?;
+        let issuer_actor = actor(issuer);
         let Some(issuer_dot) = self
             .read(issuer)
-            .and_then(|seen| Self::held_dot(&seen, &value))
+            .and_then(|seen| Self::held_actor_dot(&seen, &value, issuer_actor))
         else {
             return Ok(());
         };
         let Some(local) = self.read(target) else {
             return Ok(());
         };
-        let Some(held) = Self::held_dot(&local, &value) else {
-            return Ok(());
-        };
+        let held = Self::held_actor_dot(&local, &value, issuer_actor);
         let removal = match witness {
             Witness::Value => Entry::new(self.topic, vec![value.clone()], EntryKind::Data),
             Witness::Dot => {
@@ -526,13 +549,14 @@ impl World {
                 removal
             }
         };
-        let removed = witness == Witness::Value || held == issuer_dot;
         let now_ms = self.clock(target);
-        let op = EntryOperation::Tombstone(removal).stamped(now_ms, actor(issuer))?;
-        self.store(target, local.operate(now_ms, op, actor(issuer))?)?;
-        if removed {
-            self.removes.push(held);
-            self.replica_mut(target)?.killed.insert((value, held));
+        let op = EntryOperation::Tombstone(removal).stamped(now_ms, issuer_actor)?;
+        self.store(target, local.operate(now_ms, op, issuer_actor)?)?;
+        if let Some(held) = held {
+            if witness == Witness::Value || held == issuer_dot {
+                self.removes.push(held);
+                self.replica_mut(target)?.killed.insert((value, held));
+            }
         }
         Ok(())
     }
@@ -555,14 +579,12 @@ impl World {
             _ => delta.clone(),
         };
         self.store(receiver, joined)?;
-        let delivered = delta
-            .data
-            .iter()
-            .zip(delta.crdt.dots.iter())
+        let delivered = Self::held_attributions(&delta)
+            .into_iter()
             .filter_map(|(value, dot)| {
                 self.issued
                     .iter()
-                    .find(|add| add.value == *value && add.dot == *dot)
+                    .find(|add| add.value == value && add.dot == dot)
                     .cloned()
             })
             .collect::<Vec<_>>();
@@ -571,11 +593,17 @@ impl World {
         if replaces {
             receiving.received = BTreeSet::new();
             receiving.killed = BTreeSet::new();
-            receiving.floor = None;
+            receiving.floors = BTreeMap::new();
         }
         receiving.received.extend(delivered);
         receiving.killed.extend(sending.killed);
-        receiving.floor = receiving.floor.max(sending.floor);
+        for (writer, floor) in sending.floors {
+            receiving
+                .floors
+                .entry(writer)
+                .and_modify(|current| *current = (*current).max(floor))
+                .or_insert(floor);
+        }
         Ok(true)
     }
 
@@ -608,13 +636,15 @@ impl World {
         }
     }
 
-    /// Whether `replica` has observed a remove or a register shadowing `(value, dot)`.
+    /// Whether `replica` has observed a same-actor remove or reset floor shadowing `(value, dot)`
+    /// (#1220).
     fn covered(replica: &Replica, value: &Bytes, dot: EntryDot) -> bool {
-        replica
-            .killed
-            .iter()
-            .any(|(killed, cover)| killed == value && dot <= *cover)
-            || replica.floor.is_some_and(|floor| dot.version < floor)
+        replica.killed.iter().any(|(killed, cover)| {
+            killed == value && cover.version.actor == dot.version.actor && dot <= *cover
+        }) || replica
+            .floors
+            .get(&dot.version.actor)
+            .is_some_and(|floor| dot.version < *floor)
     }
 
     /// Check `NoLoss`, `NoResurrection`, and `Bounded` at every replica.
@@ -626,24 +656,21 @@ impl World {
         for (index, replica) in self.replicas.iter().enumerate() {
             let now_ms = self.clock(index);
             let read = self.read(index).unwrap_or_else(|| self.empty());
-            let visible = read
-                .data
-                .iter()
-                .cloned()
-                .zip(read.crdt.dots.iter().copied())
-                .collect::<Vec<_>>();
+            let attributions = Self::held_attributions(&read);
             let peak_ms = self.peak(index);
             for add in replica.received.iter() {
                 let live = peak_ms < add.dot.version.logical_time_ms + horizon
                     && peak_ms < add.expires_at_ms;
                 if live && !Self::covered(replica, &add.value, add.dot) {
-                    let kept = visible
-                        .iter()
-                        .any(|(value, dot)| *value == add.value && *dot >= add.dot);
+                    let kept = attributions.iter().any(|(value, dot)| {
+                        *value == add.value
+                            && dot.version.actor == add.dot.version.actor
+                            && *dot >= add.dot
+                    });
                     ensure(kept, format!("NoLoss at replica {index}: {add:?}"))?;
                 }
             }
-            for (value, dot) in visible.iter() {
+            for (value, dot) in attributions.iter() {
                 ensure(
                     !Self::covered(replica, value, *dot),
                     format!("NoResurrection at replica {index}: {value:?} at {dot:?}"),

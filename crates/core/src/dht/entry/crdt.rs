@@ -194,37 +194,98 @@ impl EntryTombstone {
     }
 }
 
+const SENTINEL_TIME_MS: u128 = u64::MAX as u128;
+
+fn is_sentinel_version(version: EntryVersion, sentinel_counter: u32) -> bool {
+    (version.logical_time_ms == SENTINEL_TIME_MS || version.logical_time_ms == u128::MAX)
+        && version.counter == sentinel_counter
+        && version.actor.is_default()
+        && version.operation.is_default()
+}
+
 fn co_dot_sentinel_version() -> EntryVersion {
     EntryVersion {
-        logical_time_ms: u128::MAX,
+        logical_time_ms: SENTINEL_TIME_MS,
         counter: u32::MAX,
         actor: Did::default(),
         operation: Did::default(),
     }
 }
 
+fn co_register_sentinel_version() -> EntryVersion {
+    EntryVersion {
+        logical_time_ms: SENTINEL_TIME_MS,
+        counter: u32::MAX - 1,
+        actor: Did::default(),
+        operation: Did::default(),
+    }
+}
+
+fn data_proof_sentinel_version() -> EntryVersion {
+    EntryVersion {
+        logical_time_ms: SENTINEL_TIME_MS,
+        counter: u32::MAX - 2,
+        actor: Did::default(),
+        operation: Did::default(),
+    }
+}
+
+const DOT_CHUNK_BYTES: usize = 52;
+
+fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
+    let mut buf = [0u8; DOT_CHUNK_BYTES];
+    buf[..chunk.len()].copy_from_slice(chunk);
+    let logical_time_ms = u128::from(u64::from_be_bytes(buf[0..8].try_into().unwrap_or_default()));
+    let counter = u32::from_be_bytes(buf[8..12].try_into().unwrap_or_default());
+    let actor_bytes: [u8; 20] = buf[12..32].try_into().unwrap_or_default();
+    let op_bytes: [u8; 20] = buf[32..52].try_into().unwrap_or_default();
+    EntryDot {
+        version: EntryVersion {
+            logical_time_ms,
+            counter,
+            actor: ethereum_types::H160::from(actor_bytes).into(),
+            operation: ethereum_types::H160::from(op_bytes).into(),
+        },
+        index: u32::try_from(chunk_index).unwrap_or(u32::MAX),
+    }
+}
+
+fn unpack_proof_chunk(dot: EntryDot) -> [u8; DOT_CHUNK_BYTES] {
+    let mut buf = [0u8; DOT_CHUNK_BYTES];
+    let low_time = u64::try_from(dot.version.logical_time_ms).unwrap_or_default();
+    buf[0..8].copy_from_slice(&low_time.to_be_bytes());
+    buf[8..12].copy_from_slice(&dot.version.counter.to_be_bytes());
+    buf[12..32].copy_from_slice(dot.version.actor.as_bytes());
+    buf[32..52].copy_from_slice(dot.version.operation.as_bytes());
+    buf
+}
+
 /// CRDT metadata carried beside the entry payload.
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
-/// remove side: one covering remove per removed payload. `co_dots` preserves
-/// surviving per-actor add witnesses `(element_index, dot)` when multiple
-/// attributed writers concurrently publish the same payload bytes, packed into
+/// remove side: one covering remove per removed `(payload, actor)`. `co_dots`,
+/// `co_registers`, and `proofs` preserve per-actor add witnesses, secondary
+/// per-actor reset floors, and Swarm cryptographic author proofs, packed into
 /// the `dots` sequence on the wire and on disk so the 3-field `EntryCrdt`
 /// layout remains compatible with persisted `FileStorage` records.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(into = "WireEntryCrdt", from = "WireEntryCrdt")]
 pub struct EntryCrdt {
-    /// Optional LWW reset floor for the entry payload.
+    /// Optional greatest LWW reset floor for the entry payload.
     pub register: Option<EntryVersion>,
     /// Per-element add dots. An element without one is given the dot of its index above the
     /// register floor (`EntryDot::for_index`).
     pub dots: Vec<EntryDot>,
-    /// Covering removes, at most one per payload digest.
+    /// Covering removes, scoped per `(payload, actor)` for `Data` and per `payload` for `RelayMessage`.
     pub tombstones: Vec<EntryTombstone>,
     /// Additional per-actor add dots `(element_index, dot)` for elements concurrently held by
     /// multiple attributed writers.
     pub co_dots: Vec<(u32, EntryDot)>,
+    /// Secondary per-actor reset floors when multiple attributed writers reset the carrier.
+    pub co_registers: Vec<EntryVersion>,
+    /// Cryptographic author proofs for Swarm-originated data mutations.
+    pub proofs: Vec<super::provenance::SignedDataMutation>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -237,22 +298,47 @@ struct WireEntryCrdt {
 
 impl From<EntryCrdt> for WireEntryCrdt {
     fn from(crdt: EntryCrdt) -> Self {
-        let sentinel = co_dot_sentinel_version();
+        let co_dot_sentinel = co_dot_sentinel_version();
+        let co_reg_sentinel = co_register_sentinel_version();
+        let proof_sentinel = data_proof_sentinel_version();
         let mut dots = Vec::with_capacity(
             crdt.dots
                 .len()
-                .saturating_add(crdt.co_dots.len().saturating_mul(2)),
+                .saturating_add(crdt.co_dots.len().saturating_mul(2))
+                .saturating_add(crdt.co_registers.len().saturating_mul(2)),
         );
         dots.extend(crdt.dots);
         dots.extend(crdt.co_dots.into_iter().flat_map(|(elem_idx, dot)| {
             [
                 EntryDot {
-                    version: sentinel,
+                    version: co_dot_sentinel,
                     index: elem_idx,
                 },
                 dot,
             ]
         }));
+        dots.extend(crdt.co_registers.into_iter().flat_map(|version| {
+            [
+                EntryDot {
+                    version: co_reg_sentinel,
+                    index: 0,
+                },
+                EntryDot { version, index: 0 },
+            ]
+        }));
+        if !crdt.proofs.is_empty() {
+            if let Ok(encoded) = super::provenance::encode_proof_bundle(&crdt.proofs) {
+                if let Ok(byte_len) = u32::try_from(encoded.len()) {
+                    dots.push(EntryDot {
+                        version: proof_sentinel,
+                        index: byte_len,
+                    });
+                    for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
+                        dots.push(pack_proof_chunk(chunk, chunk_idx));
+                    }
+                }
+            }
+        }
         Self {
             register: crdt.register,
             dots,
@@ -263,14 +349,39 @@ impl From<EntryCrdt> for WireEntryCrdt {
 
 impl From<WireEntryCrdt> for EntryCrdt {
     fn from(wire: WireEntryCrdt) -> Self {
-        let sentinel = co_dot_sentinel_version();
         let mut dots = Vec::with_capacity(wire.dots.len());
         let mut co_dots = Vec::new();
+        let mut co_registers = Vec::new();
+        let mut proofs = Vec::new();
         let mut iter = wire.dots.into_iter();
         while let Some(dot) = iter.next() {
-            if dot.version == sentinel {
+            if is_sentinel_version(dot.version, u32::MAX) {
                 if let Some(co_dot) = iter.next() {
                     co_dots.push((dot.index, co_dot));
+                }
+            } else if is_sentinel_version(dot.version, u32::MAX - 1) {
+                if let Some(reg_dot) = iter.next() {
+                    co_registers.push(reg_dot.version);
+                }
+            } else if is_sentinel_version(dot.version, u32::MAX - 2) {
+                let byte_len = dot.index as usize;
+                let chunk_count = byte_len.div_ceil(DOT_CHUNK_BYTES);
+                let mut raw = Vec::with_capacity(chunk_count.saturating_mul(DOT_CHUNK_BYTES));
+                let mut complete = true;
+                for _ in 0..chunk_count {
+                    match iter.next() {
+                        Some(chunk_dot) => raw.extend_from_slice(&unpack_proof_chunk(chunk_dot)),
+                        None => {
+                            complete = false;
+                            break;
+                        }
+                    }
+                }
+                if complete {
+                    raw.truncate(byte_len);
+                    proofs.extend(super::provenance::decode_proof_bundle(&raw));
+                } else {
+                    proofs.push(super::provenance::SignedDataMutation::corrupted());
                 }
             } else {
                 dots.push(dot);
@@ -281,18 +392,24 @@ impl From<WireEntryCrdt> for EntryCrdt {
             dots,
             tombstones: wire.tombstones,
             co_dots,
+            co_registers,
+            proofs,
         }
     }
 }
 
 impl EntryCrdt {
     pub(super) fn has_write_witness(&self) -> bool {
-        self.register.is_some()
+        let witnessed = |version: &EntryVersion| {
+            !version.actor.is_default() && (!version.operation.is_default() || version.counter != 0)
+        };
+        self.register.as_ref().is_some_and(witnessed)
+            || self.co_registers.iter().any(witnessed)
             || self
                 .dots
                 .iter()
                 .chain(self.co_dots.iter().map(|(_, dot)| dot))
-                .any(|dot| !dot.version.actor.is_default() || !dot.version.operation.is_default())
+                .any(|dot| witnessed(&dot.version))
     }
 
     /// Return the bottom floor used only to lift legacy payloads without dots.
@@ -304,25 +421,59 @@ impl EntryCrdt {
 /// Bounded LWW element set used by data topic buffers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataTopicBuffer {
-    /// The reset floor of the latest overwrite: every add and remove below it is dropped.
+    /// The greatest reset floor across overwrites.
     pub(super) register: Option<EntryVersion>,
+    /// Per-actor reset floors keyed by attributed writer DID.
+    pub(super) co_registers: BTreeMap<Did, EntryVersion>,
     /// Every element held and not covered by a remove, with the greatest dot that added it.
     pub(super) values: BTreeMap<Bytes, EntryDot>,
     /// Per-actor add dots for each held element, keyed by attributed writer DID.
     pub(super) co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
-    /// Every remove, by the digest of its element, with the greatest add dot it covers.
+    /// Greatest remove per element digest across all actors.
     pub(super) removes: BTreeMap<ElementDigest, EntryDot>,
+    /// Per-actor removes for each element digest, keyed by writer DID (`Did::default()` for unattributed).
+    pub(super) co_removes: BTreeMap<ElementDigest, BTreeMap<Did, EntryDot>>,
+    /// Cryptographic author proofs keyed by `(Register | Add | Remove, actor)`.
+    pub(super) proofs:
+        BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
 }
 
-/// Insert `dot` at `key`, keeping the greater dot when `key` is already present: the join of
+/// Insert `value` at `key`, keeping the greater value when `key` is already present: the join of
 /// one singleton into a pointwise-`max` map.
-pub(super) fn insert_max<K: Ord>(map: &mut BTreeMap<K, EntryDot>, key: K, dot: EntryDot) {
-    if map.get(&key).is_none_or(|current| current.lt(&dot)) {
-        map.insert(key, dot);
+pub(super) fn insert_max<K: Ord, V: Ord>(map: &mut BTreeMap<K, V>, key: K, value: V) {
+    if map.get(&key).is_none_or(|current| current.lt(&value)) {
+        map.insert(key, value);
     }
 }
 
 impl DataTopicBuffer {
+    /// Record `version` as a reset floor into `register` and, when attributed, `co_registers`.
+    pub(super) fn insert_register(
+        register: &mut Option<EntryVersion>,
+        co_registers: &mut BTreeMap<Did, EntryVersion>,
+        version: EntryVersion,
+    ) {
+        if !version.actor.is_default() {
+            insert_max(co_registers, version.actor, version);
+        }
+        *register = (*register).max(Some(version));
+    }
+
+    /// Record `(element, dot)` into `removes` and `co_removes`.
+    pub(super) fn insert_remove(
+        removes: &mut BTreeMap<ElementDigest, EntryDot>,
+        co_removes: &mut BTreeMap<ElementDigest, BTreeMap<Did, EntryDot>>,
+        element: ElementDigest,
+        dot: EntryDot,
+    ) {
+        insert_max(
+            co_removes.entry(element).or_default(),
+            dot.version.actor,
+            dot,
+        );
+        insert_max(removes, element, dot);
+    }
+
     /// Record `(value, dot)` into `values` and, when attributed, into `co_values`.
     pub(super) fn insert_value(
         values: &mut BTreeMap<Bytes, EntryDot>,
@@ -341,9 +492,6 @@ impl DataTopicBuffer {
     }
 
     /// Normalize a carrier: drop what the reset floor or a covering remove shadows.
-    ///
-    /// Post: every kept value and remove has a dot at or after `register`, and no kept value is
-    /// covered by a kept remove.
     #[allow(dead_code)]
     pub(super) fn new(
         register: Option<EntryVersion>,
@@ -366,17 +514,80 @@ impl DataTopicBuffer {
     /// Normalize a carrier with explicit per-actor add dots `co_values`.
     pub(super) fn with_co_values(
         register: Option<EntryVersion>,
+        values: BTreeMap<Bytes, EntryDot>,
+        co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
+        removes: BTreeMap<ElementDigest, EntryDot>,
+    ) -> Self {
+        let mut co_registers = BTreeMap::new();
+        if let Some(floor) = register {
+            if !floor.actor.is_default() {
+                co_registers.insert(floor.actor, floor);
+            }
+        }
+        let mut co_removes = BTreeMap::<ElementDigest, BTreeMap<Did, EntryDot>>::new();
+        for (&element, &dot) in &removes {
+            insert_max(
+                co_removes.entry(element).or_default(),
+                dot.version.actor,
+                dot,
+            );
+        }
+        Self::normalize(
+            register,
+            co_registers,
+            values,
+            co_values,
+            removes,
+            co_removes,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Normalize full per-actor state:
+    /// - An attributed floor `co_registers[actor]` drops versions of that same `actor` below it
+    ///   (and unattributed versions below it); an unattributed floor drops all versions below it.
+    /// - An attributed remove `co_removes[digest][actor]` covers dots of that same `actor` at or
+    ///   below it (and unattributed dots at or below it); an unattributed remove covers all dots
+    ///   at or below it.
+    pub(super) fn normalize(
+        register: Option<EntryVersion>,
+        mut co_registers: BTreeMap<Did, EntryVersion>,
         mut values: BTreeMap<Bytes, EntryDot>,
         mut co_values: BTreeMap<Bytes, BTreeMap<Did, EntryDot>>,
         mut removes: BTreeMap<ElementDigest, EntryDot>,
+        mut co_removes: BTreeMap<ElementDigest, BTreeMap<Did, EntryDot>>,
+        mut proofs: BTreeMap<
+            super::provenance::DataProofKey,
+            super::provenance::SignedDataMutation,
+        >,
     ) -> Self {
         if let Some(floor) = register {
-            values.retain(|_, dot| dot.version >= floor);
-            removes.retain(|_, dot| dot.version >= floor);
-            co_values.values_mut().for_each(|actors| {
-                actors.retain(|_, dot| dot.version >= floor);
-            });
+            if !floor.actor.is_default() {
+                insert_max(&mut co_registers, floor.actor, floor);
+            }
         }
+        let unattributed_floor = register.filter(|floor| floor.actor.is_default());
+        if let Some(u_floor) = unattributed_floor {
+            co_registers.retain(|_, floor| *floor >= u_floor);
+        }
+        let max_floor = unattributed_floor
+            .into_iter()
+            .chain(co_registers.values().copied())
+            .max();
+
+        let kept_by_floors = |version: EntryVersion| -> bool {
+            if unattributed_floor.is_some_and(|floor| version < floor) {
+                return false;
+            }
+            if version.actor.is_default() {
+                max_floor.is_none_or(|floor| version >= floor)
+            } else {
+                co_registers
+                    .get(&version.actor)
+                    .is_none_or(|floor| version >= *floor)
+            }
+        };
+
         for (value, dot) in &values {
             if !dot.version.actor.is_default() {
                 insert_max(
@@ -386,27 +597,103 @@ impl DataTopicBuffer {
                 );
             }
         }
-        values.retain(|value, dot| {
-            let remove_dot = (!removes.is_empty())
-                .then(|| removes.get(&ElementDigest::of(value)).copied())
-                .flatten();
-            if let Some(actors) = co_values.get_mut(value) {
-                if let Some(remove) = remove_dot {
-                    actors.retain(|_, actor_dot| *actor_dot > remove);
-                }
+        for (&element, &dot) in &removes {
+            insert_max(
+                co_removes.entry(element).or_default(),
+                dot.version.actor,
+                dot,
+            );
+        }
+
+        if max_floor.is_some() {
+            co_values.values_mut().for_each(|actors| {
+                actors.retain(|_, dot| kept_by_floors(dot.version));
+            });
+            co_removes.values_mut().for_each(|actors| {
+                actors.retain(|_, dot| kept_by_floors(dot.version));
+            });
+        }
+        co_removes.retain(|_, actors| !actors.is_empty());
+        removes.clear();
+        for (&element, actors) in &co_removes {
+            if let Some(max_dot) = actors.values().copied().max() {
+                removes.insert(element, max_dot);
             }
-            remove_dot.is_none_or(|remove| *dot > remove)
+        }
+
+        values.retain(|value, primary_dot| {
+            let actor_removes = (!co_removes.is_empty())
+                .then(|| co_removes.get(&ElementDigest::of(value)))
+                .flatten();
+            let unattributed_remove =
+                actor_removes.and_then(|map| map.get(&Did::default()).copied());
+            let max_any_remove = actor_removes.and_then(|map| map.values().copied().max());
+
+            if let Some(actors) = co_values.get_mut(value) {
+                actors.retain(|actor, actor_dot| {
+                    unattributed_remove.is_none_or(|rem| *actor_dot > rem)
+                        && actor_removes
+                            .and_then(|map| map.get(actor))
+                            .is_none_or(|rem| *actor_dot > *rem)
+                });
+            }
+
+            let unattributed_survives = primary_dot.version.actor.is_default()
+                && kept_by_floors(primary_dot.version)
+                && max_any_remove.is_none_or(|rem| *primary_dot > rem);
+
+            let best_attributed = co_values
+                .get(value)
+                .and_then(|actors| actors.values().copied().max());
+            let surviving = match (unattributed_survives, best_attributed) {
+                (true, Some(attr)) => Some((*primary_dot).max(attr)),
+                (true, None) => Some(*primary_dot),
+                (false, attr) => attr,
+            };
+            match surviving {
+                Some(best) => {
+                    *primary_dot = best;
+                    true
+                }
+                None => false,
+            }
         });
         co_values.retain(|value, actors| values.contains_key(value) && !actors.is_empty());
+
+        if !proofs.is_empty() {
+            let live_add_keys = co_values
+                .iter()
+                .flat_map(|(value, actors)| {
+                    let digest = ElementDigest(keccak256(value.as_ref()));
+                    actors.keys().copied().map(move |actor| (digest, actor))
+                })
+                .collect::<std::collections::BTreeSet<_>>();
+            proofs.retain(|key, mutation| match *key {
+                super::provenance::DataProofKey::Register(actor) => co_registers
+                    .get(&actor)
+                    .is_some_and(|floor| mutation.matches_register(*floor)),
+                super::provenance::DataProofKey::Add(digest, actor) => {
+                    live_add_keys.contains(&(digest, actor))
+                }
+                super::provenance::DataProofKey::Remove(digest, actor) => co_removes
+                    .get(&digest)
+                    .is_some_and(|actors| actors.contains_key(&actor)),
+            });
+        }
+
         Self {
-            register,
+            register: max_floor,
+            co_registers,
             values,
             co_values,
             removes,
+            co_removes,
+            proofs,
         }
     }
 
     /// Iterate over all surviving add dots held for `value` (`values` and `co_values`).
+    #[allow(dead_code)]
     pub(super) fn dots_for<'a>(&'a self, value: &'a Bytes) -> impl Iterator<Item = EntryDot> + 'a {
         self.values.get(value).copied().into_iter().chain(
             self.co_values
@@ -416,11 +703,63 @@ impl DataTopicBuffer {
         )
     }
 
-    /// Record a covering remove for `value` at its held dot, if the carrier holds `value`.
+    /// Record a covering remove for `value` across all held dots (used by relay inboxes and
+    /// unattributed carrier removal).
     pub(super) fn remove(&mut self, value: &Bytes) {
-        self.co_values.remove(value);
-        if let Some(dot) = self.values.remove(value) {
-            insert_max(&mut self.removes, ElementDigest::of(value), dot);
+        let removed_actors = self.co_values.remove(value);
+        let primary = self.values.remove(value);
+        if removed_actors.is_some() || primary.is_some() {
+            let digest = ElementDigest::of(value);
+            if let Some(actors) = removed_actors {
+                for (_, dot) in actors {
+                    Self::insert_remove(&mut self.removes, &mut self.co_removes, digest, dot);
+                }
+            }
+            if let Some(dot) = primary {
+                if dot.version.actor.is_default() || !self.co_removes.contains_key(&digest) {
+                    Self::insert_remove(&mut self.removes, &mut self.co_removes, digest, dot);
+                }
+            }
+        }
+    }
+
+    /// Record an actor-scoped covering remove for `value` on behalf of `actor`, leaving other
+    /// co-authors' dots for `value` untouched (#1220).
+    pub(super) fn remove_by(&mut self, value: &Bytes, actor: Did) {
+        if actor.is_default() {
+            self.remove(value);
+            return;
+        }
+        let mut removed_dot = None;
+        if let Some(actors) = self.co_values.get_mut(value) {
+            removed_dot = actors.remove(&actor);
+            if actors.is_empty() {
+                self.co_values.remove(value);
+            }
+        }
+        if let Some(dot) = removed_dot {
+            let digest = ElementDigest::of(value);
+            Self::insert_remove(&mut self.removes, &mut self.co_removes, digest, dot);
+            self.proofs
+                .remove(&super::provenance::DataProofKey::Add(digest, actor));
+            match self
+                .co_values
+                .get(value)
+                .and_then(|actors| actors.values().copied().max())
+            {
+                Some(remaining_max) => {
+                    self.values.insert(value.clone(), remaining_max);
+                }
+                None => {
+                    self.values.remove(value);
+                }
+            }
+        } else if self
+            .values
+            .get(value)
+            .is_some_and(|dot| dot.version.actor.is_default())
+        {
+            self.remove(value);
         }
     }
 }
@@ -428,8 +767,17 @@ impl DataTopicBuffer {
 impl JoinSemilattice for DataTopicBuffer {
     fn join(mut self, other: Self) -> Self {
         self.register = self.register.max(other.register);
+        for (actor, floor) in other.co_registers {
+            insert_max(&mut self.co_registers, actor, floor);
+        }
         for (element, dot) in other.removes {
             insert_max(&mut self.removes, element, dot);
+        }
+        for (element, actors) in other.co_removes {
+            let entry = self.co_removes.entry(element).or_default();
+            for (actor, dot) in actors {
+                insert_max(entry, actor, dot);
+            }
         }
         for (value, dot) in other.values {
             insert_max(&mut self.values, value, dot);
@@ -440,6 +788,17 @@ impl JoinSemilattice for DataTopicBuffer {
                 insert_max(entry, actor, dot);
             }
         }
-        Self::with_co_values(self.register, self.values, self.co_values, self.removes)
+        for (key, proof) in other.proofs {
+            insert_max(&mut self.proofs, key, proof);
+        }
+        Self::normalize(
+            self.register,
+            self.co_registers,
+            self.values,
+            self.co_values,
+            self.removes,
+            self.co_removes,
+            self.proofs,
+        )
     }
 }
