@@ -116,9 +116,13 @@ impl Core {
         Arc::clone(self.processor.swarm.dht().edges())
     }
 
-    /// This node's delegatee key.
-    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
-        self.processor.delegatee_key()
+    /// This node's active session key followed by any retained unexpired previous keys at
+    /// `now_ms` (#1153, #1223).
+    pub(crate) fn decryption_keys_at(
+        &self,
+        now_ms: u128,
+    ) -> Vec<rings_core::delegation::DelegateeKey> {
+        self.processor.decryption_keys_at(now_ms)
     }
 
     /// This process's onion role (#834 D2).
@@ -299,9 +303,13 @@ impl Scope {
         self.core.application_credit(peer)
     }
 
-    /// This node's current delegatee key.
-    pub(crate) fn delegatee_key(&self) -> rings_core::delegation::DelegateeKey {
-        self.core.delegatee_key()
+    /// This node's active session key followed by any retained unexpired previous keys at
+    /// `now_ms` (#1153, #1223).
+    pub(crate) fn decryption_keys_at(
+        &self,
+        now_ms: u128,
+    ) -> Vec<rings_core::delegation::DelegateeKey> {
+        self.core.decryption_keys_at(now_ms)
     }
 
     /// Self-inject `payload` into this interpreter's **own** namespace (`from = this node`).

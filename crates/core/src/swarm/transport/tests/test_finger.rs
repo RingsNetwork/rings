@@ -269,3 +269,73 @@ async fn test_invalid_finger_candidate_never_enters_connection_admission() -> Re
     );
     Ok(())
 }
+
+/// Prove that when an outbound finger dial yields on glare (`CrossingOfferVerdict::Yield`), its
+/// deferred finger update is rebound to the replacing `answering` generation and applied when
+/// `answering` is admitted (#1222).
+#[tokio::test(start_paused = true)]
+async fn test_yield_pending_in_rebinds_deferred_finger_update_to_answering() -> Result<()> {
+    let transport = default_transport()?;
+    let peer = SecretKey::random().address().into();
+    let finger_index = 0;
+    let callback = SwarmTransportCallback::new(Arc::clone(&transport));
+    let (offering, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+
+    let request = finger_request(&transport, finger_index)?;
+    assert_eq!(
+        transport.record_finger_candidate(peer, request)?,
+        FingerUpdateDisposition::Queued
+    );
+
+    let answering = transport
+        .yield_pending_in(
+            offering,
+            crate::swarm::transport::pending::Handshake::offering(
+                crate::swarm::transport::pending::OfferOwner::Overlay,
+            ),
+        )
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected yield to replace pending offer".into()))?;
+    assert_ne!(answering, offering);
+    assert_eq!(
+        transport
+            .dht
+            .lock_finger()?
+            .convergence_state()
+            .status()
+            .failure_streak(),
+        0,
+        "yielding to a crossing offer must not cancel the finger lookup"
+    );
+    assert!(matches!(
+        transport
+            .dht
+            .lock_finger()?
+            .convergence_state()
+            .status()
+            .phase(),
+        FingerConvergencePhase::AwaitingAdmission { .. }
+    ));
+
+    // Open the answering transport connection and admit it: the rebound finger proof commits.
+    let _pending_conn = transport
+        .new_pending_connection(
+            answering,
+            SwarmTransportCallback::new(Arc::clone(&transport))
+                .with_pending_connection_attempt(answering),
+        )
+        .await?;
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    SwarmTransportCallback::new(Arc::clone(&transport))
+        .with_pending_connection_attempt(answering)
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
+    assert!(transport.is_active_connection_attempt(answering));
+    transport.disconnect(peer).await?;
+    Ok(())
+}

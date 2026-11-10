@@ -90,7 +90,7 @@ pub(crate) enum OnionHopDrop {
 /// whether this node registers `relay`, and `is_client_tag` recognises the tags of its own loops.
 pub(crate) fn hop(
     admission: &mut OnionAdmissionState,
-    key: &DelegateeKey,
+    keys: &[DelegateeKey],
     relays: bool,
     is_client_tag: impl Fn(&OnionLoopTag) -> bool,
     from: Did,
@@ -111,7 +111,7 @@ pub(crate) fn hop(
             cell: charged.settle(),
         };
     }
-    let admitted = match charged.peel(key) {
+    let admitted = match charged.peel(keys) {
         Ok(peeled) => match peeled.admit(admission, now_ms) {
             Ok(admitted) => admitted,
             Err(rejection) => return OnionHopOutcome::Dropped(OnionHopDrop::Admission(rejection)),

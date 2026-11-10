@@ -99,7 +99,7 @@ impl Hop {
     fn step(&mut self, from: Did, cell: OnionCell) -> OnionHopOutcome {
         hop(
             &mut self.admission,
-            &self.key,
+            std::slice::from_ref(&self.key),
             true,
             |_| false,
             from,

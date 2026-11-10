@@ -163,7 +163,7 @@ impl SwarmTransport {
     /// The error a failed step of `attempt` reports. An attempt that lost its slot meanwhile
     /// reports why ([`Self::lost_slot`]); a current one is abandoned and reports `failure`.
     /// A poisoned lifecycle lock is propagated.
-    async fn classify_step_failure(
+    pub(in crate::swarm) async fn classify_step_failure(
         &self,
         attempt: PendingConnectionAttempt,
         failure: Error,
@@ -185,11 +185,12 @@ impl SwarmTransport {
         operation: &str,
         step: impl Future<Output = Result<T>>,
     ) -> Result<T> {
-        let settled = step.await;
-        if settled.is_err() {
-            self.abandon_pending_connection(attempt, operation).await;
+        match step.await {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self
+                .classify_step_failure(attempt, error, operation)
+                .await?),
         }
-        settled
     }
 
     /// Apply `Creating -> Sent(offer, tx_id)` to `attempt`; when it no longer owns its slot,

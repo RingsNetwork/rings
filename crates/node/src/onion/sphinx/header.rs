@@ -482,14 +482,15 @@ impl OnionHeader {
             .iter_mut()
             .zip(self.to_bytes())
             .for_each(|(slot, byte)| *slot = byte);
-        let layer = peel_in_place(&mut bytes, class, key)?;
+        let layer = peel_in_place(&mut bytes, class, std::slice::from_ref(key))?;
         let next = Self::of(&bytes);
         Ok(OnionPeeledHeader { layer, next })
     }
 }
 
 /// Peel the header `χ_i` held in `bytes`, replacing it by `χ_{i+1}` in the same bytes, and
-/// return `λ_i`. The class is the observed cell length, supplied by the cell parser alone.
+/// return `λ_i`. The class is the observed cell length, supplied by the cell parser alone;
+/// `keys` lists the hop's active key followed by any retained unexpired previous keys (#1223).
 ///
 /// ```text
 /// bytes = α_i ‖ β_i ‖ γ_i
@@ -510,7 +511,7 @@ impl OnionHeader {
 pub(super) fn peel_in_place(
     bytes: &mut [u8; ONION_HEADER_BYTES],
     class: OnionLoopClass,
-    key: &DelegateeKey,
+    keys: &[DelegateeKey],
 ) -> Result<OnionLayer, OnionPeelError> {
     let (alpha_bytes, rest) = bytes
         .split_first_chunk_mut::<ONION_GROUP_ELEMENT_BYTES>()
@@ -521,13 +522,20 @@ pub(super) fn peel_in_place(
     let encoded_alpha = PublicKey(*alpha_bytes);
     let alpha = NonIdentityPoint::<Secp256k1>::try_from(encoded_alpha)
         .map_err(|_| OnionPeelError::Invalid)?;
-    let secrets = OnionHopSecrets::derive(&encoded_alpha, &key.diffie_hellman(&alpha))?;
     let (blocks, []) = routing.as_chunks_mut::<ONION_LAYER_BYTES>() else {
         return Err(OnionPeelError::Invalid);
     };
-    if !bool::from(secrets.mac(class, blocks).ct_eq(&OnionHeaderMac(*mac))) {
-        return Err(OnionPeelError::Invalid);
-    }
+    let expected_mac = OnionHeaderMac(*mac);
+    let secrets = keys
+        .iter()
+        .find_map(|key| {
+            match OnionHopSecrets::derive(&encoded_alpha, &key.diffie_hellman(&alpha)) {
+                Ok(secrets) => bool::from(secrets.mac(class, blocks).ct_eq(&expected_mac))
+                    .then_some(Ok(secrets)),
+                Err(error) => Some(Err(OnionPeelError::from(error))),
+            }
+        })
+        .ok_or(OnionPeelError::Invalid)??;
     let mut padded = Zeroizing::new([[0; ONION_LAYER_BYTES]; MAX_ONION_LOOP_HOPS + 1]);
     padded
         .iter_mut()
