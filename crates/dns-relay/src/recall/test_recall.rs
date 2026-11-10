@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex as SyncMutex;
@@ -18,6 +19,7 @@ struct Unreachable;
 #[derive(Default)]
 struct Settable {
     answers: SyncMutex<BTreeMap<TestOwner, Announcement>>,
+    offline: AtomicBool,
     lookups: AtomicUsize,
     held: SyncMutex<Option<TestOwner>>,
     entered: Notify,
@@ -33,6 +35,11 @@ impl Settable {
             None => answers.remove(&owner),
         };
     }
+
+    /// Make every lookup fail with [`Unreachable`] when `offline` is `true`.
+    fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::SeqCst);
+    }
 }
 
 #[async_trait]
@@ -46,6 +53,9 @@ impl Directory for Settable {
         if held {
             self.entered.notify_one();
             self.release.notified().await;
+        }
+        if self.offline.load(Ordering::SeqCst) {
+            return Err(Unreachable);
         }
         Ok(self.answers.lock().unwrap().get(&owner).cloned())
     }
@@ -190,4 +200,135 @@ async fn test_a_malformed_journal_record_is_never_answered() {
         1,
         "nothing was restored"
     );
+}
+
+#[tokio::test]
+async fn test_a_failed_withdrawal_journal_remove_is_retried_and_not_resurrected_on_restart() {
+    let short_fresh = MemoryWindows {
+        fresh_ms: 15,
+        grace_ms: 7_200_000,
+    };
+    for windows in [STALE, short_fresh] {
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join(MEMORY_FILE);
+        let directory = Arc::new(Settable::default());
+        directory.set(TestOwner(1), Some(mail()));
+        directory.set(TestOwner(2), Some(mail()));
+
+        // 1. Persist non-empty announcements for owner 1 (to withdraw) and owner 2 (control).
+        let recall = open(&directory, dir.path(), windows, 4).await;
+        assert_eq!(
+            recall.announcement(TestOwner(1)).await.unwrap(),
+            Some(mail())
+        );
+        assert_eq!(
+            recall.announcement(TestOwner(2)).await.unwrap(),
+            Some(mail())
+        );
+
+        if windows.fresh_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(windows.fresh_ms + 10)).await;
+        }
+
+        // 2 & 3. Observe an explicit empty announcement while journal writes fail (`EISDIR`).
+        directory.set(TestOwner(1), Some(Announcement::default()));
+        let saved_journal = std::fs::read(&journal_path).unwrap();
+        std::fs::remove_file(&journal_path).unwrap();
+        std::fs::create_dir(&journal_path).unwrap();
+
+        let lookups_before_failed_withdraw = directory.lookups.load(Ordering::SeqCst);
+        assert_eq!(
+            recall.announcement(TestOwner(1)).await.unwrap(),
+            None,
+            "best-effort cache policy still answers the withdrawal at once"
+        );
+        assert_eq!(
+            directory.lookups.load(Ordering::SeqCst),
+            lookups_before_failed_withdraw + 1
+        );
+
+        if windows.fresh_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(windows.fresh_ms + 10)).await;
+        }
+
+        // 4. Restore journal IO (still holding owner 1's old Present record on disk) and refresh
+        // the unchanged withdrawal from the directory.
+        std::fs::remove_dir(&journal_path).unwrap();
+        std::fs::write(&journal_path, &saved_journal).unwrap();
+        let lookups_before_retry = directory.lookups.load(Ordering::SeqCst);
+        assert_eq!(recall.announcement(TestOwner(1)).await.unwrap(), None);
+        assert_eq!(
+            directory.lookups.load(Ordering::SeqCst),
+            lookups_before_retry + 1,
+            "directory refresh observed unchanged withdrawal"
+        );
+        drop(recall);
+
+        // 5. Restart within the grace window with an unavailable directory: owner 2 falls back to
+        // grace memory, while withdrawn owner 1 must not resurrect its stale announcement.
+        if windows.fresh_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(windows.fresh_ms + 10)).await;
+        }
+        directory.set_offline(true);
+        let restarted = open(&directory, dir.path(), windows, 4).await;
+        assert_eq!(
+            restarted.announcement(TestOwner(2)).await.unwrap(),
+            Some(mail()),
+            "grace fallback is active while the directory is unavailable"
+        );
+        assert!(
+            matches!(
+                restarted.announcement(TestOwner(1)).await,
+                Err(RecallError::Directory(Unreachable))
+            ),
+            "withdrawn owner must not be served from grace memory after restart"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_a_fresh_hit_flushes_a_pending_withdrawal_once_io_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join(MEMORY_FILE);
+    let windows = MemoryWindows {
+        fresh_ms: 60_000,
+        grace_ms: 7_200_000,
+    };
+    let stale_seen = now_ms().saturating_sub(windows.fresh_ms + 1_000);
+    std::fs::write(
+        &journal_path,
+        format!("{{\"Put\":[\"o1\",{{\"ports\":[[25,\"v2\"]],\"txt\":[],\"seen_at_ms\":{stale_seen}}}]}}\n"),
+    )
+    .unwrap();
+
+    let directory = Arc::new(Settable::default());
+    directory.set(TestOwner(1), Some(Announcement::default()));
+    let recall = open(&directory, dir.path(), windows, 4).await;
+
+    // Break journal IO before the stale lookup observes the withdrawal.
+    let saved_journal = std::fs::read(&journal_path).unwrap();
+    std::fs::remove_file(&journal_path).unwrap();
+    std::fs::create_dir(&journal_path).unwrap();
+
+    assert_eq!(recall.announcement(TestOwner(1)).await.unwrap(), None);
+    assert_eq!(directory.lookups.load(Ordering::SeqCst), 1);
+
+    // Restore journal IO and ask again within the 60s freshness window: no directory lookup runs,
+    // yet the pending `Forget` is flushed.
+    std::fs::remove_dir(&journal_path).unwrap();
+    std::fs::write(&journal_path, &saved_journal).unwrap();
+    assert_eq!(recall.announcement(TestOwner(1)).await.unwrap(), None);
+    assert_eq!(
+        directory.lookups.load(Ordering::SeqCst),
+        1,
+        "fresh recall spared the directory while flushing pending Forget"
+    );
+    drop(recall);
+
+    directory.set_offline(true);
+    let restarted = open(&directory, dir.path(), STALE, 4).await;
+    assert!(matches!(
+        restarted.announcement(TestOwner(1)).await,
+        Err(RecallError::Directory(Unreachable))
+    ));
 }

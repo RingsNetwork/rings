@@ -139,6 +139,25 @@ pub enum BookChange<O> {
     Unbind(Ipv6Addr),
 }
 
+/// A validated binding transition staged before persistence: its [`BookChange`]s are written and
+/// flushed to the journal before [`AddressBook::commit`] mutates the in-memory book.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlannedBind<O> {
+    address: Ipv6Addr,
+    owner: O,
+    answered_at_ms: u64,
+    persisted_at_ms: u64,
+    forgotten: Vec<Ipv6Addr>,
+    changes: Vec<BookChange<O>>,
+}
+
+impl<O> PlannedBind<O> {
+    /// The journal changes this transition requires before commit.
+    pub(crate) fn changes(&self) -> &[BookChange<O>] {
+        &self.changes
+    }
+}
+
 /// One binding of the book: the owner an address belongs to, when the relay last answered with
 /// it, and the answer time its persisted form holds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +227,75 @@ where O: Owner
         self.retention_ms / 8
     }
 
+    /// Stage binding `address` to `owner` at `now_ms` without mutating `self`.
+    ///
+    /// Pre: `address = addr(owner)` under the relay's plan.
+    pub(crate) fn plan_bind(
+        &self,
+        address: Ipv6Addr,
+        owner: O,
+        now_ms: u64,
+    ) -> Result<PlannedBind<O>, AddressCollision> {
+        let refresh = self.refresh_ms();
+        if let Some(binding) = self.bindings.get(&address) {
+            if binding.owner != owner {
+                return Err(AddressCollision { address });
+            }
+            let answered_at_ms = binding.answered_at_ms.max(now_ms);
+            if answered_at_ms.saturating_sub(binding.persisted_at_ms) <= refresh {
+                return Ok(PlannedBind {
+                    address,
+                    owner,
+                    answered_at_ms,
+                    persisted_at_ms: binding.persisted_at_ms,
+                    forgotten: Vec::new(),
+                    changes: Vec::new(),
+                });
+            }
+            return Ok(PlannedBind {
+                address,
+                owner,
+                answered_at_ms,
+                persisted_at_ms: answered_at_ms,
+                forgotten: Vec::new(),
+                changes: vec![BookChange::Bind {
+                    address,
+                    owner,
+                    answered_at_ms,
+                }],
+            });
+        }
+        let forgotten = self.victims(now_ms);
+        let mut changes = Vec::with_capacity(forgotten.len().saturating_add(1));
+        changes.extend(forgotten.iter().copied().map(BookChange::Unbind));
+        changes.push(BookChange::Bind {
+            address,
+            owner,
+            answered_at_ms: now_ms,
+        });
+        Ok(PlannedBind {
+            address,
+            owner,
+            answered_at_ms: now_ms,
+            persisted_at_ms: now_ms,
+            forgotten,
+            changes,
+        })
+    }
+
+    /// Commit a staged [`PlannedBind`] to `self` and return the changes it carried.
+    pub(crate) fn commit(&mut self, planned: PlannedBind<O>) -> Vec<BookChange<O>> {
+        for address in &planned.forgotten {
+            self.bindings.remove(address);
+        }
+        self.bindings.insert(planned.address, Binding {
+            owner: planned.owner,
+            answered_at_ms: planned.answered_at_ms,
+            persisted_at_ms: planned.persisted_at_ms,
+        });
+        planned.changes
+    }
+
     /// Bind `address` to `owner`, answered at `now_ms` (`bind` in the module doc); return the
     /// changes to persist.
     ///
@@ -220,71 +308,45 @@ where O: Owner
         owner: O,
         now_ms: u64,
     ) -> Result<Vec<BookChange<O>>, AddressCollision> {
-        let refresh = self.refresh_ms();
-        if let Some(binding) = self.bindings.get_mut(&address) {
-            if binding.owner != owner {
-                return Err(AddressCollision { address });
-            }
-            binding.answered_at_ms = binding.answered_at_ms.max(now_ms);
-            if binding
-                .answered_at_ms
-                .saturating_sub(binding.persisted_at_ms)
-                <= refresh
-            {
-                return Ok(Vec::new());
-            }
-            binding.persisted_at_ms = binding.answered_at_ms;
-            return Ok(vec![BookChange::Bind {
-                address,
-                owner,
-                answered_at_ms: binding.answered_at_ms,
-            }]);
-        }
-        let mut changes = self.make_room(now_ms);
-        self.bindings.insert(address, Binding {
-            owner,
-            answered_at_ms: now_ms,
-            persisted_at_ms: now_ms,
-        });
-        changes.push(BookChange::Bind {
-            address,
-            owner,
-            answered_at_ms: now_ms,
-        });
-        Ok(changes)
+        let planned = self.plan_bind(address, owner, now_ms)?;
+        Ok(self.commit(planned))
     }
 
-    /// Make room for one more binding at `now_ms`: forget the bindings past their retention,
-    /// then, while the book is full, the one answered longest ago.
-    ///
-    /// Post: `|B| < capacity`, unless the capacity is 0.
-    fn make_room(&mut self, now_ms: u64) -> Vec<BookChange<O>> {
+    /// Addresses to evict to make room for one new binding at `now_ms`: bindings past their
+    /// retention first, then, while the book is full, the ones answered longest ago.
+    fn victims(&self, now_ms: u64) -> Vec<Ipv6Addr> {
         if self.bindings.len() < self.capacity {
             return Vec::new();
         }
         let horizon = now_ms.saturating_sub(self.retention_ms);
-        let mut forgotten = self
-            .bindings
-            .iter()
-            .filter(|(_address, binding)| binding.answered_at_ms < horizon)
-            .map(|(address, _binding)| *address)
-            .collect::<Vec<_>>();
-        forgotten.iter().for_each(|address| {
-            self.bindings.remove(address);
-        });
-        while !self.bindings.is_empty() && self.bindings.len() >= self.capacity {
-            let oldest = self
-                .bindings
-                .iter()
-                .min_by_key(|(_address, binding)| binding.answered_at_ms)
-                .map(|(address, _binding)| *address);
-            let Some(oldest) = oldest else {
-                break;
-            };
-            self.bindings.remove(&oldest);
-            forgotten.push(oldest);
+        let mut forgotten = Vec::new();
+        let mut remaining = Vec::new();
+        for (address, binding) in &self.bindings {
+            if binding.answered_at_ms < horizon {
+                forgotten.push(*address);
+            } else {
+                remaining.push((binding.answered_at_ms, *address));
+            }
         }
-        forgotten.into_iter().map(BookChange::Unbind).collect()
+        if remaining.len() >= self.capacity {
+            // Stable sort preserves BTreeMap address order on equal `answered_at_ms`, matching
+            // repeated `min_by_key` over `self.bindings`.
+            remaining.sort_by_key(|(answered_at_ms, _address)| *answered_at_ms);
+            let evict = if self.capacity == 0 {
+                remaining.len()
+            } else {
+                remaining
+                    .len()
+                    .saturating_sub(self.capacity.saturating_sub(1))
+            };
+            forgotten.extend(
+                remaining
+                    .into_iter()
+                    .take(evict)
+                    .map(|(_answered_at_ms, address)| address),
+            );
+        }
+        forgotten
     }
 
     /// The owner `address` is bound to, if any.
