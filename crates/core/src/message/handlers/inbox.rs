@@ -97,7 +97,7 @@ pub(crate) async fn send_relay_hold(
 impl MessageHandler {
     /// How this node stands to `destination`: a peer it must hold messages for occupies a ring
     /// position this node is responsible for and has no connection, admitted or pending.
-    pub(super) fn destination_reachability(&self, destination: Did) -> Result<Reachability> {
+    pub(crate) fn destination_reachability(&self, destination: Did) -> Result<Reachability> {
         let offline = destination != self.dht.did
             && !self.transport.has_connection_attempt(destination)?
             && self.dht.is_responsible_for(destination)?;

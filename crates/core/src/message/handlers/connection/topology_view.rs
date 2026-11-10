@@ -53,6 +53,7 @@ use crate::dht::PeerRing;
 #[cfg(all(test, not(target_family = "wasm")))]
 use crate::dht::TopoInfo;
 use crate::error::Result;
+use crate::message::effects::CoreEffect;
 use crate::message::handlers::HandlerContext;
 use crate::message::types::QueryFor;
 use crate::message::types::QueryForTopoInfoReport;
@@ -89,6 +90,11 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
         msg: &QueryForTopoInfoReport,
     ) -> Result<()> {
         let ctx = context.payload();
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
         match msg.then {
             QueryFor::SyncSuccessor => {
                 // The transaction origin is the only peer allowed to spend the

@@ -63,6 +63,11 @@ fn absorb_refused_offer(result: Result<()>, peer: Did) -> Result<()> {
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &QueryForTopoInfoSend) -> Result<()> {
         let ctx = context.payload();
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
         let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
         if msg.targets(self.dht.did) {
             self.run_effects([CoreEffect::send_report_message(

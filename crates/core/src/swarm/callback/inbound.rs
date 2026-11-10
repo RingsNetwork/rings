@@ -141,6 +141,8 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
+    /// Whether final transaction admission was already committed before entering the lane.
+    admitted_final: bool,
     /// The transport lane the frame arrived on; a chunk's carrier is checked against its
     /// message once reassembled.
     carrier: Option<ChannelLane>,
@@ -278,7 +280,7 @@ impl InboundMailbox {
                 },
         } = submission;
         let lane = prepared.lane;
-        if !prepared.kind.is_chunk() {
+        let admitted_final = if !prepared.kind.is_chunk() {
             if !processor.pending_connection_admits(peer).await? {
                 finish_completion(completion, Ok(()));
                 return Ok(());
@@ -289,8 +291,10 @@ impl InboundMailbox {
             };
             processor
                 .admit_final_transaction(&prepared.payload, &prepared.message, lane, arrival)
-                .await?;
-        }
+                .await?
+        } else {
+            false
+        };
         // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
         // the actor's ordering never waits on it.
         let introducer = Arrival {
@@ -337,6 +341,7 @@ impl InboundMailbox {
             payload,
             prepared_message: Some(message),
             lane,
+            admitted_final,
             carrier,
             wire_bytes,
             permit,
@@ -815,16 +820,43 @@ async fn process_event(
     }
 
     processor.logical.pass_tapped_lane(lane).await;
-    let introducer = Arrival {
+    let arrival = Arrival {
         peer: event.peer,
         authentication: event.authentication,
+    };
+    let message = match event.prepared_message {
+        Some(message) => message,
+        None => match event.payload.transaction.data() {
+            Ok(message) => message,
+            Err(error) => {
+                finish_completion(event.completion, Err(error));
+                return InboundTaskCompletion {
+                    lane,
+                    sequence,
+                    next: None,
+                };
+            }
+        },
+    };
+    if !event.admitted_final {
+        if let Err(error) = processor
+            .admit_final_transaction(&event.payload, &message, lane, arrival)
+            .await
+        {
+            finish_completion(event.completion, Err(error));
+            return InboundTaskCompletion {
+                lane,
+                sequence,
+                next: None,
+            };
+        }
     }
-    .introducer(processor.logical.transport.dht.edges());
+    let introducer = arrival.introducer(processor.logical.transport.dht.edges());
     let result = process_logical_message(
         &processor.logical,
         &event.payload,
         introducer,
-        event.prepared_message,
+        Some(message),
     )
     .await;
     finish_completion(event.completion, result);
