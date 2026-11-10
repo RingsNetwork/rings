@@ -35,11 +35,10 @@ rings-node = { path = "crates/node", version = "1.0.0-pre.0" }
 rings-rpc = { path = "crates/rpc", version = "1.0.0-pre.0", default-features = false }
 rings-runtime = { path = "crates/runtime", version = "1.0.0-pre.0", default-features = false }
 rings-test-support = { path = "crates/test-support" }
-rings-transport = { path = "crates/transport", version = "1.0.0-pre.0" }
+rings-transport = { path = "crates/transport", version = "1.0.0-pre.0", default-features = false }
 serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.121"
 wasm-bindgen-futures = "0.4.71"
-wasm-bindgen-macro-support = "0.2.121"
 wasm-bindgen-test = "0.3.71"
 # Pinned with `webrtc-sctp` (`crates/transport`, #1146): webrtc 0.17.2 sets
 # `association::Config::mtu`, which only webrtc-sctp 0.17.2 has, so with webrtc-sctp held at

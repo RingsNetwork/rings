@@ -970,9 +970,24 @@ pub enum Error {
     #[error("Rerouting stopped while waiting to retry a placement")]
     ReroutingStopped,
 
+    /// Delegation is not yet valid (`ts_ms` is beyond the receiver's clock plus skew tolerance).
+    #[error("Delegation is not yet valid")]
+    DelegationNotYetValid,
+
     /// Delegation is expired
     #[error("Delegation is expired")]
     DelegationExpired,
+
+    /// Imported delegatee private key does not derive the delegatee DID authorized by its delegation.
+    #[error(
+        "Delegatee secret key DID {actual} does not match authorized delegatee DID {expected}"
+    )]
+    DelegateeKeyMismatch {
+        /// Delegatee DID authorized by the delegation.
+        expected: crate::dht::Did,
+        /// Delegatee DID derived from the supplied private key.
+        actual: crate::dht::Did,
+    },
 
     /// A frame was not sent: a delegation it carries expires within the lease margin, so it
     /// could expire in flight. Local: nothing reached the peer.

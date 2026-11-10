@@ -47,6 +47,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use rings_core::ecc::keys::SignatureAlgorithm;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::swarm::application::ApplicationData;
@@ -62,7 +63,9 @@ use crate::error::Result;
 use crate::extension::BackendObserver;
 use crate::native::stores::NodeStores;
 
-const FFI_SIGNATURE_LEN: usize = 65;
+/// Byte capacity passed to FFI signer callbacks: the widest supported account signature
+/// (`SignatureAlgorithm::Bls12381`, 96 bytes).
+const FFI_MAX_SIGNATURE_LEN: usize = SignatureAlgorithm::Bls12381.signature_len();
 
 #[derive(Clone, Debug, Serialize)]
 struct FfiE2eEvent {
@@ -458,10 +461,12 @@ pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut Provider
 ///
 /// # Safety
 ///
-/// String pointers, `storage_path` included, must be valid null-terminated UTF-8 strings. The
-/// signer must write exactly 65 signature bytes into the provided output buffer. Returns NULL
-/// when provider creation fails. The returned handle must be released exactly once with
-/// `rings_node_provider_destroy`.
+/// String pointers, `storage_path` included, must be valid null-terminated UTF-8 strings, and
+/// `signer` must be non-null. `signer` receives `(proof, out, out_cap)` where `out_cap` is 96
+/// bytes, must write at most `out_cap` signature bytes matching `account_type` (65 for
+/// `eip191`/`secp256k1`/`bip137`, 64 for `ed25519`/`secp256r1`, 96 for `bls12-381`) into `out`,
+/// and must return the written byte count (`0` on failure). Returns NULL when provider creation
+/// fails. The returned handle must be released exactly once with `rings_node_provider_destroy`.
 #[no_mangle]
 pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     network_id: u32,
@@ -470,10 +475,10 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     storage_path: *const c_char,
-    signer: extern "C" fn(*const c_char, *mut c_char) -> (),
+    signer: Option<extern "C" fn(*const c_char, *mut c_char, usize) -> usize>,
 ) -> *mut ProviderHandle {
     fn wrapped_signer(
-        signer: extern "C" fn(*const c_char, *mut c_char) -> (),
+        signer: extern "C" fn(*const c_char, *mut c_char, usize) -> usize,
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
             let c_data = match CString::new(data) {
@@ -483,14 +488,23 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                     return Vec::new();
                 }
             };
-            let mut sig = [0_u8; FFI_SIGNATURE_LEN];
+            let mut sig = [0_u8; FFI_MAX_SIGNATURE_LEN];
             let sig_ptr = sig.as_mut_ptr().cast::<c_char>();
-            signer(c_data.as_ptr(), sig_ptr);
-            sig.to_vec()
+            let written = signer(c_data.as_ptr(), sig_ptr, sig.len());
+            let Some(written_bytes) = sig.get(..written).filter(|bytes| !bytes.is_empty()) else {
+                tracing::error!(
+                    written,
+                    capacity = sig.len(),
+                    "FFI signer returned invalid written signature length"
+                );
+                return Vec::new();
+            };
+            written_bytes.to_vec()
         }
     }
 
     match (|| -> Result<*mut ProviderHandle> {
+        let signer = signer.ok_or(Error::FFINulPtrError)?;
         let ice: String = c_char_to_string(ice_server)?;
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
@@ -630,20 +644,95 @@ mod tests {
         }
     }
 
-    extern "C" fn test_signer(data: *const c_char, output: *mut c_char) {
+    extern "C" fn test_signer(data: *const c_char, output: *mut c_char, capacity: usize) -> usize {
         if data.is_null() || output.is_null() {
-            return;
+            return 0;
         }
         let data = unsafe { CStr::from_ptr(data) };
         let key = SecretKey::try_from(TEST_SECRET_KEY).expect("valid test key");
         let signature = eip191::sign_raw(&key, data.to_bytes()).expect("valid test signature");
+        assert!(capacity >= signature.len());
         unsafe {
             std::ptr::copy_nonoverlapping(
                 signature.as_ptr().cast::<c_char>(),
                 output,
-                FFI_SIGNATURE_LEN,
+                signature.len(),
             );
         }
+        signature.len()
+    }
+
+    const TEST_ED25519_SEED: [u8; 32] = [0x42; 32];
+
+    fn test_ed25519_account_and_did() -> (String, Did) {
+        let secret = rings_core::ecc::keys::Ed25519SecretKey::from_bytes(TEST_ED25519_SEED);
+        let pubkey = secret.public_key().expect("valid Ed25519 public key");
+        let entity = pubkey.to_base58_string().expect("base58 Ed25519 entity");
+        let did = rings_core::ecc::keys::VerificationPublicKey::Ed25519(pubkey).did();
+        (entity, did)
+    }
+
+    extern "C" fn test_ed25519_signer(
+        data: *const c_char,
+        output: *mut c_char,
+        capacity: usize,
+    ) -> usize {
+        if data.is_null() || output.is_null() {
+            return 0;
+        }
+        let data = unsafe { CStr::from_ptr(data) };
+        let secret = rings_core::ecc::keys::Ed25519SecretKey::from_bytes(TEST_ED25519_SEED);
+        let signature = secret
+            .sign_raw(data.to_bytes())
+            .expect("valid Ed25519 signature");
+        assert_eq!(signature.len(), 64);
+        assert!(capacity >= signature.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                signature.as_ptr().cast::<c_char>(),
+                output,
+                signature.len(),
+            );
+        }
+        signature.len()
+    }
+
+    extern "C" fn test_ed25519_signer_65_bytes(
+        data: *const c_char,
+        output: *mut c_char,
+        capacity: usize,
+    ) -> usize {
+        let written = test_ed25519_signer(data, output, capacity);
+        if written == 0 || capacity < 65 {
+            return 0;
+        }
+        unsafe { *output.add(64) = 0 };
+        65
+    }
+
+    extern "C" fn test_ed25519_signer_63_bytes(
+        data: *const c_char,
+        output: *mut c_char,
+        capacity: usize,
+    ) -> usize {
+        let written = test_ed25519_signer(data, output, capacity);
+        written.saturating_sub(1)
+    }
+
+    extern "C" fn test_signer_zero_bytes(
+        _data: *const c_char,
+        _output: *mut c_char,
+        _capacity: usize,
+    ) -> usize {
+        0
+    }
+
+    extern "C" fn test_signer_over_capacity(
+        _data: *const c_char,
+        _output: *mut c_char,
+        capacity: usize,
+    ) -> usize {
+        capacity + 1
     }
 
     fn c_string(value: &str) -> CString {
@@ -687,7 +776,7 @@ mod tests {
                     account.as_ptr(),
                     account_type.as_ptr(),
                     storage_path.as_ptr(),
-                    test_signer,
+                    Some(test_signer),
                 )
             };
             assert!(!handle.is_null());
@@ -721,6 +810,74 @@ mod tests {
     }
 
     #[test]
+    fn test_ffi_provider_ed25519_account_create_request_destroy() {
+        let (entity, expected_did) = test_ed25519_account_and_did();
+        let (root, storage_path) = storage_root();
+        let ice_server = c_string("stun://stun.l.google.com");
+        let account = c_string(&entity);
+        let account_type = c_string("ed25519");
+        let handle = unsafe {
+            rings_node_new_provider_with_callback(
+                0,
+                ice_server.as_ptr(),
+                1,
+                account.as_ptr(),
+                account_type.as_ptr(),
+                storage_path.as_ptr(),
+                Some(test_ed25519_signer),
+            )
+        };
+        assert!(!handle.is_null(), "Ed25519 FFI provider must construct");
+
+        let did_response: serde_json::Value =
+            serde_json::from_str(&request(handle, "nodeDid", "{}")).expect("nodeDid json");
+        let did = did_response
+            .get("did")
+            .and_then(serde_json::Value::as_str)
+            .expect("nodeDid contains did");
+        assert!(did.eq_ignore_ascii_case(&expected_did.to_string()));
+
+        unsafe { rings_node_provider_destroy(handle) };
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn test_ffi_provider_rejects_invalid_signature_lengths_and_null_signer() {
+        let (entity, _) = test_ed25519_account_and_did();
+        let ice_server = c_string("stun://stun.l.google.com");
+        let account = c_string(&entity);
+        let account_type = c_string("ed25519");
+
+        let bad_signers: [Option<extern "C" fn(*const c_char, *mut c_char, usize) -> usize>; 5] = [
+            None,
+            Some(test_ed25519_signer_65_bytes),
+            Some(test_ed25519_signer_63_bytes),
+            Some(test_signer_zero_bytes),
+            Some(test_signer_over_capacity),
+        ];
+
+        for signer in bad_signers {
+            let (root, storage_path) = storage_root();
+            let handle = unsafe {
+                rings_node_new_provider_with_callback(
+                    0,
+                    ice_server.as_ptr(),
+                    1,
+                    account.as_ptr(),
+                    account_type.as_ptr(),
+                    storage_path.as_ptr(),
+                    signer,
+                )
+            };
+            assert!(
+                handle.is_null(),
+                "invalid FFI signature length or null signer must fail provider construction"
+            );
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     fn test_ffi_free_functions_accept_null() {
         unsafe {
             rings_node_string_free(ptr::null_mut());
@@ -742,7 +899,7 @@ mod tests {
                 account.as_ptr(),
                 account_type.as_ptr(),
                 storage_path.as_ptr(),
-                test_signer,
+                Some(test_signer),
             )
         };
 

@@ -241,7 +241,7 @@ pub(crate) struct RunCommand {
 
     #[arg(
         long,
-        help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings",
+        help = "Storage files location. If not provided, use data_storage.path in config file or ~/.rings/data",
         env
     )]
     pub storage_path: Option<String>,
@@ -249,7 +249,7 @@ pub(crate) struct RunCommand {
     #[arg(
         long,
         default_value = "200000000",
-        help = "Storage capacity. If not provider, use storage.capacity in config file or 200000000",
+        help = "Storage capacity. If not provided, use data_storage.capacity in config file or 200000000",
         env
     )]
     pub storage_capacity: Option<u32>,

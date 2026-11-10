@@ -44,17 +44,17 @@ cargo install --path crates/node
 ### Build for WebAssembly
 
 
-To build Rings Network for WebAssembly, run the following commands:
+To build `rings-node` for WebAssembly from the workspace root, run:
 
 ```sh
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
+cargo build -p rings-node --lib --release --target wasm32-unknown-unknown --no-default-features --features browser
 wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
 ```
 
-Or build with `wasm-pack`
+Or build with `wasm-pack`:
 
 ```sh
-wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
+wasm-pack build crates/node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
 ```
 
 
@@ -85,7 +85,7 @@ on the JSON-RPC method:
 
 | Listener | Method | Authorization |
 |---|---|---|
-| internal (`internal_api_port`, default 50000) | every method, WebSocket, `/status`, `/gateway/status` | Bearer required |
+| internal (`internal_api_port`, default 50000) | every method, `/status`, `/gateway/status` | Bearer required |
 | external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer` | public |
 | external (`external_api_addr`, default 127.0.0.1:50001) | `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits`, `/status` | Bearer required |
 

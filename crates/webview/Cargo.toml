@@ -12,9 +12,6 @@ homepage.workspace = true
 default = []
 browser = [
     "dep:js-sys",
-    "dep:serde-wasm-bindgen",
-    "dep:wasm-bindgen",
-    "dep:wasm-bindgen-futures",
 ]
 
 [dependencies]
@@ -27,12 +24,9 @@ percent-encoding = "2"
 psl = "2"
 rings-network-policy = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
-serde-wasm-bindgen = { workspace = true, optional = true }
 serde_json = "1"
 thiserror = "1"
 url = { version = "2", features = ["serde"] }
-wasm-bindgen = { workspace = true, optional = true }
-wasm-bindgen-futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 futures = { version = "0.3.21", features = ["executor"] }

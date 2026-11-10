@@ -259,13 +259,18 @@ impl ProcessorBuilder {
 
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
+        self.build_at(get_epoch_ms())
+    }
+
+    /// Build the [Processor] validating delegation liveness and signing horizon at `now_ms`.
+    pub(crate) fn build_at(self, now_ms: u128) -> Result<Processor> {
         self.validate()?;
-        let delegation = self.delegatee_key.delegation();
-        delegation
-            .verify_delegator_authorization()
+        self.delegatee_key
+            .verify_at(now_ms)
             .map_err(|e| Error::VerifyError(e.to_string()))?;
+        let delegation = self.delegatee_key.delegation();
         // A process that could not send its first frame is refused, not started mute (#1063).
-        DelegationHorizon::of(&delegation).admitted_at(get_epoch_ms())?;
+        DelegationHorizon::of(&delegation).admitted_at(now_ms)?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let onion_entry_guard_storage = self

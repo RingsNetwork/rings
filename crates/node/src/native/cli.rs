@@ -1,19 +1,15 @@
-//! # ring-node-client
+//! Native CLI JSON-RPC client wrapper for `rings` subcommands.
 //!
-//! ring-node-client is a command-line tool for interacting with the Ring Node backend API. It allows users to establish WebRTC connections with remote peers, send and receive messages, and publish and subscribe to topics.
+//! Wraps [`rings_rpc::jsonrpc::Client`] for a running `rings-node` daemon. Construct unauthenticated
+//! clients with [`Client::new`] or Bearer-authenticated clients with [`Client::with_api_token`].
 //!
-//! ## Usage
+//! # Capabilities
 //!
-//! To use ring-node-client, simply create a new instance of the Client struct, passing in the endpoint URL and signature as arguments. Then, use the various methods on the Client instance to perform the desired actions.
-//!
-//! # Features
-//!
-//! - Establish WebRTC connections with remote peers using HTTP as a signaling channel.
-//! - Send and receive messages using WebRTC.
-//! - Publish and subscribe to topics.
-//! - Register and lookup DIDs of services.
-//! - Send HTTP requests to remote peers.
-//! - Load a seed file to establish a connection with a remote peer.
+//! - Establish WebRTC connections via HTTP signaling, seed documents, DHT routing, or manual SDP offers/answers.
+//! - Send namespace-scoped backend messages over the overlay.
+//! - Publish and subscribe to DHT data topics.
+//! - Register and look up services in the DHT.
+//! - Inspect swarm peers, Chord ring topology, and storage state.
 
 use std::time::Duration;
 
@@ -99,7 +95,7 @@ pub fn ensure_accept_answer_is_not_counter_offer(answer: &str) -> anyhow::Result
 }
 
 impl Client {
-    /// Creates a new Client instance with the specified endpoint URL and signature.
+    /// Creates an unauthenticated JSON-RPC client targeting `endpoint_url`.
     pub fn new(endpoint_url: &str) -> anyhow::Result<Self> {
         let rpc_client =
             RpcClient::new(endpoint_url).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -118,7 +114,7 @@ impl Client {
     ///
     /// This function allows two peers to establish a WebRTC connection using HTTP,
     /// which can be useful in scenarios where a direct peer-to-peer connection is not possible due to firewall restrictions or other network issues.
-    /// The function sends ICE candidates and Delegation Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
+    /// The function sends ICE candidates and Session Description Protocol (SDP) messages over HTTP as a form of signaling to establish the connection.
     ///
     /// Takes a URL for an HTTP server that will be used as the signaling channel to exchange ICE candidates and SDP with the remote peer.
     /// Returns a Did that can be used to refer to this connection in subsequent WebRTC operations.

@@ -5,10 +5,12 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 
 ## Milestones
 
-- **Pre-1.0 (now).** The wire protocol is not versioned; a release that changes it is a
-  network-wide upgrade.
-- **1.0: a stable network.** The protocol freezes once connectivity, churn handling, and
-  convergence are stable.
+- **Pre-1.0.** Every frame carries a fixed `u16` wire-version header (`"RINGS\0" ‖ wire_version`,
+  currently `WIRE_VERSION = 3`), and handshakes refuse peers of any other wire version before
+  decoding a frame body (JSON-RPC error `210`). There is no cross-version negotiation: a release
+  that bumps `WIRE_VERSION` is a coordinated network cutover.
+- **1.0: a stable network.** Stabilizes the `1.0.x` public contracts and freezes
+  `WIRE_VERSION = 3` across the `1.0.x` line; see [UPGRADING.md](./UPGRADING.md).
 - **2.0: DRanking.** Verifiable peer ranking from service receipts
   ([paper](./papers/dranking.pdf)).
 

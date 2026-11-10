@@ -43,7 +43,7 @@ const EXPIRES_MS: u128 = 100;
 fn node_key(seed: u8) -> Result<DelegateeKey> {
     let secret =
         SecretKey::try_from(format!("{seed:02x}").repeat(32).as_str()).map_err(Error::CoreError)?;
-    DelegateeKey::new_with_seckey(&secret).map_err(Error::CoreError)
+    DelegateeKey::new_with_seckey_at(&secret, u64::MAX, 0).map_err(Error::CoreError)
 }
 
 /// The nodes of `seeds`.

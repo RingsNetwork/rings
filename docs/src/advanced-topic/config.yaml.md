@@ -7,6 +7,7 @@ operator edits. This is the file it writes, with `$HOME` expanded to `/home/oper
 ```yaml
 network_id: 1
 delegatee_key: /home/operator/.rings/delegatee_key
+# delegator_key: /home/operator/.rings/ecdsa_key   # optional: enables in-process delegation renewal
 internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
@@ -82,25 +83,36 @@ measure_storage:
   capacity: 200000000
 ```
 
-Every field has the meaning below. Fields absent from a file take the value shown above, except
-where noted.
+Unknown keys are rejected (`deny_unknown_fields`). Nine top-level keys are **required** and must
+always be present in `config.yaml`: `network_id`, `delegatee_key`, `internal_api_port`,
+`external_api_addr`, `endpoint_url`, `ice_servers`, `stabilize_interval`, `data_storage` (`path`
+and `capacity`), and `measure_storage` (`path` and `capacity`). Every other field is **optional**
+and defaults to the value shown above (or `null` / empty when omitted by `rings init`, such as
+`delegator_key`, `remote_rpc_proxy_url`, `api_token_path`, `api_allowed_origins`,
+`onion_http_proxy_addr`, `services`, `dns_relay`, `external_ip`, and `webrtc_udp_port_min` /
+`webrtc_udp_port_max`).
 
 ## Identity and network
 
-* `network_id`: the Rings overlay this node joins. Signatures are bound to it, so nodes on
+* `network_id` *(required)*: the Rings overlay this node joins. Signatures are bound to it, so nodes on
   different overlays do not verify each other's messages.
-* `delegatee_key`: path of the delegatee signing key file that `rings init` writes next to the config.
+* `delegatee_key` *(required)*: path of the delegatee signing key file that `rings init` writes next to the config.
   The delegatee key is derived from your ECDSA key and signs every message on your behalf; keep the
-  file private. This field is path-only: a raw session dump and the removed `ecdsa_key` and
+  file private (`0600`). This field is path-only: a raw session dump and the removed `ecdsa_key` and
   `session_manager` fields are rejected rather than interpreted as compatibility fallbacks.
-* `ice_servers`: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
+* `delegator_key` *(optional, default `null`)*: path of an owner-only (`0600`) ECDSA secret key file
+  (first non-empty, non-`#` line, optional `0x` prefix) used by `rings run` to renew `delegatee_key`
+  in process before its signing horizon (#1153). Relative paths are resolved next to `config.yaml`.
+  `rings init` leaves this unset so the account private key is not stored unless the operator opts
+  into online renewal; see [Delegations and keys](../cli.md#delegations-and-keys).
+* `ice_servers` *(required)*: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
   STUN is ordinary discovery; TURN is optional and never a gateway prerequisite.
 
   ```yaml
   ice_servers: turn://user:pass@turn.example.org:3478;stun://stun.l.google.com:19302
   ```
 
-* `stabilize_interval`: seconds between Chord stabilization rounds.
+* `stabilize_interval` *(required)*: seconds between Chord stabilization rounds.
 * `dht_virtual_nodes`: virtual DHT positions this node owns for storage placement; `0` disables
   virtual positions.
 * `origin_quota`: runtime-local final-destination rate limits. Each of `dht_control`, `storage`,
@@ -121,13 +133,13 @@ where noted.
 
 ## Control API
 
-* `internal_api_port`: loopback JSON-RPC listener for the `rings` CLI and local tooling; every
+* `internal_api_port` *(required)*: loopback JSON-RPC listener for the `rings` CLI and local tooling; every
   route requires the Bearer token. The existing `/status` route also provides the compact
   [operator observability](../operator-observability.md) projection.
-* `external_api_addr`: JSON-RPC listener peers dial for the HTTP handshake. `nodeDid` and
+* `external_api_addr` *(required)*: JSON-RPC listener peers dial for the HTTP handshake. `nodeDid` and
   `answerOffer` are public; status and registry reads, including the compact observability
   projection, require the token.
-* `endpoint_url`: the internal endpoint the CLI connects to.
+* `endpoint_url` *(required)*: the internal endpoint the CLI connects to.
 * `remote_rpc_proxy_url`: optional HTTP(S) proxy URL used by the running node for remote JSON-RPC
   handshakes (`rings connect node`, `rings connect seed`, and managed `bootstrap.peers`); absent
   means direct connections with ambient `HTTP_PROXY` and `HTTPS_PROXY` ignored. When set, the
@@ -274,8 +286,8 @@ How a managed target is supervised:
 
 ## Storage
 
-* `data_storage`: path and capacity in bytes of the DHT data store.
-* `measure_storage`: path and capacity in bytes of the peer measurement store.
+* `data_storage` *(required; `path` and `capacity` both required)*: path and capacity in bytes of the DHT data store.
+* `measure_storage` *(required; `path` and `capacity` both required)*: path and capacity in bytes of the peer measurement store.
 
 The daemon keeps four more stores in directories beside the data store, with fixed budgets:
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this

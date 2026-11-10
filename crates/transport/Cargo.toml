@@ -15,8 +15,9 @@ homepage.workspace = true
 workspace = true
 
 [features]
-# Include nothing by default
-# The crate root rejects native+wasm backend combinations.
+# Default enables minimal native Tokio runtime/timer support; workspace consumers set
+# `default-features = false` and choose their backend (`native-webrtc`, `dummy`, or
+# `web-sys-webrtc`) explicitly. The crate root rejects native+wasm backend combinations.
 default = ["tokio/rt", "tokio/time", "tokio-util", "rings-runtime/tokio"]
 dummy = ["webrtc", "dep:webrtc-sctp", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
 native-webrtc = ["webrtc", "dep:webrtc-sctp", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
@@ -64,7 +65,6 @@ web-sys = { version = "0.3.64", optional = true, features = [
 # Common dependencies
 async-trait = { workspace = true }
 bytes = { version = "1.4.0", features = ["serde"] }
-chrono = { version = "0.4.30", features = ["wasmbind"] }
 dashmap = "5.5.1"
 rings-codec = { workspace = true }
 rings-runtime = { workspace = true }

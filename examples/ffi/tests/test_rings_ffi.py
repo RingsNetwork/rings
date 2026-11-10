@@ -86,11 +86,12 @@ def test_signer_writes_a_65_byte_signature():
     ffi = module.build_ffi()
     account = Web3().eth.account.create()
     signer = module.gen_signer(ffi, account)
-    output = ffi.new("char[]", module.SIGNATURE_LEN)
+    output = ffi.new("char[]", module.MAX_SIGNATURE_LEN)
 
-    signer(ffi.new("char[]", b"rings ffi test"), output)
+    written = signer(ffi.new("char[]", b"rings ffi test"), output, module.MAX_SIGNATURE_LEN)
 
-    signature = bytes(ffi.buffer(output, module.SIGNATURE_LEN))
+    assert written == module.SIGNATURE_LEN
+    signature = bytes(ffi.buffer(output, written))
     assert len(signature) == module.SIGNATURE_LEN
     assert any(signature)
 

@@ -230,7 +230,8 @@ impl Error {
             | Self::OriginQuota(_) | Self::ServiceReceipt(_) | Self::ProvisionalEvidence(_)
             | Self::UnmarkedFrame | Self::IncompatibleWireVersion(_)
             | Self::DelegationReferenceUnresolved(_)
-            | Self::DelegationExpired | Self::DelegationExpiresWithinMargin
+            | Self::DelegationNotYetValid | Self::DelegationExpired
+            | Self::DelegateeKeyMismatch { .. } | Self::DelegationExpiresWithinMargin
             // link control
             | Self::LinkControlOutsideLink | Self::LinkControlInFlightCapacity(_)
             | Self::DetachedRuntimeUnavailable(_)

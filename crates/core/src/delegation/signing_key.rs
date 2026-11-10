@@ -19,17 +19,37 @@ use crate::ecc::Secp256k1;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::utils;
 
 /// A verified [`Delegation`] and the delegatee's private signing key.
+///
+/// Invariant: every non-test `DelegateeKey` constructed, deserialized, or parsed via [`FromStr`]
+/// satisfies `Did::from(delegatee_secret_key.address()) == delegation.delegatee_did()` and carries
+/// a cryptographically valid delegator signature over `delegation`.
 ///
 /// Clone law: cloning a `DelegateeKey` duplicates the same in-memory signing and decryption
 /// authority. The clone preserves the delegator DID, delegatee identity, and delegatee public
 /// key; it does not mint, rotate, or narrow the capability.
 #[wasm_export]
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[serde(try_from = "UnverifiedDelegateeKey")]
 pub struct DelegateeKey {
     delegation: Delegation,
     delegatee_secret_key: SecretKey,
+}
+
+#[derive(Deserialize)]
+struct UnverifiedDelegateeKey {
+    delegation: Delegation,
+    delegatee_secret_key: SecretKey,
+}
+
+impl TryFrom<UnverifiedDelegateeKey> for DelegateeKey {
+    type Error = Error;
+
+    fn try_from(raw: UnverifiedDelegateeKey) -> Result<Self> {
+        Self::try_from_parts(raw.delegation, raw.delegatee_secret_key)
+    }
 }
 
 impl FromStr for DelegateeKey {
@@ -50,6 +70,37 @@ impl DelegateeKey {
             delegation,
             delegatee_secret_key,
         }
+    }
+
+    /// Construct a [`DelegateeKey`] after verifying both the private-key-to-delegation DID binding
+    /// and the delegator's signature over `delegation`, without enforcing wall-clock expiry so
+    /// genuinely bound historical keys used solely for decryption can still be restored.
+    pub fn try_from_parts(delegation: Delegation, delegatee_secret_key: SecretKey) -> Result<Self> {
+        let candidate = Self::from_parts(delegation, delegatee_secret_key);
+        candidate.verify_binding()?;
+        candidate.delegation.verify_delegator_signature()?;
+        Ok(candidate)
+    }
+
+    /// Verify that this key's private scalar derives `delegation.delegatee_did()`.
+    pub fn verify_binding(&self) -> Result<()> {
+        let actual = Did::from(self.delegatee_secret_key.address());
+        let expected = self.delegation.delegatee_did();
+        if actual != expected {
+            return Err(Error::DelegateeKeyMismatch { expected, actual });
+        }
+        Ok(())
+    }
+
+    /// Verify private-key binding, delegator signature, and delegation validity window as of now.
+    pub fn verify(&self) -> Result<()> {
+        self.verify_at(utils::get_epoch_ms())
+    }
+
+    /// Verify private-key binding, delegator signature, and delegation validity window at `at_ms`.
+    pub fn verify_at(&self, at_ms: u128) -> Result<()> {
+        self.verify_binding()?;
+        self.delegation.verify_delegator_authorization_at(at_ms)
     }
 
     #[cfg(test)]

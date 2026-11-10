@@ -21,6 +21,14 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 const val RINGS_SIGNATURE_LENGTH: Int = 65
+const val RINGS_MAX_SIGNATURE_LENGTH: Int = 96
+
+fun expectedSignatureLength(accountType: String): Int? = when (accountType) {
+    "eip191", "secp256k1", "bip137" -> 65
+    "ed25519", "secp256r1" -> 64
+    "bls12-381", "bls12381" -> 96
+    else -> null
+}
 
 enum class RingsLogLevel(val abiValue: Int) {
     DEBUG(0),
@@ -35,7 +43,7 @@ fun interface RingsSigner {
 }
 
 internal fun interface SignerCallback : Callback {
-    fun invoke(message: Pointer?, output: Pointer?)
+    fun invoke(message: Pointer?, output: Pointer?, capacity: Long): Long
 }
 
 internal interface NativeRings : Library {
@@ -115,18 +123,21 @@ class RingsProvider internal constructor(
     iceServer: String,
     stabilizeInterval: Long,
 ) : Closeable {
+    private val expectedLength = expectedSignatureLength(accountType) ?: RINGS_SIGNATURE_LENGTH
     private val signerFailure = AtomicReference<Throwable?>()
-    private val callback = SignerCallback { message, output ->
+    private val callback = SignerCallback { message, output, capacity ->
         try {
             require(message != null && output != null) { "Rings passed a NULL signer pointer" }
             val signature = signer.sign(message.getString(0).toByteArray(StandardCharsets.UTF_8))
-            require(signature.size == RINGS_SIGNATURE_LENGTH) {
-                "signer returned ${signature.size} bytes; expected $RINGS_SIGNATURE_LENGTH"
+            require(signature.size == expectedLength && signature.size.toLong() <= capacity) {
+                "signer returned ${signature.size} bytes; expected $expectedLength (capacity $capacity)"
             }
             output.write(0, signature, 0, signature.size)
+            signature.size.toLong()
         } catch (error: Throwable) {
-            output?.clear(RINGS_SIGNATURE_LENGTH.toLong())
+            output?.clear(minOf(capacity, RINGS_MAX_SIGNATURE_LENGTH.toLong()).coerceAtLeast(0L))
             signerFailure.set(error)
+            0L
         }
     }
     private var handle: Pointer? = native.rings_node_new_provider_with_callback(

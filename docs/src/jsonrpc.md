@@ -57,19 +57,21 @@ Errors follow JSON-RPC 2.0:
   send and DHT entries, `8xx` data, storage and configuration, `9xx` files, `10xx`
   serialization, `11xx` core, `15xx` extensions and runtime, `16xx` onion.
 * `210` is a handshake with a node of another wire version (see [Wire version](#wire-version)).
-  Its `data` names both: `{"ours": 1, "theirs": 2}`, with `theirs` null for a node from before
+  Its `data` names both: `{"ours": 3, "theirs": 2}`, with `theirs` null for a node from before
   wire versioning. A client matches the code and the data, never the message.
 
 ### Wire version
 
-Every frame a node sends, and so every offer and answer of a handshake, opens with the node's
-wire version, a number that goes up by one per release, relative to the last released wire
-version, when the release changes anything on the wire that a node of that version would reject
-or misread. It is independent of the crate version. Two nodes of
-different wire versions never connect: each refuses the other's offer or answer before decoding
-it, with error `210` over JSON-RPC. A client learns a node's wire version before joining it
-from the `wire_version` of its public `nodeDid`, and its crate version from the `x-node-version`
-header of every API response.
+Every frame a node sends, and so every offer and answer of a handshake, opens with the fixed
+header `"RINGS\0" ‖ wire_version` (`u16` big-endian; `WIRE_VERSION = 3` in 1.0). The wire version
+goes up by one per release, relative to the last released wire version, when a release changes
+anything on the wire that a node of that version would reject or misread; it is independent of
+the crate version. There is no multi-version negotiation: a node accepts only its own
+`WIRE_VERSION`, so two nodes of different wire versions never connect and each refuses the
+other's offer or answer before decoding its body (error `210` over JSON-RPC). The `1.0.x` release
+line freezes `WIRE_VERSION = 3`; any future wire-version bump is an explicit coordinated network
+cutover. A client learns a node's wire version before joining it from the `wire_version` of its
+public `nodeDid`, and its crate version from the `x-node-version` header of every API response.
 
 ## Methods
 
@@ -115,7 +117,7 @@ The DID of this node. Public on the external listener.
 
 ```json
 {"jsonrpc": "2.0", "id": 1,
- "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 2}}
+ "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 3}}
 ```
 
 ### nodeInfo

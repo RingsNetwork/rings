@@ -2,6 +2,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::Account;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::Did;
 use crate::ecc::keys::AccountVerifier;
 #[cfg(test)]
@@ -74,6 +75,12 @@ impl Delegation {
         self.ts_ms.saturating_add(u128::from(self.ttl_ms))
     }
 
+    /// Check whether this delegation is not yet valid at `at_ms`, allowing up to
+    /// [`TS_OFFSET_TOLERANCE_MS`] of future clock skew.
+    pub const fn is_not_yet_valid_at(&self, at_ms: u128) -> bool {
+        self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > at_ms
+    }
+
     /// Check whether this delegation has expired.
     pub fn is_expired(&self) -> bool {
         self.is_expired_at(utils::get_epoch_ms())
@@ -87,17 +94,9 @@ impl Delegation {
         at_ms > self.ts_ms.saturating_add(u128::from(self.ttl_ms))
     }
 
-    /// Verify that the delegator authorized this unexpired delegation.
-    pub fn verify_delegator_authorization(&self) -> Result<()> {
-        self.verify_delegator_authorization_at(utils::get_epoch_ms())
-    }
-
-    /// Verify that the delegator authorized this delegation and that it was live at `at_ms`.
-    pub fn verify_delegator_authorization_at(&self, at_ms: u128) -> Result<()> {
-        if self.is_expired_at(at_ms) {
-            return Err(Error::DelegationExpired);
-        }
-
+    /// Verify the delegator's cryptographic signature over this delegation's packed transcript,
+    /// independent of wall-clock time.
+    pub(super) fn verify_delegator_signature(&self) -> Result<()> {
         let auth_bytes = self.pack();
         if !self
             .delegator
@@ -107,6 +106,29 @@ impl Delegation {
             return Err(Error::VerifySignatureFailed);
         }
         Ok(())
+    }
+
+    /// Enforce both ends of the validity interval `[ts_ms - TS_OFFSET_TOLERANCE_MS, ts_ms + ttl_ms]`.
+    fn check_validity_window_at(&self, at_ms: u128) -> Result<()> {
+        if self.is_not_yet_valid_at(at_ms) {
+            return Err(Error::DelegationNotYetValid);
+        }
+        if self.is_expired_at(at_ms) {
+            return Err(Error::DelegationExpired);
+        }
+        Ok(())
+    }
+
+    /// Verify that the delegator authorized this currently live delegation.
+    pub fn verify_delegator_authorization(&self) -> Result<()> {
+        self.verify_delegator_authorization_at(utils::get_epoch_ms())
+    }
+
+    /// Verify that the delegator authorized this delegation and that `at_ms` falls within its
+    /// validity window `[ts_ms - TS_OFFSET_TOLERANCE_MS, ts_ms + ttl_ms]`.
+    pub fn verify_delegator_authorization_at(&self, at_ms: u128) -> Result<()> {
+        self.check_validity_window_at(at_ms)?;
+        self.verify_delegator_signature()
     }
 
     /// Verify a message signed by the delegatee key under this delegation.
@@ -125,8 +147,8 @@ impl Delegation {
     /// `authorization` is [`DelegatorAuthorization::Established`].
     ///
     /// Law: `verify_under(m, s, t, Established) = verify_at(m, s, t)` for every delegation whose
-    /// delegator signature verifies; the expiry and the delegatee's signature are checked under
-    /// both.
+    /// delegator signature verifies; the validity window (`[ts_ms - TS_OFFSET_TOLERANCE_MS,
+    /// ts_ms + ttl_ms]`) and the delegatee's signature are checked under both.
     pub(crate) fn verify_under(
         &self,
         msg: &[u8],
@@ -151,10 +173,7 @@ impl Delegation {
     ) -> Result<PublicKey<33>> {
         match authorization {
             DelegatorAuthorization::Verify => self.verify_delegator_authorization_at(at_ms)?,
-            DelegatorAuthorization::Established if self.is_expired_at(at_ms) => {
-                return Err(Error::DelegationExpired);
-            }
-            DelegatorAuthorization::Established => {}
+            DelegatorAuthorization::Established => self.check_validity_window_at(at_ms)?,
         }
         signers::secp256k1::recover(msg, sig)
             .ok()

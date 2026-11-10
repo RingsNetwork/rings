@@ -5,7 +5,7 @@
 #include "../../../crates/node/include/rings.h"
 
 struct ProviderHandle {
-  void (*signer)(const char *, char *);
+  size_t (*signer)(const char *, char *, size_t);
   char *account;
 };
 
@@ -65,8 +65,11 @@ char *rings_node_request(const struct ProviderHandle *provider,
         response, sizeof(response),
         "{\"events\":[{\"kind\":\"streamFrame\",\"stream_id\":\"fixture-stream\",\"is_final\":true}]}");
   } else if (strcmp(method, "signerByte") == 0) {
-    char signature[65];
-    provider->signer("rings ffi fixture", signature);
+    char signature[96];
+    size_t written = provider->signer("rings ffi fixture", signature, sizeof(signature));
+    if (written == 0 || written > sizeof(signature)) {
+      return NULL;
+    }
     length = snprintf(response, sizeof(response), "{\"byte\":%u}",
                       (unsigned char)signature[0]);
   } else {
@@ -100,7 +103,7 @@ struct ProviderHandle *rings_node_new_provider_with_callback(
     const char *account,
     const char *account_type,
     const char *storage_path,
-    void (*signer)(const char *, char *)) {
+    size_t (*signer)(const char *, char *, size_t)) {
   (void)network_id;
   (void)ice_server;
   (void)stabilize_interval;
@@ -120,9 +123,11 @@ struct ProviderHandle *rings_node_new_provider_with_callback(
     free(provider);
     return NULL;
   }
-  char signature[65];
-  signer("rings ffi fixture", signature);
-  if (strcmp(account, "fixture-create-failure") == 0 && signature[0] == 0) {
+  char signature[96];
+  memset(signature, 0, sizeof(signature));
+  size_t written = signer("rings ffi fixture", signature, sizeof(signature));
+  if (written == 0 || written > sizeof(signature) ||
+      (strcmp(account, "fixture-create-failure") == 0 && signature[0] == 0)) {
     free(provider->account);
     free(provider);
     return NULL;

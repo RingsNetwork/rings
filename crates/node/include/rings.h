@@ -1,6 +1,7 @@
 #ifndef RINGS_NODE_H
 #define RINGS_NODE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 typedef enum LogLevel {
@@ -76,10 +77,15 @@ void rings_node_provider_destroy(struct ProviderHandle *provider_ptr);
  * # Safety
  *
  * String pointers, `storage_path` included, must be valid null-terminated
- * UTF-8 strings. The signer must write exactly 65 signature bytes into the
- * provided output buffer. Returns NULL when provider creation fails, a store
- * that cannot be opened included. The returned handle must be released exactly
- * once with `rings_node_provider_destroy`.
+ * UTF-8 strings, and `signer` must be non-NULL. `signer` receives `(proof,
+ * out, out_cap)` where `out_cap` is the byte capacity of `out` (96 bytes, the
+ * widest supported signature). It must write at most `out_cap` signature bytes
+ * matching `account_type` (65 for `eip191`/`secp256k1`/`bip137`, 64 for
+ * `ed25519`/`secp256r1`, 96 for `bls12-381`) into `out` and return the number
+ * of bytes written, or `0` on failure. Returns NULL when provider creation
+ * fails, a store that cannot be opened or an invalid signature length
+ * included. The returned handle must be released exactly once with
+ * `rings_node_provider_destroy`.
  */
 struct ProviderHandle *rings_node_new_provider_with_callback(uint32_t network_id,
                                                              const char *ice_server,
@@ -87,6 +93,6 @@ struct ProviderHandle *rings_node_new_provider_with_callback(uint32_t network_id
                                                              const char *account,
                                                              const char *account_type,
                                                              const char *storage_path,
-                                                             void (*signer)(const char *, char *));
+                                                             size_t (*signer)(const char *, char *, size_t));
 
 #endif

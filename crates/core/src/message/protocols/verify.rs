@@ -39,16 +39,19 @@ use crate::utils::get_epoch_ms;
 /// Name of one signed message family; the first component of a [`SigningDomain`].
 ///
 /// Law: `label.len() <= u8::MAX`, so the label fits its one-byte length prefix in the
-/// transcript. Construct tags with [`domain_tag!`](crate::domain_tag), which checks the law at
-/// compile time; [`DomainTag::new`] is the total form for labels known only at runtime.
+/// transcript. Construct tags with [`domain_tag!`](crate::domain_tag), which enforces the law at
+/// compile time; [`DomainTag::new`] enforces the same precondition at runtime when called outside a
+/// `const` context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DomainTag(&'static str);
 
 impl DomainTag {
     /// Name a message family.
     ///
-    /// Pre: `label.len() <= u8::MAX`, the length prefix's width; a longer label is a programming
-    /// error and is refused here, at compile time when the constructor runs in a `const`.
+    /// # Panics
+    ///
+    /// Panics (or fails `const` evaluation) if `label.len() > u8::MAX as usize`, because the
+    /// signing transcript prefixes `label` with a one-byte length.
     pub const fn new(label: &'static str) -> Self {
         assert!(
             label.len() <= u8::MAX as usize,

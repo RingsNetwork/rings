@@ -10,9 +10,13 @@ const TEST_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([31; 16]);
 /// Distinct epoch used to witness that epoch substitution invalidates the descriptor signature.
 const TAMPERED_PROCESS_EPOCH: OnionProcessEpoch = OnionProcessEpoch::new([32; 16]);
 
+fn test_delegatee_key(secret: &SecretKey) -> Result<DelegateeKey> {
+    DelegateeKey::new_with_seckey_at(secret, u64::MAX, 0).map_err(Error::CoreError)
+}
+
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let delegatee_key = test_delegatee_key(&key)?;
     signed_exit_for_session_at(
         &delegatee_key,
         OnionServiceName::tcp(),
@@ -257,7 +261,7 @@ fn test_exit_descriptor_signature_covers_process_epoch() -> Result<()> {
 #[test]
 fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let delegatee_key = test_delegatee_key(&key)?;
     let signed = |heartbeat_at_ms, version: &str| {
         ExitDescriptorFixture {
             policy: OnionExitPolicy::default(),
@@ -307,7 +311,7 @@ fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result
 #[test]
 fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<()> {
     let key = SecretKey::random();
-    let delegatee_key = DelegateeKey::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let delegatee_key = test_delegatee_key(&key)?;
     let old_tcp =
         signed_exit_for_session_at(&delegatee_key, OnionServiceName::tcp(), 10, 100, "tcp-old")?;
     let new_tcp =
