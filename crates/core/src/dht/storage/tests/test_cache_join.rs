@@ -133,26 +133,16 @@ async fn test_local_cache_breaks_a_same_instant_add_tie_by_dot() -> Result<()> {
     Ok(())
 }
 
-/// Tie (#864): two overwrites by different writers at the same instant compete on the
-/// register, and the cache keeps the greater register's value whichever arrives last.
+/// Tie (#864, #1220): two overwrites by the same writer at the same instant compete on that
+/// writer's reset floor (broken deterministically by operation digest), while concurrent
+/// overwrites by different writers preserve both writers' payloads under actor-scoped floors.
 #[tokio::test]
 async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> Result<()> {
     let resource = Did::from(10u32);
     let now_ms = get_epoch_ms();
-    let first = stamped_delta(
-        EntryOperation::Overwrite,
-        resource,
-        &["a"],
-        now_ms,
-        Did::from(1u32),
-    )?;
-    let second = stamped_delta(
-        EntryOperation::Overwrite,
-        resource,
-        &["b"],
-        now_ms,
-        Did::from(2u32),
-    )?;
+    let writer = Did::from(1u32);
+    let first = stamped_delta(EntryOperation::Overwrite, resource, &["a"], now_ms, writer)?;
+    let second = stamped_delta(EntryOperation::Overwrite, resource, &["b"], now_ms, writer)?;
     assert_ne!(first.crdt.register, second.crdt.register);
 
     let cached = assert_cached_in_any_order(resource, &first, &second).await?;
@@ -165,6 +155,31 @@ async fn test_local_cache_breaks_a_same_instant_overwrite_tie_by_register() -> R
         cached.map(|entry| (entry.crdt.register, entry.data)),
         Some((winner.crdt.register, winner.data.clone()))
     );
+
+    let other_resource = Did::from(11u32);
+    let writer_a = stamped_delta(
+        EntryOperation::Overwrite,
+        other_resource,
+        &["a"],
+        now_ms,
+        Did::from(1u32),
+    )?;
+    let writer_b = stamped_delta(
+        EntryOperation::Overwrite,
+        other_resource,
+        &["b"],
+        now_ms,
+        Did::from(2u32),
+    )?;
+    let cross_cached = assert_cached_in_any_order(other_resource, &writer_a, &writer_b)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("cross-actor cached entry missing".to_string()))?;
+    assert_eq!(cross_cached.data.len(), 2);
+    assert_eq!(
+        cross_cached.crdt.register,
+        writer_a.crdt.register.max(writer_b.crdt.register)
+    );
+    assert_eq!(cross_cached.crdt.co_registers.len(), 1);
     Ok(())
 }
 

@@ -49,7 +49,7 @@ async fn test_a_nodes_stamps_ascend_within_one_millisecond() -> Result<()> {
 /// order, keep the appended element, since the append's dot is above the overwrite's floor.
 #[tokio::test]
 async fn test_an_append_after_an_overwrite_in_one_millisecond_survives() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let node = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
     let topic = Did::from(10u32);
     let overwrite = node
@@ -156,7 +156,7 @@ async fn test_ten_thousand_stamps_at_the_cap_ascend_and_are_admitted() -> Result
 #[tokio::test]
 async fn test_a_stamp_after_the_clock_moves_takes_the_clock_and_restarts_the_counter() -> Result<()>
 {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let node = PeerRing::new_with_storage(Did::from(1u32), 3, Box::new(MemStorage::new()));
     let now_ms = get_epoch_ms();
     let topic = Did::from(10u32);
     let stamp = |value: &'static str, at_ms: u128| {
@@ -167,7 +167,7 @@ async fn test_a_stamp_after_the_clock_moves_takes_the_clock_and_restarts_the_cou
         )
     };
     stamp("a", now_ms).await?;
-    let repeated = stamp("b", now_ms).await?.entry().max_observed_version();
+    let repeated = stamp("a", now_ms).await?.entry().max_observed_version();
     assert_eq!(repeated.map(|version| version.counter), Some(1));
     let later = stamp("c", now_ms + 5).await?.entry().max_observed_version();
     assert_eq!(

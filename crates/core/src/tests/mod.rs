@@ -86,7 +86,7 @@ pub(crate) fn live(entry: Entry) -> Entry {
 /// has only the synthesized dot at the epoch, which is past the element horizon of any clock.
 fn dotted_now(mut entry: Entry) -> Entry {
     if entry.kind == EntryKind::Data && entry.crdt.dots.is_empty() {
-        let version = EntryVersion::new(get_epoch_ms(), Did::default(), Did::default());
+        let version = EntryVersion::new(get_epoch_ms(), Did::from(1u32), Did::default());
         entry.crdt.dots = (0..entry.data.len())
             .map(|index| EntryDot {
                 version,

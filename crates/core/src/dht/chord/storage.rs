@@ -35,7 +35,7 @@ use crate::utils::get_epoch_ms;
 #[derive(Debug)]
 pub(crate) enum LookupSettlement {
     /// A live value is stored here.
-    Found(Entry),
+    Found(Box<Entry>),
     /// This node owns the placement and stores nothing for it.
     Missed(PlacementMiss),
 }
@@ -173,11 +173,13 @@ async fn live_entry(
 /// The counts a projection can change: elements, element dots, co-dots, removes, and whether a
 /// register is held. On a stored value, which is normalized, [`Entry::retired_at`] only drops,
 /// so a projection with the same shape is the same value.
-fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, bool) {
+fn projection_shape(entry: &Entry) -> (usize, usize, usize, usize, usize, usize, bool) {
     (
         entry.data.len(),
         entry.crdt.dots.len(),
         entry.crdt.co_dots.len(),
+        entry.crdt.co_registers.len(),
+        entry.crdt.proofs.len(),
         entry.crdt.tombstones.len(),
         entry.crdt.register.is_some(),
     )
@@ -604,7 +606,9 @@ impl PeerRing {
                     .await?
                     .filter(|value| value.bound_live_at(now_ms));
                 if let Some(value) = served {
-                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(value)));
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Found(Box::new(
+                        value,
+                    ))));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
                 if owner != self.did {
@@ -653,7 +657,7 @@ impl PeerRing {
             {
                 PlacementLookup::Settled(LookupSettlement::Found(value)) => {
                     return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                        value, misses,
+                        *value, misses,
                     )));
                 }
                 PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
@@ -1019,7 +1023,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         }
         let key = op.entry().did.to_string();
         let _transition = self.cache_transition.lock().await;
-        operate_live_entry(
+        match operate_live_entry(
             &CarrierStore::Whole(&self.cache),
             &key,
             op,
@@ -1028,7 +1032,10 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
             now_ms,
         )
         .await
-        .map(drop)
+        {
+            Ok(_) | Err(Error::DataEntryWriteUnauthorized) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
 
     /// Read a cached entry, as a lookup serves it.

@@ -154,7 +154,10 @@ impl ScopedStorage<'_> {
     /// nothing.
     async fn operate_observed(&self, operation: EntryOperation, now_ms: u128) -> Result<()> {
         let dht = &self.transport.dht;
-        let operation = dht.stamp_operation(operation, now_ms, None).await?;
+        let operation = dht
+            .stamp_operation(operation, now_ms, None)
+            .await?
+            .with_author_proofs(dht.did, self.transport.message_signer(), now_ms)?;
         operate_entry(self.transport, operation.clone(), self.attempts()).await?;
         dht.local_cache_observe_write_at(operation, now_ms).await
     }
@@ -169,7 +172,10 @@ impl ScopedStorage<'_> {
         quorum: StoreQuorum,
     ) -> Result<StoreReceipt> {
         let dht = &self.transport.dht;
-        let operation = dht.stamp_operation(operation, now_ms, None).await?;
+        let operation = dht
+            .stamp_operation(operation, now_ms, None)
+            .await?
+            .with_author_proofs(dht.did, self.transport.message_signer(), now_ms)?;
         let receipt =
             operate_entry_reported(self.transport, operation.clone(), self.attempts(), quorum)
                 .await?;

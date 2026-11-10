@@ -257,7 +257,11 @@ impl Entry {
         now_ms: u128,
         network_id: u32,
     ) -> Result<Vec<HeldMessage>> {
-        if self.crdt.register.is_some() {
+        if self.crdt.register.is_some()
+            || !self.crdt.co_registers.is_empty()
+            || !self.crdt.co_dots.is_empty()
+            || !self.crdt.proofs.is_empty()
+        {
             return Err(Error::RelayInboxRegisterNotAllowed);
         }
         // Every element costs signature verifications; a delta the inbox could not keep is
