@@ -84,8 +84,9 @@ async fn test_storage_join_and_ack_digest_each_element_at_most_once() -> Result<
     ));
     assert_eq!(into_held.await?, DIGEST_BOUND_ELEMENTS);
 
-    let ack = SyncedEntryAck::new(placement_key, carrier);
     let key = StorageKey::new(EntryKind::Data, placement_key);
+    let incarnation = node.observe_storage_handoff_incarnation(key)?;
+    let ack = SyncedEntryAck::new(placement_key, carrier).with_custody_incarnation(incarnation);
     let confirmed = digests_of(node.remove_storage_entry_confirmed_by(key, now_ms, &ack));
     assert_eq!(confirmed.await?, 0);
     assert_eq!(node.storage.count().await?, 0);

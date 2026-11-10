@@ -52,7 +52,6 @@ use super::carrier_store::CarrierStore;
 use super::carrier_store::RemovalIndex;
 use super::carrier_store::RemovalStorage;
 use super::carrier_store::REMOVAL_SHARES;
-use super::storage::StorageCustodyIncarnation;
 use super::storage::StorageKey;
 use super::PeerRingAction;
 use super::RemoteAction;
@@ -186,9 +185,10 @@ pub struct PeerRing {
     finger_jitter_entropy: OnceLock<uuid::Uuid>,
     /// Serializes every read-modify-write of a storage slot (see `chord::storage`).
     pub(super) storage_transition: FuturesMutex<()>,
-    /// Per-slot local custody incarnation used to bind hand-off cleanup acknowledgements to the
-    /// custody epoch that emitted them (#1207).
-    pub(super) storage_custody_incarnations: Mutex<BTreeMap<StorageKey, StorageCustodyIncarnation>>,
+    /// Monotonic allocator of non-zero local custody incarnation tokens (#1207).
+    pub(super) next_storage_custody_incarnation: AtomicU64,
+    /// Active outgoing hand-off custody incarnation tokens by slot (#1207).
+    pub(crate) storage_custody_incarnations: Mutex<BTreeMap<StorageKey, u64>>,
     /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
     pub(super) cache_transition: FuturesMutex<()>,
     /// Count of committed transitions that changed the routes (`Law (Epoch)`).
@@ -283,6 +283,7 @@ impl PeerRing {
             clock_origin: Instant::now(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
+            next_storage_custody_incarnation: AtomicU64::new(1),
             storage_custody_incarnations: Mutex::new(BTreeMap::new()),
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),

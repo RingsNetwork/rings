@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 
@@ -74,16 +76,6 @@ pub(crate) enum OperateRoute {
 pub(crate) struct StorageKey {
     kind: EntryKind,
     placement: Did,
-}
-
-/// Local custody incarnation of one [`StorageKey`] slot (#1207).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct StorageCustodyIncarnation {
-    /// Monotonically increasing custody generation for this slot.
-    pub(super) generation: u64,
-    /// Whether an outgoing hand-off has observed `generation` since the slot was last retired or
-    /// advanced.
-    pub(super) handoff_observed: bool,
 }
 
 impl StorageKey {
@@ -338,7 +330,11 @@ impl PeerRing {
             return Ok(None);
         };
         let _transition = self.storage_transition.lock().await;
-        live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await
+        let live = live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?;
+        if live.is_none() {
+            self.advance_storage_custody_incarnation(key)?;
+        }
+        Ok(live)
     }
 
     /// Every live entry of both namespaces with its key, retiring the rest. Each store yields
@@ -369,19 +365,22 @@ impl PeerRing {
                 }
             }
         }
+        let live_keys = live.iter().map(|(slot, _)| *slot).collect::<BTreeSet<_>>();
+        self.storage_custody_incarnations
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?
+            .retain(|slot, _| live_keys.contains(slot));
         Ok(live)
     }
 
-    /// Current local custody incarnation for `key`.
+    /// Current local custody incarnation for `key` (`0` when no active hand-off incarnation is
+    /// registered for `key`).
     pub(crate) fn storage_custody_incarnation(&self, key: StorageKey) -> Result<u64> {
         let incarnations = self
             .storage_custody_incarnations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        Ok(incarnations
-            .get(&key)
-            .map(|state| state.generation)
-            .unwrap_or(0))
+        Ok(incarnations.get(&key).copied().unwrap_or(0))
     }
 
     /// Record that an outgoing hand-off has observed the current custody incarnation of `key`,
@@ -391,39 +390,30 @@ impl PeerRing {
             .storage_custody_incarnations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let state = incarnations.entry(key).or_default();
-        state.handoff_observed = true;
-        Ok(state.generation)
+        let incarnation = *incarnations.entry(key).or_insert_with(|| {
+            self.next_storage_custody_incarnation
+                .fetch_add(1, Ordering::Relaxed)
+        });
+        Ok(incarnation)
     }
 
-    /// Advance the custody incarnation of `key` after its local custody epoch ends, invalidating
-    /// any still-in-flight hand-off acknowledgements from the retired epoch (#1207).
-    pub(crate) fn advance_storage_custody_incarnation(&self, key: StorageKey) -> Result<u64> {
+    /// Clear any active hand-off custody incarnation of `key` after its local custody epoch ends,
+    /// invalidating any still-in-flight hand-off acknowledgements from the retired epoch (#1207).
+    pub(crate) fn advance_storage_custody_incarnation(&self, key: StorageKey) -> Result<()> {
         let mut incarnations = self
             .storage_custody_incarnations
             .lock()
             .map_err(|_| Error::LockPoisoned)?;
-        let state = incarnations.entry(key).or_default();
-        state.generation = state.generation.saturating_add(1);
-        state.handoff_observed = false;
-        Ok(state.generation)
-    }
-
-    /// Record a local write or inbound join at `key`. If an outgoing hand-off had already observed
-    /// the current generation, advancing the generation invalidates that hand-off's cleanup
-    /// authority so a delayed acknowledgement cannot delete the newly written or re-acquired
-    /// custody state (#1207).
-    pub(crate) fn note_storage_custody_write(&self, key: StorageKey) -> Result<()> {
-        let mut incarnations = self
-            .storage_custody_incarnations
-            .lock()
-            .map_err(|_| Error::LockPoisoned)?;
-        let state = incarnations.entry(key).or_default();
-        if state.handoff_observed {
-            state.generation = state.generation.saturating_add(1);
-            state.handoff_observed = false;
-        }
+        incarnations.remove(&key);
         Ok(())
+    }
+
+    /// Record a local write or inbound join at `key`. Clearing any active hand-off incarnation
+    /// invalidates that hand-off's cleanup authority so a delayed acknowledgement cannot delete
+    /// the newly written or re-acquired custody state, while keeping untracked keys out of the map
+    /// (#1207).
+    pub(crate) fn note_storage_custody_write(&self, key: StorageKey) -> Result<()> {
+        self.advance_storage_custody_incarnation(key)
     }
 
     /// Remove the value stored at `key` iff `ack` proves the receiver holds exactly that
@@ -447,6 +437,7 @@ impl PeerRing {
         let Some(local) =
             live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
+            self.advance_storage_custody_incarnation(key)?;
             return Ok(());
         };
         if self.storage_custody_incarnation(key)? == ack.custody_incarnation()
