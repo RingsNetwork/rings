@@ -190,15 +190,16 @@ impl Scope {
         self.rows.put(row).map_err(request::js_error)
     }
 
+    /// Queue the deletion of the row stored under `key`.
+    fn queue_delete_row(&self, key: &str) -> Result<web_sys::IdbRequest> {
+        self.rows
+            .delete(&JsValue::from(key))
+            .map_err(request::js_error)
+    }
+
     /// Delete the row stored under `key`.
     async fn delete_row(&self, key: &str) -> Result<()> {
-        request::request(
-            &self
-                .rows
-                .delete(&JsValue::from(key))
-                .map_err(request::js_error)?,
-        )
-        .await?;
+        request::request(&self.queue_delete_row(key)?).await?;
         Ok(())
     }
 
@@ -282,30 +283,57 @@ impl Scope {
         self.put_rows_with_clock(&[row], Some(&successor)).await
     }
 
-    /// Retire the `count` rows with the smallest stamps.
+    /// Return the keys of the `count` least-recently-accessed rows not in `excluded`.
     ///
     /// Every candidate is decoded before any deletion is queued, so a malformed row leaves the
     /// scope with no destructive request.
-    async fn evict_least_recent(&self, count: u32) -> Result<()> {
+    async fn least_recent_keys_excluding(
+        &self,
+        excluded: &std::collections::BTreeSet<&str>,
+        count: u32,
+    ) -> Result<Vec<String>> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        let excluded_len =
+            u32::try_from(excluded.len()).map_err(|_| Error::StorageCountOverflow)?;
+        let limit = count.saturating_add(excluded_len);
         let index = self
             .rows
             .index(ACCESS_STAMP_INDEX)
             .map_err(request::js_error)?;
         let candidates = request::request(
             &index
-                .get_all_with_key_and_limit(&JsValue::NULL, count)
+                .get_all_with_key_and_limit(&JsValue::NULL, limit)
                 .map_err(request::js_error)?,
         )
         .await?;
-        let keys = candidates
-            .unchecked_into::<Array>()
-            .iter()
-            .map(|row| js_value::deserialize::<StoredRow>(row).map(|row| row.key))
-            .collect::<Result<Vec<_>>>()?;
-        for key in keys {
-            self.delete_row(&key).await?;
+        let mut keys = Vec::with_capacity(count as usize);
+        for row in candidates.unchecked_into::<Array>().iter() {
+            let row = js_value::deserialize::<StoredRow>(row)?;
+            if !excluded.contains(row.key.as_str()) {
+                keys.push(row.key);
+                if keys.len() == count as usize {
+                    break;
+                }
+            }
         }
-        Ok(())
+        Ok(keys)
+    }
+
+    /// Retire the `count` rows with the smallest stamps.
+    ///
+    /// Every candidate is decoded before any deletion is queued, so a malformed row leaves the
+    /// scope with no destructive request.
+    async fn evict_least_recent(&self, count: u32) -> Result<()> {
+        let keys = self
+            .least_recent_keys_excluding(&std::collections::BTreeSet::new(), count)
+            .await?;
+        let requests = keys
+            .iter()
+            .map(|key| self.queue_delete_row(key))
+            .collect::<Result<Vec<_>>>()?;
+        request::requests(&requests).await
     }
 
     /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists: the first open of a
@@ -592,21 +620,33 @@ where V: DeserializeOwned + Serialize + Sized
     }
 
     /// Every row in one read-write transaction, committed with this store's durability (one
-    /// strict commit for the whole batch): all or nothing. Every value is serialized and the
-    /// budget is checked for all the new keys before any row is queued, so a refusal queues no
-    /// write.
+    /// strict commit for the whole batch): all or nothing. Every value is serialized and all
+    /// reads and budget checks complete before any write or delete request is queued in a single
+    /// synchronous turn, so a refusal or mid-flight cancellation leaves no partial write.
     async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
         let mut deduplicated = super::write_ordered::WriteOrderedMap::default();
         for (key, value) in records {
-            deduplicated.insert(key.to_owned(), js_value::serialize(value)?);
+            deduplicated.insert(key.to_owned(), value);
         }
         if deduplicated.len() == 0 {
             return Ok(());
         }
+        let batch_len =
+            u32::try_from(deduplicated.len()).map_err(|_| Error::StorageCountOverflow)?;
+        if batch_len > self.cap && self.authority.evicts() {
+            return Err(Error::StorageValueExceedsCapacity {
+                required: u64::from(batch_len),
+                capacity: u64::from(self.cap),
+            });
+        }
+        let mut serialized = Vec::with_capacity(deduplicated.len());
+        while let Some((key, value)) = deduplicated.pop_oldest() {
+            serialized.push((key, js_value::serialize(value)?));
+        }
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        let mut rows = Vec::with_capacity(deduplicated.len());
+        let mut rows = Vec::with_capacity(serialized.len());
         let mut incoming = 0_u32;
-        while let Some((key, data)) = deduplicated.pop_oldest() {
+        for (key, data) in serialized {
             let existing = scope.row(&key).await?;
             let is_existing = !(existing.is_undefined() || existing.is_null());
             if !is_existing {
@@ -614,9 +654,11 @@ where V: DeserializeOwned + Serialize + Sized
             }
             rows.push((key, is_existing, data));
         }
-        let count = if incoming > 0 {
+        let count = if incoming > 0 || batch_len > self.cap {
             let count = scope.count().await?;
-            if count.saturating_add(incoming) > self.cap && !self.authority.evicts() {
+            if (count.saturating_add(incoming) > self.cap || batch_len > self.cap)
+                && !self.authority.evicts()
+            {
                 return Err(Error::StorageBudgetExhausted {
                     used: u64::from(count),
                     required: u64::from(incoming),
@@ -627,54 +669,42 @@ where V: DeserializeOwned + Serialize + Sized
         } else {
             0
         };
+        let evicted_keys = if incoming > 0 && count.saturating_add(incoming) > self.cap {
+            let excess = count.saturating_add(incoming).saturating_sub(self.cap);
+            let existing_keys = rows
+                .iter()
+                .filter_map(|(key, is_existing, _)| is_existing.then_some(key.as_str()))
+                .collect::<std::collections::BTreeSet<_>>();
+            scope
+                .least_recent_keys_excluding(&existing_keys, excess)
+                .await?
+        } else {
+            Vec::new()
+        };
         let mut clock = scope
             .clock_record()
             .await?
             .ok_or(Error::IdbAccessClockMissing)?;
-        let mut existing_rows = Vec::new();
-        let mut new_rows = Vec::new();
-        for (key, is_existing, data) in rows {
+        let mut encoded_rows = Vec::with_capacity(rows.len());
+        for (key, _, data) in rows {
             let (access_stamp, successor) = clock.tick()?;
             clock = successor;
-            let row = js_value::serialize(&StoredRow {
+            encoded_rows.push(js_value::serialize(&StoredRow {
                 key,
                 access_stamp,
                 data,
-            })?;
-            if is_existing {
-                existing_rows.push(row);
-            } else {
-                new_rows.push(row);
-            }
+            })?);
         }
         let successor = js_value::serialize(&clock)?;
-        let mut clock_pending = Some(&successor);
-        if !existing_rows.is_empty() {
-            scope
-                .put_rows_with_clock(&existing_rows, clock_pending.take())
-                .await?;
+        let mut write_requests = Vec::with_capacity(evicted_keys.len() + encoded_rows.len() + 1);
+        for key in &evicted_keys {
+            write_requests.push(scope.queue_delete_row(key)?);
         }
-        if incoming > 0 && count.saturating_add(incoming) > self.cap {
-            let existing_in_batch =
-                u32::try_from(existing_rows.len()).map_err(|_| Error::StorageCountOverflow)?;
-            let excess = count.saturating_add(incoming).saturating_sub(self.cap);
-            let non_batch = count.saturating_sub(existing_in_batch);
-            let evict_before = excess.min(non_batch);
-            if evict_before > 0 {
-                scope.evict_least_recent(evict_before).await?;
-            }
-            scope
-                .put_rows_with_clock(&new_rows, clock_pending.take())
-                .await?;
-            let evict_after = excess.saturating_sub(evict_before);
-            if evict_after > 0 {
-                scope.evict_least_recent(evict_after).await?;
-            }
-        } else if !new_rows.is_empty() {
-            scope
-                .put_rows_with_clock(&new_rows, clock_pending.take())
-                .await?;
+        for row in &encoded_rows {
+            write_requests.push(scope.queue_put_row(row)?);
         }
+        write_requests.push(scope.queue_write_clock(&successor)?);
+        request::requests(&write_requests).await?;
         scope.done().await
     }
 
@@ -685,9 +715,11 @@ where V: DeserializeOwned + Serialize + Sized
             return Ok(());
         }
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        for key in keys {
-            scope.delete_row(key).await?;
-        }
+        let requests = keys
+            .iter()
+            .map(|key| scope.queue_delete_row(key))
+            .collect::<Result<Vec<_>>>()?;
+        request::requests(&requests).await?;
         scope.done().await
     }
 }

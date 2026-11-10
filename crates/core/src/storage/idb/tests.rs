@@ -868,17 +868,31 @@ async fn test_put_batch_updates_existing_keys_preserves_caller_order_and_bounds_
     assert_eq!(count_rows(&instance).await.unwrap(), 2);
     assert!(stamp_of(&instance, "z").await < stamp_of(&instance, "a").await);
 
-    // Oversized batch on an evicting store keeps only the latest `cap` entries in batch order.
-    crate::storage::KvStorageScan::put_batch(&instance, &[
+    // Oversized deduplicated batch on an evicting store is refused whole without mutating rows.
+    let refused = crate::storage::KvStorageScan::put_batch(&instance, &[
         pair("z", "1"),
         pair("y", "2"),
         pair("x", "3"),
     ])
-    .await
-    .unwrap();
+    .await;
+    assert!(matches!(
+        refused,
+        Err(crate::error::Error::StorageValueExceedsCapacity {
+            required: 3,
+            capacity: 2,
+        })
+    ));
     assert_eq!(count_rows(&instance).await.unwrap(), 2);
-    assert_eq!(get_string(&instance, "z").await.unwrap(), None);
-    assert!(stamp_of(&instance, "y").await < stamp_of(&instance, "x").await);
+    assert_eq!(
+        get_string(&instance, "z").await.unwrap().as_deref(),
+        Some("middle")
+    );
+    assert_eq!(
+        get_string(&instance, "a").await.unwrap().as_deref(),
+        Some("late")
+    );
+    assert_eq!(get_string(&instance, "y").await.unwrap(), None);
+    assert_eq!(get_string(&instance, "x").await.unwrap(), None);
 }
 
 /// Regression (#1210): cancelling a write or recency-updating read future mid-scope aborts its

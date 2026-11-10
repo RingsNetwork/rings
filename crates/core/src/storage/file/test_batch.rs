@@ -291,3 +291,26 @@ async fn test_disposable_batch_preserves_caller_order_and_never_evicts_same_batc
         assert_eq!(stored(&storage).await, after_evict);
     }
 }
+
+/// Law (batch): an earlier oversized value for a key superseded by a later fitting value for the
+/// same key in one batch succeeds.
+#[tokio::test]
+async fn test_superseded_oversized_value_for_same_key_in_batch_succeeds() {
+    let root = TempRoot::new("batch-superseded-oversized");
+    let one = u32::try_from(
+        rings_codec::serialize(&("k", "v"))
+            .expect("record encodes")
+            .len(),
+    )
+    .expect("small record");
+    let storage = authoritative(&root, one).await;
+    let batch = [
+        ("k".to_owned(), "x".repeat(256)),
+        ("k".to_owned(), "v".to_owned()),
+    ];
+    storage
+        .put_batch(&batch)
+        .await
+        .expect("later fitting value supersedes earlier oversized value");
+    assert_eq!(stored(&storage).await, [("k".to_owned(), "v".to_owned())]);
+}

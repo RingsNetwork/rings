@@ -152,9 +152,24 @@ where V: Clone + Send + Sync
 
     /// Every pair in order under one write lock, so the batch is atomic as a whole.
     async fn put_batch(&self, records: &[(String, V)]) -> Result<()> {
-        let mut table = self.write()?;
+        let mut deduplicated = WriteOrderedMap::default();
         for (key, value) in records {
-            table.put(key.to_owned(), value.clone());
+            deduplicated.insert(key.to_owned(), value.clone());
+        }
+        let mut table = self.write()?;
+        if let Some(capacity) = table.capacity {
+            let required =
+                u64::try_from(deduplicated.len()).map_err(|_| Error::StorageCountOverflow)?;
+            let capacity = u64::from(capacity.get());
+            if required > capacity {
+                return Err(Error::StorageValueExceedsCapacity { required, capacity });
+            }
+        }
+        for (key, _) in deduplicated.iter() {
+            table.slots.remove(key);
+        }
+        while let Some((key, value)) = deduplicated.pop_oldest() {
+            table.put(key, value);
         }
         Ok(())
     }
@@ -234,6 +249,47 @@ mod tests {
         }
         assert_eq!(store.count().await?, 64);
         assert_eq!(store.get("0").await?, Some(0));
+        Ok(())
+    }
+
+    /// Law (batch): `put_batch` on a bounded memory store deduplicates by last write, preserves
+    /// existing keys rewritten by the batch, and refuses a deduplicated batch exceeding capacity
+    /// without mutating existing records.
+    #[tokio::test]
+    async fn test_bounded_put_batch_deduplicates_and_refuses_oversized_batch() -> Result<()> {
+        let store = MemStorage::bounded(capacity(2));
+        store.put("a", &1u8).await?;
+        store.put("b", &2u8).await?;
+
+        store
+            .put_batch(&[
+                ("c".to_owned(), 3u8),
+                ("a".to_owned(), 4u8),
+                ("c".to_owned(), 5u8),
+            ])
+            .await?;
+        assert_eq!(store.count().await?, 2);
+        assert_eq!(store.get("b").await?, None);
+        assert_eq!(store.get("a").await?, Some(4));
+        assert_eq!(store.get("c").await?, Some(5));
+
+        let refused = store
+            .put_batch(&[
+                ("x".to_owned(), 1u8),
+                ("y".to_owned(), 2u8),
+                ("z".to_owned(), 3u8),
+            ])
+            .await;
+        assert!(matches!(
+            refused,
+            Err(Error::StorageValueExceedsCapacity {
+                required: 3,
+                capacity: 2,
+            })
+        ));
+        assert_eq!(store.get("a").await?, Some(4));
+        assert_eq!(store.get("c").await?, Some(5));
+        assert_eq!(store.get("x").await?, None);
         Ok(())
     }
 }
