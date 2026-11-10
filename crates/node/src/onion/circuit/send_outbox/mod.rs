@@ -104,6 +104,8 @@ use crate::sync_lock::lock;
 
 mod lanes;
 mod schedule;
+#[cfg(all(test, rings_native))]
+mod test_exit_and_lanes_model;
 #[cfg(test)]
 mod tests;
 

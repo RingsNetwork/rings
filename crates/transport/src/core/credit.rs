@@ -88,7 +88,7 @@ const DATA_LANE_FLOOR: u64 = 1;
 /// what it is granted now, `floor + lent` (see `batch_of`), so a lane granted its floor alone
 /// advertises each release: the progress law needs the batch no greater than the grant.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CreditWindow {
+pub struct CreditWindow {
     /// The cap `W`.
     frames: u64,
     /// The floor `g`.
@@ -100,7 +100,7 @@ pub(crate) struct CreditWindow {
 impl CreditWindow {
     /// The priority lane's window: [`LANE_CREDIT_WINDOW`] frames, all of them its floor, so it
     /// never borrows, advertised half a window at a time.
-    pub(crate) const PRODUCTION: Self = Self {
+    pub const PRODUCTION: Self = Self {
         frames: LANE_CREDIT_WINDOW,
         floor: LANE_CREDIT_WINDOW,
         batch: LANE_CREDIT_BATCH,
@@ -108,14 +108,14 @@ impl CreditWindow {
 
     /// A data lane's window: a floor of one frame, and up to [`LANE_CREDIT_WINDOW`] with the
     /// share the node's pool lends it.
-    pub(crate) const POOLED: Self = Self {
+    pub const POOLED: Self = Self {
         frames: LANE_CREDIT_WINDOW,
         floor: DATA_LANE_FLOOR,
         batch: LANE_CREDIT_BATCH,
     };
 
     /// The window of `lane`: the priority lane's whole window, or a data lane's pooled one.
-    pub(crate) const fn of(index: CreditIndex) -> Self {
+    pub const fn of(index: CreditIndex) -> Self {
         match index {
             CreditIndex::C0 => Self::PRODUCTION,
             CreditIndex::C1 | CreditIndex::C2 | CreditIndex::C3 => Self::POOLED,
@@ -149,9 +149,8 @@ impl CreditWindow {
         }
     }
 
-    /// The cap `W`, for the model.
-    #[cfg(all(test, not(target_family = "wasm")))]
-    pub(crate) const fn frames(self) -> u64 {
+    /// The cap `W` of this credit window.
+    pub const fn frames(self) -> u64 {
         self.frames
     }
 
@@ -201,7 +200,7 @@ pub(crate) enum LaneSignal {
 /// Lanes congruent modulo [`DATA_CHANNEL_POOL_SIZE`] share one channel and so one credit,
 /// exactly as they share its ordering (`channel(lane) ≜ pool[lane mod |pool|]`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CreditIndex {
+pub enum CreditIndex {
     /// Channel 0.
     C0,
     /// Channel 1.
@@ -219,17 +218,17 @@ const _: () = assert!(
 
 impl CreditIndex {
     /// Every index, in channel order.
-    pub(crate) const ALL: [Self; 4] = [Self::C0, Self::C1, Self::C2, Self::C3];
+    pub const ALL: [Self; 4] = [Self::C0, Self::C1, Self::C2, Self::C3];
 
     /// The least lane of the channel, which credit frames are sent on, logs name, and an
     /// admitted frame reports as the lane it arrived on.
-    pub(crate) const fn lane(self) -> ChannelLane {
+    pub const fn lane(self) -> ChannelLane {
         ChannelLane::new(self as u8)
     }
 }
 
 /// The credit index of `lane`.
-pub(crate) const fn credit_index(lane: ChannelLane) -> CreditIndex {
+pub const fn credit_index(lane: ChannelLane) -> CreditIndex {
     match lane.index() % DATA_CHANNEL_POOL_SIZE {
         0 => CreditIndex::C0,
         1 => CreditIndex::C1,
@@ -239,17 +238,17 @@ pub(crate) const fn credit_index(lane: ChannelLane) -> CreditIndex {
 }
 
 /// One value per credit index; selecting by a [`CreditIndex`] is total.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct PerLane<T>([T; 4]);
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct PerLane<T>([T; 4]);
 
 impl<T> PerLane<T> {
     /// The values `value(index)` of every index.
-    pub(crate) fn from_fn(value: impl FnMut(CreditIndex) -> T) -> Self {
+    pub fn from_fn(value: impl FnMut(CreditIndex) -> T) -> Self {
         Self(CreditIndex::ALL.map(value))
     }
 
     /// Every index with its value, in channel order.
-    pub(crate) fn iter_mut(&mut self) -> impl Iterator<Item = (CreditIndex, &mut T)> {
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (CreditIndex, &mut T)> {
         CreditIndex::ALL.into_iter().zip(self.0.iter_mut())
     }
 }
@@ -282,7 +281,7 @@ impl<T> IndexMut<CreditIndex> for PerLane<T> {
 
 /// The sending end of one lane.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct SendCredit {
+pub struct SendCredit {
     /// Frames whose sends became irrevocable.
     committed: u64,
     /// Sends holding a credit that are not yet irrevocable.
@@ -297,7 +296,7 @@ pub(crate) struct SendCredit {
 
 impl SendCredit {
     /// The sender of a fresh connection generation: the window's floor granted.
-    pub(crate) const fn new(window: CreditWindow) -> Self {
+    pub const fn new(window: CreditWindow) -> Self {
         Self {
             committed: 0,
             reserved: 0,
@@ -307,11 +306,10 @@ impl SendCredit {
         }
     }
 
-    #[cfg(any(test, rings_transport_backend))]
     /// Reserve one credit for a send, if one is free.
     ///
     /// Post: on `true`, `committed + reserved ≤ limit` still holds with one more reservation.
-    pub(crate) fn try_reserve(&mut self) -> bool {
+    pub fn try_reserve(&mut self) -> bool {
         let free = self.free() > 0;
         if free {
             self.reserved = self.reserved.saturating_add(1);
@@ -319,32 +317,30 @@ impl SendCredit {
         free
     }
 
-    #[cfg(any(test, rings_transport_backend))]
     /// Turn one reservation into a sent frame: the send became irrevocable.
     ///
     /// Pre: a reservation is held.
-    pub(crate) fn commit(&mut self) {
+    pub fn commit(&mut self) {
         self.reserved = self.reserved.saturating_sub(1);
         self.committed = self.committed.saturating_add(1);
     }
 
-    #[cfg(any(test, rings_transport_backend))]
     /// Return one reservation: the send was abandoned before it became irrevocable.
     ///
     /// Pre: a reservation is held.
-    pub(crate) fn cancel(&mut self) {
+    pub fn cancel(&mut self) {
         self.reserved = self.reserved.saturating_sub(1);
     }
 
     /// The credits free for a new reservation: `limit − (committed + reserved)`, saturating.
-    pub(crate) const fn free(self) -> u64 {
+    pub const fn free(self) -> u64 {
         self.limit
             .saturating_sub(self.committed.saturating_add(self.reserved))
     }
 
     /// Join a received credit of `generation`: `limit ← max(limit, credit)` in the sender's own
     /// generation; a credit of another generation changes nothing.
-    pub(crate) fn grant(&mut self, limit: u64, generation: u64) {
+    pub fn grant(&mut self, limit: u64, generation: u64) {
         if generation == self.generation {
             self.limit = self.limit.max(limit);
         }
@@ -375,16 +371,16 @@ impl SendCredit {
 /// A frame that arrived beyond the credit its receiver advertised: the sender broke the
 /// protocol, since an honest sender never exceeds a credit it was granted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CreditViolation {
+pub struct CreditViolation {
     /// Frames of the lane already received.
-    pub(crate) received: u64,
+    pub received: u64,
     /// The credit advertised for the lane.
-    pub(crate) advertised: u64,
+    pub advertised: u64,
 }
 
 /// The receiving end of one lane.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ReceiveWindow {
+pub struct ReceiveWindow {
     /// Frames admitted.
     received: u64,
     /// Frames that left the transport.
@@ -406,7 +402,7 @@ pub(crate) struct ReceiveWindow {
 
 impl ReceiveWindow {
     /// The receiver of a fresh connection generation: the window's floor granted.
-    pub(crate) const fn new(window: CreditWindow) -> Self {
+    pub const fn new(window: CreditWindow) -> Self {
         Self {
             received: 0,
             released: 0,
@@ -422,7 +418,7 @@ impl ReceiveWindow {
     /// Admit one arriving frame of the lane, or report the credit it exceeded.
     ///
     /// Post: on `Ok`, `received ≤ advertised`; an `Err` leaves the window unchanged.
-    pub(crate) fn admit(&mut self) -> Result<(), CreditViolation> {
+    pub fn admit(&mut self) -> Result<(), CreditViolation> {
         if self.received < self.advertised {
             self.received = self.received.saturating_add(1);
             self.active = true;
@@ -438,7 +434,7 @@ impl ReceiveWindow {
     /// Release one admitted frame: it left the transport.
     ///
     /// Pre: `released < received`.
-    pub(crate) fn release(&mut self) {
+    pub fn release(&mut self) {
         self.released = self.released.saturating_add(1).min(self.received);
     }
 
@@ -448,7 +444,7 @@ impl ReceiveWindow {
     ///
     /// Post: on `Some((limit, g))`, `advertised = limit = released + floor + lent ≤
     /// released + W`; on `None`, nothing changed.
-    pub(crate) fn advertise(&mut self, window: CreditWindow) -> Option<(u64, u64)> {
+    pub fn advertise(&mut self, window: CreditWindow) -> Option<(u64, u64)> {
         if self.shrinking.is_some() {
             return None;
         }
@@ -476,7 +472,7 @@ impl ReceiveWindow {
     }
 
     /// Take `share` more of the pool, at most what the lane wants; returns what it took.
-    pub(crate) fn lend(&mut self, window: CreditWindow, share: u64) -> u64 {
+    pub fn lend(&mut self, window: CreditWindow, share: u64) -> u64 {
         let taken = share.min(self.want(window));
         self.lent = self.lent.saturating_add(taken);
         self.grown |= taken > 0;
@@ -556,8 +552,7 @@ impl ReceiveWindow {
     }
 
     /// Frames admitted and not yet released.
-    #[cfg(test)]
-    pub(crate) const fn occupancy(self) -> u64 {
+    pub const fn occupancy(self) -> u64 {
         self.received.saturating_sub(self.released)
     }
 

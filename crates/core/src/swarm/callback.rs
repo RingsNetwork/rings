@@ -28,7 +28,23 @@ mod pre_admission;
 mod processor;
 
 pub(crate) use inbound::InboundCapacity;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::InboundCapacityPermit;
 pub(crate) use inbound::InboundLane;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::InboundRequest;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::InboundResource;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::INBOUND_MODEL_LANES;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::INBOUND_MODEL_MAILBOX_BYTES;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::INBOUND_MODEL_PEER_BYTES;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::INBOUND_MODEL_PEER_EVENTS;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use inbound::INBOUND_MODEL_RESERVED_BYTES_PER_LANE;
 pub(crate) use logical::LocalDelivered;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use processor::prepare_transport_frame_lane_for_test;

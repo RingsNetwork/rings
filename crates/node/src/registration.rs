@@ -645,3 +645,5 @@ pub(crate) use readiness::RegistrationReadiness;
 
 #[cfg(test)]
 mod test_first_edge;
+#[cfg(all(test, rings_native))]
+mod test_lease_and_readiness_model;

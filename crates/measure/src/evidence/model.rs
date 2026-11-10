@@ -12,15 +12,29 @@
 //! its linearization point, and a crash during an incomplete operation may
 //! refine either the before-state or the conservatively persisted after-state.
 
+use std::collections::BTreeSet;
+
 use stateright::Checker;
+use stateright::Expectation;
 use stateright::Model;
 use stateright::Property;
 
 use super::*;
 
-const INITIAL_CREDIT: u8 = 7;
-const INITIAL_ROUTE: u8 = 11;
 const CANDIDATE_COUNT: u8 = 7;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Mutant {
+    CounterDrift,
+    SkipEviction,
+    IgnoreReplayCapacity,
+    AllowFreshnessConflict,
+    PruneResidentMarker,
+    AllowDuplicateDigest,
+    DropEvictedMarkersOnRestart,
+    OverwriteReplayFloor,
+    EvictAdmittedCandidate,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ModelRecord {
@@ -154,8 +168,6 @@ struct StoreState {
     replay_floor: u8,
     outcomes: Vec<Outcome>,
     counters: ModelCounters,
-    credit: u8,
-    route: u8,
 }
 
 impl StoreState {
@@ -166,12 +178,10 @@ impl StoreState {
             replay_floor: 0,
             outcomes: Vec::new(),
             counters: ModelCounters::default(),
-            credit: INITIAL_CREDIT,
-            route: INITIAL_ROUTE,
         }
     }
 
-    fn admit(&mut self, record: ModelRecord) {
+    fn admit(&mut self, record: ModelRecord, mutant: Option<Mutant>) {
         if record.bytes == 0 {
             self.counters.rejected_records += 1;
             self.outcomes.push(Outcome::Empty);
@@ -182,67 +192,107 @@ impl StoreState {
             self.outcomes.push(Outcome::TooLarge);
             return;
         }
-        self.advance_replay_floor(record.replay_floor);
+        self.advance_replay_floor(record.replay_floor, mutant);
         if record.freshness < self.replay_floor {
             self.counters.rejected_records += 1;
             self.outcomes.push(Outcome::Stale);
             return;
         }
-        if self
-            .markers
-            .iter()
-            .any(|marker| marker.digest == record.digest)
+        if mutant != Some(Mutant::AllowDuplicateDigest)
+            && self
+                .markers
+                .iter()
+                .any(|marker| marker.digest == record.digest)
         {
             self.counters.duplicates += 1;
             self.outcomes.push(Outcome::Duplicate);
             return;
         }
-        if let Some(retained) = self
-            .markers
-            .iter()
-            .find(|marker| marker.freshness == record.freshness)
-            .map(|marker| marker.digest)
-        {
-            self.counters.conflicts += 1;
-            self.outcomes.push(Outcome::Conflict(retained));
-            return;
+        if mutant != Some(Mutant::AllowFreshnessConflict) {
+            if let Some(retained) = self
+                .markers
+                .iter()
+                .find(|marker| {
+                    marker.freshness == record.freshness && marker.digest != record.digest
+                })
+                .map(|marker| marker.digest)
+            {
+                self.counters.conflicts += 1;
+                self.outcomes.push(Outcome::Conflict(retained));
+                return;
+            }
         }
-        if self.replay_over_bound_after(record.beneficiary) {
+        if mutant != Some(Mutant::IgnoreReplayCapacity)
+            && self.replay_over_bound_after(record.beneficiary)
+        {
             self.counters.replay_capacity_rejections += 1;
             self.outcomes.push(Outcome::ReplayCapacityExhausted);
             return;
         }
 
-        self.markers.push(record.into());
-        self.markers.sort();
-        self.records.push(record);
-        self.records.sort_by_key(|resident| resident.digest);
-        self.counters.admitted += 1;
-        self.evict_while(
-            |state| state.pair_over_bound(record.provider, record.beneficiary),
-            record.digest,
-            Some((record.provider, record.beneficiary)),
-        );
-        self.evict_while(Self::global_over_bound, record.digest, None);
+        if !self
+            .markers
+            .iter()
+            .any(|marker| marker.digest == record.digest)
+        {
+            self.markers.push(record.into());
+            self.markers.sort();
+        }
+        if !self
+            .records
+            .iter()
+            .any(|resident| resident.digest == record.digest)
+        {
+            self.records.push(record);
+            self.records.sort_by_key(|resident| resident.digest);
+        }
+        self.counters.admitted += if mutant == Some(Mutant::CounterDrift) {
+            2
+        } else {
+            1
+        };
+        if mutant != Some(Mutant::SkipEviction) {
+            let protected =
+                (mutant != Some(Mutant::EvictAdmittedCandidate)).then_some(record.digest);
+            self.evict_while(
+                |state| state.pair_over_bound(record.provider, record.beneficiary),
+                protected,
+                Some((record.provider, record.beneficiary)),
+            );
+            self.evict_while(Self::global_over_bound, protected, None);
+        }
         self.outcomes.push(Outcome::Admitted);
     }
 
-    fn advance_replay_floor(&mut self, floor: u8) {
-        self.replay_floor = self.replay_floor.max(floor);
-        self.prune_expired_evicted_markers();
+    fn advance_replay_floor(&mut self, floor: u8, mutant: Option<Mutant>) {
+        if mutant == Some(Mutant::OverwriteReplayFloor) {
+            self.replay_floor = floor;
+        } else {
+            self.replay_floor = self.replay_floor.max(floor);
+        }
+        self.prune_expired_evicted_markers(mutant);
     }
 
-    fn reconcile_restart(&mut self) {
-        self.prune_expired_evicted_markers();
-    }
-
-    fn prune_expired_evicted_markers(&mut self) {
-        self.markers.retain(|marker| {
-            marker.freshness >= self.replay_floor
-                || self
-                    .records
+    fn reconcile_restart(&mut self, mutant: Option<Mutant>) {
+        if mutant == Some(Mutant::DropEvictedMarkersOnRestart) {
+            self.markers.retain(|marker| {
+                self.records
                     .iter()
                     .any(|record| record.digest == marker.digest)
+            });
+            return;
+        }
+        self.prune_expired_evicted_markers(mutant);
+    }
+
+    fn prune_expired_evicted_markers(&mut self, mutant: Option<Mutant>) {
+        self.markers.retain(|marker| {
+            marker.freshness >= self.replay_floor
+                || (mutant != Some(Mutant::PruneResidentMarker)
+                    && self
+                        .records
+                        .iter()
+                        .any(|record| record.digest == marker.digest))
         });
     }
 
@@ -261,7 +311,7 @@ impl StoreState {
     fn evict_while(
         &mut self,
         over_bound: impl Fn(&Self) -> bool,
-        candidate_digest: u8,
+        protected_digest: Option<u8>,
         pair: Option<(u8, u8)>,
     ) {
         while over_bound(self) {
@@ -269,7 +319,7 @@ impl StoreState {
                 .records
                 .iter()
                 .filter(|record| {
-                    record.digest != candidate_digest
+                    Some(record.digest) != protected_digest
                         && pair.is_none_or(|pair| (record.provider, record.beneficiary) == pair)
                 })
                 .min_by_key(|record| (record.observed_at, record.digest))
@@ -349,8 +399,11 @@ impl StoreState {
     }
 }
 
-#[derive(Clone)]
-struct EvidenceModel;
+#[derive(Clone, Default)]
+struct EvidenceModel {
+    mutant: Option<Mutant>,
+    candidate_limit: Option<u8>,
+}
 
 impl Model for EvidenceModel {
     type State = Vec<Action>;
@@ -361,7 +414,8 @@ impl Model for EvidenceModel {
     }
 
     fn actions(&self, history: &Self::State, actions: &mut Vec<Self::Action>) {
-        for id in 0..CANDIDATE_COUNT {
+        let count = self.candidate_limit.unwrap_or(CANDIDATE_COUNT);
+        for id in 0..count {
             if !history.contains(&Action::Admit(id)) {
                 actions.push(Action::Admit(id));
             }
@@ -381,44 +435,49 @@ impl Model for EvidenceModel {
         vec![
             Property::<Self>::always(
                 "production refines every abstract transition",
-                |_, history| production_refines(history),
+                |model, history| {
+                    !matches!(model.mutant, None | Some(Mutant::CounterDrift))
+                        || production_refines(history, model.mutant)
+                },
             ),
-            Property::<Self>::always("global and per-pair hard bounds hold", |_, history| {
-                let state = abstract_replay(history);
+            Property::<Self>::always("global and per-pair hard bounds hold", |model, history| {
+                let state = abstract_replay(history, model.mutant);
                 !state.global_over_bound()
                     && (0..=4).all(|provider| {
                         (0..=3).all(|beneficiary| !state.pair_over_bound(provider, beneficiary))
                     })
             }),
-            Property::<Self>::always("durable replay-marker bounds hold", |_, history| {
-                abstract_replay(history).replay_markers_are_within_bounds()
+            Property::<Self>::always("durable replay-marker bounds hold", |model, history| {
+                abstract_replay(history, model.mutant).replay_markers_are_within_bounds()
             }),
-            Property::<Self>::always("one digest owns each freshness key", |_, history| {
-                let state = abstract_replay(history);
+            Property::<Self>::always("one digest owns each freshness key", |model, history| {
+                let state = abstract_replay(history, model.mutant);
                 state.freshness_is_unique() && state.marker_digests_are_unique()
             }),
             Property::<Self>::always(
                 "retained evidence always has a replay marker",
-                |_, history| abstract_replay(history).retained_records_have_markers(),
+                |model, history| {
+                    abstract_replay(history, model.mutant).retained_records_have_markers()
+                },
             ),
             Property::<Self>::always(
                 "an admitted digest is never admitted twice",
-                |_, history| no_digest_is_admitted_twice(history),
+                |model, history| no_digest_is_admitted_twice(history, model.mutant),
             ),
             Property::<Self>::always(
                 "every still-admissible accepted key keeps its marker",
-                |_, history| active_admissions_remain_marked(history),
+                |model, history| active_admissions_remain_marked(history, model.mutant),
             ),
-            Property::<Self>::always("the replay floor is monotonic", |_, history| {
-                replay_floor_is_monotonic(history)
+            Property::<Self>::always("the replay floor is monotonic", |model, history| {
+                replay_floor_is_monotonic(history, model.mutant)
             }),
             Property::<Self>::always(
                 "an admitted candidate survives its transition",
-                |_, history| {
+                |model, history| {
                     let Some(Action::Admit(id)) = history.last() else {
                         return true;
                     };
-                    let state = abstract_replay(history);
+                    let state = abstract_replay(history, model.mutant);
                     state.outcomes.last() != Some(&Outcome::Admitted)
                         || state
                             .records
@@ -426,37 +485,36 @@ impl Model for EvidenceModel {
                             .any(|record| record.digest == candidate(*id).digest)
                 },
             ),
-            Property::<Self>::always("evidence cannot affect credit or routing", |_, history| {
-                let state = abstract_replay(history);
-                state.credit == INITIAL_CREDIT && state.route == INITIAL_ROUTE
-            }),
-            Property::<Self>::sometimes("duplicate is reachable", |_, history| {
-                abstract_replay(history)
+            Property::<Self>::sometimes("duplicate is reachable", |model, history| {
+                abstract_replay(history, model.mutant)
                     .outcomes
                     .contains(&Outcome::Duplicate)
             }),
-            Property::<Self>::sometimes("freshness conflict is reachable", |_, history| {
-                abstract_replay(history)
+            Property::<Self>::sometimes("freshness conflict is reachable", |model, history| {
+                abstract_replay(history, model.mutant)
                     .outcomes
                     .iter()
                     .any(|outcome| matches!(outcome, Outcome::Conflict(_)))
             }),
-            Property::<Self>::sometimes("bounded eviction is reachable", |_, history| {
-                abstract_replay(history).counters.evicted_records > 0
+            Property::<Self>::sometimes("bounded eviction is reachable", |model, history| {
+                abstract_replay(history, model.mutant)
+                    .counters
+                    .evicted_records
+                    > 0
             }),
             Property::<Self>::sometimes(
                 "an evicted receipt remains duplicate-protected",
-                |_, history| evicted_duplicate_is_rejected(history),
+                |model, history| evicted_duplicate_is_rejected(history, model.mutant),
             ),
-            Property::<Self>::sometimes("replay capacity fails closed", |_, history| {
-                abstract_replay(history)
+            Property::<Self>::sometimes("replay capacity fails closed", |model, history| {
+                abstract_replay(history, model.mutant)
                     .outcomes
                     .contains(&Outcome::ReplayCapacityExhausted)
             }),
             Property::<Self>::sometimes(
                 "distinct beneficiaries share the global replay budget",
-                |_, history| {
-                    let state = abstract_replay(history);
+                |model, history| {
+                    let state = abstract_replay(history, model.mutant);
                     state.markers.iter().any(|left| {
                         state
                             .markers
@@ -465,38 +523,43 @@ impl Model for EvidenceModel {
                     })
                 },
             ),
-            Property::<Self>::sometimes("clock regression fails closed", |_, history| {
-                abstract_replay(history).outcomes.contains(&Outcome::Stale)
+            Property::<Self>::sometimes("clock regression fails closed", |model, history| {
+                abstract_replay(history, model.mutant)
+                    .outcomes
+                    .contains(&Outcome::Stale)
             }),
             Property::<Self>::sometimes(
                 "an expired evicted marker is eventually pruned",
-                |_, history| expired_evicted_marker_is_pruned(history),
+                |model, history| expired_evicted_marker_is_pruned(history, model.mutant),
             ),
-            Property::<Self>::sometimes("invalid records are rejected", |_, history| {
-                abstract_replay(history).counters.rejected_records > 0
+            Property::<Self>::sometimes("invalid records are rejected", |model, history| {
+                abstract_replay(history, model.mutant)
+                    .counters
+                    .rejected_records
+                    > 0
             }),
         ]
     }
 }
 
-fn abstract_replay(history: &[Action]) -> StoreState {
+fn abstract_replay(history: &[Action], mutant: Option<Mutant>) -> StoreState {
     let mut state = StoreState::initial();
     for action in history {
         match action {
-            Action::Admit(id) => state.admit(candidate(*id)),
-            Action::CrashRestart => state.reconcile_restart(),
+            Action::Admit(id) => state.admit(candidate(*id), mutant),
+            Action::CrashRestart => state.reconcile_restart(mutant),
         }
     }
     state
 }
 
-fn no_digest_is_admitted_twice(history: &[Action]) -> bool {
+fn no_digest_is_admitted_twice(history: &[Action], mutant: Option<Mutant>) -> bool {
     let mut state = StoreState::initial();
     let mut admitted = Vec::new();
     for action in history {
         match action {
             Action::Admit(id) => {
-                state.admit(candidate(*id));
+                state.admit(candidate(*id), mutant);
                 if state.outcomes.last() == Some(&Outcome::Admitted) {
                     let digest = candidate(*id).digest;
                     if admitted.contains(&digest) {
@@ -505,25 +568,25 @@ fn no_digest_is_admitted_twice(history: &[Action]) -> bool {
                     admitted.push(digest);
                 }
             }
-            Action::CrashRestart => state.reconcile_restart(),
+            Action::CrashRestart => state.reconcile_restart(mutant),
         }
     }
     true
 }
 
-fn active_admissions_remain_marked(history: &[Action]) -> bool {
+fn active_admissions_remain_marked(history: &[Action], mutant: Option<Mutant>) -> bool {
     let mut state = StoreState::initial();
     let mut admitted = Vec::new();
     for action in history {
         match action {
             Action::Admit(id) => {
                 let record = candidate(*id);
-                state.admit(record);
+                state.admit(record, mutant);
                 if state.outcomes.last() == Some(&Outcome::Admitted) {
                     admitted.push(ModelMarker::from(record));
                 }
             }
-            Action::CrashRestart => state.reconcile_restart(),
+            Action::CrashRestart => state.reconcile_restart(mutant),
         }
     }
     admitted
@@ -531,38 +594,38 @@ fn active_admissions_remain_marked(history: &[Action]) -> bool {
         .all(|marker| marker.freshness < state.replay_floor || state.markers.contains(&marker))
 }
 
-fn replay_floor_is_monotonic(history: &[Action]) -> bool {
+fn replay_floor_is_monotonic(history: &[Action], mutant: Option<Mutant>) -> bool {
     let mut state = StoreState::initial();
     let mut prior = state.replay_floor;
     for action in history {
         match action {
             Action::Admit(id) => {
-                state.admit(candidate(*id));
+                state.admit(candidate(*id), mutant);
                 if state.replay_floor < prior {
                     return false;
                 }
                 prior = state.replay_floor;
             }
-            Action::CrashRestart => state.reconcile_restart(),
+            Action::CrashRestart => state.reconcile_restart(mutant),
         }
     }
     true
 }
 
-fn expired_evicted_marker_is_pruned(history: &[Action]) -> bool {
-    let state = abstract_replay(history);
+fn expired_evicted_marker_is_pruned(history: &[Action], mutant: Option<Mutant>) -> bool {
+    let state = abstract_replay(history, mutant);
     let mut prefix = StoreState::initial();
     let mut admitted_first = false;
     for action in history {
         match action {
             Action::Admit(id) => {
-                prefix.admit(candidate(*id));
+                prefix.admit(candidate(*id), mutant);
                 if *id == 0 {
                     admitted_first = prefix.outcomes.last() == Some(&Outcome::Admitted);
                     break;
                 }
             }
-            Action::CrashRestart => prefix.reconcile_restart(),
+            Action::CrashRestart => prefix.reconcile_restart(mutant),
         }
     }
     admitted_first
@@ -577,22 +640,22 @@ fn expired_evicted_marker_is_pruned(history: &[Action]) -> bool {
             .any(|marker| marker.digest == candidate(0).digest)
 }
 
-fn evicted_duplicate_is_rejected(history: &[Action]) -> bool {
+fn evicted_duplicate_is_rejected(history: &[Action], mutant: Option<Mutant>) -> bool {
     let mut state = StoreState::initial();
     let mut first_was_evicted = false;
     for action in history {
         match action {
             Action::Admit(id) => {
                 if *id == 1 && first_was_evicted {
-                    state.admit(candidate(*id));
+                    state.admit(candidate(*id), mutant);
                     return matches!(
                         state.outcomes.last(),
                         Some(Outcome::Duplicate | Outcome::Stale)
                     );
                 }
-                state.admit(candidate(*id));
+                state.admit(candidate(*id), mutant);
             }
-            Action::CrashRestart => state.reconcile_restart(),
+            Action::CrashRestart => state.reconcile_restart(mutant),
         }
         first_was_evicted = state
             .markers
@@ -696,12 +759,10 @@ fn projection(store: &ProvisionalEvidenceStore<u8>, outcomes: Vec<Outcome>) -> S
             rejected_replay_markers: u8::try_from(counters.rejected_replay_markers())
                 .unwrap_or(u8::MAX),
         },
-        credit: INITIAL_CREDIT,
-        route: INITIAL_ROUTE,
     }
 }
 
-fn production_refines(history: &[Action]) -> bool {
+fn production_refines(history: &[Action], mutant: Option<Mutant>) -> bool {
     let mut store = ProvisionalEvidenceStore::new(model_limits());
     let mut outcomes = Vec::new();
     for action in history {
@@ -734,7 +795,7 @@ fn production_refines(history: &[Action]) -> bool {
             }
         }
     }
-    projection(&store, outcomes) == abstract_replay(history) && pagination_matches(&store)
+    projection(&store, outcomes) == abstract_replay(history, mutant) && pagination_matches(&store)
 }
 
 fn pagination_matches(store: &ProvisionalEvidenceStore<u8>) -> bool {
@@ -757,11 +818,91 @@ fn pagination_matches(store: &ProvisionalEvidenceStore<u8>) -> bool {
     actual == expected
 }
 
+/// The names of the properties `model` refutes or leaves unwitnessed.
+fn refuted(model: EvidenceModel) -> BTreeSet<&'static str> {
+    let checker = model.checker().spawn_bfs().join();
+    checker
+        .model()
+        .properties()
+        .into_iter()
+        .filter(|property| {
+            let discovered = checker.discovery(property.name).is_some();
+            match property.expectation {
+                Expectation::Sometimes => !discovered,
+                _ => discovered,
+            }
+        })
+        .map(|property| property.name)
+        .collect()
+}
+
 #[test]
 fn model_checks_every_bounded_admission_and_restart_schedule() {
-    EvidenceModel
+    EvidenceModel::default()
         .checker()
         .spawn_bfs()
         .join()
         .assert_properties();
+}
+
+/// Every safety invariant of the evidence-store model is load-bearing: mutating the transition
+/// relation is refuted by the property that states the violated law.
+#[test]
+fn test_each_evidence_store_mutant_is_refuted() {
+    for (mutant, candidate_limit, law) in [
+        (
+            Mutant::CounterDrift,
+            Some(2),
+            "production refines every abstract transition",
+        ),
+        (
+            Mutant::SkipEviction,
+            Some(5),
+            "global and per-pair hard bounds hold",
+        ),
+        (
+            Mutant::IgnoreReplayCapacity,
+            Some(6),
+            "durable replay-marker bounds hold",
+        ),
+        (
+            Mutant::AllowFreshnessConflict,
+            Some(3),
+            "one digest owns each freshness key",
+        ),
+        (
+            Mutant::PruneResidentMarker,
+            Some(5),
+            "retained evidence always has a replay marker",
+        ),
+        (
+            Mutant::AllowDuplicateDigest,
+            Some(2),
+            "an admitted digest is never admitted twice",
+        ),
+        (
+            Mutant::DropEvictedMarkersOnRestart,
+            Some(4),
+            "every still-admissible accepted key keeps its marker",
+        ),
+        (
+            Mutant::OverwriteReplayFloor,
+            Some(6),
+            "the replay floor is monotonic",
+        ),
+        (
+            Mutant::EvictAdmittedCandidate,
+            Some(4),
+            "an admitted candidate survives its transition",
+        ),
+    ] {
+        let model = EvidenceModel {
+            mutant: Some(mutant),
+            candidate_limit,
+        };
+        assert!(
+            refuted(model).contains(law),
+            "{mutant:?} must be refuted by `{law}`"
+        );
+    }
 }

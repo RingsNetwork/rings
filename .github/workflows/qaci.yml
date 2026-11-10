@@ -112,17 +112,41 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: ./.github/actions/rust-cache
 
+      # Host filesystem durability syscalls in `storage::file` (`libc::fsync` in `batch.rs`,
+      # directory `sync_all`, `flock`, and Windows `MoveFileExW` in `presence.rs`) cross the OS
+      # boundary that Miri's isolation mode rejects; they are exercised under ASan/LSan in
+      # `ffi_sanitizers`, while the pure crash/barrier/presence plan algebra
+      # (`storage::file::test_durability`) runs under Miri here.
       - name: Run Miri-compatible core tests
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
         run: |
           set -euo pipefail
           for filter in \
-            "lifecycle::tests" \
-            "dht::did::tests" \
-            "dht::virtual_node::tests"
+            "lifecycle::test_lifecycle::" \
+            "lifecycle::epoch::tests::" \
+            "storage::file::test_durability::" \
+            "dht::did::tests::" \
+            "dht::virtual_node::tests::"
           do
-            cargo +"$NIGHTLY_TOOLCHAIN" miri test -q -p rings-core --lib "$filter"
+            listed="$(cargo +"$NIGHTLY_TOOLCHAIN" miri test -p rings-core --lib "$filter" -- --list --format terse)"
+            printf '%s\n' "$listed"
+            if ! grep -Eq ': test$' <<< "$listed"; then
+              echo "error: Miri filter '$filter' matched zero tests" >&2
+              exit 1
+            fi
+            set +e
+            output="$(cargo +"$NIGHTLY_TOOLCHAIN" miri test -p rings-core --lib "$filter" 2>&1)"
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+            if [ "$status" -ne 0 ]; then
+              exit "$status"
+            fi
+            if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<< "$output"; then
+              echo "error: Miri filter '$filter' executed zero unignored tests" >&2
+              exit 1
+            fi
           done
 
   ffi_sanitizers:
@@ -145,6 +169,19 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: ./.github/actions/rust-cache
+
+      - name: Run core file-storage durability tests under ASan and LSan
+        run: |
+          set -euo pipefail
+          set +e
+          output="$(cargo +"$NIGHTLY_TOOLCHAIN" test --target x86_64-unknown-linux-gnu -p rings-core --lib storage::file:: -- --nocapture 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<< "$output"
 
       - name: Run FFI lifecycle tests under ASan and LSan
         run: |
@@ -455,23 +492,18 @@ jobs:
           print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
           print("RINGS_DECODE_BOUNDARY_CASES=1024")
           PY
-      - name: Compile and run core dummy tests
+      - name: Compile and run core and node dummy tests
         env:
           RUST_TEST_THREADS: 2
         run: |
           mkdir -p target/ci-evidence
           cargo test --locked --profile ci -p rings-core --features dummy --no-run --timings --message-format=json > target/ci-evidence/core-dummy.jsonl
-          python3 scripts/run-ci-tests.py target/ci-evidence/core-dummy.jsonl \
-            --inventory target/ci-evidence/core-dummy-inventory.json \
+          cargo test --locked --profile ci -p rings-node --features dummy --no-run --timings --message-format=json > target/ci-evidence/node-dummy.jsonl
+          cat target/ci-evidence/core-dummy.jsonl target/ci-evidence/node-dummy.jsonl > target/ci-evidence/core-node-dummy.jsonl
+          python3 scripts/run-ci-tests.py target/ci-evidence/core-node-dummy.jsonl \
+            --inventory target/ci-evidence/core-node-dummy-inventory.json \
             --skip-file scripts/ci-native-model-tests.txt \
             --skip tests::default::test_sync_storm::
-      - name: Compile and run node dummy tests
-        env:
-          RUST_TEST_THREADS: 2
-        run: |
-          cargo test --locked --profile ci -p rings-node --features dummy --no-run --timings --message-format=json > target/ci-evidence/node-dummy.jsonl
-          python3 scripts/run-ci-tests.py target/ci-evidence/node-dummy.jsonl \
-            --inventory target/ci-evidence/node-dummy-inventory.json
       - name: Compile and run transport dummy tests
         run: |
           cargo test --locked --profile ci -p rings-transport --no-default-features --features dummy --no-run --timings --message-format=json > target/ci-evidence/transport-dummy.jsonl

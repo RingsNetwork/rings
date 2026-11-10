@@ -5,6 +5,8 @@
 
 mod test_liveness;
 mod test_mark;
+#[cfg(rings_native)]
+mod test_session_order_model;
 mod test_witness;
 
 use bytes::Bytes;

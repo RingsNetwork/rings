@@ -269,6 +269,20 @@ pub(crate) struct InboundRequest {
     charge: InboundCharge,
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
+impl InboundRequest {
+    /// Build a byte-charged request on `lane` for `peer`, for refinement checks against the
+    /// fair-admission model.
+    pub(crate) const fn bytes_for_test(peer: Option<Did>, lane: InboundLane, bytes: usize) -> Self {
+        Self {
+            peer,
+            lane,
+            carrier: None,
+            charge: InboundCharge::Bytes(bytes),
+        }
+    }
+}
+
 /// A set of at most four inbound resources.
 pub(crate) type InboundResources =
     std::iter::Flatten<std::array::IntoIter<Option<InboundResource>, 5>>;
@@ -531,19 +545,27 @@ impl AdmissionLedger for Arc<InboundCapacity> {
         let Some((lane, bytes)) = request.charge.reservation(request.lane) else {
             return Vec::new();
         };
-        // Every charge fits an idle reservation (the constant assertions above), so a lane
-        // whose reservation does not cover it now may.
+        // Only a charge that fits an idle lane reservation (`<= INBOUND_RESERVED_BYTES[lane]`) can
+        // shed `Shared` when its lane releases (#932 added whole-message charges larger than one
+        // frame reservation).
         let reserved = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .covers(lane, bytes);
+        let fits_lane_reservation = INBOUND_RESERVED_TRANSFERS
+            .get(lane.index())
+            .is_some_and(|&count| count >= 1)
+            && INBOUND_RESERVED_BYTES
+                .get(lane.index())
+                .is_some_and(|&limit| bytes <= limit);
         let floor = request.charge.opening().filter(|(introducer, bytes)| {
             let open = self.open();
             !open.within_floor(*introducer, *bytes) && open.fits_floor(*introducer, *bytes)
         });
         [
-            (!reserved).then(|| (InboundResource::Lane(lane), vec![InboundResource::Shared])),
+            (!reserved && fits_lane_reservation)
+                .then(|| (InboundResource::Lane(lane), vec![InboundResource::Shared])),
             floor.map(|(introducer, _)| {
                 (InboundResource::Floor(introducer), vec![
                     InboundResource::OpenPool,

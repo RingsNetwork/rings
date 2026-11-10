@@ -55,9 +55,23 @@ use self::barrier::UnfinishedReassembly;
 use self::capacity::memory_reservation;
 pub(super) use self::capacity::HeldCharge;
 pub(crate) use self::capacity::InboundCapacity;
-pub(super) use self::capacity::InboundCapacityPermit;
+pub(crate) use self::capacity::InboundCapacityPermit;
 use self::capacity::InboundCharge;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use self::capacity::InboundRequest;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use self::capacity::InboundResource;
 pub(crate) use self::lane::InboundLane;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_LANES: usize = INBOUND_LANE_COUNT;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_MAILBOX_BYTES: usize = INBOUND_MAILBOX_BYTE_CAPACITY;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_RESERVED_BYTES_PER_LANE: usize = INBOUND_RESERVED_BYTES_PER_LANE;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_PEER_BYTES: usize = INBOUND_PEER_BYTE_CAPACITY;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) const INBOUND_MODEL_PEER_EVENTS: usize = INBOUND_PEER_CAPACITY;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyClock;

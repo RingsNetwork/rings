@@ -5,9 +5,17 @@ name: Decode Boundary Smoke
 # files or a separate fuzz workspace.
 
 on:
+  push:
+    tags:
+      - "v*"
   schedule:
     - cron: "0 3 * * 1"
   workflow_dispatch:
+    inputs:
+      cases:
+        description: Number of generated decode-boundary cases per test (default 4096; 1024 on tag pushes).
+        required: false
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,7 +26,7 @@ permissions:
 
 jobs:
   decode_boundary_smoke:
-    name: Decode boundary smoke (scheduled)
+    name: Decode boundary smoke
     timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
@@ -34,12 +42,23 @@ jobs:
       # builds this debug configuration, so a restore here could never hit.
 
       - name: Generate decode-boundary inputs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CASES: ${{ inputs.cases }}
         run: |
           python3 - <<'PY' | tee -a "$GITHUB_ENV"
+          import os
           import secrets
 
+          configured = os.environ.get("INPUT_CASES", "").strip()
+          if configured:
+              cases = max(1, int(configured))
+          elif os.environ.get("EVENT_NAME") == "push":
+              cases = 1024
+          else:
+              cases = 4096
           print(f"RINGS_DECODE_BOUNDARY_SEED={secrets.randbits(64)}")
-          print("RINGS_DECODE_BOUNDARY_CASES=4096")
+          print(f"RINGS_DECODE_BOUNDARY_CASES={cases}")
           PY
 
       - name: Run generated decode-boundary tests

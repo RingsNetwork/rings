@@ -1078,17 +1078,25 @@ async fn test_set_delegatee_key_enforces_signature_and_monotone_horizon() -> Res
         Err(Error::DelegationExpiresWithinMargin)
     ));
 
-    // Later horizon with tampered delegator signature is refused.
+    // Later horizon with tampered delegator signature is refused at deserialization (#1199),
+    // and a valid delegation from a different delegator is refused by set_delegatee_key (#1223).
     let valid_next = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0 + 1_000)?;
     let mut dumped: serde_json::Value =
         serde_json::to_value(&valid_next).map_err(|e| Error::InvalidMessage(e.to_string()))?;
     dumped["delegation"]["delegator_signature"] = serde_json::json!(vec![0u8; 65]);
-    let tampered: crate::delegation::DelegateeKey =
-        serde_json::from_value(dumped).map_err(|e| Error::InvalidMessage(e.to_string()))?;
     assert!(
-        swarm.set_delegatee_key(tampered).is_err(),
-        "set_delegatee_key must reject a tampered delegator signature"
+        serde_json::from_value::<crate::delegation::DelegateeKey>(dumped).is_err(),
+        "DelegateeKey deserialization must reject a tampered delegator signature"
     );
+    let wrong_delegator = crate::delegation::DelegateeKey::new_with_seckey_at(
+        &SecretKey::random(),
+        ttl_ms,
+        t0 + 1_000,
+    )?;
+    assert!(matches!(
+        swarm.set_delegatee_key(wrong_delegator),
+        Err(Error::VerifySignatureFailed)
+    ));
     assert_eq!(
         swarm.transport.delegatee_key().delegatee_public_key(),
         initial.delegatee_public_key()

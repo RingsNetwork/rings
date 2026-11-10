@@ -29,6 +29,14 @@ impl FairWaitBudget {
         }
     }
 
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(super) fn try_acquire_for_test(
+        self: &Arc<Self>,
+        cost: usize,
+    ) -> Option<FairWaitBudgetPermit> {
+        self.try_acquire(cost)
+    }
+
     fn try_acquire(self: &Arc<Self>, cost: usize) -> Option<FairWaitBudgetPermit> {
         let mut state = self
             .state
@@ -48,7 +56,7 @@ impl FairWaitBudget {
     }
 }
 
-struct FairWaitBudgetPermit {
+pub(super) struct FairWaitBudgetPermit {
     budget: Arc<FairWaitBudget>,
     cost: usize,
 }

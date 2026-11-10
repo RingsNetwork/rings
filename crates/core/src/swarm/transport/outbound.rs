@@ -112,7 +112,7 @@ pub(crate) use queue::OUTBOUND_CONTROL_BURST;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use queue::OUTBOUND_LANE_WINDOW;
 pub(super) use sender_bounded::SenderBound;
-use sender_bounded::SenderBounded;
+pub(super) use sender_bounded::SenderBounded;
 use session_encoding::SharedDelegationLessee;
 use spawn::spawn_worker;
 pub(super) use transfer::ChunkFrames;
