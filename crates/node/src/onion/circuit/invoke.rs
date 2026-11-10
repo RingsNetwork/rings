@@ -37,6 +37,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::invoke_accounting::OnionInvokeAccounting;
+use crate::onion::invoke_accounting::OnionInvokeLease;
 use crate::onion::invoke_descriptor::OnionInvokePolicy;
 use crate::onion::pipeline::OnionInvokeArguments;
 use crate::onion::role::OnionInvokeOffer;
@@ -281,52 +282,25 @@ impl OnionInvokeRegistry {
         let send_scope = scope.clone();
 
         scope.tasks().spawn(async move {
-            let _lease = lease;
             let call = OnionInvokeCall {
                 shape,
                 backend,
                 constants,
                 input: carried_input,
             };
-            let mut timer = pin!(sleep(latency));
-            let output = {
-                let eval_fut = pin!(backend_impl.invoke(call));
-                match select(eval_fut, timer.as_mut()).await {
-                    Either::Left((Ok(output), _)) => output,
-                    Either::Left((Err(error), _)) => {
-                        tracing::debug!(%error, ?shape, "drop failed onion invoke evaluation");
-                        return;
-                    }
-                    Either::Right((_, _)) => {
-                        tracing::debug!(?shape, "drop onion invoke that overran L(f)");
-                        return;
-                    }
-                }
-            };
-
-            let completed_at_ms = received_at_ms.saturating_add(started.elapsed().as_millis());
-            let prepared = match complete_invoke(
-                shape,
+            let Some(prepared) = run_invoke_under_lease(
+                lease,
+                backend_impl,
+                call,
+                latency,
                 received_at_ms,
-                completed_at_ms,
-                output.as_slice(),
+                started,
                 *surb,
-            ) {
-                Ok(prepared) => prepared,
-                Err(drop_reason) => {
-                    tracing::debug!(%drop_reason, ?shape, "drop onion invoke output");
-                    return;
-                }
+            )
+            .await
+            else {
+                return;
             };
-
-            // Wait out the exact remainder of the single `L(f)` timer started at receipt (L4).
-            tracing::trace!(
-                ?shape,
-                release_at_ms = prepared.release_at_ms,
-                wait_ms = prepared.wait.as_millis(),
-                "awaiting L(f) release deadline for onion invoke cell"
-            );
-            let _ = timer.await;
 
             if prepared.expiry.has_passed_at(get_epoch_ms()) {
                 tracing::debug!(?shape, "drop onion invoke cell after SURB expiry");
@@ -342,6 +316,60 @@ impl OnionInvokeRegistry {
     }
 }
 
+async fn run_invoke_under_lease(
+    _lease: OnionInvokeLease,
+    backend_impl: Arc<rings_runtime::maybe_send_sync!(dyn OnionInvokeBackend)>,
+    call: OnionInvokeCall,
+    latency: Duration,
+    received_at_ms: u128,
+    started: Instant,
+    surb: OnionSurb,
+) -> Option<OnionPreparedInvoke> {
+    let shape = call.shape;
+    let mut timer = pin!(sleep(latency));
+    let output = {
+        let eval_fut = pin!(backend_impl.invoke(call));
+        match select(eval_fut, timer.as_mut()).await {
+            Either::Left((Ok(output), _)) => output,
+            Either::Left((Err(error), _)) => {
+                tracing::debug!(%error, ?shape, "drop failed onion invoke evaluation");
+                let _ = timer.await;
+                return None;
+            }
+            Either::Right((_, _)) => {
+                tracing::debug!(?shape, "drop onion invoke that overran L(f)");
+                return None;
+            }
+        }
+    };
+
+    let completed_at_ms = received_at_ms.saturating_add(started.elapsed().as_millis());
+    let prepared = match complete_invoke(
+        shape,
+        received_at_ms,
+        completed_at_ms,
+        output.as_slice(),
+        surb,
+    ) {
+        Ok(prepared) => prepared,
+        Err(drop_reason) => {
+            tracing::debug!(%drop_reason, ?shape, "drop onion invoke output");
+            let _ = timer.await;
+            return None;
+        }
+    };
+
+    // Wait out the exact remainder of the single `L(f)` timer started at receipt (L4).
+    tracing::trace!(
+        ?shape,
+        release_at_ms = prepared.release_at_ms,
+        wait_ms = prepared.wait.as_millis(),
+        "awaiting L(f) release deadline for onion invoke cell"
+    );
+    let _ = timer.await;
+    Some(prepared)
+}
+
 const fn shape_key(
     shape: OnionInvokeShape,
     backend: OnionBackendName,
@@ -351,10 +379,26 @@ const fn shape_key(
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use futures::future::select;
+    use futures::future::Either;
+    use rings_core::dht::Did;
+    use rings_runtime::sleep;
+    use web_time::Instant;
+
     use super::complete_invoke;
+    use super::run_invoke_under_lease;
+    use super::OnionInvokeBackend;
+    use super::OnionInvokeCall;
     use super::OnionInvokeDrop;
+    use super::OnionInvokeFn;
+    use crate::error::Error;
+    use crate::onion::invoke_accounting::OnionInvokeAccounting;
+    use crate::onion::invoke_descriptor::OnionInvokePolicy;
+    use crate::onion::signature::OnionBackendName;
     use crate::onion::signature::OnionInputType;
     use crate::onion::signature::OnionInvokeShape;
     use crate::onion::signature::OnionLatencyClass;
@@ -424,6 +468,77 @@ mod tests {
                     expected: 64,
                 }
             );
+        }
+    }
+
+    /// Early backend errors and output-width mismatches still hold their `OnionInvokeLease` until
+    /// the full `L(f)` timer expires so concurrency quota release timing never leaks early failure.
+    #[tokio::test]
+    async fn test_early_invoke_error_and_width_mismatch_hold_lease_until_release_deadline() {
+        let shape = OnionInvokeShape::new(
+            OnionInputType::Fixed(OnionWidthClass::B32),
+            OnionWidthClass::B64,
+            OnionLatencyClass::Ms100,
+        );
+        let backend_name = OnionBackendName::parse("fail.early").expect("backend name");
+        let policy = OnionInvokePolicy {
+            max_concurrent: 1,
+            max_invocations_per_minute: 0,
+        };
+        let accounting = OnionInvokeAccounting::default();
+        let peer = Did::from(7_u32);
+        let latency = shape.latency().duration();
+
+        let err_backend: Arc<rings_runtime::maybe_send_sync!(dyn OnionInvokeBackend)> =
+            Arc::new(OnionInvokeFn(|_call: OnionInvokeCall| async move {
+                Err(Error::NoPermission)
+            }));
+        let bad_width_backend: Arc<rings_runtime::maybe_send_sync!(dyn OnionInvokeBackend)> =
+            Arc::new(OnionInvokeFn(|_call: OnionInvokeCall| async move {
+                Ok(vec![0xaa; 7])
+            }));
+
+        for backend_impl in [err_backend, bad_width_backend] {
+            let lease = accounting
+                .admit(shape, &backend_name, &policy, peer, 60_000)
+                .expect("initial lease admitted");
+            let call = OnionInvokeCall {
+                shape,
+                backend: backend_name.clone(),
+                constants: Vec::new(),
+                input: vec![0x11; 32],
+            };
+            let mut eval_fut = pin!(run_invoke_under_lease(
+                lease,
+                backend_impl,
+                call,
+                latency,
+                60_000,
+                Instant::now(),
+                sample_surb(),
+            ));
+
+            // After 15 ms (< L(f) = 100 ms), the backend has already failed, but the task must
+            // still be waiting on `timer` and holding its concurrency lease.
+            let probe_timer = pin!(sleep(Duration::from_millis(15)));
+            let probe = select(eval_fut.as_mut(), probe_timer).await;
+            assert!(
+                matches!(probe, Either::Right(_)),
+                "early failure must not complete before L(f)"
+            );
+            assert!(
+                accounting
+                    .admit(shape, &backend_name, &policy, peer, 60_015)
+                    .is_err(),
+                "concurrency lease must remain held until L(f) expires"
+            );
+
+            // Once L(f) completes, the dropped evaluation returns None and frees the lease.
+            assert!(eval_fut.await.is_none());
+            let next_lease = accounting
+                .admit(shape, &backend_name, &policy, peer, 60_120)
+                .expect("lease released at L(f)");
+            drop(next_lease);
         }
     }
 }

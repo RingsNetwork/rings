@@ -133,12 +133,23 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     Ok(OnionProxyRoute { target, route })
 }
 
-/// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline.
+/// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline
+/// whose first hop is a directly connected peer.
 pub(crate) async fn build_onion_pipeline_route(
     reader: &impl OnionDirectoryReader,
     pipeline: &OnionInvokePipeline,
 ) -> Result<OnionPipelineRoute> {
-    build_onion_pipeline_route_with_first_hop(reader, pipeline, |_| true).await
+    let direct_peers = reader.direct_peer_dids();
+    let allowed_peers = direct_peers.clone();
+    let route = build_onion_pipeline_route_with_first_hop(reader, pipeline, move |did| {
+        allowed_peers.contains(&did)
+    })
+    .await?;
+    let first_hop = route.hops().guard().did;
+    if first_hop != reader.local_did() && direct_peers.contains(&first_hop) {
+        return Ok(route);
+    }
+    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
 pub(crate) async fn build_onion_pipeline_route_with_first_hop(

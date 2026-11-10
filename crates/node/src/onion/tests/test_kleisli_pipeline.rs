@@ -604,8 +604,17 @@ async fn test_three_stage_kleisli_associativity_via_directory_discovery() -> Res
     let right_assoc = f.into_pipeline().then(g.then(k)?)?;
     assert_eq!(left_assoc, right_assoc);
 
-    // Select the 11-hop guard-closed route from the signed DHT directory entries, then establish
-    // the real WebRTC links along the selected loop edges.
+    // Without a direct peer link, `build_onion_pipeline_route` rejects route selection because no
+    // first-hop guard is directly connected.
+    assert!(client
+        .processor
+        .build_onion_pipeline_route(&left_assoc)
+        .await
+        .is_err());
+
+    // Link the client to a directly connected relay guard, select the 11-hop guard-closed route
+    // from the signed DHT directory entries, then establish the remaining loop edges.
+    link_pair(&client, &overlay[3]).await?;
     let route = client
         .processor
         .build_onion_pipeline_route(&left_assoc)
@@ -622,13 +631,12 @@ async fn test_three_stage_kleisli_associativity_via_directory_discovery() -> Res
         .positions()
         .map(|hop| hop.did)
         .collect::<Vec<_>>();
+    assert_eq!(positions[0], overlay[3].did());
     let mut linked_edges = std::collections::BTreeSet::new();
     let mut ensure_edge = |a: Did, b: Did| {
         let key = if a < b { (a, b) } else { (b, a) };
         linked_edges.insert(key)
     };
-    let guard_node = find_node(positions[0]);
-    link_pair(&client, guard_node).await?;
     for pair in positions.windows(2) {
         if ensure_edge(pair[0], pair[1]) {
             link_pair(find_node(pair[0]), find_node(pair[1])).await?;
