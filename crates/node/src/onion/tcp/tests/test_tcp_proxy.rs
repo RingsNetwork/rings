@@ -212,7 +212,7 @@ async fn test_pump_tcp_duplex_makes_bidirectional_progress_when_queues_fill() {
     let expected_down_len = down_chunk.len() * (queued_down + 4);
 
     let (mut peer_read, mut peer_write) = peer.into_split();
-    let writer_task = tokio::spawn(async move {
+    let writer_task = crate::test_support::TestTask::spawn(async move {
         for _ in 0..upload_chunks {
             peer_write.write_all(up_chunk).await.expect("write upload");
             tokio::task::yield_now().await;
@@ -220,7 +220,7 @@ async fn test_pump_tcp_duplex_makes_bidirectional_progress_when_queues_fill() {
         peer_write.shutdown().await.expect("shutdown upload");
     });
 
-    let reader_task = tokio::spawn(async move {
+    let reader_task = crate::test_support::TestTask::spawn(async move {
         let mut received = Vec::new();
         peer_read
             .read_to_end(&mut received)
@@ -229,7 +229,7 @@ async fn test_pump_tcp_duplex_makes_bidirectional_progress_when_queues_fill() {
         received
     });
 
-    let driver_task = tokio::spawn(async move {
+    let driver_task = crate::test_support::TestTask::spawn(async move {
         let mut uploaded = Vec::new();
         for extra in 0..4 {
             if extra < 4 {
@@ -271,7 +271,7 @@ async fn test_pump_tcp_duplex_preserves_partial_write_and_polls_upload_while_wri
     let (stream, mut driver) = OnionClientStream::driven_by_test();
     let (sender, receiver) = stream.split();
 
-    let pump_task = tokio::spawn(async move {
+    let pump_task = crate::test_support::TestTask::spawn(async move {
         let (_, end) =
             pump_tcp_duplex(&mut local, sender, receiver, Some(Duration::from_secs(5))).await;
         end
@@ -286,7 +286,7 @@ async fn test_pump_tcp_duplex_preserves_partial_write_and_polls_upload_while_wri
     // While the 4-byte download write is blocked after writing at most 1 byte into the 1-byte
     // duplex buffer, upload writes and EOF from `peer` still progress through the pump (split
     // across 1-byte duplex reads).
-    let collect_upload = tokio::spawn(async move {
+    let collect_upload = crate::test_support::TestTask::spawn(async move {
         let mut uploaded = Vec::new();
         while let Some(chunk) = driver.next_data().await {
             uploaded.extend_from_slice(&chunk);

@@ -1144,7 +1144,7 @@ mod tests {
         };
         let (mut inbound_tx, inbound_rx) =
             futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
-        let driver = tokio::spawn(super::drive(
+        let driver = crate::test_support::TestTask::spawn(super::drive(
             std::sync::Arc::clone(&shared),
             None,
             arguments,
@@ -1255,7 +1255,7 @@ mod tests {
             },
         );
 
-        let driver = tokio::spawn(super::drive(
+        let driver = crate::test_support::TestTask::spawn(super::drive(
             std::sync::Arc::clone(&shared),
             None,
             arguments,
@@ -1324,7 +1324,7 @@ mod tests {
         };
         let (mut inbound_tx, inbound_rx) =
             futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
-        let driver = tokio::spawn(super::drive(
+        let driver = crate::test_support::TestTask::spawn(super::drive(
             std::sync::Arc::clone(&shared),
             None,
             arguments,
@@ -1452,7 +1452,7 @@ mod tests {
         };
         let (mut inbound_tx, inbound_rx) =
             futures::channel::mpsc::channel(super::ONION_EXIT_SESSION_INBOUND);
-        let driver = tokio::spawn(super::drive(
+        let driver = crate::test_support::TestTask::spawn(super::drive(
             std::sync::Arc::clone(&shared),
             None,
             arguments,
