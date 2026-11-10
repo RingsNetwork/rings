@@ -500,7 +500,12 @@ impl OnionSessionDriver {
                         refill_pending = false;
                         (Ok(()), control)
                     }
-                    ReplyOrFlush::Flushed(Err(())) => return Ok(()),
+                    ReplyOrFlush::Flushed(Err(())) => {
+                        if !(self.fin_sent && self.world_ended) {
+                            self.abort(&sink);
+                        }
+                        return Ok(());
+                    }
                     ReplyOrFlush::Reply(Some(reply)) => match self.on_reply(reply, &mut events, &mut pending_events, opened) {
                         OnionReplyFlow::Continue if pending_events.is_empty() => {
                             (Ok(()), Some(OnionControlStep::Refill))

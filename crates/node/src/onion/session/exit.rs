@@ -229,11 +229,6 @@ impl OnionExitSession {
         now_ms.saturating_sub(self.last_forward_ms) >= ONION_ADMISSION_WINDOW_MS
     }
 
-    /// Record the arrival time of a forward loop while draining final writes.
-    pub(crate) fn note_forward_at(&mut self, now_ms: u128) {
-        self.last_forward_ms = now_ms;
-    }
-
     /// One forward loop at `now`: its reply block and its frame.
     pub(crate) fn forward(
         &mut self,
@@ -418,10 +413,16 @@ impl OnionExitSession {
                     target: Some(target),
                 },
             ) if OnionTargetDigest::of(&target) != self.digest => self.abort(now_ms, effects),
-            (_, OnionStreamFrame::Data { payload, .. }) => Self::write(payload, effects),
+            (_, OnionStreamFrame::Data { payload, .. }) if !self.write_closed => {
+                Self::write(payload, effects);
+            }
+            (_, OnionStreamFrame::Data { .. }) => {}
             (_, OnionStreamFrame::Fin { .. }) => {
                 self.write_closed = true;
                 effects.push(OnionExitEffect::ShutdownWrite);
+                if self.read_closed {
+                    self.close(effects);
+                }
             }
         }
     }
