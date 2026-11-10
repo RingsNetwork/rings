@@ -13,6 +13,7 @@ use super::send_frame;
 use super::Outbound;
 use super::RelayTask;
 use super::TransportSessions;
+use super::UdpFlowKey;
 use super::UDP_BUF;
 use crate::extension::ext::Scope;
 use crate::extension::transport::Frame;
@@ -44,6 +45,13 @@ impl TransportSessions {
                 return;
             }
         };
+        let listener_addr = match socket.local_addr() {
+            Ok(addr) => addr,
+            Err(e) => {
+                tracing::error!("transport udp local_addr {local_addr} failed: {e:?}");
+                return;
+            }
+        };
         spawner.spawn(async move {
             let mut buf = vec![0u8; UDP_BUF];
             loop {
@@ -53,7 +61,8 @@ impl TransportSessions {
                             tracing::error!("UDP listener returned a length beyond its buffer");
                             break;
                         };
-                        match self.udp_flow(&src) {
+                        let flow = UdpFlowKey::new(listener_addr, src);
+                        match self.udp_flow(&flow) {
                             Some(key) => {
                                 let _ = send_frame(&scope, key.peer, Frame::Datagram {
                                     session: key.session,
@@ -64,7 +73,7 @@ impl TransportSessions {
                             }
                             None => {
                                 if let Some(token) =
-                                    self.reserve_pending_udp(socket.clone(), src, bytes)
+                                    self.reserve_pending_udp(socket.clone(), flow, bytes)
                                 {
                                     if inject_accepted(&scope, token, peer, service.clone())
                                         .await
@@ -229,7 +238,8 @@ mod tests {
     use crate::error::Error;
     use crate::error::Result;
     use crate::extension::transport::engine::relay_task_for_test;
-    use crate::extension::transport::engine::relay_task_for_test_with_src;
+    use crate::extension::transport::engine::relay_task_for_test_with_flow;
+    use crate::extension::transport::engine::UdpFlowKey;
     use crate::extension::transport::engine::UdpFlowState;
     use crate::sync_lock::lock;
 
@@ -256,9 +266,11 @@ mod tests {
     #[tokio::test]
     async fn test_idle_udp_return_path_reclaims_session_and_flow_projection() -> Result<()> {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP"));
+        let listener = socket.local_addr().expect("listener addr");
         let src = "127.0.0.1:19001".parse().expect("UDP source");
-        let (task, sessions, key) = relay_task_for_test_with_src("udp", Some(src))?;
-        lock(&sessions.udp_flows)?.insert(src, UdpFlowState::Active(key.clone()));
+        let flow = UdpFlowKey::new(listener, src);
+        let (task, sessions, key) = relay_task_for_test_with_flow("udp", Some(flow))?;
+        lock(&sessions.udp_flows)?.insert(flow, UdpFlowState::Active(key.clone()));
 
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -267,7 +279,7 @@ mod tests {
         .await
         .expect("idle UDP return path must terminate");
         assert!(!sessions.is_live(&key));
-        assert!(!lock(&sessions.udp_flows)?.contains_key(&src));
+        assert!(!lock(&sessions.udp_flows)?.contains_key(&flow));
         Ok(())
     }
 
