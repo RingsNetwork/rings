@@ -77,7 +77,7 @@ impl MeasureClock for ManualMeasureClock {
 }
 
 fn provisional_evidence_fixture(
-    nonce: u8,
+    tag: u8,
 ) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
     let provider = rings_core::delegation::DelegateeKey::new_with_seckey(
         &rings_core::ecc::SecretKey::random(),
@@ -95,9 +95,9 @@ fn provisional_evidence_fixture(
         provider.delegator_did(),
         beneficiary.delegator_did(),
         ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
-        [nonce; 32],
-        [nonce.wrapping_add(1); 32],
-        [nonce.wrapping_add(2); 32],
+        *rings_core::ecc::SecretKey::random().ser(),
+        [tag.wrapping_add(1); 32],
+        [tag.wrapping_add(2); 32],
     );
     let provider_attestation = claim
         .sign_provider(MessageSigner::new(&provider, 7))
@@ -556,7 +556,7 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
     )
     .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
     let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
-    let make_record = |nonce: u8| {
+    let make_record = |tag: u8| {
         let beneficiary = rings_core::delegation::DelegateeKey::new_with_seckey(
             &rings_core::ecc::SecretKey::random(),
         )
@@ -567,9 +567,9 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
             provider.delegator_did(),
             beneficiary.delegator_did(),
             ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
-            [nonce; 32],
-            [nonce.wrapping_add(1); 32],
-            [nonce.wrapping_add(2); 32],
+            *rings_core::ecc::SecretKey::random().ser(),
+            [tag.wrapping_add(1); 32],
+            [tag.wrapping_add(2); 32],
         );
         let provider_attestation = claim
             .sign_provider(MessageSigner::new(&provider, 7))
