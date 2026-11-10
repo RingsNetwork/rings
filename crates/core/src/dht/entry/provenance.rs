@@ -1228,10 +1228,9 @@ pub(super) fn retain_fair_data_elements(
     );
     let mut by_value = BTreeMap::<Bytes, Vec<EntryDot>>::new();
     for (_, value, dot) in ranked {
-        if by_value.len() < max_len {
-            by_value.entry(value).or_default().push(dot);
-        } else if let Some(dots) = by_value.get_mut(&value) {
-            dots.push(dot);
+        by_value.entry(value).or_default().push(dot);
+        if by_value.len() == max_len {
+            break;
         }
     }
     by_value

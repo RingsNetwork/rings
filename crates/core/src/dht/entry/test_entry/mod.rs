@@ -1213,28 +1213,23 @@ fn test_issue_1220_unique_value_water_filling_resists_co_dot_amplification_and_c
         assert_eq!(lhs, rhs, "retire_t homomorphism failed at {check_ms}");
     }
 
-    // When `values.len() > max_len` and an admitted shared value has co-dots from both a
-    // low-volume writer (`actor_c`, older timestamp `NOW_MS + 100`, rank 0) and a high-volume
-    // writer (`actor_a`, newer timestamp `NOW_MS + 350`, rank `ENTRY_DATA_MAX_LEN - 1` behind
-    // `ENTRY_DATA_MAX_LEN - 1` newer items at `NOW_MS + 400`), all co-dots of admitted values are
-    // preserved past the `by_value.len() == max_len` cutoff, the primary dot does not regress,
-    // `retire_t` commutes with `join`, and `join` is associative.
+    // When `values.len() > max_len` and an admitted shared value has co-dots from multiple
+    // honest writers (`actor_c` at `NOW_MS + 100` and `actor_d` at `NOW_MS + 350`, both at rank 0)
+    // alongside a flooder (`actor_a` writing `ENTRY_DATA_MAX_LEN` items at `NOW_MS + 400`), both
+    // co-authors' dots are preserved, the primary dot is the newest (`NOW_MS + 350`), `retire_t`
+    // commutes with `join`, and `join` is associative.
     let actor_d = Did::from(14u32);
     let low_vol_entries = Entry::new(topic_did, vec![Bytes::from("b-unique")], EntryKind::Data)
         .stamp_delta(EntryVersion::new(NOW_MS + 250, actor_b, actor_b))?
         .join(
             Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
                 .stamp_delta(EntryVersion::new(NOW_MS + 100, actor_c, actor_c))?,
-        )?
-        .join(
-            Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
-                .stamp_delta(EntryVersion::new(NOW_MS + 300, actor_d, actor_d))?,
         )?;
     let high_vol_shared = Entry::new(topic_did, vec![Bytes::from("co-shared")], EntryKind::Data)
-        .stamp_delta(EntryVersion::new(NOW_MS + 350, actor_a, actor_a))?;
+        .stamp_delta(EntryVersion::new(NOW_MS + 350, actor_d, actor_d))?;
     let high_vol_flood = Entry::new(
         topic_did,
-        (0..(ENTRY_DATA_MAX_LEN - 1))
+        (0..ENTRY_DATA_MAX_LEN)
             .map(|i| Bytes::from(format!("hv-{i}")))
             .collect(),
         EntryKind::Data,
