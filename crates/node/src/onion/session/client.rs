@@ -351,7 +351,7 @@ impl OnionCreditWindow {
     /// large classes (`KiB256..MiB12`) from minting hundreds or thousands of SURBs that exceed `W`
     /// or `Q_max` and would be dropped by `OnionSurbPool`.
     pub(crate) fn credit_blocks(self, class: OnionLoopClass) -> usize {
-        let cap = self.target.min(ONION_SURB_POOL_CAPACITY).max(1);
+        let cap = self.target.clamp(1, ONION_SURB_POOL_CAPACITY);
         OnionFrame::credit_capacity(class).min(cap)
     }
 
