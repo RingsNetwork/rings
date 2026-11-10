@@ -4066,6 +4066,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "smoltcp",
+ "stateright",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",

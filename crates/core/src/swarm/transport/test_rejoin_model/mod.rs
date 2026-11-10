@@ -510,6 +510,60 @@ fn test_initial_states_satisfy_the_premise_and_only_the_mesh_is_converged() {
     }
 }
 
+/// Fast bounded exhaustive slice (`N = 3`, `W = 1`) that runs unconditionally in both debug
+/// (`cargo test`) and optimized (`--profile ci` / `--release`) builds, so local and IDE runs
+/// exercise exhaustive chain-bootstrap discovery and link-cut head replacement (both safety and
+/// conditional liveness) without waiting for the release-sized `W = 3` graphs below.
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn test_fast_exhaustive_chain_and_cut_slices_hold_in_all_profiles() {
+    let small_chain = Overlay::new(
+        Did::from(0u32),
+        NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+        1,
+        1,
+        QUIET,
+        Bootstrap::Chain,
+        ShellMutation::Faithful,
+    );
+    let SearchReport::Safe {
+        states: chain_states,
+        uncovered: chain_uncovered,
+        liveness: chain_liveness,
+        ..
+    } = check(&small_chain, laws::retains_live_heads)
+    else {
+        panic!("small chain slice violated a safety law");
+    };
+    assert!(chain_states > 0);
+    assert_eq!(chain_uncovered, CHURN_WITNESSES);
+    assert!(chain_liveness.unstable_premise_states > 0);
+    assert!(chain_liveness.stable_states > 0);
+    assert!(chain_liveness.violation.is_none());
+
+    let small_cut = Overlay::new(
+        Did::from(0u32),
+        NonZeroU32::new(3).unwrap_or(NonZeroU32::MIN),
+        2,
+        1,
+        Budget { cuts: 1, ..QUIET },
+        Bootstrap::ConvergedMesh,
+        ShellMutation::Faithful,
+    );
+    let SearchReport::Safe {
+        states: cut_states,
+        liveness: cut_liveness,
+        ..
+    } = check(&small_cut, laws::retains_live_heads)
+    else {
+        panic!("small cut slice violated a safety law");
+    };
+    assert!(cut_states > 0);
+    assert!(cut_liveness.premise_states > 0);
+    assert!(cut_liveness.stable_states > 0);
+    assert!(cut_liveness.violation.is_none());
+}
+
 /// Every law and conditional liveness over every behaviour in which a peer
 /// restarts: the retired generation is inert, unavailable heads are
 /// replaced, topology evidence is backed by admitted generations, topologies

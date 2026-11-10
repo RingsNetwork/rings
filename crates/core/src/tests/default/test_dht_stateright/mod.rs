@@ -611,6 +611,7 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 /// topology reducer directly instead of duplicating transition semantics.
 mod finger_retry_model;
 mod relay_custody_model;
+mod repair_model;
 mod storage_model;
 
 #[cfg(test)]

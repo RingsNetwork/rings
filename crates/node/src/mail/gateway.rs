@@ -189,7 +189,7 @@ impl MailDrop for MailGateway {
 /// The verdict on a mail written to `did`'s topic: stored once its `receipt` resolves stored,
 /// unstored once it resolves otherwise, unreported once `elapsed` resolves first. The receipt
 /// is polled first, so a report that arrives as the wait ends still counts.
-pub(super) async fn confirmed(
+pub(crate) async fn confirmed(
     did: Did,
     receipt: impl Future<Output = Result<(), StoreUnconfirmed>>,
     elapsed: impl Future<Output = ()>,

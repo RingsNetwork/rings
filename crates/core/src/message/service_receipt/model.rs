@@ -31,7 +31,10 @@
 //! under loss. Deleting or replacing the configured evidence store is outside
 //! the process-crash model.
 
+use std::collections::BTreeSet;
+
 use stateright::Checker;
+use stateright::Expectation;
 use stateright::Model;
 use stateright::Property;
 
@@ -42,8 +45,16 @@ use crate::ecc::SecretKey;
 const MAX_TIME: u8 = 4;
 const MODEL_PROOF_TTL: u8 = 2;
 const MODEL_EPOCH_END: u8 = 3;
-const INITIAL_CREDIT: u8 = 7;
-const INITIAL_ROUTE: u8 = 11;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Mutant {
+    AdmitStaleReceipt,
+    AdmitWithoutTranscript,
+    AdmitWithoutMarker,
+    ClearMarkerOnEvict,
+    IgnoreFreshnessMarker,
+    PartialCommitOnFailure,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum WireKind {
@@ -100,12 +111,11 @@ struct ProbeState {
     acknowledgement_replayed: bool,
     evidence_observed_at: Option<u8>,
     freshness_occupied: bool,
+    marker_ever_committed: bool,
     admission_count: u8,
     capacity_rejected: bool,
     persistence_failed: bool,
     crash_restarted: bool,
-    credit: u8,
-    route: u8,
 }
 
 impl ProbeState {
@@ -137,12 +147,11 @@ impl ProbeState {
             acknowledgement_replayed: false,
             evidence_observed_at: None,
             freshness_occupied: false,
+            marker_ever_committed: false,
             admission_count: 0,
             capacity_rejected: false,
             persistence_failed: false,
             crash_restarted: false,
-            credit: INITIAL_CREDIT,
-            route: INITIAL_ROUTE,
         }
     }
 
@@ -241,13 +250,19 @@ impl ProbeState {
         self.acknowledgement_copies = 1;
     }
 
-    fn deliver_acknowledgement(&mut self) {
+    fn deliver_acknowledgement(&mut self, mutant: Option<Mutant>) {
         self.decrement(WireKind::Acknowledgement);
-        if self.acknowledgement_replayed || !self.beneficiary_attestation_is_live_at(self.now) {
+        let ignore_replay = mutant == Some(Mutant::IgnoreFreshnessMarker);
+        let skip_liveness = mutant == Some(Mutant::AdmitStaleReceipt);
+        if (!ignore_replay && self.acknowledgement_replayed)
+            || (!skip_liveness && !self.beneficiary_attestation_is_live_at(self.now))
+        {
             return;
         }
         self.acknowledgement_replayed = true;
-        if self.freshness_occupied || !self.receipt_is_live_at(self.now) {
+        if (!ignore_replay && self.freshness_occupied)
+            || (!skip_liveness && !self.receipt_is_live_at(self.now))
+        {
             return;
         }
         match self.admission_mode {
@@ -257,12 +272,19 @@ impl ProbeState {
             }
             AdmissionMode::PersistenceFailure => {
                 self.persistence_failed = true;
+                if mutant == Some(Mutant::PartialCommitOnFailure) {
+                    self.freshness_occupied = true;
+                    self.marker_ever_committed = true;
+                }
                 return;
             }
             AdmissionMode::Commit => {}
         }
         self.evidence_observed_at = Some(self.now);
-        self.freshness_occupied = true;
+        if mutant != Some(Mutant::AdmitWithoutMarker) {
+            self.freshness_occupied = true;
+            self.marker_ever_committed = true;
+        }
         self.admission_count = self.admission_count.saturating_add(1);
     }
 
@@ -282,8 +304,11 @@ impl ProbeState {
         self.acknowledgement_copies = 0;
     }
 
-    fn evict(&mut self) {
+    fn evict(&mut self, mutant: Option<Mutant>) {
         self.evidence_observed_at = None;
+        if mutant == Some(Mutant::ClearMarkerOnEvict) {
+            self.freshness_occupied = false;
+        }
     }
 }
 
@@ -300,14 +325,33 @@ enum Action {
     Evict,
 }
 
-#[derive(Clone)]
-struct ProbeModel;
+#[derive(Clone, Default)]
+struct ProbeModel {
+    mutant: Option<Mutant>,
+}
 
 impl Model for ProbeModel {
     type State = ProbeState;
     type Action = Action;
 
     fn init_states(&self) -> Vec<Self::State> {
+        if let Some(mutant) = self.mutant {
+            return match mutant {
+                Mutant::AdmitStaleReceipt => {
+                    vec![ProbeState::initial(2, 2, 0, 0, AdmissionMode::Commit)]
+                }
+                Mutant::PartialCommitOnFailure => {
+                    vec![ProbeState::initial(
+                        2,
+                        2,
+                        2,
+                        2,
+                        AdmissionMode::PersistenceFailure,
+                    )]
+                }
+                _ => vec![ProbeState::initial(2, 2, 2, 2, AdmissionMode::Commit)],
+            };
+        }
         let mut states = Vec::new();
         for request_end in 0..=MAX_TIME {
             for completion_end in 0..=MAX_TIME {
@@ -336,6 +380,13 @@ impl Model for ProbeModel {
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         if !state.request_issued {
             actions.push(Action::SendRequest);
+        }
+        if self.mutant == Some(Mutant::AdmitWithoutTranscript)
+            && state.request_issued
+            && state.acknowledgement_copies == 0
+            && !state.acknowledgement_replayed
+        {
+            actions.push(Action::DeliverAcknowledgement);
         }
         for (kind, deliver) in [
             (WireKind::Request, Action::DeliverRequest),
@@ -367,12 +418,20 @@ impl Model for ProbeModel {
             Action::SendRequest => state.send_request(),
             Action::DeliverRequest => state.deliver_request(),
             Action::DeliverOffer => state.deliver_offer(),
-            Action::DeliverAcknowledgement => state.deliver_acknowledgement(),
+            Action::DeliverAcknowledgement => {
+                if self.mutant == Some(Mutant::AdmitWithoutTranscript)
+                    && state.acknowledgement_copies == 0
+                {
+                    state.provider_attestation = Some(ProofWindow::signed_at(state.now));
+                    state.beneficiary_attestation = Some(ProofWindow::signed_at(state.now));
+                }
+                state.deliver_acknowledgement(self.mutant);
+            }
             Action::Duplicate(kind) => state.duplicate(kind),
             Action::Drop(kind) => state.drop_one(kind),
             Action::Tick => state.now = state.now.saturating_add(1),
             Action::HardCrashRestart => state.restart(),
-            Action::Evict => state.evict(),
+            Action::Evict => state.evict(self.mutant),
         }
         (state != *previous).then_some(state)
     }
@@ -398,6 +457,10 @@ impl Model for ProbeModel {
                 "retained evidence always has a replay marker",
                 |_, state| state.evidence_observed_at.is_none() || state.freshness_occupied,
             ),
+            Property::<Self>::always(
+                "committed replay marker survives eviction and hard crash",
+                |_, state| !state.marker_ever_committed || state.freshness_occupied,
+            ),
             Property::<Self>::always("one freshness key is admitted at most once", |_, state| {
                 state.admission_count <= 1
             }),
@@ -407,10 +470,6 @@ impl Model for ProbeModel {
                         && !state.freshness_occupied
                         && state.admission_count == 0)
             }),
-            Property::<Self>::always(
-                "receipt evidence does not change routing inputs",
-                |_, state| state.credit == INITIAL_CREDIT && state.route == INITIAL_ROUTE,
-            ),
             Property::<Self>::sometimes("one live transcript is admitted", |_, state| {
                 state.evidence_observed_at.is_some()
             }),
@@ -474,7 +533,69 @@ fn signed_receipt_with_session_ends(
 
 #[test]
 fn model_checks_all_bounded_time_and_network_schedules() {
-    ProbeModel.checker().spawn_bfs().join().assert_properties();
+    ProbeModel::default()
+        .checker()
+        .spawn_bfs()
+        .join()
+        .assert_properties();
+}
+
+/// The names of the properties `model` refutes or leaves unwitnessed.
+fn refuted(model: ProbeModel) -> BTreeSet<&'static str> {
+    let checker = model.checker().spawn_bfs().join();
+    checker
+        .model()
+        .properties()
+        .into_iter()
+        .filter(|property| {
+            let discovered = checker.discovery(property.name).is_some();
+            match property.expectation {
+                Expectation::Sometimes => !discovered,
+                _ => discovered,
+            }
+        })
+        .map(|property| property.name)
+        .collect()
+}
+
+/// Every safety invariant of the receipt model is load-bearing: mutating the protocol transition
+/// is refuted by the exact property that states the violated law.
+#[test]
+fn test_each_probe_receipt_mutant_is_refuted() {
+    for (mutant, law) in [
+        (
+            Mutant::AdmitStaleReceipt,
+            "admitted evidence was live at observation",
+        ),
+        (
+            Mutant::AdmitWithoutTranscript,
+            "only a complete transcript is admitted",
+        ),
+        (
+            Mutant::AdmitWithoutMarker,
+            "retained evidence always has a replay marker",
+        ),
+        (
+            Mutant::ClearMarkerOnEvict,
+            "committed replay marker survives eviction and hard crash",
+        ),
+        (
+            Mutant::IgnoreFreshnessMarker,
+            "one freshness key is admitted at most once",
+        ),
+        (
+            Mutant::PartialCommitOnFailure,
+            "failed admission commits no evidence state",
+        ),
+    ] {
+        let model = ProbeModel {
+            mutant: Some(mutant),
+        };
+        assert!(
+            refuted(model).contains(law),
+            "{mutant:?} must be refuted by `{law}`"
+        );
+    }
 }
 
 #[test]

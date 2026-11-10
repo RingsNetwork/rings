@@ -7,6 +7,8 @@
 mod bloom;
 mod budget;
 mod links;
+#[cfg(rings_native)]
+mod test_admission_model;
 mod window;
 
 use std::num::NonZeroU32;
