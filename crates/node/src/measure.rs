@@ -938,17 +938,17 @@ impl Measure for PeriodicMeasure {
             self.state.persistence_lock.lock(),
         )
         .await;
-        let (before, result, snapshot) = {
+        let (rollback_before, previous_override, result, snapshot) = {
             let mut runtime = lock_or_recover(&self.state.runtime);
-            let before = runtime
-                .committed_evidence_override
-                .clone()
-                .unwrap_or_else(|| runtime.evidence.clone());
-            runtime.committed_evidence_override = Some(before.clone());
+            let rollback_before = runtime.evidence.clone();
+            let previous_override = runtime.committed_evidence_override.clone();
+            if runtime.committed_evidence_override.is_none() {
+                runtime.committed_evidence_override = Some(rollback_before.clone());
+            }
             let result = runtime.evidence.admit(record);
             mark_runtime_dirty(&mut runtime);
             let snapshot = runtime.evidence.snapshot();
-            (before, result, snapshot)
+            (rollback_before, previous_override, result, snapshot)
         };
         self.wake_persistence();
         if let Err(error) = self
@@ -959,8 +959,8 @@ impl Measure for PeriodicMeasure {
         {
             tracing::error!(%error, "failed to commit provisional evidence admission");
             let mut runtime = lock_or_recover(&self.state.runtime);
-            runtime.evidence = before;
-            runtime.committed_evidence_override = None;
+            runtime.evidence = rollback_before;
+            runtime.committed_evidence_override = previous_override;
             return Err(EvidenceError::PersistenceUnavailable);
         }
         lock_or_recover(&self.state.runtime).committed_evidence_override = None;

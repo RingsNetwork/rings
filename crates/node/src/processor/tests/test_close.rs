@@ -313,3 +313,72 @@ async fn test_close_returns_within_bounded_time_when_storage_stalls() {
     .expect("Provider::close must return within bounded time when storage stalls");
     close_result.expect("close over unwedged measurement store succeeds");
 }
+
+/// Law (#1231): when the last `Provider` handle drops `Processor` during close, but a detached
+/// store handle (`Arc<FileStore>`) remains held past `drain_timeout`, `close_with_drain_timeout`
+/// reports `Err(Error::ProviderStillShared { released })` instead of `Ok(())`, and `released`
+/// resolves once that store holder drops.
+#[tokio::test]
+async fn test_close_reports_provider_still_shared_when_store_release_times_out() {
+    use rings_core::storage::file::FileStorage;
+    use rings_core::storage::RecordAuthority;
+
+    use crate::release::StoresReleased;
+
+    let root = tempfile::tempdir().unwrap();
+    let held_store_path = root.path().join("held-store");
+    let held_store = FileStorage::new_with_cap_path_and_authority(
+        64 * 1024,
+        held_store_path.to_string_lossy().to_string(),
+        RecordAuthority::Disposable,
+    )
+    .await
+    .expect("held file store opens");
+    let released_witness = StoresReleased::of([held_store.released()]);
+
+    let config = test_processor_config(&SecretKey::random(), 0);
+    let processor = Arc::new(
+        test_processor_builder(&config)
+            .dht_virtual_nodes(0)
+            .stores_released(released_witness)
+            .build()
+            .expect("processor builds"),
+    );
+    let provider = Provider::from_processor(processor);
+
+    let close_result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.close_with_drain_timeout(std::time::Duration::from_millis(50)),
+    )
+    .await
+    .expect("close_with_drain_timeout must return after drain_timeout");
+    let Err(Error::ProviderStillShared { released }) = close_result else {
+        panic!("expected ProviderStillShared when a store remains held past drain_timeout");
+    };
+
+    let mut released_fut = released.into_future();
+    assert!(
+        (&mut released_fut).now_or_never().is_none(),
+        "the held store keeps the release witness pending"
+    );
+    assert!(
+        FileStorage::new_with_cap_path_and_authority(
+            64 * 1024,
+            held_store_path.to_string_lossy().to_string(),
+            RecordAuthority::Disposable,
+        )
+        .await
+        .is_err(),
+        "the directory remains locked while held_store lives"
+    );
+
+    drop(held_store);
+    released_fut.await;
+    FileStorage::new_with_cap_path_and_authority(
+        64 * 1024,
+        held_store_path.to_string_lossy().to_string(),
+        RecordAuthority::Disposable,
+    )
+    .await
+    .expect("the store reopens once the held store drops");
+}

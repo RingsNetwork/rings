@@ -46,24 +46,32 @@ const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
 
-async fn await_close_phase<F>(phase_fut: F, timeout: std::time::Duration, phase: &'static str)
-where F: Future<Output = ()> {
+async fn await_close_phase<F>(
+    phase_fut: F,
+    timeout: std::time::Duration,
+    phase: &'static str,
+) -> bool
+where
+    F: Future<Output = ()>,
+{
     let deadline = rings_runtime::sleep(timeout);
     futures::pin_mut!(phase_fut, deadline);
-    if let futures::future::Either::Right((timer, _)) =
-        futures::future::select(phase_fut, deadline).await
-    {
-        match timer {
-            Ok(()) => tracing::warn!(
-                phase,
-                timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
-                "provider close timed out waiting for shutdown phase"
-            ),
-            Err(error) => tracing::warn!(
-                phase,
-                ?error,
-                "provider close timer unavailable while waiting for shutdown phase"
-            ),
+    match futures::future::select(phase_fut, deadline).await {
+        futures::future::Either::Left(((), _)) => true,
+        futures::future::Either::Right((timer, _)) => {
+            match timer {
+                Ok(()) => tracing::warn!(
+                    phase,
+                    timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                    "provider close timed out waiting for shutdown phase"
+                ),
+                Err(error) => tracing::warn!(
+                    phase,
+                    ?error,
+                    "provider close timer unavailable while waiting for shutdown phase"
+                ),
+            }
+            false
         }
     }
 }
@@ -384,12 +392,18 @@ impl Provider {
         match Arc::into_inner(processor) {
             Some(processor) => {
                 drop(processor);
-                await_close_phase(
-                    std::future::IntoFuture::into_future(released),
+                if !await_close_phase(
+                    std::future::IntoFuture::into_future(released.clone()),
                     drain_timeout,
                     "stores_released",
                 )
-                .await;
+                .await
+                {
+                    if let Err(error) = closed {
+                        tracing::warn!(%error, "a closing node whose stores are still held failed to close its network");
+                    }
+                    return Err(Error::ProviderStillShared { released });
+                }
                 closed
             }
             None => {
