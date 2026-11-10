@@ -38,11 +38,17 @@
 //! client only receives (Prop. SURB batching). The driver awaits the user's consumption of each
 //! event before it tops up credit, so a slow user slows `h` down instead of losing bytes.
 
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::future::Either;
+use futures::future::Fuse;
+use futures::future::FusedFuture;
 use futures::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -88,7 +94,7 @@ pub(crate) const ONION_SESSION_OPEN_TIMEOUT: Duration = Duration::from_secs(45);
 const ONION_SESSION_TICK_MS: u128 = 10_000;
 
 /// Commands and events queued between a stream and its driver.
-const ONION_SESSION_QUEUE: usize = 32;
+pub(crate) const ONION_SESSION_QUEUE: usize = 32;
 
 /// The session a client asks for.
 pub(crate) struct OnionSessionRequest {
@@ -205,12 +211,27 @@ impl OnionTestDriver {
             .expect("the user holds the stream");
     }
 
+    /// Try to enqueue `event` to the stream's user without waiting; `false` when the event queue
+    /// is full.
+    pub(crate) fn try_emit(&mut self, event: OnionStreamEvent) -> bool {
+        self.events.try_send(event).is_ok()
+    }
+
     /// Wait for the user's next command: whether it is `fin`, `None` once the user is gone.
     pub(crate) async fn next_is_fin(&mut self) -> Option<bool> {
         self.commands
             .next()
             .await
             .map(|command| matches!(command, OnionStreamCommand::Fin))
+    }
+
+    /// Wait for the user's next data command: `Some(bytes)` for `Data(bytes)`, `None` on `Fin`
+    /// or once the user is gone.
+    pub(crate) async fn next_data(&mut self) -> Option<Bytes> {
+        match self.commands.next().await {
+            Some(OnionStreamCommand::Data(bytes)) => Some(bytes),
+            Some(OnionStreamCommand::Fin) | None => None,
+        }
     }
 }
 
@@ -242,6 +263,33 @@ impl OnionStreamSender {
         self.commands
             .send(OnionStreamCommand::Fin)
             .await
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::TcpStreamClosed))
+    }
+
+    /// Wait until the command queue can accept one command without blocking.
+    ///
+    /// Cancel-safe: no command is enqueued until [`Self::start_send`] or [`Self::start_fin`]
+    /// consumes the ready slot.
+    #[cfg(rings_native)]
+    pub(crate) async fn ready(&mut self) -> Result<()> {
+        std::future::poll_fn(|cx| self.commands.poll_ready(cx))
+            .await
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::TcpStreamClosed))
+    }
+
+    /// Enqueue stream bytes into the slot reserved by [`Self::ready`].
+    #[cfg(rings_native)]
+    pub(crate) fn start_send(&mut self, bytes: Bytes) -> Result<()> {
+        self.commands
+            .start_send(OnionStreamCommand::Data(bytes))
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::TcpStreamClosed))
+    }
+
+    /// Enqueue `fin` into the slot reserved by [`Self::ready`].
+    #[cfg(rings_native)]
+    pub(crate) fn start_fin(&mut self) -> Result<()> {
+        self.commands
+            .start_send(OnionStreamCommand::Fin)
             .map_err(|_| Error::OnionRouteError(OnionRouteError::TcpStreamClosed))
     }
 }
@@ -357,6 +405,9 @@ struct OnionSessionDriver {
 /// once `h` refused it, or the error the session ended with before `h` answered.
 type OnionOpenAnswer = futures::channel::oneshot::Sender<Result<bool>>;
 
+/// An in-flight stream frame send on the loop client.
+type LoopSend = Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = Result<OnionExpiry>>)>>;
+
 /// What the driver does after one reply.
 enum OnionReplyFlow {
     /// Keep driving.
@@ -403,13 +454,38 @@ impl OnionSessionDriver {
         self.send(&frame, &sink).await?;
         self.control(OnionControlStep::Refill, &sink)?;
         let mut tick = Box::pin(sleep(self.tick_after(get_epoch_ms())).fuse());
+        let mut sending: Fuse<LoopSend> = Fuse::terminated();
+        let mut upload_rest = Bytes::new();
+        let mut fin_requested = false;
+        let mut pending_events = VecDeque::new();
+        let mut refill_pending = false;
         loop {
+            if sending.is_terminated() {
+                if let Err(error) =
+                    self.start_next_send(&mut sending, &mut upload_rest, &mut fin_requested, &sink)
+                {
+                    self.fail_closed(&sink, &mut events);
+                    return Err(error);
+                }
+            }
+            let can_send_command = sending.is_terminated();
             let (step, control) = futures::select! {
-                command = commands.next() => match command {
-                    Some(OnionStreamCommand::Data(bytes)) => {
-                        (self.upload(bytes, &sink).await, None)
+                sent = sending => match sent {
+                    Ok(expiry) => {
+                        self.departed(expiry);
+                        (Ok(()), None)
                     }
-                    Some(OnionStreamCommand::Fin) => (self.finish(&sink).await, None),
+                    Err(error) => (Err(error), None),
+                },
+                command = next_command(&mut commands, can_send_command).fuse() => match command {
+                    Some(OnionStreamCommand::Data(bytes)) => {
+                        upload_rest = bytes;
+                        (Ok(()), None)
+                    }
+                    Some(OnionStreamCommand::Fin) => {
+                        fin_requested = true;
+                        (Ok(()), None)
+                    }
                     None => {
                         // The user is gone: give the session up, unless both directions ended.
                         if !(self.fin_sent && self.world_ended) {
@@ -418,9 +494,26 @@ impl OnionSessionDriver {
                         return Ok(());
                     }
                 },
-                reply = replies.next() => match reply {
-                    Some(reply) => match self.on_reply(reply, &mut events, opened).await {
-                        OnionReplyFlow::Continue => (Ok(()), Some(OnionControlStep::Refill)),
+                reply_step = step_reply_or_flush(&mut replies, &mut events, &mut pending_events).fuse() => match reply_step {
+                    ReplyOrFlush::Flushed(Ok(())) => {
+                        let control = refill_pending.then_some(OnionControlStep::Refill);
+                        refill_pending = false;
+                        (Ok(()), control)
+                    }
+                    ReplyOrFlush::Flushed(Err(())) => {
+                        if !(self.fin_sent && self.world_ended) {
+                            self.abort(&sink);
+                        }
+                        return Ok(());
+                    }
+                    ReplyOrFlush::Reply(Some(reply)) => match self.on_reply(reply, &mut events, &mut pending_events, opened) {
+                        OnionReplyFlow::Continue if pending_events.is_empty() => {
+                            (Ok(()), Some(OnionControlStep::Refill))
+                        }
+                        OnionReplyFlow::Continue => {
+                            refill_pending = true;
+                            (Ok(()), None)
+                        }
                         OnionReplyFlow::Stop => return Ok(()),
                         OnionReplyFlow::Fail => (
                             Err(Error::OnionRouteError(OnionRouteError::SessionFailed)),
@@ -429,7 +522,7 @@ impl OnionSessionDriver {
                     },
                     // The tag table closed the queue: a reply of this session was lost here, or
                     // may have been (`circuit::tags`, Fate), so the session fails closed.
-                    None => (
+                    ReplyOrFlush::Reply(None) => (
                         Err(Error::OnionRouteError(OnionRouteError::SessionFailed)),
                         None,
                     ),
@@ -445,20 +538,19 @@ impl OnionSessionDriver {
             });
             if let Err(error) = controlled {
                 // Fail closed: `h` learns of it by our `abort`, the user by `Failed`.
-                self.abort(&sink);
-                self.witness_failure();
-                let _ = events.send(OnionStreamEvent::Failed).await;
+                self.fail_closed(&sink, &mut events);
                 return Err(error);
             }
         }
     }
 
-    /// Apply one reply: count its block, release its frames in order, and hand the events to
+    /// Apply one reply: count its block, release its frames in order, and queue the events for
     /// the user (the open result to the opener).
-    async fn on_reply(
+    fn on_reply(
         &mut self,
         reply: OnionReply,
         events: &mut mpsc::Sender<OnionStreamEvent>,
+        pending_events: &mut VecDeque<OnionStreamEvent>,
         opened: &mut Option<OnionOpenAnswer>,
     ) -> OnionReplyFlow {
         self.credit.replied(reply.received_at_ms);
@@ -467,12 +559,11 @@ impl OnionSessionDriver {
         };
         self.witness.record_stalled(self.machine.stalled());
         for event in released {
-            let forwarded = match event {
+            match event {
                 OnionClientEvent::Opened => {
                     if let Some(opened) = opened.take() {
                         let _ = opened.send(Ok(true));
                     }
-                    Ok(())
                 }
                 OnionClientEvent::Refused => {
                     if let Some(opened) = opened.take() {
@@ -480,25 +571,34 @@ impl OnionSessionDriver {
                     }
                     return OnionReplyFlow::Stop;
                 }
-                OnionClientEvent::Data(bytes) => events.send(OnionStreamEvent::Data(bytes)).await,
+                OnionClientEvent::Data(bytes) => {
+                    pending_events.push_back(OnionStreamEvent::Data(bytes));
+                }
                 OnionClientEvent::Fin => {
                     self.world_ended = true;
-                    events.send(OnionStreamEvent::Fin).await
+                    pending_events.push_back(OnionStreamEvent::Fin);
                 }
                 // `h` gave the session up and dropped it: a failure, never an end of stream,
                 // and nothing to tell `h` back.
                 OnionClientEvent::Aborted => {
                     self.given_up = true;
                     self.witness_failure();
-                    let _ = events.send(OnionStreamEvent::Failed).await;
+                    pending_events.clear();
+                    let _ = events.try_send(OnionStreamEvent::Failed);
                     return OnionReplyFlow::Stop;
                 }
-            };
-            if forwarded.is_err() {
-                return OnionReplyFlow::Stop;
             }
         }
         OnionReplyFlow::Continue
+    }
+
+    /// Fail closed: queue `abort(n)` toward `h`, mark the witness failed, and enqueue `Failed`
+    /// if the user's event queue has room (otherwise dropping `events` closes the stream as
+    /// failed without blocking on a full queue).
+    fn fail_closed(&mut self, sink: &OnionReplySink, events: &mut mpsc::Sender<OnionStreamEvent>) {
+        self.abort(sink);
+        self.witness_failure();
+        let _ = events.try_send(OnionStreamEvent::Failed);
     }
 
     /// Record the session's failure in its witness before the user hears of it, unless the
@@ -510,26 +610,45 @@ impl OnionSessionDriver {
         }
     }
 
-    /// Send `bytes` as data frames, each no wider than the frame capacity of the class.
-    async fn upload(&mut self, bytes: Bytes, sink: &OnionReplySink) -> Result<()> {
-        let mut rest = bytes;
-        while !rest.is_empty() {
+    /// Start the next in-flight loop send for `upload_rest` or `fin_requested`, one frame at a
+    /// time.
+    fn start_next_send(
+        &mut self,
+        sending: &mut Fuse<LoopSend>,
+        upload_rest: &mut Bytes,
+        fin_requested: &mut bool,
+        sink: &OnionReplySink,
+    ) -> Result<()> {
+        if !upload_rest.is_empty() {
             let capacity = self.machine.data_capacity(self.class).max(1);
-            let chunk = rest.split_to(capacity.min(rest.len()));
+            let chunk = upload_rest.split_to(capacity.min(upload_rest.len()));
             let frame = self.machine.data(chunk).map_err(|_| Error::InvalidData)?;
-            self.send(&frame, sink).await?;
+            *sending = self.send_loop(&frame, sink)?.fuse();
+        } else if *fin_requested {
+            *fin_requested = false;
+            if !self.fin_sent {
+                self.fin_sent = true;
+                let frame = self.machine.fin().map_err(|_| Error::InvalidData)?;
+                *sending = self.send_loop(&frame, sink)?.fuse();
+            }
         }
         Ok(())
     }
 
-    /// Close this direction with `fin(n)`, once.
-    async fn finish(&mut self, sink: &OnionReplySink) -> Result<()> {
-        if self.fin_sent {
-            return Ok(());
-        }
-        self.fin_sent = true;
-        let frame = self.machine.fin().map_err(|_| Error::InvalidData)?;
-        self.send(&frame, sink).await
+    /// Build a future that sends `frame` in a fresh loop and resolves once it has left.
+    fn send_loop(&self, frame: &OnionFrame, sink: &OnionReplySink) -> Result<LoopSend> {
+        let value = self.encode(frame)?;
+        let loops = self.loops.clone();
+        let scope = self.scope.clone();
+        let route = self.route.clone();
+        let application = self.application.clone();
+        let class = self.class;
+        let sink = sink.clone();
+        Ok(Box::pin(async move {
+            loops
+                .send(&scope, &route, &application, class, &value, &sink)
+                .await
+        }))
     }
 
     /// Give the session up toward `h`: queue `abort(n)` once, best effort, so `h` drops the
@@ -658,4 +777,56 @@ impl OnionSessionDriver {
 /// retries.
 fn is_lane_full(error: &Error) -> bool {
     matches!(error, Error::OnionQueueAdmission { reason, .. } if reason.is_full())
+}
+
+/// Receive the next user command only while no upload loop send is in flight.
+async fn next_command(
+    commands: &mut mpsc::Receiver<OnionStreamCommand>,
+    idle: bool,
+) -> Option<OnionStreamCommand> {
+    if !idle {
+        return futures::future::pending().await;
+    }
+    commands.next().await
+}
+
+/// Outcome of [`step_reply_or_flush`].
+enum ReplyOrFlush {
+    /// All queued stream events were flushed to the user's event channel.
+    Flushed(std::result::Result<(), ()>),
+    /// The next reply arrived (or the reply channel closed) while no events were pending.
+    Reply(Option<OnionReply>),
+}
+
+/// Drain `pending` stream events into `events` when non-empty; otherwise wait for the next
+/// reply from `replies`, preserving backpressure before refilling credit.
+///
+/// Cancel-safe: each event is popped from `pending` only in the poll that observes readiness on
+/// `events`.
+async fn step_reply_or_flush(
+    replies: &mut mpsc::Receiver<OnionReply>,
+    events: &mut mpsc::Sender<OnionStreamEvent>,
+    pending: &mut VecDeque<OnionStreamEvent>,
+) -> ReplyOrFlush {
+    if pending.is_empty() {
+        return ReplyOrFlush::Reply(replies.next().await);
+    }
+    let flushed = std::future::poll_fn(|cx| {
+        while !pending.is_empty() {
+            match events.poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    if let Some(event) = pending.pop_front() {
+                        if events.start_send(event).is_err() {
+                            return Poll::Ready(Err(()));
+                        }
+                    }
+                }
+                Poll::Ready(Err(_)) => return Poll::Ready(Err(())),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    })
+    .await;
+    ReplyOrFlush::Flushed(flushed)
 }

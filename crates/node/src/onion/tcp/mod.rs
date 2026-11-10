@@ -127,6 +127,31 @@ pub(crate) struct OnionTcpReader {
 /// The write half of a connected target.
 pub(crate) struct OnionTcpWriter(OwnedWriteHalf);
 
+#[cfg(all(test, rings_native))]
+impl OnionTcpReader {
+    /// Wrap an already-split read half for unit tests.
+    pub(crate) fn from_split(
+        half: OwnedReadHalf,
+        policy: OnionExitPolicy,
+        accounting: OnionExitAccounting,
+    ) -> Self {
+        Self {
+            half,
+            policy,
+            accounting,
+            buffer: BytesMut::new(),
+        }
+    }
+}
+
+#[cfg(all(test, rings_native))]
+impl OnionTcpWriter {
+    /// Wrap an already-split write half for unit tests.
+    pub(crate) const fn from_split(half: OwnedWriteHalf) -> Self {
+        Self(half)
+    }
+}
+
 #[async_trait::async_trait]
 impl OnionWorld for OnionTcpWorld {
     type Reader = OnionTcpReader;
