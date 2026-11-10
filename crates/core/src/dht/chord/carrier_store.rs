@@ -338,8 +338,7 @@ impl ItemChanges {
 
 /// An in-flight removal-store operation stored inside [`RemovalIndex::writes`] so a subsequent
 /// recovery or write can await its completion if the original caller was cancelled mid-await.
-type InFlightRemovalOp =
-    Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = ()> + 'static)>>;
+type InFlightRemovalOp = Pin<Box<rings_runtime::maybe_send!(dyn Future<Output = ()> + 'static)>>;
 
 /// Tracks keys whose remove side may be newer than their element side because a two-stage write
 /// touched `removals` and its matching `elements` write has not yet finished.
@@ -796,14 +795,7 @@ impl CarrierStore<'_> {
                 let (dirty_after, in_flight_after) = index.dirty_state(key);
                 let dirty = dirty_before || dirty_after;
                 let can_clear_dirty = dirty && !in_flight_before && !in_flight_after;
-                Self::resolve_read(
-                    index,
-                    key,
-                    held,
-                    record.as_ref(),
-                    dirty,
-                    can_clear_dirty,
-                )
+                Self::resolve_read(index, key, held, record.as_ref(), dirty, can_clear_dirty)
             }
         }
     }

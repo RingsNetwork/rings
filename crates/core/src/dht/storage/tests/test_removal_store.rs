@@ -990,26 +990,30 @@ async fn test_recovery_waits_for_a_cancelled_backends_late_commit() -> Result<()
     let (release_tx, release_rx) = oneshot::channel();
     removals.configure(|state| state.park_put = Some((false, parked_tx, release_rx)))?;
 
-    with_hang_guard("cancel put before late backend commit", Duration::from_secs(5), async {
-        let mut put_fut = Box::pin(store.put(&key, &removed, Principal::Local, now_ms));
-        tokio::select! {
-            _ = &mut put_fut => panic!("put should park inside removals.put"),
-            res = parked_rx => assert!(res.is_ok()),
-        }
-        // Cancel the caller while the removal-store write is still parked.
-        drop(put_fut);
+    with_hang_guard(
+        "cancel put before late backend commit",
+        Duration::from_secs(5),
+        async {
+            let mut put_fut = Box::pin(store.put(&key, &removed, Principal::Local, now_ms));
+            tokio::select! {
+                _ = &mut put_fut => panic!("put should park inside removals.put"),
+                res = parked_rx => assert!(res.is_ok()),
+            }
+            // Cancel the caller while the removal-store write is still parked.
+            drop(put_fut);
 
-        // Start a read (`get`), which triggers `ensure_recovered`, poll it once while the
-        // cancelled write is still parked, then release the backend write to commit.
-        let mut get_fut = Box::pin(store.get(&key));
-        assert!(futures::poll!(&mut get_fut).is_pending());
-        assert!(release_tx.send(()).is_ok());
+            // Start a read (`get`), which triggers `ensure_recovered`, poll it once while the
+            // cancelled write is still parked, then release the backend write to commit.
+            let mut get_fut = Box::pin(store.get(&key));
+            assert!(futures::poll!(&mut get_fut).is_pending());
+            assert!(release_tx.send(()).is_ok());
 
-        let read = get_fut.await?;
-        assert_eq!(read.as_ref().map(|entry| entry.data.len()), Some(0));
-        assert_eq!(node.removal_held(Principal::Local), 1);
-        Ok::<(), Error>(())
-    })
+            let read = get_fut.await?;
+            assert_eq!(read.as_ref().map(|entry| entry.data.len()), Some(0));
+            assert_eq!(node.removal_held(Principal::Local), 1);
+            Ok::<(), Error>(())
+        },
+    )
     .await?;
     Ok(())
 }
