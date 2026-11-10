@@ -28,7 +28,7 @@ struct RetiredPendingConnection {
 impl SwarmTransport {
     /// Release the record of `attempt` iff it is still pending, leaving its transport object,
     /// if any, in place: the `Pending` arm of the one cancellation transition without the close.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(in crate::swarm::transport) fn retire_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
