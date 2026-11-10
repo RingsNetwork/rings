@@ -16,8 +16,12 @@
 //! The DNS authority and the ingress both read owners through it.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -43,6 +47,41 @@ use crate::state::StateError;
 
 /// File name of the memory's journal in the state directory.
 const MEMORY_FILE: &str = "announcements.jsonl";
+
+/// Threshold above which waiting on or holding `Recall::persisted` logs a warning.
+const SLOW_PERSISTED_LOCK_THRESHOLD: Duration = Duration::from_millis(500);
+
+struct SlowPersistedGuard<'a, O> {
+    guard: tokio::sync::MutexGuard<'a, Persisted<O>>,
+    acquired_at: Instant,
+}
+
+impl<O> Deref for SlowPersistedGuard<'_, O> {
+    type Target = Persisted<O>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<O> DerefMut for SlowPersistedGuard<'_, O> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<O> Drop for SlowPersistedGuard<'_, O> {
+    fn drop(&mut self) {
+        let held = self.acquired_at.elapsed();
+        if held >= SLOW_PERSISTED_LOCK_THRESHOLD {
+            tracing::warn!(
+                lock = "Recall::persisted",
+                held_ms = u64::try_from(held.as_millis()).unwrap_or(u64::MAX),
+                "dns relay persisted lock held across slow journal I/O"
+            );
+        }
+    }
+}
 
 /// Why [`Recall`] could not answer.
 #[derive(Debug, Error)]
@@ -120,6 +159,13 @@ where O: Owner
     /// flushed, then compact the journal when it has outgrown the memory.
     async fn flush_pending(&mut self) -> Result<(), StateError> {
         let changes = self.memory.pending_changes();
+        if changes.is_empty()
+            && !self
+                .journal
+                .needs_compaction(self.memory.remembered().count())
+        {
+            return Ok(());
+        }
         let mut batch = self.journal.batch();
         for change in &changes {
             match change {
@@ -194,6 +240,21 @@ where D: Directory
             budget: Semaphore::new(max_lookups),
         })
     }
+
+    async fn lock_persisted(&self) -> SlowPersistedGuard<'_, D::Owner> {
+        let wait_started = Instant::now();
+        let guard = self.persisted.lock().await;
+        let acquired_at = Instant::now();
+        let waited = acquired_at.duration_since(wait_started);
+        if waited >= SLOW_PERSISTED_LOCK_THRESHOLD {
+            tracing::warn!(
+                lock = "Recall::persisted",
+                wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX),
+                "dns relay query waited behind long-held persisted lock"
+            );
+        }
+        SlowPersistedGuard { guard, acquired_at }
+    }
 }
 
 #[async_trait]
@@ -206,7 +267,7 @@ where D: Directory
     async fn announcement(&self, owner: Self::Owner) -> Result<Option<Announcement>, Self::Error> {
         let asked_at = now_ms();
         {
-            let mut persisted = self.persisted.lock().await;
+            let mut persisted = self.lock_persisted().await;
             if let Recalled::Fresh(answer) = persisted.memory.recall(&owner, asked_at) {
                 if persisted.memory.has_pending_changes() {
                     if let Err(error) = persisted.flush_pending().await {
@@ -219,7 +280,7 @@ where D: Directory
             }
         }
         let Ok(_slot) = self.budget.try_acquire() else {
-            let persisted = self.persisted.lock().await;
+            let persisted = self.lock_persisted().await;
             return persisted
                 .memory
                 .graced(&owner, asked_at)
@@ -227,7 +288,7 @@ where D: Directory
                 .ok_or(RecallError::Busy);
         };
         let observed = self.directory.announcement(owner).await;
-        let mut persisted = self.persisted.lock().await;
+        let mut persisted = self.lock_persisted().await;
         let observation = persisted.memory.observe(owner, observed, now_ms());
         if persisted.memory.has_pending_changes() {
             if let Err(error) = persisted.flush_pending().await {

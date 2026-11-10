@@ -427,7 +427,8 @@ pub(crate) struct DhtRegistrationPublisher<S> {
     renewal_margin_ms: u128,
     /// The freshness window `T` this registration signs.
     fresh_for_ms: u64,
-    /// The lease held, if any; its lock also serializes the heartbeats.
+    /// The lease held, if any; its lock serializes only the synchronous lease state transition
+    /// and is released before appending descriptor elements over the DHT (`publish_lease`).
     held: Arc<AsyncMutex<Option<HeldLease<S>>>>,
 }
 
@@ -458,28 +459,34 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
         now_ms: u128,
         descriptors_for: impl Fn(LeaseTerms) -> Result<S>,
     ) -> Result<S> {
-        let mut held = self.held.lock().await;
-        context.ensure_running()?;
-        let delegatee_public_key = context.delegatee_key().delegatee_public_key();
-        let kept = match held.as_ref() {
-            Some(lease)
-                if lease.delegatee_public_key == delegatee_public_key
-                    && now_ms.saturating_add(self.renewal_margin_ms)
-                        < lease.terms.expires_at_ms =>
-            {
-                let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
-                (bodies == lease.bodies).then(|| lease.clone())
-            }
-            _ => None,
-        };
-        let lease = match kept {
-            Some(lease) => lease,
-            None => {
-                let nominal_expires_at_ms = now_ms.saturating_add(registry_lease().as_millis());
-                let max_admissible_expires_at_ms = nominal_expires_at_ms
-                    .saturating_add(rings_core::consts::TS_OFFSET_TOLERANCE_MS);
-                let terms =
-                    LeaseTerms {
+        // Scope `held` strictly around the synchronous lease transition; network/DHT appends run
+        // outside the lock so a slow placement never stalls concurrent heartbeat state checks.
+        let lease = {
+            let mut held = rings_core::utils::SlowLockGuard::acquire(
+                "DhtRegistrationPublisher::held",
+                self.held.lock(),
+            )
+            .await;
+            context.ensure_running()?;
+            let delegatee_public_key = context.delegatee_key().delegatee_public_key();
+            let kept = match held.as_ref() {
+                Some(lease)
+                    if lease.delegatee_public_key == delegatee_public_key
+                        && now_ms.saturating_add(self.renewal_margin_ms)
+                            < lease.terms.expires_at_ms =>
+                {
+                    let bodies = signing_data(descriptors_for(lease.terms)?.as_slice())?;
+                    (bodies == lease.bodies).then(|| lease.clone())
+                }
+                _ => None,
+            };
+            match kept {
+                Some(lease) => lease,
+                None => {
+                    let nominal_expires_at_ms = now_ms.saturating_add(registry_lease().as_millis());
+                    let max_admissible_expires_at_ms = nominal_expires_at_ms
+                        .saturating_add(rings_core::consts::TS_OFFSET_TOLERANCE_MS);
+                    let terms = LeaseTerms {
                         fresh_for_ms: self.fresh_for_ms,
                         expires_at_ms: nominal_expires_at_ms
                             .max(held.as_ref().map_or(0, |previous| {
@@ -487,20 +494,21 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
                             }))
                             .min(max_admissible_expires_at_ms),
                     };
-                let descriptors = descriptors_for(terms)?;
-                let lease = HeldLease {
-                    terms,
-                    delegatee_public_key,
-                    bodies: signing_data(descriptors.as_slice())?,
-                    elements: descriptors
-                        .as_slice()
-                        .iter()
-                        .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
-                        .collect::<Result<_>>()?,
-                    descriptors,
-                };
-                *held = Some(lease.clone());
-                lease
+                    let descriptors = descriptors_for(terms)?;
+                    let lease = HeldLease {
+                        terms,
+                        delegatee_public_key,
+                        bodies: signing_data(descriptors.as_slice())?,
+                        elements: descriptors
+                            .as_slice()
+                            .iter()
+                            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
+                            .collect::<Result<_>>()?,
+                        descriptors,
+                    };
+                    **held = Some(lease.clone());
+                    lease
+                }
             }
         };
         for element in &lease.elements {

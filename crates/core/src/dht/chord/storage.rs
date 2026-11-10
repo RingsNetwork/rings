@@ -30,6 +30,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::fair_admission::Principal;
 use crate::utils::get_epoch_ms;
+use crate::utils::SlowLockGuard;
 
 /// A lookup placement settled here.
 #[derive(Debug)]
@@ -331,7 +332,11 @@ impl PeerRing {
         let Some(store) = self.carrier_storage(key.kind()) else {
             return Ok(None);
         };
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let live = live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?;
         if live.is_none() {
             self.advance_storage_custody_incarnation(key)?;
@@ -349,7 +354,11 @@ impl PeerRing {
         &self,
         now_ms: u128,
     ) -> Result<Vec<(StorageKey, Entry)>> {
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let mut live = Vec::new();
         for kind in [EntryKind::Data, EntryKind::RelayMessage] {
             let Some(store) = self.carrier_storage(kind) else {
@@ -435,7 +444,11 @@ impl PeerRing {
         let Some(store) = self.carrier_storage(key.kind()) else {
             return Ok(());
         };
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let Some(local) =
             live_entry(&store, &key.to_string(), now_ms, Projection::WrittenBack).await?
         else {
@@ -475,7 +488,11 @@ impl PeerRing {
         let store = self.carrier_store_for_write(incoming.kind)?;
         let slot = StorageKey::new(incoming.kind, key);
         let key = slot.to_string();
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         // The join normalizes the union once, so the incoming value is normalized on its own
         // only when there is nothing to join it with (`join_live_entry` takes an admitted value,
         // normalized first, so it would hash every element twice).
@@ -516,7 +533,11 @@ impl PeerRing {
         let store = self.carrier_store_for_write(admitted.kind())?;
         let slot = StorageKey::new(admitted.kind(), key);
         let key = slot.to_string();
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         let stored = join_live_entry(&store, &key, admitted, introducer, now_ms).await?;
         self.note_storage_custody_write(slot)?;
         Ok(stored)
@@ -563,7 +584,11 @@ impl PeerRing {
         let store = self.carrier_store_for_write(op.kind())?;
         let slot = StorageKey::new(op.kind(), placement);
         let key = slot.to_string();
-        let _transition = self.storage_transition.lock().await;
+        let _transition = SlowLockGuard::acquire(
+            "PeerRing::storage_transition",
+            self.storage_transition.lock(),
+        )
+        .await;
         if operate_live_entry(&store, &key, op, writer, introducer, now_ms).await? {
             self.note_storage_custody_write(slot)?;
         } else {

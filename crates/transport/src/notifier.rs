@@ -42,10 +42,17 @@ impl Notifier {
     }
 
     /// Immediately wake the notifier.
+    ///
+    /// Law (Lock order): `NotifierState`'s mutex is a leaf and is released before any registered
+    /// [`Waker`](std::task::Waker) runs, so an inline waker that re-enters [`Notifier::poll`] or
+    /// [`Notifier::wake`] on the same thread cannot self-deadlock.
     pub fn wake(&self) {
-        let mut state = self.state();
-        state.woken = true;
-        for waker in state.wakers.drain(..) {
+        let wakers = {
+            let mut state = self.state();
+            state.woken = true;
+            std::mem::take(&mut state.wakers)
+        };
+        for waker in wakers {
             waker.wake();
         }
     }
@@ -82,6 +89,9 @@ pub(crate) async fn within(
 
 impl Future for Notifier {
     type Output = ();
+    /// Law (Lock order): acquires `NotifierState`'s leaf mutex only to inspect `woken` and
+    /// register `cx.waker()`, releasing it before returning; [`Notifier::wake`] drops the same
+    /// mutex before invoking any waker, so inline re-entry into `poll` from `wake` is safe.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut state = self.state();
 

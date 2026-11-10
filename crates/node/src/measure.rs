@@ -207,7 +207,10 @@ pub struct PeriodicMeasure {
 struct MeasureState {
     storage: SharedMeasureStorage,
     evidence_storage: SharedEvidenceStorage,
+    /// Synchronous in-memory ledger and evidence state (`Law (Lock order): persistence_lock ≺ runtime`,
+    /// `runtime` is a leaf never held across `.await`).
     runtime: Mutex<RuntimeLedger>,
+    /// Serializes durable snapshot writes (`Law (Lock order): persistence_lock ≺ runtime`).
     persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
     /// The executor captured at construction, which owns persistence and flush work.
@@ -233,11 +236,22 @@ impl MeasureState {
 struct RuntimeLedger {
     ledger: MeasurementLedger<Did>,
     evidence: ProvisionalEvidenceStore<Did>,
+    /// Last durable view while an admission write is in flight, so read-only evidence queries
+    /// need only the synchronous `runtime` lock without observing uncommitted state.
+    committed_evidence_override: Option<ProvisionalEvidenceStore<Did>>,
     dirty: bool,
     persisting: bool,
     mutated_while_persisting: bool,
     last_clock: UnixTime,
     next_prune_at: UnixTime,
+}
+
+impl RuntimeLedger {
+    fn committed_evidence(&self) -> &ProvisionalEvidenceStore<Did> {
+        self.committed_evidence_override
+            .as_ref()
+            .unwrap_or(&self.evidence)
+    }
 }
 
 // Boundary: the adapter supplies wall-clock seconds to the pure state relation.
@@ -382,6 +396,7 @@ impl PeriodicMeasure {
             runtime: Mutex::new(RuntimeLedger {
                 ledger,
                 evidence,
+                committed_evidence_override: None,
                 dirty,
                 persisting: false,
                 mutated_while_persisting: false,
@@ -485,7 +500,12 @@ impl PeriodicMeasure {
 }
 
 async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
-    let _guard = state.persistence_lock.lock().await;
+    // Law (Lock order): persistence_lock ≺ runtime; `runtime` is released before storage I/O.
+    let _guard = rings_core::utils::SlowLockGuard::acquire(
+        "PeriodicMeasure::persistence_lock",
+        state.persistence_lock.lock(),
+    )
+    .await;
     let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
         prepare_snapshots(&mut runtime)
@@ -612,6 +632,9 @@ fn valid_persisted_replay_marker(
 
 fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.persisting = false;
+    if succeeded {
+        runtime.committed_evidence_override = None;
+    }
     if succeeded && !runtime.mutated_while_persisting {
         runtime.dirty = false;
     }
@@ -749,7 +772,12 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
 }
 
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
-    let _guard = state.persistence_lock.lock().await;
+    // Law (Lock order): persistence_lock ≺ runtime; `runtime` is released before storage I/O.
+    let _guard = rings_core::utils::SlowLockGuard::acquire(
+        "PeriodicMeasure::persistence_lock",
+        state.persistence_lock.lock(),
+    )
+    .await;
     let (snapshot, evidence_snapshot) = {
         let mut runtime = lock_or_recover(&state.runtime);
         if !runtime.dirty {
@@ -902,13 +930,21 @@ impl Measure for PeriodicMeasure {
         record: ProvisionalEvidenceRecord<Did>,
     ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
         // The evidence-storage put below is the successful operation's linearization point.
-        // Queries and other admissions take this same lock, so an explicit write failure is
-        // rolled back before it becomes observable. Cancellation may conservatively leave the
-        // dirty in-memory marker for the worker to persist, which preserves at-most-once admission.
-        let _persistence_guard = self.state.persistence_lock.lock().await;
+        // Law (Lock order): persistence_lock ≺ runtime. While the durable write is in flight,
+        // `committed_evidence_override` preserves the pre-admission view for read-only queries so
+        // they never block behind storage I/O and never observe an uncommitted admission.
+        let _persistence_guard = rings_core::utils::SlowLockGuard::acquire(
+            "PeriodicMeasure::persistence_lock",
+            self.state.persistence_lock.lock(),
+        )
+        .await;
         let (before, result, snapshot) = {
             let mut runtime = lock_or_recover(&self.state.runtime);
-            let before = runtime.evidence.clone();
+            let before = runtime
+                .committed_evidence_override
+                .clone()
+                .unwrap_or_else(|| runtime.evidence.clone());
+            runtime.committed_evidence_override = Some(before.clone());
             let result = runtime.evidence.admit(record);
             mark_runtime_dirty(&mut runtime);
             let snapshot = runtime.evidence.snapshot();
@@ -924,8 +960,10 @@ impl Measure for PeriodicMeasure {
             tracing::error!(%error, "failed to commit provisional evidence admission");
             let mut runtime = lock_or_recover(&self.state.runtime);
             runtime.evidence = before;
+            runtime.committed_evidence_override = None;
             return Err(EvidenceError::PersistenceUnavailable);
         }
+        lock_or_recover(&self.state.runtime).committed_evidence_override = None;
         result
     }
 
@@ -934,15 +972,17 @@ impl Measure for PeriodicMeasure {
         after: Option<EvidenceDigest>,
         limit: NonZeroUsize,
     ) -> Result<EvidencePage<Did>, EvidenceError> {
-        let _persistence_guard = self.state.persistence_lock.lock().await;
+        // Leaf read (`runtime` only, `Law (Lock order): persistence_lock ≺ runtime`).
         Ok(lock_or_recover(&self.state.runtime)
-            .evidence
+            .committed_evidence()
             .page(after, limit))
     }
 
     async fn provisional_evidence_counters(&self) -> EvidenceCounters {
-        let _persistence_guard = self.state.persistence_lock.lock().await;
-        lock_or_recover(&self.state.runtime).evidence.counters()
+        // Leaf read (`runtime` only, `Law (Lock order): persistence_lock ≺ runtime`).
+        lock_or_recover(&self.state.runtime)
+            .committed_evidence()
+            .counters()
     }
 }
 

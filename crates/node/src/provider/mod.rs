@@ -41,8 +41,32 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::release::StoresReleased;
 
+const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
+
+async fn await_close_phase<F>(phase_fut: F, timeout: std::time::Duration, phase: &'static str)
+where F: Future<Output = ()> {
+    let deadline = rings_runtime::sleep(timeout);
+    futures::pin_mut!(phase_fut, deadline);
+    if let futures::future::Either::Right((timer, _)) =
+        futures::future::select(phase_fut, deadline).await
+    {
+        match timer {
+            Ok(()) => tracing::warn!(
+                phase,
+                timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
+                "provider close timed out waiting for shutdown phase"
+            ),
+            Err(error) => tracing::warn!(
+                phase,
+                ?error,
+                "provider close timer unavailable while waiting for shutdown phase"
+            ),
+        }
+    }
+}
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
@@ -321,12 +345,24 @@ impl Provider {
     /// handshake, a payload send), or is a replay transition or flush, which ends after its
     /// write.
     pub async fn close(self) -> Result<()> {
+        self.close_with_drain_timeout(CLOSE_DRAIN_TIMEOUT).await
+    }
+
+    pub(crate) async fn close_with_drain_timeout(
+        self,
+        drain_timeout: std::time::Duration,
+    ) -> Result<()> {
         let tasks = self.processor.tasks().clone();
         tasks.stop();
-        self.processor.await_listener_generations().await;
-        tasks.drained().await;
-        let closed = self.processor.close().await;
-        tasks.drained().await;
+        await_close_phase(
+            self.processor.await_listener_generations(),
+            drain_timeout,
+            "listener_generations",
+        )
+        .await;
+        await_close_phase(tasks.drained(), drain_timeout, "tasks_before_network_close").await;
+        let closed = self.processor.close_with_timeout(drain_timeout).await;
+        await_close_phase(tasks.drained(), drain_timeout, "tasks_after_network_close").await;
         let released = self.processor.stores_released();
         let Self {
             processor,
@@ -348,7 +384,12 @@ impl Provider {
         match Arc::into_inner(processor) {
             Some(processor) => {
                 drop(processor);
-                released.await;
+                await_close_phase(
+                    std::future::IntoFuture::into_future(released),
+                    drain_timeout,
+                    "stores_released",
+                )
+                .await;
                 closed
             }
             None => {

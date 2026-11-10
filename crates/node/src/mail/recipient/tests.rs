@@ -195,3 +195,117 @@ async fn test_concurrent_polls_of_one_recipient_file_once() {
     assert_eq!(second_report.unwrap(), PollReport::default());
     assert_eq!(recipient.inbox().file_attempts.load(Ordering::SeqCst), 1);
 }
+
+/// A `KvStorageInterface` whose reads hang indefinitely after notifying `entered`, modeling a
+/// wedged IndexedDB or disk store (#1231).
+#[derive(Clone)]
+struct StalledRecordsStore {
+    entered: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl KvStorageInterface<RecipientRecord> for StalledRecordsStore {
+    async fn get(&self, _: &str) -> rings_core::error::Result<Option<RecipientRecord>> {
+        self.entered.notify_waiters();
+        futures::future::pending().await
+    }
+
+    async fn put(&self, _: &str, _: &RecipientRecord) -> rings_core::error::Result<()> {
+        self.entered.notify_waiters();
+        futures::future::pending().await
+    }
+
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, RecipientRecord)>> {
+        self.entered.notify_waiters();
+        futures::future::pending().await
+    }
+
+    async fn remove(&self, _: &str) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> rings_core::error::Result<()> {
+        Ok(())
+    }
+
+    async fn count(&self) -> rings_core::error::Result<u32> {
+        Ok(0)
+    }
+}
+
+/// Law (#1231): `Recipient::run` aborts an in-flight poll as soon as its `StopToken` fires, even
+/// when local storage / IndexedDB hangs indefinitely while `poll_lock` is held.
+#[tokio::test]
+async fn test_recipient_run_exits_promptly_on_stop_when_storage_stalls() {
+    use std::time::Duration;
+
+    use rings_core::lifecycle::StopSource;
+
+    use crate::test_support::TestTask;
+
+    let processor = processor_for(&SecretKey::random());
+    let sealed = sealed_for(&processor);
+    store_mail(&processor, &sealed).await;
+    let stalled = StalledRecordsStore {
+        entered: Arc::new(tokio::sync::Notify::new()),
+    };
+    let recipient = Arc::new(
+        Recipient::start(
+            processor,
+            KvInbox::new(MemStorage::new()),
+            stalled.clone(),
+            DEFAULT_MAIL_POLL_INTERVAL,
+        )
+        .unwrap(),
+    );
+    let stop = StopSource::new();
+    let stop_token = stop.token();
+    let entered = stalled.entered.notified();
+    let running_recipient = Arc::clone(&recipient);
+    let task = TestTask::spawn(async move {
+        running_recipient.run(stop_token).await;
+    });
+
+    tokio::time::timeout(Duration::from_secs(1), entered)
+        .await
+        .expect("recipient must enter stalled records read");
+    stop.request_stop();
+
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("recipient run must stop promptly despite stalled storage")
+        .expect("recipient task must join cleanly");
+}
+
+/// Law (#1231): a stalled storage promise cannot wedge `Recipient::poll` forever; the per-poll
+/// timeout aborts the stalled attempt and releases `poll_lock`.
+#[tokio::test]
+async fn test_recipient_poll_times_out_when_storage_stalls() {
+    use std::time::Duration;
+
+    use super::RecipientError;
+
+    let processor = processor_for(&SecretKey::random());
+    let sealed = sealed_for(&processor);
+    store_mail(&processor, &sealed).await;
+    let stalled = StalledRecordsStore {
+        entered: Arc::new(tokio::sync::Notify::new()),
+    };
+    let timeout = Duration::from_millis(40);
+    let recipient = Recipient::start(
+        processor,
+        KvInbox::new(MemStorage::new()),
+        stalled,
+        DEFAULT_MAIL_POLL_INTERVAL,
+    )
+    .unwrap()
+    .with_poll_timeout(timeout);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(1), recipient.poll())
+        .await
+        .expect("poll must resolve by its per-poll timeout");
+    assert!(matches!(
+        outcome,
+        Err(RecipientError::PollTimeout { timeout: actual }) if actual == timeout
+    ));
+}

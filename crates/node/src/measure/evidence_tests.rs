@@ -386,3 +386,101 @@ async fn successful_admission_survives_native_restart_without_flush() {
         .unwrap_or_else(|error| panic!("evidence page must project: {error}"));
     assert_eq!(page.records().len(), 1);
 }
+
+#[tokio::test]
+async fn evidence_reads_do_not_block_or_observe_uncommitted_state_during_slow_put() {
+    use crate::test_support::TestTask;
+
+    #[derive(Clone)]
+    struct BlockingEvidenceStorage {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<EvidenceSnapshot<Did>> for BlockingEvidenceStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+            Ok(None)
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            _value: &EvidenceSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(())
+        }
+
+        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(0)
+        }
+    }
+
+    let (record, collector) = provisional_evidence_fixture(9);
+    let blocking = BlockingEvidenceStorage {
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+    };
+    let measure = Arc::new(
+        PeriodicMeasure::new_with_clock_and_evidence(
+            Box::new(MemStorage::new()),
+            Box::new(blocking.clone()),
+            Some(collector),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}")),
+    );
+
+    let entered = blocking.entered.notified();
+    let admitting_measure = Arc::clone(&measure);
+    let admission =
+        TestTask::spawn(async move { admitting_measure.admit_provisional_evidence(record).await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered)
+        .await
+        .unwrap_or_else(|_| panic!("admission must enter evidence_storage.put"));
+
+    // Read queries complete immediately without waiting on persistence_lock and still see 0
+    // committed records until the durable write finishes.
+    let in_flight_page = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        measure.provisional_evidence_page(None, nonzero_usize(4)),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("evidence page query must not block on storage put"))
+    .unwrap_or_else(|error| panic!("evidence page must project: {error}"));
+    assert!(in_flight_page.records().is_empty());
+
+    blocking.release.notify_waiters();
+    let report = admission
+        .await
+        .unwrap_or_else(|error| panic!("admission task must join: {error}"))
+        .unwrap_or_else(|error| panic!("admission must commit: {error}"));
+    assert_eq!(
+        report.admission(),
+        rings_measure::EvidenceAdmission::Admitted
+    );
+
+    let committed_page = measure
+        .provisional_evidence_page(None, nonzero_usize(4))
+        .await
+        .unwrap_or_else(|error| panic!("committed page must project: {error}"));
+    assert_eq!(committed_page.records().len(), 1);
+}

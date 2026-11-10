@@ -34,6 +34,7 @@ use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
+use crate::extension::protocols::outbox::OverlayOutbox;
 
 /// A JS handler effect: send `payload` to `to` over the overlay, under the protocol's own
 /// namespace (the scope decides the namespace — a handler cannot choose another).
@@ -92,15 +93,27 @@ impl Protocol for JsProtocol {
     }
 }
 
-/// JS protocol interpreter: each parsed handler effect is an overlay `send`.
-pub struct JsShell;
+/// JS protocol interpreter: each parsed handler effect is enqueued onto a bounded per-peer
+/// asynchronous outbox so outbound network I/O never blocks `Runner::transition_gate`.
+#[derive(Default)]
+pub struct JsShell {
+    outbox: OverlayOutbox,
+}
+
+impl JsShell {
+    /// Construct a new JS protocol shell with an isolated per-peer send outbox.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 #[async_trait::async_trait(?Send)]
 impl Interpret for JsShell {
     type Effect = JsSend;
 
     async fn run(&self, scope: &EffectScope, effect: JsSend) -> crate::error::Result<Vec<Bytes>> {
-        scope.send(effect.to, effect.payload).await?;
+        self.outbox
+            .enqueue(scope.lifecycle(), effect.to, effect.payload)?;
         Ok(Vec::new())
     }
 }
