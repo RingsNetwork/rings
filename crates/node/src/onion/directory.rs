@@ -7,6 +7,12 @@ use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::utils::get_epoch_ms;
 
+use super::invoke_descriptor::OnionInvokeDescriptor;
+use super::pipeline::OnionInvokePipeline;
+use super::route::select_onion_pipeline_route_from_candidates;
+use super::route::OnionPipelineRoute;
+use super::route::OnionPipelineRouteCandidates;
+use super::route::OnionPipelineRouteRequest;
 use super::select_onion_route_from_candidates;
 use super::OnionEntryGuards;
 use super::OnionExitDescriptor;
@@ -25,7 +31,7 @@ use crate::online::OnlineNodeDescriptor;
 /// Read-only directory effects required by onion route construction.
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
-pub(crate) trait OnionDirectoryReader {
+pub(crate) trait OnionDirectoryReader: rings_runtime::MaybeSendSync {
     /// Return the local DID that must not appear as a selected relay.
     fn local_did(&self) -> Did;
 
@@ -37,6 +43,11 @@ pub(crate) trait OnionDirectoryReader {
 
     /// Return live onion exits that offer `service`.
     async fn live_onion_exits(&self, service: &str) -> Result<Vec<OnionExitDescriptor>>;
+
+    /// Return live intermediate `invoke` descriptors across the directory.
+    async fn live_onion_invokes(&self) -> Result<Vec<OnionInvokeDescriptor>> {
+        Ok(Vec::new())
+    }
 
     /// Return local peer-quality observations for route weighting.
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)>;
@@ -120,6 +131,52 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
         build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
     Ok(OnionProxyRoute { target, route })
+}
+
+/// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline.
+pub(crate) async fn build_onion_pipeline_route(
+    reader: &impl OnionDirectoryReader,
+    pipeline: &OnionInvokePipeline,
+) -> Result<OnionPipelineRoute> {
+    build_onion_pipeline_route_with_first_hop(reader, pipeline, |_| true).await
+}
+
+pub(crate) async fn build_onion_pipeline_route_with_first_hop(
+    reader: &impl OnionDirectoryReader,
+    pipeline: &OnionInvokePipeline,
+    first_hop_permitted: impl Fn(Did) -> bool,
+) -> Result<OnionPipelineRoute> {
+    let request = OnionPipelineRouteRequest::from_pipeline(pipeline);
+    let online_nodes = reader.live_online_nodes().await?;
+    let invokes = reader.live_onion_invokes().await?;
+    let now_ms = get_epoch_ms();
+    let candidates = OnionPipelineRouteCandidates::from_validated_descriptors(
+        reader.local_did(),
+        reader.dht_protocol_mode(),
+        now_ms,
+        online_nodes,
+        invokes,
+    );
+    let qualities = reader.peer_qualities().await;
+    let mut entropy = SystemRouteEntropy::new();
+    let first_hop_permitted = &first_hop_permitted;
+    let guard_set = reader
+        .onion_entry_guards()
+        .select_relay_guards(
+            reader.dht_protocol_mode().network_id,
+            &candidates.relays,
+            &qualities,
+            &mut entropy,
+            first_hop_permitted,
+        )
+        .await?;
+    select_onion_pipeline_route_from_candidates(
+        &request,
+        candidates,
+        qualities,
+        &mut entropy,
+        |did| guard_set.contains(did) && first_hop_permitted(did),
+    )
 }
 
 async fn build_onion_route_from_exits(

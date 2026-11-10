@@ -296,11 +296,21 @@ impl ProcessorBuilder {
             let onion_exit_registration = OnionExitRegistration::new(
                 self.onion_exit_heartbeat_interval,
                 self.onion_exit_ttl,
-                self.online_node_type,
+                self.online_node_type.clone(),
                 offer.clone(),
                 onion_process_epoch.clone(),
             );
             registration_tasks.push(Arc::new(onion_exit_registration));
+        }
+        if let Some(offer) = self.onion_role.invoke() {
+            let onion_invoke_registration = crate::onion::OnionInvokeRegistration::new(
+                self.onion_exit_heartbeat_interval,
+                self.onion_exit_ttl,
+                self.online_node_type,
+                offer.clone(),
+                onion_process_epoch.clone(),
+            );
+            registration_tasks.push(Arc::new(onion_invoke_registration));
         }
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);

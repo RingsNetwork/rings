@@ -122,7 +122,7 @@ fn fixture_layer(seed: u64, position: usize, hops: usize) -> OnionLayer {
         let mut arguments = [0; ONION_ARGUMENT_BYTES];
         rng.fill_bytes(&mut arguments);
         OnionLayerApplication::Apply(OnionApplication {
-            symbol: OnionServiceName::tcp(),
+            symbol: OnionServiceName::tcp().into(),
             arguments: OnionArguments::new(arguments),
         })
     } else {

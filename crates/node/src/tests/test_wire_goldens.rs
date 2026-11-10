@@ -107,8 +107,16 @@ use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
+use crate::onion::OnionInputType;
+use crate::onion::OnionInvokeDescriptor;
+use crate::onion::OnionInvokeDescriptorBody;
+use crate::onion::OnionInvokePolicy;
+use crate::onion::OnionInvokeShape;
+use crate::onion::OnionLatencyClass;
 use crate::onion::OnionProcessEpoch;
+use crate::onion::OnionWidthClass;
 use crate::onion::ONION_EXITS_TOPIC;
+use crate::onion::ONION_INVOKES_TOPIC;
 use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
@@ -120,7 +128,7 @@ use crate::online::ONLINE_NODES_TOPIC;
 /// Both parts are one literal so a diff shows the version and the hash moving together.
 const PINNED: (u16, &str) = (
     3,
-    "7a0a9edf42724e6496f666077c55e44da1ab388e8c0b6aa7eb194c08aaef4be5",
+    "49b47d058300953c6b10fad4d47f78d1a0dc0a7cf3c7b7fbde5060291c15db27",
 );
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -355,6 +363,35 @@ fn format_goldens() -> (String, Vec<u8>) {
     tracer.trace_value(&mut samples, &exit_body).unwrap();
     tracer.trace_value(&mut samples, &exit_descriptor).unwrap();
 
+    let invoke_body = OnionInvokeDescriptorBody {
+        did,
+        public_key: alice.public_key.clone(),
+        delegatee_public_key: pk33,
+        process_epoch: OnionProcessEpoch::new([0x43; 16]),
+        node_type: OnlineNodeType::Native,
+        network_id: GOLDEN_NETWORK_ID,
+        shape: OnionInvokeShape::new(
+            OnionInputType::Fixed(OnionWidthClass::B32),
+            OnionWidthClass::B64,
+            OnionLatencyClass::Ms500,
+        ),
+        backend: crate::onion::OnionBackendName::parse("jev.typesafe").unwrap(),
+        policy: OnionInvokePolicy {
+            max_concurrent: 16,
+            max_invocations_per_minute: 600,
+        },
+        started_at_ms: GOLDEN_EPOCH_MS,
+        fresh_for_ms,
+        expires_at_ms,
+        version: "0.7.0".to_string(),
+    };
+    let (_, _, invoke_descriptor): (_, _, OnionInvokeDescriptor) =
+        sign_descriptor_at(invoke_body.clone(), &alice);
+    tracer.trace_value(&mut samples, &invoke_body).unwrap();
+    tracer
+        .trace_value(&mut samples, &invoke_descriptor)
+        .unwrap();
+
     let service_body = ServiceDescriptorBody {
         did,
         public_key: alice.public_key.clone(),
@@ -463,6 +500,10 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
             ONION_EXITS_TOPIC.as_bytes().to_vec(),
         ),
         (
+            "descriptor/topic/onion_invokes".to_string(),
+            ONION_INVOKES_TOPIC.as_bytes().to_vec(),
+        ),
+        (
             "descriptor/topic/service".to_string(),
             service_topic(alice.did).into_bytes(),
         ),
@@ -483,6 +524,12 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
         (
             "descriptor/domain_tag/onion_exit".to_string(),
             <OnionExitDescriptorBody as SignedDescriptorBody>::DOMAIN_TAG
+                .as_bytes()
+                .to_vec(),
+        ),
+        (
+            "descriptor/domain_tag/onion_invoke".to_string(),
+            <OnionInvokeDescriptorBody as SignedDescriptorBody>::DOMAIN_TAG
                 .as_bytes()
                 .to_vec(),
         ),
@@ -556,6 +603,38 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
     out.push((
         "descriptor/OnionExitDescriptor/element".to_string(),
         exit_element.to_vec(),
+    ));
+
+    let invoke_body = OnionInvokeDescriptorBody {
+        did: alice.did,
+        public_key: alice.public_key.clone(),
+        delegatee_public_key: alice.delegatee_key.delegatee_public_key(),
+        process_epoch: OnionProcessEpoch::new([0x43; 16]),
+        node_type: OnlineNodeType::Native,
+        network_id: GOLDEN_NETWORK_ID,
+        shape: OnionInvokeShape::new(
+            OnionInputType::Fixed(OnionWidthClass::B32),
+            OnionWidthClass::B64,
+            OnionLatencyClass::Ms500,
+        ),
+        backend: crate::onion::OnionBackendName::parse("jev.typesafe").unwrap(),
+        policy: OnionInvokePolicy {
+            max_concurrent: 16,
+            max_invocations_per_minute: 600,
+        },
+        started_at_ms: GOLDEN_EPOCH_MS,
+        fresh_for_ms,
+        expires_at_ms,
+        version: "0.7.0".to_string(),
+    };
+    let (invoke_signing_data, invoke_element, _) = sign_descriptor_at(invoke_body, &alice);
+    out.push((
+        "descriptor/OnionInvokeDescriptor/signing_data".to_string(),
+        invoke_signing_data,
+    ));
+    out.push((
+        "descriptor/OnionInvokeDescriptor/element".to_string(),
+        invoke_element.to_vec(),
     ));
 
     let service_body = ServiceDescriptorBody {

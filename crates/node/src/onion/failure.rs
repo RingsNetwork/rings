@@ -122,6 +122,43 @@ pub enum OnionRouteError {
     /// An exit-reported failure reached the local route client.
     #[error("{0}")]
     ExitFailure(OnionExitFailure),
+    /// No live `invoke` descriptor offers `(shape, backend)`.
+    #[error("no live onion node registers invoke symbol ({shape}, {backend:?})")]
+    NoLiveSymbol {
+        /// Canonical `invoke` shape string.
+        shape: String,
+        /// Requested backend name.
+        backend: String,
+    },
+    /// Every live `invoke` registrant of `(shape, backend)` differs from its node's current relay
+    /// registration in session key or process epoch (#834 D2).
+    #[error(
+        "every onion registrant of ({shape}, {backend:?}) differs from its node's current relay \
+         registration in session key or process epoch"
+    )]
+    SymbolRelayRegistrationMismatch {
+        /// Canonical `invoke` shape string.
+        shape: String,
+        /// Requested backend name.
+        backend: String,
+    },
+    /// Every live `invoke` registrant of `(shape, backend)` lacks a relay registration (#834 D2).
+    #[error("every onion registrant of ({shape}, {backend:?}) lacks a relay registration")]
+    SymbolWithoutRelayRegistration {
+        /// Canonical `invoke` shape string.
+        shape: String,
+        /// Requested backend name.
+        backend: String,
+    },
+    /// A Kleisli pipeline's `(shape, backend)` sequence does not match the selected route's.
+    #[error("onion pipeline symbols do not match the selected pipeline route")]
+    PipelineRouteMismatch,
+    /// A one-shot Kleisli pipeline did not return before its loop expiry `x`.
+    #[error("onion Kleisli pipeline timed out before loop expiry")]
+    PipelineTimedOut,
+    /// A one-shot Kleisli pipeline failed closed (e.g., its guard link retired or dropped).
+    #[error("onion Kleisli pipeline failed closed")]
+    PipelineFailed,
 }
 
 /// Why an `https` exit returned no response: the encoded failure of a fetch outcome. It carries

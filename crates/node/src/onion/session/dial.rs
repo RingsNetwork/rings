@@ -333,7 +333,7 @@ pub(crate) async fn open(
         loops,
         scope,
         application: OnionApplication {
-            symbol: request.symbol,
+            symbol: request.symbol.into(),
             arguments: arguments.encode(),
         },
         route: request.route,

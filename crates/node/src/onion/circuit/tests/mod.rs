@@ -143,7 +143,7 @@ impl Fixture {
         build_loop(
             &self.route(),
             &[OnionApplication {
-                symbol: OnionServiceName::tcp(),
+                symbol: OnionServiceName::tcp().into(),
                 arguments: arguments().encode(),
             }],
             Did::from(CLIENT),

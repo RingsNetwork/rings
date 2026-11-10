@@ -1,25 +1,24 @@
-//! The native handle of a node's onion runtime: `tcp` streams and `https` requests over loops.
-//!
-//! A native node installs one runtime (`onion::runtime`) whose exit algebra registers exactly the
-//! configured exit services `Σ_n`, each over its own world: `tcp` over sockets, `https` over the
-//! native fetch. One interpretation per symbol, never a fallback to another (#834 D1′).
-//!
-//! ```text
-//! open_tcp_target[_with_class](t[, b])         ─▶ route(tcp, t) ─▶ open_tcp_stream_with_class
-//! open_tcp_stream[_with_class](route, t[, b])  ─▶ session(tcp, t, b) ─▶ NativeOnionOpenStream ─relay─▶ local stream
-//! request_https[_with_class](route, call[, b]) ─▶ session(https, route.target, b) ─▶ response
-//! ```
+//! The native handle of a node's onion runtime: `tcp` streams, `https` requests, and multi-stage
+//! `invoke` Kleisli pipelines over client-sealed loops.
+
+use std::time::Duration;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::circuit::OnionInvokeBackend;
 use crate::onion::https::OnionHttpsCall;
 use crate::onion::https::OnionHttpsClient;
 use crate::onion::https::OnionHttpsResponse;
+use crate::onion::invoke_descriptor::OnionInvokePolicy;
+use crate::onion::pipeline::OnionInvokePipeline;
 use crate::onion::proxy::OnionProxyProtocol;
 use crate::onion::proxy::OnionProxyRoute;
+use crate::onion::route::OnionPipelineRoute;
 use crate::onion::runtime::OnionRuntime;
 use crate::onion::session::client::OnionCreditWindow;
 use crate::onion::session::dial::OnionSessionRequest;
+use crate::onion::signature::OnionBackendName;
+use crate::onion::signature::OnionInvokeShape;
 use crate::onion::tcp::NativeOnionOpenStream;
 use crate::onion::OnionLoopClass;
 use crate::onion::OnionProxyTarget;
@@ -28,7 +27,7 @@ use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
 use crate::processor::Processor;
 
-/// Native handle for TCP streams and HTTPS requests over onion loops.
+/// Native handle for TCP streams, HTTPS requests, and Kleisli pipelines over onion loops.
 #[derive(Clone)]
 pub struct NativeOnionCircuitHandle {
     /// The installed runtime.
@@ -42,15 +41,67 @@ impl NativeOnionCircuitHandle {
         Self { runtime }
     }
 
+    /// Register an intermediate `invoke` backend `⟦(shape, backend)⟧` on this node's Σ-algebra
+    /// (#834 D2). If the node's role already advertises `(shape, backend)` in its
+    /// [`crate::onion::OnionInvokeOffer`], that signed quota policy takes precedence over `policy`.
+    pub fn register_invoke(
+        &self,
+        shape: OnionInvokeShape,
+        backend: OnionBackendName,
+        policy: OnionInvokePolicy,
+        backend_impl: impl OnionInvokeBackend + 'static,
+    ) -> Result<()> {
+        self.runtime
+            .register_invoke(shape, backend, policy, backend_impl)
+    }
+
+    /// Select a multi-stage route for `pipeline` from `processor`'s directory and evaluate it at
+    /// `pipeline.loop_class()` (#834 D4, L3).
+    pub async fn invoke_pipeline(
+        &self,
+        processor: &Processor,
+        pipeline: &OnionInvokePipeline,
+        input: &[u8],
+    ) -> Result<Vec<u8>> {
+        let route = processor.build_onion_pipeline_route(pipeline).await?;
+        self.invoke_pipeline_over_route(&route, pipeline, input)
+            .await
+    }
+
+    /// Evaluate `pipeline` over an already selected `route` at `pipeline.loop_class()` (#834 L3).
+    pub async fn invoke_pipeline_over_route(
+        &self,
+        route: &OnionPipelineRoute,
+        pipeline: &OnionInvokePipeline,
+        input: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.invoke_pipeline_over_route_with_options(
+            route,
+            pipeline,
+            pipeline.loop_class(),
+            input,
+            None,
+        )
+        .await
+    }
+
+    /// Evaluate `pipeline` over `route` at explicit loop `class` and optional caller `timeout`
+    /// (clamped to the loop's expiry `x`).
+    pub async fn invoke_pipeline_over_route_with_options(
+        &self,
+        route: &OnionPipelineRoute,
+        pipeline: &OnionInvokePipeline,
+        class: OnionLoopClass,
+        input: &[u8],
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>> {
+        self.runtime
+            .invoke_with_class_and_timeout(route, pipeline, class, input, timeout)
+            .await
+    }
+
     /// Select a `tcp` route to `target` from `processor`'s directory and open a session over it
-    /// at [`OnionLoopClass::DEFAULT`] (`16 KiB`, [`Self::open_tcp_stream`]): the default pipeline
-    /// of byte-tunnel ingresses, HTTP CONNECT and the packet gateway alike.
-    ///
-    /// To choose a non-default loop class `b`, call [`Self::open_tcp_target_with_class`].
-    ///
-    /// # Errors
-    ///
-    /// The route selection's failure, or as for [`Self::open_tcp_stream`].
+    /// at [`OnionLoopClass::DEFAULT`].
     pub async fn open_tcp_target(
         &self,
         processor: &Processor,
@@ -61,14 +112,7 @@ impl NativeOnionCircuitHandle {
     }
 
     /// Select a `tcp` route to `target` from `processor`'s directory and open a session of loop
-    /// class `class` (`b`) over it ([`Self::open_tcp_stream_with_class`]).
-    ///
-    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
-    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
-    ///
-    /// # Errors
-    ///
-    /// The route selection's failure, or as for [`Self::open_tcp_stream_with_class`].
+    /// class `class` (`b`) over it.
     pub async fn open_tcp_target_with_class(
         &self,
         processor: &Processor,
@@ -82,15 +126,8 @@ impl NativeOnionCircuitHandle {
             .await
     }
 
-    /// Open a `tcp` session over `route` at [`OnionLoopClass::DEFAULT`] (`16 KiB`) and wait until
-    /// the exit has connected `target`.
-    ///
-    /// To choose a non-default loop class `b`, call [`Self::open_tcp_stream_with_class`].
-    ///
-    /// # Errors
-    ///
-    /// [`OnionRouteError::PayloadServiceMismatch`] for a route selected for another symbol, the
-    /// exit's refusal, or a timeout.
+    /// Open a `tcp` session over `route` at [`OnionLoopClass::DEFAULT`] and wait until the exit
+    /// has connected `target`.
     pub async fn open_tcp_stream(
         &self,
         route: OnionRoute,
@@ -102,14 +139,6 @@ impl NativeOnionCircuitHandle {
 
     /// Open a `tcp` session of loop class `class` (`b`) over `route` and wait until the exit has
     /// connected `target`.
-    ///
-    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
-    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
-    ///
-    /// # Errors
-    ///
-    /// [`OnionRouteError::PayloadServiceMismatch`] for a route selected for another symbol, the
-    /// exit's refusal, or a timeout.
     pub async fn open_tcp_stream_with_class(
         &self,
         route: OnionRoute,
@@ -137,19 +166,6 @@ impl NativeOnionCircuitHandle {
     }
 
     /// Send `call` to `route.target` over `route` and wait for the exit's response.
-    ///
-    /// Obtain the target and call from [`OnionHttpsCall::from_url`], then select `route` for that
-    /// target under [`OnionProxyProtocol::HttpsProxy`]. The session opens at
-    /// [`OnionHttpsCall::class`] ([`OnionLoopClass::DEFAULT`], `16 KiB`, unless chosen via
-    /// [`OnionHttpsClientRequest::class`](crate::onion::https::OnionHttpsClientRequest::class) or
-    /// [`OnionHttpsCall::with_class`]); to override the class at send time, call
-    /// [`Self::request_https_with_class`].
-    /// Dropping the future ends the session, and a silent exit yields
-    /// [`Error::OnionProxyRequestTimedOut`].
-    ///
-    /// # Errors
-    ///
-    /// The session's refusal or failure, the exit's reported failure, or the timeout.
     pub async fn request_https(
         &self,
         route: &OnionProxyRoute,
@@ -162,15 +178,6 @@ impl NativeOnionCircuitHandle {
 
     /// Send `call` to `route.target` over `route` in a session of loop class `class` (`b`) and
     /// wait for the exit's response.
-    ///
-    /// Every hop on the loop sees `b` (#834 leakage table), and each cell of the loop costs
-    /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
-    /// Dropping the future ends the session, and a silent exit yields
-    /// [`Error::OnionProxyRequestTimedOut`].
-    ///
-    /// # Errors
-    ///
-    /// The session's refusal or failure, the exit's reported failure, or the timeout.
     pub async fn request_https_with_class(
         &self,
         route: &OnionProxyRoute,

@@ -6,6 +6,7 @@ use subtle::ConstantTimeEq;
 use super::fixture_layer;
 use super::fixture_rng;
 use crate::onion::loop_shape::MAX_ONION_LOOP_HOPS;
+use crate::onion::signature::OnionSymbol;
 use crate::onion::sphinx::class::OnionLoopClass;
 use crate::onion::sphinx::class::ONION_CELL_FRAMING_BYTES;
 use crate::onion::sphinx::header::OnionHeaderMac;
@@ -17,7 +18,6 @@ use crate::onion::sphinx::layer::ONION_ARGUMENT_BYTES;
 use crate::onion::sphinx::layer::ONION_DID_BYTES;
 use crate::onion::sphinx::layer::ONION_EXPIRY_BYTES;
 use crate::onion::sphinx::layer::ONION_LAYER_BYTES;
-use crate::onion::OnionServiceName;
 
 /// The widths are the specified ones (D5, D6″ with #834 H2): `Ĥ = 14`, `ℓ = 205`, `|β| = 2870`,
 /// `|χ| = 2919`.
@@ -55,8 +55,8 @@ fn test_accepted_strings_are_canonical() {
     for _ in 0..512 {
         let mut bytes = [0_u8; ONION_LAYER_BYTES];
         rng.fill_bytes(&mut bytes);
-        // Codes `0..=|Σ|`, `|Σ| = 1 + |Σ_W|`, cover every symbol and the first code outside `Σ`.
-        let symbols = 1 + OnionServiceName::world_facing().count();
+        // Codes `0..=|Σ|`, `|Σ| = OnionSymbol::COUNT`, cover every symbol and the first code outside `Σ`.
+        let symbols = OnionSymbol::COUNT;
         bytes[0] %= u8::try_from(symbols + 1).expect("Σ fits a byte");
         if bytes[0] == 0 {
             bytes[1..=ONION_ARGUMENT_BYTES].fill(0);
