@@ -1061,26 +1061,13 @@ async fn test_strict_bridge_lookup_must_not_return_to_the_same_query_node() -> R
 
     manually_establish_connection(&node_a.swarm, &node_c.swarm).await;
     manually_establish_connection(&node_a.swarm, &node_d.swarm).await;
+    wait_for_msgs([&node_a, &node_c, &node_d]).await;
+
     manually_establish_connection(&node_d.swarm, &node_b.swarm).await;
-    wait_for_msgs([&node_a, &node_b, &node_c, &node_d]).await;
-    if node_a
-        .swarm
-        .transport
-        .get_connection(node_b.did())
-        .is_some()
-    {
-        node_a.swarm.disconnect(node_b.did()).await?;
-        wait_until("node_a and node_b drop their direct link", || {
-            Ok(node_a
-                .swarm
-                .transport
-                .get_connection(node_b.did())
-                .is_none()
-                && !node_a.dht().successors().list()?.contains(&node_b.did()))
-        })
-        .await?;
-    }
-    wait_for_msgs([&node_a, &node_b, &node_c, &node_d]).await;
+    // Drain the initial topology query emitted on opening `D <-> B` so the background
+    // mesh discovery does not connect `A <-> B` before we test the bridged lookup.
+    let _ = node_d.listen_once().await;
+    let _ = node_b.listen_once().await;
 
     // `A` knows `[C, D]` and has passive bridge hint `B via D`.
     node_a
@@ -1149,21 +1136,37 @@ async fn test_strict_bridge_lookup_must_not_return_to_the_same_query_node() -> R
         )
         .await?;
 
-    let at_d = node_d.listen_once().await.ok_or_else(|| {
-        Error::InvalidMessage("expected strict query to arrive at node_d".to_string())
-    })?;
-    assert_eq!(at_d.relay.destination, node_d.did());
-    assert_eq!(at_d.relay.next_hop, node_d.did());
+    let mut saw_at_d = false;
+    for _ in 0..8 {
+        if let Some(pkt) = node_d.listen_once().await {
+            if matches!(
+                pkt.transaction.data::<Message>()?,
+                Message::FindSuccessorSend(ref q) if q.strict && q.did == node_b.did()
+            ) {
+                assert_eq!(pkt.relay.destination, node_d.did());
+                assert_eq!(pkt.relay.next_hop, node_d.did());
+                saw_at_d = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_at_d, "expected strict query to arrive at node_d");
 
-    handler_d
-        .handle(&HandlerContext::unbound_for_test(&at_d), &strict_query)
-        .await?;
-
-    let at_b = node_b.listen_once().await.ok_or_else(|| {
-        Error::InvalidMessage("expected strict query to arrive at node_b".to_string())
-    })?;
-    assert_eq!(at_b.relay.destination, node_b.did());
-    assert_eq!(at_b.relay.next_hop, node_b.did());
+    let mut saw_at_b = false;
+    for _ in 0..8 {
+        if let Some(pkt) = node_b.listen_once().await {
+            if matches!(
+                pkt.transaction.data::<Message>()?,
+                Message::FindSuccessorSend(ref q) if q.strict && q.did == node_b.did()
+            ) {
+                assert_eq!(pkt.relay.destination, node_b.did());
+                assert_eq!(pkt.relay.next_hop, node_b.did());
+                saw_at_b = true;
+                break;
+            }
+        }
+    }
+    assert!(saw_at_b, "expected strict query to arrive at node_b");
 
     Ok(())
 }
