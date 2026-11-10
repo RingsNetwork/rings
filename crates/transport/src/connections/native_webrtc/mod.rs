@@ -355,18 +355,16 @@ impl PhysicalCloseCompletion {
         runtime: &tokio::runtime::Handle,
         close: impl Future<Output = Result<()>> + Send + 'static,
     ) -> Result<()> {
-        let mut candidate_close = Some(close);
+        let mut unused_close = None;
         let (mut outcome_rx, join_handle) = {
             let mut task_slot = lock_recover(&self.0.task);
             if let Some(existing) = task_slot.as_ref() {
+                unused_close = Some(close);
                 (
                     existing.outcome_rx.clone(),
                     Arc::clone(&existing.join_handle),
                 )
             } else {
-                let close = candidate_close
-                    .take()
-                    .expect("candidate close future is present on initial close");
                 let (outcome_tx, outcome_rx) = watch::channel(None);
                 let completed = Arc::clone(&self.0.completed);
                 let join_handle = runtime.spawn(async move {
@@ -387,7 +385,7 @@ impl PhysicalCloseCompletion {
                 (outcome_rx, join_handle)
             }
         };
-        drop(candidate_close);
+        drop(unused_close);
         drop(self);
 
         let _ = outcome_rx.wait_for(Option::is_some).await;
