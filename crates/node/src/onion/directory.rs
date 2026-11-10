@@ -1,5 +1,7 @@
 //! Directory reader boundary for onion route construction.
 
+use std::collections::BTreeSet;
+
 use rings_core::dht::Did;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
@@ -39,17 +41,30 @@ pub(crate) trait OnionDirectoryReader {
     /// Return local peer-quality observations for route weighting.
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)>;
 
+    /// Return the DIDs of directly connected peers eligible as first-hop guards.
+    fn direct_peer_dids(&self) -> BTreeSet<Did>;
+
     /// Return the local entry-guard manager for this client.
     fn onion_entry_guards(&self) -> &OnionEntryGuards;
 }
 
-/// Build an onion proxy route for a concrete target.
+/// Build an onion proxy route for a concrete target whose first hop is a directly connected peer.
 pub(crate) async fn build_onion_proxy_route(
     reader: &impl OnionDirectoryReader,
     proxy: OnionProxyProtocol,
     target: OnionProxyTarget,
 ) -> Result<OnionProxyRoute> {
-    build_onion_proxy_route_with_first_hop(reader, proxy, target, |_| true).await
+    let direct_peers = reader.direct_peer_dids();
+    let allowed_peers = direct_peers.clone();
+    let route = build_onion_proxy_route_with_first_hop(reader, proxy, target, move |did| {
+        allowed_peers.contains(&did)
+    })
+    .await?;
+    let first_hop = route.route.hops().guard().did;
+    if first_hop != reader.local_did() && direct_peers.contains(&first_hop) {
+        return Ok(route);
+    }
+    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
 pub(crate) async fn build_onion_proxy_route_with_first_hop(

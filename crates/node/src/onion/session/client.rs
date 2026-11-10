@@ -346,17 +346,32 @@ impl OnionCreditWindow {
         Self { target }
     }
 
-    /// The number of full credit loops to send when `outstanding` blocks are live at `h` in
-    /// class `class`: `⌊(min(W, Q_max) − outstanding) / (k + 1)⌋`. Each leaves `k + 1` blocks,
-    /// so together they never exceed the window, and none is sent until the window is `k + 1`
-    /// short. The window is capped at `h`'s pool bound `Q_max`, since a block past it is
-    /// dropped at `h` and its loop wasted.
+    /// The number of reply blocks to mint in one credit frame of `class` under this window:
+    /// `min(k, max(1, min(W, Q_max)))`. Capping per-frame minting at the effective window prevents
+    /// large classes (`KiB256..MiB12`) from minting hundreds or thousands of SURBs that exceed `W`
+    /// or `Q_max` and would be dropped by `OnionSurbPool`.
+    pub(crate) fn credit_blocks(self, class: OnionLoopClass) -> usize {
+        let cap = self.target.clamp(1, ONION_SURB_POOL_CAPACITY);
+        OnionFrame::credit_capacity(class).min(cap)
+    }
+
+    /// The number of credit loops to send when `outstanding` blocks are live at `h` in class
+    /// `class`. Each loop leaves `b + 1` blocks at `h`, where `b = credit_blocks(class)`. When a
+    /// full loop fits inside `cap = min(W, Q_max)`, send `⌊(cap − outstanding) / (b + 1)⌋` loops;
+    /// when a single loop's `b + 1` reaches or exceeds `cap` (large loop classes), send 1 refill
+    /// loop once `outstanding` drops to or below `⌊cap / 2⌋` (`deficit ≥ ⌈cap / 2⌉`).
     pub(crate) fn credit_loops(self, outstanding: usize, class: OnionLoopClass) -> usize {
-        let deficit = self
-            .target
-            .min(ONION_SURB_POOL_CAPACITY)
-            .saturating_sub(outstanding);
-        deficit / (OnionFrame::credit_capacity(class) + 1)
+        let cap = self.target.min(ONION_SURB_POOL_CAPACITY);
+        if cap == 0 || outstanding >= cap {
+            return 0;
+        }
+        let deficit = cap - outstanding;
+        let per_loop = self.credit_blocks(class) + 1;
+        if per_loop <= cap {
+            deficit / per_loop
+        } else {
+            usize::from(deficit >= cap.div_ceil(2))
+        }
     }
 
     /// The full credit loops the driver sends after `step` at `now`, with `outstanding` blocks

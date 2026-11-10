@@ -161,6 +161,16 @@ impl OnionClientTags {
         })
     }
 
+    /// Remove the entries of `tags` when their carrying loop or credit cell failed to leave this
+    /// node.
+    pub(crate) fn unregister_all(&self, tags: impl IntoIterator<Item = OnionLoopTag>) {
+        if let Ok(mut entries) = lock(&self.entries) {
+            for tag in tags {
+                entries.remove(&tag);
+            }
+        }
+    }
+
     /// `lose(T, p)`: the link to `guard` retired or dropped a message, so a reply returning
     /// through it is lost or may be. Close the session of every entry whose loop returns through
     /// `guard`, and drop those entries (Fate).

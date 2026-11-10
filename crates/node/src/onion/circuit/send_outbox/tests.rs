@@ -696,3 +696,112 @@ fn test_queue_bounds_hold_per_link_and_globally() {
         .enqueue(next, 99, largest, 0, QueueRole::Relay)
         .is_ok());
 }
+
+/// Regression (#1224): dropping an armed `OnionLaneWait` before wake-up decrements `waiting[peer]`
+/// once (without `wake_one` double-decrementing it later), and dropping an armed `OnionLaneWait`
+/// after `wake_one` delivered a wake-up into its channel forwards that wake-up to the next
+/// waiting endpoint.
+#[test]
+fn test_dropped_endpoint_waiter_neither_double_decrements_nor_loses_wakeup() {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use futures::FutureExt;
+
+    use super::OnionLaneWait;
+
+    let peer = Did::from(42_u32);
+    let floor = OnionIdleFloor::DEFAULT;
+    let class = OnionLoopClass::DEFAULT;
+    let endpoint = QueueRole::Endpoint { holding: false };
+    let state = Arc::new(Mutex::new(OrderedSendState::<usize>::default()));
+
+    let epoch = state.lock().unwrap().open(peer, 0).expect("a new lane");
+    for item in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
+        assert!(state
+            .lock()
+            .unwrap()
+            .enqueue(peer, item, class, 0, QueueRole::Relay)
+            .is_ok());
+    }
+
+    // Part 1: drop `first_wait` BEFORE `complete` runs `wake_one`.
+    let first_space = match state.lock().unwrap().enqueue(peer, 900, class, 0, endpoint) {
+        Err(Refusal {
+            space: Some(space), ..
+        }) => space,
+        _ => panic!("expected endpoint refusal with waiter"),
+    };
+    let second_space = match state.lock().unwrap().enqueue(peer, 901, class, 0, endpoint) {
+        Err(Refusal {
+            space: Some(space), ..
+        }) => space,
+        _ => panic!("expected second endpoint refusal with waiter"),
+    };
+    let first_wait = OnionLaneWait::new(Arc::clone(&state), peer, first_space);
+    let mut second_wait = OnionLaneWait::new(Arc::clone(&state), peer, second_space);
+    assert_eq!(state.lock().unwrap().waiting.get(&peer), Some(&2));
+
+    drop(first_wait);
+    assert_eq!(state.lock().unwrap().waiting.get(&peer), Some(&1));
+
+    // Free one slot: `wake_one` skips the dropped first waiter without decrementing `waiting` a
+    // second time, and wakes `second_wait`.
+    assert!(matches!(
+        state.lock().unwrap().next(peer, epoch, floor, true, 0),
+        EmitterStep::Emit(Emission::Real(0))
+    ));
+    state.lock().unwrap().complete(peer, epoch);
+    assert_eq!(
+        state.lock().unwrap().waiting.get(&peer),
+        Some(&1),
+        "wake_one must not double-decrement waiting count"
+    );
+    assert_eq!(second_wait.wait().now_or_never(), Some(()));
+    second_wait.hand_back();
+    assert!(state
+        .lock()
+        .unwrap()
+        .enqueue(peer, 901, class, 0, QueueRole::Endpoint { holding: true })
+        .is_ok());
+    assert_eq!(state.lock().unwrap().waiting.get(&peer), None);
+
+    // Part 2: `third_wait` receives a wake-up from `complete` and is then dropped BEFORE retrying
+    // `enqueue`; its `Drop` must forward the consumed wake-up to `fourth_wait`.
+    let third_space = match state.lock().unwrap().enqueue(peer, 902, class, 0, endpoint) {
+        Err(Refusal {
+            space: Some(space), ..
+        }) => space,
+        _ => panic!("expected third endpoint refusal with waiter"),
+    };
+    let fourth_space = match state.lock().unwrap().enqueue(peer, 903, class, 0, endpoint) {
+        Err(Refusal {
+            space: Some(space), ..
+        }) => space,
+        _ => panic!("expected fourth endpoint refusal with waiter"),
+    };
+    let third_wait = OnionLaneWait::new(Arc::clone(&state), peer, third_space);
+    let mut fourth_wait = OnionLaneWait::new(Arc::clone(&state), peer, fourth_space);
+
+    assert!(matches!(
+        state
+            .lock()
+            .unwrap()
+            .next(peer, epoch, floor, true, slot_micros(1)),
+        EmitterStep::Emit(Emission::Real(1))
+    ));
+    state.lock().unwrap().complete(peer, epoch);
+
+    // `third_wait` now holds the delivered `()` in its channel; dropping it must forward the
+    // wake-up to `fourth_wait`.
+    drop(third_wait);
+    assert_eq!(state.lock().unwrap().waiting.get(&peer), Some(&1));
+    assert_eq!(fourth_wait.wait().now_or_never(), Some(()));
+    fourth_wait.hand_back();
+    assert!(state
+        .lock()
+        .unwrap()
+        .enqueue(peer, 903, class, 0, QueueRole::Endpoint { holding: true })
+        .is_ok());
+    assert_eq!(state.lock().unwrap().waiting.get(&peer), None);
+}

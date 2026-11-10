@@ -31,6 +31,7 @@ use crate::onion::sphinx::builder::build_surb;
 use crate::onion::sphinx::cell::OnionCell;
 use crate::onion::sphinx::cell::OnionSurb;
 use crate::onion::sphinx::class::OnionLoopClass;
+use crate::onion::sphinx::header::OnionLoopTag;
 use crate::onion::sphinx::layer::OnionApplication;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -78,8 +79,11 @@ impl OnionLoopClient {
         value: &[u8],
         sink: &OnionReplySink,
     ) -> Result<OnionExpiry> {
-        let (link, cell, expiry) = self.prepare(route, application, class, value, sink)?;
-        self.link_sender.send(scope.clone(), link, cell).await?;
+        let (link, cell, expiry, tag) = self.prepare(route, application, class, value, sink)?;
+        if let Err(error) = self.link_sender.send(scope.clone(), link, cell).await {
+            self.tags.unregister_all([tag]);
+            return Err(error);
+        }
         Ok(expiry)
     }
 
@@ -99,13 +103,17 @@ impl OnionLoopClient {
         value: &[u8],
         sink: &OnionReplySink,
     ) -> Result<OnionExpiry> {
-        let (link, cell, expiry) = self.prepare(route, application, class, value, sink)?;
-        self.link_sender.enqueue_local(scope.clone(), link, cell)?;
+        let (link, cell, expiry, tag) = self.prepare(route, application, class, value, sink)?;
+        if let Err(error) = self.link_sender.enqueue_local(scope.clone(), link, cell) {
+            self.tags.unregister_all([tag]);
+            return Err(error);
+        }
         Ok(expiry)
     }
 
     /// Build one loop and register its reply key in `T` (the module law: before its cell
-    /// leaves); return the guard's link, the first cell and the loop's expiry.
+    /// leaves); return the guard's link, the first cell, the loop's expiry and the registered
+    /// loop tag.
     fn prepare(
         &self,
         route: &OnionRoute,
@@ -113,7 +121,7 @@ impl OnionLoopClient {
         class: OnionLoopClass,
         value: &[u8],
         sink: &OnionReplySink,
-    ) -> Result<(OnionLink, OnionCell, OnionExpiry)> {
+    ) -> Result<(OnionLink, OnionCell, OnionExpiry, OnionLoopTag)> {
         let now_ms = get_epoch_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let built = build_loop(
@@ -126,13 +134,15 @@ impl OnionLoopClient {
             &mut rand::thread_rng(),
         )
         .map_err(|error| Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string())))?;
+        let tag = built.reply.tag;
         self.tags
             .register(now_ms, built.guard, built.reply, sink.clone())?;
-        Ok((OnionLink::new(built.guard), built.cell, expiry))
+        Ok((OnionLink::new(built.guard), built.cell, expiry, tag))
     }
 
     /// Build `count` reply blocks over `route`'s return path in class `class`, registering each
-    /// block's reply key for `sink`; returns the blocks and their common expiry.
+    /// block's reply key for `sink`; returns the blocks, their registered tags, and their common
+    /// expiry.
     ///
     /// # Errors
     ///
@@ -143,7 +153,7 @@ impl OnionLoopClient {
         class: OnionLoopClass,
         count: usize,
         sink: &OnionReplySink,
-    ) -> Result<(Vec<OnionSurb>, OnionExpiry)> {
+    ) -> Result<(Vec<OnionSurb>, Vec<OnionLoopTag>, OnionExpiry)> {
         let now_ms = get_epoch_ms();
         let expiry = OnionExpiry::of_build(now_ms);
         let guard = route.hops().guard().did;
@@ -151,20 +161,36 @@ impl OnionLoopClient {
         // Sized once: a growing vector would leave copies of the blocks' seeds in the buffers
         // it frees.
         let mut surbs = Vec::with_capacity(count);
+        let mut registered_tags = Vec::with_capacity(count);
         for _ in 0..count {
-            let (surb, reply) = build_surb(
+            let (surb, reply) = match build_surb(
                 route.hops().return_path(),
                 self.local,
                 class,
                 expiry,
                 &mut rng,
-            )
-            .map_err(|error| {
-                Error::OnionRouteError(OnionRouteError::LoopBuild(error.to_string()))
-            })?;
-            self.tags.register(now_ms, guard, reply, sink.clone())?;
+            ) {
+                Ok(built) => built,
+                Err(error) => {
+                    self.tags.unregister_all(registered_tags);
+                    return Err(Error::OnionRouteError(OnionRouteError::LoopBuild(
+                        error.to_string(),
+                    )));
+                }
+            };
+            let tag = reply.tag;
+            if let Err(error) = self.tags.register(now_ms, guard, reply, sink.clone()) {
+                self.tags.unregister_all(registered_tags);
+                return Err(error);
+            }
+            registered_tags.push(tag);
             surbs.push(surb);
         }
-        Ok((surbs, expiry))
+        Ok((surbs, registered_tags, expiry))
+    }
+
+    /// Roll back registered reply tags whose carrying loop failed to leave this node.
+    pub(crate) fn unregister_tags(&self, tags: impl IntoIterator<Item = OnionLoopTag>) {
+        self.tags.unregister_all(tags);
     }
 }

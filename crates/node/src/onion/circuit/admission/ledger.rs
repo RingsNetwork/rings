@@ -84,7 +84,8 @@ impl QuantumLedger {
         // the fold from its head is total.
         let [head, tail @ ..] = &mut next.charges;
         let cell = tail.iter_mut().fold(head, |best, charge| {
-            if (charge.quantum != quantum, charge.quantum) < (best.quantum != quantum, best.quantum)
+            if (charge.quantum != quantum, charge.quantum, charge.units)
+                < (best.quantum != quantum, best.quantum, best.units)
             {
                 charge
             } else {
@@ -103,6 +104,44 @@ impl QuantumLedger {
             units: charged,
         };
         Some(next)
+    }
+
+    /// Merge the in-window charges of `other` at `quantum` into `self`, saturating at `cap` over
+    /// the window `(quantum − N, quantum]`.
+    pub(super) fn merge_in_window(mut self, quantum: u128, other: &Self, cap: u32) -> Self {
+        for charge in &other.charges {
+            if charge.units == 0 || !Self::in_window(charge.quantum, quantum) {
+                continue;
+            }
+            let headroom = cap.saturating_sub(self.load(quantum));
+            let added = charge.units.min(headroom);
+            if added == 0 {
+                continue;
+            }
+            let [head, tail @ ..] = &mut self.charges;
+            let cell = tail.iter_mut().fold(head, |best, current| {
+                if (
+                    current.quantum != charge.quantum,
+                    current.quantum,
+                    current.units,
+                ) < (best.quantum != charge.quantum, best.quantum, best.units)
+                {
+                    current
+                } else {
+                    best
+                }
+            });
+            let units = if cell.quantum == charge.quantum {
+                cell.units.saturating_add(added)
+            } else {
+                added
+            };
+            *cell = QuantumCharge {
+                quantum: charge.quantum,
+                units,
+            };
+        }
+        self
     }
 
     /// Whether quantum `r` lies in the window `(s − N, s]`. Quanta after `s` are counted as well,
@@ -142,6 +181,11 @@ impl SlotLedger {
             .is_some_and(|generations| generations.contains(&generation))
     }
 
+    /// Whether `did` holds any live link generation on this slot.
+    pub(super) fn contains_live_peer(&self, did: Did) -> bool {
+        self.live.contains_key(&did)
+    }
+
     /// Whether `did` has an unexpired charge of its own on this slot at `quantum`.
     pub(super) fn has_unexpired_charge(&self, did: Did, quantum: u128) -> bool {
         self.ledger.load(quantum) > 0
@@ -160,16 +204,15 @@ impl SlotLedger {
     /// `did`'s last live generation on this slot was removed, `Some(false)` when `did` still
     /// holds another live generation, or `None` when `(did, generation)` was not live.
     pub(super) fn remove_live_generation(&mut self, did: Did, generation: u64) -> Option<bool> {
-        let (removed, empty) = {
-            let generations = self.live.get_mut(&did)?;
-            (generations.remove(&generation), generations.is_empty())
-        };
-        removed.then(|| {
-            if empty {
-                self.live.remove(&did);
-            }
-            empty
-        })
+        let generations = self.live.get_mut(&did)?;
+        if !generations.remove(&generation) {
+            return None;
+        }
+        let empty = generations.is_empty();
+        if empty {
+            self.live.remove(&did);
+        }
+        Some(empty)
     }
 
     /// Take the retained DIDs whose window since retirement has elapsed (or whose slot load has

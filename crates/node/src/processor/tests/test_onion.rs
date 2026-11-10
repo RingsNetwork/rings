@@ -80,13 +80,14 @@ async fn test_onion_proxy_route_uses_presence_relays_without_exit_descriptor() -
         ])?)
         .await?;
 
-    let route = processor
-        .build_onion_proxy_route(
-            OnionProxyProtocol::TcpConnect,
-            OnionProxyTarget::parse_authority("example.com:443")?,
-        )
-        .await?
-        .route;
+    let route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::TcpConnect,
+        OnionProxyTarget::parse_authority("example.com:443")?,
+        |_| true,
+    )
+    .await?
+    .route;
     let dids = route
         .hops()
         .positions()
@@ -158,12 +159,20 @@ async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
     store_onion_relays(&processor, &[&tcp_exit, &https_exit], 2).await?;
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
-    let tcp_route = processor
-        .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target.clone())
-        .await?;
-    let https_route = processor
-        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
-        .await?;
+    let tcp_route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::TcpConnect,
+        target.clone(),
+        |_| true,
+    )
+    .await?;
+    let https_route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::HttpsProxy,
+        target,
+        |_| true,
+    )
+    .await?;
 
     assert_eq!(tcp_route.exit_service(), "tcp");
     assert_eq!(tcp_route.exit_did(), tcp_exit.did());
@@ -239,9 +248,13 @@ async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
     store_onion_relays(&processor, &[&allowed_exit, &denied_exit], 2).await?;
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
-    let route = processor
-        .build_onion_proxy_route(OnionProxyProtocol::HttpsProxy, target)
-        .await?;
+    let route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::HttpsProxy,
+        target,
+        |_| true,
+    )
+    .await?;
 
     assert_eq!(route.exit_did(), allowed_exit.did());
     Ok(())
@@ -278,5 +291,68 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
         Error::OnionRouteError(OnionRouteError::NoExitAllowsTarget { service, target })
             if service == "https" && target == "example.com:443"
     ));
+    Ok(())
+}
+
+/// Regression (#1224): native `Processor::build_onion_proxy_route` requires a directly connected
+/// peer for the first-hop guard instead of permitting arbitrary directory relays with no active
+/// transport link.
+#[tokio::test]
+async fn test_onion_proxy_route_requires_direct_peer_for_first_hop() -> Result<()> {
+    let processor = prepare_processor().await;
+    let exit = prepare_processor().await;
+    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
+    store_onion_relays(&processor, &[&exit], 3).await?;
+    processor
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            exit_descriptor,
+        ])?)
+        .await?;
+
+    let error = processor
+        .build_onion_proxy_route(
+            OnionProxyProtocol::TcpConnect,
+            OnionProxyTarget::parse_authority("example.com:443")?,
+        )
+        .await
+        .err()
+        .ok_or_else(|| Error::InvalidConfig("expected NoPermittedFirstHop".to_string()))?;
+
+    assert!(matches!(
+        error,
+        Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop)
+    ));
+    Ok(())
+}
+
+/// Regression (#1224): when only one directory relay has an active transport link to `processor`,
+/// `Processor::build_onion_proxy_route` selects that connected peer as the first-hop entry guard.
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_onion_proxy_route_selects_only_directly_connected_first_hop_guard() -> Result<()> {
+    let _net = network_test_guard().await;
+    let processor = prepare_processor().await;
+    let exit = prepare_processor().await;
+    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "tcp", get_epoch_ms())?;
+    let relays = store_onion_relays(&processor, &[&exit], 3).await?;
+    processor
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            exit_descriptor,
+        ])?)
+        .await?;
+
+    let _client_rec = ApplicationRecorder::attach(&processor);
+    let _guard_rec = ApplicationRecorder::attach(&relays[1]);
+    connect_processors(&processor, &relays[1]).await;
+
+    let route = processor
+        .build_onion_proxy_route(
+            OnionProxyProtocol::TcpConnect,
+            OnionProxyTarget::parse_authority("example.com:443")?,
+        )
+        .await?
+        .route;
+
+    assert_eq!(route.hops().guard().did, relays[1].did());
     Ok(())
 }

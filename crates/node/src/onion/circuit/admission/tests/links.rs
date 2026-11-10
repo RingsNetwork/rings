@@ -971,3 +971,289 @@ fn test_reconcile_restores_core_truth_under_lost_events() {
         model.occurred
     );
 }
+
+/// Regression (#1224): a reconnecting peer whose previously retained slot is now occupied by a
+/// live honest peer must not resume that live slot or co-locate onto the honest peer's ledger.
+#[test]
+fn test_reconnecting_peer_does_not_colocate_onto_occupied_live_slot() {
+    const R: usize = 2;
+    let mut rng = StdRng::seed_from_u64(0x1224_0001);
+    let mut admission = state_with(&mut rng, EPOCH, R, 0..0);
+    let x = latest_expiry(ORIGIN_MS);
+
+    // Charge all `2·R = 4` slots and close their links: attacker `1` leaves 1 unit on slot 0, and
+    // peers `2..=4` leave 2 units on slots `1..4`.
+    open(&mut admission, ORIGIN_MS, generation(1, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(1_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    assert_eq!(
+        send_on(&mut admission, ORIGIN_MS, generation(1, 0), 1, layer(x, 1)),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(1, 0));
+
+    for filler in 2..=4_u32 {
+        open(&mut admission, ORIGIN_MS, generation(filler, 0));
+        assert_eq!(
+            send_on(
+                &mut admission,
+                ORIGIN_MS,
+                generation(filler, 0),
+                2,
+                layer(x, u128::from(filler))
+            ),
+            Verdict::Admitted
+        );
+        admission.link_closed(ORIGIN_MS, generation(filler, 0));
+    }
+
+    // Honest peer `10` connects and receives the cleanest free slot (slot 0, with 1 unit).
+    open(&mut admission, ORIGIN_MS + 1, generation(10, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(10_u32)),
+        Some(OnionSlotId::new(0))
+    );
+
+    // Attacker `1` reconnects while honest peer `10` is live on slot 0: `1` must get a free slot
+    // (`slot 1`), never co-locating onto `10`'s live slot or exhausting `10`'s sender budget.
+    open(&mut admission, ORIGIN_MS + 2, generation(1, 1));
+    let attacker_slot = admission
+        .slot_of(Did::from(1_u32))
+        .expect("reconnected attacker holds a slot");
+    assert_ne!(attacker_slot, OnionSlotId::new(0));
+    assert_eq!(attacker_slot, OnionSlotId::new(1));
+
+    let attacker_remaining = ONION_ADMISSION_SENDER_UNITS - 3;
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 2,
+            generation(1, 1),
+            attacker_remaining,
+            layer(x, 100)
+        ),
+        Verdict::Admitted
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 2,
+            generation(1, 1),
+            1,
+            layer(x, 101)
+        ),
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
+    );
+
+    // Honest peer `10` on slot 0 retains its own slot budget unimpaired by attacker `1`.
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 2,
+            generation(10, 0),
+            ONION_ADMISSION_SLOT_FLOOR_UNITS - 1,
+            layer(x, 200)
+        ),
+        Verdict::Admitted
+    );
+}
+
+/// Regression (#1224): attaching an `R`-slot [`SlotRoster`] aligns `OnionAdmissionState` slot
+/// capacity to `R`, so cleanest-first `SlotRoster` assignments in `0..R` are honored even when
+/// every slot in `0..R` carries residual load, while overlapping generations of one live peer
+/// remain permitted up to `2·R`.
+#[test]
+fn test_with_slot_roster_aligns_slot_capacity_and_honors_charged_roster_assignments() {
+    const R: usize = 4;
+    let mut rng = StdRng::seed_from_u64(0x1224_0002);
+    let roster = Arc::new(SlotRoster::new(R));
+    let mut admission =
+        OnionAdmissionState::new(EPOCH, OnionReplayFilterKey::new(rng.gen()), registry(R))
+            .with_slot_roster(Arc::clone(&roster));
+    assert_eq!(admission.slot_capacity, R);
+
+    let x = latest_expiry(ORIGIN_MS);
+    for (idx, load) in [10_u32, 3_u32, 20_u32, 30_u32].into_iter().enumerate() {
+        let did = 100 + u32::try_from(idx).unwrap();
+        roster.arrive(Did::from(did), &SlotFloorUse::default());
+        open(&mut admission, ORIGIN_MS, generation(did, 0));
+        assert_eq!(
+            admission.slot_of(Did::from(did)),
+            Some(OnionSlotId::new(idx))
+        );
+        assert_eq!(
+            send_on(
+                &mut admission,
+                ORIGIN_MS,
+                generation(did, 0),
+                load,
+                layer(x, u128::from(did))
+            ),
+            Verdict::Admitted
+        );
+        admission.link_closed(ORIGIN_MS, generation(did, 0));
+        roster.depart(Did::from(did));
+    }
+
+    // Every slot `0..R` now has residual load > 0; slot 1 is cleanest (load 3). `SlotRoster`
+    // assigns newcomer `500` to slot 1, and `admission` must honor slot 1 rather than inventing
+    // phantom slots in `R..2R`.
+    roster.arrive(Did::from(500_u32), &SlotFloorUse::default());
+    open(&mut admission, ORIGIN_MS + 1, generation(500, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(500_u32)),
+        Some(OnionSlotId::new(1))
+    );
+
+    // Fill the remaining 3 slots (`0`, `2`, `3`) with live peers `501..=503`.
+    for newcomer in 501..=503_u32 {
+        roster.arrive(Did::from(newcomer), &SlotFloorUse::default());
+        open(&mut admission, ORIGIN_MS + 1, generation(newcomer, 0));
+        assert!(admission.slot_of(Did::from(newcomer)).unwrap().index() < R);
+    }
+
+    // An overlapping generation of an already-live peer on slot 1 is accepted (`live_link_count`
+    // headroom is `2·R`), whereas a 5th distinct peer has no free slot in `0..R` and is refused.
+    open(&mut admission, ORIGIN_MS + 1, generation(500, 1));
+    assert_eq!(
+        admission.link_opened(ORIGIN_MS + 1, generation(999, 0)),
+        Err(OnionLinkTableFull)
+    );
+}
+
+/// Regression (#1224 / #1229 item 3): a peer that exhausts its slot budget on generation 0,
+/// reconnects on generation 1 sending zero cells, and disconnects again must keep its unexpired
+/// charge bound across the zero-charge reconnect so generation 2 still resumes the charged slot.
+#[test]
+fn test_reconnect_with_zero_new_charges_retains_prior_charge_until_window_expires() {
+    const R: usize = 4;
+    let mut rng = StdRng::seed_from_u64(0x1224_0003);
+    let mut admission = state_with(&mut rng, EPOCH, R, 0..0);
+    let x = latest_expiry(ORIGIN_MS);
+
+    open(&mut admission, ORIGIN_MS, generation(1, 0));
+    let charged_slot = admission
+        .slot_of(Did::from(1_u32))
+        .expect("peer 1 holds a slot");
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(1, 0),
+            ONION_ADMISSION_SENDER_UNITS,
+            layer(x, 1)
+        ),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(1, 0));
+
+    // Reconnect as generation 1, send zero cells, and close generation 1 within the same window.
+    open(&mut admission, ORIGIN_MS + 1, generation(1, 1));
+    assert_eq!(admission.slot_of(Did::from(1_u32)), Some(charged_slot));
+    admission.link_closed(ORIGIN_MS + 2, generation(1, 1));
+    assert_eq!(admission.slot_of(Did::from(1_u32)), Some(charged_slot));
+
+    // Reconnect again as generation 2 while cleaner slots are completely free: peer 1 must still
+    // resume `charged_slot` and remain capped by `ONION_ADMISSION_SENDER_UNITS`.
+    open(&mut admission, ORIGIN_MS + 3, generation(1, 2));
+    assert_eq!(admission.slot_of(Did::from(1_u32)), Some(charged_slot));
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 3,
+            generation(1, 2),
+            1,
+            layer(x, 2)
+        ),
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
+    );
+}
+
+/// Regression (#1224): cleanest-first free-slot selection prefers unretained and lower-total-load
+/// slots over exhausted grace-period slots whose `FloorUse` saturates at `f`, and a peer forced
+/// onto a new slot during its grace period retains its spent window charge.
+#[test]
+fn test_grace_period_slot_ranking_and_relocated_peer_charge_preservation() {
+    const R: usize = 1;
+    let mut rng = StdRng::seed_from_u64(0x1224_0004);
+    let mut admission = state_with(&mut rng, EPOCH, R, 0..0);
+    let x = latest_expiry(ORIGIN_MS);
+
+    // Peer 1 on slot 0 spends its entire sender budget `B` and disconnects into its grace period.
+    open(&mut admission, ORIGIN_MS, generation(1, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(1_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(1, 0),
+            ONION_ADMISSION_SENDER_UNITS,
+            layer(x, 1)
+        ),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(1, 0));
+
+    // Peer 2 on slot 1 spends exactly the floor `f` (`FloorUse = 1.0`, matching slot 0's saturated
+    // `FloorUse`), then we clear `retained` on slot 1 to model an unretained residual slot at `f`.
+    open(&mut admission, ORIGIN_MS, generation(2, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(2_u32)),
+        Some(OnionSlotId::new(1))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS,
+            generation(2, 0),
+            ONION_ADMISSION_SLOT_FLOOR_UNITS,
+            layer(x, 2)
+        ),
+        Verdict::Admitted
+    );
+    admission.link_closed(ORIGIN_MS, generation(2, 0));
+    if let Some(slot1) = admission.slots.get_mut(&OnionSlotId::new(1)) {
+        slot1.retained.clear();
+    }
+    admission.peer_slots.remove(&Did::from(2_u32));
+
+    // Both slots 0 and 1 are free and have `FloorUse == 1.0`, but slot 0 is a retained
+    // grace-period slot at `load = B` whereas slot 1 is unretained at `load = f`. An arriving
+    // honest peer `10` must be assigned to slot 1, not slot 0.
+    open(&mut admission, ORIGIN_MS + 1, generation(10, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(10_u32)),
+        Some(OnionSlotId::new(1))
+    );
+
+    // Now honest peer `11` takes the only remaining free slot (slot 0), occupying peer `1`'s
+    // grace-period slot. When peer `1` reconnects after `10` closes slot 1, peer `1` is relocated
+    // onto slot 1 and must retain its spent window charge `B`.
+    open(&mut admission, ORIGIN_MS + 2, generation(11, 0));
+    assert_eq!(
+        admission.slot_of(Did::from(11_u32)),
+        Some(OnionSlotId::new(0))
+    );
+    admission.link_closed(ORIGIN_MS + 2, generation(10, 0));
+
+    open(&mut admission, ORIGIN_MS + 3, generation(1, 1));
+    assert_eq!(
+        admission.slot_of(Did::from(1_u32)),
+        Some(OnionSlotId::new(1))
+    );
+    assert_eq!(
+        send_on(
+            &mut admission,
+            ORIGIN_MS + 3,
+            generation(1, 1),
+            1,
+            layer(x, 3)
+        ),
+        Verdict::Unpaid(OnionChargeRejection::SenderBudget)
+    );
+}
