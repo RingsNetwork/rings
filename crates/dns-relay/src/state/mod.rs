@@ -293,7 +293,9 @@ impl Journal {
     {
         let mut batch = self.batch();
         self.batch_put(&mut batch, key, value)?;
-        self.append_batch(batch).await
+        self.append_batch(batch).await?;
+        self.confirm_append();
+        Ok(())
     }
 
     /// Append the record that `key` maps to nothing.
@@ -302,7 +304,29 @@ impl Journal {
     where K: Serialize {
         let mut batch = self.batch();
         self.batch_remove(&mut batch, key)?;
-        self.append_batch(batch).await
+        self.append_batch(batch).await?;
+        self.confirm_append();
+        Ok(())
+    }
+
+    /// Confirm that the caller has committed the in-memory state corresponding to the last
+    /// [`Self::append_batch`], disarming any pending rollback truncation.
+    pub(crate) fn confirm_append(&mut self) {
+        self.pending_truncate = None;
+    }
+
+    /// Truncate any unconfirmed or torn tail left by an interrupted or cancelled append before
+    /// inspecting or mutating the journal further.
+    pub(crate) async fn settle_pending_truncate(&mut self) -> Result<(), StateError> {
+        if let Some(valid_len) = self.pending_truncate {
+            match truncate_file(&self.path, valid_len).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(source) => return Err(StateError::io(&self.path, source)),
+            }
+            self.pending_truncate = None;
+        }
+        Ok(())
     }
 
     /// Whether a map of `live` entries should be compacted: its log holds more than twice them.
@@ -320,6 +344,7 @@ impl Journal {
         K: Serialize,
         V: Serialize,
     {
+        self.settle_pending_truncate().await?;
         let mut text = String::new();
         let mut records = 0usize;
         for (key, value) in entries {
@@ -340,19 +365,13 @@ impl Journal {
         Ok(())
     }
 
-    /// Append all records in `batch` in one write and flush; roll back any partial write on
-    /// failure so a later append never writes behind a torn tail.
+    /// Append all records in `batch` in one write and flush; roll back any partial or unconfirmed
+    /// write on failure or cancellation so a later operation never leaves the journal ahead of
+    /// in-memory state or writes behind a torn tail.
     pub(crate) async fn append_batch(&mut self, batch: JournalBatch) -> Result<(), StateError> {
+        self.settle_pending_truncate().await?;
         if batch.records == 0 {
             return Ok(());
-        }
-        if let Some(valid_len) = self.pending_truncate {
-            match truncate_file(&self.path, valid_len).await {
-                Ok(()) => {}
-                Err(error) if error.kind() == ErrorKind::NotFound => {}
-                Err(source) => return Err(StateError::io(&self.path, source)),
-            }
-            self.pending_truncate = None;
         }
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
@@ -366,6 +385,7 @@ impl Journal {
             .await
             .map_err(|source| StateError::io(&self.path, source))?
             .len();
+        self.pending_truncate = Some(len_before);
         // A Tokio file writes in the background: the flush waits until the batch is written, so
         // no later write or compaction overtakes it.
         let write_result = async {
@@ -374,8 +394,8 @@ impl Journal {
         }
         .await;
         if let Err(source) = write_result {
-            if file.set_len(len_before).await.is_err() {
-                self.pending_truncate = Some(len_before);
+            if file.set_len(len_before).await.is_ok() && file.flush().await.is_ok() {
+                self.pending_truncate = None;
             }
             return Err(StateError::io(&self.path, source));
         }

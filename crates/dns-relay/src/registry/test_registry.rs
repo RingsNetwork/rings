@@ -134,3 +134,55 @@ async fn test_a_failed_journal_write_leaves_in_memory_bindings_unchanged_and_ret
         "refreshed timestamp must be persisted on retry: {journal_text}"
     );
 }
+
+#[tokio::test]
+async fn test_cancelled_binding_does_not_forget_a_later_successful_answer_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let book_path = dir.path().join(BOOK_FILE);
+    let registry = open(dir.path(), Duration::from_secs(600), 1).await;
+
+    // Step 1: bind owner 1 at t=1000.
+    let first = registry.address_for(TestOwner(1), 1_000).await.unwrap();
+    let len_after_first = std::fs::metadata(&book_path).unwrap().len();
+    assert!(len_after_first > 0);
+
+    // Step 2: start binding owner 2 at t=1050 (which plans `[Unbind(first), Bind(second)]`) and
+    // poll until its journal write lands on disk, then cancel before `book.commit(planned)` runs.
+    {
+        let mut fut = Box::pin(registry.address_for(TestOwner(2), 1_050));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+        loop {
+            match std::future::Future::poll(fut.as_mut(), &mut cx) {
+                std::task::Poll::Ready(_) => {
+                    break;
+                }
+                std::task::Poll::Pending => {
+                    let current_len = std::fs::metadata(&book_path).unwrap().len();
+                    if current_len > len_after_first {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "timed out waiting for journal write to reach disk before commit"
+                    );
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+        drop(fut);
+    }
+
+    // Step 3: answer owner 1 again within its refresh window (producing `planned.changes() == []`).
+    assert_eq!(
+        registry.address_for(TestOwner(1), 1_100).await.unwrap(),
+        first
+    );
+    assert_eq!(registry.owner_at(&first).await, Some(TestOwner(1)));
+    drop(registry);
+
+    // Step 4: reopen the registry from disk; owner 1 must still be bound.
+    let reopened = open(dir.path(), Duration::from_secs(600), 1).await;
+    assert_eq!(reopened.owner_at(&first).await, Some(TestOwner(1)));
+}

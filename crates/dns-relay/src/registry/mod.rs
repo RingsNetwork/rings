@@ -119,6 +119,7 @@ where O: Owner
         let planned = persisted.book.plan_bind(address, owner, now_ms)?;
         persisted.journal_changes(planned.changes()).await?;
         persisted.book.commit(planned);
+        persisted.journal.confirm_append();
         if let Err(error) = persisted.compact_if_needed().await {
             tracing::warn!("dns relay: address book not compacted: {error}");
         }
@@ -127,7 +128,11 @@ where O: Owner
 
     /// The owner `address` is bound to, if any.
     pub async fn owner_at(&self, address: &Ipv6Addr) -> Option<O> {
-        self.persisted.lock().await.book.owner_at(address)
+        let mut persisted = self.persisted.lock().await;
+        if let Err(error) = persisted.journal.settle_pending_truncate().await {
+            tracing::warn!("dns relay: address book not settled: {error}");
+        }
+        persisted.book.owner_at(address)
     }
 }
 

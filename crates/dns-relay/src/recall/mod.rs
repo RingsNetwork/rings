@@ -141,6 +141,7 @@ where O: Owner
         for change in &changes {
             self.memory.mark_persisted(change);
         }
+        self.journal.confirm_append();
         let remembered = self.memory.remembered().count();
         if self.journal.needs_compaction(remembered) {
             let snapshot = self
@@ -211,6 +212,8 @@ where D: Directory
                     if let Err(error) = persisted.flush_pending().await {
                         tracing::warn!("dns relay: memory not journaled: {error}");
                     }
+                } else if let Err(error) = persisted.journal.settle_pending_truncate().await {
+                    tracing::warn!("dns relay: memory journal not settled: {error}");
                 }
                 return Ok(answer);
             }
