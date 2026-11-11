@@ -41,7 +41,7 @@ A frame beyond the advertised credit is a protocol violation: it is refused, rep
 callback as an invalid frame, and logged.
 
 What a node holds of received frames is bounded hard, whatever the number of connections
-(#934; load-bounds paper, Law 3):
+(#934; [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Fair Admission & Load Bounds, Law 3):
 
 - **Floors and the pool.** A connection's lanes always hold their floors: 16 frames on the
   priority lane and one on each data lane. Beyond its floor, a data lane is lent credit from the
@@ -130,7 +130,7 @@ lane.
   indexed waitlist. The order is model checked: no overtaking on an exhausted resource, stream
   order, no admissible arrival left waiting, and every wait resolved.
 - A chunked message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the
-  `n·d₀` its buffer and its completed copy take (#932; load-bounds paper, Law 4). That charge
+  `n·d₀` its buffer and its completed copy take (#932; [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Fair Admission & Load Bounds, Law 4). That charge
   sits on the lane of the message's class and in the open-message table, by the connection
   slot that delivered it: each slot has a floor of 256 KiB, and larger messages share a pool of
   128 MiB in fair claims, so open messages hold at most 210 MiB of the 256 MiB mailbox and a
@@ -173,13 +173,13 @@ Core never calls, awaits or waits on application code (#935). The application re
 and peer facts from one bounded inbox (`ApplicationInbox::next`, or `try_next` without
 waiting) at its own pace, and no inbound lane ever waits for it to read:
 
-- Application delivery is lossy by design. A live application message that does not fit the
-  full inbox is dropped, counted (`ApplicationInbox::dropped`) and logged at `warn`, as a
-  best-effort network drops it, and nothing tells its sender. A drop of a message from an
-  admitted peer is told to the application itself, as `SwarmEvent::MessageDropped` (one per
-  peer while it is unread), so a protocol whose state rides that link, such as an onion
-  session, can end that state instead of losing a cell silently (#969). A protocol that needs a
-  reliable stream detects loss end to end: the TCP relay numbers its segments and resets a
+- **Non-blocking, bounded application inbox (64 MiB).** Core protocol lanes remain isolated from
+  application consumption speed. If an application inbox reaches its 64 MiB bound
+  (`APPLICATION_INBOX_WEIGHT`), overflow messages are shed cleanly, counted
+  (`ApplicationInbox::dropped`), and logged at `warn`, while notifying the application via
+  `SwarmEvent::MessageDropped` (one per peer while unread) so stateful protocols such as onion
+  sessions can react immediately (#969). Stream protocols enforce end-to-end reliability above
+  this boundary: the TCP relay numbers its segments and resets a
   stream whose gap outlives `REORDER_DEADLINE` (four delivery bounds: a superseded path with
   at most four hops left to cross) or the replay window, closing the local socket
   abortively, and the E2E stream decryptor fails a stream that made no progress for its stall

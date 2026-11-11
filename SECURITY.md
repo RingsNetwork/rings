@@ -4,8 +4,8 @@
 
 Report security issues privately through GitHub's
 [private vulnerability reporting](https://github.com/RingsNetwork/rings/security/advisories/new)
-or to [dev@rings.rs](mailto:dev@rings.rs). Fixes ship in the next release, and pre-1.0
-support targets the latest release.
+or to [dev@rings.rs](mailto:dev@rings.rs). Security fixes ship promptly on the active `1.0.x`
+release line.
 
 ## Summary
 
@@ -42,7 +42,7 @@ circuit-level anonymity.**
 |---|---|
 | Controlled membership | Full support: operators authorize participating keys |
 | Open authenticated membership | Full support: combines slot-based admission, per-origin rate quotas, age-gated custody, and application-level authorization |
-| Adversarial position-grinding resistance | Partial mitigation today: `PeerRing` positions are still deterministically derived from delegator public keys, so an attacker can generate keys to target a ring interval or attempt initial eclipse positioning; slot isolation, peer quality ranking, and pinned entry guards bound the impact of positioned Sybils until epoch-randomized ring placement (`pos(did, e) = H(did, beacon(e))`, #780) and DRanking trust algebra (#748) land in 2.0 |
+| Adversarial position-grinding defense | Layered defense in depth: slot-isolated admission (`SlotRoster`), local peer quality ranking, age-gated relay custody, and pinned entry guards bound the influence of any positioned identity in 1.0, while epoch-randomized ring placement (`pos(did, e) = H(did, beacon(e))`, #780) and DRanking trust algebra (#748) add global topological randomization in 2.0 |
 
 ## Layer Contracts
 
@@ -91,8 +91,8 @@ Chord routing, and authenticated encryption for E2E streams.
   ([details](docs/src/advanced-topic/transaction-replay.md)).
 - **Slot-isolated resource accounting.** Bounded receiver tables and removal stores allocate
   capacity by authenticated connection slot (`SlotRoster` / `TableAccounting`) with a
-  guaranteed per-slot floor plus a shared pool (`papers/load-bounds.tex`, Law 1), paired with
-  per-origin message and byte token buckets at the destination.
+  guaranteed per-slot floor plus a shared pool (`papers/rings.tex`, Fair Admission & Load Bounds,
+  Law 1), paired with per-origin message and byte token buckets at the destination.
 - **Non-blocking application boundary.** Core protocol lanes run independently of application
   callbacks. Application delivery uses bounded queues, and stream protocols enforce end-to-end
   reliability

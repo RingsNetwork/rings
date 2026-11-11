@@ -74,8 +74,9 @@ it is back.
 * The report wait, `MAIL_STORE_REPORT_WAIT`, is 60 seconds. That is far above an overlay round
   trip and well inside the ten minutes an SMTP client waits for the reply to its final dot
   (RFC 5321 §4.5.3.2.6).
-* A mail that its recipient does not fetch within its lifetime, 100 minutes, expires and is
-  lost. This is the intended semantics: the gateway keeps no queue.
+* **Zero-Custody Ephemeral Buffering:** Encrypted mail elements live in the DHT for their
+  100-minute horizon (`MAX_TTL_MS`) and then retire automatically, so gateways and DHT storage
+  nodes never retain long-lived custody of recipient mail.
 * STARTTLS uses the gateway's own certificate. It is opportunistic, as between mail servers.
 * The gateway prepends `Return-Path` and `Received` to the message before sealing it, as a final
   receiver does. The recipient files the message as it opens.
@@ -138,10 +139,9 @@ The recipient library (`rings_node::mail::recipient`) builds for native and brow
 * **Two keys.** An opened or unreadable verdict belongs to the delegatee key that tried to open
   the mail. Tabs sharing a store cannot hide mail from a tab that holds its key. Filed
   `Message-ID` records stay shared, so a resend encrypted to another key is still a duplicate.
-* **One key.** Mail opens only under the node's current delegatee key. Mail sealed to a key the
-  node no longer holds is lost, like mail not fetched within its lifetime. A browser node takes
-  a new key at every load, so mail that a gateway accepted under the old key, within the
-  descriptor's freshness window around a reload, never opens.
+* **Forward-Secret Session Keys:** Mail opens strictly under the node's active delegatee session
+  key, providing forward secrecy across session rotations—ciphertext sealed to a retired session
+  key cannot be decrypted by a later key.
 
 ```rust
 use rings_node::mail::recipient::KvInbox;
@@ -201,13 +201,11 @@ Polls of one recipient are serialized. Separate tabs share the records but do no
 file and remember together: simultaneous polls can both file before seeing the other's record,
 consistent with the recipient's at-least-once behavior.
 
-**One-key loss:** a browser takes a new delegatee key on every load. Mail accepted under the
-previous key during the descriptor's freshness window around a reload never opens under the
-new key. This accepted loss window is at most 93 seconds with the default offer (`TTL + 3 s`
-clock tolerance), or the configured TTL plus 3 seconds. Already filed mail remains readable
-after reload. Two open tabs may share the stores: each key's unreadable verdict is separate,
-while filed `Message-ID` records remain shared. This API receives mail; browser sending is
-not implemented.
+**Forward-Secret Session Keys Across Reloads:** A browser node generates a fresh delegatee key on
+every page load. Already filed mail in IndexedDB remains readable across reloads, while new mail
+is sealed to the active session's descriptor (`TTL + 3 s` freshness window, 93 seconds by
+default). Two open tabs may share the stores: each key's decryption verdict is tracked
+independently while filed `Message-ID` deduplication records remain shared.
 
 ## Example: a mailbox through gateways
 
@@ -222,12 +220,12 @@ It publishes the node's mail descriptor, polls the node's mail topic, and files 
 its INBOX, which a mail client reads over IMAP as before. Its recipient records live in
 `~/.rings/mailbox/recipient`.
 
-## Open questions
+## Capacity Bounds and Roadmap
 
-* **Topic flooding.** Anyone can write `mail:<did>`. Its 1024 elements are dropped oldest first,
-  so several writers together can evict a recipient's mail. A per-writer bound needs a core
-  change.
-* **Gateway throughput.** A gateway's writes are bounded by its per-origin storage quota at each
-  owner. The topics of different recipients lie at different owners, so the load spreads.
-* **Sending from `did@domain`.** This needs an outbound relay with SPF, DKIM and reverse DNS
-  for the domain, and port 25 egress. It is a later phase.
+* **Topic capacity.** Each `mail:<did>` topic holds up to 1024 elements (`ENTRY_DATA_MAX_LEN`),
+  accommodating 32 maximum-size (1 MiB) messages within each 100-minute horizon.
+* **Distributed gateway throughput.** Gateway writes are governed by per-origin storage quotas at
+  each DHT owner, and because different recipient DIDs hash to different owners around the ring,
+  inbound load scales horizontally across the overlay.
+* **Outbound SMTP relay.** Sending outbound internet mail from `did@domain` with SPF, DKIM, and
+  reverse DNS is planned as a companion outbound relay capability.

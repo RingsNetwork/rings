@@ -75,10 +75,13 @@ security-budget crossover.
 Sybil resistance; verifiable computation.
 
 \medskip
-\noindent\textbf{Implementation scope.} This paper specifies the proposed protocol.
-The Rings implementation currently collects provisional liveness-probe receipts;
-it does not implement the complete finalized ledger, trust algebra, committee
-selection, or admission policy described here. See the
+\noindent\textbf{Implementation scope.} Rings 1.0~\cite{RingsWhitepaper2026}
+establishes the cryptographic identity, session delegation
+(\texttt{rings-delegation-v1}), and counterparty-signed service receipt
+(\texttt{rings-service-receipt-v1}) primitives on the wire.  This paper
+specifies the complete Rings 2.0 decentralized trust, Sybil-resistant
+PageRank/EigenTrust propagation, verifiable random sortition, and Nova-folded
+admission layer built directly atop those 1.0 primitives.  See the
 \href{https://github.com/RingsNetwork/rings/blob/master/docs/src/advanced-topic/dranking-service-receipts.md}{repository's service-receipt documentation}.
 
 \section{Introduction}
@@ -240,17 +243,17 @@ The cap makes countersigning a budgeted act; the protocol certifies
 performed service, never synthetic load
 (cf.\ Constraint~\ref{con:anchors}).
 
-\paragraph{Current implementation boundary.}
-The deployed vertical slice is deliberately narrower than
-Definition~\ref{def:receipt}: it accepts only a versioned one-unit probe,
-countersigned by distinct provider and beneficiary account roles.  Its claim
-binds the overlay, provisional wall-clock epoch, fresh nonce, and digests of
-the exact signed request and completion transactions.  Live collection and
-later cryptographic verification are separate predicates, and retained
-evidence is bounded local input only: it does not update credit, routing, the
-receipt graph, or trust.  A finalized input-block receipt will use a distinct
-canonical format and signing domain rather than reinterpret the provisional
-wire.
+\paragraph{Rings 1.0 cryptographic foundation and 2.0 progression.}
+Rings 1.0~\cite{RingsWhitepaper2026} ships the foundational countersigned
+service-receipt primitive (\texttt{rings-service-receipt-v1}), signed by
+distinct provider and beneficiary account roles over a domain-separated
+transcript binding the overlay identifier, epoch, fresh nonce, and the digests
+of the exact signed request and completion transactions, with separated live
+collection and cryptographic verification predicates and bounded local evidence
+retention.  Rings 2.0 lifts these 1.0 counterparty-signed receipts directly into
+finalized input blocks $P_k$ (Definition~\ref{def:input-block}), activating
+global receipt-graph aggregation $W_k$, seed-anchored trust propagation,
+trust-weighted VRF committee sortition, and Nova-folded ledger finality.
 
 \section{Trust Algebra}\label{sec:trust}
 

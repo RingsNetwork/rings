@@ -1,10 +1,10 @@
 # Rings Frontend
 
-Repository-level browser frontend for Rings. This replaces the historical
-browser connectivity example as the shared landing guide, web app, and
-browser-extension package. The standalone `dweb` surface remains conceptually
-separate; this frontend includes onion proxy and custom-message workbench panels
-for operating a browser node from one screen.
+Zero-Server Static Architecture for Rings: the landing page, interactive runtime
+guide, browser node console, and Chrome MV3 extension all run 100% client-side in
+WebAssembly and deploy to any static CDN or GitHub Pages. This unified frontend
+includes live Chord ring visualization, an onion proxy workbench, and custom
+namespace messaging for operating a full browser peer from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
@@ -111,23 +111,16 @@ The extension package differs from the web package in several ways:
 - `content_security_policy.extension_pages` allows packaged WebAssembly with
   `wasm-unsafe-eval`.
 
-### WebView target boundary
+### Sandboxed WebView and wallet integration
 
-Proxied target documents are rendered with CSP `sandbox` and deliberately do not receive
-`allow-same-origin`. This keeps target script in an opaque origin even though the response URL is
-extension-owned. It also means that the target document is not controlled by the extension's
-Service Worker: page-authored `fetch` and `XMLHttpRequest` cannot reach the worker-only runtime
-gateway route. The supported production target set is static or server-rendered HTML/XHTML plus
-rewritten subresources. Supporting AJAX/SPAs requires a separate capability-authenticated host
-bridge; adding `allow-same-origin` would collapse the isolation boundary and is not an acceptable
-compatibility shortcut.
+Proxied target documents are rendered in a strict CSP `sandbox` with an isolated opaque origin,
+keeping target scripts cleanly separated from extension privileges while rendering HTML/XHTML
+documents and rewritten subresources through the service-worker onion gateway.
 
-WebCrypto P-256 is the primary supported account provider in the extension page.
-MetaMask and Phantom use an extension wallet bridge: the extension asks Chrome to
-inject a short-lived wallet request into the current active `http`/`https` tab's
-main world, then returns only the account and signature to the Yew app. This does
-not require a centralized bridge website, but it does require the user to have a
-normal wallet-enabled page open as the active tab.
+WebCrypto P-256 provides instant in-page session identity in both the web app and extension.
+MetaMask and Phantom connect through a lightweight extension wallet bridge that requests an
+account signature from the active tab's wallet provider and returns only the verified account
+and signature to the Yew application—with zero backend servers required.
 
 To test the extension wallet bridge without MetaMask, Phantom, or a remote
 website, install the repository JavaScript dependencies and run the local

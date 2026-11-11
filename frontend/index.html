@@ -47,7 +47,7 @@
         "@type": "SoftwareSourceCode",
         "name": "Rings Network",
         "alternateName": "Rings",
-        "description": "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path.",
+        "description": "Rings is a browser-native, structured peer-to-peer network that gives every browser tab and native daemon a sovereign network layer.",
         "url": "https://rings.rs/",
         "codeRepository": "https://github.com/RingsNetwork/rings",
         "license": "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
@@ -110,7 +110,7 @@
           <div>
             <p class="static-kicker" data-project-content="name">Rings Network</p>
             <h1 id="static-landing-title" data-project-content="tagline">A P2P network for the sovereign age.</h1>
-            <p class="static-lede" data-project-content="introduction">Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT.</p>
+            <p class="static-lede" data-project-content="introduction">Rings is a browser-native, structured peer-to-peer network that gives every browser tab and native daemon a sovereign network layer. Peers join a unified Chord DHT overlay, authenticate and discover each other by DID, exchange encrypted messages over direct WebRTC datachannels, and route private traffic through multi-hop Sphinx onion circuits.</p>
             <div class="static-actions" aria-label="Learn about Rings">
               <a class="static-primary-action" href="https://rings.rs/docs/">Read the docs</a>
               <a href="https://rings.rs/llms.txt">llms.txt</a>
@@ -124,11 +124,11 @@
           <div class="static-feature-grid">
             <section>
               <h3>Browser-native peers</h3>
-              <p>Rings runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry direct peer traffic without an application server in the data path.</p>
+              <p>Rings runs directly in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels carry peer-to-peer traffic across browsers and daemons.</p>
             </section>
             <section>
               <h3>DID identity and cryptography</h3>
-              <p>Peers use decentralized identifiers backed by selectable signature schemes, bridging browser, daemon, and wallet identity workflows without binding the network to one key system.</p>
+              <p>Peers use decentralized identifiers backed by selectable signature schemes, connecting browser, daemon, and wallet identity workflows across secp256k1, secp256r1, ed25519, BLS, and bip137.</p>
             </section>
             <section>
               <h3>Structured peer routing</h3>
@@ -143,9 +143,9 @@
 
         <section class="static-section static-architecture" aria-labelledby="static-architecture-title">
           <p class="static-kicker">Architecture</p>
-          <h2 id="static-architecture-title">Applications over protocols, Chord, WebRTC, and DID.</h2>
-          <p>Rings separates application behavior, protocol state, overlay routing, transport, and identity. Applications address peers and namespaces while the lower layers establish direct connectivity and route authenticated messages across the structured overlay.</p>
-          <p>The interactive browser node adds wallet login, SDP and HTTP connectivity, topology inspection, onion proxy requests, and custom messages when JavaScript and WebAssembly are available.</p>
+          <h2 id="static-architecture-title">Applications over protocols, Sphinx onion privacy, Chord, WebRTC, and DID.</h2>
+          <p>Rings layers application behavior, pure protocol state machines, multi-hop Sphinx onion circuits, Chord DHT routing, direct WebRTC transport, and DID identity. Applications address peers and namespaces while the lower layers establish direct connectivity, route authenticated messages, and protect metadata privacy.</p>
+          <p>The interactive browser node includes wallet login, SDP and HTTP connectivity, live Chord ring topology inspection, onion proxy routing, and custom namespace messaging right in your browser tab.</p>
         </section>
       </article>
 

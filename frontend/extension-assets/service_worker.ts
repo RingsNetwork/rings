@@ -212,9 +212,12 @@ chrome.action.onClicked.addListener((): void => {
 chrome.runtime.onMessage.addListener(
   (
     message: unknown,
-    _sender: chrome.runtime.MessageSender,
+    sender: chrome.runtime.MessageSender,
     sendResponse: (response?: RuntimeResponse<unknown>) => void,
   ): boolean => {
+    if (sender.id !== chrome.runtime.id) {
+      return false;
+    }
     if (isIconSetMessage(message)) {
       setNodeIconState(message.state)
         .then((): void => sendResponse({ ok: true }))
