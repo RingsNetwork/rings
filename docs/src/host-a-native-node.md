@@ -10,7 +10,7 @@ rings init
 
 This command will generate a configuration file named config.yaml for you. The default path is $HOME/.rings/config.yaml. You can also customize the path by using `rings init --location <path>`. Additionally, you can specify the key used by the Rings node by using `rings init -k <your private key>`. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false`, so it is the one place you edit; see [Native Gateway](native-gateway.md).
 
-By default, an ECDSA key pair will be automatically generated for you. The key pair in Rings Network is used for user identification and message signing. The key pair is utilized in various components of the network, so it is essential for users to ensure the security of their key pair. In the Native Node environment, since the private key is stored in plaintext, we strongly **discourage** the use of any asset-related key pair to host Rings Network.
+By default, `rings init` generates a fresh ECDSA account key and issues a bounded-authority session delegation (`delegatee_key`, valid for 30 days by default and configurable via `--ttl-seconds`) with owner-only file permissions (`0600` on Unix). Because the daemon signs day-to-day traffic with `delegatee_key` rather than your root account key, you can keep your primary or asset-holding keys offline and rotate session delegations on your own schedule; see [Delegations and keys](cli.md#delegations-and-keys).
 
 More about `config.yaml`you can find at:
 

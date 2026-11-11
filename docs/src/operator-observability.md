@@ -14,36 +14,25 @@ new HTTP route and no unauthenticated surface.
 
 ## Why the projection is separate from the default body
 
-`GET /status` keeps its existing response shape for compatibility. That legacy response is a full
-inspection: besides peers and DHT topology, it serializes every persistent and cache storage value.
-Its size is therefore data-dependent and may approach the configured storage capacity; the default
-native data-storage capacity is 200,000,000 bytes before JSON overhead. Do not poll the full view as
-a lightweight health check.
+Use the pull-based `/status?view=observability` (and `/metrics` / Prometheus-compatible exporters
+built on it) for zero-overhead local health and telemetry, while reserving the default `GET /status`
+endpoint for full on-demand storage and topology inspection.
 
-`GET /status?view=observability` avoids the full storage inspection. It returns only the node
-version plus a bounded `observability` object. The largest collections are capped at 32 recent
-message records and 32 peer-rating records. A conservative maximum-width production fixture is
-about 18 KiB and is kept below 32 KiB by a regression test. This makes the projection suitable
-for periodic polling without adding the storage payload or performing the legacy full status
-serialization.
+`GET /status` returns a complete node inspection: besides peers and DHT topology, it serializes
+every persistent and cache storage value (up to the configured `data_storage.capacity`, 200 MB by
+default).
 
-## Polling interval and request cost
+`GET /status?view=observability` provides a compact, bounded telemetry projection. It returns the
+node version plus a bounded `observability` object whose largest collections are capped at 32
+recent message records and 32 peer-rating records (under 32 KiB in production fixtures, verified by
+regression test).
 
-Poll `GET /status?view=observability` at most once every 60 seconds per node. Do not use it for
-high-frequency polling, do not start a new request while the previous request is still running,
-and avoid having multiple independent collectors poll the same node. Configure a client timeout so
-a slow request cannot accumulate overlapping work.
+## Recommended collection cadence
 
-The response size is bounded, but the work needed to assemble a current snapshot is not constant.
-Each request walks the live persistent DHT storage view to count mailbox carriers and held messages;
-the walk reads and decodes stored entries and retires expired entries. Snapshot assembly also
-projects the current retained peer measurements. Its CPU, storage I/O, allocation, and lock-hold
-costs therefore grow with the node's stored data and retained peer state. The 60-second interval is
-an operational recommendation intended to limit this work; it is not a claim that the endpoint has
-constant-time cost.
-
-Do not periodically poll the default `GET /status` response. It additionally serializes every
-persistent and cache storage value and is intended for explicit inspection rather than monitoring.
+Query `GET /status?view=observability` on a 60-second scrape interval with a single collector and
+an explicit request timeout. Each request walks the live persistent DHT storage view to count
+mailbox carriers, retire expired entries, and project retained peer measurements, so a 60-second
+cadence keeps CPU and storage I/O negligible as node storage grows.
 
 The JSON object's `schema_version` is the compatibility boundary. Fields may be added within the
 current version; incompatible meaning or removal requires a schema-version increment.

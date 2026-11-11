@@ -1,31 +1,29 @@
 # Connect Rings Network
 
-Rings is a peer-to-peer network based on WebRTC transport, and as such, you have multiple ways to establish connections:
+Rings is a peer-to-peer network built on WebRTC transport, offering three flexible ways to establish peer connections:
 
-### Peer-to-Peer：
+### 1. Manual Out-of-Band Exchange (SDP)
 
-You can establish a direct connection by exchanging Session Description Protocol (SDP). SDP is a format used to describe media session characteristics in a format that can be exchanged between peers. Read more:
+Two peers can open a direct WebRTC datachannel without any intermediary by exchanging Session Description Protocol (SDP) offers and answers out of band. Read more in [Exchange SDP](../advanced-topic/exchange-sdp.md).
 
-[exchange-sdp.md](../advanced-topic/exchange-sdp.md)
+### 2. HTTP Seed Endpoint
 
-### Via Entry Point
+Native nodes and Browser nodes are full peers on the same overlay. Native nodes can expose a public HTTP seed endpoint (`nodeDid` and `answerOffer`) so joining nodes—including browser tabs and nodes behind firewalls—can bootstrap into the network with a single request.
 
-Rings nodes are functionally equivalent, but they are divided into two categories based on the execution environment: Node nodes and Browser nodes. Node nodes are allowed to enable an external service called `EntryPoint`.
-
-The Entry Point is an HTTP service primarily used to assist in the initialization and network connection of nodes within a firewall. As long as you can connect to one of the nodes, you can join the Rings Network.
-
-If you have installed a Node node, you can use the following command to utilize the Entry Point:
+From a Native node CLI:
 
 ```bash
-rings connect node <entry_point url>
+rings connect node https://node.rings.rs
 ```
 
-If you are using a Browser node, you can utilize the Entry Point by calling the following function:
+From a Browser node (`@ringsnetwork/rings-node`):
 
 ```javascript
-client.connect_peer_via_http(url)
+await provider.connect_peer_via_http("https://node.rings.rs")
 ```
 
-Future reading:
+### 3. Chord Overlay Routing
 
-[handshake.md](../advanced-topic/handshake.md)
+Once connected to at least one peer, a node can dial any other peer on the network by its DID (`rings connect did <did>`). The Chord overlay routes the WebRTC offer and returns the answer along the recorded signaling path so the two peers establish a direct datachannel.
+
+Further reading: [How handshake works](../advanced-topic/handshake.md)

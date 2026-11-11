@@ -65,6 +65,9 @@ pub enum RpcError {
 /// A wrap `Result` contains ClientError.
 type Result<T> = std::result::Result<T, RpcError>;
 
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl Client {
     /// Creates an RPC client with redirects disabled on native targets.
     ///
@@ -72,7 +75,10 @@ impl Client {
     /// credentials through an ambient proxy. Browser credentials use Fetch with
     /// redirect mode `error` at the send boundary.
     pub fn new(endpoint_url: &str) -> Result<Self> {
-        Self::with_http_client_builder(endpoint_url, HttpClient::builder())
+        let builder = HttpClient::builder();
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.timeout(DEFAULT_RPC_REQUEST_TIMEOUT);
+        Self::with_http_client_builder(endpoint_url, builder)
     }
 
     /// Builds an RPC transport while retaining caller DNS pins, timeouts and TLS roots.

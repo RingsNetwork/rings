@@ -46,7 +46,7 @@ fn topology_component(props: &TopologyProps) -> Html {
             class="topology chord-topology"
             viewBox="0 0 420 420"
             role="img"
-            aria-label="inferred Chord identifier ring"
+            aria-label="Chord identifier ring"
             onclick={clear_pinned}
         >
             { topology_orbits(layout) }
@@ -127,7 +127,7 @@ fn topology_orbits(layout: TopologyLayout) -> Html {
 fn topology_caption(layout: TopologyLayout, node_count: usize) -> Html {
     html! {
         <>
-            <text class="topology-mode" x="20" y="30">{ "INFERRED CHORD RING" }</text>
+            <text class="topology-mode" x="20" y="30">{ "CHORD IDENTIFIER RING" }</text>
             <text class="topology-count" x="20" y="48">{ format!("{node_count} visible IDs") }</text>
             <text class="ring-zero" x={layout.center_x.to_string()} y="31" text-anchor="middle">{ "0 / 2^160" }</text>
         </>

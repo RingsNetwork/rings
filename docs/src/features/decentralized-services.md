@@ -9,9 +9,9 @@ A service on Rings has two independent parts:
 2. **Transport.** The client reaches a provider by DID through an extension protocol: a
    namespaced message, or a TCP/UDP tunnel through the built-in relay.
 
-Registering a name binds no endpoint: the DHT entry holds DIDs only, and what a provider serves
-is whatever its extension protocols do. There is no service backend in `config.yaml`; the node
-configuration rejects unknown keys, so an old `backend:` section fails to load.
+Registering a name in the DHT advertises the provider's DID, while extension protocols and the
+declarative `services:` section in [`config.yaml`](../advanced-topic/config.yaml.md#services-and-dns-relay)
+bind local sockets and handlers to serve traffic.
 
 ## Discovery
 
@@ -59,9 +59,11 @@ the browser.
 
 ### TCP and UDP relay
 
-`rings run` installs the relay on the namespaces `tcp` and `udp`, but registers no relay service:
-the relay maps a service name to a local socket address only through `RelayHandle` in an
-embedding Rust program, and neither the CLI, the JSON-RPC API nor the configuration can add one.
+`rings run` installs the built-in relay on the `tcp` and `udp` namespaces. You can expose local
+ports declaratively via the `services:` section in
+[`config.yaml`](../advanced-topic/config.yaml.md#services-and-dns-relay) (for DNS relay ingress at
+`<did>.<zone>`) or register and tunnel named TCP/UDP services programmatically in Rust through
+`RelayHandle`:
 
 ```rust
 // Provider node: expose a local socket under a relay service name, and advertise it.

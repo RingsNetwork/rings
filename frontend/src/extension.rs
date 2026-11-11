@@ -142,7 +142,10 @@ pub fn headless_node() -> Html {
             let remove_listener = js_method(&on_message, "removeListener").ok();
             let listener = Closure::<dyn FnMut(JsValue, JsValue, Function) -> bool>::new({
                 let state = state.clone();
-                move |message: JsValue, _sender: JsValue, send_response: Function| {
+                move |message: JsValue, sender: JsValue, send_response: Function| {
+                    if !is_trusted_extension_sender(&sender) {
+                        return false;
+                    }
                     let target = js_string_field(&message, "target").unwrap_or_default();
                     if target != EXTENSION_NODE_TARGET {
                         return false;
@@ -892,6 +895,20 @@ fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
 
 fn send_node_response(send_response: Function, response: Result<JsValue, String>) {
     let _sent = send_response.call1(&JsValue::NULL, &runtime_response(response));
+}
+
+fn is_trusted_extension_sender(sender: &JsValue) -> bool {
+    let Ok(sender_id) = js_string_field(sender, "id") else {
+        return false;
+    };
+    let Some(runtime_id) = Reflect::get(&js_sys::global(), &JsValue::from_str("chrome"))
+        .ok()
+        .and_then(|chrome| js_prop(&chrome, "runtime").ok())
+        .and_then(|runtime| js_string_field(&runtime, "id").ok())
+    else {
+        return false;
+    };
+    !runtime_id.is_empty() && sender_id == runtime_id
 }
 
 fn runtime_response(response: Result<JsValue, String>) -> JsValue {

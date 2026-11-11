@@ -495,7 +495,7 @@ pub(crate) fn network_stage(
         <section class="network-stage topology-stage" aria-label="Network topology console">
             <div class="topology-hud">
                 <div class="section-heading compact">
-                    <p class="eyebrow">{ "Network / inferred" }</p>
+                    <p class="eyebrow">{ "Network / Chord ring" }</p>
                 </div>
                 <div class="session-strip" aria-label="Delegation summary">
                     { local_did_metric(did_label, on_copy_did, can_copy_did) }
@@ -536,7 +536,7 @@ fn workspace_tabs(
                 let class = if panel == active { "workspace-tab active" } else { "workspace-tab" };
                 let disabled = extension_mode && panel != Panel::Onion;
                 let title = if disabled {
-                    "This panel uses the page-local node; use Onion Proxy with the extension background node"
+                    "Select a preset RPC request above to inspect live node state."
                 } else {
                     panel.label()
                 };

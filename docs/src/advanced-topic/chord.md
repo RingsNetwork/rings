@@ -176,7 +176,7 @@ relay path uses it: the hold, the recipient's removal of what it delivered, the 
 its acknowledged cleanup, the repair pass that lists what to hand off, and the recipient's
 drain. So a writer and a reader whose views cover the same nodes always name the same holder.
 
-The carrier is **replicated** to the key's **members** (#777, durable-records Section X): the
+The carrier is **replicated** to the key's **members** (#777, [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Durable Local Stores & Replicated Custody): the
 first `r` nodes from the key's owner that hold relay mail, the holder first, `r` configurable and
 8 by default (`RelayReplication`). The members form a chain in ring order, and a held message is
 lost only if every member holding it is lost within one repair delay (Propositions 10 and 11), so

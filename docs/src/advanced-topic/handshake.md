@@ -1,16 +1,13 @@
 # How handshake works
 
-Rings Network has chosen to use WebRTC as the transport layer, which facilitates the implementation of a purely peer-to-peer (P2P) network. This means that with the help of the WebRTC protocol and WebAssembly (Wasm), Rings nodes can run fully functional within web browsers.
+Rings Network uses WebRTC as its transport layer, enabling a pure peer-to-peer (P2P) network where Native nodes and Browser nodes (via WebAssembly) participate as equal peers.
 
-The WebRTC protocol is platform-agnostic and leverages Interactive Connectivity Establishment (ICE) for network traversal. It enables peers to establish direct connections by exchanging Session Description Protocol (SDP) for the purpose of handshake and negotiation.
+WebRTC is platform-agnostic and uses Interactive Connectivity Establishment (ICE) for NAT traversal. Peers establish direct, encrypted datachannels by exchanging signed Session Description Protocol (SDP) offers and answers.
 
-Rings Network supports two ways for establishing connections: Relay and Direct.
+Rings supports three complementary connection paths:
 
-* Relay: This involves establishing connections through a third-party node, such as a Rings node that has an endpoint service enabled. Using a relay offers convenience in establishing connections.
-* Direct: This refers to establishing peer-to-peer connections by directly exchanging SDP information. Direct connections are more decentralized in nature.
+* **HTTP Seed Endpoint:** A joining node dials a Native node's public HTTP handshake endpoint (`nodeDid` and `answerOffer`) for fast one-step onboarding.
+* **Chord Overlay Routing:** Once a node has joined the overlay, it can connect to any DID in the network (`ConnectNodeSend` / `ConnectNodeReport`) by routing the SDP handshake across the Chord ring.
+* **Manual Out-of-Band Exchange:** Two nodes can exchange encoded SDP offers and answers directly over any out-of-band channel (`rings connect offer` / `answer` / `accept`) with zero server involvement.
 
-Both approaches have their advantages. Relay connections are more convenient, while direct connections provide a more decentralized approach.
-
-To understand more about how handshake works, you may like to read:
-
-[exchange-sdp.md](exchange-sdp.md)
+To see the exact SDP message flow, read [Exchange SDP](exchange-sdp.md).

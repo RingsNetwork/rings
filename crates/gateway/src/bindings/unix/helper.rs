@@ -27,6 +27,7 @@ use crate::bindings::TunnelControl;
 use crate::GatewayError;
 use crate::GatewayPlan;
 
+const HELPER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const HELPER_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Configuration for one foreground Unix helper lifecycle.
@@ -272,7 +273,8 @@ fn accept_authorized(
             .map_err(|error| GatewayError::platform("accept-unix-helper", error))?;
         if peer_uid(&stream)? == authorized_uid {
             stream
-                .set_write_timeout(Some(HELPER_WRITE_TIMEOUT))
+                .set_read_timeout(Some(HELPER_READ_TIMEOUT))
+                .and_then(|()| stream.set_write_timeout(Some(HELPER_WRITE_TIMEOUT)))
                 .map_err(|error| GatewayError::platform("configure-unix-helper-peer", error))?;
             return Ok(stream);
         }
@@ -539,7 +541,10 @@ mod tests {
         let server = accept_authorized(&listener, Uid::effective().as_raw())
             .expect("accept authorized client");
 
-        assert_eq!(server.read_timeout().expect("read timeout"), None);
+        assert_eq!(
+            server.read_timeout().expect("read timeout"),
+            Some(super::HELPER_READ_TIMEOUT)
+        );
         assert!(server.write_timeout().expect("write timeout").is_some());
         drop(server);
         drop(client.join().expect("client thread"));

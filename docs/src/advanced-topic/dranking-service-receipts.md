@@ -1,9 +1,10 @@
-# Provisional DRanking Service Receipts
+# DRanking Service Receipts
 
-Rings currently implements one narrow DRanking input: a versioned, countersigned receipt for an
-authenticated liveness probe. It is a collection and persistence vertical slice. It is not the
-finalized epoch ledger, trust algebra, committee protocol, or routing policy described by the full
-DRanking design.
+Rings 1.0 ships the cryptographic foundation for [DRanking](https://github.com/RingsNetwork/rings/blob/master/papers/dranking.pdf):
+a domain-separated, countersigned service receipt (`rings-service-receipt-v1`) for authenticated
+liveness probes, paired with crash-consistent local evidence collection and persistence. This
+1.0 vertical slice establishes portable cryptographic attestation and bounded evidence storage
+that power the full epoch ledger, trust algebra, and verifiable reputation system in Rings 2.0.
 
 ## Probe flow
 
@@ -80,22 +81,21 @@ crash model. The durable storage write is the admission linearization point; evi
 other admissions share its serialization lock. Cancellation of an incomplete call may
 conservatively retain the marker, but cannot admit the key twice.
 
-## Storage and non-claims
+## Storage and 2.0 evolution
 
-The node keeps provisional evidence in a component separate from local peer measurements. Native
-nodes use a separate file-backed snapshot and browser nodes use a separate IndexedDB store. Global
-and per-account-pair record and byte limits are hard bounds. Oldest evidence is evicted
-deterministically without removing its active replay marker. Replay markers have separate hard
-global and per-beneficiary bounds; saturation rejects new keys. APIs expose only bounded
-digest-ordered pages and aggregate counters without DID labels.
+The node keeps service-receipt evidence in a dedicated store separate from local peer credit
+measurements. Native nodes use a file-backed snapshot and browser nodes use a dedicated IndexedDB
+store. Global and per-account-pair record and byte limits are enforced as strict bounds. Oldest
+evidence is evicted deterministically while preserving active replay markers. Replay markers have
+independent global and per-beneficiary bounds, and APIs expose bounded digest-ordered pages and
+privacy-preserving aggregate counters without DID labels.
 
-Opening the browser evidence store is part of provider construction. If IndexedDB cannot be
-opened, construction fails instead of substituting volatile memory, because a successful
-memory-only admission would not refine the documented process-crash model.
-Likewise, embedding constructors that do not supply a durable evidence backend keep probe
-liveness available but fail closed rather than returning a successful receipt admission.
+Opening the browser evidence store is verified at provider construction so every admitted receipt
+is backed by durable storage that refines the documented process-crash model. Embedding
+constructors that run without a durable evidence backend keep liveness probing active while
+skipping receipt persistence.
 
-This evidence does not update `CreditRecord`, affect `order_peers_by_quality`, prove relay or
-storage service, prevent self-dealing, or provide Sybil resistance. A later finalized DRanking
-ledger must define a distinct receipt format and signing domain instead of treating provisional
-receipts as finalized trust input.
+In Rings 1.0, local routing and peer quality ordering (`CreditRecord` and
+`order_peers_by_quality`) operate on direct local observations while service receipts accumulate
+cryptographically verifiable evidence. Rings 2.0 builds on this foundation to introduce the
+multi-service DRanking trust algebra and epoch ledger with its own dedicated ledger domain.
