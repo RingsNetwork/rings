@@ -11,7 +11,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "1.0.0-pre.1"
+version = "1.0.0-pre.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 authors = ["RND <dev@rings.rs>"]
@@ -22,19 +22,19 @@ homepage = "https://rings.rs"
 async-trait = "0.1.77"
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
-rings-aez = { path = "crates/aez", version = "1.0.0-pre.1" }
-rings-codec = { path = "crates/codec", version = "1.0.0-pre.1" }
-rings-core = { path = "crates/core", version = "1.0.0-pre.1", default-features = false }
-rings-derive = { path = "crates/derive", version = "1.0.0-pre.1", default-features = false }
-rings-dns-relay = { path = "crates/dns-relay", version = "1.0.0-pre.1" }
-rings-gateway = { path = "crates/gateway", version = "1.0.0-pre.1" }
-rings-measure = { path = "crates/measure", version = "1.0.0-pre.1" }
-rings-network-policy = { path = "crates/network-policy", version = "1.0.0-pre.1" }
-rings-node = { path = "crates/node", version = "1.0.0-pre.1" }
-rings-rpc = { path = "crates/rpc", version = "1.0.0-pre.1", default-features = false }
-rings-runtime = { path = "crates/runtime", version = "1.0.0-pre.1", default-features = false }
+rings-aez = { path = "crates/aez", version = "1.0.0-pre.2" }
+rings-codec = { path = "crates/codec", version = "1.0.0-pre.2" }
+rings-core = { path = "crates/core", version = "1.0.0-pre.2", default-features = false }
+rings-derive = { path = "crates/derive", version = "1.0.0-pre.2", default-features = false }
+rings-dns-relay = { path = "crates/dns-relay", version = "1.0.0-pre.2" }
+rings-gateway = { path = "crates/gateway", version = "1.0.0-pre.2" }
+rings-measure = { path = "crates/measure", version = "1.0.0-pre.2" }
+rings-network-policy = { path = "crates/network-policy", version = "1.0.0-pre.2" }
+rings-node = { path = "crates/node", version = "1.0.0-pre.2" }
+rings-rpc = { path = "crates/rpc", version = "1.0.0-pre.2", default-features = false }
+rings-runtime = { path = "crates/runtime", version = "1.0.0-pre.2", default-features = false }
 rings-test-support = { path = "crates/test-support" }
-rings-transport = { path = "crates/transport", version = "1.0.0-pre.1", default-features = false }
+rings-transport = { path = "crates/transport", version = "1.0.0-pre.2", default-features = false }
 serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.121"
 wasm-bindgen-futures = "0.4.71"

@@ -5,7 +5,7 @@
   ],
   "description": "Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons find each other by DID and talk over WebRTC, routed by a Chord DHT.",
   "homepage": "https://rings.rs",
-  "version": "1.0.0-pre.1",
+  "version": "1.0.0-pre.2",
   "license": "AGPL-3.0-only",
   "repository": {
     "type": "git",
