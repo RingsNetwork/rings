@@ -3,7 +3,7 @@
 extern crate proc_macro;
 use proc_macro::TokenStream;
 
-/// If the feature is not "wasm", the macro does nothing; otherwise, it calls wasm_bindgen.
+/// Attach `wasm_bindgen` when compiling the annotated item for a `wasm` target family.
 /// wasm_export does not work for Js Class. To export a class to js,
 /// you should use wasm_bindgen or __wasm_bindgen_class_marker.
 /// ref: <https://docs.rs/wasm-bindgen-macro/0.2.86/src/wasm_bindgen_macro/lib.rs.html#51>
@@ -17,16 +17,10 @@ pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     }
-    #[cfg(feature = "wasm")]
-    {
-        let input: proc_macro2::TokenStream = input.into();
-        quote::quote! {
-            #[cfg_attr(target_family = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
-            #input
-        }
-        .into()
+    let input: proc_macro2::TokenStream = input.into();
+    quote::quote! {
+        #[cfg_attr(target_family = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
+        #input
     }
-
-    #[cfg(not(feature = "wasm"))]
-    return input;
+    .into()
 }

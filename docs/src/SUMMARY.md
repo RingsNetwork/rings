@@ -33,7 +33,7 @@
 - [Account Abstraction](advanced-topic/account-abstraction.md)
 - [Transaction Replay Protection](advanced-topic/transaction-replay.md)
 - [Delegation References](advanced-topic/delegation-references.md)
-- [Provisional DRanking Service Receipts](advanced-topic/dranking-service-receipts.md)
+- [DRanking Service Receipts](advanced-topic/dranking-service-receipts.md)
 - [Local measurements and browser storage](advanced-topic/measurement-storage.md)
 - [config.yaml](advanced-topic/config.yaml.md)
 

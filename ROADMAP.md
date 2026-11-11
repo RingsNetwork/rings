@@ -5,42 +5,43 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 
 ## Milestones
 
-- **Pre-1.0.** Every frame carries a fixed `u16` wire-version header (`"RINGS\0" ‖ wire_version`,
-  currently `WIRE_VERSION = 3`), and handshakes refuse peers of any other wire version before
-  decoding a frame body (JSON-RPC error `210`). There is no cross-version negotiation: a release
-  that bumps `WIRE_VERSION` is a coordinated network cutover.
-- **1.0: a stable network.** Stabilizes the `1.0.x` public contracts and freezes
-  `WIRE_VERSION = 3` across the `1.0.x` line; see [UPGRADING.md](./UPGRADING.md).
-- **2.0: DRanking.** Verifiable peer ranking from service receipts
-  ([paper](./papers/dranking.pdf)).
+- **1.0: a stable network.** Delivers deterministic wire-versioned framing
+  (`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 3`), range-proved and non-transitive Chord
+  stabilization, CRDT removal stability, durable group-committed local stores and chain-replicated
+  relay custody, fair slot-isolated admission and load bounds, and client-sealed Sphinx onion
+  Kleisli pipelines (#834, #843, #880). Stabilizes the `1.0.x` public runtime contracts across the
+  `1.0.x` release line; see [UPGRADING.md](./UPGRADING.md) and the unified
+  [Rings whitepaper](./papers/rings.pdf).
+- **2.0: DRanking & randomized topology.** Verifiable peer ranking from cryptographic service
+  receipts ([paper](./papers/dranking.pdf)) and epoch-randomized ring placement (#780).
 
 ## Shipped
 
-- **Overlay:** Chord DHT with DID addressing, `network_id` isolation, and a path-less relay
-  whose carrier names only the next hop, destination, and hop budget (`crates/core`); connect
-  signaling alone records the relays it crosses, so its answer retraces them (#947).
-- **Transport:** WebRTC datachannels, native and browser, browser to browser included
+- **Overlay:** Chord DHT with DID addressing, `network_id` isolation, range-proved finger
+  convergence, non-transitive reachability healing, and a path-less relay whose carrier names only
+  the next hop, destination, and hop budget (`crates/core`); connect signaling records the relays
+  it crosses so its answer retraces them directly (#947).
+- **Transport:** WebRTC datachannels across native and browser peers, browser-to-browser included,
+  with 4-lane credit flow control and independent challenge-response liveness probes
   (`crates/transport`).
-- **Identity:** DIDs over secp256k1, secp256r1, ed25519, BLS, and bip137 keys; E2E ElGamal
-  encryption to a DID after its handshake.
-- **Admission:** at-most-once delivery through a persisted per-origin replay window,
-  per-origin rate limits, delegations referenced by content address, and bounded
-  connection and storage state.
-- **Privacy:** onion loops of fixed-width Sphinx cells, constant-rate link emission with real
-  cells substituted for cover, paid admission, size classes, persisted entry guards, and TCP/HTTPS exits (`crates/node/src/onion`); the TUN
-  gateway (`crates/gateway`) and onion WebView (`crates/webview`).
+- **Identity:** DIDs over secp256k1, secp256r1, ed25519, BLS, and bip137 keys; receiver-leased
+  delegation references and E2E ElGamal encryption to a DID after its handshake.
+- **Admission & storage:** at-most-once delivery through a group-committed per-origin replay
+  window, slot-isolated resource accounting (`SlotRoster` / `TableAccounting`), per-origin rate
+  quotas, clock-bounded CRDT removal stability, and chain-replicated relay-inbox custody.
+- **Privacy:** client-sealed Sphinx/AEZ onion Kleisli pipelines (#834, #843, #880) over fixed-width
+  cells, constant-rate link emission with real cells substituted for cover, paid admission, size
+  classes, persisted entry guards, and TCP/HTTPS exits (`crates/node/src/onion`); the TUN gateway
+  (`crates/gateway`) and onion WebView (`crates/webview`).
 - **Runtimes:** native daemon and `rings` CLI, JSON-RPC, C FFI, the browser provider, and the
   hosted console at [rings.rs](https://rings.rs/#node).
 - **Protocols:** pure `Protocol` + namespace-scoped `Interpret` shells (RFC #594), with
-  built-in TCP/UDP relay tunnels.
+  built-in TCP/UDP relay tunnels, DNS relay, and SMTP/IMAP mail gateway.
 
 ## In progress
 
-- Churn handling for 1.0 (#773–#779): a churn simulator, successor lists sized from network
-  estimates, RTT-derived liveness with ICE restart, inbox replication, stability-weighted
-  storage, and browser lifecycle handling.
-- Onion loops as client-sealed pipelines of registered operation symbols (#834); the loop
-  data plane is cut over (#843, #880).
+- Adaptive churn telemetry and tuning (#773–#779): churn simulation harnesses, dynamic successor-list
+  sizing from network estimates, RTT-aware ICE restart tuning, and browser lifecycle refinements.
 
 ## Planned
 

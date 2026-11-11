@@ -332,15 +332,23 @@ async fn close_provider(provider: Arc<Provider>) -> Result<()> {
 /// used again.
 #[no_mangle]
 pub unsafe extern "C" fn rings_node_listen(provider_ptr: *const ProviderHandle) {
-    let provider = match unsafe { ProviderHandle::from_ptr(provider_ptr) } {
-        Ok(provider) => provider,
-        Err(error) => {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let provider = match unsafe { ProviderHandle::from_ptr(provider_ptr) } {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::error!("FFI listen failed: {error}");
+                return;
+            }
+        };
+        if let Err(error) = provider.spawn_listener() {
             tracing::error!("FFI listen failed: {error}");
-            return;
         }
-    };
-    if let Err(error) = provider.spawn_listener() {
-        tracing::error!("FFI listen failed: {error}");
+    }))
+    .is_err()
+    {
+        let _ = std::panic::catch_unwind(|| {
+            tracing::error!("FFI listen panicked across C ABI boundary");
+        });
     }
 }
 
@@ -361,7 +369,7 @@ pub unsafe extern "C" fn rings_node_request(
     method: *const c_char,
     params: *const c_char,
 ) -> *mut c_char {
-    match (|| -> Result<*mut c_char> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<*mut c_char> {
         let handle = unsafe { ProviderHandle::from_ptr(provider_ptr) }?;
 
         let method = c_char_to_string(method)?;
@@ -385,10 +393,18 @@ pub unsafe extern "C" fn rings_node_request(
         let ret: String = serde_json::to_string(&ret)?;
         let c_ret = CString::new(ret)?.into_raw();
         Ok(c_ret)
-    })() {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("FFI Request failed, cause by: {:?}", e);
+    })) {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing::error!("FFI Request failed, cause by: {:?}", e);
+            }));
+            ptr::null_mut()
+        }
+        Err(_) => {
+            let _ = std::panic::catch_unwind(|| {
+                tracing::error!("FFI Request panicked across C ABI boundary");
+            });
             ptr::null_mut()
         }
     }
@@ -406,10 +422,18 @@ pub unsafe extern "C" fn rings_node_request(
 /// not already been freed.
 #[no_mangle]
 pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
-    if value.is_null() {
-        return;
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if value.is_null() {
+            return;
+        }
+        drop(unsafe { CString::from_raw(value) });
+    }))
+    .is_err()
+    {
+        let _ = std::panic::catch_unwind(|| {
+            tracing::error!("FFI string_free panicked across C ABI boundary");
+        });
     }
-    drop(unsafe { CString::from_raw(value) });
 }
 
 /// Destroy a provider handle returned by [`rings_node_new_provider_with_callback`].
@@ -429,11 +453,19 @@ pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
 /// and must not be used concurrently by other FFI calls while destruction runs.
 #[no_mangle]
 pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut ProviderHandle) {
-    if provider_ptr.is_null() {
-        return;
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if provider_ptr.is_null() {
+            return;
+        }
+        let provider = unsafe { Box::from_raw(provider_ptr) };
+        provider.shutdown();
+    }))
+    .is_err()
+    {
+        let _ = std::panic::catch_unwind(|| {
+            tracing::error!("FFI provider_destroy panicked across C ABI boundary");
+        });
     }
-    let provider = unsafe { Box::from_raw(provider_ptr) };
-    provider.shutdown();
 }
 
 /// Craft a new Provider with signer, keeping its stores under `storage_path`.
@@ -503,58 +535,68 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         }
     }
 
-    match (|| -> Result<*mut ProviderHandle> {
-        let signer = signer.ok_or(Error::FFINulPtrError)?;
-        let ice: String = c_char_to_string(ice_server)?;
-        let acc: String = c_char_to_string(account)?;
-        let acc_ty: String = c_char_to_string(account_type)?;
-        let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<*mut ProviderHandle> {
+            let signer = signer.ok_or(Error::FFINulPtrError)?;
+            let ice: String = c_char_to_string(ice_server)?;
+            let acc: String = c_char_to_string(account)?;
+            let acc_ty: String = c_char_to_string(account_type)?;
+            let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
 
-        let creation = std::thread::Builder::new()
-            .name("rings-ffi-provider-init".to_owned())
-            .spawn(move || -> Result<(Provider, Arc<Runtime>)> {
-                let runtime = Arc::new(Runtime::new().map_err(|error| {
-                    Error::ExtensionError(format!("failed to create runtime: {error}"))
-                })?);
-                let provider = runtime.block_on(async {
-                    let stores = NodeStores::open_under(&storage_root).await?;
-                    Provider::new_provider_internal(
-                        network_id,
-                        ice,
-                        stabilize_interval,
-                        acc,
-                        acc_ty,
-                        Signer::Sync(Box::new(wrapped_signer(signer))),
-                        ProviderStores {
-                            entry: Some(stores.data),
-                            relay: Some(stores.relay),
-                            removals: Some(stores.removals),
-                            measure: Some(stores.measure),
-                            evidence: Some(stores.evidence),
-                            guards: Some(stores.guards),
-                            replay: Some(stores.replay),
-                            released: stores.released,
-                        },
-                    )
-                    .await
+            let creation = std::thread::Builder::new()
+                .name("rings-ffi-provider-init".to_owned())
+                .spawn(move || -> Result<(Provider, Arc<Runtime>)> {
+                    let runtime = Arc::new(Runtime::new().map_err(|error| {
+                        Error::ExtensionError(format!("failed to create runtime: {error}"))
+                    })?);
+                    let provider = runtime.block_on(async {
+                        let stores = NodeStores::open_under(&storage_root).await?;
+                        Provider::new_provider_internal(
+                            network_id,
+                            ice,
+                            stabilize_interval,
+                            acc,
+                            acc_ty,
+                            Signer::Sync(Box::new(wrapped_signer(signer))),
+                            ProviderStores {
+                                entry: Some(stores.data),
+                                relay: Some(stores.relay),
+                                removals: Some(stores.removals),
+                                measure: Some(stores.measure),
+                                evidence: Some(stores.evidence),
+                                guards: Some(stores.guards),
+                                replay: Some(stores.replay),
+                                released: stores.released,
+                            },
+                        )
+                        .await
+                    })?;
+                    Ok((provider, runtime))
+                })
+                .map_err(|error| {
+                    Error::ExtensionError(format!("failed to start FFI provider runtime: {error}"))
                 })?;
-                Ok((provider, runtime))
-            })
-            .map_err(|error| {
-                Error::ExtensionError(format!("failed to start FFI provider runtime: {error}"))
-            })?;
-        let (provider, runtime) = creation.join().map_err(|_| {
-            Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
-        })??;
-        let provider = Arc::new(provider);
-        let e2e_events = Arc::new(FfiE2eInbox::default());
-        let handle = ProviderHandle::new(provider, runtime, e2e_events);
-        handle.spawn_application()?;
-        Ok(Box::into_raw(Box::new(handle)))
-    })() {
-        Ok(provider_ptr) => provider_ptr,
-        Err(error) => {
-            tracing::error!("FFI provider creation failed: {error}");
+            let (provider, runtime) = creation.join().map_err(|_| {
+                Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
+            })??;
+            let provider = Arc::new(provider);
+            let e2e_events = Arc::new(FfiE2eInbox::default());
+            let handle = ProviderHandle::new(provider, runtime, e2e_events);
+            handle.spawn_application()?;
+            Ok(Box::into_raw(Box::new(handle)))
+        },
+    )) {
+        Ok(Ok(provider_ptr)) => provider_ptr,
+        Ok(Err(error)) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                tracing::error!("FFI provider creation failed: {error}");
+            }));
+            ptr::null_mut()
+        }
+        Err(_) => {
+            let _ = std::panic::catch_unwind(|| {
+                tracing::error!("FFI provider creation panicked across C ABI boundary");
+            });
             ptr::null_mut()
         }
     }

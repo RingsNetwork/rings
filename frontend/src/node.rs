@@ -207,17 +207,14 @@ pub async fn accept_answer(provider: &Arc<Provider>, answer: String) -> Result<(
 /// Disconnect all currently known peers from a local provider.
 pub async fn disconnect_all(provider: &Arc<Provider>) -> Result<usize, String> {
     let peers = list_peers(provider).await?;
-    let mut closed = 0;
-    let mut attempted = 0;
-    for peer in peers {
-        attempted += 1;
-        if request(provider, "disconnect", obj(&[("did", peer.did())]))
-            .await
-            .is_ok()
-        {
-            closed += 1;
-        }
-    }
+    let attempted = peers.len();
+    let results = futures::future::join_all(
+        peers
+            .iter()
+            .map(|peer| request(provider, "disconnect", obj(&[("did", peer.did())]))),
+    )
+    .await;
+    let closed = results.into_iter().filter(Result::is_ok).count();
     if attempted == closed {
         Ok(closed)
     } else {

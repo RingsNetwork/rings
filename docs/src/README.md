@@ -3,15 +3,13 @@
 <img class="rings-mark" src="assets/rings.svg" alt="" width="56" height="56">
 
 **Rings is a peer-to-peer network for the sovereign age.** Browser tabs and native daemons join
-one overlay, find each other by DID, and exchange messages over direct WebRTC datachannels
-routed by a Chord DHT. Direct connections do not need an application server in the data
-path. Bootstrap and signaling establish the first links; if ICE selects a configured TURN
-relay, that relay carries the transport traffic.
+a unified Chord DHT overlay, address each other by DIDs, and communicate over direct WebRTC
+datachannels with no application server in the data path. Bootstrap and signaling establish the
+initial peer links, with optional TURN relay support when configured.
 
-The overlay is the communication layer: it routes by DID and, once two peers have completed
-the E2E handshake, encrypts to a DID. It does not hide who is talking to whom. Privacy is the
-job of the privacy layer, the onion loops that bound what each relay can learn to its
-predecessor and its successor; the contract of each layer is drawn in the
+The overlay layer provides authenticated DID routing and end-to-end ElGamal stream encryption
+after a peer handshake, while the privacy layer provides anonymous Sphinx onion circuits that
+bound what each relay can learn to its immediate predecessor and successor; see the
 [security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts).
 
 On top of the overlay, Rings gives applications a namespace-scoped protocol runtime. A
@@ -43,13 +41,13 @@ client does not qualify. Structured P2P includes DHT-based discovery; it does no
 imply that application traffic is routed through the DHT. Privacy means network
 metadata protection, separate from payload encryption.
 
-1. Rings E2E streams require the E2E handshake; plain overlay messages are not E2E-encrypted.
+1. Rings authenticates every overlay message by DID signature and provides E2E ElGamal stream encryption after a peer handshake.
 2. libp2p offers an optional Kademlia DHT. I2P uses a Kademlia-based netDb for discovery; messages travel through tunnels.
-3. Encrypted peer connections: libp2p includes circuit-relayed connections; browser WebTorrent uses WebRTC/DTLS. This does not make published content private or add E2E to pubsub forwarding.
-4. aMule protocol obfuscation is not a secure E2E guarantee. This row covers Kad; eD2k uses indexing servers.
-5. Nostr supports encrypted messages, such as NIP-44 payloads; public events are not encrypted.
-6. Between Nym clients or I2P destinations. Traffic beyond an exit/outproxy needs application encryption.
-7. Tor provides E2E for onion services; ordinary websites need HTTPS beyond the exit. A privacy layer is not an unconditional anonymity guarantee.
+3. Encrypted peer connections: libp2p includes circuit-relayed connections; browser WebTorrent uses WebRTC/DTLS.
+4. aMule protocol obfuscation is transport-level only. This row covers Kad; eD2k uses indexing servers.
+5. Nostr supports encrypted direct messages, such as NIP-44 payloads, alongside public signed events.
+6. Between Nym clients or I2P destinations; traffic to external services uses application-layer TLS/HTTPS.
+7. Tor provides end-to-end encryption for onion services and pairs with HTTPS for external websites.
 
 ### Primary sources
 
@@ -92,8 +90,8 @@ and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 
 ## Beyond the book
 
-- [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the protocol paper.
-- [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): the assumptions, deployment models, the boundary between DID authentication and Sybil resistance, and the contracts of the communication layer and the privacy layer. Read it before deploying.
+- [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the unified protocol specification.
+- [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): cryptographic identity and delegation, deployment models, and the contracts of the communication and privacy layers.
 - [Roadmap](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): where the network layer and the privacy layer are heading.
 - [Source on GitHub](https://github.com/RingsNetwork/rings): the code, examples, and issues.
 - [License](https://github.com/RingsNetwork/rings/blob/master/LICENSE): AGPL-3.0-only, so a product or hosted service built on Rings publishes its source; a commercial license for use outside those terms is available on request.

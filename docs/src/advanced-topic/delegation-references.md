@@ -181,22 +181,15 @@ A frame that references a delegation is refused there with `DelegationReferenceU
 frame on a connection from a peer other than the one its handshake is bound to: it arrived on no
 link, and is judged as self-contained.
 
-## Hard cutover
+## Canonical wire framing and signing domains
 
-0.28.0 is a network-wide protocol cutover. Payload frames begin with the `RINGS-PAYLOAD` marker
-and link-control frames with `RINGS-LINK`; a frame with neither, including every frame of
-0.27.x and earlier, is rejected before deserialization. There is no dual decoder, negotiation,
-or downgrade path.
+Payload frames begin with the `RINGS-PAYLOAD` marker and link-control frames with `RINGS-LINK`;
+a frame without a recognized marker is rejected before deserialization. `Known` frames carry the
+remaining duration of a lease (`remaining_ms`) relative to the receiver's clock so lease
+accounting requires no wall-clock synchronization between peers (#908).
 
-#908 changes the link-control tags again: `Request` and `Announce` are removed, and `Known`
-carries the remaining duration of a lease (`remaining_ms`) instead of an instant on the
-receiver's clock. A link-control frame of the previous encoding is not decoded; both ends of a
-link upgrade together.
-
-The protocol is not versioned before 1.0. Markers, signing domains, AEAD namespaces, and storage
-keys carry no version suffix: each of them names one domain, and a change to a domain is a
-total cutover, not a new version beside an old one. The version suffixes earlier releases had
-put on these names are removed in 0.28.0, so every signing domain (`rings-core:message-verification:transaction`,
-`rings-core:message-verification:payload`, the inbox, receipt, descriptor and onion domains)
-and the transaction-replay storage key change with it; a replay window persisted by 0.27.x is
-not read, which loses nothing, since no 0.27.x frame is accepted either.
+Every cryptographic proof uses an explicit, domain-separated signing transcript (`rings-delegation-v1`
+and EIP-712 / account verifiers for delegations, `rings-core:message-verification:transaction` for
+transactions, `rings-core:message-verification:payload` for hop carriers, and dedicated inbox,
+receipt, descriptor, and onion domains), paired with wire-versioned framing (`WIRE_VERSION = 3` in
+Rings 1.0).

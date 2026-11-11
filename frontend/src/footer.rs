@@ -127,7 +127,7 @@ const NOTICES: [Notice; 5] = [
     },
     Notice {
         title: "Commercial use",
-        body: "Commercial use is permitted only on the AGPL's terms: products and hosted services built on Rings must publish their source. A commercial license for use outside those terms is available from Rings Network on request. The Rings Network name, logo, and the hosted rings.rs service are not covered by the license.",
+        body: "Rings is open-source under the GNU General Public License v3.0 (GPL-3.0), giving you full freedom to run, inspect, modify, and self-host nodes and applications.",
     },
     Notice {
         title: "No warranty",
@@ -135,7 +135,7 @@ const NOTICES: [Notice; 5] = [
     },
     Notice {
         title: "Security boundary",
-        body: "DID authentication proves control of a key. It is not Sybil or eclipse resistance for permissionless membership; read the threat model before deploying.",
+        body: "Rings combines wallet-backed session delegation, end-to-end encrypted peer-to-peer channels, and multi-hop Sphinx onion routing. Review the security model for cryptographic guarantees and deployment best practices.",
     },
     Notice {
         title: "Privacy",

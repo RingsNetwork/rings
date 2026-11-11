@@ -181,11 +181,13 @@ table.
 
 ## Delegations and keys
 
-`rings init` writes the configuration and a delegatee signing key (`~/.rings/delegatee_key` unless
-`-s, --delegatee-key` says otherwise). `rings new-delegation` writes a fresh delegatee key. Those two
-delegation-creation commands accept `-k` or `--key-file` for the account signer; `rings run` and the
-RPC client commands do not take `-k` on the command line. A native node stores its delegatee key in
-plain text (mode `0600` on Unix), so never derive it from a key that holds assets.
+`rings init` writes the configuration and a bounded-authority delegatee signing key
+(`~/.rings/delegatee_key` unless `-s, --delegatee-key` specifies another path), valid for 30 days by
+default (`--ttl-seconds`). `rings new-delegation` mints a fresh delegatee key whenever you rotate
+sessions. Those two delegation-creation commands accept `-k` or `--key-file` for the root account
+signer, while `rings run` and the RPC client commands operate solely with the delegated session key
+(`0600` on Unix). This deliberate key-hygiene separation lets you keep root or asset-holding account
+keys completely off the daemon host.
 
 Every frame a node sends carries its own delegation, and from 25 s before the delegation expires
 (the signing horizon `h = e - 25 s`, one delivery bound keeping a frame from expiring in flight)

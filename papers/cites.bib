@@ -34,11 +34,31 @@
 @inproceedings{Chord,
   author = {Ion Stoica and Robert Morris and David Karger and M. Frans Kaashoek and Hari Balakrishnan},
   title = {Chord: A Scalable Peer-to-Peer Lookup Service for Internet Applications},
-  booktitle = {Proceedings of the 2001 Conference on Applications, Technologies, Architectures, and Protocols for Computer Communications},
+  booktitle = {Proceedings of the 2001 Conference on Applications, Technologies, Architectures, and Protocols for Computer Communications (SIGCOMM '01)},
   pages = {149--160},
   year = {2001},
   publisher = {ACM},
   doi = {10.1145/383059.383071}
+}
+
+@article{Stoica2003,
+  author  = {Ion Stoica and Robert Morris and David Liben-Nowell and David R. Karger and M. Frans Kaashoek and Frank Dabek and Hari Balakrishnan},
+  title   = {Chord: A Scalable Peer-to-Peer Lookup Protocol for Internet Applications},
+  journal = {IEEE/ACM Transactions on Networking},
+  volume  = {11},
+  number  = {1},
+  pages   = {17--32},
+  year    = {2003},
+  doi     = {10.1109/TNET.2002.808407}
+}
+
+@misc{Zave2015,
+  author        = {Pamela Zave},
+  title         = {How to Make {Chord} Correct (Using a Stable Base)},
+  year          = {2015},
+  eprint        = {1502.06461},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DC}
 }
 
 @article{ZaveChordCorrect,
@@ -53,6 +73,71 @@
   note = {\url{https://arxiv.org/abs/1610.01140}}
 }
 
+@inproceedings{Rhea2004,
+  author    = {Sean Rhea and Dennis Geels and Timothy Roscoe and John Kubiatowicz},
+  title     = {Handling Churn in a {DHT}},
+  booktitle = {Proceedings of the 2004 USENIX Annual Technical Conference},
+  pages     = {127--140},
+  year      = {2004},
+  publisher = {USENIX Association}
+}
+
+@inproceedings{Fidge1988,
+  author    = {Colin J. Fidge},
+  title     = {Timestamps in Message-Passing Systems That Preserve the Partial Ordering},
+  booktitle = {Proceedings of the 11th Australian Computer Science Conference},
+  pages     = {56--66},
+  year      = {1988}
+}
+
+@techreport{RFC9562,
+  author      = {Kyzer R. Davis and Brad Peabody and Paul J. Leach},
+  title       = {Universally Unique Identifiers ({UUIDs})},
+  type        = {RFC},
+  number      = {9562},
+  institution = {Internet Engineering Task Force},
+  year        = {2024},
+  doi         = {10.17487/RFC9562}
+}
+
+@inproceedings{Freedman2005,
+  author    = {Michael J. Freedman and Karthik Lakshminarayanan and David Mazi{\`e}res},
+  title     = {Non-Transitive Connectivity and {DHT}s},
+  booktitle = {Proceedings of the 2nd Conference on Real, Large Distributed Systems (WORLDS '05)},
+  pages     = {55--60},
+  year      = {2005},
+  publisher = {USENIX Association}
+}
+
+@inproceedings{Bryan2008,
+  author    = {David A. Bryan and Bruce B. Lowekamp and Cullen Jennings},
+  title     = {{SOSIMPLE}: A Serverless, Standards-based, {P2P} {SIP} Communication System},
+  booktitle = {Proceedings of the First International Workshop on Advanced Architectures and Algorithms for Internet Delivery and Applications (AAA-IDEA '05)},
+  pages     = {42--49},
+  year      = {2005},
+  publisher = {IEEE},
+  doi       = {10.1109/AAA-IDEA.2005.15}
+}
+
+@inproceedings{Ford2006,
+  author    = {Bryan Ford and Pyda Srisuresh and Dan Kegel},
+  title     = {Peer-to-Peer Communication Across Network Address Translators},
+  booktitle = {Proceedings of the 2005 USENIX Annual Technical Conference},
+  pages     = {179--192},
+  year      = {2005},
+  publisher = {USENIX Association}
+}
+
+@techreport{RFC8840,
+  author      = {Cullen Jennings and Bruce Lowekamp and Eric Rescorla and Salman Baset and Henning Schulzrinne},
+  title       = {Resource Location And Discovery ({RELOAD}) Base Protocol},
+  type        = {RFC},
+  number      = {6940},
+  institution = {Internet Engineering Task Force},
+  year        = {2014},
+  doi         = {10.17487/RFC6940}
+}
+
 @inproceedings{ShapiroCRDT,
   author = {Marc Shapiro and Nuno Pregui{\c{c}}a and Carlos Baquero and Marek Zawirski},
   title = {Conflict-Free Replicated Data Types},
@@ -63,6 +148,98 @@
   publisher = {Springer},
   year = {2011},
   doi = {10.1007/978-3-642-24550-3_29}
+}
+
+@article{HerlihyWing1990,
+  author  = {Maurice P. Herlihy and Jeannette M. Wing},
+  title   = {Linearizability: A Correctness Condition for Concurrent Objects},
+  journal = {ACM Transactions on Programming Languages and Systems},
+  volume  = {12},
+  number  = {3},
+  pages   = {463--492},
+  year    = {1990},
+  doi     = {10.1145/78969.78972}
+}
+
+@inproceedings{Pillai2014,
+  author    = {Thanumalayan Sankaranarayana Pillai and Vijay Chidambaram and Ramnatthan Alagappan and Samer Al-Kiswany and Andrea C. Arpaci-Dusseau and Remzi H. Arpaci-Dusseau},
+  title     = {All File Systems Are Not Created Equal: On the Complexity of Crafting Crash-Consistent Applications},
+  booktitle = {11th USENIX Symposium on Operating Systems Design and Implementation (OSDI '14)},
+  pages     = {433--448},
+  year      = {2014},
+  publisher = {USENIX Association}
+}
+
+@misc{IndexedDB3,
+  author       = {{W3C Web Applications Working Group}},
+  title        = {Indexed Database {API} 3.0},
+  howpublished = {W3C Editor's Draft, \url{https://w3c.github.io/IndexedDB/}},
+  note         = {Section ``Transaction durability''; accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{ChromeDurability,
+  author       = {{Chrome for Developers}},
+  title        = {A change to the default durability mode in {IndexedDB}},
+  howpublished = {\url{https://developer.chrome.com/blog/indexeddb-durability-mode-now-defaults-to-relaxed}},
+  note         = {Default changes from strict to relaxed in Chrome 121; accessed 2026-10-23},
+  year         = {2024}
+}
+
+@misc{GeckoIDB,
+  author       = {{Mozilla}},
+  title        = {{IndexedDB} parent actors (\texttt{ActorsParent.cpp})},
+  howpublished = {\url{https://github.com/mozilla-firefox/firefox/blob/main/dom/indexedDB/ActorsParent.cpp}},
+  note         = {\texttt{BeginWriteTransaction} and \texttt{GetDefaultSynchronousMode}; accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{WebKitIDB,
+  author       = {{WebKit}},
+  title        = {{IndexedDB} {SQLite} backing store (\texttt{SQLiteIDBBackingStore.cpp})},
+  howpublished = {\url{https://github.com/WebKit/WebKit/blob/main/Source/WebCore/Modules/indexeddb/server/SQLiteIDBBackingStore.cpp}},
+  note         = {\texttt{commitTransaction}; accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{SQLiteWAL,
+  author       = {{SQLite}},
+  title        = {Write-Ahead Logging, and {PRAGMA} synchronous},
+  howpublished = {\url{https://www.sqlite.org/wal.html}},
+  note         = {Accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{MDNEviction,
+  author       = {{MDN Web Docs}},
+  title        = {Storage quotas and eviction criteria},
+  howpublished = {\url{https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria}},
+  note         = {Accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{AppleFsync,
+  author       = {{Apple}},
+  title        = {\texttt{fsync(2)} and \texttt{fcntl(2)}: \texttt{F\_FULLFSYNC}},
+  howpublished = {macOS manual pages},
+  note         = {Accessed 2026-10-23},
+  year         = {2026}
+}
+
+@misc{MoveFileEx,
+  author       = {{Microsoft}},
+  title        = {\texttt{MoveFileExW} function (\texttt{winbase.h}): \texttt{MOVEFILE\_WRITE\_THROUGH}},
+  howpublished = {\url{https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw}},
+  note         = {Accessed 2026-10-23},
+  year         = {2026}
+}
+
+@inproceedings{BlakeRodrigues,
+  author    = {Charles Blake and Rodrigo Rodrigues},
+  title     = {High Availability, Scalable Storage, Dynamic Peer Networks: Pick Two},
+  booktitle = {Proceedings of the 9th Workshop on Hot Topics in Operating Systems (HotOS IX)},
+  year      = {2003},
+  pages     = {1--6}
 }
 
 @article{ssss,
@@ -76,13 +253,236 @@
   doi = {10.1145/359168.359176}
 }
 
-@misc{RFC4975,
-  author = {B. Campbell and R. Mahy and C. Jennings},
-  title = {The Message Session Relay Protocol ({MSRP})},
-  howpublished = {RFC 4975},
-  year = {2007},
-  doi = {10.17487/RFC4975},
-  note = {\url{https://www.rfc-editor.org/info/rfc4975}}
+@article{Chaum1981,
+  author  = {David L. Chaum},
+  title   = {Untraceable Electronic Mail, Return Addresses, and Digital Pseudonyms},
+  journal = {Communications of the ACM},
+  volume  = {24},
+  number  = {2},
+  pages   = {84--90},
+  year    = {1981},
+  doi     = {10.1145/358549.358563}
+}
+
+@inproceedings{Danezis2003,
+  author    = {George Danezis and Roger Dingledine and Nick Mathewson},
+  title     = {Mixminion: Design of a Type {III} Anonymous Remailer Protocol},
+  booktitle = {Proceedings of the 2003 IEEE Symposium on Security and Privacy},
+  pages     = {2--15},
+  year      = {2003},
+  publisher = {IEEE},
+  doi       = {10.1109/SECPRI.2003.1199323}
+}
+
+@inproceedings{Danezis2009,
+  author    = {George Danezis and Ian Goldberg},
+  title     = {Sphinx: A Compact and Provably Secure Mix Format},
+  booktitle = {Proceedings of the 30th IEEE Symposium on Security and Privacy},
+  pages     = {269--282},
+  year      = {2009},
+  publisher = {IEEE},
+  doi       = {10.1109/SP.2009.15}
+}
+
+@inproceedings{Piotrowska2017,
+  author    = {Ania M. Piotrowska and Jamie Hayes and Tariq Elahi and Sebastian Meiser and George Danezis},
+  title     = {The {Loopix} Anonymity System},
+  booktitle = {Proceedings of the 26th USENIX Security Symposium},
+  pages     = {1199--1216},
+  year      = {2017},
+  publisher = {USENIX Association}
+}
+
+@inproceedings{Degabriele2018,
+  author    = {Jean Paul Degabriele and Martijn Stam},
+  title     = {Untagging {Tor}: A Formal Treatment of Onion Encryption},
+  booktitle = {Advances in Cryptology -- EUROCRYPT 2018},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {10822},
+  pages     = {259--293},
+  year      = {2018},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-319-78372-7_9}
+}
+
+@inproceedings{Anderson1996,
+  author    = {Ross Anderson and Eli Biham},
+  title     = {Two Practical and Provably Secure Block Ciphers: {BEAR} and {LION}},
+  booktitle = {Fast Software Encryption (FSE 1996)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {1039},
+  pages     = {113--120},
+  year      = {1996},
+  publisher = {Springer},
+  doi       = {10.1007/3-540-60865-6_48}
+}
+
+@inproceedings{Hoang2015,
+  author    = {Viet Tung Hoang and Ted Krovetz and Phillip Rogaway},
+  title     = {Robust Authenticated-Encryption: {AEZ} and the Problem That It Solves},
+  booktitle = {Advances in Cryptology -- EUROCRYPT 2015},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {9056},
+  pages     = {15--44},
+  year      = {2015},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-662-46800-5_2}
+}
+
+@misc{AEZv5,
+  author       = {Viet Tung Hoang and Ted Krovetz and Phillip Rogaway},
+  title        = {{AEZ} v5: Authenticated Encryption by Enciphering},
+  howpublished = {CAESAR competition submission, third round},
+  year         = {2017}
+}
+
+@article{Moggi1991,
+  author  = {Eugenio Moggi},
+  title   = {Notions of Computation and Monads},
+  journal = {Information and Computation},
+  volume  = {93},
+  number  = {1},
+  pages   = {55--92},
+  year    = {1991},
+  doi     = {10.1016/0890-5401(91)90052-4}
+}
+
+@article{Plotkin2003,
+  author  = {Gordon Plotkin and John Power},
+  title   = {Algebraic Operations and Generic Effects},
+  journal = {Applied Categorical Structures},
+  volume  = {11},
+  number  = {1},
+  pages   = {69--94},
+  year    = {2003},
+  doi     = {10.1023/A:1023064908962}
+}
+
+@inproceedings{Plotkin2009,
+  author    = {Gordon Plotkin and Matija Pretnar},
+  title     = {Handlers of Algebraic Effects},
+  booktitle = {Programming Languages and Systems (ESOP 2009)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {5502},
+  pages     = {80--94},
+  year      = {2009},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-642-00590-9_7}
+}
+
+@article{Hughes2000,
+  author  = {John Hughes},
+  title   = {Generalising Monads to Arrows},
+  journal = {Science of Computer Programming},
+  volume  = {37},
+  number  = {1--3},
+  pages   = {67--111},
+  year    = {2000},
+  doi     = {10.1016/S0167-6423(99)00023-4}
+}
+
+@article{Lindley2011,
+  author  = {Sam Lindley and Philip Wadler and Jeremy Yallop},
+  title   = {Idioms Are Oblivious, Arrows Are Meticulous, Monads Are Promiscuous},
+  journal = {Electronic Notes in Theoretical Computer Science},
+  volume  = {229},
+  number  = {5},
+  pages   = {97--117},
+  year    = {2011},
+  doi     = {10.1016/j.entcs.2011.02.018}
+}
+
+@article{Mokhov2019,
+  author  = {Andrey Mokhov and Georgy Lukyanov and Simon Marlow and Jeremie Dimino},
+  title   = {Selective Applicative Functors},
+  journal = {Proceedings of the ACM on Programming Languages},
+  volume  = {3},
+  number  = {ICFP},
+  pages   = {90:1--90:29},
+  year    = {2019},
+  doi     = {10.1145/3341694}
+}
+
+@inproceedings{Goguen1982,
+  author    = {Joseph A. Goguen and Jos{\'e} Meseguer},
+  title     = {Security Policies and Security Models},
+  booktitle = {Proceedings of the 1982 IEEE Symposium on Security and Privacy},
+  pages     = {11--20},
+  year      = {1982},
+  publisher = {IEEE},
+  doi       = {10.1109/SP.1982.10014}
+}
+
+@article{Bloom1970,
+  author  = {Burton H. Bloom},
+  title   = {Space/Time Trade-offs in Hash Coding with Allowable Errors},
+  journal = {Communications of the ACM},
+  volume  = {13},
+  number  = {7},
+  pages   = {422--426},
+  year    = {1970},
+  doi     = {10.1145/362686.362692}
+}
+
+@article{Almeida2007,
+  author  = {Paulo S{\'e}rgio Almeida and Carlos Baquero and Nuno Pregui{\c{c}}a and David Hutchison},
+  title   = {Scalable {Bloom} Filters},
+  journal = {Information Processing Letters},
+  volume  = {101},
+  number  = {6},
+  pages   = {255--261},
+  year    = {2007},
+  doi     = {10.1016/j.ipl.2006.10.007}
+}
+
+@misc{RingsDRanking2026,
+  author       = {Ryan J. Kung},
+  title        = {The {DRanking} Protocol: Verifiable Distributed Ranking and Sybil-Bounded Admission for Structured Peer-to-Peer Networks},
+  howpublished = {Rings Network Companion Specification (\texttt{papers/dranking.pdf})},
+  year         = {2026}
+}
+
+@inproceedings{Douceur2002,
+  author    = {John R. Douceur},
+  title     = {The Sybil Attack},
+  booktitle = {Peer-to-Peer Systems, First International Workshop (IPTPS 2002)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {2429},
+  pages     = {251--260},
+  publisher = {Springer},
+  year      = {2002},
+  doi       = {10.1007/3-540-45748-8_24}
+}
+
+@inproceedings{EigenTrust,
+  author    = {Sepandar D. Kamvar and Mario T. Schlosser and Hector Garcia-Molina},
+  title     = {The {EigenTrust} Algorithm for Reputation Management in {P2P} Networks},
+  booktitle = {Proceedings of the 12th International Conference on World Wide Web (WWW 2003)},
+  pages     = {640--651},
+  publisher = {ACM},
+  year      = {2003},
+  doi       = {10.1145/775152.775242}
+}
+
+@techreport{PageRank,
+  author      = {Lawrence Page and Sergey Brin and Rajeev Motwani and Terry Winograd},
+  title       = {The {PageRank} Citation Ranking: Bringing Order to the Web},
+  institution = {Stanford InfoLab},
+  number      = {1999-66},
+  year        = {1999},
+  note        = {\url{http://ilpubs.stanford.edu:8090/422/}}
+}
+
+@inproceedings{Nova,
+  author    = {Abhiram Kothapalli and Srinath Setty and Ioanna Tzialla},
+  title     = {Nova: Recursive Zero-Knowledge Arguments from Folding Schemes},
+  booktitle = {Advances in Cryptology -- CRYPTO 2022},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {13510},
+  pages     = {359--388},
+  publisher = {Springer},
+  year      = {2022},
+  doi       = {10.1007/978-3-031-15985-5_13}
 }
 
 @book{LamportSpecifyingSystems,
@@ -97,7 +497,8 @@
   author = {Jonathan Nadal},
   title = {Stateright: Model Checking for Implementing Distributed Systems},
   howpublished = {\url{https://www.stateright.rs/}},
-  note = {Accessed: July 4, 2026}
+  note = {Accessed: July 4, 2026},
+  year = {2026}
 }
 
 @inproceedings{Kademlia,

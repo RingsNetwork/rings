@@ -43,13 +43,12 @@ communicate over direct WebRTC datachannels with no application server in the da
 
 ## Status
 
-Active public overlay at the seed `node.rings.rs`, with wire-versioned framing
-(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 3`) on every frame and handshake. Nodes accept only
-their own `WIRE_VERSION` without cross-version negotiation; 1.0 freezes `WIRE_VERSION = 3` and
-the public runtime contracts across `1.0.x`, while 2.0 extends the overlay with epoch-randomized
-ring placement ([#780](https://github.com/RingsNetwork/rings/issues/780)) and decentralized trust
-ranking (DRanking). See [UPGRADING.md](./UPGRADING.md), [ROADMAP.md](./ROADMAP.md), and
-[SECURITY.md](./SECURITY.md).
+Active public overlay at the seed `node.rings.rs`, with deterministic wire-versioned framing
+(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 3`) across every frame and handshake. 1.0 stabilizes
+`WIRE_VERSION = 3` and the public runtime contracts across `1.0.x`, while 2.0 extends the overlay
+with epoch-randomized ring placement ([#780](https://github.com/RingsNetwork/rings/issues/780)) and
+decentralized trust ranking (DRanking). See [UPGRADING.md](./UPGRADING.md),
+[ROADMAP.md](./ROADMAP.md), and [SECURITY.md](./SECURITY.md).
 
 ## Where Rings fits
 
@@ -151,7 +150,7 @@ The installer detects macOS (`aarch64`, `x86_64`) or Linux (`x86_64` static musl
 gnu), downloads the matching [release](https://github.com/RingsNetwork/rings/releases)
 archive, verifies its SHA-256 checksum, and installs `rings` to `/usr/local/bin` (when
 writable) or `~/.local/bin`. Re-run the same command to upgrade in place, or pass
-`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.1`)
+`--version vX.Y.Z` (`curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.2`)
 to pin a release.
 
 - **Cargo:** build with the toolchain pinned in [`rust-toolchain.toml`](./rust-toolchain.toml):
@@ -182,10 +181,12 @@ live under [`contrib/`](./contrib/README.md).
 
 ## Whitepaper
 
-- [Rings whitepaper](./papers/rings.pdf) ([LaTeX](./papers/rings.tex), [build notes](./papers/README.md))
-- [DRanking](./papers/dranking.pdf): decentralized trust and ranking protocol for 2.0, backed
+- [Rings whitepaper](./papers/rings.pdf) ([LaTeX](./papers/rings.tex), [build notes](./papers/README.md)):
+  the unified protocol specification, integrating range-proved and non-transitive Chord
+  stabilization, CRDT removal stability, durable local stores and chain-replicated relay custody,
+  fair slot-isolated admission and load bounds, and Sphinx onion Kleisli pipelines.
+- [DRanking](./papers/dranking.pdf): decentralized trust and ranking protocol for Rings 2.0, backed
   by signed [service-receipt evidence](./docs/src/advanced-topic/dranking-service-receipts.md).
-- [Finger convergence](./papers/finger-convergence.pdf): range-proved finger convergence.
 
 To cite Rings:
 

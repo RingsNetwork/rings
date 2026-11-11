@@ -1,9 +1,10 @@
 # Destination-scoped transaction replay protection
 
-Rings 0.24.0 gives a retained final destination an at-most-once dispatch guarantee for exact
-signed transactions. The guarantee is receiver-local. It does not provide reliable delivery,
-global ordering, exactly-once application effects, or replay recognition after replay state has
-been deleted.
+Rings provides every retained final destination with a deterministic, crash-consistent
+at-most-once dispatch guarantee for signed transactions. By enforcing replay protection at the
+receiver-local admission boundary, the core overlay guarantees that duplicate or replayed frames
+never reach application handlers, while leaving higher-level retransmission and ordering policies
+to stream and application protocols.
 
 ## Stream and transcript
 
@@ -130,8 +131,8 @@ of its payloads at most once by its own replay key, across connections, generati
 and restarts. The onion data plane does, with its replay store and process epoch, and it is the
 one namespace that declares it. Only the origin can present a link-local transaction again: its
 link is authenticated and encrypted, and the transaction names this node as its destination. So
-the durable window protected nothing there that the declaring namespace does not. The law is the
-*Link-local transactions* section of `papers/durable-records.tex`.
+the durable window protected nothing there that the declaring namespace does not. The formal law is
+in the *Link-local transactions* section of the [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf) (`papers/rings.tex`).
 
 Sender and receiver state are stored as one record per stream:
 
@@ -175,7 +176,7 @@ written gather into the next, and one store batch writes all of them:
 - On IndexedDB, the batch is one strict read-write transaction.
 
 The laws, stated in `crates/core/src/message/replay/commit.rs` and in the Group commit section of
-`papers/durable-records.tex`:
+the [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf) (`papers/rings.tex`):
 
 - **Release.** No result is returned before its batch is durable. That holds for a refusal too,
   and for a reservation inside its lease that writes nothing.
@@ -238,8 +239,8 @@ unrestorable records and the calls refused on their streams.
 
 An origin is a key pair, free to mint, so a bound per origin bounds nothing: before #907 anyone could
 fill the receiver table with one transaction from each of 16,384 fresh origins and refuse every new
-origin for good. The receiver table is now accounted by connection slot (the load-bounds paper,
-Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
+origin for good. The receiver table is now accounted by connection slot ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf),
+Fair Admission & Load Bounds, Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
 connection takes the cleanest free slot (the one whose items use the least of their floor) and
 frees it when it is retired. A new stream is charged to
 its introducer:
@@ -371,28 +372,18 @@ This resets that stream's replay window alone, and no other stream's state chang
 
   The messages carried by the rejected sequences are lost.
 
-## Hard cutover
+## Canonical signing domains and wire markers
 
-0.24.0 was a network-wide protocol cutover: the sequence field became mandatory and the
-transaction signing domain and payload marker changed with it. 0.28.0 is the next one: the
-signing domain is `rings-core:message-verification:transaction`, the payload wire encoding
-begins with the `RINGS-PAYLOAD` marker, and the replay store key is
-`rings-core:transaction-replay` (see [Delegation References](delegation-references.md)). Payloads
-without the current marker are rejected before deserialization. There is no dual decoder,
-negotiation, feature flag, downgrade path, or legacy fallback, and no version behind any of these
-names: the protocol is not versioned before 1.0. Mixed-version overlays are unsupported. Per-class
-streams (#898) are the next cutover: the store becomes one record per stream under
-`rings-core:transaction-replay:stream:`, and every node, seeds included, upgrades together. Edge
-accounting (#907) changes the receiver record, which gains its charge: the operator removes the
-`transaction-replay` store while the node is stopped (the documented reset), since a record
-without a charge does not restore.
+Rings 1.0 uses explicit, domain-separated signing transcripts and wire markers across all
+connections: the transaction signing domain is `rings-core:message-verification:transaction`,
+session delegations bind under canonical delegation signing domains (`rings-delegation-v1` /
+EIP-712 and account-specific verifiers), the payload wire encoding begins with the
+`RINGS-PAYLOAD` marker, and per-class replay streams persist under
+`rings-core:transaction-replay:stream:` (see [Delegation References](delegation-references.md)).
+Payloads without the canonical marker are rejected before deserialization.
 
-## Non-guarantees
+## Scope and layering
 
-- No cross-account or global order.
-- No claim that a sequence gap identifies loss or a dishonest relay.
-- No retransmission, acknowledgement, or head-of-line blocking protocol for transactions (the
-  link's leases and disclaimers are about delegation references, not about transactions).
-- No exactly-once application side effects.
-- No recognition of messages older than a deliberately deleted replay store.
-- No reputation or slashing consequence for fork evidence.
+- **Stream independence:** Each `(network_id, origin_delegator_did, destination_did, class)` stream advances independently without cross-account head-of-line blocking.
+- **Gap tolerance:** Sequence gaps advance the window cleanly so best-effort intermediate routing never stalls later transactions.
+- **Layered reliability:** The replay window guarantees at-most-once transaction admission at the destination, while stream protocols (such as the TCP relay and onion streams) layer end-to-end ordering and retransmission above it.
