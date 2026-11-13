@@ -65,8 +65,9 @@ pub enum RpcError {
 /// A wrap `Result` contains ClientError.
 type Result<T> = std::result::Result<T, RpcError>;
 
-#[cfg(not(target_arch = "wasm32"))]
-const DEFAULT_RPC_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const DEFAULT_RPC_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
+pub(crate) const MAX_RPC_RESPONSE_BYTES: usize = 16 * 1_024 * 1_024;
 
 impl Client {
     /// Creates an RPC client with redirects disabled on native targets.

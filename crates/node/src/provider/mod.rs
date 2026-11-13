@@ -78,12 +78,9 @@ where
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
-/// General Provider, which holding reference of Processor
-/// Provider should be obey memory layout of CLang
-/// Provider should be export for wasm-bindgen
+/// General Provider holding the node processor, RPC dispatcher, and extension registry.
 #[derive(Clone)]
 #[allow(dead_code)]
-#[repr(C)]
 #[wasm_export]
 pub struct Provider {
     processor: Arc<Processor>,
@@ -692,8 +689,13 @@ fn onion_directory_endpoint_from_rpc(
     let api_token = params
         .get("api_token")
         .and_then(serde_json::Value::as_str)
-        .map(Arc::<str>::from);
-    Some(BrowserDirectoryEndpoint { url, api_token })
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(Arc::<str>::from)?;
+    Some(BrowserDirectoryEndpoint {
+        url,
+        api_token: Some(api_token),
+    })
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]

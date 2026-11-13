@@ -73,11 +73,17 @@ where P: AsRef<std::path::Path> {
 pub mod loader {
     //! A module to help user load config from local file or remote url.
 
+    use std::io::Read;
+    use std::time::Duration;
+
     use async_trait::async_trait;
     use reqwest::Url;
     use serde::de::DeserializeOwned;
 
     use crate::seed::Seed;
+
+    const MAX_RESOURCE_BYTES: usize = 4 * 1_024 * 1_024;
+    const RESOURCE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
     /// Load config from local file or remote url.
     /// To use this trait, derive DeserializeOwned then implement this trait.
@@ -88,19 +94,89 @@ pub mod loader {
         where Self: Sized + DeserializeOwned {
             let url = Url::parse(source).map_err(|e| anyhow::anyhow!("{}", e))?;
 
-            if let Ok(path) = url.to_file_path() {
-                let data = std::fs::read_to_string(path)
+            if url.scheme() == "file" {
+                let path = url
+                    .to_file_path()
+                    .map_err(|_| anyhow::anyhow!("Invalid file resource path"))?;
+                let file = std::fs::File::open(path)
                     .map_err(|_| anyhow::anyhow!("Unable to read resource file"))?;
-
-                serde_json::from_str(&data).map_err(|e| anyhow::anyhow!("{}", e))
-            } else {
-                let resp = reqwest::get(source)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("failed to get resource from {}", source))?;
-                resp.json()
-                    .await
-                    .map_err(|_| anyhow::anyhow!("failed to load resource from {}", source))
+                let mut bytes = Vec::new();
+                file.take((MAX_RESOURCE_BYTES as u64).saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| anyhow::anyhow!("Unable to read resource file"))?;
+                if bytes.len() > MAX_RESOURCE_BYTES {
+                    anyhow::bail!("resource file exceeds maximum {MAX_RESOURCE_BYTES} bytes");
+                }
+                return serde_json::from_slice(&bytes).map_err(|e| anyhow::anyhow!("{}", e));
             }
+
+            if !matches!(url.scheme(), "http" | "https") {
+                anyhow::bail!("unsupported resource scheme {}", url.scheme());
+            }
+            if !url.username().is_empty() || url.password().is_some() {
+                anyhow::bail!("resource URL must not contain userinfo credentials");
+            }
+            rings_network_policy::validate_public_url_host(&url)
+                .map_err(|e| anyhow::anyhow!("resource URL blocked by network policy: {e}"))?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| anyhow::anyhow!("resource URL missing host"))?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| anyhow::anyhow!("resource URL missing port"))?;
+            let resolved: Vec<std::net::SocketAddr> = tokio::time::timeout(
+                RESOURCE_FETCH_TIMEOUT,
+                tokio::net::lookup_host((host, port)),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("timed out resolving resource host"))?
+            .map_err(|e| anyhow::anyhow!("failed to resolve resource host: {e}"))?
+            .collect();
+            if resolved.is_empty()
+                || resolved
+                    .iter()
+                    .any(|addr| !rings_network_policy::is_public_ip(addr.ip()))
+            {
+                anyhow::bail!("resource URL resolved to a non-public IP address");
+            }
+
+            let mut builder = reqwest::Client::builder()
+                .timeout(RESOURCE_FETCH_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy();
+            if matches!(url.host(), Some(url::Host::Domain(_))) {
+                builder = builder.resolve_to_addrs(host, &resolved);
+            }
+            let client = builder
+                .build()
+                .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
+            let mut resp = client
+                .get(url)
+                .send()
+                .await
+                .map_err(|_| anyhow::anyhow!("failed to get resource from {}", source))?
+                .error_for_status()
+                .map_err(|_| anyhow::anyhow!("failed to get resource from {}", source))?;
+            if let Some(len) = resp.content_length() {
+                if len > MAX_RESOURCE_BYTES as u64 {
+                    anyhow::bail!(
+                        "remote resource length {len} exceeds maximum {MAX_RESOURCE_BYTES} bytes"
+                    );
+                }
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = resp
+                .chunk()
+                .await
+                .map_err(|_| anyhow::anyhow!("failed to load resource from {}", source))?
+            {
+                if body.len().saturating_add(chunk.len()) > MAX_RESOURCE_BYTES {
+                    anyhow::bail!("remote resource exceeds maximum {MAX_RESOURCE_BYTES} bytes");
+                }
+                body.extend_from_slice(&chunk);
+            }
+            serde_json::from_slice(&body)
+                .map_err(|_| anyhow::anyhow!("failed to load resource from {}", source))
         }
     }
 

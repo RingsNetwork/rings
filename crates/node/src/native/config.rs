@@ -344,6 +344,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             onion_exit_ttl_secs: config.onion_exit_ttl_secs,
             onion_exit_services: config.onion_exit_services,
             onion_exit_policy: config.onion_exit_policy,
+            onion_invoke_offer: None,
             remote_rpc_proxy_url: config.remote_rpc_proxy_url,
         })
     }
@@ -427,6 +428,12 @@ impl Config {
                 source,
             }
         })?;
+        io::Write::flush(&mut f_writer).map_err(|e| Error::CreateFileError(e.to_string()))?;
+        let f = f_writer
+            .into_inner()
+            .map_err(|e| Error::CreateFileError(e.into_error().to_string()))?;
+        f.sync_all()
+            .map_err(|e| Error::CreateFileError(e.to_string()))?;
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))

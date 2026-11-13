@@ -129,6 +129,7 @@ struct SessionHandle {
     cancel: CancellationToken,
     udp_flow: Option<UdpFlowKey>,
     generation: u64,
+    last_activity: tokio::time::Instant,
 }
 
 /// What the relay holds for as long as it holds one accepted TCP stream: dropped when the relay
@@ -283,7 +284,7 @@ impl TransportSessions {
         peer: Did,
         service: String,
         kind: TransportKind,
-    ) {
+    ) -> Result<()> {
         match kind {
             TransportKind::Tcp => self.listen_tcp(scope, local_addr, peer, service).await,
             TransportKind::Udp => self.listen_udp(scope, local_addr, peer, service).await,
@@ -526,7 +527,7 @@ impl TransportSessions {
             Some(UdpFlowState::Active(key)) => key.clone(),
             Some(UdpFlowState::Pending(_) | UdpFlowState::Opening(_)) | None => return None,
         };
-        if self.is_live(&key) {
+        if self.touch_live(&key) {
             return Some(key);
         }
         self.remove_udp_flow_for_key(*flow, &key);
@@ -665,6 +666,7 @@ impl TransportSessions {
                     cancel: cancel.clone(),
                     udp_flow,
                     generation,
+                    last_activity: tokio::time::Instant::now(),
                 });
                 SlotRegistration::Registered((outbound_rx, cancel, generation))
             }
@@ -684,6 +686,14 @@ impl TransportSessions {
             .lock()
             .ok()
             .and_then(|map| map.get(key).map(|handle| handle.generation))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_live(&self, key: &SessionKey) -> bool {
+        self.map
+            .lock()
+            .ok()
+            .is_some_and(|map| map.contains_key(key))
     }
 
     /// Enqueue `outbound` for the session's local socket without waiting for local-socket
@@ -711,13 +721,36 @@ impl TransportSessions {
         }
     }
 
-    /// Whether a session is currently live (registered in the table). Used by the UDP
-    /// listener to detect a flow whose key has since been closed.
-    fn is_live(&self, key: &SessionKey) -> bool {
+    /// Whether a session is currently live (registered in the table), refreshing its activity
+    /// timestamp for client→peer UDP fast-path datagrams.
+    fn touch_live(&self, key: &SessionKey) -> bool {
         self.map
             .lock()
-            .map(|map| map.contains_key(key))
+            .map(|mut map| {
+                if let Some(handle) = map.get_mut(key) {
+                    handle.last_activity = tokio::time::Instant::now();
+                    true
+                } else {
+                    false
+                }
+            })
             .unwrap_or(false)
+    }
+
+    /// Return `Some(next_deadline)` if the given session generation received client→peer activity
+    /// more recently than `now - idle_timeout`.
+    pub(super) fn unexpired_deadline(
+        &self,
+        key: &SessionKey,
+        generation: u64,
+        idle_timeout: Duration,
+    ) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        let deadline = self.map.lock().ok().and_then(|map| {
+            let handle = map.get(key)?;
+            (handle.generation == generation).then(|| handle.last_activity + idle_timeout)
+        })?;
+        (now < deadline).then_some(deadline)
     }
 }
 

@@ -129,13 +129,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
             (Ok(local_nodes), Ok(remote_nodes)) => {
                 Ok(merge_online_node_descriptors(local_nodes, remote_nodes))
             }
-            (Ok(local_nodes), Err(remote_error)) => {
-                if local_nodes.is_empty() {
-                    Err(remote_error)
-                } else {
-                    Ok(local_nodes)
-                }
-            }
+            (Ok(local_nodes), Err(_remote_error)) => Ok(local_nodes),
             (Err(_), Ok(remote_nodes)) => Ok(remote_nodes),
             (Err(_), Err(remote_error)) => Err(remote_error),
         }
@@ -165,13 +159,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
             (Ok(local_exits), Ok(remote_exits)) => {
                 Ok(merge_onion_exit_descriptors(local_exits, remote_exits))
             }
-            (Ok(local_exits), Err(remote_error)) => {
-                if local_exits.is_empty() {
-                    Err(remote_error)
-                } else {
-                    Ok(local_exits)
-                }
-            }
+            (Ok(local_exits), Err(_remote_error)) => Ok(local_exits),
             (Err(_), Ok(remote_exits)) => Ok(remote_exits),
             (Err(_), Err(remote_error)) => Err(remote_error),
         }

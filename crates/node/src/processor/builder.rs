@@ -450,7 +450,7 @@ impl ProcessorBuilder {
         validate_registration_timing(
             "onion_exit",
             "advertise_onion_exit",
-            self.onion_role.exit().is_some(),
+            self.onion_role.exit().is_some() || self.onion_role.invoke().is_some(),
             self.onion_exit_heartbeat_interval,
             self.onion_exit_ttl,
         )?;

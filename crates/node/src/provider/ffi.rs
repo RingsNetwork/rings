@@ -41,6 +41,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::future::IntoFuture;
 use std::ptr;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -72,10 +73,12 @@ struct FfiE2eEvent {
     kind: &'static str,
     from: String,
     public_key: Option<String>,
+    ephemeral_public_key: Option<String>,
     stream_id: Option<String>,
     sequence: Option<u64>,
     is_final: Option<bool>,
     ciphertext_blocks: Option<usize>,
+    ciphertext: Option<String>,
 }
 
 /// The answer to `takeE2eEvents`.
@@ -142,28 +145,34 @@ fn ffi_e2e_event(message: &ApplicationMessage) -> Result<Option<FfiE2eEvent>> {
             kind: "handshakeRequest",
             from,
             public_key: Some(public_key_json_string(request.requester_public_key)?),
+            ephemeral_public_key: None,
             stream_id: None,
             sequence: None,
             is_final: None,
             ciphertext_blocks: None,
+            ciphertext: None,
         },
         ApplicationData::E2eHandshakeResponse(response) => FfiE2eEvent {
             kind: "handshakeResponse",
             from,
             public_key: Some(public_key_json_string(response.responder_public_key)?),
+            ephemeral_public_key: None,
             stream_id: None,
             sequence: None,
             is_final: None,
             ciphertext_blocks: None,
+            ciphertext: None,
         },
         ApplicationData::E2eStreamFrame(frame) => FfiE2eEvent {
             kind: "streamFrame",
             from,
             public_key: Some(public_key_json_string(frame.sender_public_key)?),
+            ephemeral_public_key: Some(public_key_json_string(frame.ephemeral_public_key)?),
             stream_id: Some(frame.stream_id.to_string()),
             sequence: Some(frame.sequence),
             is_final: Some(frame.is_final),
             ciphertext_blocks: Some(frame.ciphertext_blocks()),
+            ciphertext: Some(base64::encode(&frame.ciphertext)),
         },
         _ => return Ok(None),
     }))
@@ -184,6 +193,7 @@ pub struct ProviderHandle {
     runtime: Arc<Runtime>,
     e2e_events: Arc<FfiE2eInbox>,
     stop: StopSource,
+    listening: AtomicBool,
     listener_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
@@ -194,6 +204,7 @@ impl ProviderHandle {
             runtime,
             e2e_events,
             stop: StopSource::new(),
+            listening: AtomicBool::new(false),
             listener_threads: Mutex::new(Vec::new()),
         }
     }
@@ -207,18 +218,44 @@ impl ProviderHandle {
     }
 
     fn spawn_listener(&self) -> Result<()> {
+        if self
+            .listening
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(());
+        }
         let provider = self.provider.clone();
         let runtime = self.runtime.clone();
         let stop = self.stop.token();
-        let mut listener_threads = self.listener_threads.lock().map_err(|_| Error::Lock)?;
-        listener_threads.push(std::thread::spawn(move || {
-            runtime.block_on(async {
-                if let Err(error) = provider.listen_with(stop).await {
-                    tracing::error!("FFI listen failed: {error}");
-                }
-            })
-        }));
-        Ok(())
+        let mut listener_threads = match self.listener_threads.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.listening.store(false, Ordering::Release);
+                return Err(Error::Lock);
+            }
+        };
+        let spawned = std::thread::Builder::new()
+            .name("rings-ffi-listener".to_owned())
+            .spawn(move || {
+                runtime.block_on(async {
+                    if let Err(error) = provider.listen_with(stop).await {
+                        tracing::error!("FFI listen failed: {error}");
+                    }
+                })
+            });
+        match spawned {
+            Ok(join_handle) => {
+                listener_threads.push(join_handle);
+                Ok(())
+            }
+            Err(error) => {
+                self.listening.store(false, Ordering::Release);
+                Err(Error::ExtensionError(format!(
+                    "failed to spawn FFI listener thread: {error}"
+                )))
+            }
+        }
     }
 
     /// Serve the swarm's application inbox with the extension [`Backend`], whose observer
@@ -242,6 +279,7 @@ impl ProviderHandle {
             runtime,
             e2e_events: _,
             stop,
+            listening: _,
             listener_threads,
         } = self;
         stop.request_stop();
@@ -380,15 +418,21 @@ pub unsafe extern "C" fn rings_node_request(
             serde_json::to_value(handle.take_e2e_events()?)?
         } else if method == "dispatchDropCounters" {
             serde_json::to_value(handle.provider.dispatch_drop_counters())?
+        } else if tokio::runtime::Handle::try_current().is_err() {
+            handle
+                .runtime
+                .block_on(handle.provider.request_internal(method, params))?
         } else {
             let provider = handle.provider.clone();
             let runtime = handle.runtime.clone();
-            let handle = std::thread::spawn(move || {
-                runtime.block_on(async { provider.request_internal(method, params).await })
-            });
-            handle
-                .join()
-                .map_err(|_| Error::ExtensionError("FFI request thread panicked".to_string()))??
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(move || {
+                        runtime.block_on(async { provider.request_internal(method, params).await })
+                    })
+                    .join()
+                    .map_err(|_| Error::ExtensionError("FFI request thread panicked".to_string()))
+            })??
         };
         let ret: String = serde_json::to_string(&ret)?;
         let c_ret = CString::new(ret)?.into_raw();
@@ -582,7 +626,10 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
             let provider = Arc::new(provider);
             let e2e_events = Arc::new(FfiE2eInbox::default());
             let handle = ProviderHandle::new(provider, runtime, e2e_events);
-            handle.spawn_application()?;
+            if let Err(error) = handle.spawn_application() {
+                handle.shutdown();
+                return Err(error);
+            }
             Ok(Box::into_raw(Box::new(handle)))
         },
     )) {

@@ -205,7 +205,10 @@ fn external_router(processor: Arc<Processor>, security: Arc<ApiSecurity>) -> Rou
 }
 
 fn secure_router(router: Router, policy: Arc<ApiSecurity>, listener: ApiListener) -> Router {
-    let cors = policy.cors_layer();
+    let cors = match listener {
+        ApiListener::Internal => policy.cors_layer(),
+        ApiListener::External => policy.external_cors_layer(),
+    };
     router
         .layer(axum::middleware::from_fn_with_state(
             ListenerSecurity { policy, listener },
@@ -302,6 +305,11 @@ where
 {
     let response = match request {
         Ok(request) => {
+            if let jsonrpc_core::Request::Batch(calls) = &request {
+                if calls.len() > rings_rpc::method::MAX_JSONRPC_BATCH_CALLS {
+                    return Err(HttpError::BadRequest);
+                }
+            }
             state
                 .io_handler
                 .handle_rpc_request(request, state.processor.clone())
@@ -560,7 +568,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn external_listener_serves_the_handshake_without_a_token() {
-        for method in ["nodeDid", "answerOffer"] {
+        for method in ["nodeDid", "answerOffer", "acceptAnswer"] {
             assert_eq!(
                 status_of(
                     stub_router(ApiListener::External),
@@ -571,7 +579,7 @@ mod security_tests {
                 "{method} must be public on the external listener"
             );
         }
-        let handshake = batch(&["nodeDid", "answerOffer"]);
+        let handshake = batch(&["nodeDid", "answerOffer", "acceptAnswer"]);
         assert_eq!(
             status_of(
                 stub_router(ApiListener::External),
@@ -579,6 +587,18 @@ mod security_tests {
             )
             .await,
             Some(StatusCode::OK)
+        );
+        let oversized_public: Vec<&str> = (0..=rings_rpc::method::MAX_PUBLIC_BATCH_CALLS)
+            .map(|_| "nodeDid")
+            .collect();
+        assert_eq!(
+            status_of(
+                stub_router(ApiListener::External),
+                jsonrpc_request(batch(&oversized_public))
+            )
+            .await,
+            Some(StatusCode::UNAUTHORIZED),
+            "unauthenticated batch exceeding MAX_PUBLIC_BATCH_CALLS must be gated"
         );
     }
 
@@ -604,7 +624,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn internal_listener_gates_every_method_including_the_handshake() {
-        for method in ["nodeDid", "answerOffer", "nodeInfo"] {
+        for method in ["nodeDid", "answerOffer", "acceptAnswer", "nodeInfo"] {
             assert_eq!(
                 status_of(
                     stub_router(ApiListener::Internal),
@@ -710,6 +730,26 @@ mod security_tests {
             denied,
             Ok(response) if response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none()
         ));
+
+        let preflight = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/")
+            .header(ORIGIN, "https://dapp.example")
+            .header("access-control-request-method", "POST")
+            .header("access-control-request-headers", "content-type")
+            .body(Body::empty())
+            .expect("preflight request must build");
+        let external_preflight = stub_router(ApiListener::External)
+            .oneshot(preflight)
+            .await
+            .expect("external preflight response");
+        assert!(external_preflight.status().is_success());
+        assert_eq!(
+            external_preflight
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("*"))
+        );
     }
 
     async fn json_reply(

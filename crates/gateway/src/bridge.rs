@@ -14,7 +14,7 @@ use crate::FlowId;
 use crate::GatewayError;
 use crate::OnionStreamConnector;
 
-const FLOW_COMMAND_CAPACITY: usize = 1;
+const FLOW_COMMAND_CAPACITY: usize = 2;
 
 #[derive(Debug)]
 pub(super) enum BridgeCommand {
@@ -38,6 +38,7 @@ pub(super) enum BridgeEvent {
         buffer: Vec<u8>,
     },
     PeerClosed(FlowId),
+    WriteClosed(FlowId),
     Failed {
         flow: FlowId,
         error: GatewayError,
@@ -230,6 +231,9 @@ async fn run_bridge(
                     Ok(UploadPoll::ShutDown) => {
                         pending_upload = None;
                         write_open = false;
+                        if events.send(BridgeEvent::WriteClosed(flow)).await.is_err() {
+                            return;
+                        }
                     }
                     Err(error) => {
                         let operation = match pending_upload {
@@ -262,6 +266,9 @@ async fn run_bridge(
                     }
                     Some(BridgeCommand::CloseWrite) => {
                         write_open = false;
+                        if events.send(BridgeEvent::WriteClosed(flow)).await.is_err() {
+                            return;
+                        }
                     }
                     None => {
                         if write_open {
@@ -396,6 +403,10 @@ mod tests {
         handle
             .try_send(BridgeCommand::CloseWrite)
             .expect("empty bounded command queue");
+        let write_closed = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("write-close deadline");
+        assert!(matches!(write_closed, Some(BridgeEvent::WriteClosed(id)) if id == flow()));
         let closed = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
             .await
             .expect("close deadline");
@@ -534,6 +545,10 @@ mod tests {
             .expect("CloseWrite progressed while download ack was held")
             .expect("read upstream EOF");
         assert_eq!(eof, 0);
+        let write_closed = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
+            .await
+            .expect("write-closed event deadline");
+        assert!(matches!(write_closed, Some(BridgeEvent::WriteClosed(id)) if id == flow()));
 
         // Releasing the download acknowledgement resumes the paused download half.
         first_consumed

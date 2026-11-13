@@ -225,6 +225,9 @@ pub struct ProcessorConfigSerialized {
     /// Exit policy advertised by this node.
     #[serde(default = "default_onion_exit_policy")]
     pub(crate) onion_exit_policy: OnionExitPolicy,
+    /// Optional intermediate `invoke` offer advertised by this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) onion_invoke_offer: Option<crate::onion::OnionInvokeOffer>,
     /// Optional HTTP(S) proxy URL for remote JSON-RPC endpoints on native targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_rpc_proxy_url: Option<String>,
@@ -315,6 +318,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
                 .onion_role
                 .exit()
                 .map_or_else(default_onion_exit_policy, |offer| offer.policy().clone()),
+            onion_invoke_offer: ins.onion_role.invoke().cloned(),
             remote_rpc_proxy_url: ins
                 .remote_rpc_proxy
                 .as_ref()
@@ -353,12 +357,25 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
             origin_quota: ins.origin_quota,
-            onion_role: OnionRole::from_flags(
-                ins.advertise_onion_relay,
-                ins.advertise_onion_exit,
-                ins.onion_exit_services,
-                ins.onion_exit_policy,
-            )?,
+            onion_role: {
+                let role = OnionRole::from_flags(
+                    ins.advertise_onion_relay,
+                    ins.advertise_onion_exit,
+                    ins.onion_exit_services,
+                    ins.onion_exit_policy,
+                )?;
+                match ins.onion_invoke_offer {
+                    Some(invoke) => {
+                        if !ins.advertise_onion_relay {
+                            return Err(Error::InvalidConfig(
+                                "onion_invoke_offer requires advertise_onion_relay".to_string(),
+                            ));
+                        }
+                        role.with_invoke(invoke)
+                    }
+                    None => role,
+                }
+            },
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
             remote_rpc_proxy,

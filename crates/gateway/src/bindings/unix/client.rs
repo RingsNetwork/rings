@@ -183,6 +183,14 @@ fn control_timeout_error(operation: &'static str, timeout: Duration) -> GatewayE
     }
 }
 
+fn is_control_timeout(error: &GatewayError) -> bool {
+    matches!(
+        error,
+        GatewayError::Platform { message, .. }
+            if message.contains("Unix helper control operation timed out after")
+    )
+}
+
 struct HelperReply {
     stream: Arc<Mutex<UnixStream>>,
     response: UnixConfigResponse,
@@ -254,11 +262,19 @@ impl TunnelControl for UnixTunnelControl {
             };
             return Err(TeardownFailure::new(lease, error));
         }
-        let exchange = self
-            .exchange(UnixConfigRequest::Teardown {
-                lease_id: lease.id.as_str().to_string(),
-            })
-            .await;
+        let request = UnixConfigRequest::Teardown {
+            lease_id: lease.id.as_str().to_string(),
+        };
+        let exchange = match self.exchange(request.clone()).await {
+            Ok(reply) => Ok(reply),
+            Err(error) if is_control_timeout(&error) => Err(error),
+            Err(_disconnected) => {
+                self.stream = None;
+                self.establish_via_helper(request)
+                    .await
+                    .map(|reply| (reply.response, reply.descriptor))
+            }
+        };
         let (response, descriptor) = match exchange {
             Ok(reply) => reply,
             Err(error) => return Err(TeardownFailure::new(lease, error)),
@@ -328,6 +344,50 @@ mod tests {
 
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn teardown_reconnects_when_initial_control_stream_closed() {
+        use std::os::unix::net::UnixListener;
+
+        use crate::bindings::TunnelControl;
+
+        let directory = tempfile::tempdir().expect("create tempdir");
+        let socket_path = directory.path().join("helper.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind helper socket");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept reconnect teardown");
+            let request = super::super::transport::read_request(&mut stream)
+                .expect("read teardown request")
+                .expect("request frame");
+            assert_eq!(request, super::UnixConfigRequest::Teardown {
+                lease_id: "test-lease-1".to_string()
+            });
+            super::super::transport::send_response(
+                &mut stream,
+                &super::UnixConfigResponse::TornDown,
+                None,
+            )
+            .expect("send TornDown");
+        });
+
+        let (client, dropped_helper) =
+            std::os::unix::net::UnixStream::pair().expect("create broken stream pair");
+        drop(dropped_helper);
+
+        let lease_id = super::UnixLeaseId::new("test-lease-1".to_string()).expect("lease id");
+        let mut control = UnixTunnelControl::new(UnixTunnelOptions::new(socket_path));
+        control.active = Some(lease_id.clone());
+        control.stream = Some(std::sync::Arc::new(std::sync::Mutex::new(client)));
+
+        control
+            .teardown(super::UnixTunnelLease { id: lease_id })
+            .await
+            .expect("teardown should reconnect and succeed");
+        assert!(control.active.is_none());
+        assert!(control.stream.is_none());
+        server.join().expect("join helper thread");
     }
 
     #[test]

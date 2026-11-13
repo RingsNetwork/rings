@@ -64,6 +64,10 @@ pub enum PacketDropReason {
     Udp,
     /// The IPv4 protocol is outside the TCP-only data plane.
     UnsupportedIpv4Protocol,
+    /// The captured packet exceeds the configured gateway interface MTU.
+    OversizedPacket,
+    /// The destination address is loopback, unspecified, link-local, multicast, or broadcast.
+    NonRoutableDestination,
 }
 
 /// Reason one valid TCP segment is rejected without terminating the gateway.
@@ -142,6 +146,9 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
     }
     let source_ip = Ipv4Addr::from(ipv4.src_addr().octets());
     let target_ip = Ipv4Addr::from(ipv4.dst_addr().octets());
+    if is_non_routable_ipv4_destination(target_ip) {
+        return PacketDisposition::Drop(PacketDropReason::NonRoutableDestination);
+    }
     PacketDisposition::Tcp(TcpSegment {
         flow: FlowId {
             source: SocketAddr::V4(SocketAddrV4::new(source_ip, tcp.src_port())),
@@ -151,6 +158,14 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
         ack: tcp.ack(),
         rst: tcp.rst(),
     })
+}
+
+const fn is_non_routable_ipv4_destination(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
 }
 
 #[cfg(test)]
@@ -267,6 +282,29 @@ mod tests {
             classify_ipv4_packet(&packet),
             PacketDisposition::Drop(PacketDropReason::InvalidTcpChecksum)
         );
+    }
+
+    #[test]
+    fn non_routable_destinations_are_dropped_before_endpoint_admission() {
+        for dst in [
+            [127, 0, 0, 1],
+            [0, 0, 0, 0],
+            [169, 254, 1, 1],
+            [224, 0, 0, 1],
+            [255, 255, 255, 255],
+        ] {
+            let mut packet = ipv4_packet(6, &tcp_segment(0x02, &[]));
+            packet[16..20].copy_from_slice(&dst);
+            let source = smoltcp::wire::Ipv4Address::new(100, 64, 0, 2);
+            let target = smoltcp::wire::Ipv4Address::new(dst[0], dst[1], dst[2], dst[3]);
+            TcpPacket::new_unchecked(&mut packet[IPV4_HEADER_LEN..])
+                .fill_checksum(&source.into(), &target.into());
+
+            assert_eq!(
+                classify_ipv4_packet(&packet),
+                PacketDisposition::Drop(PacketDropReason::NonRoutableDestination)
+            );
+        }
     }
 
     #[test]
