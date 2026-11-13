@@ -193,6 +193,9 @@ pub struct PeerRing {
     pub(super) storage_transition: FuturesMutex<()>,
     /// Monotonic allocator of non-zero local custody incarnation tokens (#1207).
     pub(super) next_storage_custody_incarnation: AtomicU64,
+    /// Round-robin cursor for periodic `TopoInfo` bridge-hint synchronization across connected
+    /// non-head topology peers (#1256).
+    bridge_sync_cursor: std::sync::atomic::AtomicUsize,
     /// Active outgoing hand-off custody incarnation tokens by slot (#1207).
     pub(crate) storage_custody_incarnations: Mutex<BTreeMap<StorageKey, u64>>,
     /// Serializes every read-modify-write of a fetch-cache slot (see `chord::storage`).
@@ -292,6 +295,7 @@ impl PeerRing {
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
             next_storage_custody_incarnation: AtomicU64::new(1),
+            bridge_sync_cursor: std::sync::atomic::AtomicUsize::new(0),
             storage_custody_incarnations: Mutex::new(BTreeMap::new()),
             cache_transition: FuturesMutex::new(()),
             topology_epoch: Epoch::default(),
@@ -539,9 +543,13 @@ impl PeerRing {
         let (next, outcome) = transition(&current, self.now_ms());
         self.commit_unlocked(&next.state)?;
         if next.state.successors != current.successors {
-            self.lock_pending_successor_sync()?
-                .retain_current(&next.state.successors);
             self.forget_next_relay_holder(None)?;
+        }
+        let next_referenced = next.state.referenced_peers();
+        if next_referenced != current.referenced_peers() {
+            let referenced: Vec<Did> = next_referenced.into_iter().collect();
+            self.lock_pending_successor_sync()?
+                .retain_current(&referenced);
         }
         if !next.state.routes_equal(&current) {
             self.topology_epoch.advance();

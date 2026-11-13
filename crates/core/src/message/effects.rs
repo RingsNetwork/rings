@@ -626,6 +626,10 @@ impl<'handler> CoreEffectInterpreter<'handler> {
             } => {
                 let disposition = self.transport.record_finger_candidate(did, request)?;
                 if disposition.proof_awaits_owner() && reports_remote {
+                    if self.transport.is_candidate_dial_backed_off(did) {
+                        self.transport.dht.cancel_finger_lookup(request)?;
+                        return Ok(());
+                    }
                     if let Err(error) = self.connect_dht_peer(did).await {
                         self.transport.dht.cancel_finger_lookup(request)?;
                         return Err(error);
@@ -691,7 +695,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
     }
 
     async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
-        if self.connection_is_satisfied(peer) {
+        if self.connection_is_satisfied(peer) || self.transport.is_candidate_dial_backed_off(peer) {
             return Ok(());
         }
 

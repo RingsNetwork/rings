@@ -362,6 +362,7 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     let payload = MessagePayload::from_wire(bytes)?;
     prepare_resolved_frame(
         network_id,
+        crate::utils::get_epoch_ms(),
         None,
         payload,
         bytes.len(),

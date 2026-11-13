@@ -685,12 +685,14 @@ pub trait PayloadSender {
         self.forward_by_relay(payload, relay).await
     }
 
-    /// Reset the destination to a secp DID.
+    /// Reset the destination to a secp DID, routing via a live intermediate hop when the target
+    /// is not directly connected.
     async fn reset_destination(&self, payload: &MessagePayload, next_hop: Did) -> Result<()> {
+        let hop = self.next_hop_toward(next_hop, RouteStage::TOWARD)?;
         let relay = payload
             .relay
             .reset_destination(next_hop)
-            .forward(self.dht().did, NextHop::toward(next_hop))?;
+            .forward(self.dht().did, hop)?;
         self.forward_by_relay(payload, relay).await
     }
 }

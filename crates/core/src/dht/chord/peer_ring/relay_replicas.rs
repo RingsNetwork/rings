@@ -367,10 +367,18 @@ impl PeerRing {
         )
     }
 
-    /// The union of `TopologyState::referenced_peers` and any remote relay chain neighbours
-    /// (#1182).
+    /// The union of `TopologyState::referenced_peers`, active bridge `via` hops, and any remote
+    /// relay chain neighbours (#1182, #1256).
     pub(crate) fn referenced_and_chain_peers(&self) -> Result<std::collections::BTreeSet<Did>> {
-        let mut referenced = self.topology_state()?.referenced_peers();
+        let state = self.topology_state()?;
+        let mut referenced = state.referenced_peers();
+        referenced.extend(
+            state
+                .bridged
+                .values()
+                .copied()
+                .filter(|&via| via != state.local),
+        );
         let (remote_prev, remote_next) = self.remote_relay_chain_neighbours()?;
         referenced.extend(remote_prev.into_iter().chain(remote_next));
         Ok(referenced)

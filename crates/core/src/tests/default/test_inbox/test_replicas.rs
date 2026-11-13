@@ -607,29 +607,31 @@ async fn join_before<'a>(joining: &'a Node, anchor: &'a Node, ring: &[&'a Node])
 #[tokio::test]
 async fn test_chain_neighbour_past_a_storage_less_run_is_directly_probed_and_fails_over_within_ten_seconds(
 ) -> Result<()> {
-    let [key_h0, key_s1, key_s2, key_s3, key_n1, key_n2, key_n3] = gen_ordered_keys::<7>();
+    let [key_h0, key_s1, key_s2, key_s3, key_s4, key_n1, key_n2, key_n3] = gen_ordered_keys::<8>();
     let h0 = prepare_node(key_h0).await;
     let s1 = prepare_node_without_relay_storage(key_s1)?;
     let s2 = prepare_node_without_relay_storage(key_s2)?;
     let s3 = prepare_node_without_relay_storage(key_s3)?;
+    let s4 = prepare_node_without_relay_storage(key_s4)?;
     let n1 = prepare_node(key_n1).await;
     let n2 = prepare_node(key_n2).await;
     let n3 = prepare_node(key_n3).await;
 
-    // Form the four-holder ring first, then insert the storage-less run s1 -> s2 -> s3 of length
-    // DEFAULT_SUCCESSOR_CAPACITY between h0 and n1.
+    // Form the four-holder ring first, then insert the storage-less run s1 -> s2 -> s3 -> s4 of
+    // length DEFAULT_SUCCESSOR_CAPACITY between h0 and n1.
     ring_of_three(&h0, &n1, &n2).await?;
     join_before(&n3, &h0, &[&h0, &n1, &n2, &n3]).await?;
-    join_before(&s3, &n1, &[&h0, &s3, &n1, &n2, &n3]).await?;
-    join_before(&s2, &s3, &[&h0, &s2, &s3, &n1, &n2, &n3]).await?;
-    join_before(&s1, &s2, &[&h0, &s1, &s2, &s3, &n1, &n2, &n3]).await?;
+    join_before(&s4, &n1, &[&h0, &s4, &n1, &n2, &n3]).await?;
+    join_before(&s3, &s4, &[&h0, &s3, &s4, &n1, &n2, &n3]).await?;
+    join_before(&s2, &s3, &[&h0, &s2, &s3, &s4, &n1, &n2, &n3]).await?;
+    join_before(&s1, &s2, &[&h0, &s1, &s2, &s3, &s4, &n1, &n2, &n3]).await?;
 
-    let ring = [&h0, &s1, &s2, &s3, &n1, &n2, &n3];
+    let ring = [&h0, &s1, &s2, &s3, &s4, &n1, &n2, &n3];
     settle_previous_holders(&ring, &ring).await?;
 
     let h0_successors = h0.dht().topology_state()?.successors;
     assert_eq!(h0_successors.len(), DEFAULT_SUCCESSOR_CAPACITY);
-    assert_eq!(h0_successors, vec![s1.did(), s2.did(), s3.did()]);
+    assert_eq!(h0_successors, vec![s1.did(), s2.did(), s3.did(), s4.did()]);
     assert!(
         !h0_successors.contains(&n1.did()),
         "n1 lies past the storage-less successor list of length DEFAULT_SUCCESSOR_CAPACITY"
@@ -688,9 +690,9 @@ async fn test_chain_neighbour_past_a_storage_less_run_is_directly_probed_and_fai
         "suspecting n1 past a storage-less run triggers chain repair"
     );
     assert_eq!(
-        s3.dht().topology_state()?.successors.first().copied(),
+        s4.dht().topology_state()?.successors.first().copied(),
         Some(n1.did()),
-        "the storage-less predecessor s3 has not evicted n1 at the 10 s chain bound"
+        "the storage-less predecessor s4 has not evicted n1 at the 10 s chain bound"
     );
 
     // Run the event-driven chain repair triggered by suspecting n1, drive the FindRelayHolder /

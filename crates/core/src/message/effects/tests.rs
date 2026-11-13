@@ -453,3 +453,36 @@ fn test_dht_notify_to_self_is_noop() -> Result<()> {
     .is_none());
     Ok(())
 }
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn test_backed_off_finger_candidate_cancels_lookup_without_stalling_slot() -> Result<()> {
+    let first = prepare_node(SecretKey::random()).await;
+    let second_did = first.dht().did + Did::from(1u32);
+    let candidate = first.dht().did + Did::from(2u32);
+    first.dht().admit_connected(second_did, None)?;
+    first
+        .swarm
+        .transport
+        .record_candidate_dial_failure(candidate);
+    assert!(first
+        .swarm
+        .transport
+        .is_candidate_dial_backed_off(candidate));
+
+    let PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessorForFix { request, .. }) =
+        first.dht().advance_finger_convergence()?
+    else {
+        return Err(Error::InvalidMessage("expected finger step".to_string()));
+    };
+    let interpreter = CoreEffectInterpreter::new(&first.swarm.transport);
+    interpreter
+        .run(CoreEffect::admit_finger_candidate(candidate, request, true))
+        .await?;
+    let projection = first.dht().lock_finger()?.convergence_state().projection();
+    assert!(
+        projection.in_flight.is_none() && projection.deferred.is_none(),
+        "backed-off finger candidate must release in-flight and deferred ownership immediately"
+    );
+    Ok(())
+}

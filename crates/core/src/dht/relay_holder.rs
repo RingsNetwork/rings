@@ -546,7 +546,7 @@ impl RelayNeighborhood {
         from: Did,
         previous: Vec<PreviousHolder>,
     ) -> bool {
-        (state.predecessor == Some(from))
+        (state.predecessor == Some(from) || state.predecessors.contains(&from))
             .then(|| previous.first().copied())
             .flatten()
             .filter(|&nearest| self.admits_nearest_previous(state, from, nearest))

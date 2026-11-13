@@ -397,15 +397,15 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     for route in overlay.check_all_routes() {
         assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
         assert!(
-            route.path().len() <= 4,
-            "expected at most 3 hops: {route:?}"
+            route.path().len() <= 3,
+            "expected at most 2 hops: {route:?}"
         );
     }
 
     let e_to_a = overlay.check_route_law(e, a, RouteStage::TOWARD);
     assert_eq!(
         (e_to_a.path(), e_to_a.outcome),
-        (vec![e, d, c, a], Outcome::Delivered)
+        (vec![e, c, a], Outcome::Delivered)
     );
 
     let d_to_b = overlay.check_route_law(d, b, RouteStage::TOWARD);
@@ -417,7 +417,7 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     let a_to_e = overlay.check_route_law(a, e, RouteStage::TOWARD);
     assert_eq!(
         (a_to_e.path(), a_to_e.outcome),
-        (vec![a, b, c, e], Outcome::Delivered)
+        (vec![a, c, e], Outcome::Delivered)
     );
 
     let b_to_d = overlay.check_route_law(b, d, RouteStage::TOWARD);
@@ -558,5 +558,69 @@ fn test_gap_bridge_handoff_ignores_intermediate_bridged_peer_past_aim() {
     assert_eq!(
         (route.path(), route.outcome),
         (vec![n10, head50, aim20], Outcome::Delivered)
+    );
+}
+
+/// Non-transitive two-clique topology `(ABC)(CDE)` where `A, B` cannot link directly to `D, E`
+/// and `C` bridges both cliques (`K = 4` successors at `C`): all cross-clique pairs `(A -> E)`,
+/// `(B -> D)`, `(E -> A)`, `(D -> B)` plus `RouteStage::via` replies route cleanly through `C`,
+/// and `find_successor(state, state.local)` resolves locally.
+#[test]
+fn test_non_transitive_two_clique_bridge_routes_both_directions_and_reply_via() {
+    let [a10, b20, c30, d40, e50] = [10u32, 20, 30, 40, 50].map(Did::from);
+
+    let mut view_a = TopologyState::new(a10, vec![b20, c30], Some(c30), vec![None; 8]);
+    view_a.bridged.insert(d40, c30);
+    view_a.bridged.insert(e50, c30);
+
+    let mut view_b = TopologyState::new(b20, vec![c30, a10], Some(a10), vec![None; 8]);
+    view_b.bridged.insert(d40, c30);
+    view_b.bridged.insert(e50, c30);
+
+    let mut view_c = TopologyState::new(c30, vec![d40, e50, a10, b20], Some(b20), vec![None; 8]);
+    view_c.predecessors = vec![b20, e50];
+
+    let mut view_d = TopologyState::new(d40, vec![e50, c30], Some(c30), vec![None; 8]);
+    view_d.bridged.insert(a10, c30);
+    view_d.bridged.insert(b20, c30);
+
+    let mut view_e = TopologyState::new(e50, vec![c30, d40], Some(d40), vec![None; 8]);
+    view_e.bridged.insert(a10, c30);
+    view_e.bridged.insert(b20, c30);
+
+    assert_eq!(
+        crate::dht::topology::find_successor(&view_a, a10),
+        crate::dht::topology::FindSuccessorStep::Local(a10)
+    );
+
+    let views = BTreeMap::from([
+        (a10, view_a),
+        (b20, view_b),
+        (c30, view_c),
+        (d40, view_d),
+        (e50, view_e),
+    ]);
+    let links = [
+        (a10, b20),
+        (b20, c30),
+        (a10, c30),
+        (c30, d40),
+        (d40, e50),
+        (c30, e50),
+    ];
+    let overlay = Overlay::with_links(views, links);
+
+    for (src, dst) in [(a10, e50), (b20, d40), (e50, a10), (d40, b20)] {
+        let route = overlay.check_route_law(src, dst, RouteStage::TOWARD);
+        assert_eq!(
+            (route.path(), route.outcome),
+            (vec![src, c30, dst], Outcome::Delivered)
+        );
+    }
+
+    let reply = overlay.check_route_law(e50, a10, RouteStage::replying_via(Some(c30)));
+    assert_eq!(
+        (reply.path(), reply.outcome),
+        (vec![e50, c30, a10], Outcome::Delivered)
     );
 }

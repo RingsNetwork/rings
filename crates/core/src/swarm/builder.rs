@@ -73,7 +73,7 @@ impl SwarmBuilder {
             ice_servers: ice_servers.to_string(),
             external_address: None,
             webrtc_udp_port_range: None,
-            dht_succ_max: 3,
+            dht_succ_max: crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY as u8,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,

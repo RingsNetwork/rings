@@ -97,7 +97,21 @@ impl MessageHandler {
     /// How this node stands to `destination`: a peer it must hold messages for occupies a ring
     /// position this node is responsible for and has no connection, admitted or pending.
     pub(crate) fn destination_reachability(&self, destination: Did) -> Result<Reachability> {
+        let bridged_reachable = if destination != self.dht.did {
+            let state = self.dht.topology_state()?;
+            state
+                .bridged
+                .get(&destination)
+                .copied()
+                .filter(|&via| via != state.local && state.references(via))
+                .map(|via| self.transport.has_connection_attempt(via))
+                .transpose()?
+                .unwrap_or(false)
+        } else {
+            false
+        };
         let offline = destination != self.dht.did
+            && !bridged_reachable
             && !self.transport.has_connection_attempt(destination)?
             && self.dht.is_responsible_for(destination)?;
         Ok(if offline {

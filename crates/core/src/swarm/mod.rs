@@ -462,37 +462,65 @@ impl Swarm {
     /// registered before the request is sent, so its report always finds it; dropping it
     /// withdraws the lookup. The step and the hop come from one topology snapshot.
     pub async fn lookup_successor(&self, key: Did) -> Result<SuccessorLookup> {
-        match self.dht.find_successor(key)? {
+        let next = match self.dht.find_successor(key)? {
             PeerRingAction::Some(successor) => {
-                let correlation = LookupCorrelation::StorageResource(key);
-                self.transport
-                    .observer()
-                    .lookup_started(LookupKind::Successor, correlation);
-                self.transport.observer().lookup_finished(
-                    LookupKind::Successor,
-                    correlation,
-                    LookupOutcome::Succeeded,
-                );
-                Ok(SuccessorLookup::Local(successor))
+                let bridged_via =
+                    if successor != key && successor != self.dht.did && key != self.dht.did {
+                        let state = self.dht.topology_state()?;
+                        let target_dist = crate::dht::topology::dist(state.local, key);
+                        let head_dist = crate::dht::topology::dist(state.local, successor);
+                        state
+                            .bridged
+                            .iter()
+                            .filter(|(&peer, &via)| {
+                                peer != state.local
+                                    && via != state.local
+                                    && state.references(via)
+                                    && !state.references(peer)
+                                    && self.transport.get_connection(via).is_some()
+                            })
+                            .filter_map(|(&peer, &via)| {
+                                let peer_dist = crate::dht::topology::dist(state.local, peer);
+                                (target_dist <= peer_dist && peer_dist < head_dist)
+                                    .then_some((peer_dist, via))
+                            })
+                            .min_by(|(dist_a, _), (dist_b, _)| dist_a.cmp(dist_b))
+                            .map(|(_, via)| via)
+                    } else {
+                        None
+                    };
+                if let Some(via) = bridged_via {
+                    via
+                } else {
+                    let correlation = LookupCorrelation::StorageResource(key);
+                    self.transport
+                        .observer()
+                        .lookup_started(LookupKind::Successor, correlation);
+                    self.transport.observer().lookup_finished(
+                        LookupKind::Successor,
+                        correlation,
+                        LookupOutcome::Succeeded,
+                    );
+                    return Ok(SuccessorLookup::Local(successor));
+                }
             }
-            PeerRingAction::RemoteAction(next, _) => {
-                let request = Message::FindSuccessorSend(FindSuccessorSend {
-                    did: key,
-                    strict: false,
-                    then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
-                });
-                let egress = self.transport.application_egress();
-                let payload = egress.originate(request, key, Some(next)).await?;
-                let report = self
-                    .transport
-                    .application()
-                    .lookups
-                    .register(payload.transaction.tx_id);
-                egress.send_payload(payload).await?;
-                Ok(SuccessorLookup::Routed(report))
-            }
-            action => Err(Error::PeerRingUnexpectedAction(Box::new(action))),
-        }
+            PeerRingAction::RemoteAction(next, _) => next,
+            action => return Err(Error::PeerRingUnexpectedAction(Box::new(action))),
+        };
+        let request = Message::FindSuccessorSend(FindSuccessorSend {
+            did: key,
+            strict: false,
+            then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+        });
+        let egress = self.transport.application_egress();
+        let payload = egress.originate(request, key, Some(next)).await?;
+        let report = self
+            .transport
+            .application()
+            .lookups
+            .register(payload.transaction.tx_id);
+        egress.send_payload(payload).await?;
+        Ok(SuccessorLookup::Routed(report))
     }
 
     /// Return local measurement counters for `peer`, if observed.

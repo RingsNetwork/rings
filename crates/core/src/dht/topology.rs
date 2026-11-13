@@ -86,8 +86,8 @@ pub(crate) use successor_sync::SuccessorSyncState;
 /// Ring bit-width; `Did` is `Z/2^160`.
 pub const RING_BITS: usize = 160;
 
-/// Default successor-list capacity used by the production builder and tests.
-pub const DEFAULT_SUCCESSOR_CAPACITY: usize = 3;
+/// Default successor-list capacity used by the production builder and tests (`K = 4`).
+pub const DEFAULT_SUCCESSOR_CAPACITY: usize = 4;
 
 /// Logical connections retained per topology reference slot.
 ///
@@ -810,6 +810,9 @@ pub fn is_responsible_for(state: &TopologyState, id: Did) -> bool {
 /// self hop; `TopologyState::routes_clockwise_toward` (test build) names this
 /// proposition.
 pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
+    if did == state.local {
+        return FindSuccessorStep::Local(state.local);
+    }
     let Some(head) = successor_head(state) else {
         return FindSuccessorStep::Local(state.local);
     };
@@ -837,6 +840,7 @@ fn step_admit(
         };
     }
 
+    let previously_referenced = state.references(peer);
     // The deferred proof is replayed before `peer` is inserted, so it cannot
     // overwrite a slot that changed while admission was in progress.
     let verified = deferred_proof.map_or_else(
@@ -844,19 +848,10 @@ fn step_admit(
         |request| apply_finger_result(state, request, peer, now_ms).0,
     );
     let successors = update_successors(state.local, &state.successors, peer, capacity);
-    // Only a newly retained successor needs a follow-up successor-list query.
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
     let (fingers, finger_convergence) =
         rehint(&verified, finger_join(state.local, &verified.fingers, peer));
 
-    let mut actions = Vec::new();
-    if inserted {
-        actions.push(TopologyAction::QuerySuccessorList(peer));
-    }
-    actions.push(TopologyAction::FindSuccessorForConnect {
-        next: peer,
-        did: state.local,
-    });
     let mut next_state = TopologyState {
         successors,
         fingers,
@@ -865,6 +860,15 @@ fn step_admit(
     };
     prune_predecessors(&mut next_state, capacity);
     prune_bridged(&mut next_state, Some(peer), capacity);
+
+    let mut actions = Vec::new();
+    if inserted || (!previously_referenced && next_state.references(peer)) {
+        actions.push(TopologyAction::QuerySuccessorList(peer));
+    }
+    actions.push(TopologyAction::FindSuccessorForConnect {
+        next: peer,
+        did: state.local,
+    });
     TopologyStep {
         state: next_state,
         actions,

@@ -294,23 +294,13 @@ impl InboundMailbox {
                 },
         } = submission;
         let lane = prepared.lane;
-        let admitted_final = if !prepared.kind.is_chunk() {
-            if !processor.pending_connection_admits(peer).await? {
-                finish_completion(completion, Ok(()));
-                return Ok(());
-            }
-            let arrival = Arrival {
-                peer,
-                authentication,
-            };
-            processor
-                .admit_final_transaction(&prepared.payload, &prepared.message, lane, arrival)
-                .await?
-        } else {
-            false
-        };
-        // Capacity before the ticket: an arrival waiting for capacity holds no sequence, so
-        // the actor's ordering never waits on it.
+        if !prepared.kind.is_chunk() && !processor.pending_connection_admits(peer).await? {
+            finish_completion(completion, Ok(()));
+            return Ok(());
+        }
+        // Capacity before the ticket and durable replay admission: an arrival waiting for
+        // capacity holds no sequence and burns no durable replay sequence if dropped or
+        // cancelled while waiting.
         let introducer = Arrival {
             peer,
             authentication,
@@ -318,7 +308,6 @@ impl InboundMailbox {
         .introducer(processor.logical.transport.dht.edges());
         let charge = arrival_charge(&prepared.message, bytes.len(), (carrier, introducer));
         let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
-        let ticket = self.reserve_ticket(lane, lane.category(carrier))?;
         let PreparedInboundFrame {
             payload,
             message,
@@ -337,16 +326,25 @@ impl InboundMailbox {
             finish_completion(completion, Ok(()));
             return Ok(());
         }
-        let payload = if kind.is_chunk() {
+        let (payload, admitted_final) = if kind.is_chunk() {
             processor
                 .validate_preverified_payload(peer, authentication, &payload)
                 .await?;
-            payload
+            (payload, false)
         } else {
-            processor
+            let payload = processor
                 .accept_verified_logical_message(peer, authentication, payload)
-                .await?
+                .await?;
+            let arrival = Arrival {
+                peer,
+                authentication,
+            };
+            let admitted_final = processor
+                .admit_final_transaction(&payload, &message, lane, arrival)
+                .await?;
+            (payload, admitted_final)
         };
+        let ticket = self.reserve_ticket(lane, lane.category(carrier))?;
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
             sequence,

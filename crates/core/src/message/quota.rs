@@ -29,9 +29,9 @@ use crate::message::types::MessageCategory;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// Default message rate admitted for one origin in one logical lane.
-pub const DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND: u64 = 8;
+pub const DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND: u64 = 64;
 /// Default instantaneous message allowance for one origin in one logical lane.
-pub const DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST: u64 = 32;
+pub const DEFAULT_ORIGIN_QUOTA_MESSAGE_BURST: u64 = 128;
 /// Default byte rate admitted for one origin in one logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_BYTES_PER_SECOND: u64 = 4 * 1024 * 1024;
 /// Default instantaneous byte allowance for one origin in one logical lane.
@@ -51,17 +51,17 @@ pub const DEFAULT_ORIGIN_QUOTA_BYTE_BURST: u64 = 64 * 1024 * 1024;
 /// length. The decode and signature checks run before the quota and are not bounded by it.
 pub const DELEGATED_MIN_CHARGE: usize = 16 * 1024;
 /// Default number of runtime-local origin records retained per logical lane.
-pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 1024;
+pub const DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE: usize = 4096;
 
 /// The shares of one logical lane's origin-quota record table under
 /// [`DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE`] (load-bounds paper, Law 1, #1178): `f = 1` record
-/// per connection slot, a shared pool of `128`, a local share of `288` and an inbox share of
-/// `256`, so `B(s) = R(s)·1 + 672`: `1000` at `s = 3` and `1024` at `s = 15`.
+/// per connection slot, a shared pool of `2048`, a local share of `1056` and an inbox share of
+/// `640`, so `B(s) = R(s) + 3744`: `4074` at `s = 4` and `4096` at `s = 15`.
 pub(crate) const ORIGIN_QUOTA_SHARES: Shares = Shares {
     floor: 1,
-    pool: 128,
-    local: 288,
-    inbox: 256,
+    pool: 2048,
+    local: 1056,
+    inbox: 640,
     custody: 0,
 };
 

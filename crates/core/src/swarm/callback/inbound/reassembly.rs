@@ -220,15 +220,15 @@ async fn advance_chunk_event(
     // Chunk envelopes are transport framing. The verified original transaction is admitted here,
     // before it reserves or enters its logical lane, and therefore consumes one quota charge no
     // matter how many envelopes carried it.
+    let payload = processor
+        .accept_verified_logical_message(event.peer, event.authentication, payload)
+        .await?;
     let arrival = Arrival {
         peer: event.peer,
         authentication: event.authentication,
     };
     let admitted_final = processor
         .admit_final_transaction(&payload, &message, lane, arrival)
-        .await?;
-    let payload = processor
-        .accept_verified_logical_message(event.peer, event.authentication, payload)
         .await?;
     Ok(Some(ReassembledEvent {
         payload,
