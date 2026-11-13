@@ -211,6 +211,11 @@ impl OnionLinkSender {
         self.origin.elapsed().as_micros()
     }
 
+    /// Whether `link` currently has an open outbound lane.
+    pub(crate) fn has_lane(&self, link: OnionLink) -> Result<bool> {
+        Ok(lock(&self.state)?.has_lane(link.peer))
+    }
+
     /// The link to `link` is up: it emits at least the floor from now on.
     ///
     /// # Errors

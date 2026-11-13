@@ -123,7 +123,10 @@ impl TopoInfo {
                 predecessors.insert(0, pred);
             }
         }
-        let predecessor = self.predecessor.filter(|peer| is_routable(*peer));
+        let predecessor = self
+            .predecessor
+            .filter(|peer| is_routable(*peer))
+            .or_else(|| predecessors.first().copied());
         Self {
             successors,
             predecessor,

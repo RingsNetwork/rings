@@ -1,26 +1,26 @@
-//! End-to-end ElGamal encryption for byte payloads.
+//! End-to-end authenticated encryption for byte payloads.
 //!
 //! This module models E2E encryption as two separate protocol facts:
 //!
 //! - peers discover encryption public keys with signed handshake messages;
-//! - message bodies are encrypted directly with secp256k1 ElGamal stream
-//!   frames, each carried by its own signed
-//!   [`MessagePayload`](crate::message::MessagePayload).
+//! - message bodies are encrypted with per-frame secp256k1 ephemeral-key ECIES
+//!   (ECDH + HKDF-SHA256 + ChaCha20-Poly1305) stream frames, each carried by its
+//!   own signed [`MessagePayload`](crate::message::MessagePayload).
 //!
 //! Rings intentionally uses the DID/account secp256k1 public key as the
-//! ElGamal key. The public key carried by a handshake or encrypted message must
-//! resolve to the signed DID; this is the protocol's key-ownership proof. The
-//! module does not derive a separate encryption subkey.
+//! encryption key. The public key carried by a handshake or encrypted message
+//! must resolve to the signed DID; this is the protocol's key-ownership proof.
+//! The module does not derive a separate encryption subkey.
 //!
-//! The direct ElGamal body is deliberately not KEM/DEM or AEAD. Keeping the
-//! ciphertext in group-element form preserves the algebraic structure needed by
-//! future homomorphic operations. That also means ciphertext frames are
-//! malleable if detached from the signed message envelope. Integrity, sender
-//! authentication, public-key ownership, and per-frame integrity are provided by
-//! the surrounding [`MessagePayload`](crate::message::MessagePayload)
-//! signature. The stream id, sequence, and final marker make truncation
-//! observable and let the decryptor release reordered frames as a gapless
-//! plaintext stream.
+//! Each [`E2eStreamFrame`] carries a fresh ephemeral secp256k1 public key and a
+//! ChaCha20-Poly1305 ciphertext whose associated data binds the stream
+//! identifier, sender public key, recipient public key, ephemeral public key,
+//! monotonic sequence number, and end-of-stream flag. Ciphertext modification,
+//! cross-stream replay, sequence swapping, or finality tampering are therefore
+//! rejected by the AEAD tag even if a frame is inspected outside its outer
+//! [`MessagePayload`](crate::message::MessagePayload) envelope. The stream id,
+//! sequence, and final marker make truncation observable and let the decryptor
+//! release reordered frames as a gapless plaintext stream.
 //!
 //! Delivery to the application is best effort, so a frame may be lost. Law (no silent
 //! stall): the decryptor releases plaintext only as a gapless prefix of the stream, and a stream
@@ -32,14 +32,25 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::aead::KeyInit;
+use chacha20poly1305::aead::Payload;
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::Key;
+use chacha20poly1305::Nonce;
+use hkdf::Hkdf;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
+use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::dht::Did;
 use crate::ecc::elgamal::impls::secp256k1;
 use crate::ecc::group::Point;
 use crate::ecc::group::Secp256k1;
+use crate::ecc::prime_order::NonIdentityPoint;
+use crate::ecc::prime_order::NonZeroScalar;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -48,11 +59,19 @@ use crate::message::REORDER_DEADLINE;
 use crate::message::REORDER_WINDOW;
 use crate::utils::SystemEntropy;
 
-/// Plaintext bytes carried by one ElGamal body block.
+/// Plaintext bytes per logical E2E block unit.
 pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
 
 /// Default plaintext bytes per encrypted E2E stream frame.
 pub const DEFAULT_E2E_PLAINTEXT_FRAME_LEN: usize = E2E_PLAINTEXT_BLOCK_LEN * 16;
+
+const E2E_AEAD_KEY_LEN: usize = 32;
+const E2E_AEAD_NONCE_LEN: usize = 12;
+const E2E_AEAD_TAG_LEN: usize = 16;
+const E2E_ECIES_SALT: &[u8] = b"rings-core:e2e-ecies-v1:salt";
+const E2E_ECIES_INFO: &[u8] = b"rings-core:e2e-ecies-v1:chacha20poly1305";
+const E2E_ECIES_AAD_TAG: &[u8] = b"rings-core:e2e-ecies-v1:aad";
+const E2E_ECIES_AAD_LEN: usize = E2E_ECIES_AAD_TAG.len() + 16 + 33 + 33 + 33 + 8 + 1;
 
 /// Identifier shared by all frames of one encrypted E2E stream.
 pub type E2eStreamId = uuid::Uuid;
@@ -71,19 +90,21 @@ pub struct E2eHandshakeResponse {
     pub responder_public_key: PublicKey<33>,
 }
 
-/// One ordered ElGamal-encrypted stream frame.
+/// One ordered ECIES-authenticated stream frame.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct E2eStreamFrame {
     /// Stream identifier shared by all frames in this body stream.
     pub stream_id: E2eStreamId,
     /// Public key owned by the signed sender DID.
     pub sender_public_key: PublicKey<33>,
-    /// Monotonic frame counter checked by the decryptor.
+    /// Per-frame ephemeral secp256k1 public key for ECDH key agreement.
+    pub ephemeral_public_key: PublicKey<33>,
+    /// Monotonic frame counter checked by the decryptor and bound in AEAD AAD.
     pub sequence: u64,
-    /// End-of-stream marker authenticated by this frame's message signature.
+    /// End-of-stream marker authenticated by AEAD AAD and the message signature.
     pub is_final: bool,
-    /// ElGamal ciphertext blocks for this frame's plaintext bytes.
-    pub ciphertext: Vec<secp256k1::CiphertextBlock>,
+    /// ChaCha20-Poly1305 ciphertext and 16-byte authentication tag.
+    pub ciphertext: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,14 +230,26 @@ impl E2eHandshakeResponse {
 }
 
 impl E2eStreamFrame {
-    /// Verify that the carried sender key belongs to the signed sender DID.
+    /// Verify that the carried sender key belongs to the signed sender DID and that the
+    /// ephemeral public key is a valid non-identity secp256k1 point.
     pub fn verify_sender(&self, sender: Did) -> Result<()> {
-        ensure_public_key_matches_did(self.sender_public_key, sender)
+        ensure_public_key_matches_did(self.sender_public_key, sender)?;
+        ensure_valid_public_key(self.ephemeral_public_key)
+    }
+
+    /// Logical ciphertext block count (`>= 1` for every valid AEAD frame, including an empty
+    /// final frame carrying only the 16-byte authentication tag).
+    pub fn ciphertext_blocks(&self) -> usize {
+        self.ciphertext
+            .len()
+            .saturating_sub(E2E_AEAD_TAG_LEN)
+            .div_ceil(E2E_PLAINTEXT_BLOCK_LEN)
+            .max(1)
     }
 }
 
 impl E2eStreamEncryptor {
-    /// Create a direct ElGamal streaming encryptor for `recipient_public_key`.
+    /// Create an ECIES streaming encryptor for `recipient_public_key`.
     pub fn new(
         stream_id: E2eStreamId,
         sender_public_key: PublicKey<33>,
@@ -280,11 +313,33 @@ impl E2eStreamEncryptor {
             self.next_sequence = next_sequence(sequence)?;
         }
 
-        let ciphertext =
-            secp256k1::encrypt_bytes_with_rng(plaintext, self.recipient_public_key, rng)?;
+        let recipient_point = NonIdentityPoint::<Secp256k1>::try_from(self.recipient_public_key)?;
+        let ephemeral_secret_key = SecretKey::random_with_rng(rng);
+        let ephemeral_scalar = NonZeroScalar::<Secp256k1>::from_secret_key(&ephemeral_secret_key);
+        let ephemeral_public_key =
+            PublicKey::from(&NonIdentityPoint::generator_mul(&ephemeral_scalar));
+        let shared_secret = recipient_point.shared_secret(&ephemeral_scalar);
+        let (key, nonce) = derive_e2e_key_and_nonce(shared_secret.as_slice(), true)?;
+        let aad = e2e_ecies_aad(
+            self.stream_id,
+            self.sender_public_key,
+            self.recipient_public_key,
+            ephemeral_public_key,
+            sequence,
+            is_final,
+        );
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce), Payload {
+                msg: plaintext,
+                aad: aad.as_slice(),
+            })
+            .map_err(|_| Error::MessageEncryptionFailed("E2E AEAD seal failed".to_string()))?;
+
         Ok(E2eStreamFrame {
             stream_id: self.stream_id,
             sender_public_key: self.sender_public_key,
+            ephemeral_public_key,
             sequence,
             is_final,
             ciphertext,
@@ -293,7 +348,7 @@ impl E2eStreamEncryptor {
 }
 
 impl E2eStreamDecryptor {
-    /// Create a direct ElGamal streaming decryptor for a recipient secret key, at `now_ms`.
+    /// Create an ECIES streaming decryptor for a recipient secret key, at `now_ms`.
     pub fn new(
         stream_id: E2eStreamId,
         expected_sender: Did,
@@ -438,10 +493,13 @@ impl E2eStreamDecryptor {
 
     fn decrypt_ready_frames(&mut self) -> Result<Vec<u8>> {
         let mut plaintext = Vec::new();
+        let recipient_public_key = self.recipient_secret_key.pubkey();
+        let recipient_scalar =
+            NonZeroScalar::<Secp256k1>::from_secret_key(&self.recipient_secret_key);
 
         while let Some(frame) = self.pending_frames.get(&self.next_sequence) {
             let frame_plaintext =
-                secp256k1::decrypt_bytes(&frame.ciphertext, &self.recipient_secret_key)?;
+                decrypt_ecies_frame(frame, recipient_public_key, &recipient_scalar)?;
             let is_final = frame.is_final;
             plaintext.extend_from_slice(&frame_plaintext);
             self.pending_frames.remove(&self.next_sequence);
@@ -479,6 +537,85 @@ impl E2eStreamDecryptor {
     }
 }
 
+fn decrypt_ecies_frame(
+    frame: &E2eStreamFrame,
+    recipient_public_key: PublicKey<33>,
+    recipient_scalar: &NonZeroScalar<Secp256k1>,
+) -> Result<Vec<u8>> {
+    let ephemeral_point = NonIdentityPoint::<Secp256k1>::try_from(frame.ephemeral_public_key)?;
+    let shared_secret = ephemeral_point.shared_secret(recipient_scalar);
+    let (key, nonce) = derive_e2e_key_and_nonce(shared_secret.as_slice(), false)?;
+    let aad = e2e_ecies_aad(
+        frame.stream_id,
+        frame.sender_public_key,
+        recipient_public_key,
+        frame.ephemeral_public_key,
+        frame.sequence,
+        frame.is_final,
+    );
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+    cipher
+        .decrypt(Nonce::from_slice(&nonce), Payload {
+            msg: frame.ciphertext.as_slice(),
+            aad: aad.as_slice(),
+        })
+        .map_err(|_| Error::MessageDecryptionFailed("E2E AEAD open failed".to_string()))
+}
+
+fn derive_e2e_key_and_nonce(
+    shared_secret: &[u8],
+    encrypt_side: bool,
+) -> Result<(Zeroizing<[u8; E2E_AEAD_KEY_LEN]>, [u8; E2E_AEAD_NONCE_LEN])> {
+    let mut okm = Zeroizing::new([0u8; E2E_AEAD_KEY_LEN + E2E_AEAD_NONCE_LEN]);
+    Hkdf::<Sha256>::new(Some(E2E_ECIES_SALT), shared_secret)
+        .expand(E2E_ECIES_INFO, okm.as_mut_slice())
+        .map_err(|_| {
+            if encrypt_side {
+                Error::MessageEncryptionFailed("E2E key derivation failed".to_string())
+            } else {
+                Error::MessageDecryptionFailed("E2E key derivation failed".to_string())
+            }
+        })?;
+    let mut key = Zeroizing::new([0u8; E2E_AEAD_KEY_LEN]);
+    let mut nonce = [0u8; E2E_AEAD_NONCE_LEN];
+    if let Some(key_bytes) = okm.get(..E2E_AEAD_KEY_LEN) {
+        key.copy_from_slice(key_bytes);
+    }
+    if let Some(nonce_bytes) = okm.get(E2E_AEAD_KEY_LEN..) {
+        nonce.copy_from_slice(nonce_bytes);
+    }
+    Ok((key, nonce))
+}
+
+fn e2e_ecies_aad(
+    stream_id: E2eStreamId,
+    sender_public_key: PublicKey<33>,
+    recipient_public_key: PublicKey<33>,
+    ephemeral_public_key: PublicKey<33>,
+    sequence: u64,
+    is_final: bool,
+) -> [u8; E2E_ECIES_AAD_LEN] {
+    let mut aad = [0u8; E2E_ECIES_AAD_LEN];
+    let mut offset = 0usize;
+    for part in [
+        E2E_ECIES_AAD_TAG,
+        stream_id.as_bytes().as_slice(),
+        sender_public_key.0.as_slice(),
+        recipient_public_key.0.as_slice(),
+        ephemeral_public_key.0.as_slice(),
+        sequence.to_be_bytes().as_slice(),
+        [u8::from(is_final)].as_slice(),
+    ] {
+        let next = offset + part.len();
+        if let Some(slot) = aad.get_mut(offset..next) {
+            slot.copy_from_slice(part);
+        }
+        offset = next;
+    }
+    debug_assert_eq!(offset, E2E_ECIES_AAD_LEN);
+    aad
+}
+
 fn plaintext_stream_frames(
     plaintext: &[u8],
     max_plaintext_frame_len: usize,
@@ -486,7 +623,7 @@ fn plaintext_stream_frames(
     E2ePlaintextFrames::new(plaintext, max_plaintext_frame_len)
 }
 
-/// Encrypt a byte slice lazily into direct-ElGamal E2E stream frames.
+/// Encrypt a byte slice lazily into ECIES-authenticated E2E stream frames.
 pub fn encrypt_stream_frames_with_rng<R: RngCore>(
     plaintext: &[u8],
     stream_id: E2eStreamId,
@@ -520,7 +657,7 @@ pub fn encrypt_stream_frames(
     )
 }
 
-/// Encrypt a byte slice into direct-ElGamal E2E stream frames.
+/// Encrypt a byte slice into ECIES-authenticated E2E stream frames.
 pub fn encrypt_stream_with_rng(
     plaintext: &[u8],
     stream_id: E2eStreamId,
@@ -540,7 +677,7 @@ pub fn encrypt_stream_with_rng(
     .collect()
 }
 
-/// Decrypt a complete direct-ElGamal E2E frame sequence into bytes.
+/// Decrypt a complete ECIES-authenticated E2E frame sequence into bytes.
 pub fn decrypt_stream(
     frames: &[E2eStreamFrame],
     stream_id: E2eStreamId,

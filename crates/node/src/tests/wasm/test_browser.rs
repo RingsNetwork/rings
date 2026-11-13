@@ -232,23 +232,25 @@ async fn test_get_address_from_hex_pubkey() {
 
 #[wasm_bindgen_test]
 async fn test_get_address() {
-    let expect_address = "0x8b98cf912975b4b6b67ce94882fc25c210a60a60";
-    let got_address = browser::get_address(
-        "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK",
-        browser::AddressType::Ed25519,
-    )
-    .ok()
-    .unwrap();
+    let raw_account = "9z1ZTaGocNSAu3DSqGKR6Dqt214X4dXucVd6C53EgqBK";
+    let expect_address =
+        rings_core::ecc::AccountVerifier::from_account_parts(raw_account, "ed25519")
+            .unwrap()
+            .did()
+            .to_string();
+    let got_address = browser::get_address(raw_account, browser::AddressType::Ed25519)
+        .ok()
+        .unwrap();
     assert!(
         expect_address.eq_ignore_ascii_case(got_address.as_str()),
         "got address: {got_address}, expect: {expect_address}"
     );
-    let got_address = browser::get_address(expect_address, browser::AddressType::DEFAULT)
+    let got_address = browser::get_address(expect_address.as_str(), browser::AddressType::DEFAULT)
         .ok()
         .unwrap();
 
     assert!(
-        got_address.eq_ignore_ascii_case(expect_address),
+        got_address.eq_ignore_ascii_case(expect_address.as_str()),
         "got address: {got_address}, expect: {expect_address}"
     )
 }

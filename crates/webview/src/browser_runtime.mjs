@@ -1,4 +1,4 @@
-;(function(config) {
+;(function installBootstrap(globalThis, config) {
   const { prefix, targetBase, marker } = config;
   const shellNavigation = config.delegateNavigation === true
     ? globalThis.__ringsWebviewShellNavigation
@@ -434,7 +434,8 @@
         return false;
       }
       const fields = new URLSearchParams();
-      const data = submitter ? new FormData(form, submitter) : new FormData(form);
+      const FormDataCtor = globalThis.FormData;
+      const data = submitter ? new FormDataCtor(form, submitter) : new FormDataCtor(form);
       for (const [name, value] of data.entries()) {
         fields.append(String(name), typeof value === "string" ? value : String(value?.name || ""));
       }
@@ -503,10 +504,13 @@
   const nativeFetch = globalThis.fetch?.bind(globalThis);
   if (nativeFetch) {
     globalThis.fetch = function(input, init) {
-      const runtime = runtimeGatewayRequest(input instanceof Request ? input.url : input);
-      const next = input instanceof Request ? new Request(runtime.url, input) : runtime.url;
+      const RequestCtor = globalThis.Request;
+      const HeadersCtor = globalThis.Headers;
+      const isRequest = typeof RequestCtor === "function" && input instanceof RequestCtor;
+      const runtime = runtimeGatewayRequest(isRequest ? input.url : input);
+      const next = isRequest ? new RequestCtor(runtime.url, input) : runtime.url;
       try {
-        const headers = new Headers(init?.headers || (input instanceof Request ? next.headers : undefined));
+        const headers = new HeadersCtor(init?.headers || (isRequest ? next.headers : undefined));
         if (runtime.target) {
           headers.set("X-Rings-Webview-Kind", "fetch");
           headers.set(runtimeTargetHeader, runtime.target);
@@ -571,6 +575,72 @@
     else container?.append?.(script);
     return true;
   }
+  function ensureChildRealmBootstrap(childWindow) {
+    if (!childWindow || typeof childWindow !== "object") return;
+    try {
+      if (childWindow[marker]) return;
+      childWindow.__ringsWebviewTransforms = transforms;
+      installBootstrap(childWindow, {
+        ...config,
+        targetBase: resolveTargetBase(),
+        delegateNavigation: false,
+      });
+    } catch (_error) {}
+  }
+  const nativeIframeContentWindow = findPropertyDescriptor(
+    globalThis.HTMLIFrameElement?.prototype || {},
+    "contentWindow"
+  );
+  const nativeIframeContentDocument = findPropertyDescriptor(
+    globalThis.HTMLIFrameElement?.prototype || {},
+    "contentDocument"
+  );
+  function bootstrapInsertedFrames(value) {
+    if (!globalThis.Node || !(value instanceof globalThis.Node)) return;
+    if (String(value.tagName || "").toLowerCase() === "iframe") {
+      try {
+        const childWin = nativeIframeContentWindow?.get
+          ? nativeIframeContentWindow.get.call(value)
+          : value.contentWindow;
+        ensureChildRealmBootstrap(childWin);
+      } catch (_error) {}
+    }
+    const nested = value.querySelectorAll?.("iframe");
+    if (nested) {
+      for (const frame of nested) {
+        try {
+          const childWin = nativeIframeContentWindow?.get
+            ? nativeIframeContentWindow.get.call(frame)
+            : frame.contentWindow;
+          ensureChildRealmBootstrap(childWin);
+        } catch (_error) {}
+      }
+    }
+  }
+  function patchChildFrameAccess() {
+    const proto = globalThis.HTMLIFrameElement?.prototype;
+    if (!proto) return;
+    if (nativeIframeContentWindow?.get) {
+      Object.defineProperty(proto, "contentWindow", {
+        ...nativeIframeContentWindow,
+        get() {
+          const childWindow = nativeIframeContentWindow.get.call(this);
+          ensureChildRealmBootstrap(childWindow);
+          return childWindow;
+        }
+      });
+    }
+    if (nativeIframeContentDocument?.get) {
+      Object.defineProperty(proto, "contentDocument", {
+        ...nativeIframeContentDocument,
+        get() {
+          const childDocument = nativeIframeContentDocument.get.call(this);
+          ensureChildRealmBootstrap(childDocument?.defaultView);
+          return childDocument;
+        }
+      });
+    }
+  }
   function rewriteInsertedNode(value) {
     if (!globalThis.Node || !(value instanceof globalThis.Node)) return;
     rewriteHtmlTree(
@@ -584,7 +654,9 @@
     if (!native) return;
     prototype[method] = function(...args) {
       for (const index of indexes) rewriteInsertedNode(args[index]);
-      return native.apply(this, args);
+      const result = native.apply(this, args);
+      for (const index of indexes) bootstrapInsertedFrames(args[index]);
+      return result;
     };
   }
   function patchVariadicInsertions(prototype, method) {
@@ -592,7 +664,9 @@
     if (!native) return;
     prototype[method] = function(...args) {
       for (const value of args) rewriteInsertedNode(value);
-      return native.apply(this, args);
+      const result = native.apply(this, args);
+      for (const value of args) bootstrapInsertedFrames(value);
+      return result;
     };
   }
   patchInsertionArguments(globalThis.Node?.prototype, "appendChild", [0]);
@@ -755,6 +829,7 @@
   patchUrlProperty("HTMLScriptElement", "src");
   patchUrlProperty("HTMLIFrameElement", "src");
   patchUrlProperty("HTMLIFrameElement", "srcdoc");
+  patchChildFrameAccess();
   patchUrlProperty("HTMLLinkElement", "href");
   patchUrlProperty("HTMLFormElement", "action");
   patchUrlProperty("HTMLInputElement", "src");
@@ -772,4 +847,4 @@
   installNetworkEffects();
   installDomEffects();
   gatewayState.prefix = prefix;
-})(globalThis.__ringsWebviewBootstrapConfig);
+})(globalThis, globalThis.__ringsWebviewBootstrapConfig);

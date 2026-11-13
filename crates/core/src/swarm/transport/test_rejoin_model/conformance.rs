@@ -20,7 +20,7 @@
 //! through the stabilizer's `clean_unavailable_connections`. The model's
 //! component is the `StorageRepair` effect of its `Observe` step.
 //!
-//! The transport carries the production table sizes (`K = 3`, 160 finger
+//! The transport carries the production table sizes (`K = 4`, 160 finger
 //! slots), so the finger projection compared here is not degenerate. The
 //! first test removes on the close path (`Ordinary`); the second, under the
 //! dummy transport whose data channels are routable, removes the head on the
@@ -240,18 +240,18 @@ async fn test_model_agrees_with_the_production_shell_on_the_close_path() -> Resu
 
 /// Law: on the close path of an admitted peer that no slot references, the
 /// removal is the identity on the topology in both the model and the
-/// production shell, and neither requests a repair round. In a ring of six,
-/// the fifth peer is behind the `K = 3` successors, ahead of the predecessor,
+/// production shell, and neither requests a repair round. In a ring of seven,
+/// the sixth peer is behind the `K = 4` successors, ahead of the predecessor,
 /// and the fixpoint of no finger slot.
 #[tokio::test]
 async fn test_model_agrees_with_the_production_shell_on_an_unreferenced_close() -> Result<()> {
-    let (transport, overlay, [observer, first, second, third, unreferenced, last]) =
-        observed_ring::<6>()?;
+    let (transport, overlay, [observer, first, second, third, fourth, unreferenced, last]) =
+        observed_ring::<7>()?;
     let handler = handler_for(&transport);
 
     // Init: every peer admitted in ring order, predecessor notified.
     let model = overlay.init();
-    for peer in [first, second, third] {
+    for peer in [first, second, third, fourth] {
         admit_unlinked(&transport, peer).await?;
     }
     let retired = admit_unlinked(&transport, unreferenced).await?;

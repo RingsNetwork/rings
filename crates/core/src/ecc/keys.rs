@@ -40,7 +40,7 @@ fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
     out
 }
 
-fn domain_separated_address(algorithm: &str, raw_bytes: &[u8]) -> PublicKeyAddress {
+pub(crate) fn domain_separated_address(algorithm: &str, raw_bytes: &[u8]) -> PublicKeyAddress {
     PublicKeyAddress::from_slice(&keccak256(&public_key_transcript(algorithm, raw_bytes))[12..])
 }
 
@@ -228,8 +228,12 @@ impl VerificationPublicKey {
             Self::Secp256k1(pk) => signers::secp256k1::verify(msg, &pk.address(), sig.as_ref()),
             Self::Eip191(pk) => signers::eip191::verify(msg, &pk.address(), sig.as_ref()),
             Self::Bip137(pk) => signers::bip137::verify(msg, &pk.address(), sig.as_ref()),
-            Self::Secp256r1(pk) => signers::secp256r1::verify(msg, &pk.address(), sig.as_ref(), pk),
-            Self::Ed25519(pk) => signers::ed25519::verify(msg, &pk.address(), sig.as_ref(), pk),
+            Self::Secp256r1(pk) => {
+                signers::secp256r1::verify(msg, &self.domain_separated_address(), sig.as_ref(), pk)
+            }
+            Self::Ed25519(pk) => {
+                signers::ed25519::verify(msg, &self.domain_separated_address(), sig.as_ref(), pk)
+            }
             Self::Bls12381(pk) => {
                 let Ok(sig_data) = sig.as_ref().try_into() else {
                     return false;
@@ -298,12 +302,17 @@ impl AccountVerifier {
                     public_key,
                 )))
             }
-            "ed25519" => Ok(Self::PublicKey(VerificationPublicKey::Ed25519(
-                PublicKey::try_from_b58t(account_entity)?,
-            ))),
-            "bls12-381" | "bls12381" => Ok(Self::PublicKey(VerificationPublicKey::Bls12381(
-                public_key_from_b58m_exact(account_entity)?,
-            ))),
+            "ed25519" => {
+                let public_key = PublicKey::try_from_b58t(account_entity)?;
+                let _: ed25519_dalek::VerifyingKey = public_key.try_into()?;
+                Ok(Self::PublicKey(VerificationPublicKey::Ed25519(public_key)))
+            }
+            "bls12-381" | "bls12381" => {
+                let public_key = public_key_from_b58m_exact(account_entity)?;
+                let _: ark_bls12_381::G1Projective =
+                    public_key.try_into().map_err(|_| Error::InvalidPublicKey)?;
+                Ok(Self::PublicKey(VerificationPublicKey::Bls12381(public_key)))
+            }
             _ => Err(Error::UnknownAccount),
         }
     }

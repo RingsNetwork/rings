@@ -814,8 +814,7 @@ impl RelayHandle {
         self.engine
             .clone()
             .listen(scope.clone(), local_addr, peer, service, kind)
-            .await;
-        Ok(())
+            .await
     }
 
     /// Register (at runtime) a local service the **TCP** relay may dial (`name` → `addr`).

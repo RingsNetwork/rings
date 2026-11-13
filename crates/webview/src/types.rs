@@ -18,18 +18,21 @@ impl GatewayHeader {
     /// Build a validated gateway header.
     pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
         let name = name.into();
-        if name.trim().is_empty() {
+        if name.is_empty() {
             return Err(WebviewError::Header("header name is empty".to_string()));
         }
-        if name.chars().any(|ch| ch.is_control()) {
+        if !name.bytes().all(is_rfc9110_tchar) {
             return Err(WebviewError::Header(format!(
-                "header name {name:?} contains control characters"
+                "header name {name:?} contains invalid HTTP token characters"
             )));
         }
         let value = value.into();
-        if value.chars().any(|ch| ch == '\r' || ch == '\n') {
+        if value
+            .chars()
+            .any(|ch| ch == '\r' || ch == '\n' || ch == '\0' || (ch.is_control() && ch != '\t'))
+        {
             return Err(WebviewError::Header(format!(
-                "header {name:?} value contains newline"
+                "header {name:?} value contains control characters"
             )));
         }
         Ok(Self { name, value })
@@ -39,6 +42,27 @@ impl GatewayHeader {
     pub fn name_eq(&self, name: &str) -> bool {
         self.name.eq_ignore_ascii_case(name)
     }
+}
+
+fn is_rfc9110_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Browser request class that produced a gateway request.
@@ -258,5 +282,22 @@ mod tests {
         assert!(request.lacks_runtime_source_origin());
         assert!(!request.allows_target_cookies());
         Ok(())
+    }
+
+    #[test]
+    fn test_gateway_header_enforces_rfc9110_token_names_and_rejects_control_values() {
+        for bad_name in ["", "Bad Name", "X:Injected", "X\0Null", "X(Paren)"] {
+            assert!(
+                GatewayHeader::new(bad_name, "ok").is_err(),
+                "accepted invalid header name {bad_name:?}"
+            );
+        }
+        for bad_value in ["a\0b", "a\x07b", "a\r\nb"] {
+            assert!(
+                GatewayHeader::new("X-Test", bad_value).is_err(),
+                "accepted invalid header value {bad_value:?}"
+            );
+        }
+        assert!(GatewayHeader::new("X-Valid_Token!1", "tab\tallowed").is_ok());
     }
 }

@@ -840,7 +840,11 @@ impl SwarmTransport {
                 detached_admission,
             ),
             Framing::Chunked { chunk_size } => {
-                let chunks: ChunkFrames = Box::new(Chunk::stream(payload.to_wire()?, chunk_size));
+                let chunks: ChunkFrames = Box::new(Chunk::stream_at(
+                    payload.to_wire()?,
+                    chunk_size,
+                    self.now_ms(),
+                ));
                 OutboundTransfer::chunked(
                     route,
                     ChunkedFrameSource::new(self.message_signer(), chunks, logical_sequence),

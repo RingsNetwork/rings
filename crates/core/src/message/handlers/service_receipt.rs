@@ -32,9 +32,7 @@ use crate::message::ServiceReceiptError;
 use crate::message::Transaction;
 
 enum ProbeEffect<'payload> {
-    Forward {
-        ctx: &'payload MessagePayload,
-    },
+    RejectNonDirect,
     RespondToRequest {
         ctx: &'payload MessagePayload,
         request: &'payload ProbeRequest,
@@ -50,19 +48,22 @@ enum ProbeEffect<'payload> {
 }
 
 impl<'payload> ProbeEffect<'payload> {
-    fn local_or_forward(local: Did, ctx: &'payload MessagePayload, local_effect: Self) -> Self {
-        match ctx.should_forward_from(local).then_some(ctx) {
-            Some(ctx) => Self::Forward { ctx },
-            None => local_effect,
+    fn direct_local_only(local: Did, ctx: &'payload MessagePayload, local_effect: Self) -> Self {
+        if ctx.should_forward_from(local)
+            || ctx.delegations().hop.delegator_did() != ctx.transaction.origin()
+        {
+            Self::RejectNonDirect
+        } else {
+            local_effect
         }
     }
 
     fn request(local: Did, ctx: &'payload MessagePayload, request: &'payload ProbeRequest) -> Self {
-        Self::local_or_forward(local, ctx, Self::RespondToRequest { ctx, request })
+        Self::direct_local_only(local, ctx, Self::RespondToRequest { ctx, request })
     }
 
     fn offer(local: Did, ctx: &'payload MessagePayload, offer: &'payload ProbeOffer) -> Self {
-        Self::local_or_forward(local, ctx, Self::RespondToOffer { ctx, offer })
+        Self::direct_local_only(local, ctx, Self::RespondToOffer { ctx, offer })
     }
 
     fn acknowledgement(
@@ -70,7 +71,7 @@ impl<'payload> ProbeEffect<'payload> {
         ctx: &'payload MessagePayload,
         acknowledgement: &'payload ProbeAcknowledgement,
     ) -> Self {
-        Self::local_or_forward(local, ctx, Self::AdmitAcknowledgement {
+        Self::direct_local_only(local, ctx, Self::AdmitAcknowledgement {
             ctx,
             acknowledgement,
         })
@@ -190,11 +191,9 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
 
     async fn run(&self, effect: ProbeEffect<'_>) -> Result<()> {
         match effect {
-            ProbeEffect::Forward { ctx } => {
-                self.handler
-                    .run_effects([CoreEffect::forward_payload(ctx, None)])
-                    .await
-            }
+            ProbeEffect::RejectNonDirect => Err(Error::InvalidMessage(
+                "probe transcript messages must be delivered directly without relaying".to_string(),
+            )),
             ProbeEffect::RespondToRequest { ctx, request } => {
                 self.respond_to_request(ctx, request).await
             }

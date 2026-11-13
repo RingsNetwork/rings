@@ -560,3 +560,98 @@ fn test_gap_bridge_handoff_ignores_intermediate_bridged_peer_past_aim() {
         (vec![n10, head50, aim20], Outcome::Delivered)
     );
 }
+
+/// Non-transitive two-clique topology `(ABC)(CDE)` where `A, B` cannot link directly to `D, E`
+/// and `C` bridges both cliques (`K = 4` successors at `C`): all cross-clique pairs `(A -> E)`,
+/// `(B -> D)`, `(E -> A)`, `(D -> B)` plus `RouteStage::via` replies route cleanly through `C`,
+/// and `find_successor(state, state.local)` resolves locally.
+#[test]
+fn test_non_transitive_two_clique_bridge_routes_both_directions_and_reply_via() {
+    let [a10, b20, c30, d40, e50] = [10u32, 20, 30, 40, 50].map(Did::from);
+
+    let mut view_a = TopologyState::new(a10, vec![b20, c30], Some(c30), vec![None; 8]);
+    view_a.bridged.insert(d40, c30);
+    view_a.bridged.insert(e50, c30);
+
+    let mut view_b = TopologyState::new(b20, vec![c30, a10], Some(a10), vec![None; 8]);
+    view_b.bridged.insert(d40, c30);
+    view_b.bridged.insert(e50, c30);
+
+    let mut view_c = TopologyState::new(c30, vec![d40, e50, a10, b20], Some(b20), vec![None; 8]);
+    view_c.predecessors = vec![b20, e50];
+
+    let mut view_d = TopologyState::new(d40, vec![e50, c30], Some(c30), vec![None; 8]);
+    view_d.bridged.insert(a10, c30);
+    view_d.bridged.insert(b20, c30);
+
+    let mut view_e = TopologyState::new(e50, vec![c30, d40], Some(d40), vec![None; 8]);
+    view_e.bridged.insert(a10, c30);
+    view_e.bridged.insert(b20, c30);
+
+    assert_eq!(
+        crate::dht::topology::find_successor(&view_a, a10),
+        crate::dht::topology::FindSuccessorStep::Local(a10)
+    );
+
+    let views = BTreeMap::from([
+        (a10, view_a),
+        (b20, view_b),
+        (c30, view_c),
+        (d40, view_d),
+        (e50, view_e),
+    ]);
+    let links = [
+        (a10, b20),
+        (b20, c30),
+        (a10, c30),
+        (c30, d40),
+        (d40, e50),
+        (c30, e50),
+    ];
+    let overlay = Overlay::with_links(views, links);
+
+    for (src, dst, expected) in [
+        (a10, e50, vec![a10, c30, e50]),
+        (b20, d40, vec![b20, c30, d40]),
+        (e50, a10, vec![e50, c30, a10]),
+        (d40, b20, vec![d40, e50, c30, b20]),
+    ] {
+        let route = overlay.check_route_law(src, dst, RouteStage::TOWARD);
+        assert_eq!(
+            (route.path(), route.outcome),
+            (expected, Outcome::Delivered)
+        );
+    }
+
+    let reply = overlay.check_route_law(e50, a10, RouteStage::replying_via(Some(b20)));
+    assert_eq!(
+        (reply.path(), reply.outcome),
+        (vec![e50, c30, a10], Outcome::Delivered)
+    );
+}
+
+/// Regression: when a node has a stale `bridged[T] = C` hint (`C-T` disconnected) alongside a
+/// closer live greedy forward peer `B` (`A=10 < C=20 < B=30 < T=40` with links `A-C`, `A-B`,
+/// `B-T`), `delivery_step` prefers the viable ordinary forward `A -> B -> T` instead of bouncing
+/// into the stale bridge `C`.
+#[test]
+fn test_stale_bridge_hint_does_not_override_viable_greedy_forward() {
+    let [a10, c20, b30, t40] = [10u32, 20, 30, 40].map(Did::from);
+
+    let mut view_a = TopologyState::new(a10, vec![c20, b30], Some(t40), vec![None; 8]);
+    view_a.bridged.insert(t40, c20);
+
+    let view_c = TopologyState::new(c20, vec![b30, t40, a10], Some(a10), vec![None; 8]);
+    let view_b = TopologyState::new(b30, vec![t40, a10, c20], Some(c20), vec![None; 8]);
+    let view_t = TopologyState::new(t40, vec![a10, c20, b30], Some(b30), vec![None; 8]);
+
+    let views = BTreeMap::from([(a10, view_a), (c20, view_c), (b30, view_b), (t40, view_t)]);
+    let links = [(a10, c20), (a10, b30), (b30, t40)];
+    let overlay = Overlay::with_links(views, links);
+
+    let route = overlay.check_route_law(a10, t40, RouteStage::TOWARD);
+    assert_eq!(
+        (route.path(), route.outcome),
+        (vec![a10, b30, t40], Outcome::Delivered)
+    );
+}

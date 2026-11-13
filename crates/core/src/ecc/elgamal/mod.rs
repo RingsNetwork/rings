@@ -50,6 +50,7 @@
 use std::marker::PhantomData;
 
 use rand::RngCore;
+use zeroize::Zeroize;
 
 use crate::algebra::Module;
 use crate::ecc::group::Bls12381G1;
@@ -137,14 +138,29 @@ where Element: CyclicModule
         &self.scalar
     }
 
-    /// Unwrap into the secret scalar.
-    pub fn into_scalar(self) -> Element::Scalar {
-        self.scalar
+    /// Unwrap into the secret scalar, wiping this wrapper's copy before drop.
+    pub fn into_scalar(mut self) -> Element::Scalar
+    where Element::Scalar: Clone {
+        let out = self.scalar.clone();
+        self.scalar.zeroize();
+        out
     }
 
     /// Derive the public key `h = xg`.
     pub fn public_key(&self) -> ElGamalPublicKey<Element> {
         ElGamalPublicKey::from_element(Element::generator_mul(&self.scalar))
+    }
+}
+
+impl<Element: CyclicModule> Zeroize for ElGamalSecretKey<Element> {
+    fn zeroize(&mut self) {
+        self.scalar.zeroize();
+    }
+}
+
+impl<Element: CyclicModule> Drop for ElGamalSecretKey<Element> {
+    fn drop(&mut self) {
+        self.scalar.zeroize();
     }
 }
 

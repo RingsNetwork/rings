@@ -387,6 +387,14 @@ impl Charged<OnionCell> {
     }
 }
 
+impl OnionPeeledCell {
+    /// Return the decrypted layer head before admission, so unforwardable relay layers can be
+    /// dropped without burning a replay nonce in the Bloom filter.
+    pub(crate) const fn head(&self) -> &OnionLayerHead {
+        &self.layer.head
+    }
+}
+
 impl Charged<OnionPeeledCell> {
     /// Admit the peeled layer with the token of its own cell: epoch, window at the charge's
     /// arrival, and replay (#834 L9). A rejection keeps the charge taken and drops the cell.
@@ -411,7 +419,8 @@ impl Charged<OnionPeeledCell> {
 }
 
 impl OnionAdmittedCell {
-    /// Return the head of `λ_i`, for the decisions made before the carry step.
+    /// Return the head of `λ_i`, for test assertions on admitted cells.
+    #[cfg(test)]
     pub(crate) const fn head(&self) -> &OnionLayerHead {
         &self.0.layer.head
     }
@@ -511,8 +520,7 @@ impl OnionSurb {
         self.class
     }
 
-    /// `next_υ`, for the non-interference law.
-    #[cfg(test)]
+    /// `next_υ`, the first hop of the reply block's return path.
     pub(crate) const fn next(&self) -> Did {
         self.next
     }

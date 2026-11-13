@@ -19,7 +19,7 @@ use rings_core::error::Result as CoreResult;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -360,23 +360,27 @@ pub(crate) struct OnionInvokeRegistration {
     process_epoch: OnionProcessEpochCell,
     started_at_ms: u128,
     offer: OnionInvokeOffer,
+    clock: SharedClock,
     publisher: DhtRegistrationPublisher<Vec<OnionInvokeDescriptor>>,
 }
 
 impl OnionInvokeRegistration {
-    pub(crate) fn new(
+    pub(crate) fn new_with_clock(
         heartbeat_interval: Duration,
         ttl: Duration,
         node_type: OnlineNodeType,
         offer: OnionInvokeOffer,
         process_epoch: OnionProcessEpochCell,
+        clock: SharedClock,
     ) -> Self {
+        let started_at_ms = clock.now_ms();
         Self {
             heartbeat_interval,
             node_type,
             process_epoch,
-            started_at_ms: get_epoch_ms(),
+            started_at_ms,
             offer,
+            clock,
             publisher: DhtRegistrationPublisher::new(ONION_INVOKES_TOPIC, heartbeat_interval, ttl),
         }
     }
@@ -419,7 +423,7 @@ impl OnionInvokeRegistration {
         context: &RegistrationContext<'_>,
     ) -> Result<Vec<OnionInvokeDescriptor>> {
         self.publisher
-            .publish_lease(context, get_epoch_ms(), |terms| {
+            .publish_lease(context, self.clock.now_ms(), |terms| {
                 self.descriptors_at(context, terms)
             })
             .await

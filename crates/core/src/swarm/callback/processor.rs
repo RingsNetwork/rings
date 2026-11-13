@@ -21,7 +21,6 @@ use crate::message::LinkWindows;
 use crate::message::Message;
 use crate::message::MessageKind;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
 use crate::message::ReplayWindow;
 use crate::swarm::session_link::DelegationLessor;
@@ -270,7 +269,7 @@ impl InboundProcessor {
             }
         };
         let network_id = self.logical.transport.network_id;
-        if !payload.verify_transaction_and_payload(network_id) {
+        if !payload.verify_transaction_and_payload_at(network_id, self.now_ms()) {
             log_inbound_verification_failure(peer, &payload, msg.len());
             self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
@@ -286,7 +285,10 @@ impl InboundProcessor {
         authentication: Authentication,
         payload: &MessagePayload,
     ) -> crate::error::Result<()> {
-        if payload.is_expired() || payload.transaction.is_expired() {
+        let now_ms = self.now_ms();
+        if !payload.verification.is_live_at(now_ms)
+            || !payload.transaction.verification.is_live_at(now_ms)
+        {
             self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message expired after transport admission".to_string(),
@@ -324,12 +326,13 @@ impl InboundProcessor {
 /// reference, this is the verification it always was.
 pub(super) fn prepare_resolved_frame(
     network_id: u32,
+    now_ms: u128,
     peer: Option<Did>,
     payload: MessagePayload,
     wire_bytes: usize,
     authorization: PerSlot<DelegatorAuthorization>,
 ) -> crate::error::Result<PreparedInboundFrame> {
-    if !payload.verify_transaction_and_payload_under(network_id, authorization) {
+    if !payload.verify_transaction_and_payload_under_at(network_id, now_ms, authorization) {
         log_inbound_verification_failure(peer, &payload, wire_bytes);
         return Err(crate::error::Error::InvalidMessage(
             "message verification failed or message expired".to_string(),
@@ -359,6 +362,7 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     let payload = MessagePayload::from_wire(bytes)?;
     prepare_resolved_frame(
         network_id,
+        crate::utils::get_epoch_ms(),
         None,
         payload,
         bytes.len(),

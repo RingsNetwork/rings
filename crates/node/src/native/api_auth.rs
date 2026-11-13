@@ -173,11 +173,21 @@ impl ApiSecurity {
             && provided.as_bytes().ct_eq(self.token.as_bytes()).into()
     }
 
-    /// Build the explicit CORS layer for this policy.
+    /// Build the explicit CORS layer for the internal operator listener.
     pub fn cors_layer(&self) -> CorsLayer {
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(self.allowed_origins.clone()))
-            .allow_methods([Method::GET, Method::POST])
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+            .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT])
+            .expose_headers([NODE_VERSION_HEADER])
+    }
+
+    /// Build the credential-less CORS layer for the peer-facing external listener so browser
+    /// clients from arbitrary DApp origins can complete HTTP WebRTC handshakes and preflights.
+    pub fn external_cors_layer(&self) -> CorsLayer {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers([AUTHORIZATION, CONTENT_TYPE, ACCEPT])
             .expose_headers([NODE_VERSION_HEADER])
     }
@@ -458,7 +468,10 @@ mod tests {
     fn every_call_is_public(request: &jsonrpc_core::Request) -> bool {
         match request {
             jsonrpc_core::Request::Single(call) => call_is_public(call),
-            jsonrpc_core::Request::Batch(calls) => calls.iter().all(call_is_public),
+            jsonrpc_core::Request::Batch(calls) => {
+                calls.len() <= rings_rpc::method::MAX_PUBLIC_BATCH_CALLS
+                    && calls.iter().all(call_is_public)
+            }
         }
     }
 
@@ -475,7 +488,7 @@ mod tests {
     fn method_is_public(name: &str) -> bool {
         matches!(
             RpcMethod::try_from(name),
-            Ok(RpcMethod::NodeDid | RpcMethod::AnswerOffer)
+            Ok(RpcMethod::NodeDid | RpcMethod::AnswerOffer | RpcMethod::AcceptAnswer)
         )
     }
 

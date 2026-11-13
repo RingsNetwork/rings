@@ -109,9 +109,53 @@ pub struct ProvisionalEvidenceRecord<P> {
     pair: EvidenceAccountPair<P>,
     freshness: EvidenceFreshnessKey<P>,
     digest: EvidenceDigest,
+    #[serde(with = "canonical_bytes")]
     canonical_receipt: Vec<u8>,
     observed_at: UnixTime,
     replay_floor: u64,
+}
+
+mod canonical_bytes {
+    use serde::de;
+    use serde::Deserializer;
+    use serde::Serializer;
+
+    pub(super) fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        serializer.serialize_bytes(bytes)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where D: Deserializer<'de> {
+        struct BytesOrSeqVisitor;
+
+        impl<'de> de::Visitor<'de> for BytesOrSeqVisitor {
+            type Value = Vec<u8>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("canonical receipt byte slice or byte sequence")
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E> {
+                Ok(value.to_vec())
+            }
+
+            fn visit_byte_buf<E>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+                Ok(value)
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where A: de::SeqAccess<'de> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+                while let Some(byte) = seq.next_element()? {
+                    bytes.push(byte);
+                }
+                Ok(bytes)
+            }
+        }
+
+        deserializer.deserialize_byte_buf(BytesOrSeqVisitor)
+    }
 }
 
 impl<P> ProvisionalEvidenceRecord<P> {

@@ -67,7 +67,7 @@ pub struct OnionHttpsClientRequest {
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     /// Request body bytes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_request_body")]
     pub body: Vec<u8>,
     /// Optional loop class `b` for the request's session. Defaults to
     /// [`OnionLoopClass::DEFAULT`] (`16 KiB`) when `None`.
@@ -76,6 +76,40 @@ pub struct OnionHttpsClientRequest {
     /// `b / 16 KiB` admission units ([`OnionLoopClass::units`]).
     #[serde(default)]
     pub class: Option<OnionLoopClass>,
+}
+
+/// Deserialize a request body from either raw byte buffers (`Uint8Array` / `&[u8]`) or a sequence
+/// of `u8` values (`Array` / JSON `[1, 2, 3]`).
+fn deserialize_request_body<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where D: serde::Deserializer<'de> {
+    struct RequestBodyVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for RequestBodyVisitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a byte buffer or byte array")
+        }
+
+        fn visit_bytes<E>(self, v: &[u8]) -> std::result::Result<Self::Value, E> {
+            Ok(v.to_vec())
+        }
+
+        fn visit_byte_buf<E>(self, v: Vec<u8>) -> std::result::Result<Self::Value, E> {
+            Ok(v)
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+        where A: serde::de::SeqAccess<'de> {
+            let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+            while let Some(byte) = seq.next_element::<u8>()? {
+                bytes.push(byte);
+            }
+            Ok(bytes)
+        }
+    }
+
+    deserializer.deserialize_bytes(RequestBodyVisitor)
 }
 
 /// Normalized HTTPS request that names no target.

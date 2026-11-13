@@ -10,10 +10,12 @@ use std::sync::Arc;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::consts::REMOVAL_STORE_MAX_REMOVES;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::RemovalStorage;
+use rings_core::ecc::AccountVerifier;
 use rings_core::ecc::PublicKey;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
@@ -21,12 +23,18 @@ use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::consts::DEFAULT_STORAGE_CAPACITY;
+use crate::consts::DHT_REMOVAL_STORAGE_CAPACITY;
+use crate::consts::ONION_ENTRY_GUARD_STORAGE_CAPACITY;
+use crate::consts::RELAY_INBOX_STORAGE_CAPACITY;
+use crate::consts::TRANSACTION_REPLAY_STORAGE_CAPACITY;
 use crate::error::Error;
 use crate::error::Result as NodeResult;
 use crate::mail::registration::MailOffer;
@@ -85,28 +93,44 @@ impl ProviderRef {
     }
 }
 
+fn default_wallet_storage_name(did: Did) -> String {
+    format!("{DEFAULT_BROWSER_STORAGE_NAME}-{did}")
+}
+
 fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     Box::new(
-        move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+        move |data: String| -> Pin<Box<dyn Future<Output = NodeResult<Vec<u8>>>>> {
             let signer = signer.clone();
             Box::pin(async move {
-                let signer = signer.clone();
                 let promise = match signer.call1(&JsValue::NULL, &JsValue::from_str(&data)) {
                     Ok(value) => js_sys::Promise::from(value),
                     Err(error) => {
                         tracing::error!("failed to call external JS signer: {error:?}");
-                        return Vec::new();
+                        return Err(Error::JsError(format!(
+                            "external JS signer threw synchronously: {error:?}"
+                        )));
                     }
                 };
                 let value = match JsFuture::from(promise).await {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::error!("external JS signer rejected: {error:?}");
-                        return Vec::new();
+                        return Err(Error::JsError(format!(
+                            "external JS signer rejected: {error:?}"
+                        )));
                     }
                 };
+                if !value.is_instance_of::<Uint8Array>() {
+                    return Err(Error::JsError(
+                        "external JS signer must resolve to a Uint8Array".to_string(),
+                    ));
+                }
                 let sig: js_sys::Uint8Array = Uint8Array::from(value);
-                sig.to_vec()
+                let bytes = sig.to_vec();
+                if bytes.is_empty() {
+                    return Err(Error::InvalidAuthData);
+                }
+                Ok(bytes)
             })
         },
     )
@@ -123,34 +147,42 @@ const RELAY_STORAGE_ROWS: u32 = 1024;
 /// closed with [`Error::BrowserStorageLocked`] before any IndexedDB database is opened.
 ///
 /// Each store's [`RecordAuthority`] and fallback policy follow the durable-records laws:
-/// - **DHT entry store** (`Disposable`, 50,000 rows): retires undecodable rows; falls back to
-///   in-memory storage if IndexedDB cannot open.
-/// - **Relay-inbox store** (`Retained`, [`RELAY_STORAGE_ROWS`], #1021): strict durability, no
-///   eviction; if IndexedDB cannot open, returns `None` so the node holds no relay mail.
-/// - **Data removal store** (`Retained`, `REMOVAL_STORE_MAX_REMOVES`, #920): strict durability,
-///   no eviction; falls back to in-memory removals on open failure.
-/// - **Peer measurement store** (`Disposable`, 50,000 rows): falls back to in-memory storage.
-/// - **Provisional evidence store** (`Disposable`, 2 rows): required; fails closed on open error.
-/// - **Onion entry-guard store** (`DurableCache`, 1,024 rows, #911): retires undecodable guards;
-///   falls back to in-memory guards on open failure.
-/// - **Transaction replay store** (`Authoritative`, `TRANSACTION_REPLAY_STORE_MAX_RECORDS`, #923):
-///   strict durability, no eviction, never retires undecodable records; fails closed on open error.
+/// - **DHT entry store** (`Disposable`, 50,000 rows, [`DEFAULT_STORAGE_CAPACITY`]): retires
+///   undecodable rows; falls back to in-memory storage if IndexedDB cannot open.
+/// - **Relay-inbox store** (`Retained`, [`RELAY_STORAGE_ROWS`], [`RELAY_INBOX_STORAGE_CAPACITY`],
+///   #1021): strict durability, no eviction; if IndexedDB cannot open, returns `None` so the node
+///   holds no relay mail.
+/// - **Data removal store** (`Retained`, `REMOVAL_STORE_MAX_REMOVES`,
+///   [`DHT_REMOVAL_STORAGE_CAPACITY`], #920): strict durability, no eviction; fails closed on open
+///   error so tombstoned data can never resurrect across reloads.
+/// - **Peer measurement store** (`Disposable`, 50,000 rows, [`DEFAULT_STORAGE_CAPACITY`]): falls
+///   back to in-memory storage.
+/// - **Provisional evidence store** (`Disposable`, 2 rows, [`DEFAULT_STORAGE_CAPACITY`]): required;
+///   fails closed on open error.
+/// - **Onion entry-guard store** (`DurableCache`, 1,024 rows,
+///   [`ONION_ENTRY_GUARD_STORAGE_CAPACITY`], #911): retires undecodable guards; fails closed on
+///   open error so entry-guard pinning survives browser restarts.
+/// - **Transaction replay store** (`Authoritative`, `TRANSACTION_REPLAY_STORE_MAX_RECORDS`,
+///   [`TRANSACTION_REPLAY_STORAGE_CAPACITY`], #923): strict durability, no eviction, never retires
+///   undecodable records; fails closed on open error.
 pub(super) async fn open_browser_provider_stores(
     storage_name: &str,
 ) -> NodeResult<(ProviderStores, Rc<lock::BrowserStorageLock>)> {
     let (storage_lock, released) = lock::lock_browser_storage(storage_name).await?;
     let storage_lock = Rc::new(storage_lock);
-    let entry_storage = lock::LockedBrowserStorage::open_or_warn(
+    let entry_storage = lock::LockedBrowserStorage::open_with_byte_cap_or_warn(
         50000,
-        storage_name,
+        DEFAULT_STORAGE_CAPACITY,
+        &format!("{storage_name}/entries"),
         RecordAuthority::Disposable,
         &storage_lock,
         "browser entry IndexedDB unavailable; falling back to in-memory entry storage",
     )
     .await
     .map(|storage| Box::new(storage) as EntryStorage);
-    let relay_storage = lock::LockedBrowserStorage::open_or_warn(
+    let relay_storage = lock::LockedBrowserStorage::open_with_byte_cap_or_warn(
         RELAY_STORAGE_ROWS,
+        RELAY_INBOX_STORAGE_CAPACITY,
         &format!("{storage_name}/relay-inbox"),
         RecordAuthority::Retained,
         &storage_lock,
@@ -159,17 +191,20 @@ pub(super) async fn open_browser_provider_stores(
     .await
     .map(|storage| Box::new(storage) as EntryStorage);
     let removal_rows = u32::try_from(REMOVAL_STORE_MAX_REMOVES).unwrap_or(u32::MAX);
-    let removal_storage = lock::LockedBrowserStorage::open_or_warn(
-        removal_rows,
-        &format!("{storage_name}/dht-removals"),
-        RecordAuthority::Retained,
-        &storage_lock,
-        "browser removal IndexedDB unavailable; data-topic removes are kept in memory",
-    )
-    .await
-    .map(|storage| Box::new(storage) as RemovalStorage);
-    let measure_storage = lock::LockedBrowserStorage::open_or_warn(
+    let removal_storage = Some(
+        lock::LockedBrowserStorage::open_with_byte_cap(
+            removal_rows,
+            DHT_REMOVAL_STORAGE_CAPACITY,
+            &format!("{storage_name}/dht-removals"),
+            RecordAuthority::Retained,
+            &storage_lock,
+        )
+        .await
+        .map(|storage| Box::new(storage) as RemovalStorage)?,
+    );
+    let measure_storage = lock::LockedBrowserStorage::open_with_byte_cap_or_warn(
         50000,
+        DEFAULT_STORAGE_CAPACITY,
         &format!("{storage_name}/measure"),
         RecordAuthority::Disposable,
         &storage_lock,
@@ -178,8 +213,9 @@ pub(super) async fn open_browser_provider_stores(
     .await
     .map(|storage| Box::new(storage) as MeasureStorage);
     let evidence_storage = Some(
-        lock::LockedBrowserStorage::open(
+        lock::LockedBrowserStorage::open_with_byte_cap(
             2,
+            DEFAULT_STORAGE_CAPACITY,
             &format!("{storage_name}/provisional-evidence"),
             RecordAuthority::Disposable,
             &storage_lock,
@@ -187,15 +223,17 @@ pub(super) async fn open_browser_provider_stores(
         .await
         .map(|storage| Box::new(storage) as EvidenceStorage)?,
     );
-    let onion_entry_guard_storage = lock::LockedBrowserStorage::open_or_warn(
-        1024,
-        &format!("{storage_name}/onion-entry-guards"),
-        RecordAuthority::DurableCache,
-        &storage_lock,
-        "browser onion entry-guard IndexedDB unavailable; falling back to in-memory entry guards",
-    )
-    .await
-    .map(|storage| Box::new(storage) as OnionEntryGuardStorage);
+    let onion_entry_guard_storage = Some(
+        lock::LockedBrowserStorage::open_with_byte_cap(
+            1024,
+            ONION_ENTRY_GUARD_STORAGE_CAPACITY,
+            &format!("{storage_name}/onion-entry-guards"),
+            RecordAuthority::DurableCache,
+            &storage_lock,
+        )
+        .await
+        .map(|storage| Box::new(storage) as OnionEntryGuardStorage)?,
+    );
     let replay_name = format!("{storage_name}/transaction-replay");
     let replay_rows = u32::try_from(TRANSACTION_REPLAY_STORE_MAX_RECORDS).map_err(|_| {
         Error::BrowserStorageOpen {
@@ -203,8 +241,9 @@ pub(super) async fn open_browser_provider_stores(
             source: rings_core::error::Error::InvalidCapacity,
         }
     })?;
-    let replay_storage = lock::LockedBrowserStorage::open(
+    let replay_storage = lock::LockedBrowserStorage::open_with_byte_cap(
         replay_rows,
+        TRANSACTION_REPLAY_STORAGE_CAPACITY,
         &replay_name,
         RecordAuthority::Authoritative,
         &storage_lock,
@@ -251,8 +290,15 @@ impl Provider {
     ) -> NodeResult<Self> {
         let provider =
             Self::new_provider_with_storage_and_mail_internal(config, stores, mail_offer).await?;
-        provider.install_relay_onion_runtime()?;
-        provider.set_backend()?;
+        if let Err(error) = provider
+            .install_relay_onion_runtime()
+            .and_then(|()| provider.set_backend())
+        {
+            if let Err(close_error) = provider.close().await {
+                tracing::warn!(%close_error, "failed to close browser provider after post-build setup error");
+            }
+            return Err(error);
+        }
         Ok(provider)
     }
 }
@@ -288,21 +334,19 @@ impl Provider {
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-            let (stores, _storage_lock) =
-                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
-
-            let provider = Provider::new_provider_internal(
-                network_id,
-                ice_servers,
-                stabilize_interval,
-                account,
-                account_type,
-                Signer::Async(Box::new(signer)),
-                stores,
-            )
-            .await?;
-
-            provider.set_backend().map_err(JsError::from)?;
+            let delegatee_key =
+                Provider::mint_delegatee_key(account, account_type, Signer::Async(signer))
+                    .await
+                    .map_err(JsError::from)?;
+            let storage_name = default_wallet_storage_name(delegatee_key.delegator_did());
+            let (stores, _storage_lock) = open_browser_provider_stores(&storage_name)
+                .await
+                .map_err(JsError::from)?;
+            let config =
+                ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval);
+            let provider = Self::new_browser_provider_from_stores(config, stores, None)
+                .await
+                .map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -324,27 +368,23 @@ impl Provider {
             let signer = wrapped_signer(signer);
             let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
                 .map_err(JsError::from)?;
+            policy.validate_browser_targets().map_err(JsError::from)?;
             let offer =
                 OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
-            let (stores, _storage_lock) =
-                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
-
-            let provider = Provider::new_provider_internal_with_config(
-                network_id,
-                ice_servers,
-                stabilize_interval,
-                account,
-                account_type,
-                Signer::Async(Box::new(signer)),
-                stores,
-                move |config| config.onion_role(OnionRole::Exit(offer)),
-            )
-            .await?;
-
-            provider
-                .install_relay_onion_runtime()
+            let delegatee_key =
+                Provider::mint_delegatee_key(account, account_type, Signer::Async(signer))
+                    .await
+                    .map_err(JsError::from)?;
+            let storage_name = default_wallet_storage_name(delegatee_key.delegator_did());
+            let (stores, _storage_lock) = open_browser_provider_stores(&storage_name)
+                .await
                 .map_err(JsError::from)?;
-            provider.set_backend().map_err(JsError::from)?;
+            let config =
+                ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval)
+                    .onion_role(OnionRole::Exit(offer));
+            let provider = Self::new_browser_provider_from_stores(config, stores, None)
+                .await
+                .map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -405,8 +445,11 @@ impl Provider {
     pub fn request(&self, method: String, params: JsValue) -> js_sys::Promise {
         let ins = self.clone();
         future_to_promise(async move {
-            let params =
-                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let params = if params.is_undefined() || params.is_null() {
+                serde_json::json!({})
+            } else {
+                js_value::json_value(params).map_err(|e| JsError::new(e.to_string().as_str()))?
+            };
             let ret = ins
                 .request_internal(method, params)
                 .await
@@ -511,6 +554,46 @@ impl Provider {
             provider.leave_internal().await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
+    }
+
+    /// Inspect this node's active delegation signing horizon (`expires_at_ms`, `horizon_ms`,
+    /// `remaining_ms`, and `signs_now`).
+    pub fn signing_horizon(&self) -> Result<JsValue, JsError> {
+        js_value::serialize(&self.signing_horizon_snapshot()).map_err(JsError::from)
+    }
+
+    /// Replace this node's active session key in process before its signing horizon expires.
+    pub fn renew_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<JsValue, JsError> {
+        self.processor
+            .renew_delegatee_key(delegatee_key, self.processor.clock().now_ms())
+            .map_err(JsError::from)?;
+        js_value::serialize(&self.signing_horizon_snapshot()).map_err(JsError::from)
+    }
+
+    /// Mint and install a fresh session key in process via an external wallet `signer`.
+    pub fn renew_with_signer(
+        &self,
+        account: String,
+        account_type: String,
+        signer: js_sys::Function,
+    ) -> js_sys::Promise {
+        let provider = self.clone();
+        future_to_promise(async move {
+            let next = Provider::mint_delegatee_key(
+                account,
+                account_type,
+                Signer::Async(wrapped_signer(signer)),
+            )
+            .await
+            .map_err(JsError::from)?;
+            provider.renew_delegatee_key(next).map_err(JsValue::from)
+        })
+    }
+
+    /// Drain all retained inbound E2E handshake and stream-frame events.
+    pub fn take_e2e_events(&self) -> Result<JsValue, JsError> {
+        let response = self.take_e2e_events_internal().map_err(JsError::from)?;
+        js_value::serialize(&response).map_err(JsError::from)
     }
 
     /// Close this node and release its browser storage Web Lock (#1055, #1085): stop background
@@ -633,10 +716,9 @@ fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
         AddressType::DEFAULT => {
             Did::from_str(address).map_err(|_| JsError::new("invalid address"))?
         }
-        AddressType::Ed25519 => PublicKey::try_from_b58t(address)
+        AddressType::Ed25519 => AccountVerifier::from_account_parts(address, "ed25519")
             .map_err(|_| JsError::new("invalid address"))?
-            .address()
-            .into(),
+            .did(),
     };
     Ok(did)
 }

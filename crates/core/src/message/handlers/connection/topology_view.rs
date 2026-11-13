@@ -112,8 +112,12 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 let capacity = self.dht.successors().capacity();
                 let candidates = topology::bounded_connection_candidates(
                     self.dht.did,
-                    capacity,
-                    msg.info.successors.iter().copied(),
+                    stabilization_connection_budget(capacity),
+                    msg.info
+                        .predecessor
+                        .into_iter()
+                        .chain(msg.info.predecessors.iter().copied())
+                        .chain(msg.info.successors.iter().copied()),
                 );
                 let candidates = self
                     .transport
@@ -127,7 +131,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                     msg.request_id,
                     candidates,
                     self.dht.did,
-                    capacity,
+                    stabilization_connection_budget(capacity),
                 );
                 // `Complete` and `Stale` both end the loop; the claim drops
                 // with the handler either way. A connection or join failure

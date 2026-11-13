@@ -1112,6 +1112,32 @@ async fn test_set_delegatee_key_enforces_signature_and_monotone_horizon() -> Res
     Ok(())
 }
 
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_bridged_destination_is_reachable_via_connected_bridge() -> Result<()> {
+    let transport_only = default_transport()?;
+    let did_c: Did = SecretKey::random().address().into();
+    let did_d: Did = SecretKey::random().address().into();
+
+    let handler_only = crate::message::MessageHandler::new(Arc::clone(&transport_only));
+    assert!(matches!(
+        handler_only.destination_reachability(did_d)?,
+        crate::message::handlers::custom::Reachability::Offline
+    ));
+
+    let transport_a = default_transport()?;
+    let _pending_c = transport_a.reserve_pending_connection(did_c).await?;
+    let _ = transport_a.dht.admit_connected(did_c, None)?;
+    let _ = crate::dht::types::Chord::notify(&*transport_a.dht, did_c)?;
+    transport_a.dht.record_bridged_peers(did_c, vec![did_d])?;
+    let handler_a = crate::message::MessageHandler::new(Arc::clone(&transport_a));
+    assert!(matches!(
+        handler_a.destination_reachability(did_d)?,
+        crate::message::handlers::custom::Reachability::Reachable
+    ));
+    Ok(())
+}
+
 /// The detached boundary under worker loss: a `Cancelled` published after the claim.
 #[cfg(feature = "dummy")]
 mod detached;

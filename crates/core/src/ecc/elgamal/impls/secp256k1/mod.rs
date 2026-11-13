@@ -208,39 +208,41 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
     bytes.into_iter().skip_while(|n| *n == 0u8).collect()
 }
 
-/// Lift a field candidate into a secp256k1 affine point.
+const LIFT_X_TRIALS: u8 = 64;
+
+/// Lift a field candidate into a secp256k1 affine point in constant iteration count.
 ///
-/// The initial candidate uses its own parity. If it is not on the curve, the
-/// search decrements byte `0` from `254` to `1` and retries. This keeps bytes
-/// `1..` intact, so decoding can recover the original marker, chunk length, and
-/// plaintext bytes. If no high-byte candidate lifts, the adapter returns a
-/// typed error.
+/// Sweeps `LIFT_X_TRIALS` high-byte biases (`initial_bias - step`, `0..64`) without secret-dependent
+/// branching, selecting the first candidate that lies on secp256k1 via [`subtle::ConditionallySelectable`].
+/// Because bytes `1..` remain untouched across all trials, decoding recovers the original marker,
+/// chunk length, and plaintext bytes.
 fn lift_x(x: &Field) -> Result<Affine> {
-    let x_bytes = x.b32();
-    if let Some(point) = decompress_x(x_bytes, x.is_odd()) {
-        return Ok(point);
-    }
+    let base_bytes = x.b32();
+    let initial_bias = base_bytes.first().copied().unwrap_or(u8::MAX);
+    let parity = Choice::from(u8::from(x.is_odd()));
+    let mut selected = Affine::IDENTITY;
+    let mut found = Choice::from(0);
 
-    for bias in (1..=254).rev() {
-        let mut bytes = x_bytes;
-        let Some(first) = bytes.first_mut() else {
-            return Err(Error::Secp256k1PointLiftFailed);
-        };
-        *first = bias;
-
-        let candidate = Field::new(bytes);
-        if let Some(point) = decompress_x(candidate.b32(), candidate.is_odd()) {
-            return Ok(point);
+    for step in 0..LIFT_X_TRIALS {
+        let mut candidate_bytes = base_bytes;
+        if let Some(first) = candidate_bytes.first_mut() {
+            *first = initial_bias.wrapping_sub(step);
         }
+        let decompressed = Affine::decompress(&k256::FieldBytes::from(candidate_bytes), parity);
+        let is_valid = decompressed.is_some();
+        let point = decompressed.unwrap_or(Affine::IDENTITY);
+        let take = !found & is_valid;
+        selected = <Affine as subtle::ConditionallySelectable>::conditional_select(
+            &selected, &point, take,
+        );
+        found |= is_valid;
     }
 
-    // Typed safeguard for future encoding changes; normal adapter chunks should
-    // find a valid lift among the high-byte candidates above.
-    Err(Error::Secp256k1PointLiftFailed)
-}
-
-fn decompress_x(x: [u8; 32], y_is_odd: bool) -> Option<Affine> {
-    Affine::decompress(&k256::FieldBytes::from(x), Choice::from(y_is_odd as u8)).into()
+    if bool::from(found) {
+        Ok(selected)
+    } else {
+        Err(Error::Secp256k1PointLiftFailed)
+    }
 }
 
 /// Convert bytes into secp256k1 points using the adapter encoding.
@@ -378,10 +380,9 @@ fn derive_aead_key(
                 "invalid AEAD key material length {}",
                 key_material.len()
             )),
-            AeadErrorSide::Decrypt => Error::MessageDecryptionFailed(format!(
-                "invalid AEAD key material length {}",
-                key_material.len()
-            )),
+            AeadErrorSide::Decrypt => {
+                Error::MessageDecryptionFailed("AEAD open failed".to_string())
+            }
         });
     }
 

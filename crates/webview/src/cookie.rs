@@ -9,6 +9,7 @@ use crate::types::GatewayRequestKind;
 
 const MAX_COOKIE_BYTES: usize = 4_096;
 const MAX_COOKIES: usize = 4_096;
+const MAX_COOKIES_PER_PARTITION: usize = 180;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredCookie {
@@ -117,13 +118,44 @@ impl CookieJar {
         set_cookie: &str,
         now: i64,
     ) -> Result<()> {
-        let outcome = evaluate_set_cookie(partition, origin, set_cookie, now)?;
+        let outcome = evaluate_set_cookie(partition.clone(), origin, set_cookie, now)?;
         self.cookies.retain(|cookie| !cookie_expired(cookie, now));
+        let secure_origin = origin.scheme() == "https";
+        let origin_host = origin.host_str().unwrap_or_default().to_ascii_lowercase();
         match outcome {
             SetCookieOutcome::Ignore => {}
-            SetCookieOutcome::Remove(key) => self.remove_cookie(&key),
+            SetCookieOutcome::Remove(key) => {
+                if !secure_origin
+                    && self.has_conflicting_secure_cookie(&partition, &key.name, &origin_host)
+                {
+                    return Ok(());
+                }
+                self.remove_cookie(&key);
+            }
             SetCookieOutcome::Upsert(cookie) => {
+                if !secure_origin
+                    && self.has_conflicting_secure_cookie(&partition, &cookie.name, &origin_host)
+                {
+                    return Ok(());
+                }
                 self.remove_cookie(&cookie.key());
+                while self
+                    .cookies
+                    .iter()
+                    .filter(|existing| existing.partition == cookie.partition)
+                    .count()
+                    >= MAX_COOKIES_PER_PARTITION
+                {
+                    if let Some(pos) = self
+                        .cookies
+                        .iter()
+                        .position(|existing| existing.partition == cookie.partition)
+                    {
+                        self.cookies.remove(pos);
+                    } else {
+                        break;
+                    }
+                }
                 if self.cookies.len() == MAX_COOKIES {
                     self.cookies.remove(0);
                 }
@@ -131,6 +163,21 @@ impl CookieJar {
             }
         }
         Ok(())
+    }
+
+    fn has_conflicting_secure_cookie(
+        &self,
+        partition: &CookiePartitionKey,
+        name: &str,
+        origin_host: &str,
+    ) -> bool {
+        self.cookies.iter().any(|existing| {
+            existing.partition == *partition
+                && existing.name == name
+                && existing.secure
+                && (domain_matches(existing, origin_host)
+                    || host_domain_matches(&existing.domain, origin_host))
+        })
     }
 
     fn remove_cookie(&mut self, key: &CookieKey) {
@@ -259,6 +306,8 @@ fn evaluate_set_cookie(
     };
     let mut delete_cookie = false;
     let mut saw_max_age = false;
+    let mut saw_explicit_root_path = false;
+    let secure_origin = origin.scheme() == "https";
 
     for part in parts {
         let lower = part.to_ascii_lowercase();
@@ -275,6 +324,7 @@ fn evaluate_set_cookie(
                 cookie.host_only = false;
             } else if key.eq_ignore_ascii_case("path") {
                 let path = value.trim();
+                saw_explicit_root_path = path == "/";
                 cookie.path = if path.starts_with('/') {
                     path.to_string()
                 } else {
@@ -311,6 +361,18 @@ fn evaluate_set_cookie(
         }
     }
 
+    if cookie.secure && !secure_origin {
+        return Ok(SetCookieOutcome::Ignore);
+    }
+    let lower_name = cookie.name.to_ascii_lowercase();
+    if lower_name.starts_with("__host-")
+        && !(secure_origin && cookie.secure && cookie.host_only && saw_explicit_root_path)
+    {
+        return Ok(SetCookieOutcome::Ignore);
+    }
+    if lower_name.starts_with("__secure-") && !(secure_origin && cookie.secure) {
+        return Ok(SetCookieOutcome::Ignore);
+    }
     if !delete_cookie && cookie.same_site == SameSite::None && !cookie.secure {
         return Ok(SetCookieOutcome::Ignore);
     }
@@ -667,21 +729,42 @@ mod tests {
     fn test_cookie_jar_has_deterministic_count_and_entry_size_bounds() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/")?;
-        for index in 0..=MAX_COOKIES {
+        for index in 0..=MAX_COOKIES_PER_PARTITION {
             jar.store_set_cookie(&origin, format!("cookie{index}=value; Path=/").as_str())?;
         }
-        assert_eq!(jar.len(), MAX_COOKIES);
+        assert_eq!(jar.len(), MAX_COOKIES_PER_PARTITION);
         let header = jar.cookie_header(&origin).unwrap_or_default();
         assert!(!header.contains("cookie0=value"));
-        assert!(header.contains(format!("cookie{MAX_COOKIES}=value").as_str()));
+        assert!(header.contains(format!("cookie{MAX_COOKIES_PER_PARTITION}=value").as_str()));
 
         let oversized = format!("oversized={}", "x".repeat(MAX_COOKIE_BYTES));
         jar.store_set_cookie(&origin, oversized.as_str())?;
-        assert_eq!(jar.len(), MAX_COOKIES);
+        assert_eq!(jar.len(), MAX_COOKIES_PER_PARTITION);
         assert!(!jar
             .cookie_header(&origin)
             .unwrap_or_default()
             .contains("oversized="));
+
+        // Across distinct partitions, the global MAX_COOKIES cap still bounds total entries
+        // without allowing one noisy partition to evict other partitions prematurely.
+        let mut global_jar = CookieJar::new();
+        for index in 0..=MAX_COOKIES {
+            let site = Url::parse(format!("https://site-{index}.example/").as_str())?;
+            global_jar.store_set_cookie(&site, "sid=value; Path=/")?;
+        }
+        assert_eq!(global_jar.len(), MAX_COOKIES);
+        assert_eq!(
+            global_jar.cookie_header(&Url::parse("https://site-0.example/")?),
+            None
+        );
+        assert_eq!(
+            global_jar
+                .cookie_header(&Url::parse(
+                    format!("https://site-{MAX_COOKIES}.example/").as_str()
+                )?)
+                .as_deref(),
+            Some("sid=value")
+        );
         Ok(())
     }
 
@@ -961,6 +1044,41 @@ mod tests {
         assert_eq!(
             jar.cookie_header_for_request(&request).as_deref(),
             Some("sid=none")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_cookie_prefixes_and_insecure_origin_secure_cookie_protection() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let https_origin = Url::parse("https://example.com/app/page")?;
+        let http_origin = Url::parse("http://example.com/app/page")?;
+
+        // __Host- requires Secure + HTTPS + host-only + explicit Path=/
+        jar.store_set_cookie(&https_origin, "__Host-sid=bad1; Path=/")?;
+        jar.store_set_cookie(&https_origin, "__Host-sid=bad2; Secure; Path=/app")?;
+        jar.store_set_cookie(
+            &https_origin,
+            "__Host-sid=bad3; Secure; Domain=example.com; Path=/",
+        )?;
+        jar.store_set_cookie(&http_origin, "__Host-sid=bad4; Secure; Path=/")?;
+        assert!(jar.is_empty_at(0));
+
+        jar.store_set_cookie(&https_origin, "__Host-sid=good; Secure; Path=/")?;
+        jar.store_set_cookie(&https_origin, "__Secure-tok=bad; Path=/")?;
+        jar.store_set_cookie(&https_origin, "__Secure-tok=good; Secure; Path=/")?;
+        assert_eq!(
+            jar.cookie_header(&https_origin).as_deref(),
+            Some("__Host-sid=good; __Secure-tok=good")
+        );
+
+        // Non-HTTPS origins cannot overwrite or delete an existing Secure cookie.
+        jar.store_set_cookie(&http_origin, "__Host-sid=clobber; Path=/")?;
+        jar.store_set_cookie(&http_origin, "__Secure-tok=clobber; Path=/")?;
+        jar.store_set_cookie(&http_origin, "__Secure-tok=gone; Path=/; Max-Age=0")?;
+        assert_eq!(
+            jar.cookie_header(&https_origin).as_deref(),
+            Some("__Host-sid=good; __Secure-tok=good")
         );
         Ok(())
     }

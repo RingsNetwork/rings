@@ -33,25 +33,28 @@ impl TransportSessions {
         local_addr: SocketAddr,
         peer: Did,
         service: String,
-    ) {
-        let Ok(spawner) = scope.tasks().spawner() else {
+    ) -> crate::error::Result<()> {
+        let spawner = scope.tasks().spawner().map_err(|_| {
             tracing::error!("transport udp listen on {local_addr} requires a runtime");
-            return;
-        };
-        let socket = match UdpSocket::bind(local_addr).await {
-            Ok(socket) => Arc::new(socket),
-            Err(e) => {
+            crate::error::Error::ExtensionError(format!(
+                "transport udp listen on {local_addr} requires a runtime"
+            ))
+        })?;
+        let socket = UdpSocket::bind(local_addr)
+            .await
+            .map(Arc::new)
+            .map_err(|e| {
                 tracing::error!("transport udp bind {local_addr} failed: {e:?}");
-                return;
-            }
-        };
-        let listener_addr = match socket.local_addr() {
-            Ok(addr) => addr,
-            Err(e) => {
-                tracing::error!("transport udp local_addr {local_addr} failed: {e:?}");
-                return;
-            }
-        };
+                crate::error::Error::ExtensionError(format!(
+                    "transport udp bind {local_addr} failed: {e}"
+                ))
+            })?;
+        let listener_addr = socket.local_addr().map_err(|e| {
+            tracing::error!("transport udp local_addr {local_addr} failed: {e:?}");
+            crate::error::Error::ExtensionError(format!(
+                "transport udp local_addr {local_addr} failed: {e}"
+            ))
+        })?;
         spawner.spawn(async move {
             let mut buf = vec![0u8; UDP_BUF];
             loop {
@@ -92,6 +95,7 @@ impl TransportSessions {
                 }
             }
         });
+        Ok(())
     }
 }
 
@@ -149,7 +153,15 @@ async fn relay_udp_connected_with_idle(
                 }
                 Some(Outbound::Segment { .. } | Outbound::Shutdown { .. }) | None => break,
             },
-            _ = &mut idle => break,
+            _ = &mut idle => {
+                if let Some(next_deadline) =
+                    sessions.unexpired_deadline(&key, generation, idle_timeout)
+                {
+                    idle.as_mut().reset(next_deadline);
+                } else {
+                    break;
+                }
+            }
         }
     }
     // Only tell the peer if we were still the current owner (stale task stays silent).
@@ -199,7 +211,15 @@ async fn relay_udp_sendto(
                 }
                 Some(Outbound::Segment { .. } | Outbound::Shutdown { .. }) | None => break,
             },
-            _ = &mut idle => break,
+            _ = &mut idle => {
+                if let Some(next_deadline) =
+                    sessions.unexpired_deadline(&key, generation, idle_timeout)
+                {
+                    idle.as_mut().reset(next_deadline);
+                } else {
+                    break;
+                }
+            }
         }
     }
     // The return-path task owns the client-side UDP flow lifetime. An idle timeout therefore

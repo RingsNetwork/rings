@@ -106,8 +106,9 @@ impl TryFrom<PublicKey<33>> for K256PublicKey {
 impl TryFrom<PublicKey<33>> for ed25519_dalek::VerifyingKey {
     type Error = Error;
     fn try_from(key: PublicKey<33>) -> Result<Self> {
-        // pubkey[0] == 0
-        let [_, bytes @ ..] = key.0;
+        let [0, bytes @ ..] = key.0 else {
+            return Err(Error::EdDSAPublicKeyBadFormat);
+        };
         Self::from_bytes(&bytes).map_err(|_| Error::EdDSAPublicKeyBadFormat)
     }
 }

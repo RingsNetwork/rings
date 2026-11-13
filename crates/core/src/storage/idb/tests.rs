@@ -915,7 +915,7 @@ async fn test_cancelled_write_or_touch_preserves_access_clock_invariant() {
         {
             let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
             let data = js_value::serialize(&"cancelled".to_owned()).unwrap();
-            let mut fut = Box::pin(scope.put_stamped("k1".to_owned(), data));
+            let mut fut = Box::pin(scope.put_stamped("k1".to_owned(), None, data, None));
             let _ = fut.as_mut().now_or_never();
             next_task().await;
             let _ = fut.as_mut().now_or_never();
@@ -948,4 +948,66 @@ async fn test_cancelled_write_or_touch_preserves_access_clock_invariant() {
         assert!(seed_stamp < after_stamp);
         assert!(after_stamp < clock);
     }
+}
+
+#[wasm_bindgen_test]
+async fn test_idb_byte_budget_lru_evicts_and_retained_refuses() {
+    let entry_bytes = rings_codec::serialize(&("k1", &"abcd".to_owned()))
+        .unwrap()
+        .len() as u32;
+    let two_entries_cap = entry_bytes * 2;
+
+    let cache_name = format!("rings-idb-byte-cache-{}", uuid::Uuid::new_v4());
+    let cache = IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        two_entries_cap,
+        &cache_name,
+        RecordAuthority::DurableCache,
+    )
+    .await
+    .unwrap();
+    cache.put("k1", &"abcd".to_owned()).await.unwrap();
+    cache.put("k2", &"efgh".to_owned()).await.unwrap();
+    assert_eq!(
+        get_string(&cache, "k1").await.unwrap().as_deref(),
+        Some("abcd")
+    );
+    cache.put("k3", &"ijkl".to_owned()).await.unwrap();
+    assert_eq!(get_string(&cache, "k2").await.unwrap(), None);
+    assert_eq!(
+        get_string(&cache, "k1").await.unwrap().as_deref(),
+        Some("abcd")
+    );
+    assert_eq!(
+        get_string(&cache, "k3").await.unwrap().as_deref(),
+        Some("ijkl")
+    );
+
+    let retained_name = format!("rings-idb-byte-retained-{}", uuid::Uuid::new_v4());
+    let retained = IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        two_entries_cap,
+        &retained_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .unwrap();
+    retained.put("k1", &"abcd".to_owned()).await.unwrap();
+    retained.put("k2", &"efgh".to_owned()).await.unwrap();
+    assert!(matches!(
+        retained.put("k3", &"ijkl".to_owned()).await,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+    <IdbStorage as KvStorageInterface<String>>::remove(&retained, "k1")
+        .await
+        .unwrap();
+    retained.put("k3", &"ijkl".to_owned()).await.unwrap();
+    crate::storage::KvStorageScan::<String>::remove_batch(&retained, &[
+        "k2".to_owned(),
+        "k3".to_owned(),
+    ])
+    .await
+    .unwrap();
+    retained.put("k4", &"mnop".to_owned()).await.unwrap();
+    retained.put("k5", &"qrst".to_owned()).await.unwrap();
 }

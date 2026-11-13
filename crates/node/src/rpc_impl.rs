@@ -269,9 +269,10 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
         &self,
         req: FetchTopicMessagesRequest,
     ) -> Result<FetchTopicMessagesResponse> {
-        let data = self
-            .fetch_text_elements(&req.topic, req.skip as usize)
-            .await?;
+        let skip = usize::try_from(req.skip).map_err(|_| {
+            Error::invalid_params("skip must be a non-negative integer within platform bounds")
+        })?;
+        let data = self.fetch_text_elements(&req.topic, skip).await?;
         Ok(FetchTopicMessagesResponse { data })
     }
 }

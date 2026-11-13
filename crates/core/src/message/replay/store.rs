@@ -389,6 +389,8 @@ pub(super) enum Defect {
     NotAStream,
     /// It holds a receiver window that violates its invariant.
     InvalidWindow,
+    /// Its decoded `(table, StreamKey)` does not match the storage key it was filed under.
+    KeyMismatch,
 }
 
 /// The replay store as one load restores it: the tables and the records that fail closed.
@@ -477,6 +479,15 @@ enum Contribution {
     },
 }
 
+impl RestoredStream {
+    const fn table_and_key(&self) -> (ReplayTable, &StreamKey) {
+        match self {
+            Self::Sender(key, _) => (ReplayTable::Sender, key),
+            Self::Receiver(key, _, _, _) => (ReplayTable::Receiver, key),
+        }
+    }
+}
+
 /// Classify one scanned record (pure): a restored stream, or an unrestorable record under its
 /// name.
 ///
@@ -496,7 +507,20 @@ fn classify(record: ScannedRecord<ReplayRecord>, name: &impl Fn(&str) -> String)
             key,
             value: ReplayRecord(bytes),
         } => match restore_record(&bytes) {
-            Ok(stream) => Contribution::Stream(stream),
+            Ok(stream) => {
+                let (table, stream_key) = stream.table_and_key();
+                if matches!(record_key(table, stream_key), Ok(ref expected) if expected == &key) {
+                    Contribution::Stream(stream)
+                } else {
+                    Contribution::Unrestorable {
+                        name: name(&key),
+                        failure: RestoreFailure::Defective {
+                            key,
+                            defect: Defect::KeyMismatch,
+                        },
+                    }
+                }
+            }
             Err(defect) => Contribution::Unrestorable {
                 name: name(&key),
                 failure: RestoreFailure::Defective { key, defect },
@@ -924,6 +948,28 @@ mod tests {
             .insert("torn".to_owned(), RestoreFailure::Undecodable);
         assert!(store.admits_new_stream(ReplayTable::Sender).is_err());
         assert!(store.admits_new_stream(ReplayTable::Receiver).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_restore_quarantines_stream_record_filed_under_mismatched_key() -> Result<()> {
+        let stream_one = maximal_key(1);
+        let stream_two = maximal_key(2);
+        let (_own_key, record_one) = sender_record(&stream_one, 7)?;
+        let wrong_key = record_key(ReplayTable::Sender, &stream_two)?;
+        let scanned = vec![ScannedRecord::Filed {
+            key: wrong_key.clone(),
+            value: record_one,
+        }];
+        let restored = restore(scanned, by_digest);
+        assert!(restored.tables.sender.is_empty());
+        assert_eq!(
+            restored.unrestorable.get(&by_digest(&wrong_key)),
+            Some(&RestoreFailure::Defective {
+                key: wrong_key,
+                defect: Defect::KeyMismatch,
+            })
+        );
         Ok(())
     }
 }

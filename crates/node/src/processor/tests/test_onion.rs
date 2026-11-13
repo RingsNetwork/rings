@@ -294,6 +294,64 @@ async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_https_proxy_route_skips_browser_exit_for_domain_target_and_allows_public_ip_literal(
+) -> Result<()> {
+    let processor = prepare_processor().await;
+    let browser_exit = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+    let descriptor = ExitDescriptorFixture {
+        node_type: OnlineNodeType::Browser,
+        ..ExitDescriptorFixture::live(
+            &browser_exit,
+            OnionServiceName::https(),
+            bounded_policy(&["*:*"], &[])?,
+            now_ms,
+        )
+    }
+    .sign()?;
+
+    processor
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            descriptor,
+        ])?)
+        .await?;
+    store_onion_relays(&processor, &[&browser_exit], 3).await?;
+
+    let domain_target = OnionProxyTarget::parse_authority("example.com:443")?;
+    let domain_error = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::HttpsProxy,
+        domain_target,
+        |_| true,
+    )
+    .await
+    .err()
+    .ok_or_else(|| Error::InvalidConfig("expected domain target rejection".to_string()))?;
+    assert!(matches!(
+        domain_error,
+        Error::OnionRouteError(OnionRouteError::NoExitAllowsTarget { service, target })
+            if service == "https" && target == "example.com:443"
+    ));
+
+    let public_ip_target = OnionProxyTarget::parse_authority("1.1.1.1:443")?;
+    let ip_route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::HttpsProxy,
+        public_ip_target,
+        |_| true,
+    )
+    .await?;
+    assert_eq!(ip_route.exit_did(), browser_exit.did());
+    assert!(bounded_policy(&["example.com:443"], &[])?
+        .validate_browser_targets()
+        .is_err());
+    assert!(bounded_policy(&["1.1.1.1:443"], &[])?
+        .validate_browser_targets()
+        .is_ok());
+    Ok(())
+}
+
 /// Regression (#1224): native `Processor::build_onion_proxy_route` requires a directly connected
 /// peer for the first-hop guard instead of permitting arbitrary directory relays with no active
 /// transport link.

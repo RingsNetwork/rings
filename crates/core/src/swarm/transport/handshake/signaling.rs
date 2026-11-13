@@ -286,7 +286,6 @@ impl SwarmTransport {
     ) -> Result<()> {
         let carrier = self.signaling_reply_carrier(request)?;
         let peer = request.transaction.origin();
-        self.clear_candidate_dial_backoff(peer);
         match self
             .open_answer(peer, OfferOwner::Overlay, callback, offer)
             .await?

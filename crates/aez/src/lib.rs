@@ -24,10 +24,12 @@ use zeroize::Zeroize;
 use crate::block::Block;
 use crate::cipher::Direction;
 pub use crate::error::DecryptError;
+pub use crate::error::EncryptError;
 pub use crate::error::ExpansionExceedsBuffer;
 pub use crate::error::Inauthentic;
 pub use crate::error::KeyError;
 pub use crate::error::Subkey;
+pub use crate::error::ZeroExpansion;
 use crate::tbc::Subkeys;
 pub use crate::tbc::KEY_BYTES;
 
@@ -90,13 +92,19 @@ impl Aez {
     ///
     /// # Errors
     ///
-    /// [`ExpansionExceedsBuffer`] if the buffer is shorter than `τ`; the buffer is untouched.
+    /// - [`EncryptError::ZeroExpansion`] if `expansion == 0`; use [`Self::encipher`] instead.
+    /// - [`EncryptError::ExpansionExceedsBuffer`] if the buffer is shorter than `τ`.
+    ///
+    /// In both error cases the buffer is untouched.
     pub fn encrypt(
         &self,
         tweak: Tweak<'_>,
         expansion: usize,
         buffer: &mut [u8],
-    ) -> Result<(), ExpansionExceedsBuffer> {
+    ) -> Result<(), EncryptError> {
+        if expansion == 0 {
+            return Err(EncryptError::ZeroExpansion(ZeroExpansion));
+        }
         split_authenticator(buffer, expansion)?;
         buffer
             .iter_mut()
@@ -109,10 +117,11 @@ impl Aez {
 
     /// `Decrypt_K(T, τ, C)` in place; returns the plaintext prefix of the buffer.
     ///
-    /// Law: `decrypt(T, τ, encrypt(T, τ, M ‖ s)) = M` for every slot content `s`.
+    /// Law: `decrypt(T, τ, encrypt(T, τ, M ‖ s)) = M` for every `τ > 0` and slot content `s`.
     ///
     /// # Errors
     ///
+    /// - [`DecryptError::ZeroExpansion`] if `expansion == 0`; the buffer is untouched.
     /// - [`DecryptError::Truncated`] if `|C| < τ`; the buffer is untouched.
     /// - [`DecryptError::Inauthentic`] if the deciphered authenticator is not `0^τ`. The
     ///   whole buffer is zeroized, so no unverified plaintext is released.
@@ -122,6 +131,9 @@ impl Aez {
         expansion: usize,
         buffer: &'b mut [u8],
     ) -> Result<&'b mut [u8], DecryptError> {
+        if expansion == 0 {
+            return Err(DecryptError::ZeroExpansion(ZeroExpansion));
+        }
         split_authenticator(buffer, expansion)?;
         self.transform(tweak, expansion, Direction::Decipher, buffer);
         if !is_zero(buffer.iter().rev().take(expansion)) {

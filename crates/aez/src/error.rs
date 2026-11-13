@@ -30,6 +30,12 @@ pub enum KeyError {
     ZeroSubkey(Subkey),
 }
 
+/// Authenticated encryption requires a non-zero authenticator (`τ > 0`); use
+/// [`Aez::encipher`](crate::Aez::encipher) and [`Aez::decipher`](crate::Aez::decipher) for `τ = 0`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("AEZ authenticated encryption requires expansion > 0")]
+pub struct ZeroExpansion;
+
 /// The buffer cannot hold the `τ`-byte authenticator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{expansion}-byte AEZ authenticator exceeds the {length}-byte buffer")]
@@ -40,9 +46,23 @@ pub struct ExpansionExceedsBuffer {
     pub expansion: usize,
 }
 
+/// Why an encryption call was refused before touching the buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EncryptError {
+    /// `expansion == 0` provides no authentication; use [`Aez::encipher`](crate::Aez::encipher).
+    #[error(transparent)]
+    ZeroExpansion(#[from] ZeroExpansion),
+    /// The buffer cannot hold the `τ`-byte authenticator.
+    #[error(transparent)]
+    ExpansionExceedsBuffer(#[from] ExpansionExceedsBuffer),
+}
+
 /// Why a ciphertext was not accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecryptError {
+    /// `expansion == 0` provides no authentication; use [`Aez::decipher`](crate::Aez::decipher).
+    #[error(transparent)]
+    ZeroExpansion(#[from] ZeroExpansion),
     /// The ciphertext is shorter than `τ`, so it encrypts no message.
     #[error(transparent)]
     Truncated(#[from] ExpansionExceedsBuffer),

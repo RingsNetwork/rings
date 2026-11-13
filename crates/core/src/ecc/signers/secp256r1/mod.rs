@@ -51,11 +51,17 @@ use sha2::Digest;
 use sha2::Sha256;
 use subtle::CtOption;
 
+use crate::ecc::keys::domain_separated_address;
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+
+/// Derive the domain-separated Rings address for a secp256r1 public key.
+pub fn address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
+    domain_separated_address("secp256r1", &pubkey.0)
+}
 
 /// sign function with `hash` data. Recover is no needed.
 pub fn sign(sec: &SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
@@ -91,11 +97,11 @@ pub fn hash(msg: &[u8]) -> [u8; 32] {
 /// Verify message signed by secp256r1
 pub fn verify(
     msg: &[u8],
-    address: &PublicKeyAddress,
+    expected_address: &PublicKeyAddress,
     sig: impl AsRef<[u8]>,
     pubkey: &PublicKey<33>,
 ) -> bool {
-    if pubkey.address() != *address {
+    if address(pubkey) != *expected_address {
         return false;
     }
     let ct_pk: CtOption<Result<ecdsa::VerifyingKey<p256::NistP256>>> =

@@ -604,8 +604,9 @@ impl PeerRing {
     /// find_storage_owner(placement)
     ///   ├─ Some(owner) ─▶ [live value stored here?] ── yes ─▶ Found(value)
     ///   │                        │ no
-    ///   │                        ├─ owner ≠ self ─────────────────────▶ Remote(owner)
-    ///   │                        └─ owner = self ─▶ [fallback ∧ virtual nodes ∧ ∃ head]
+    ///   │                        ├─ ¬virtual nodes ──────────────────▶ Missed(placement, self)
+    ///   │                        ├─ owner ≠ self ────────────────────▶ Remote(owner)
+    ///   │                        └─ owner = self ─▶ [fallback ∧ ∃ head]
     ///   │                                              ├─ yes ─▶ Remote(head)
     ///   │                                              └─ no  ─▶ Missed(placement, self)
     ///   └─ RemoteAction(next, FindSuccessor(id)) ──────────────────▶ Remote(next) for id
@@ -635,15 +636,19 @@ impl PeerRing {
                     ))));
                 }
                 tracing::debug!("Cannot find entry in local storage, try to query from successor");
+                if !self.storage_virtual_nodes_enabled()? {
+                    return Ok(PlacementLookup::Settled(LookupSettlement::Missed(
+                        PlacementMiss::new(query.placement, self.did),
+                    )));
+                }
                 if owner != self.did {
                     return Ok(PlacementLookup::Remote { next: owner, query });
                 }
-                let head =
-                    if fallback_on_local_virtual_miss && self.storage_virtual_nodes_enabled()? {
-                        self.with_topology_state(topology::successor_head)?
-                    } else {
-                        None
-                    };
+                let head = if fallback_on_local_virtual_miss {
+                    self.with_topology_state(topology::successor_head)?
+                } else {
+                    None
+                };
                 Ok(match head {
                     Some(next) => PlacementLookup::Remote { next, query },
                     None => PlacementLookup::Settled(LookupSettlement::Missed(PlacementMiss::new(

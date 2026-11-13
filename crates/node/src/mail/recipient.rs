@@ -46,7 +46,8 @@ use rings_core::dht::entry::Entry;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::storage::KvStorageInterface;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
 use serde::Deserialize;
 use serde::Serialize;
@@ -98,12 +99,18 @@ pub struct StoredMail {
 /// An inbox over a key-value store: each mail under `mail-<mail id>`.
 pub struct KvInbox<K> {
     store: K,
+    clock: SharedClock,
 }
 
 impl<K> KvInbox<K> {
-    /// The inbox keeping its mail in `store`.
+    /// The inbox keeping its mail in `store` stamped with the system clock.
     pub fn new(store: K) -> Self {
-        Self { store }
+        Self::new_with_clock(store, Arc::new(SystemClock))
+    }
+
+    /// The inbox keeping its mail in `store` stamped with `clock`.
+    pub fn new_with_clock(store: K, clock: SharedClock) -> Self {
+        Self { store, clock }
     }
 
     /// The store the mail is kept in.
@@ -122,7 +129,7 @@ where K: KvStorageInterface<StoredMail> + MaybeSendSync
     async fn file(&self, mail: &OpenedMail) -> Result<(), Self::Error> {
         let stored = StoredMail {
             message: mail.message.clone(),
-            filed_at_ms: get_epoch_ms(),
+            filed_at_ms: self.clock.now_ms(),
         };
         self.store
             .put(&format!("mail-{}", mail.mail_id), &stored)
@@ -438,7 +445,7 @@ where
             }
             Err(error) => return Err(RecipientError::Fetch(error)),
         };
-        let now_ms = get_epoch_ms();
+        let now_ms = self.processor.clock().now_ms();
         let mut records = self.retained_records(now_ms).await?;
         let Some(entry) = entry else {
             return Ok(PollReport::default());

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use super::is_transport_managed_header;
 use super::limits::admit_body_chunk;
 use super::limits::headers_bytes;
 use super::limits::reject_content_length_over_limit;
@@ -19,23 +20,7 @@ const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The validated URL is the sole authority source. Message framing and hop-by-hop behavior also
 /// belong to reqwest so untrusted callers cannot override transport semantics.
 pub(super) fn is_native_transport_managed_header(name: &str) -> bool {
-    [
-        "host",
-        ":authority",
-        "connection",
-        "proxy-connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "content-length",
-        "upgrade",
-        "expect",
-    ]
-    .iter()
-    .any(|managed| name.eq_ignore_ascii_case(managed))
+    is_transport_managed_header(name)
 }
 
 /// Native HTTPS egress: the target host pinned to its resolved public addresses.

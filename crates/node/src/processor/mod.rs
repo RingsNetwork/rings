@@ -171,6 +171,12 @@ pub struct Processor {
     remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
 
+impl Drop for Processor {
+    fn drop(&mut self) {
+        self.tasks.stop();
+    }
+}
+
 /// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
 /// the stop is the registration's cooperative stop, anything else an entry error.
 pub(crate) fn stoppable_storage_error(error: rings_core::error::Error) -> Error {
@@ -265,6 +271,10 @@ impl Processor {
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
+    }
+
+    pub(crate) fn onion_entry_guards_arc(&self) -> Arc<OnionEntryGuards> {
+        Arc::clone(&self.onion_entry_guards)
     }
 
     /// Return the onion symbols this process registers (#834 D2).

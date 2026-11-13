@@ -45,18 +45,19 @@ impl TransportSessions {
         local_addr: SocketAddr,
         peer: Did,
         service: String,
-    ) {
-        let Ok(spawner) = scope.tasks().spawner() else {
+    ) -> crate::error::Result<()> {
+        let spawner = scope.tasks().spawner().map_err(|_| {
             tracing::error!("transport listen on {local_addr} requires a runtime");
-            return;
-        };
-        let listener = match TcpListener::bind(local_addr).await {
-            Ok(listener) => listener,
-            Err(e) => {
-                tracing::error!("transport listen bind {local_addr} failed: {e:?}");
-                return;
-            }
-        };
+            crate::error::Error::ExtensionError(format!(
+                "transport listen on {local_addr} requires a runtime"
+            ))
+        })?;
+        let listener = TcpListener::bind(local_addr).await.map_err(|e| {
+            tracing::error!("transport listen bind {local_addr} failed: {e:?}");
+            crate::error::Error::ExtensionError(format!(
+                "transport listen bind {local_addr} failed: {e}"
+            ))
+        })?;
         spawner.spawn(async move {
             loop {
                 match listener.accept().await {
@@ -83,6 +84,7 @@ impl TransportSessions {
                 }
             }
         });
+        Ok(())
     }
 }
 

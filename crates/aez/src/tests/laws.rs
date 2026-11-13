@@ -6,19 +6,21 @@ use crate::block::Block;
 use crate::tbc::Subkeys;
 use crate::Aez;
 use crate::DecryptError;
+use crate::EncryptError;
 use crate::ExpansionExceedsBuffer;
 use crate::Inauthentic;
 use crate::KeyError;
 use crate::Subkey;
 use crate::Tweak;
+use crate::ZeroExpansion;
 use crate::KEY_BYTES;
 
 /// Byte lengths every sweep covers: all of AEZ-tiny, the tiny/core boundary, and the first
 /// few AEZ-core pair counts with every `|M_uv|` residue.
 const SWEEP_LENGTHS: core::ops::RangeInclusive<usize> = 0..=130;
 
-/// Expansions exercised by the AE laws: none, sub-block, one block, and multi-block.
-const EXPANSIONS: [usize; 6] = [0, 1, 15, 16, 17, 40];
+/// Non-zero expansions exercised by the AE laws: sub-block, one block, and multi-block.
+const EXPANSIONS: [usize; 5] = [1, 15, 16, 17, 40];
 
 /// A fresh AEZ instance from the stream.
 fn keyed(stream: &mut Stream) -> Aez {
@@ -119,13 +121,36 @@ witness! {
         }
     }
 
+    /// Law: `expansion == 0` is refused by `encrypt` and `decrypt` with buffer untouched,
+    /// forcing callers that want unauthenticated `τ = 0` to name `encipher` / `decipher`.
+    fn zero_expansion_is_refused_untouched() {
+        let aez = keyed(&mut Stream::new(0x5eed_0005));
+        for length in [0usize, 1, 15, 16, 48] {
+            let original = vec![0x5au8; length];
+            let mut buffer = original.clone();
+            assert_eq!(
+                aez.encrypt(Tweak::EMPTY, 0, &mut buffer),
+                Err(EncryptError::ZeroExpansion(ZeroExpansion))
+            );
+            assert_eq!(buffer, original);
+            assert_eq!(
+                aez.decrypt(Tweak::EMPTY, 0, &mut buffer).map(|_| ()),
+                Err(DecryptError::ZeroExpansion(ZeroExpansion))
+            );
+            assert_eq!(buffer, original);
+        }
+    }
+
     /// Law: a buffer shorter than `τ` is refused by both directions and left untouched.
     fn buffers_shorter_than_the_expansion_are_refused_untouched() {
         let aez = keyed(&mut Stream::new(0x5eed_0005));
         let original = [7u8; 15];
         let refusal = ExpansionExceedsBuffer { length: 15, expansion: 16 };
         let mut buffer = original;
-        assert_eq!(aez.encrypt(Tweak::EMPTY, 16, &mut buffer), Err(refusal));
+        assert_eq!(
+            aez.encrypt(Tweak::EMPTY, 16, &mut buffer),
+            Err(EncryptError::ExpansionExceedsBuffer(refusal))
+        );
         assert_eq!(buffer, original);
         assert_eq!(
             aez.decrypt(Tweak::EMPTY, 16, &mut buffer).map(|_| ()),

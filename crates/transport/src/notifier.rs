@@ -130,8 +130,11 @@ pub(crate) async fn wait_for_data_channel_open(
         .notified_within(Duration::from_secs(timeout_seconds.into()))
         .await?;
 
-    if snapshot().data_channel_open() {
+    let after = snapshot();
+    if after.data_channel_open() {
         Ok(())
+    } else if after.webrtc().is_terminal() {
+        Err(Error::DataChannelOpen("Connection unavailable".to_string()))
     } else {
         Err(Error::DataChannelOpen(format!(
             "DataChannel not open in {timeout_seconds} seconds"

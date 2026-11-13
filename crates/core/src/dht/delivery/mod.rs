@@ -247,27 +247,23 @@ pub fn delivery_step(
         return Some(NextHop::new(destination, stage));
     }
     let aim = stage.aim(destination);
-    if aim != destination {
-        if aim == view.local {
-            return None;
-        }
-        if linked(aim) {
-            return Some(NextHop::new(aim, stage));
-        }
+    if aim == view.local {
+        return None;
+    }
+    if aim != destination && linked(aim) {
+        return Some(NextHop::new(aim, stage));
     }
     match route_toward(view, aim, &linked) {
         RouteStep::Forward(peer) => Some(NextHop::new(peer, stage)),
         RouteStep::Handoff(peer) if !stage.handed_off => {
-            if stage.via.is_none() {
-                if let Some(&bridge) = view.bridged.get(&aim) {
-                    if bridge != view.local && linked(bridge) && !linked(aim) {
-                        let next_stage = if dist(view.local, bridge) < dist(view.local, aim) {
-                            stage
-                        } else {
-                            stage.handed_off()
-                        };
-                        return Some(NextHop::new(bridge, next_stage));
-                    }
+            if let Some(&bridge) = view.bridged.get(&aim) {
+                if bridge != view.local && linked(bridge) && !linked(aim) {
+                    let next_stage = if dist(view.local, bridge) < dist(view.local, aim) {
+                        stage
+                    } else {
+                        stage.handed_off()
+                    };
+                    return Some(NextHop::new(bridge, next_stage));
                 }
             }
             Some(NextHop::new(peer, stage.handed_off()))

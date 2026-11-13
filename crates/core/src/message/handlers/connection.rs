@@ -249,23 +249,19 @@ impl MessageHandler {
             if self.transport.get_connection(msg.did).is_some() {
                 return Ok(PeerRingAction::Some(msg.did));
             }
-            if let Some(action) = self.dht.with_topology_state(|state| {
-                if state.references(msg.did) {
-                    return Some(PeerRingAction::Some(msg.did));
-                }
-                state
-                    .bridged
-                    .get(&msg.did)
-                    .copied()
-                    .filter(|&via| via != state.local && state.successors.contains(&via))
-                    .map(|via| {
-                        PeerRingAction::RemoteAction(
-                            via,
-                            crate::dht::PeerRingRemoteAction::FindSuccessor(msg.did),
-                        )
-                    })
-            })? {
-                return Ok(action);
+            let state = self.dht.topology_state()?;
+            if state.references(msg.did) {
+                return Ok(PeerRingAction::Some(msg.did));
+            }
+            if let Some(via) = state.bridged.get(&msg.did).copied().filter(|&via| {
+                via != state.local
+                    && state.references(via)
+                    && self.transport.get_connection(via).is_some()
+            }) {
+                return Ok(PeerRingAction::RemoteAction(
+                    via,
+                    crate::dht::PeerRingRemoteAction::FindSuccessor(msg.did),
+                ));
             }
             return self.dht.find_successor(msg.did);
         }
@@ -277,25 +273,25 @@ impl MessageHandler {
         if head == self.dht.did || msg.did == self.dht.did {
             return Ok(PeerRingAction::Some(head));
         }
-        let bridged = self.dht.with_topology_state(|state| {
-            let target = crate::dht::topology::dist(state.local, msg.did);
-            let head_dist = crate::dht::topology::dist(state.local, head);
-            state
-                .bridged
-                .iter()
-                .filter(|(&peer, &via)| {
-                    peer != state.local
-                        && via != state.local
-                        && state.successors.contains(&via)
-                        && !state.references(peer)
-                })
-                .filter_map(|(&peer, &via)| {
-                    let peer_dist = crate::dht::topology::dist(state.local, peer);
-                    (target <= peer_dist && peer_dist < head_dist).then_some((peer_dist, peer, via))
-                })
-                .min_by(|(dist_a, _, _), (dist_b, _, _)| dist_a.cmp(dist_b))
-                .map(|(_, peer, via)| (peer, via))
-        })?;
+        let state = self.dht.topology_state()?;
+        let target = crate::dht::topology::dist(state.local, msg.did);
+        let head_dist = crate::dht::topology::dist(state.local, head);
+        let bridged = state
+            .bridged
+            .iter()
+            .filter(|(&peer, &via)| {
+                peer != state.local
+                    && via != state.local
+                    && state.references(via)
+                    && self.transport.get_connection(via).is_some()
+                    && !state.references(peer)
+            })
+            .filter_map(|(&peer, &via)| {
+                let peer_dist = crate::dht::topology::dist(state.local, peer);
+                (target <= peer_dist && peer_dist < head_dist).then_some((peer_dist, peer, via))
+            })
+            .min_by(|(dist_a, _, _), (dist_b, _, _)| dist_a.cmp(dist_b))
+            .map(|(_, peer, via)| (peer, via));
         let Some((bridged_peer, _via)) = bridged else {
             return Ok(PeerRingAction::Some(head));
         };
@@ -340,7 +336,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                                         .successors()
                                         .list()?
                                         .into_iter()
-                                        .next()
+                                        .find(|succ| self.transport.get_connection(*succ).is_some())
                                         .unwrap_or(did)
                                 }
                                 _ => did,

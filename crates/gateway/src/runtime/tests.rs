@@ -797,6 +797,166 @@ async fn runtime_drains_buffered_client_bytes_exceeding_bridge_chunk_before_clos
     result.expect("clean runtime stop");
 }
 
+struct HalfClosingSlowReaderConnector {
+    opened: mpsc::Sender<FlowId>,
+    captured: mpsc::Sender<Vec<u8>>,
+}
+
+#[async_trait::async_trait]
+impl OnionStreamConnector for HalfClosingSlowReaderConnector {
+    async fn open_stream(
+        &self,
+        flow: FlowId,
+        mut stream: BoxGatewayDuplex,
+    ) -> Result<BoxOnionStreamProbe, GatewayError> {
+        self.opened
+            .send(flow)
+            .await
+            .map_err(|error| GatewayError::OnionUnavailable {
+                target: flow.target,
+                message: error.to_string(),
+            })?;
+        let captured = self.captured.clone();
+        tokio::spawn(async move {
+            let _ = stream.shutdown().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut bytes = Vec::new();
+            let _ = stream.read_to_end(&mut bytes).await;
+            let _ = captured.send(bytes).await;
+        });
+        Ok(unobserved_stream())
+    }
+}
+
+#[tokio::test]
+async fn oversized_captured_packet_is_dropped_without_terminating_runtime() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(16);
+    let (egress_tx, mut egress_rx) = mpsc::channel(16);
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut runtime = GatewayRuntime::new(config(), connector, 19).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    assert_eq!(
+        runtime
+            .ingest_packet(vec![0x45; 2_000], Duration::ZERO)
+            .expect("oversized packet must be dropped"),
+        PacketOutcome::Dropped(crate::PacketDropReason::OversizedPacket)
+    );
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        let mut device = ChannelPacketIo {
+            ingress: ingress_rx,
+            egress: egress_tx,
+        };
+        let result = runtime
+            .run(&mut device, || task_stop.load(Ordering::Acquire))
+            .await;
+        (runtime, result)
+    });
+
+    ingress_tx
+        .send(vec![0x45; 4_096])
+        .await
+        .expect("send oversized packet larger than MTU");
+    ingress_tx
+        .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
+        .await
+        .expect("send valid SYN after oversized packet");
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
+        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
+    })
+    .await;
+    assert_eq!(syn_ack.acknowledgment, Some(TcpSeqNumber(8)));
+
+    stop.store(true, Ordering::Release);
+    let (_runtime, result) = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("runtime stop deadline")
+        .expect("runtime task");
+    result.expect("clean runtime stop");
+}
+
+#[tokio::test]
+async fn client_data_with_fin_after_peer_half_close_flushes_tail_chunk_cleanly() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(32);
+    let (egress_tx, mut egress_rx) = mpsc::channel(32);
+    let (opened_tx, mut opened_rx) = mpsc::channel(1);
+    let (captured_tx, mut captured_rx) = mpsc::channel(1);
+    let connector = Arc::new(HalfClosingSlowReaderConnector {
+        opened: opened_tx,
+        captured: captured_tx,
+    });
+    let mut runtime = GatewayRuntime::new(config(), connector, 23).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    runtime.set_exit_availability(ExitObservation::Available);
+    let status = runtime.status_handle();
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        let mut device = ChannelPacketIo {
+            ingress: ingress_rx,
+            egress: egress_tx,
+        };
+        let result = runtime
+            .run(&mut device, || task_stop.load(Ordering::Acquire))
+            .await;
+        (runtime, result)
+    });
+
+    ingress_tx
+        .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
+        .await
+        .expect("send SYN");
+    let syn_ack = receive_tcp(&mut egress_rx, |packet| {
+        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.fin
+    })
+    .await;
+    ingress_tx
+        .send(handshake_ack_from_observation(&syn_ack))
+        .await
+        .expect("send handshake ACK");
+    tokio::time::timeout(Duration::from_secs(1), opened_rx.recv())
+        .await
+        .expect("Onion open deadline")
+        .expect("Onion open event");
+
+    let server_fin = receive_tcp(&mut egress_rx, |packet| packet.fin).await;
+    let payload = b"tail-payload-with-fin";
+    ingress_tx
+        .send(
+            UNIT_CLIENT
+                .packet(
+                    TcpControl::Fin,
+                    TcpSeqNumber(8),
+                    Some(server_fin.sequence + 1),
+                    payload,
+                )
+                .expect("client Data + FIN"),
+        )
+        .await
+        .expect("send client Data + FIN");
+
+    let received = tokio::time::timeout(Duration::from_secs(2), captured_rx.recv())
+        .await
+        .expect("captured tail payload deadline")
+        .expect("captured tail payload");
+    assert_eq!(received, payload);
+    assert_eq!(status.snapshot().last_flow_reset, None);
+
+    stop.store(true, Ordering::Release);
+    let (_runtime, result) = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("runtime stop deadline")
+        .expect("runtime task");
+    result.expect("clean runtime stop");
+}
+
 #[tokio::test]
 async fn onion_open_failure_resets_captured_flow_without_fallback() {
     let (ingress_tx, ingress_rx) = mpsc::channel(8);

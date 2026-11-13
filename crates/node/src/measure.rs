@@ -21,6 +21,8 @@ use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
 use rings_core::measure::PeerQualityThresholds;
 use rings_core::storage::KvStorageInterface;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_measure::ApplyOutcome;
 use rings_measure::Authentication;
 use rings_measure::CreditPolicy;
@@ -259,25 +261,12 @@ trait MeasureClock: Send + Sync {
     fn now(&self) -> UnixTime;
 }
 
-struct SystemMeasureClock;
+struct SharedMeasureClock(SharedClock);
 
-impl MeasureClock for SystemMeasureClock {
-    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+impl MeasureClock for SharedMeasureClock {
     fn now(&self) -> UnixTime {
-        let seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or(0);
+        let seconds = u64::try_from(self.0.now_ms() / 1_000).unwrap_or(u64::MAX);
         UnixTime::from_secs(seconds)
-    }
-
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    fn now(&self) -> UnixTime {
-        let milliseconds = js_sys::Date::now();
-        if !milliseconds.is_finite() || milliseconds <= 0.0 {
-            return UnixTime::EPOCH;
-        }
-        UnixTime::from_secs((milliseconds / 1_000.0) as u64)
     }
 }
 
@@ -294,7 +283,7 @@ impl PeriodicMeasure {
             storage,
             Box::new(UnavailableEvidenceStorage),
             None,
-            Arc::new(SystemMeasureClock),
+            Arc::new(SharedMeasureClock(Arc::new(SystemClock))),
         )
         .await
     }
@@ -308,11 +297,27 @@ impl PeriodicMeasure {
         evidence_storage: EvidenceStorage,
         collector: EvidenceCollectorIdentity,
     ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_evidence_storage_and_clock(
+            storage,
+            evidence_storage,
+            collector,
+            Arc::new(SystemClock),
+        )
+        .await
+    }
+
+    /// [`Self::new_with_evidence_storage`] reading epoch timestamps from `clock`.
+    pub async fn new_with_evidence_storage_and_clock(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
+        collector: EvidenceCollectorIdentity,
+        clock: SharedClock,
+    ) -> Result<Self, MeasureRuntimeError> {
         Self::new_with_clock_and_evidence(
             storage,
             evidence_storage,
             Some(collector),
-            Arc::new(SystemMeasureClock),
+            Arc::new(SharedMeasureClock(clock)),
         )
         .await
     }

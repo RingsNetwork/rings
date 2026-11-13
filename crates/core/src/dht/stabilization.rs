@@ -881,6 +881,30 @@ impl Stabilizer {
                 );
             }
         }
+        if let Some((peer, request_id)) = self.dht.begin_next_non_head_bridge_sync(|candidate| {
+            self.transport.get_connection(candidate).is_some()
+        })? {
+            if let Err(error) = self
+                .transport
+                .protocol_egress()
+                .send_direct_message(
+                    Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync_with_id(
+                        peer, request_id,
+                    )),
+                    peer,
+                )
+                .await
+            {
+                self.dht.cancel_successor_sync(peer, request_id)?;
+                tracing::debug!(
+                    target: "rings_core::dht::stabilization",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    error = ?error,
+                    "STABILIZATION non-head bridge sync query failed"
+                );
+            }
+        }
         Ok(())
     }
 }

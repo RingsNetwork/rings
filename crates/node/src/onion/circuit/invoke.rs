@@ -23,7 +23,8 @@ use std::time::Duration;
 use futures::future::select;
 use futures::future::Either;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use rings_runtime::sleep;
 use rings_runtime::MaybeSend;
 use rings_runtime::MaybeSendSync;
@@ -173,16 +174,27 @@ struct RegisteredInvoke {
 }
 
 /// Shared `(shape, backend)` interpretation table of one node's Σ-algebra (#834 D2).
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct OnionInvokeRegistry {
     offered_policies: Arc<BTreeMap<(OnionInvokeShape, OnionBackendName), OnionInvokePolicy>>,
     entries: Arc<RwLock<BTreeMap<(OnionInvokeShape, OnionBackendName), RegisteredInvoke>>>,
     accounting: OnionInvokeAccounting,
     link_sender: OnionLinkSender,
+    clock: SharedClock,
+}
+
+impl Default for OnionInvokeRegistry {
+    fn default() -> Self {
+        Self::new_with_clock(None, OnionLinkSender::default(), Arc::new(SystemClock))
+    }
 }
 
 impl OnionInvokeRegistry {
-    pub(crate) fn new(offer: Option<&OnionInvokeOffer>, link_sender: OnionLinkSender) -> Self {
+    pub(crate) fn new_with_clock(
+        offer: Option<&OnionInvokeOffer>,
+        link_sender: OnionLinkSender,
+        clock: SharedClock,
+    ) -> Self {
         let offered_policies = offer
             .map(|offer| {
                 offer
@@ -196,6 +208,7 @@ impl OnionInvokeRegistry {
             entries: Arc::new(RwLock::new(BTreeMap::new())),
             accounting: OnionInvokeAccounting::default(),
             link_sender,
+            clock,
         }
     }
 
@@ -259,13 +272,6 @@ impl OnionInvokeRegistry {
             );
             return Ok(());
         };
-        let Ok(lease) =
-            self.accounting
-                .admit(shape, &backend, &policy, input.from, input.received_at_ms)
-        else {
-            tracing::debug!(?shape, %backend, "drop onion invoke exceeding quota");
-            return Ok(());
-        };
         let latency = shape.latency().duration();
         let release_at_ms = input
             .received_at_ms
@@ -274,11 +280,31 @@ impl OnionInvokeRegistry {
             tracing::debug!(?shape, %backend, "drop onion invoke expiring before release");
             return Ok(());
         }
+        if !self
+            .link_sender
+            .has_lane(OnionLink::new(input.surb.next()))?
+        {
+            tracing::debug!(
+                ?shape,
+                %backend,
+                next = %input.surb.next(),
+                "drop onion invoke whose SURB next hop has no live outbound lane"
+            );
+            return Ok(());
+        }
+        let Ok(lease) =
+            self.accounting
+                .admit(shape, &backend, &policy, input.from, input.received_at_ms)
+        else {
+            tracing::debug!(?shape, %backend, "drop onion invoke exceeding quota");
+            return Ok(());
+        };
 
         let carried_input = input.value.as_slice().to_vec();
         let surb = input.surb;
         let received_at_ms = input.received_at_ms;
         let link_sender = self.link_sender.clone();
+        let clock = self.clock.clone();
         let send_scope = scope.clone();
 
         scope.tasks().spawn(async move {
@@ -302,7 +328,7 @@ impl OnionInvokeRegistry {
                 return;
             };
 
-            if prepared.expiry.has_passed_at(get_epoch_ms()) {
+            if prepared.expiry.has_passed_at(clock.now_ms()) {
                 tracing::debug!(?shape, "drop onion invoke cell after SURB expiry");
                 return;
             }

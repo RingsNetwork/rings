@@ -87,16 +87,22 @@ impl Method {
     /// Only the two halves of the HTTP handshake are `Public`: `nodeDid` reveals the DID the
     /// caller is about to address, and `answerOffer` admits a session whose offer already carries
     /// a signature bound to the peer DID, so neither is guarded by the listener credential. Every
+    /// Return the credential class of this method.
+    ///
+    /// Only the HTTP handshake (`nodeDid`, `answerOffer`, and `acceptAnswer`) is `Public`: `nodeDid`
+    /// identifies the peer to dial, `answerOffer` is guarded by its signed payload, and
+    /// `acceptAnswer` is guarded by a live pending `transport_id` and its signed payload. Every
     /// other method reads node status, reads a registry, or controls the node, and is `Gated`.
     pub fn authorization_class(&self) -> AuthorizationClass {
         match self {
-            Method::NodeDid | Method::AnswerOffer => AuthorizationClass::Public,
+            Method::NodeDid | Method::AnswerOffer | Method::AcceptAnswer => {
+                AuthorizationClass::Public
+            }
             Method::ConnectPeerViaHttp
             | Method::ConnectWithDid
             | Method::ConnectWithSeed
             | Method::ListPeers
             | Method::CreateOffer
-            | Method::AcceptAnswer
             | Method::Disconnect
             | Method::SendBackendMessage
             | Method::SendE2eHandshake
@@ -113,6 +119,12 @@ impl Method {
         }
     }
 }
+
+/// Maximum number of JSON-RPC calls admitted in an unauthenticated `Public` batch request.
+pub const MAX_PUBLIC_BATCH_CALLS: usize = 8;
+
+/// Maximum number of JSON-RPC calls admitted in any single HTTP batch request.
+pub const MAX_JSONRPC_BATCH_CALLS: usize = 64;
 
 /// The credential a listener must demand before executing a method.
 ///
@@ -159,16 +171,23 @@ impl AuthorizationClass {
         Method::try_from(method).map_or(Self::Gated, |method| method.authorization_class())
     }
 
-    /// Return the class of a whole request: `⊔ { of_call(c) | c ∈ calls }`.
+    /// Return the class of a whole request: `⊔ { of_call(c) | c ∈ calls }`, bounded to at most
+    /// [`MAX_PUBLIC_BATCH_CALLS`] calls for unauthenticated callers.
     ///
-    /// The join over the empty batch is `⊥`, since such a request executes nothing.
+    /// The join over the empty batch is `⊥`, since such a request executes nothing; batches above
+    /// [`MAX_PUBLIC_BATCH_CALLS`] are `⊤` (`Gated`) to prevent unauthenticated batch amplification.
     pub fn of_request(request: &Request) -> Self {
         match request {
             Request::Single(call) => Self::of_call(call),
-            Request::Batch(calls) => calls
-                .iter()
-                .map(Self::of_call)
-                .fold(Self::Public, Self::join),
+            Request::Batch(calls) => {
+                if calls.len() > MAX_PUBLIC_BATCH_CALLS {
+                    return Self::Gated;
+                }
+                calls
+                    .iter()
+                    .map(Self::of_call)
+                    .fold(Self::Public, Self::join)
+            }
         }
     }
 }
@@ -227,13 +246,14 @@ mod tests {
     /// before the crate compiles again.
     fn expected_class(method: &Method) -> AuthorizationClass {
         match method {
-            Method::NodeDid | Method::AnswerOffer => AuthorizationClass::Public,
+            Method::NodeDid | Method::AnswerOffer | Method::AcceptAnswer => {
+                AuthorizationClass::Public
+            }
             Method::ConnectPeerViaHttp
             | Method::ConnectWithDid
             | Method::ConnectWithSeed
             | Method::ListPeers
             | Method::CreateOffer
-            | Method::AcceptAnswer
             | Method::Disconnect
             | Method::SendBackendMessage
             | Method::SendE2eHandshake
@@ -337,6 +357,15 @@ mod tests {
         assert_eq!(
             AuthorizationClass::of_request(&empty),
             AuthorizationClass::Public
+        );
+        let oversized = Request::Batch(
+            (0..=super::MAX_PUBLIC_BATCH_CALLS)
+                .map(|_| call("nodeDid"))
+                .collect(),
+        );
+        assert_eq!(
+            AuthorizationClass::of_request(&oversized),
+            AuthorizationClass::Gated
         );
     }
 }

@@ -14,8 +14,30 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils;
 
-pub(super) fn pack_delegation(delegatee_did: Did, ts_ms: u128, ttl_ms: u64) -> String {
-    format!("{delegatee_did}\n{ts_ms}\n{ttl_ms}")
+pub(super) fn pack_delegation_parts(
+    algorithm: &str,
+    delegator_did: Did,
+    delegatee_did: Did,
+    ts_ms: u128,
+    ttl_ms: u64,
+) -> String {
+    format!("rings-delegation-v1\n{algorithm}\n{delegator_did}\n{delegatee_did}\n{ts_ms}\n{ttl_ms}")
+}
+
+pub(super) fn pack_delegation(
+    delegator: &Account,
+    delegatee_did: Did,
+    ts_ms: u128,
+    ttl_ms: u64,
+) -> String {
+    let verifier = delegator.account_verifier();
+    pack_delegation_parts(
+        verifier.algorithm().as_str(),
+        verifier.did(),
+        delegatee_did,
+        ts_ms,
+        ttl_ms,
+    )
 }
 
 /// How a verification treats a delegation's delegator authorization: the delegator's signature
@@ -48,11 +70,10 @@ pub struct Delegation {
 }
 
 impl Delegation {
-    /// Pack the delegatee DID and validity period for signature verification.
+    /// Pack the domain-separated delegator identity, delegatee DID, and validity period for
+    /// signature verification.
     pub fn pack(&self) -> Vec<u8> {
-        pack_delegation(self.delegatee_did, self.ts_ms, self.ttl_ms)
-            .as_bytes()
-            .to_vec()
+        pack_delegation(&self.delegator, self.delegatee_did, self.ts_ms, self.ttl_ms).into_bytes()
     }
 
     /// Return the DID derived from the delegatee public signing key.

@@ -251,6 +251,7 @@ async fn test_session_driver_and_cross_crate_dummy_clock_advance_without_wall_cl
     };
 
     let driver_clock = clock.clone();
+    #[allow(clippy::disallowed_methods)]
     let open_fut = tokio::spawn(async move {
         dial::open_with_capabilities(loops, scope, request, driver_clock, &rng).await
     });

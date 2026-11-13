@@ -312,7 +312,7 @@ mod tests {
         let storage = Box::new(MemStorage::new());
         PeerRing::new_with_storage_and_finger_table_size(
             did,
-            3,
+            crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY as u8,
             storage,
             SCHEDULE_FINGER_TABLE_SIZE,
         )

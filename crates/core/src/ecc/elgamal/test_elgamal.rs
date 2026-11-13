@@ -167,6 +167,12 @@ impl AlgebraField for TestScalar {
     }
 }
 
+impl zeroize::Zeroize for TestScalar {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 #[test]
 fn test_encrypt_block_is_pure_group_operation() {
     let secret_key = ElGamalSecretKey::<TestElement>::from_scalar(TestScalar(5));

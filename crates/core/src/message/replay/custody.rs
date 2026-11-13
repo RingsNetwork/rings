@@ -122,7 +122,7 @@ impl TransactionReplay {
         self: &std::sync::Arc<Self>,
         admission: Admission,
     ) -> Result<RelayAdmission> {
-        let clock = super::replay_clock(self.started_at);
+        let clock = super::replay_clock(self.started_at, &self.clock);
         self.admit_relayed_at(admission, clock).await
     }
 

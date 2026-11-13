@@ -349,7 +349,7 @@ impl LogicalInbound {
                 let lookup = self
                     .transport
                     .dht
-                    .lookup_placement(query, false, crate::utils::get_epoch_ms())
+                    .lookup_placement(query, false, self.transport.now_ms())
                     .await?;
                 Ok(!matches!(
                     lookup,

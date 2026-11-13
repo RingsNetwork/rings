@@ -268,6 +268,13 @@ pub enum Error {
     /// any IndexedDB database instead of interleaving with it.
     #[error("Browser storage \"{0}\" is held by another open node")]
     BrowserStorageLocked(String) = 823,
+    /// A browser `storage_name` is empty or contains path separators or control characters, which
+    /// could alias another namespace's sub-store Web Lock (`rings-node/<storage_name>/<substore>`).
+    #[error(
+        "Invalid browser storage name \"{0}\": must be a non-empty single namespace segment \
+         without '/', '\\', or control characters"
+    )]
+    InvalidBrowserStorageName(String) = 824,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,

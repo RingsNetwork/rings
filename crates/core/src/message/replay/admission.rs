@@ -12,6 +12,7 @@ use crate::message::types::MessageCategory;
 use crate::message::OriginQuotaCharge;
 use crate::message::OriginQuotaInstant;
 use crate::utils::Instant;
+use crate::utils::SharedClock;
 
 /// The shares of the receiver table (load-bounds paper, Law 2): `f = 32` new streams per slot,
 /// a pool of 3328, a local share of 1024 for this node's own signaling and an inbox share of
@@ -88,16 +89,20 @@ impl ReplayInstant {
     }
 }
 
-/// The replay clock: monotonic time elapsed since `started_at` and the wall clock, read when
-/// called.
-pub(super) fn replay_clock(started_at: Instant) -> impl FnOnce() -> ReplayInstant {
+/// The replay clock: monotonic time elapsed since `started_at` and the injected epoch clock,
+/// read when called.
+pub(super) fn replay_clock(
+    started_at: Instant,
+    clock: &SharedClock,
+) -> impl FnOnce() -> ReplayInstant {
+    let clock = SharedClock::clone(clock);
     move || ReplayInstant {
         quota: OriginQuotaInstant::from_nanos(
             Instant::now()
                 .saturating_duration_since(started_at)
                 .as_nanos(),
         ),
-        wall_ms: crate::utils::get_epoch_ms(),
+        wall_ms: clock.now_ms(),
     }
 }
 

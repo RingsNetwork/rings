@@ -306,10 +306,10 @@ impl PeerRing {
 
     fn storage_virtual_nodes_for_topology(&self, state: &TopologyState) -> StorageVirtualNodes {
         // Pre: `state` is this node's authenticated topology view.
-        // Post: the virtual-owner set is `{local} ∪ { p | Referenced(n, p) }`,
-        // the physical DIDs currently visible to storage routing. It is an
-        // observed view, not a global registry.
+        // Post: the virtual-owner set is `{local} ∪ { p | Referenced(n, p) } ∪ dom(bridged)`,
+        // so non-transitive cliques compute the same VNode ring across bridges.
         let mut owners = state.referenced_peers();
+        owners.extend(state.bridged.keys().copied());
         owners.insert(state.local);
         StorageVirtualNodes::from_owners(self.storage_virtual_node_config(), owners)
     }
@@ -427,6 +427,16 @@ impl PeerRing {
         if owner == state.local {
             return None;
         }
+        if state.predecessor == Some(owner) || state.predecessors.contains(&owner) {
+            return Some(owner);
+        }
+        if let Some(&via) = state
+            .bridged
+            .get(&owner)
+            .filter(|&&via| via != state.local && state.references(via) && !state.references(owner))
+        {
+            return Some(via);
+        }
         match topology::find_successor(state, owner) {
             // If this local view cannot prove a better physical next hop, try
             // the target owner directly rather than accepting the payload as
@@ -441,7 +451,7 @@ impl PeerRing {
             .storage_virtual_nodes_for_topology(state)
             .owner_for_key(key)
         {
-            return (owner != state.local).then_some(owner);
+            return Self::next_hop_to_physical_owner_in(state, owner);
         }
         match topology::find_successor(state, key) {
             FindSuccessorStep::Local(_) => None,

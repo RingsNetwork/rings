@@ -109,6 +109,10 @@ const ONION_EXIT_SESSION_INBOUND: usize = 256;
 /// The period of a session's tick: its idle and gap checks run at least this often.
 const ONION_EXIT_SESSION_TICK: Duration = Duration::from_secs(10);
 
+/// Maximum duration one exit world open operation may stay pending before failing the session
+/// closed (`Q = 30 s`, matching [`super::dial::ONION_SESSION_OPEN_TIMEOUT`]'s 30 s world-open budget).
+const ONION_EXIT_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Maximum duration one exit world write or shutdown operation may stay pending before failing
 /// the session closed.
 const ONION_EXIT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -800,14 +804,25 @@ async fn open<W: OnionWorld>(
         tracing::debug!(target = %target.authority(), "onion exit policy refuses a target");
         return None;
     }
-    match shared.world.open(&target).await {
-        Ok((reader, writer)) => Some(OnionOpenWorld {
+    let open_fut = shared.world.open(&target).fuse();
+    let timeout_fut = session_sleep(ONION_EXIT_OPEN_TIMEOUT).fuse();
+    futures::pin_mut!(open_fut, timeout_fut);
+    let result = futures::select! {
+        res = open_fut => Some(res),
+        _ = timeout_fut => None,
+    };
+    match result {
+        Some(Ok((reader, writer))) => Some(OnionOpenWorld {
             reader: Some(reader),
             writer: Some(writer),
             pending_writes: VecDeque::new(),
         }),
-        Err(error) => {
+        Some(Err(error)) => {
             tracing::debug!(target = %target.authority(), %error, "onion exit world refused");
+            None
+        }
+        None => {
+            tracing::debug!(target = %target.authority(), "onion exit world open timed out");
             None
         }
     }

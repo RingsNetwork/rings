@@ -321,6 +321,15 @@ impl OnionExitTarget {
             OnionExitTargetPattern::Authority(authority) => authority == target,
         }
     }
+
+    /// Return whether this target pattern is a single canonical public IP-literal authority.
+    pub fn is_public_ip_literal_authority(&self) -> bool {
+        matches!(
+            &self.0,
+            OnionExitTargetPattern::Authority(target)
+                if target::validate_public_ip_literal(target).is_ok()
+        )
+    }
 }
 
 impl std::fmt::Display for OnionExitTarget {
@@ -375,6 +384,22 @@ impl OnionExitPolicy {
                 "advertise_onion_exit requires at least one valid onion_exit_policy allowed target"
                     .to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Validate target lists for a browser onion exit, which can only enforce address-level
+    /// public-IP admission on explicit public IP-literal targets.
+    pub fn validate_browser_targets(&self) -> Result<()> {
+        self.validate_targets()?;
+        if let Some(target) = self
+            .allowed_targets
+            .iter()
+            .find(|target| !target.is_public_ip_literal_authority())
+        {
+            return Err(Error::InvalidConfig(format!(
+                "browser HTTPS onion exit policy only supports public IP-literal allowed_targets, got {target}"
+            )));
         }
         Ok(())
     }

@@ -128,6 +128,8 @@ use crate::message::OriginQuotaKey;
 use crate::storage::KvStorageScan;
 use crate::swarm::transport::DELIVERY_BOUND;
 use crate::utils::Instant;
+use crate::utils::SharedClock;
+use crate::utils::SystemClock;
 
 mod admission;
 mod commit;
@@ -507,6 +509,7 @@ pub(crate) struct TransactionReplay {
     accounting: TableAccounting,
     state: Mutex<TransactionAdmissionState>,
     started_at: Instant,
+    clock: SharedClock,
     counters: ReplayCounterState,
     quota_counters: OriginQuotaCounterState,
 }
@@ -560,9 +563,16 @@ impl TransactionReplay {
                 journal: Journal::default(),
             }),
             started_at: Instant::now(),
+            clock: Arc::new(SystemClock),
             counters: ReplayCounterState::default(),
             quota_counters: OriginQuotaCounterState::default(),
         }
+    }
+
+    /// Bind `clock` as the epoch clock read by spent-stream retirement and relay custody.
+    pub(crate) fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Current observable counters.
@@ -723,7 +733,7 @@ impl TransactionReplay {
         self: &Arc<Self>,
         admission: Admission,
     ) -> Result<SequenceVerdict> {
-        let clock = replay_clock(self.started_at);
+        let clock = replay_clock(self.started_at, &self.clock);
         self.admit_at(admission, clock).await
     }
 
@@ -901,7 +911,7 @@ impl TransactionReplay {
             introducer,
             ..
         } = admission;
-        let clock = replay_clock(self.started_at);
+        let clock = replay_clock(self.started_at, &self.clock);
         let mut state = self.state.lock().await;
         let TransactionAdmissionState { quota, journal, .. } = &mut *state;
         let (next, verdict) = observe(window.clone(), sequence, digest);
