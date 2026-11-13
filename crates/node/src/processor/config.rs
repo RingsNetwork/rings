@@ -2,6 +2,8 @@ use rings_core::dht::default_storage_virtual_positions_per_owner;
 use rings_core::dht::VirtualNodeConfig;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 
 use super::*;
 use crate::remote_endpoint::RemoteRpcProxy;
@@ -46,6 +48,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) onion_exit_ttl: Duration,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(crate) remote_rpc_proxy: Option<RemoteRpcProxy>,
+    /// Epoch clock capability injected into this node's runtime subsystems.
+    pub(in crate::processor) clock: SharedClock,
 }
 
 #[wasm_export]
@@ -79,6 +83,7 @@ impl ProcessorConfig {
             ),
             onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
             remote_rpc_proxy: None,
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -140,6 +145,17 @@ impl ProcessorConfig {
     /// `proxy` instead of connecting directly.
     pub fn remote_rpc_proxy(mut self, proxy: RemoteRpcProxy) -> Self {
         self.remote_rpc_proxy = Some(proxy);
+        self
+    }
+
+    /// Return the [`SharedClock`] capability configured for this node.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Inject a custom [`SharedClock`] capability for deterministic node time.
+    pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
         self
     }
 }
@@ -346,6 +362,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
             remote_rpc_proxy,
+            clock: Arc::new(SystemClock),
         })
     }
 }

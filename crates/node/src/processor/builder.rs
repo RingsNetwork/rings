@@ -1,7 +1,6 @@
 use rings_core::dht::RemovalStorage;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
-use rings_core::utils::SystemClock;
 
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
@@ -74,7 +73,7 @@ impl ProcessorBuilder {
             webrtc_udp_port_range: config.webrtc_udp_port_range()?,
             delegatee_key: config.delegatee_key.clone(),
             onion_process_epoch: None,
-            clock: Arc::new(SystemClock),
+            clock: config.clock.clone(),
             rng: SharedRng::system(),
             storage: None,
             relay_storage: None,
@@ -334,12 +333,13 @@ impl ProcessorBuilder {
             registration_tasks.push(Arc::new(onion_exit_registration));
         }
         if let Some(offer) = self.onion_role.invoke() {
-            let onion_invoke_registration = crate::onion::OnionInvokeRegistration::new(
+            let onion_invoke_registration = crate::onion::OnionInvokeRegistration::new_with_clock(
                 self.onion_exit_heartbeat_interval,
                 self.onion_exit_ttl,
                 self.online_node_type,
                 offer.clone(),
                 onion_process_epoch.clone(),
+                self.clock.clone(),
             );
             registration_tasks.push(Arc::new(onion_invoke_registration));
         }
@@ -348,7 +348,9 @@ impl ProcessorBuilder {
         registration_tasks.extend(self.mail_registration);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
-        let observability = Arc::new(crate::observability::Observability::new());
+        let observability = Arc::new(crate::observability::Observability::new_with_clock(
+            self.clock.clone(),
+        ));
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
             &self.ice_servers,

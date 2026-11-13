@@ -118,6 +118,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
                     .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
                 Ok(crate::rpc_dto::online_node_descriptors_from_infos(
                     response.nodes,
+                    self.processor.clock().now_ms(),
                     self.processor.swarm.network_id(),
                 ))
             }
@@ -137,6 +138,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
                     .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
                 Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
                     response.exits,
+                    self.processor.clock().now_ms(),
                     self.processor.swarm.network_id(),
                 ))
             }
@@ -240,9 +242,19 @@ impl BrowserOnionProxy {
             let route_response =
                 browser_onion_route_info(&response.route.route).map_err(JsError::from)?;
             let route_value = js_value::serialize(&route_response).map_err(JsError::from)?;
-            let value = js_value::serialize(&response.response).map_err(JsError::from)?;
+            let headers_value =
+                js_value::serialize(&response.response.headers).map_err(JsError::from)?;
+            let body_value = js_sys::Uint8Array::from(response.response.body.as_slice());
+            let value = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &value,
+                &JsValue::from_str("status"),
+                &JsValue::from_f64(f64::from(response.response.status)),
+            )?;
+            js_sys::Reflect::set(&value, &JsValue::from_str("headers"), &headers_value)?;
+            js_sys::Reflect::set(&value, &JsValue::from_str("body"), &body_value)?;
             js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
-            Ok(value)
+            Ok(value.into())
         })
     }
 }

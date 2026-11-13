@@ -257,11 +257,14 @@ impl SwarmBuilder {
             delegatee_key: self.delegatee_key,
             dht: dht.clone(),
             measure: self.measure,
-            transaction_replay: Arc::new(TransactionReplay::new_with_quota(
-                self.replay_storage,
-                self.origin_quota,
-                TableAccounting::new(RECEIVER_STREAM_SHARES),
-            )),
+            transaction_replay: Arc::new(
+                TransactionReplay::new_with_quota(
+                    self.replay_storage,
+                    self.origin_quota,
+                    TableAccounting::new(RECEIVER_STREAM_SHARES),
+                )
+                .with_clock(self.clock.clone()),
+            ),
             settings: SwarmTransportSettings::new(
                 self.dht_storage_redundancy,
                 storage_virtual_node_config,

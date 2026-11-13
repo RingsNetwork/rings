@@ -606,7 +606,9 @@ impl Swarm {
         &self,
         offer_payload: MessagePayload,
     ) -> Result<OfferReply<MessagePayload, MessagePayload>> {
-        if !offer_payload.verify_transaction_and_payload(self.network_id()) {
+        if !offer_payload
+            .verify_transaction_and_payload_at(self.network_id(), self.transport.now_ms())
+        {
             return Err(Error::VerifySignatureFailed);
         }
 
@@ -683,7 +685,9 @@ impl Swarm {
         expected: Option<PendingConnectionAttempt>,
         answer_payload: MessagePayload,
     ) -> Result<()> {
-        if !answer_payload.verify_transaction_and_payload(self.network_id()) {
+        if !answer_payload
+            .verify_transaction_and_payload_at(self.network_id(), self.transport.now_ms())
+        {
             return Err(Error::VerifySignatureFailed);
         }
 

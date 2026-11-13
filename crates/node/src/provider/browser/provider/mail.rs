@@ -24,6 +24,7 @@ use wasm_bindgen_futures::future_to_promise;
 use super::lock::BrowserStorageLock;
 use super::lock::LockedBrowserStorage;
 use super::open_browser_provider_stores;
+use crate::consts::MAIL_STORAGE_CAPACITY;
 use crate::mail::open::OpenedMail;
 use crate::mail::recipient::KvInbox;
 use crate::mail::recipient::MailInbox;
@@ -164,8 +165,9 @@ async fn open_mail_storage(
     storage_lock: &Rc<BrowserStorageLock>,
 ) -> Result<LockedBrowserStorage, BrowserMailError> {
     let name = format!("{storage_name}/{suffix}");
-    LockedBrowserStorage::open(
+    LockedBrowserStorage::open_with_byte_cap(
         MAIL_STORAGE_ROWS,
+        MAIL_STORAGE_CAPACITY,
         &name,
         RecordAuthority::Retained,
         storage_lock,
@@ -178,7 +180,9 @@ async fn open_mail_storage(
 fn serialize_mail(value: &impl Serialize) -> Result<JsValue, BrowserMailError> {
     value
         .serialize(
-            &serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true),
+            &serde_wasm_bindgen::Serializer::new()
+                .serialize_large_number_types_as_bigints(true)
+                .serialize_maps_as_objects(true),
         )
         .map_err(BrowserMailError::from)
 }
@@ -220,8 +224,9 @@ impl Provider {
     ) -> Result<Self, BrowserMailError> {
         config.validate_onion_role()?;
         let (stores, storage_lock) = open_browser_provider_stores(&storage_name).await?;
-        let inbox = Rc::new(KvInbox::new(
+        let inbox = Rc::new(KvInbox::new_with_clock(
             open_mail_storage(&storage_name, "mail-inbox", &storage_lock).await?,
+            config.clock().clone(),
         ));
         let records = open_mail_storage(&storage_name, "mail-records", &storage_lock).await?;
         let mut provider =

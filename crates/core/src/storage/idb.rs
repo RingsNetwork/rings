@@ -96,6 +96,9 @@ const ACCESS_STAMP_INDEX: &str = "access_stamp";
 /// Out-of-line key of the single record in the clock store.
 const CLOCK_KEY: &str = "access_clock";
 
+/// Out-of-line key of the byte-usage counter in the companion store when `byte_cap` is enabled.
+const USED_BYTES_KEY: &str = "used_bytes";
+
 /// Suffix of the clock store name; appending it keeps the name distinct from the row store.
 const CLOCK_STORE_SUFFIX: &str = "/access-clock";
 
@@ -106,14 +109,40 @@ const CLOCK_STORE_SUFFIX: &str = "/access-clock";
 const CLOCK_LIMIT: u64 = (1 << 53) - 1;
 
 /// Logical time of one access; stamps of one database are pairwise distinct.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(transparent)]
 struct AccessStamp(u64);
 
+impl Serialize for AccessStamp {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if self.0 <= CLOCK_LIMIT {
+            serializer.serialize_f64(self.0 as f64)
+        } else {
+            Err(serde::ser::Error::custom(
+                "IndexedDB access stamp exceeded IEEE-754 exact integer range",
+            ))
+        }
+    }
+}
+
 /// Store-wide access clock: the stamp the next access receives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(transparent)]
 struct AccessClock(u64);
+
+impl Serialize for AccessClock {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if self.0 <= CLOCK_LIMIT {
+            serializer.serialize_f64(self.0 as f64)
+        } else {
+            Err(serde::ser::Error::custom(
+                "IndexedDB access clock exceeded IEEE-754 exact integer range",
+            ))
+        }
+    }
+}
 
 impl AccessClock {
     /// Clock of a store that has never been accessed.
@@ -133,7 +162,7 @@ impl AccessClock {
     }
 }
 
-/// Stored row: the key, the stamp of its latest access, and the caller's payload.
+/// Stored row: the key, the stamp of its latest access, optional byte accounting, and payload.
 ///
 /// The payload stays an opaque JavaScript value, so moving a row between layouts or stamps
 /// never decodes or re-encodes caller data.
@@ -143,9 +172,23 @@ struct StoredRow {
     key: String,
     /// Logical time of the latest access; the `access_stamp` index orders eviction by it.
     access_stamp: AccessStamp,
+    /// Canonical wire byte size recorded when this store enforces a byte budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    byte_len: Option<u32>,
     /// Caller-owned payload, already serialized.
     #[serde(with = "serde_wasm_bindgen::preserve")]
     data: JsValue,
+}
+
+impl StoredRow {
+    fn accounted_bytes(&self) -> u64 {
+        u64::from(self.byte_len.unwrap_or(0))
+    }
+}
+
+fn measure_wire_bytes<V: Serialize>(key: &str, value: &V) -> Result<u32> {
+    let bytes = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
+    u32::try_from(bytes.len()).map_err(|_| Error::StorageCountOverflow)
 }
 
 /// Name of the clock store that accompanies the row store `name`.
@@ -250,15 +293,45 @@ impl Scope {
         Ok(())
     }
 
-    /// Queue the writes of `rows` and, when `clock` is `Some`, the clock record, and await all
-    /// of them in one batch.
-    async fn put_rows_with_clock(&self, rows: &[JsValue], clock: Option<&JsValue>) -> Result<()> {
-        let mut requests = Vec::with_capacity(rows.len() + usize::from(clock.is_some()));
+    /// Read the byte-usage counter from the companion store; `None` before byte tracking starts.
+    async fn used_bytes_record(&self) -> Result<Option<u64>> {
+        let record = request::request(
+            &self
+                .clock
+                .get(&JsValue::from(USED_BYTES_KEY))
+                .map_err(request::js_error)?,
+        )
+        .await?;
+        js_value::deserialize(record)
+    }
+
+    /// Queue the write of the byte-usage counter.
+    fn queue_write_used_bytes(&self, used_bytes: u64) -> Result<web_sys::IdbRequest> {
+        let encoded = js_value::serialize_storage(&used_bytes)?;
+        self.clock
+            .put_with_key(&encoded, &JsValue::from(USED_BYTES_KEY))
+            .map_err(request::js_error)
+    }
+
+    /// Queue the writes of `rows`, optional `clock`, and optional `used_bytes`, and await all of
+    /// them in one batch.
+    async fn put_rows_with_clock_and_bytes(
+        &self,
+        rows: &[JsValue],
+        clock: Option<&JsValue>,
+        used_bytes: Option<u64>,
+    ) -> Result<()> {
+        let mut requests = Vec::with_capacity(
+            rows.len() + usize::from(clock.is_some()) + usize::from(used_bytes.is_some()),
+        );
         for row in rows {
             requests.push(self.queue_put_row(row)?);
         }
         if let Some(encoded) = clock {
             requests.push(self.queue_write_clock(encoded)?);
+        }
+        if let Some(bytes) = used_bytes {
+            requests.push(self.queue_write_used_bytes(bytes)?);
         }
         request::requests(&requests).await
     }
@@ -268,86 +341,96 @@ impl Scope {
     ///
     /// The row and the successor clock are both encoded before either write is queued, so an
     /// encoding failure changes neither; a failed request or a dropped scope aborts both.
-    async fn put_stamped(&self, key: String, data: JsValue) -> Result<()> {
+    async fn put_stamped(
+        &self,
+        key: String,
+        byte_len: Option<u32>,
+        data: JsValue,
+        used_bytes: Option<u64>,
+    ) -> Result<()> {
         let clock = self
             .clock_record()
             .await?
             .ok_or(Error::IdbAccessClockMissing)?;
         let (access_stamp, successor) = clock.tick()?;
-        let row = js_value::serialize(&StoredRow {
+        let row = js_value::serialize_storage(&StoredRow {
             key,
             access_stamp,
+            byte_len,
             data,
         })?;
-        let successor = js_value::serialize(&successor)?;
-        self.put_rows_with_clock(&[row], Some(&successor)).await
+        let successor = js_value::serialize_storage(&successor)?;
+        self.put_rows_with_clock_and_bytes(&[row], Some(&successor), used_bytes)
+            .await
     }
 
-    /// Return the keys of the `count` least-recently-accessed rows not in `excluded`.
+    /// Return the least-recently-accessed rows not in `excluded` until `min_rows` and `min_bytes`
+    /// are both satisfied.
     ///
     /// Every candidate is decoded before any deletion is queued, so a malformed row leaves the
     /// scope with no destructive request.
-    async fn least_recent_keys_excluding(
+    async fn least_recent_rows_for_budget(
         &self,
         excluded: &std::collections::BTreeSet<&str>,
-        count: u32,
-    ) -> Result<Vec<String>> {
-        if count == 0 {
-            return Ok(Vec::new());
+        min_rows: u32,
+        min_bytes: u64,
+    ) -> Result<(Vec<String>, u64)> {
+        if min_rows == 0 && min_bytes == 0 {
+            return Ok((Vec::new(), 0));
         }
-        let excluded_len =
-            u32::try_from(excluded.len()).map_err(|_| Error::StorageCountOverflow)?;
-        let limit = count.saturating_add(excluded_len);
         let index = self
             .rows
             .index(ACCESS_STAMP_INDEX)
             .map_err(request::js_error)?;
-        let candidates = request::request(
-            &index
-                .get_all_with_key_and_limit(&JsValue::NULL, limit)
-                .map_err(request::js_error)?,
-        )
-        .await?;
-        let mut keys = Vec::with_capacity(count as usize);
+        let candidates = if min_bytes == 0 {
+            let excluded_len =
+                u32::try_from(excluded.len()).map_err(|_| Error::StorageCountOverflow)?;
+            let limit = min_rows.saturating_add(excluded_len);
+            request::request(
+                &index
+                    .get_all_with_key_and_limit(&JsValue::NULL, limit)
+                    .map_err(request::js_error)?,
+            )
+            .await?
+        } else {
+            request::request(&index.get_all().map_err(request::js_error)?).await?
+        };
+        let mut keys = Vec::new();
+        let mut reclaimed_bytes = 0_u64;
         for row in candidates.unchecked_into::<Array>().iter() {
             let row = js_value::deserialize::<StoredRow>(row)?;
             if !excluded.contains(row.key.as_str()) {
+                reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes());
                 keys.push(row.key);
-                if keys.len() == count as usize {
+                if keys.len() >= min_rows as usize && reclaimed_bytes >= min_bytes {
                     break;
                 }
             }
         }
-        Ok(keys)
+        Ok((keys, reclaimed_bytes))
     }
 
-    /// Retire the `count` rows with the smallest stamps.
-    ///
-    /// Every candidate is decoded before any deletion is queued, so a malformed row leaves the
-    /// scope with no destructive request.
-    async fn evict_least_recent(&self, count: u32) -> Result<()> {
-        let keys = self
-            .least_recent_keys_excluding(&std::collections::BTreeSet::new(), count)
-            .await?;
-        let requests = keys
-            .iter()
-            .map(|key| self.queue_delete_row(key))
-            .collect::<Result<Vec<_>>>()?;
-        request::requests(&requests).await
-    }
-
-    /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists: the first open of a
-    /// database writes it, and every later open finds it (module docs, schema).
-    async fn start_clock(&self) -> Result<()> {
-        if self.clock_record().await?.is_some() {
-            return Ok(());
+    /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists, and initialize the
+    /// byte counter from stored rows when `track_bytes` is enabled.
+    async fn start_clock(&self, track_bytes: bool) -> Result<()> {
+        if self.clock_record().await?.is_none() {
+            self.write_clock(&js_value::serialize_storage(&AccessClock::ORIGIN)?)
+                .await?;
         }
-        self.write_clock(&js_value::serialize(&AccessClock::ORIGIN)?)
-            .await
+        if track_bytes && self.used_bytes_record().await?.is_none() {
+            let mut sum = 0_u64;
+            for raw in self.all_rows().await? {
+                if let Ok(row) = js_value::deserialize::<StoredRow>(raw) {
+                    sum = sum.saturating_add(row.accounted_bytes());
+                }
+            }
+            request::request(&self.queue_write_used_bytes(sum)?).await?;
+        }
+        Ok(())
     }
 }
 
-/// Named IndexedDB key/value storage with bounded row capacity.
+/// Named IndexedDB key/value storage with bounded row capacity and optional byte budget.
 pub struct IdbStorage {
     /// Open database handle; transactions own their requests until completion.
     db: IdbDatabase,
@@ -355,6 +438,8 @@ pub struct IdbStorage {
     authority: RecordAuthority,
     /// Maximum number of stored rows.
     cap: u32,
+    /// Optional maximum total canonical wire bytes across stored rows.
+    byte_cap: Option<u32>,
     /// Row store and database name selected by the caller.
     storage_name: String,
     /// Clock store name derived from `storage_name`.
@@ -376,6 +461,29 @@ impl IdbStorage {
         name: &str,
         authority: RecordAuthority,
     ) -> Result<Self> {
+        Self::open_internal(row_capacity, None, name, authority).await
+    }
+
+    /// Open a named database of the given authority enforcing both a nonzero row cap and a nonzero
+    /// canonical wire byte cap (`byte_capacity`), matching `FileStorage` byte-budget semantics.
+    pub async fn new_with_byte_cap_name_and_authority(
+        row_capacity: u32,
+        byte_capacity: u32,
+        name: &str,
+        authority: RecordAuthority,
+    ) -> Result<Self> {
+        if byte_capacity == 0 {
+            return Err(Error::InvalidCapacity);
+        }
+        Self::open_internal(row_capacity, Some(byte_capacity), name, authority).await
+    }
+
+    async fn open_internal(
+        row_capacity: u32,
+        byte_capacity: Option<u32>,
+        name: &str,
+        authority: RecordAuthority,
+    ) -> Result<Self> {
         if row_capacity == 0 {
             return Err(Error::InvalidCapacity);
         }
@@ -391,13 +499,14 @@ impl IdbStorage {
             .await?,
             authority,
             cap: row_capacity,
+            byte_cap: byte_capacity,
             storage_name: name.to_owned(),
             clock_store_name,
         };
         let scope = storage.scope(IdbTransactionMode::Readwrite)?;
-        scope.start_clock().await?;
+        scope.start_clock(storage.byte_cap.is_some()).await?;
         scope.done().await?;
-        // Opening under a smaller row budget immediately restores the configured bound.
+        // Opening under a smaller row or byte budget immediately restores the configured bound.
         storage.prune().await?;
         Ok(storage)
     }
@@ -405,11 +514,20 @@ impl IdbStorage {
     /// Open a transaction over both object stores; a read-write one commits with the durability
     /// of this store's authority (the durability law of `request`).
     fn scope(&self, mode: IdbTransactionMode) -> Result<Scope> {
-        let durability = if self.authority.flushes() {
-            request::Durability::Strict
-        } else {
-            request::Durability::Default
-        };
+        let durability =
+            if matches!(mode, IdbTransactionMode::Readwrite) && self.authority.flushes() {
+                request::Durability::Strict
+            } else {
+                request::Durability::Default
+            };
+        self.scope_with_durability(mode, durability)
+    }
+
+    fn scope_with_durability(
+        &self,
+        mode: IdbTransactionMode,
+        durability: request::Durability,
+    ) -> Result<Scope> {
         let commit = request::transaction(
             &self.db,
             &[&self.storage_name, &self.clock_store_name],
@@ -431,37 +549,55 @@ impl IdbStorage {
         })
     }
 
-    /// Restore the configured row budget under the budget law: a disposable store retires every
-    /// least-recently-accessed excess row; an authoritative store over its budget fails.
-    ///
-    /// Counting, selection, and deletion share one read-write transaction.
-    /// Post: `Ok(())` implies at most `cap` rows; an authoritative store removed nothing.
+    /// Restore the configured row and byte budgets under the budget law: a disposable store
+    /// retires every least-recently-accessed excess row; an authoritative store over its budget
+    /// fails.
     async fn prune(&self) -> Result<()> {
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
         let count = scope.count().await?;
-        if count > self.cap {
-            self.make_room(&scope, count, 0).await?;
+        let used_bytes = match self.byte_cap {
+            Some(_) => scope.used_bytes_record().await?.unwrap_or(0),
+            None => 0,
+        };
+        let excess_rows = count.saturating_sub(self.cap);
+        let excess_bytes = self
+            .byte_cap
+            .map_or(0, |cap| used_bytes.saturating_sub(u64::from(cap)));
+        if excess_rows > 0 || excess_bytes > 0 {
+            if !self.authority.evicts() {
+                if excess_rows > 0 {
+                    return Err(Error::StorageBudgetExhausted {
+                        used: u64::from(count),
+                        required: 0,
+                        capacity: u64::from(self.cap),
+                    });
+                }
+                let byte_cap = u64::from(self.byte_cap.unwrap_or(0));
+                return Err(Error::StorageBudgetExhausted {
+                    used: used_bytes,
+                    required: 0,
+                    capacity: byte_cap,
+                });
+            }
+            let (evicted_keys, reclaimed_bytes) = scope
+                .least_recent_rows_for_budget(
+                    &std::collections::BTreeSet::new(),
+                    excess_rows,
+                    excess_bytes,
+                )
+                .await?;
+            let mut requests = Vec::with_capacity(evicted_keys.len() + 1);
+            for key in &evicted_keys {
+                requests.push(scope.queue_delete_row(key)?);
+            }
+            if self.byte_cap.is_some() {
+                requests.push(
+                    scope.queue_write_used_bytes(used_bytes.saturating_sub(reclaimed_bytes))?,
+                );
+            }
+            request::requests(&requests).await?;
         }
         scope.done().await
-    }
-
-    /// Make room for `incoming` more rows beside the `count` stored ones under the budget law:
-    /// a disposable store retires its least recently accessed rows until they fit; an
-    /// authoritative store fails instead.
-    ///
-    /// Pre: `count + incoming > cap`, observed in `scope`.
-    /// Post: `Ok(())` implies the rows that remain in `scope` plus `incoming` fit in `cap`; on
-    /// `Err`, an authoritative store queued no request.
-    async fn make_room(&self, scope: &Scope, count: u32, incoming: u32) -> Result<()> {
-        if !self.authority.evicts() {
-            return Err(Error::StorageBudgetExhausted {
-                used: u64::from(count),
-                required: u64::from(incoming),
-                capacity: u64::from(self.cap),
-            });
-        }
-        let excess = count.saturating_add(incoming).saturating_sub(self.cap);
-        scope.evict_least_recent(excess).await
     }
 
     /// The decode law of this store's authority (module docs) on one row payload: the decoded
@@ -495,16 +631,30 @@ impl IdbStorage {
     async fn retire_undecodable<V>(&self, keys: Vec<String>) -> Result<()>
     where V: DeserializeOwned {
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let mut reclaimed_bytes = 0_u64;
         for key in keys {
             let stored = scope.row(&key).await?;
-            let still_undecodable = match js_value::deserialize::<Option<StoredRow>>(stored)? {
-                Some(row) => self.decode_under_authority::<V>(row.data)?.is_none(),
-                None => false,
+            let retired_bytes = match js_value::deserialize::<Option<StoredRow>>(stored)? {
+                Some(row) => {
+                    let row_bytes = row.accounted_bytes();
+                    if self.decode_under_authority::<V>(row.data)?.is_none() {
+                        Some(row_bytes)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
             };
-            if still_undecodable {
+            if let Some(row_bytes) = retired_bytes {
                 self.authority.report_retired(&key);
                 scope.delete_row(&key).await?;
+                reclaimed_bytes = reclaimed_bytes.saturating_add(row_bytes);
             }
+        }
+        if self.byte_cap.is_some() && reclaimed_bytes > 0 {
+            let used = scope.used_bytes_record().await?.unwrap_or(0);
+            request::request(&scope.queue_write_used_bytes(used.saturating_sub(reclaimed_bytes))?)
+                .await?;
         }
         scope.done().await
     }
@@ -518,44 +668,126 @@ where V: DeserializeOwned + Serialize + Sized
         if !self.authority.evicts() {
             return self.get_unstamped(key).await;
         }
-        // Reading is a touch: keep lookup, restamp, and clock advance in one write transaction
-        // so a concurrent put cannot be overwritten by stale data.
-        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        // Reading is a recency touch: use `Durability::Default` so `DurableCache` reads do not
+        // trigger synchronous OS fsyncs merely to advance `access_stamp`.
+        let scope = self
+            .scope_with_durability(IdbTransactionMode::Readwrite, request::Durability::Default)?;
         let stored = scope.row(key).await?;
         let Some(row) = js_value::deserialize::<Option<StoredRow>>(stored)? else {
             scope.done().await?;
             return Ok(None);
         };
+        let row_bytes = row.accounted_bytes();
+        let row_byte_len = row.byte_len;
         // Decode before scheduling any write, so a kept row stays untouched.
         let value = match self.decode_under_authority(row.data.clone())? {
             Some(value) => value,
             None => {
                 self.authority.report_retired(&row.key);
                 scope.delete_row(&row.key).await?;
+                if self.byte_cap.is_some() && row_bytes > 0 {
+                    let used = scope.used_bytes_record().await?.unwrap_or(0);
+                    request::request(
+                        &scope.queue_write_used_bytes(used.saturating_sub(row_bytes))?,
+                    )
+                    .await?;
+                }
                 scope.done().await?;
                 return Ok(None);
             }
         };
-        scope.put_stamped(row.key, row.data).await?;
+        scope
+            .put_stamped(row.key, row_byte_len, row.data, None)
+            .await?;
         scope.done().await?;
         Ok(Some(value))
     }
 
     async fn put(&self, key: &str, value: &V) -> Result<()> {
-        // Serialize before opening a destructive transaction so serialization failure cannot
-        // evict any previously stored row.
-        let data = js_value::serialize(value)?;
-        let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        // Check existence under the same transaction that will evict and store the row.
-        let existing = scope.row(key).await?;
-        if existing.is_undefined() || existing.is_null() {
-            // Count includes every row visible to this transaction; only a new key needs room.
-            let count = scope.count().await?;
-            if count >= self.cap {
-                self.make_room(&scope, count, 1).await?;
+        // Serialize and validate capacity before opening a destructive transaction so a failure
+        // cannot evict any previously stored row.
+        let data = js_value::serialize_storage(value)?;
+        let byte_len = match self.byte_cap {
+            Some(byte_cap) => {
+                let len = measure_wire_bytes(key, value)?;
+                if len > byte_cap {
+                    return Err(Error::StorageValueExceedsCapacity {
+                        required: u64::from(len),
+                        capacity: u64::from(byte_cap),
+                    });
+                }
+                Some(len)
             }
-        }
-        scope.put_stamped(key.to_owned(), data).await?;
+            None => None,
+        };
+        let scope = self.scope(IdbTransactionMode::Readwrite)?;
+        let existing_raw = scope.row(key).await?;
+        let existing_row = if existing_raw.is_undefined() || existing_raw.is_null() {
+            None
+        } else {
+            js_value::deserialize::<Option<StoredRow>>(existing_raw)?
+        };
+        let incoming_rows = u32::from(existing_row.is_none());
+        let existing_bytes = existing_row.as_ref().map_or(0, StoredRow::accounted_bytes);
+        let incoming_bytes = u64::from(byte_len.unwrap_or(0));
+
+        let excess_rows = if incoming_rows > 0 {
+            let count = scope.count().await?;
+            if count.saturating_add(incoming_rows) > self.cap && !self.authority.evicts() {
+                return Err(Error::StorageBudgetExhausted {
+                    used: u64::from(count),
+                    required: u64::from(incoming_rows),
+                    capacity: u64::from(self.cap),
+                });
+            }
+            count.saturating_add(incoming_rows).saturating_sub(self.cap)
+        } else {
+            0
+        };
+
+        let (used_bytes_before, excess_bytes) = match self.byte_cap {
+            Some(byte_cap) => {
+                let used = scope.used_bytes_record().await?.unwrap_or(0);
+                let base = used.saturating_sub(existing_bytes);
+                let projected = base.saturating_add(incoming_bytes);
+                let cap_u64 = u64::from(byte_cap);
+                if projected > cap_u64 && !self.authority.evicts() {
+                    return Err(Error::StorageBudgetExhausted {
+                        used: base,
+                        required: incoming_bytes,
+                        capacity: cap_u64,
+                    });
+                }
+                (Some(base), projected.saturating_sub(cap_u64))
+            }
+            None => (None, 0),
+        };
+
+        let reclaimed_bytes = if excess_rows > 0 || excess_bytes > 0 {
+            let mut excluded = std::collections::BTreeSet::new();
+            if existing_row.is_some() {
+                excluded.insert(key);
+            }
+            let (evicted_keys, reclaimed) = scope
+                .least_recent_rows_for_budget(&excluded, excess_rows, excess_bytes)
+                .await?;
+            let requests = evicted_keys
+                .iter()
+                .map(|evicted| scope.queue_delete_row(evicted))
+                .collect::<Result<Vec<_>>>()?;
+            request::requests(&requests).await?;
+            reclaimed
+        } else {
+            0
+        };
+
+        let next_used_bytes = used_bytes_before.map(|base| {
+            base.saturating_sub(reclaimed_bytes)
+                .saturating_add(incoming_bytes)
+        });
+        scope
+            .put_stamped(key.to_owned(), byte_len, data, next_used_bytes)
+            .await?;
         scope.done().await
     }
 
@@ -580,14 +812,34 @@ where V: DeserializeOwned + Serialize + Sized
 
     async fn remove(&self, key: &str) -> Result<()> {
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        scope.delete_row(key).await?;
+        if self.byte_cap.is_some() {
+            let existing_raw = scope.row(key).await?;
+            let existing_bytes = if existing_raw.is_undefined() || existing_raw.is_null() {
+                0
+            } else {
+                js_value::deserialize::<Option<StoredRow>>(existing_raw)?
+                    .map_or(0, |row| row.accounted_bytes())
+            };
+            let used = scope.used_bytes_record().await?.unwrap_or(0);
+            let delete_req = scope.queue_delete_row(key)?;
+            let bytes_req = scope.queue_write_used_bytes(used.saturating_sub(existing_bytes))?;
+            request::requests(&[delete_req, bytes_req]).await?;
+        } else {
+            scope.delete_row(key).await?;
+        }
         scope.done().await
     }
 
     /// Delete all values. The clock keeps running, so later stamps stay above earlier ones.
     async fn clear(&self) -> Result<()> {
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        request::request(&scope.rows.clear().map_err(request::js_error)?).await?;
+        let clear_req = scope.rows.clear().map_err(request::js_error)?;
+        if self.byte_cap.is_some() {
+            let bytes_req = scope.queue_write_used_bytes(0)?;
+            request::requests(&[clear_req, bytes_req]).await?;
+        } else {
+            request::request(&clear_req).await?;
+        }
         scope.done().await
     }
 
@@ -640,19 +892,46 @@ where V: DeserializeOwned + Serialize + Sized
             });
         }
         let mut serialized = Vec::with_capacity(deduplicated.len());
+        let mut batch_bytes = 0_u64;
         while let Some((key, value)) = deduplicated.pop_oldest() {
-            serialized.push((key, js_value::serialize(value)?));
+            let data = js_value::serialize_storage(value)?;
+            let byte_len = match self.byte_cap {
+                Some(_) => {
+                    let len = measure_wire_bytes(&key, value)?;
+                    batch_bytes = batch_bytes.saturating_add(u64::from(len));
+                    Some(len)
+                }
+                None => None,
+            };
+            serialized.push((key, byte_len, data));
+        }
+        if let Some(byte_cap) = self.byte_cap {
+            if batch_bytes > u64::from(byte_cap) && self.authority.evicts() {
+                return Err(Error::StorageValueExceedsCapacity {
+                    required: batch_bytes,
+                    capacity: u64::from(byte_cap),
+                });
+            }
         }
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
         let mut rows = Vec::with_capacity(serialized.len());
         let mut incoming = 0_u32;
-        for (key, data) in serialized {
-            let existing = scope.row(&key).await?;
-            let is_existing = !(existing.is_undefined() || existing.is_null());
-            if !is_existing {
+        let mut overwritten_bytes = 0_u64;
+        for (key, byte_len, data) in serialized {
+            let existing_raw = scope.row(&key).await?;
+            let existing_row = if existing_raw.is_undefined() || existing_raw.is_null() {
+                None
+            } else {
+                js_value::deserialize::<Option<StoredRow>>(existing_raw)?
+            };
+            let is_existing = existing_row.is_some();
+            if let Some(existing_row) = existing_row {
+                overwritten_bytes =
+                    overwritten_bytes.saturating_add(existing_row.accounted_bytes());
+            } else {
                 incoming = incoming.saturating_add(1);
             }
-            rows.push((key, is_existing, data));
+            rows.push((key, is_existing, byte_len, data));
         }
         let count = if incoming > 0 || batch_len > self.cap {
             let count = scope.count().await?;
@@ -669,34 +948,56 @@ where V: DeserializeOwned + Serialize + Sized
         } else {
             0
         };
-        let evicted_keys = if incoming > 0 && count.saturating_add(incoming) > self.cap {
-            let excess = count.saturating_add(incoming).saturating_sub(self.cap);
+        let excess_rows = if incoming > 0 {
+            count.saturating_add(incoming).saturating_sub(self.cap)
+        } else {
+            0
+        };
+        let (used_bytes_base, excess_bytes) = match self.byte_cap {
+            Some(byte_cap) => {
+                let used = scope.used_bytes_record().await?.unwrap_or(0);
+                let base = used.saturating_sub(overwritten_bytes);
+                let projected = base.saturating_add(batch_bytes);
+                let cap_u64 = u64::from(byte_cap);
+                if projected > cap_u64 && !self.authority.evicts() {
+                    return Err(Error::StorageBudgetExhausted {
+                        used: base,
+                        required: batch_bytes,
+                        capacity: cap_u64,
+                    });
+                }
+                (Some(base), projected.saturating_sub(cap_u64))
+            }
+            None => (None, 0),
+        };
+        let (evicted_keys, reclaimed_bytes) = if excess_rows > 0 || excess_bytes > 0 {
             let existing_keys = rows
                 .iter()
-                .filter_map(|(key, is_existing, _)| is_existing.then_some(key.as_str()))
+                .filter_map(|(key, is_existing, _, _)| is_existing.then_some(key.as_str()))
                 .collect::<std::collections::BTreeSet<_>>();
             scope
-                .least_recent_keys_excluding(&existing_keys, excess)
+                .least_recent_rows_for_budget(&existing_keys, excess_rows, excess_bytes)
                 .await?
         } else {
-            Vec::new()
+            (Vec::new(), 0)
         };
         let mut clock = scope
             .clock_record()
             .await?
             .ok_or(Error::IdbAccessClockMissing)?;
         let mut encoded_rows = Vec::with_capacity(rows.len());
-        for (key, _, data) in rows {
+        for (key, _, byte_len, data) in rows {
             let (access_stamp, successor) = clock.tick()?;
             clock = successor;
-            encoded_rows.push(js_value::serialize(&StoredRow {
+            encoded_rows.push(js_value::serialize_storage(&StoredRow {
                 key,
                 access_stamp,
+                byte_len,
                 data,
             })?);
         }
-        let successor = js_value::serialize(&clock)?;
-        let mut write_requests = Vec::with_capacity(evicted_keys.len() + encoded_rows.len() + 1);
+        let successor = js_value::serialize_storage(&clock)?;
+        let mut write_requests = Vec::with_capacity(evicted_keys.len() + encoded_rows.len() + 2);
         for key in &evicted_keys {
             write_requests.push(scope.queue_delete_row(key)?);
         }
@@ -704,6 +1005,14 @@ where V: DeserializeOwned + Serialize + Sized
             write_requests.push(scope.queue_put_row(row)?);
         }
         write_requests.push(scope.queue_write_clock(&successor)?);
+        if let Some(base) = used_bytes_base {
+            write_requests.push(
+                scope.queue_write_used_bytes(
+                    base.saturating_sub(reclaimed_bytes)
+                        .saturating_add(batch_bytes),
+                )?,
+            );
+        }
         request::requests(&write_requests).await?;
         scope.done().await
     }
@@ -715,10 +1024,29 @@ where V: DeserializeOwned + Serialize + Sized
             return Ok(());
         }
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
-        let requests = keys
-            .iter()
-            .map(|key| scope.queue_delete_row(key))
-            .collect::<Result<Vec<_>>>()?;
+        let mut unique_keys = std::collections::BTreeSet::new();
+        for key in keys {
+            unique_keys.insert(key.as_str());
+        }
+        let mut reclaimed_bytes = 0_u64;
+        if self.byte_cap.is_some() {
+            for key in &unique_keys {
+                let existing_raw = scope.row(key).await?;
+                if !(existing_raw.is_undefined() || existing_raw.is_null()) {
+                    if let Some(row) = js_value::deserialize::<Option<StoredRow>>(existing_raw)? {
+                        reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes());
+                    }
+                }
+            }
+        }
+        let mut requests = Vec::with_capacity(unique_keys.len() + 1);
+        for key in unique_keys {
+            requests.push(scope.queue_delete_row(key)?);
+        }
+        if self.byte_cap.is_some() {
+            let used = scope.used_bytes_record().await?.unwrap_or(0);
+            requests.push(scope.queue_write_used_bytes(used.saturating_sub(reclaimed_bytes))?);
+        }
         request::requests(&requests).await?;
         scope.done().await
     }
@@ -747,6 +1075,7 @@ impl std::fmt::Debug for IdbStorage {
         f.debug_struct("IdbStorage")
             .field("storage_name", &self.storage_name)
             .field("cap", &self.cap)
+            .field("byte_cap", &self.byte_cap)
             .field("authority", &self.authority)
             .finish()
     }

@@ -451,10 +451,11 @@ impl Provider {
             config.network_id(),
             config.delegatee_key().delegator_did(),
         );
-        let measure = PeriodicMeasure::new_with_evidence_storage(
+        let measure = PeriodicMeasure::new_with_evidence_storage_and_clock(
             measure_storage,
             evidence_storage,
             collector,
+            config.clock().clone(),
         )
         .await?;
 

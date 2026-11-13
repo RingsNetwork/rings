@@ -66,7 +66,7 @@ impl MailboxStorageInspect {
     /// Post: read only, as every snapshot is: values are projected and filtered as a storage
     /// read would, but no projection is written back and no expired value is retired.
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
-        let now_ms = get_epoch_ms();
+        let now_ms = dht.epoch_ms();
         let mut snapshot = Self::default();
         let Some(relay_storage) = dht.relay_storage.as_ref() else {
             return Ok(Self::default());
@@ -90,18 +90,19 @@ impl MailboxStorageInspect {
 impl SwarmInspect {
     /// Build a full inspection snapshot from `swarm`.
     pub async fn inspect(swarm: &Swarm) -> Self {
+        let now_ms = swarm.clock().now_ms();
         let dht = DHTInspect::inspect(&swarm.dht());
         let peers = swarm.peers();
         let mut persistence_storage =
-            StorageInspect::inspect_kv_storage(&swarm.dht().storage).await;
+            StorageInspect::inspect_kv_storage_at(&swarm.dht().storage, now_ms).await;
         if let Some(relay_storage) = swarm.dht().relay_storage.as_ref() {
             persistence_storage.items.extend(
-                StorageInspect::inspect_kv_storage(relay_storage)
+                StorageInspect::inspect_kv_storage_at(relay_storage, now_ms)
                     .await
                     .items,
             );
         }
-        let cache_storage = StorageInspect::inspect_kv_storage(&swarm.dht().cache).await;
+        let cache_storage = StorageInspect::inspect_kv_storage_at(&swarm.dht().cache, now_ms).await;
 
         Self {
             peers,
@@ -162,7 +163,11 @@ impl StorageInspect {
     /// projection, leaving both to the next storage read; the store's own scan may still retire
     /// a record it cannot decode, under a disposable store's decode law.
     pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {
-        let now_ms = get_epoch_ms();
+        Self::inspect_kv_storage_at(storage, get_epoch_ms()).await
+    }
+
+    /// [`Self::inspect_kv_storage`] judged at the caller's epoch timestamp `now_ms`.
+    pub async fn inspect_kv_storage_at(storage: &EntryStorage, now_ms: u128) -> Self {
         Self {
             items: storage
                 .get_all()

@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rings_core::dht::entry::Entry;
+#[cfg(test)]
 use rings_core::utils::get_epoch_ms;
 use rings_dns_relay::Announcement;
 use rings_dns_relay::Directory;
@@ -91,7 +92,7 @@ impl Directory for DhtDirectory {
             .fetch_storage_entry(key)
             .await
             .map_err(|source| DirectoryError::Fetch { did, source })?;
-        let now_ms = get_epoch_ms();
+        let now_ms = self.processor.clock().now_ms();
         let network_id = self.processor.swarm.network_id();
         Ok(entry
             .and_then(|entry| announcement_in(heard_descriptors(&entry), did, now_ms, network_id)))

@@ -317,9 +317,13 @@ async fn build_processor(
     let stores = NodeStores::open(&data_storage, &measure_storage).await?;
     let collector =
         EvidenceCollectorIdentity::new(pc.network_id(), pc.delegatee_key().delegator_did());
-    let measure =
-        PeriodicMeasure::new_with_evidence_storage(stores.measure, stores.evidence, collector)
-            .await?;
+    let measure = PeriodicMeasure::new_with_evidence_storage_and_clock(
+        stores.measure,
+        stores.evidence,
+        collector,
+        pc.clock().clone(),
+    )
+    .await?;
 
     let builder = ProcessorBuilder::from_config(pc)?
         .storage(stores.data)

@@ -8,7 +8,6 @@ use std::time::Duration;
 
 use futures::future::select;
 use futures::future::Either;
-use rings_core::utils::get_epoch_ms;
 use rings_runtime::sleep;
 
 use super::circuit::OnionAlgebra;
@@ -83,7 +82,11 @@ impl OnionRuntime {
         let link_sender = OnionLinkSender::new_with_rng(core.onion_idle_floor(), rng.clone());
         let tags = OnionClientTags::default();
         let accounting = OnionExitAccounting::new_with_clock(clock.clone());
-        let invokes = OnionInvokeRegistry::new(core.onion_role().invoke(), link_sender.clone());
+        let invokes = OnionInvokeRegistry::new_with_clock(
+            core.onion_role().invoke(),
+            link_sender.clone(),
+            clock.clone(),
+        );
         let capacity = NonZeroUsize::new(core.connection_registry_capacity()?)
             .ok_or_else(|| Error::InvalidConfig("connection registry of capacity 0".to_string()))?;
         let built_algebra = algebra(&accounting, &link_sender).with_invokes(invokes.clone());
@@ -168,7 +171,8 @@ impl OnionRuntime {
             .send_pipeline(&self.scope, route, pipeline, class, input)
             .await?;
         let remaining_expiry_ms =
-            u64::try_from(expiry.as_ms().saturating_sub(get_epoch_ms())).unwrap_or(u64::MAX);
+            u64::try_from(expiry.as_ms().saturating_sub(self.loops.clock().now_ms()))
+                .unwrap_or(u64::MAX);
         let expiry_bound = Duration::from_millis(remaining_expiry_ms);
         let wait_bound = timeout.map_or(expiry_bound, |requested| requested.min(expiry_bound));
         match select(pin!(receiver), pin!(sleep(wait_bound))).await {

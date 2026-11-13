@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
@@ -21,6 +22,8 @@ use rings_core::swarm::observer::MessageActivity;
 use rings_core::swarm::observer::MessageObservation;
 use rings_core::swarm::observer::ObservationOutcome;
 use rings_core::swarm::observer::SwarmObserver;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 use serde::Serialize;
 
 /// Version of the observability object nested in the HTTP status response.
@@ -42,6 +45,8 @@ const LOOKUP_LATENCY_BUCKETS_MS: [u64; 12] = [
 pub struct Observability {
     /// Unix epoch millisecond at which this recorder was constructed.
     process_started_at_ms: u128,
+    /// Injected epoch clock capability for event and lookup correlation timestamps.
+    clock: SharedClock,
     /// Complete bounded state protected for one short synchronous transition.
     state: Mutex<RuntimeState>,
 }
@@ -258,8 +263,15 @@ impl Default for RuntimeState {
 impl Observability {
     /// Construct an empty process-local recorder at the current wall-clock instant.
     pub fn new() -> Self {
+        Self::new_with_clock(Arc::new(SystemClock))
+    }
+
+    /// Construct an empty process-local recorder bound to `clock`.
+    pub fn new_with_clock(clock: SharedClock) -> Self {
+        let process_started_at_ms = clock.now_ms();
         Self {
-            process_started_at_ms: now_ms(),
+            process_started_at_ms,
+            clock,
             state: Mutex::new(RuntimeState::default()),
         }
     }
@@ -299,7 +311,7 @@ pub struct RuntimeSnapshot {
 
 impl SwarmObserver for Observability {
     fn observe_message(&self, observation: MessageObservation) {
-        let observed_at_ms = now_ms();
+        let observed_at_ms = self.clock.now_ms();
         let mut state = lock_or_recover(&self.state);
         let activity = activity_index(observation.activity);
         let category = category_index(observation.category);
@@ -328,7 +340,7 @@ impl SwarmObserver for Observability {
     }
 
     fn lookup_started(&self, kind: LookupKind, correlation: LookupCorrelation) {
-        let observed_at_ms = now_ms();
+        let observed_at_ms = self.clock.now_ms();
         let mut state = lock_or_recover(&self.state);
         expire_lookups(&mut state, observed_at_ms);
         if let Some(previous) = state.lookups.remove(&(kind, correlation)) {
@@ -359,7 +371,7 @@ impl SwarmObserver for Observability {
         correlation: LookupCorrelation,
         outcome: LookupOutcome,
     ) {
-        let observed_at_ms = now_ms();
+        let observed_at_ms = self.clock.now_ms();
         let mut state = lock_or_recover(&self.state);
         expire_lookups(&mut state, observed_at_ms);
         if let Some(start) = state.lookups.remove(&(kind, correlation)) {
@@ -373,7 +385,8 @@ impl SwarmObserver for Observability {
     }
 }
 
-/// Return the current Unix epoch time in milliseconds.
+/// Return the current Unix epoch time in milliseconds for unit tests.
+#[cfg(test)]
 fn now_ms() -> u128 {
     rings_core::utils::get_epoch_ms()
 }
@@ -669,5 +682,34 @@ mod tests {
             "compact status response was {} bytes",
             encoded.len()
         );
+    }
+
+    #[test]
+    fn injected_manual_clock_drives_event_and_lookup_timestamps() {
+        use rings_core::utils::Clock;
+
+        let manual = rings_core::utils::ManualClock::new(1_700_000_000_000);
+        let shared: SharedClock = Arc::new(manual.clone());
+        let recorder = Observability::new_with_clock(shared);
+        assert_eq!(recorder.process_started_at_ms(), 1_700_000_000_000);
+
+        manual.advance(125);
+        recorder.observe_message(observation(
+            MessageActivity::Sent,
+            ObservationOutcome::Succeeded,
+        ));
+        let correlation = LookupCorrelation::Transaction(uuid::Uuid::new_v4());
+        recorder.lookup_started(LookupKind::Successor, correlation);
+
+        manual.advance(250);
+        recorder.lookup_finished(LookupKind::Successor, correlation, LookupOutcome::Succeeded);
+
+        let snapshot = recorder.runtime_snapshot(manual.now_ms());
+        assert_eq!(
+            snapshot.recent_messages[0].observed_at_ms,
+            1_700_000_000_125
+        );
+        assert_eq!(snapshot.dht_lookups.succeeded, 1);
+        assert_eq!(snapshot.dht_lookups.latency_sum_ms, 250);
     }
 }
