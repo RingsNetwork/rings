@@ -83,11 +83,15 @@ fn next_test_transaction_sequence(key: StreamKey) -> Result<u64> {
     Ok(next)
 }
 
-/// The digest both signatures of a payload cover: every signed field of the transaction.
+/// The digest both signatures of a payload cover: every signed field of the transaction,
+/// bound to the origin delegator DID so swapping the delegation slot for another delegator
+/// sharing the same delegatee key invalidates the transaction signature.
 ///
-/// `reply_via` is encoded as a presence byte followed by the DID when present, before the
-/// variable-length `data`, so the encoding stays injective.
+/// `origin` and `destination` are fixed-width 20-byte DIDs, and `reply_via` is encoded as a
+/// presence byte followed by the DID when present, before the variable-length `data`, so the
+/// encoding stays injective.
 fn hash_transaction(
+    origin: Did,
     destination: Did,
     tx_id: uuid::Uuid,
     sequence: u64,
@@ -96,6 +100,7 @@ fn hash_transaction(
 ) -> [u8; 32] {
     let mut msg = vec![];
 
+    msg.extend_from_slice(origin.as_bytes());
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
     msg.extend_from_slice(&sequence.to_be_bytes());
@@ -198,7 +203,14 @@ impl Transaction {
         T: Serialize,
     {
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, sequence, reply_via, &data);
+        let msg_hash = hash_transaction(
+            signer.delegator_did(),
+            destination,
+            tx_id,
+            sequence,
+            reply_via,
+            &data,
+        );
         let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
@@ -213,6 +225,7 @@ impl Transaction {
     /// The digest both the origin's and each hop's signature cover.
     fn signed_hash(&self) -> [u8; 32] {
         hash_transaction(
+            self.origin(),
             self.destination,
             self.tx_id,
             self.sequence,

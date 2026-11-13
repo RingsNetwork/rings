@@ -128,7 +128,7 @@ use crate::online::ONLINE_NODES_TOPIC;
 /// Both parts are one literal so a diff shows the version and the hash moving together.
 const PINNED: (u16, &str) = (
     3,
-    "49b47d058300953c6b10fad4d47f78d1a0dc0a7cf3c7b7fbde5060291c15db27",
+    "896e4b972b675dd6b3084198f40ab10562697da1067e2494f4289922a167b783",
 );
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -161,7 +161,8 @@ impl GoldenActor {
         let delegator = Account::Secp256k1(did);
         let ttl_ms = DEFAULT_DELEGATION_TTL_MS;
         let ts_ms = GOLDEN_EPOCH_MS;
-        let proof = format!("{delegatee_did}\n{ts_ms}\n{ttl_ms}");
+        let proof =
+            format!("rings-delegation-v1\nsecp256k1\n{did}\n{delegatee_did}\n{ts_ms}\n{ttl_ms}");
         let delegator_signature = account_key.sign(&proof).unwrap().to_vec();
         let delegatee_key: DelegateeKey = serde_json::from_value(serde_json::json!({
             "delegation": {

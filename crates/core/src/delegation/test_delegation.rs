@@ -349,6 +349,73 @@ fn test_delegation_validity_lower_bound_enforced_with_skew_under_verify_and_esta
     assert!(!proof.verify_live_at(domain, msg, one_day_early));
 }
 
+#[test]
+fn test_delegation_proof_binds_delegator_and_algorithm_against_cross_replay() {
+    let delegator_a = SecretKey::random();
+    let delegator_b = SecretKey::random();
+    let delegatee = SecretKey::random();
+    let ts_ms: u128 = 1_800_000_000_000;
+    let ttl_ms: u64 = 600_000;
+
+    let valid_a = DelegateeKey::new_with_seckey_at(&delegator_a, ttl_ms, ts_ms).unwrap();
+    let delegation_a = valid_a.delegation();
+    assert!(delegation_a
+        .verify_delegator_authorization_at(ts_ms)
+        .is_ok());
+
+    let replayed_to_b = Delegation {
+        delegatee_did: delegation_a.delegatee_did,
+        delegator: Account::Secp256k1(delegator_b.address().into()),
+        ttl_ms: delegation_a.ttl_ms,
+        ts_ms: delegation_a.ts_ms,
+        delegator_signature: delegation_a.delegator_signature.clone(),
+    };
+    assert!(replayed_to_b
+        .verify_delegator_authorization_at(ts_ms)
+        .is_err());
+
+    let replayed_as_eip191 = Delegation {
+        delegatee_did: delegation_a.delegatee_did,
+        delegator: Account::EIP191(delegator_a.address().into()),
+        ttl_ms: delegation_a.ttl_ms,
+        ts_ms: delegation_a.ts_ms,
+        delegator_signature: delegation_a.delegator_signature,
+    };
+    assert!(replayed_as_eip191
+        .verify_delegator_authorization_at(ts_ms)
+        .is_err());
+
+    // Ensure non-recoverable delegator signature also binds delegator_did.
+    let ed_key = SigningSecretKey::random_ed25519();
+    let VerificationPublicKey::Ed25519(ed_pk) = ed_key.public_key().unwrap() else {
+        unreachable!("random_ed25519 produces Ed25519 public key");
+    };
+    let mut builder =
+        DelegationBuilder::new(ed_pk.to_base58_string().unwrap(), "ed25519".to_string());
+    let proof = builder.unsigned_proof();
+    assert!(proof.starts_with("rings-delegation-v1\ned25519\n"));
+    builder = builder.set_delegator_signature(ed_key.sign_raw(proof.as_bytes()).unwrap());
+    let built = builder.build().unwrap().delegation();
+    assert!(built.verify_delegator_authorization().is_ok());
+
+    let other_ed = SigningSecretKey::random_ed25519();
+    let VerificationPublicKey::Ed25519(other_ed_pk) = other_ed.public_key().unwrap() else {
+        unreachable!("random_ed25519 produces Ed25519 public key");
+    };
+    let swapped_ed = Delegation {
+        delegatee_did: delegatee.address().into(),
+        ..built.clone()
+    };
+    assert!(swapped_ed.verify_delegator_authorization().is_err());
+    let swapped_ed_delegator = Delegation {
+        delegator: Account::Ed25519(other_ed_pk),
+        ..built
+    };
+    assert!(swapped_ed_delegator
+        .verify_delegator_authorization()
+        .is_err());
+}
+
 /// The cost of verifying one message proof's delegation, with the delegator's signature
 /// recovered (`Verify`) and established (`Established`). Run with
 /// `--release -- --ignored --nocapture`.

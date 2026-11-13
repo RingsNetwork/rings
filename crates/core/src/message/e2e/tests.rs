@@ -417,3 +417,41 @@ fn test_progress_restarts_the_stall_deadline_and_completion_ends_it() {
         "a complete stream never stalls"
     );
 }
+
+#[test]
+fn test_ecies_frame_rejects_ciphertext_bitflip_sequence_swap_and_stream_transplant() {
+    let sender = sender_key();
+    let recipient = recipient_key();
+    let sender_did: Did = sender.address().into();
+    let payload = b"authenticated stream frames resist tampering";
+    let (stream_id, frames) = encrypted(payload, 16, 77);
+    assert!(frames.len() >= 2);
+    assert!(frames.iter().all(|f| f.ciphertext_blocks() >= 1));
+
+    let mut flipped = frames.clone();
+    flipped[0].ciphertext[0] ^= 0x01;
+    assert!(matches!(
+        decrypt_stream(&flipped, stream_id, sender_did, recipient.clone()),
+        Err(Error::MessageDecryptionFailed(_))
+    ));
+
+    let mut swapped_sequence = frames.clone();
+    let seq0 = swapped_sequence[0].sequence;
+    let seq1 = swapped_sequence[1].sequence;
+    swapped_sequence[0].sequence = seq1;
+    swapped_sequence[1].sequence = seq0;
+    assert!(matches!(
+        decrypt_stream(&swapped_sequence, stream_id, sender_did, recipient.clone()),
+        Err(Error::MessageDecryptionFailed(_))
+    ));
+
+    let other_stream_id = uuid::Uuid::new_v4();
+    let mut transplanted = frames;
+    for frame in &mut transplanted {
+        frame.stream_id = other_stream_id;
+    }
+    assert!(matches!(
+        decrypt_stream(&transplanted, other_stream_id, sender_did, recipient),
+        Err(Error::MessageDecryptionFailed(_))
+    ));
+}

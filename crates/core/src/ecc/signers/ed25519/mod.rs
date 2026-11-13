@@ -1,9 +1,15 @@
 //! ed25519 sign algorithm using ed25519_dalek
 use ed25519_dalek::Signer;
 
+use crate::ecc::keys::domain_separated_address;
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
 use crate::error::Result;
+
+/// Derive the domain-separated Rings address for an Ed25519 public key.
+pub fn address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
+    domain_separated_address("ed25519", &pubkey.0)
+}
 
 /// Derive an Ed25519 public key from a 32-byte seed.
 pub fn public_key(seed: &[u8; 32]) -> Result<PublicKey<33>> {
@@ -21,11 +27,11 @@ pub fn sign(seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64]> {
 /// ref <https://www.rfc-editor.org/rfc/rfc8709>
 pub fn verify(
     msg: &[u8],
-    address: &PublicKeyAddress,
+    expected_address: &PublicKeyAddress,
     sig: impl AsRef<[u8]>,
     pubkey: &PublicKey<33>,
 ) -> bool {
-    if pubkey.address() != *address {
+    if address(pubkey) != *expected_address {
         return false;
     }
     // The one length gate: any signature other than 64 bytes is refused here.

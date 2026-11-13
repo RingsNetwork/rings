@@ -163,7 +163,7 @@ fn ffi_e2e_event(message: &ApplicationMessage) -> Result<Option<FfiE2eEvent>> {
             stream_id: Some(frame.stream_id.to_string()),
             sequence: Some(frame.sequence),
             is_final: Some(frame.is_final),
-            ciphertext_blocks: Some(frame.ciphertext.len()),
+            ciphertext_blocks: Some(frame.ciphertext_blocks()),
         },
         _ => return Ok(None),
     }))

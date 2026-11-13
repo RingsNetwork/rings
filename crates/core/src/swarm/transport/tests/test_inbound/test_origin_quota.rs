@@ -155,7 +155,7 @@ async fn spoofed_transaction_destination_with_local_relay_destination_is_rejecte
         crate::utils::new_uuid(),
         0,
         None,
-        Message::custom(&vec![7; 128])?,
+        Message::custom(&[7; 128])?,
         MessageSigner::new(&relay.session, TEST_NETWORK_ID),
     )?;
     let spoofed = MessagePayload::new(

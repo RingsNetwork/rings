@@ -708,3 +708,45 @@ fn test_relay_destination_is_bound_to_transaction_destination_except_for_redirec
     );
     Ok(())
 }
+
+#[test]
+fn test_transaction_verify_rejects_origin_swap_with_shared_delegatee_session() -> Result<()> {
+    let alice_account = SecretKey::random();
+    let mallory_account = SecretKey::random();
+    let shared_delegatee_secret = SecretKey::random();
+    let ts_ms: u128 = get_epoch_ms();
+    let ttl_ms: u64 = 600_000;
+
+    let alice_session = DelegateeKey::from_test_keys(
+        &alice_account,
+        shared_delegatee_secret.clone(),
+        ts_ms,
+        ttl_ms,
+    )?;
+    let mallory_session =
+        DelegateeKey::from_test_keys(&mallory_account, shared_delegatee_secret, ts_ms, ttl_ms)?;
+    let destination: Did = SecretKey::random().address().into();
+
+    let mut tx = Transaction::new(
+        destination,
+        uuid::Uuid::new_v4(),
+        0,
+        None,
+        Message::custom(b"alice-bound-tx")?,
+        MessageSigner::new(&alice_session, TEST_NETWORK_ID),
+    )?;
+    assert!(tx.verify(TEST_NETWORK_ID));
+
+    // Mallory swaps in her own valid delegation over the exact same delegatee key to spoof origin.
+    tx.verification.delegation = mallory_session.delegation();
+    assert!(tx
+        .verification
+        .delegation
+        .verify_delegator_authorization_at(ts_ms)
+        .is_ok());
+    assert!(
+        !tx.verify(TEST_NETWORK_ID),
+        "swapping delegator on a signed transaction must invalidate hash_transaction"
+    );
+    Ok(())
+}

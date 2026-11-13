@@ -40,11 +40,20 @@ impl DelegationBuilder {
 
     /// Construct the proof string that the external account must sign.
     pub fn unsigned_proof(&self) -> String {
-        pack_delegation(
-            self.delegatee_secret_key.address().into(),
-            self.ts_ms,
-            self.ttl_ms,
-        )
+        let delegatee_did = self.delegatee_secret_key.address().into();
+        if let Ok(delegator) =
+            Account::try_from((self.delegator_entity.clone(), self.delegator_type.clone()))
+        {
+            pack_delegation(&delegator, delegatee_did, self.ts_ms, self.ttl_ms)
+        } else {
+            super::model::pack_delegation_parts(
+                &self.delegator_type,
+                crate::dht::Did::default(),
+                delegatee_did,
+                self.ts_ms,
+                self.ttl_ms,
+            )
+        }
     }
 
     /// Set the delegator signature authorizing this delegation.
