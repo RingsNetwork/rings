@@ -181,9 +181,162 @@ struct StoredRow {
 }
 
 impl StoredRow {
-    fn accounted_bytes(&self) -> u64 {
-        u64::from(self.byte_len.unwrap_or(0))
+    fn accounted_bytes(&self) -> Result<u64> {
+        let len = match self.byte_len {
+            Some(len) => len,
+            None => measure_legacy_wire_bytes(&self.key, &self.data)?,
+        };
+        Ok(u64::from(len))
     }
+}
+
+/// Maximum nesting depth accepted when measuring a legacy `JsValue` payload without `byte_len`.
+const MAX_LEGACY_WIRE_DEPTH: usize = 128;
+
+/// Adapter that serializes a legacy structured-clone `JsValue` payload through the Rings wire
+/// codec so pre-`byte_len` schema-v2 rows can be measured and migrated on open.
+struct LegacyJsWireValue<'a> {
+    value: &'a JsValue,
+    depth: usize,
+}
+
+impl serde::Serialize for LegacyJsWireValue<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if self.depth > MAX_LEGACY_WIRE_DEPTH {
+            return Err(serde::ser::Error::custom(
+                "legacy IndexedDB payload exceeded maximum nesting depth",
+            ));
+        }
+        if self.value.is_undefined() {
+            return Err(serde::ser::Error::custom(
+                "legacy IndexedDB payload is undefined",
+            ));
+        }
+        if self.value.is_null() {
+            return serializer.serialize_unit();
+        }
+        if let Some(flag) = self.value.as_bool() {
+            return serializer.serialize_bool(flag);
+        }
+        if self.value.is_bigint() {
+            if let Ok(unsigned) = u64::try_from(self.value.clone()) {
+                return serializer.serialize_u64(unsigned);
+            }
+            if let Ok(signed) = i64::try_from(self.value.clone()) {
+                return serializer.serialize_i64(signed);
+            }
+            if let Ok(unsigned) = u128::try_from(self.value.clone()) {
+                return serializer.serialize_u128(unsigned);
+            }
+            if let Ok(signed) = i128::try_from(self.value.clone()) {
+                return serializer.serialize_i128(signed);
+            }
+            return Err(serde::ser::Error::custom(
+                "legacy IndexedDB BigInt exceeds 128-bit integer range",
+            ));
+        }
+        if let Some(num) = self.value.as_f64() {
+            if !num.is_finite() {
+                return Err(serde::ser::Error::custom(
+                    "non-finite JavaScript number in legacy IndexedDB payload",
+                ));
+            }
+            if num.fract() == 0.0 {
+                if num >= 0.0 && num <= CLOCK_LIMIT as f64 {
+                    return serializer.serialize_u64(num as u64);
+                }
+                if num < 0.0 && num >= -(CLOCK_LIMIT as f64) {
+                    return serializer.serialize_i64(num as i64);
+                }
+            }
+            return serializer.serialize_f64(num);
+        }
+        if let Some(text) = self.value.as_string() {
+            return serializer.serialize_str(&text);
+        }
+        if let Some(view) = self.value.dyn_ref::<js_sys::Uint8Array>() {
+            return serializer.serialize_bytes(&view.to_vec());
+        }
+        if let Some(buffer) = self.value.dyn_ref::<js_sys::ArrayBuffer>() {
+            return serializer.serialize_bytes(&js_sys::Uint8Array::new(buffer).to_vec());
+        }
+        if Array::is_array(self.value) {
+            let array: Array = self.value.clone().unchecked_into();
+            let mut seq = serializer.serialize_seq(Some(array.length() as usize))?;
+            for element in array.iter() {
+                serde::ser::SerializeSeq::serialize_element(&mut seq, &LegacyJsWireValue {
+                    value: &element,
+                    depth: self.depth + 1,
+                })?;
+            }
+            return serde::ser::SerializeSeq::end(seq);
+        }
+        if let Some(map) = self.value.dyn_ref::<js_sys::Map>() {
+            let entries = Array::from(&map.entries());
+            let mut map_ser = serializer.serialize_map(Some(entries.length() as usize))?;
+            for pair in entries.iter() {
+                let pair = Array::from(&pair);
+                let key = pair.get(0);
+                let val = pair.get(1);
+                serde::ser::SerializeMap::serialize_entry(
+                    &mut map_ser,
+                    &LegacyJsWireValue {
+                        value: &key,
+                        depth: self.depth + 1,
+                    },
+                    &LegacyJsWireValue {
+                        value: &val,
+                        depth: self.depth + 1,
+                    },
+                )?;
+            }
+            return serde::ser::SerializeMap::end(map_ser);
+        }
+        if self.value.is_object() && !self.value.is_function() && !self.value.is_symbol() {
+            let obj: &js_sys::Object = self.value.unchecked_ref();
+            let proto = js_sys::Object::get_prototype_of(self.value);
+            let plain_proto = js_sys::Object::get_prototype_of(&js_sys::Object::new());
+            if (!proto.is_null() && proto != plain_proto)
+                || js_sys::Object::get_own_property_symbols(obj).length() > 0
+            {
+                return Err(serde::ser::Error::custom(
+                    "unsupported non-plain JavaScript object in legacy IndexedDB payload",
+                ));
+            }
+            let entries = js_sys::Object::entries(obj);
+            let mut map_ser = serializer.serialize_map(Some(entries.length() as usize))?;
+            for pair in entries.iter() {
+                let pair = Array::from(&pair);
+                let key = pair.get(0);
+                let val = pair.get(1);
+                serde::ser::SerializeMap::serialize_entry(
+                    &mut map_ser,
+                    &LegacyJsWireValue {
+                        value: &key,
+                        depth: self.depth + 1,
+                    },
+                    &LegacyJsWireValue {
+                        value: &val,
+                        depth: self.depth + 1,
+                    },
+                )?;
+            }
+            return serde::ser::SerializeMap::end(map_ser);
+        }
+        Err(serde::ser::Error::custom(
+            "unsupported JavaScript value in legacy IndexedDB payload",
+        ))
+    }
+}
+
+fn measure_legacy_wire_bytes(key: &str, data: &JsValue) -> Result<u32> {
+    let bytes = rings_codec::serialize(&(key, LegacyJsWireValue {
+        value: data,
+        depth: 0,
+    }))
+    .map_err(Error::CodecSerialize)?;
+    u32::try_from(bytes.len()).map_err(|_| Error::StorageCountOverflow)
 }
 
 fn measure_wire_bytes<V: Serialize>(key: &str, value: &V) -> Result<u32> {
@@ -400,7 +553,7 @@ impl Scope {
         for row in candidates.unchecked_into::<Array>().iter() {
             let row = js_value::deserialize::<StoredRow>(row)?;
             if !excluded.contains(row.key.as_str()) {
-                reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes());
+                reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes()?);
                 keys.push(row.key);
                 if keys.len() >= min_rows as usize && reclaimed_bytes >= min_bytes {
                     break;
@@ -410,23 +563,45 @@ impl Scope {
         Ok((keys, reclaimed_bytes))
     }
 
-    /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists, and initialize the
-    /// byte counter from stored rows when `track_bytes` is enabled.
+    /// Start the clock at [`AccessClock::ORIGIN`] unless its record exists, and migrate legacy
+    /// rows + initialize the byte counter from stored rows when `track_bytes` is enabled.
     async fn start_clock(&self, track_bytes: bool) -> Result<()> {
-        if self.clock_record().await?.is_none() {
-            self.write_clock(&js_value::serialize_storage(&AccessClock::ORIGIN)?)
-                .await?;
-        }
-        if track_bytes && self.used_bytes_record().await?.is_none() {
-            let mut sum = 0_u64;
-            for raw in self.all_rows().await? {
-                if let Ok(row) = js_value::deserialize::<StoredRow>(raw) {
-                    sum = sum.saturating_add(row.accounted_bytes());
-                }
+        let clock_missing = self.clock_record().await?.is_none();
+        if !track_bytes {
+            if clock_missing {
+                self.write_clock(&js_value::serialize_storage(&AccessClock::ORIGIN)?)
+                    .await?;
             }
-            request::request(&self.queue_write_used_bytes(sum)?).await?;
+            return Ok(());
         }
-        Ok(())
+        let raw_rows = self.all_rows().await?;
+        let mut sum = 0_u64;
+        let mut migrated_rows = Vec::new();
+        for raw in raw_rows {
+            let mut row = js_value::deserialize::<StoredRow>(raw)?;
+            let byte_len = match row.byte_len {
+                Some(len) => len,
+                None => {
+                    let len = measure_legacy_wire_bytes(&row.key, &row.data)?;
+                    row.byte_len = Some(len);
+                    migrated_rows.push(js_value::serialize_storage(&row)?);
+                    len
+                }
+            };
+            sum = sum
+                .checked_add(u64::from(byte_len))
+                .ok_or(Error::StorageCountOverflow)?;
+        }
+        let mut requests = Vec::with_capacity(usize::from(clock_missing) + migrated_rows.len() + 1);
+        if clock_missing {
+            let origin = js_value::serialize_storage(&AccessClock::ORIGIN)?;
+            requests.push(self.queue_write_clock(&origin)?);
+        }
+        for row in &migrated_rows {
+            requests.push(self.queue_put_row(row)?);
+        }
+        requests.push(self.queue_write_used_bytes(sum)?);
+        request::requests(&requests).await
     }
 }
 
@@ -636,7 +811,11 @@ impl IdbStorage {
             let stored = scope.row(&key).await?;
             let retired_bytes = match js_value::deserialize::<Option<StoredRow>>(stored)? {
                 Some(row) => {
-                    let row_bytes = row.accounted_bytes();
+                    let row_bytes = if self.byte_cap.is_some() {
+                        row.accounted_bytes()?
+                    } else {
+                        0
+                    };
                     if self.decode_under_authority::<V>(row.data)?.is_none() {
                         Some(row_bytes)
                     } else {
@@ -677,8 +856,15 @@ where V: DeserializeOwned + Serialize + Sized
             scope.done().await?;
             return Ok(None);
         };
-        let row_bytes = row.accounted_bytes();
-        let row_byte_len = row.byte_len;
+        let (row_byte_len, row_bytes) = if self.byte_cap.is_some() {
+            let bytes = row.accounted_bytes()?;
+            (
+                Some(u32::try_from(bytes).map_err(|_| Error::StorageCountOverflow)?),
+                bytes,
+            )
+        } else {
+            (row.byte_len, 0)
+        };
         // Decode before scheduling any write, so a kept row stays untouched.
         let value = match self.decode_under_authority(row.data.clone())? {
             Some(value) => value,
@@ -707,19 +893,16 @@ where V: DeserializeOwned + Serialize + Sized
         // Serialize and validate capacity before opening a destructive transaction so a failure
         // cannot evict any previously stored row.
         let data = js_value::serialize_storage(value)?;
-        let byte_len = match self.byte_cap {
-            Some(byte_cap) => {
-                let len = measure_wire_bytes(key, value)?;
-                if len > byte_cap {
-                    return Err(Error::StorageValueExceedsCapacity {
-                        required: u64::from(len),
-                        capacity: u64::from(byte_cap),
-                    });
-                }
-                Some(len)
+        let len = measure_wire_bytes(key, value)?;
+        if let Some(byte_cap) = self.byte_cap {
+            if len > byte_cap {
+                return Err(Error::StorageValueExceedsCapacity {
+                    required: u64::from(len),
+                    capacity: u64::from(byte_cap),
+                });
             }
-            None => None,
-        };
+        }
+        let byte_len = Some(len);
         let scope = self.scope(IdbTransactionMode::Readwrite)?;
         let existing_raw = scope.row(key).await?;
         let existing_row = if existing_raw.is_undefined() || existing_raw.is_null() {
@@ -728,8 +911,11 @@ where V: DeserializeOwned + Serialize + Sized
             js_value::deserialize::<Option<StoredRow>>(existing_raw)?
         };
         let incoming_rows = u32::from(existing_row.is_none());
-        let existing_bytes = existing_row.as_ref().map_or(0, StoredRow::accounted_bytes);
-        let incoming_bytes = u64::from(byte_len.unwrap_or(0));
+        let existing_bytes = match (&existing_row, self.byte_cap) {
+            (Some(row), Some(_)) => row.accounted_bytes()?,
+            _ => 0,
+        };
+        let incoming_bytes = u64::from(len);
 
         let excess_rows = if incoming_rows > 0 {
             let count = scope.count().await?;
@@ -817,8 +1003,10 @@ where V: DeserializeOwned + Serialize + Sized
             let existing_bytes = if existing_raw.is_undefined() || existing_raw.is_null() {
                 0
             } else {
-                js_value::deserialize::<Option<StoredRow>>(existing_raw)?
-                    .map_or(0, |row| row.accounted_bytes())
+                match js_value::deserialize::<Option<StoredRow>>(existing_raw)? {
+                    Some(row) => row.accounted_bytes()?,
+                    None => 0,
+                }
             };
             let used = scope.used_bytes_record().await?.unwrap_or(0);
             let delete_req = scope.queue_delete_row(key)?;
@@ -895,15 +1083,9 @@ where V: DeserializeOwned + Serialize + Sized
         let mut batch_bytes = 0_u64;
         while let Some((key, value)) = deduplicated.pop_oldest() {
             let data = js_value::serialize_storage(value)?;
-            let byte_len = match self.byte_cap {
-                Some(_) => {
-                    let len = measure_wire_bytes(&key, value)?;
-                    batch_bytes = batch_bytes.saturating_add(u64::from(len));
-                    Some(len)
-                }
-                None => None,
-            };
-            serialized.push((key, byte_len, data));
+            let len = measure_wire_bytes(&key, value)?;
+            batch_bytes = batch_bytes.saturating_add(u64::from(len));
+            serialized.push((key, Some(len), data));
         }
         if let Some(byte_cap) = self.byte_cap {
             if batch_bytes > u64::from(byte_cap) && self.authority.evicts() {
@@ -926,8 +1108,10 @@ where V: DeserializeOwned + Serialize + Sized
             };
             let is_existing = existing_row.is_some();
             if let Some(existing_row) = existing_row {
-                overwritten_bytes =
-                    overwritten_bytes.saturating_add(existing_row.accounted_bytes());
+                if self.byte_cap.is_some() {
+                    overwritten_bytes =
+                        overwritten_bytes.saturating_add(existing_row.accounted_bytes()?);
+                }
             } else {
                 incoming = incoming.saturating_add(1);
             }
@@ -1034,7 +1218,7 @@ where V: DeserializeOwned + Serialize + Sized
                 let existing_raw = scope.row(key).await?;
                 if !(existing_raw.is_undefined() || existing_raw.is_null()) {
                     if let Some(row) = js_value::deserialize::<Option<StoredRow>>(existing_raw)? {
-                        reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes());
+                        reclaimed_bytes = reclaimed_bytes.saturating_add(row.accounted_bytes()?);
                     }
                 }
             }
