@@ -10,10 +10,12 @@ use std::sync::Arc;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::consts::REMOVAL_STORE_MAX_REMOVES;
+use rings_core::delegation::DelegateeKey;
 use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::RemovalStorage;
+use rings_core::ecc::AccountVerifier;
 use rings_core::ecc::PublicKey;
 use rings_core::message::ReplayStorage;
 use rings_core::message::TRANSACTION_REPLAY_STORE_MAX_RECORDS;
@@ -21,6 +23,7 @@ use rings_core::storage::RecordAuthority;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
 use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures;
@@ -90,28 +93,44 @@ impl ProviderRef {
     }
 }
 
+fn default_wallet_storage_name(did: Did) -> String {
+    format!("{DEFAULT_BROWSER_STORAGE_NAME}-{did}")
+}
+
 fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     Box::new(
-        move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+        move |data: String| -> Pin<Box<dyn Future<Output = NodeResult<Vec<u8>>>>> {
             let signer = signer.clone();
             Box::pin(async move {
-                let signer = signer.clone();
                 let promise = match signer.call1(&JsValue::NULL, &JsValue::from_str(&data)) {
                     Ok(value) => js_sys::Promise::from(value),
                     Err(error) => {
                         tracing::error!("failed to call external JS signer: {error:?}");
-                        return Vec::new();
+                        return Err(Error::JsError(format!(
+                            "external JS signer threw synchronously: {error:?}"
+                        )));
                     }
                 };
                 let value = match JsFuture::from(promise).await {
                     Ok(value) => value,
                     Err(error) => {
                         tracing::error!("external JS signer rejected: {error:?}");
-                        return Vec::new();
+                        return Err(Error::JsError(format!(
+                            "external JS signer rejected: {error:?}"
+                        )));
                     }
                 };
+                if !value.is_instance_of::<Uint8Array>() {
+                    return Err(Error::JsError(
+                        "external JS signer must resolve to a Uint8Array".to_string(),
+                    ));
+                }
                 let sig: js_sys::Uint8Array = Uint8Array::from(value);
-                sig.to_vec()
+                let bytes = sig.to_vec();
+                if bytes.is_empty() {
+                    return Err(Error::InvalidAuthData);
+                }
+                Ok(bytes)
             })
         },
     )
@@ -271,8 +290,15 @@ impl Provider {
     ) -> NodeResult<Self> {
         let provider =
             Self::new_provider_with_storage_and_mail_internal(config, stores, mail_offer).await?;
-        provider.install_relay_onion_runtime()?;
-        provider.set_backend()?;
+        if let Err(error) = provider
+            .install_relay_onion_runtime()
+            .and_then(|()| provider.set_backend())
+        {
+            if let Err(close_error) = provider.close().await {
+                tracing::warn!(%close_error, "failed to close browser provider after post-build setup error");
+            }
+            return Err(error);
+        }
         Ok(provider)
     }
 }
@@ -308,21 +334,19 @@ impl Provider {
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-            let (stores, _storage_lock) =
-                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
-
-            let provider = Provider::new_provider_internal(
-                network_id,
-                ice_servers,
-                stabilize_interval,
-                account,
-                account_type,
-                Signer::Async(Box::new(signer)),
-                stores,
-            )
-            .await?;
-
-            provider.set_backend().map_err(JsError::from)?;
+            let delegatee_key =
+                Provider::mint_delegatee_key(account, account_type, Signer::Async(signer))
+                    .await
+                    .map_err(JsError::from)?;
+            let storage_name = default_wallet_storage_name(delegatee_key.delegator_did());
+            let (stores, _storage_lock) = open_browser_provider_stores(&storage_name)
+                .await
+                .map_err(JsError::from)?;
+            let config =
+                ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval);
+            let provider = Self::new_browser_provider_from_stores(config, stores, None)
+                .await
+                .map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -346,25 +370,20 @@ impl Provider {
                 .map_err(JsError::from)?;
             let offer =
                 OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
-            let (stores, _storage_lock) =
-                open_browser_provider_stores(DEFAULT_BROWSER_STORAGE_NAME).await?;
-
-            let provider = Provider::new_provider_internal_with_config(
-                network_id,
-                ice_servers,
-                stabilize_interval,
-                account,
-                account_type,
-                Signer::Async(Box::new(signer)),
-                stores,
-                move |config| config.onion_role(OnionRole::Exit(offer)),
-            )
-            .await?;
-
-            provider
-                .install_relay_onion_runtime()
+            let delegatee_key =
+                Provider::mint_delegatee_key(account, account_type, Signer::Async(signer))
+                    .await
+                    .map_err(JsError::from)?;
+            let storage_name = default_wallet_storage_name(delegatee_key.delegator_did());
+            let (stores, _storage_lock) = open_browser_provider_stores(&storage_name)
+                .await
                 .map_err(JsError::from)?;
-            provider.set_backend().map_err(JsError::from)?;
+            let config =
+                ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval)
+                    .onion_role(OnionRole::Exit(offer));
+            let provider = Self::new_browser_provider_from_stores(config, stores, None)
+                .await
+                .map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -536,6 +555,46 @@ impl Provider {
         })
     }
 
+    /// Inspect this node's active delegation signing horizon (`expires_at_ms`, `horizon_ms`,
+    /// `remaining_ms`, and `signs_now`).
+    pub fn signing_horizon(&self) -> Result<JsValue, JsError> {
+        js_value::serialize(&self.signing_horizon_snapshot()).map_err(JsError::from)
+    }
+
+    /// Replace this node's active session key in process before its signing horizon expires.
+    pub fn renew_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<JsValue, JsError> {
+        self.processor
+            .renew_delegatee_key(delegatee_key, self.processor.clock().now_ms())
+            .map_err(JsError::from)?;
+        js_value::serialize(&self.signing_horizon_snapshot()).map_err(JsError::from)
+    }
+
+    /// Mint and install a fresh session key in process via an external wallet `signer`.
+    pub fn renew_with_signer(
+        &self,
+        account: String,
+        account_type: String,
+        signer: js_sys::Function,
+    ) -> js_sys::Promise {
+        let provider = self.clone();
+        future_to_promise(async move {
+            let next = Provider::mint_delegatee_key(
+                account,
+                account_type,
+                Signer::Async(wrapped_signer(signer)),
+            )
+            .await
+            .map_err(JsError::from)?;
+            provider.renew_delegatee_key(next).map_err(JsValue::from)
+        })
+    }
+
+    /// Drain all retained inbound E2E handshake and stream-frame events.
+    pub fn take_e2e_events(&self) -> Result<JsValue, JsError> {
+        let response = self.take_e2e_events_internal().map_err(JsError::from)?;
+        js_value::serialize(&response).map_err(JsError::from)
+    }
+
     /// Close this node and release its browser storage Web Lock (#1055, #1085): stop background
     /// tasks (`Backend::serve`, `Recipient::run`, and listener generations), hand off relay
     /// carriers and send `Leave`, close every peer connection, flush measurements, and await the
@@ -656,10 +715,9 @@ fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
         AddressType::DEFAULT => {
             Did::from_str(address).map_err(|_| JsError::new("invalid address"))?
         }
-        AddressType::Ed25519 => PublicKey::try_from_b58t(address)
+        AddressType::Ed25519 => AccountVerifier::from_account_parts(address, "ed25519")
             .map_err(|_| JsError::new("invalid address"))?
-            .address()
-            .into(),
+            .did(),
     };
     Ok(did)
 }

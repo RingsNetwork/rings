@@ -35,7 +35,7 @@ pub(crate) struct OnionProxyHttpRequest {
     pub(crate) method: String,
     /// HTTP headers.
     pub(crate) headers: Vec<(String, String)>,
-    /// UTF-8 request body bytes.
+    /// Exact request body bytes sent through the onion exit.
     pub(crate) body: Vec<u8>,
 }
 
@@ -165,9 +165,7 @@ impl OnionProxyHttpRequest {
             url: required_string_field(message, "url", "enter an HTTPS URL")?,
             method: required_string_field(message, "method", "enter an HTTP method")?,
             headers: parse_headers_js(js_prop(message, "headers")?)?,
-            body: js_string_field(message, "body")
-                .unwrap_or_default()
-                .into_bytes(),
+            body: optional_body_js(js_prop(message, "body")?)?,
         })
     }
 
@@ -177,11 +175,7 @@ impl OnionProxyHttpRequest {
         js_set(&object, "url", &JsValue::from_str(&self.url))?;
         js_set(&object, "method", &JsValue::from_str(&self.method))?;
         js_set(&object, "headers", &headers_js(&self.headers).into())?;
-        js_set(
-            &object,
-            "body",
-            &JsValue::from_str(&String::from_utf8_lossy(&self.body)),
-        )?;
+        js_set(&object, "body", &body_js(&self.body).into())?;
         Ok(object.into())
     }
 
@@ -446,6 +440,13 @@ fn parse_route_exit_js(value: &JsValue) -> Result<String, String> {
     js_string_field(value, "did")
 }
 
+fn optional_body_js(value: JsValue) -> Result<Vec<u8>, String> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(Vec::new());
+    }
+    parse_body_js(value)
+}
+
 fn parse_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     if let Some(body) = value.as_string() {
         return Ok(body.into_bytes());
@@ -623,5 +624,39 @@ mod tests {
             .map(|response| response.body_text());
 
         assert_eq!(parsed, Ok("hello through onion".to_string()));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_request_roundtrip_preserves_binary_body_bytes() {
+        let request = super::OnionProxyHttpRequest {
+            url: "https://example.com/upload".to_string(),
+            method: "POST".to_string(),
+            headers: vec![(
+                "content-type".to_string(),
+                "application/octet-stream".to_string(),
+            )],
+            body: vec![0xff, 0x00, 0x80, 0xfe],
+        };
+
+        let parsed = request
+            .to_js()
+            .and_then(|value| super::OnionProxyHttpRequest::from_js(&value));
+
+        assert_eq!(parsed, Ok(request));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_request_from_js_accepts_legacy_body_string() {
+        let request = Object::new();
+        let set_request =
+            super::js_set(&request, "url", &JsValue::from_str("https://example.com/"))
+                .and_then(|()| super::js_set(&request, "method", &JsValue::from_str("POST")))
+                .and_then(|()| super::js_set(&request, "headers", &Array::new().into()))
+                .and_then(|()| super::js_set(&request, "body", &JsValue::from_str("legacy-body")));
+        assert_eq!(set_request, Ok(()));
+
+        let parsed = super::OnionProxyHttpRequest::from_js(&request.into()).map(|req| req.body);
+
+        assert_eq!(parsed, Ok(b"legacy-body".to_vec()));
     }
 }

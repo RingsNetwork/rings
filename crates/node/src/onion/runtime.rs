@@ -123,7 +123,7 @@ impl OnionRuntime {
                 tracing::warn!(%error, "onion data plane could not reconcile its link table");
             }
         })?;
-        let entry_guards = core.onion_entry_guards();
+        let entry_guards = core.onion_entry_guards()?;
         let network_id = core.network_id();
         Ok(Self {
             scope,

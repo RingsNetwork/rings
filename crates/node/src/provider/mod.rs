@@ -2,13 +2,18 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use rings_core::delegation::DelegateeKey;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::RemovalStorage;
+use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::EvidenceCounters;
 use rings_core::measure::EvidenceDigest;
@@ -17,7 +22,11 @@ use rings_core::measure::EvidencePage;
 use rings_core::measure::PeerMeasurement;
 use rings_core::message::ReplayStorage;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::application::ApplicationData;
+use rings_core::swarm::application::ApplicationMessage;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -36,6 +45,8 @@ use crate::onion::native::NativeOnionCircuitHandle;
 use crate::onion::runtime::OnionRuntime;
 use crate::onion::OnionEntryGuardStorage;
 use crate::prelude::wasm_export;
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+use crate::processor::DelegationHorizon;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
@@ -78,6 +89,160 @@ where
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+/// Maximum E2E events retained in a provider's bounded [`E2eInbox`] before further events drop.
+const E2E_EVENT_CAPACITY: usize = 4096;
+
+/// One inbound E2E handshake or stream-frame event retained by [`Provider`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct E2eEvent {
+    /// Event kind (`"handshakeRequest"`, `"handshakeResponse"`, or `"streamFrame"`).
+    pub kind: String,
+    /// Verified sender DID.
+    pub from: String,
+    /// Sender / responder compressed secp256k1 public key when present.
+    pub public_key: Option<String>,
+    /// Per-frame ECIES ephemeral secp256k1 public key for `"streamFrame"` events.
+    pub ephemeral_public_key: Option<String>,
+    /// Stream UUID for `"streamFrame"` events.
+    pub stream_id: Option<String>,
+    /// Stream sequence number for `"streamFrame"` events.
+    pub sequence: Option<u64>,
+    /// Whether this frame terminates the stream.
+    pub is_final: Option<bool>,
+    /// Legacy block count reported for `"streamFrame"` events.
+    pub ciphertext_blocks: Option<usize>,
+    /// Base64-encoded ciphertext payload for `"streamFrame"` events.
+    pub ciphertext: Option<String>,
+}
+
+/// Snapshot returned when draining retained E2E events from [`Provider`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TakeE2eEventsResponse {
+    /// Events retained since the previous drain.
+    pub events: Vec<E2eEvent>,
+    /// Cumulative events dropped since provider creation because the bounded inbox was full.
+    pub dropped: u64,
+}
+
+/// JSON/JS-safe snapshot of this node's active delegation signing horizon.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SigningHorizonSnapshot {
+    /// Delegation expiry timestamp in Unix epoch milliseconds (decimal string).
+    pub expires_at_ms: String,
+    /// First millisecond at which outbound frames can no longer be signed (decimal string).
+    pub horizon_ms: String,
+    /// Milliseconds remaining before `horizon_ms` at snapshot time (decimal string).
+    pub remaining_ms: String,
+    /// Whether this node can sign outbound frames at snapshot time.
+    pub signs_now: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct E2eInbox {
+    events: Mutex<Vec<E2eEvent>>,
+    dropped: AtomicU64,
+}
+
+impl E2eInbox {
+    pub(crate) fn take(&self) -> Result<TakeE2eEventsResponse> {
+        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
+        Ok(TakeE2eEventsResponse {
+            events: std::mem::take(&mut *events),
+            dropped: self.dropped.load(Ordering::Relaxed),
+        })
+    }
+
+    fn push(&self, event: E2eEvent) -> Result<()> {
+        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
+        if events.len() < E2E_EVENT_CAPACITY {
+            events.push(event);
+        } else {
+            let dropped = self
+                .dropped
+                .fetch_add(1, Ordering::Relaxed)
+                .saturating_add(1);
+            tracing::debug!(dropped, "provider E2E event inbox full; event dropped");
+        }
+        Ok(())
+    }
+}
+
+impl BackendObserver for E2eInbox {
+    fn e2e_message(&self, message: &ApplicationMessage) {
+        match e2e_event_from_message(message)
+            .and_then(|event| event.map_or(Ok(()), |e| self.push(e)))
+        {
+            Ok(()) => {}
+            Err(error) => tracing::warn!(error = ?error, "provider E2E event not retained"),
+        }
+    }
+}
+
+struct CompositeBackendObserver {
+    e2e_inbox: Arc<E2eInbox>,
+    extra: Option<Arc<dyn BackendObserver>>,
+}
+
+impl BackendObserver for CompositeBackendObserver {
+    fn link_fact(&self, fact: crate::extension::ext::LinkFact) {
+        if let Some(extra) = self.extra.as_deref() {
+            extra.link_fact(fact);
+        }
+    }
+
+    fn e2e_message(&self, message: &ApplicationMessage) {
+        self.e2e_inbox.e2e_message(message);
+        if let Some(extra) = self.extra.as_deref() {
+            extra.e2e_message(message);
+        }
+    }
+}
+
+fn e2e_event_from_message(message: &ApplicationMessage) -> Result<Option<E2eEvent>> {
+    let from = message.from.to_string();
+    Ok(Some(match &message.data {
+        ApplicationData::E2eHandshakeRequest(request) => E2eEvent {
+            kind: "handshakeRequest".to_owned(),
+            from,
+            public_key: Some(public_key_json_string(request.requester_public_key)?),
+            ephemeral_public_key: None,
+            stream_id: None,
+            sequence: None,
+            is_final: None,
+            ciphertext_blocks: None,
+            ciphertext: None,
+        },
+        ApplicationData::E2eHandshakeResponse(response) => E2eEvent {
+            kind: "handshakeResponse".to_owned(),
+            from,
+            public_key: Some(public_key_json_string(response.responder_public_key)?),
+            ephemeral_public_key: None,
+            stream_id: None,
+            sequence: None,
+            is_final: None,
+            ciphertext_blocks: None,
+            ciphertext: None,
+        },
+        ApplicationData::E2eStreamFrame(frame) => E2eEvent {
+            kind: "streamFrame".to_owned(),
+            from,
+            public_key: Some(public_key_json_string(frame.sender_public_key)?),
+            ephemeral_public_key: Some(public_key_json_string(frame.ephemeral_public_key)?),
+            stream_id: Some(frame.stream_id.to_string()),
+            sequence: Some(frame.sequence),
+            is_final: Some(frame.is_final),
+            ciphertext_blocks: Some(frame.ciphertext_blocks()),
+            ciphertext: Some(base64::encode(&frame.ciphertext)),
+        },
+        _ => return Ok(None),
+    }))
+}
+
+fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
+    let value = serde_json::to_value(public_key)?;
+    value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
+}
+
 /// General Provider holding the node processor, RPC dispatcher, and extension registry.
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -87,6 +252,7 @@ pub struct Provider {
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
     dispatch_drops: Arc<DispatchDrops>,
+    e2e_inbox: Arc<E2eInbox>,
     /// The onion runtime installed in this provider's registry, shared by its clones; its lock
     /// serializes the check-and-install, so the runtime is installed at most once.
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
@@ -110,17 +276,17 @@ pub(crate) struct BrowserDirectoryEndpoint {
 
 /// Async signer, without Send required
 #[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>>>>>;
+pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>>>>>;
 
 /// Async signer, use for non-wasm envirement, Send is necessary
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>>>;
+pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> + Send>>>;
 
 /// Signer can be async and sync
 #[allow(clippy::type_complexity)]
 pub enum Signer {
     /// Sync signer
-    Sync(Box<dyn Fn(String) -> Vec<u8>>),
+    Sync(Box<dyn Fn(String) -> Result<Vec<u8>>>),
     /// Async signer
     Async(AsyncSigner),
 }
@@ -160,6 +326,7 @@ impl Provider {
             handler: InternalRpcHandler,
             extensions,
             dispatch_drops: Arc::default(),
+            e2e_inbox: Arc::default(),
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
@@ -226,6 +393,40 @@ impl Provider {
     /// The application envelopes the [`Backend`] dropped instead of dispatching, by reason.
     pub fn dispatch_drop_counters(&self) -> DispatchDropCounters {
         self.dispatch_drops.counters()
+    }
+
+    pub(crate) fn take_e2e_events_internal(&self) -> Result<TakeE2eEventsResponse> {
+        self.e2e_inbox.take()
+    }
+
+    /// Drain all retained inbound E2E handshake and stream-frame events.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub fn take_e2e_events(&self) -> Result<TakeE2eEventsResponse> {
+        self.take_e2e_events_internal()
+    }
+
+    pub(crate) fn signing_horizon_snapshot(&self) -> SigningHorizonSnapshot {
+        let now_ms = self.processor.clock().now_ms();
+        let horizon = self.processor.signing_horizon();
+        SigningHorizonSnapshot {
+            expires_at_ms: horizon.expires_at_ms().to_string(),
+            horizon_ms: horizon.horizon_ms().to_string(),
+            remaining_ms: horizon.horizon_ms().saturating_sub(now_ms).to_string(),
+            signs_now: horizon.signs_at(now_ms),
+        }
+    }
+
+    /// Return the active delegation signing horizon of this node.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub fn signing_horizon(&self) -> DelegationHorizon {
+        self.processor.signing_horizon()
+    }
+
+    /// Renew this node's active session key in process before its signing horizon expires.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub fn renew_delegatee_key(&self, next: DelegateeKey) -> Result<DelegationHorizon> {
+        self.processor
+            .renew_delegatee_key(next, self.processor.clock().now_ms())
     }
 
     /// The capability handle — overlay `send` / `did` / self-addressed `inject`. (Authenticated
@@ -374,6 +575,7 @@ impl Provider {
             handler,
             extensions,
             dispatch_drops,
+            e2e_inbox,
             onion_runtime,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint,
@@ -382,7 +584,13 @@ impl Provider {
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             pagehide,
         } = self;
-        drop((handler, extensions, dispatch_drops, onion_runtime));
+        drop((
+            handler,
+            extensions,
+            dispatch_drops,
+            e2e_inbox,
+            onion_runtime,
+        ));
         #[cfg(all(feature = "browser", target_family = "wasm"))]
         drop((onion_directory_endpoint, browser_mail, pagehide));
         // Atomic: `Some` only for the last strong clone, which a `Weak` upgrade cannot race.
@@ -513,6 +721,21 @@ impl Provider {
         .await
     }
 
+    pub(crate) async fn mint_delegatee_key(
+        account: String,
+        account_type: String,
+        signer: Signer,
+    ) -> Result<DelegateeKey> {
+        let mut sk_builder = DelegationBuilder::new(account, account_type);
+        let proof = sk_builder.unsigned_proof();
+        let sig = match signer {
+            Signer::Sync(s) => s(proof)?,
+            Signer::Async(s) => s(proof).await?,
+        };
+        sk_builder = sk_builder.set_delegator_signature(sig);
+        sk_builder.build().map_err(Error::InternalError)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_provider_internal_with_config(
         network_id: u32,
@@ -524,14 +747,7 @@ impl Provider {
         stores: ProviderStores,
         configure: impl FnOnce(ProcessorConfig) -> ProcessorConfig,
     ) -> Result<Provider> {
-        let mut sk_builder = DelegationBuilder::new(account, account_type);
-        let proof = sk_builder.unsigned_proof();
-        let sig = match signer {
-            Signer::Sync(s) => s(proof),
-            Signer::Async(s) => s(proof).await,
-        };
-        sk_builder = sk_builder.set_delegator_signature(sig.to_vec());
-        let delegatee_key = sk_builder.build().map_err(Error::InternalError)?;
+        let delegatee_key = Self::mint_delegatee_key(account, account_type, signer).await?;
         let config =
             ProcessorConfig::new(network_id, ice_servers, delegatee_key, stabilize_interval);
         let config = configure(config);
@@ -593,11 +809,11 @@ impl Provider {
             .swarm
             .application_inbox()
             .map_err(Error::InternalError)?;
-        let backend = Backend::new(Arc::new(self.clone()));
-        let backend = match observer {
-            Some(observer) => backend.observed_by(observer),
-            None => backend,
-        };
+        let composite_observer: Arc<dyn BackendObserver> = Arc::new(CompositeBackendObserver {
+            e2e_inbox: Arc::clone(&self.e2e_inbox),
+            extra: observer,
+        });
+        let backend = Backend::new(Arc::new(self.clone())).observed_by(composite_observer);
         Ok(backend.serve(inbox, stop))
     }
 
@@ -609,6 +825,28 @@ impl Provider {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         tracing::debug!("request {}", method);
+        match method.as_str() {
+            "takeE2eEvents" => return Ok(serde_json::to_value(self.take_e2e_events_internal()?)?),
+            "dispatchDropCounters" => {
+                return Ok(serde_json::to_value(self.dispatch_drop_counters())?);
+            }
+            "signingHorizon" => return Ok(serde_json::to_value(self.signing_horizon_snapshot())?),
+            "renewDelegateeKey" => {
+                let raw_key = params
+                    .get("delegatee_key")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        Error::InternalRpcError(jsonrpc_core::Error::invalid_params(
+                            "missing string field `delegatee_key`",
+                        ))
+                    })?;
+                let next = DelegateeKey::from_str(raw_key)?;
+                self.processor
+                    .renew_delegatee_key(next, self.processor.clock().now_ms())?;
+                return Ok(serde_json::to_value(self.signing_horizon_snapshot())?);
+            }
+            _ => {}
+        }
         #[cfg(all(feature = "browser", target_family = "wasm"))]
         let onion_directory_endpoint = onion_directory_endpoint_from_rpc(method.as_str(), &params);
         let result = self

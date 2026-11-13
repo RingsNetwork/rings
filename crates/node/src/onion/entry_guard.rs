@@ -142,24 +142,36 @@ struct GuardTimeoutState {
 
 pub(crate) struct OnionEntryGuards {
     storage: OnionEntryGuardStorage,
+    local_did: Option<Did>,
     target_guard_count: usize,
     timeout_state: std::sync::Mutex<GuardTimeoutState>,
 }
 
 impl OnionEntryGuards {
-    pub(crate) fn new(storage: OnionEntryGuardStorage) -> Self {
-        Self::new_with_target_count(storage, DEFAULT_ENTRY_GUARD_COUNT)
+    pub(crate) fn new_for_did(storage: OnionEntryGuardStorage, local_did: Did) -> Self {
+        Self {
+            storage,
+            local_did: Some(local_did),
+            target_guard_count: DEFAULT_ENTRY_GUARD_COUNT,
+            timeout_state: std::sync::Mutex::new(GuardTimeoutState::default()),
+        }
     }
 
+    #[cfg(all(test, not(all(feature = "browser", target_family = "wasm"))))]
     pub(crate) fn new_with_target_count(
         storage: OnionEntryGuardStorage,
         target_guard_count: usize,
     ) -> Self {
         Self {
             storage,
+            local_did: None,
             target_guard_count: target_guard_count.max(1),
             timeout_state: std::sync::Mutex::new(GuardTimeoutState::default()),
         }
+    }
+
+    fn state_key(&self, network_id: u32) -> String {
+        entry_guard_state_key_for_did(network_id, self.local_did)
     }
 
     /// Record whether a circuit attempt whose entry guard was `guard` timed out or succeeded,
@@ -208,7 +220,7 @@ impl OnionEntryGuards {
 
     /// Remove `guard` from `network_id`'s persisted entry-guard set if present.
     pub(crate) async fn evict_guard(&self, network_id: u32, guard: Did) -> Result<bool> {
-        let key = entry_guard_state_key(network_id);
+        let key = self.state_key(network_id);
         let Some(mut stored) = self
             .storage
             .get(&key)
@@ -259,7 +271,7 @@ impl OnionEntryGuards {
         entropy: &mut impl RouteEntropy,
         first_hop_permitted: impl Fn(Did) -> bool,
     ) -> Result<OnionEntryGuardSet> {
-        let key = entry_guard_state_key(network_id);
+        let key = self.state_key(network_id);
         let stored = self
             .storage
             .get(&key)
@@ -462,8 +474,16 @@ fn eligible_guard_dids(
     }
 }
 
+#[cfg(all(test, not(all(feature = "browser", target_family = "wasm"))))]
 fn entry_guard_state_key(network_id: u32) -> String {
-    format!("{ENTRY_GUARD_KEY_PREFIX}:network:{network_id}")
+    entry_guard_state_key_for_did(network_id, None)
+}
+
+fn entry_guard_state_key_for_did(network_id: u32, local_did: Option<Did>) -> String {
+    match local_did {
+        Some(did) => format!("{ENTRY_GUARD_KEY_PREFIX}:network:{network_id}:did:{did}"),
+        None => format!("{ENTRY_GUARD_KEY_PREFIX}:network:{network_id}"),
+    }
 }
 
 #[cfg(all(test, not(all(feature = "browser", target_family = "wasm"))))]
@@ -1166,6 +1186,82 @@ mod tests {
             })
             .await?;
         assert_eq!(single.dids, BTreeSet::from([first_guard]));
+        Ok(())
+    }
+
+    #[derive(Clone)]
+    struct SharedMemGuardStorage(std::sync::Arc<MemStorage<OnionEntryGuardState>>);
+
+    #[async_trait::async_trait]
+    impl KvStorageInterface<OnionEntryGuardState> for SharedMemGuardStorage {
+        async fn get(&self, key: &str) -> rings_core::error::Result<Option<OnionEntryGuardState>> {
+            self.0.get(key).await
+        }
+
+        async fn put(
+            &self,
+            key: &str,
+            value: &OnionEntryGuardState,
+        ) -> rings_core::error::Result<()> {
+            self.0.put(key, value).await
+        }
+
+        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, OnionEntryGuardState)>> {
+            self.0.get_all().await
+        }
+
+        async fn remove(&self, key: &str) -> rings_core::error::Result<()> {
+            self.0.remove(key).await
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            self.0.clear().await
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            self.0.count().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_did_scoped_entry_guards_do_not_collide_over_shared_storage() -> Result<()> {
+        let shared = SharedMemGuardStorage(std::sync::Arc::new(
+            MemStorage::<OnionEntryGuardState>::new(),
+        ));
+        let did_a: Did = SecretKey::random().address().into();
+        let did_b: Did = SecretKey::random().address().into();
+        assert_ne!(did_a, did_b);
+
+        let manager_a = OnionEntryGuards::new_for_did(Box::new(shared.clone()), did_a);
+        let manager_b = OnionEntryGuards::new_for_did(Box::new(shared), did_b);
+
+        let relay_a = relay()?;
+        let relay_b = relay()?;
+        let mut entropy_a = FixedEntropy::new([0]);
+        let set_a = manager_a
+            .select_relay_guards_at(1, &[relay_a], &[], 10_000, &mut entropy_a, |_| true)
+            .await?;
+        assert_eq!(set_a.dids, BTreeSet::from([relay_a.did]));
+
+        let mut entropy_b = FixedEntropy::new([0]);
+        let set_b = manager_b
+            .select_relay_guards_at(1, &[relay_b], &[], 10_000, &mut entropy_b, |_| true)
+            .await?;
+        assert_eq!(set_b.dids, BTreeSet::from([relay_b.did]));
+
+        // Re-reading `did_a`'s guards when both relays are eligible keeps `relay_a` pinned.
+        let mut recheck_entropy = FixedEntropy::new([0]);
+        let rechecked_a = manager_a
+            .select_relay_guards_at(
+                1,
+                &[relay_a, relay_b],
+                &[],
+                11_000,
+                &mut recheck_entropy,
+                |_| true,
+            )
+            .await?;
+        assert!(rechecked_a.contains(relay_a.did));
         Ok(())
     }
 }

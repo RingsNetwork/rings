@@ -107,9 +107,27 @@ impl ProcessorConfig {
         self.dht_virtual_nodes = positions_per_peer;
         self
     }
+
+    /// Enable or disable onion relay advertisement on this node.
+    ///
+    /// When enabling relay while currently `Client`, upgrades the role to `Relay`; when disabling
+    /// relay, resets the role to `Client`.
+    pub fn advertise_onion_relay(mut self, enabled: bool) -> Self {
+        self.onion_role = match (enabled, self.onion_role) {
+            (true, OnionRole::Client) => OnionRole::Relay,
+            (true, role) => role,
+            (false, _) => OnionRole::Client,
+        };
+        self
+    }
 }
 
 impl ProcessorConfig {
+    /// Override the runtime family advertised in the online-node registry.
+    pub fn online_node_type(mut self, node_type: OnlineNodeType) -> Self {
+        self.online_node_type = node_type;
+        self
+    }
     /// Returns the validated native WebRTC UDP port range, when configured.
     pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)

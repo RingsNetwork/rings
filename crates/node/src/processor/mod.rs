@@ -171,6 +171,12 @@ pub struct Processor {
     remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
 
+impl Drop for Processor {
+    fn drop(&mut self) {
+        self.tasks.stop();
+    }
+}
+
 /// The node error of a DHT operation run under a registration stop: a rerouting wait ended by
 /// the stop is the registration's cooperative stop, anything else an entry error.
 pub(crate) fn stoppable_storage_error(error: rings_core::error::Error) -> Error {

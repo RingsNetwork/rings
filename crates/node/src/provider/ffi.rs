@@ -42,18 +42,13 @@ use std::ffi::CString;
 use std::future::IntoFuture;
 use std::ptr;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use rings_core::ecc::keys::SignatureAlgorithm;
-use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
-use rings_core::swarm::application::ApplicationData;
-use rings_core::swarm::application::ApplicationMessage;
-use serde::Serialize;
 use tokio::runtime::Runtime;
 
 use super::Provider;
@@ -61,127 +56,13 @@ use super::ProviderStores;
 use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::BackendObserver;
 use crate::native::stores::NodeStores;
+use crate::online::OnlineNodeType;
+use crate::processor::ProcessorConfig;
 
 /// Byte capacity passed to FFI signer callbacks: the widest supported account signature
 /// (`SignatureAlgorithm::Bls12381`, 96 bytes).
 const FFI_MAX_SIGNATURE_LEN: usize = SignatureAlgorithm::Bls12381.signature_len();
-
-#[derive(Clone, Debug, Serialize)]
-struct FfiE2eEvent {
-    kind: &'static str,
-    from: String,
-    public_key: Option<String>,
-    ephemeral_public_key: Option<String>,
-    stream_id: Option<String>,
-    sequence: Option<u64>,
-    is_final: Option<bool>,
-    ciphertext_blocks: Option<usize>,
-    ciphertext: Option<String>,
-}
-
-/// The answer to `takeE2eEvents`.
-#[derive(Serialize)]
-struct TakeFfiE2eEventsResponse {
-    /// The events retained since the previous take.
-    events: Vec<FfiE2eEvent>,
-    /// The events dropped because the inbox was full, cumulative since the provider was created.
-    dropped: u64,
-}
-
-/// E2E events retained for the C caller to take: bounded, so a caller that never takes them
-/// costs at most [`FFI_E2E_EVENT_CAPACITY`] events, and a further event is dropped, counted.
-#[derive(Default)]
-struct FfiE2eInbox {
-    events: Mutex<Vec<FfiE2eEvent>>,
-    dropped: AtomicU64,
-}
-
-/// E2E events an [`FfiE2eInbox`] retains before it drops further ones.
-const FFI_E2E_EVENT_CAPACITY: usize = 4096;
-
-impl FfiE2eInbox {
-    /// Take every retained event, with the count of those dropped so far.
-    fn take(&self) -> Result<TakeFfiE2eEventsResponse> {
-        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
-        Ok(TakeFfiE2eEventsResponse {
-            events: std::mem::take(&mut *events),
-            dropped: self.dropped.load(Ordering::Relaxed),
-        })
-    }
-
-    /// Retain `event`, or drop it, counted, when full.
-    fn push(&self, event: FfiE2eEvent) -> Result<()> {
-        let mut events = self.events.lock().map_err(|_| Error::Lock)?;
-        if events.len() < FFI_E2E_EVENT_CAPACITY {
-            events.push(event);
-        } else {
-            let dropped = self
-                .dropped
-                .fetch_add(1, Ordering::Relaxed)
-                .saturating_add(1);
-            tracing::warn!(dropped, "FFI E2E event inbox full; event dropped");
-        }
-        Ok(())
-    }
-}
-
-impl BackendObserver for FfiE2eInbox {
-    /// Retain an E2E message as an FFI event.
-    fn e2e_message(&self, message: &ApplicationMessage) {
-        match ffi_e2e_event(message).and_then(|event| event.map_or(Ok(()), |e| self.push(e))) {
-            Ok(()) => {}
-            Err(error) => tracing::warn!(error = ?error, "FFI E2E event not retained"),
-        }
-    }
-}
-
-/// The FFI event of an E2E `message`; `None` for any other application data.
-fn ffi_e2e_event(message: &ApplicationMessage) -> Result<Option<FfiE2eEvent>> {
-    let from = message.from.to_string();
-    Ok(Some(match &message.data {
-        ApplicationData::E2eHandshakeRequest(request) => FfiE2eEvent {
-            kind: "handshakeRequest",
-            from,
-            public_key: Some(public_key_json_string(request.requester_public_key)?),
-            ephemeral_public_key: None,
-            stream_id: None,
-            sequence: None,
-            is_final: None,
-            ciphertext_blocks: None,
-            ciphertext: None,
-        },
-        ApplicationData::E2eHandshakeResponse(response) => FfiE2eEvent {
-            kind: "handshakeResponse",
-            from,
-            public_key: Some(public_key_json_string(response.responder_public_key)?),
-            ephemeral_public_key: None,
-            stream_id: None,
-            sequence: None,
-            is_final: None,
-            ciphertext_blocks: None,
-            ciphertext: None,
-        },
-        ApplicationData::E2eStreamFrame(frame) => FfiE2eEvent {
-            kind: "streamFrame",
-            from,
-            public_key: Some(public_key_json_string(frame.sender_public_key)?),
-            ephemeral_public_key: Some(public_key_json_string(frame.ephemeral_public_key)?),
-            stream_id: Some(frame.stream_id.to_string()),
-            sequence: Some(frame.sequence),
-            is_final: Some(frame.is_final),
-            ciphertext_blocks: Some(frame.ciphertext_blocks()),
-            ciphertext: Some(base64::encode(&frame.ciphertext)),
-        },
-        _ => return Ok(None),
-    }))
-}
-
-fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
-    let value = serde_json::to_value(public_key)?;
-    value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
-}
 
 /// Opaque provider handle owned by the C ABI caller.
 ///
@@ -191,18 +72,16 @@ fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
 pub struct ProviderHandle {
     provider: Arc<Provider>,
     runtime: Arc<Runtime>,
-    e2e_events: Arc<FfiE2eInbox>,
     stop: StopSource,
     listening: AtomicBool,
     listener_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl ProviderHandle {
-    fn new(provider: Arc<Provider>, runtime: Arc<Runtime>, e2e_events: Arc<FfiE2eInbox>) -> Self {
+    fn new(provider: Arc<Provider>, runtime: Arc<Runtime>) -> Self {
         Self {
             provider,
             runtime,
-            e2e_events,
             stop: StopSource::new(),
             listening: AtomicBool::new(false),
             listener_threads: Mutex::new(Vec::new()),
@@ -258,26 +137,20 @@ impl ProviderHandle {
         }
     }
 
-    /// Serve the swarm's application inbox with the extension [`Backend`], whose observer
-    /// retains E2E events for the caller, as a node task on the provider runtime until the
+    /// Serve the swarm's application inbox with the extension [`Backend`], retaining inbound E2E
+    /// events in the provider's bounded inbox as a node task on the provider runtime until the
     /// provider is closed.
     ///
     /// [`Backend`]: crate::extension::Backend
     fn spawn_application(&self) -> Result<()> {
         let _entered = self.runtime.enter();
-        self.provider
-            .serve_application(Some(self.e2e_events.clone()))
-    }
-
-    fn take_e2e_events(&self) -> Result<TakeFfiE2eEventsResponse> {
-        self.e2e_events.take()
+        self.provider.set_backend()
     }
 
     fn shutdown(self) {
         let Self {
             provider,
             runtime,
-            e2e_events: _,
             stop,
             listening: _,
             listener_threads,
@@ -414,11 +287,7 @@ pub unsafe extern "C" fn rings_node_request(
         let params = c_char_to_string(params)?;
         let params = serde_json::from_str(&params)?;
 
-        let ret = if method == "takeE2eEvents" {
-            serde_json::to_value(handle.take_e2e_events()?)?
-        } else if method == "dispatchDropCounters" {
-            serde_json::to_value(handle.provider.dispatch_drop_counters())?
-        } else if tokio::runtime::Handle::try_current().is_err() {
+        let ret = if tokio::runtime::Handle::try_current().is_err() {
             handle
                 .runtime
                 .block_on(handle.provider.request_internal(method, params))?
@@ -555,15 +424,12 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
 ) -> *mut ProviderHandle {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char, usize) -> usize,
-    ) -> impl Fn(String) -> Vec<u8> {
-        move |data: String| -> Vec<u8> {
-            let c_data = match CString::new(data) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::error!("FFI signer input contains nul byte: {error}");
-                    return Vec::new();
-                }
-            };
+    ) -> impl Fn(String) -> Result<Vec<u8>> {
+        move |data: String| -> Result<Vec<u8>> {
+            let c_data = CString::new(data).map_err(|error| {
+                tracing::error!("FFI signer input contains nul byte: {error}");
+                Error::InvalidAuthData
+            })?;
             let mut sig = [0_u8; FFI_MAX_SIGNATURE_LEN];
             let sig_ptr = sig.as_mut_ptr().cast::<c_char>();
             let written = signer(c_data.as_ptr(), sig_ptr, sig.len());
@@ -573,9 +439,9 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                     capacity = sig.len(),
                     "FFI signer returned invalid written signature length"
                 );
-                return Vec::new();
+                return Err(Error::InvalidAuthData);
             };
-            written_bytes.to_vec()
+            Ok(written_bytes.to_vec())
         }
     }
 
@@ -594,25 +460,30 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                         Error::ExtensionError(format!("failed to create runtime: {error}"))
                     })?);
                     let provider = runtime.block_on(async {
-                        let stores = NodeStores::open_under(&storage_root).await?;
-                        Provider::new_provider_internal(
-                            network_id,
-                            ice,
-                            stabilize_interval,
+                        let delegatee_key = Provider::mint_delegatee_key(
                             acc,
                             acc_ty,
                             Signer::Sync(Box::new(wrapped_signer(signer))),
-                            ProviderStores {
-                                entry: Some(stores.data),
-                                relay: Some(stores.relay),
-                                removals: Some(stores.removals),
-                                measure: Some(stores.measure),
-                                evidence: Some(stores.evidence),
-                                guards: Some(stores.guards),
-                                replay: Some(stores.replay),
-                                released: stores.released,
-                            },
                         )
+                        .await?;
+                        let stores = NodeStores::open_under(&storage_root).await?;
+                        let config = ProcessorConfig::new(
+                            network_id,
+                            ice,
+                            delegatee_key,
+                            stabilize_interval,
+                        )
+                        .online_node_type(OnlineNodeType::Ffi);
+                        Provider::new_provider_with_storage_internal(config, ProviderStores {
+                            entry: Some(stores.data),
+                            relay: Some(stores.relay),
+                            removals: Some(stores.removals),
+                            measure: Some(stores.measure),
+                            evidence: Some(stores.evidence),
+                            guards: Some(stores.guards),
+                            replay: Some(stores.replay),
+                            released: stores.released,
+                        })
                         .await
                     })?;
                     Ok((provider, runtime))
@@ -624,8 +495,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
                 Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
             })??;
             let provider = Arc::new(provider);
-            let e2e_events = Arc::new(FfiE2eInbox::default());
-            let handle = ProviderHandle::new(provider, runtime, e2e_events);
+            let handle = ProviderHandle::new(provider, runtime);
             if let Err(error) = handle.spawn_application() {
                 handle.shutdown();
                 return Err(error);
@@ -884,6 +754,20 @@ mod tests {
             assert!(events_response.contains("\"dropped\":0"));
             let drops_response = request(handle, "dispatchDropCounters", "{}");
             assert!(drops_response.contains("\"queueFull\":0"));
+            let horizon_before: serde_json::Value =
+                serde_json::from_str(&request(handle, "signingHorizon", "{}"))
+                    .expect("signingHorizon json");
+            assert_eq!(
+                horizon_before
+                    .get("signs_now")
+                    .and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                crate::registration::default_online_node_type(),
+                OnlineNodeType::Native,
+                "enabling the ffi cargo feature must not taint native OnlineNodeType defaults"
+            );
 
             let weak_provider = unsafe { Arc::downgrade(&(*handle).provider) };
             unsafe { rings_node_provider_destroy(handle) };
@@ -1026,7 +910,7 @@ mod tests {
                     .record_authenticated_measurement_for_test(peer),
             )
             .expect("test mutation must be applied");
-        ProviderHandle::new(provider, runtime, Arc::default()).shutdown();
+        ProviderHandle::new(provider, runtime).shutdown();
 
         let snapshot = storage
             .value

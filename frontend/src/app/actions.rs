@@ -268,7 +268,7 @@ impl StartAction {
         {
             Ok(node) if token.is_current() => Some(node),
             Ok(node) => {
-                node.stop();
+                let _ = node.close().await;
                 None
             }
             Err(error) => {
@@ -287,12 +287,12 @@ impl StartAction {
     ) {
         let my_did = built.provider.address();
         if let Err(error) = self.register_local_protocols(&built, &my_did) {
-            built.stop();
+            let _ = built.close().await;
             self.fail_if_current(&token, error);
             return;
         }
         if !token.is_current() {
-            built.stop();
+            let _ = built.close().await;
             return;
         }
         self.did.set(my_did.clone());
@@ -304,7 +304,7 @@ impl StartAction {
             Err(error) => Err(error),
         };
         if !token.is_current() {
-            self.discard_stale_local_node(&built);
+            self.discard_stale_local_node(built).await;
             return;
         }
         let webview_ready = match webview_result {
@@ -322,16 +322,22 @@ impl StartAction {
             .await;
     }
 
-    fn discard_stale_local_node(&self, built: &DemoNode) {
-        built.stop();
-        let mut node_ref = self.node_ref.borrow_mut();
-        if node_ref
-            .as_ref()
-            .is_some_and(|node| node.same_provider_instance(built))
-        {
-            *node_ref = None;
-            webview::clear_browser_gateway();
-        }
+    async fn discard_stale_local_node(&self, built: DemoNode) {
+        let stale = {
+            let mut node_ref = self.node_ref.borrow_mut();
+            if node_ref
+                .as_ref()
+                .is_some_and(|node| node.same_provider_instance(&built))
+            {
+                let taken = node_ref.take();
+                webview::clear_browser_gateway();
+                taken
+            } else {
+                None
+            }
+        };
+        drop(stale);
+        let _ = built.close().await;
     }
 
     fn register_local_protocols(&self, built: &DemoNode, my_did: &str) -> Result<(), String> {
@@ -472,14 +478,16 @@ impl DisconnectAction {
             self.status.set(offline_disconnect_message(was_starting));
             return;
         };
-        let provider = node.provider.clone();
         webview::clear_browser_gateway();
         self.clear_session();
         self.status.set("node disconnected".to_string());
         let status = self.status.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let message = cleanup_peer_links(&provider).await;
-            node.stop();
+            let message = cleanup_peer_links(&node.provider).await;
+            let message = match node.close().await {
+                Ok(()) => message,
+                Err(error) => format!("{message}; storage release failed: {error}"),
+            };
             if cleanup_token.is_current() {
                 status.set(message);
             }

@@ -114,12 +114,20 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     let relay = RelayHandle::install(&provider.extensions())?;
     let (services, relaying) = (c.services.as_ref(), c.dns_relay.as_ref());
     let dns_relay = dns_relay::open(services, relaying, &processor, &relay).await?;
-    let onion = provider.onion_circuit()?;
-    let gateway_runner = c
-        .enabled_gateway()
-        .cloned()
-        .map(|config| NativeGatewayRunner::new(processor.clone(), onion.clone(), config))
+    let needs_onion_runtime = processor.onion_role().registers_relay()
+        || c.enabled_gateway().is_some()
+        || onion_http_proxy.is_some();
+    let onion = needs_onion_runtime
+        .then(|| provider.onion_circuit())
         .transpose()?;
+    let gateway_runner = match (c.enabled_gateway().cloned(), onion.as_ref()) {
+        (Some(config), Some(onion)) => Some(NativeGatewayRunner::new(
+            processor.clone(),
+            onion.clone(),
+            config,
+        )?),
+        _ => None,
+    };
     let gateway_status = gateway_runner
         .as_ref()
         .map(NativeGatewayRunner::status_handle);
@@ -177,15 +185,16 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
                 .context("DNS relay stopped")
         });
     }
-    if let Some(proxy_options) = onion_http_proxy {
-        let proxy_processor = processor.clone();
-        tasks.spawn(async move {
-            run_onion_http_proxy(proxy_options, proxy_processor, onion)
-                .await
-                .context("Onion HTTP proxy stopped")
-        });
-    } else {
-        drop(onion);
+    match (onion_http_proxy, onion) {
+        (Some(proxy_options), Some(onion)) => {
+            let proxy_processor = processor.clone();
+            tasks.spawn(async move {
+                run_onion_http_proxy(proxy_options, proxy_processor, onion)
+                    .await
+                    .context("Onion HTTP proxy stopped")
+            });
+        }
+        (_, onion) => drop(onion),
     }
     drop((relay, provider));
     await_foreground_exit(

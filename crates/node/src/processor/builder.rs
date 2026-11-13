@@ -406,12 +406,16 @@ impl ProcessorBuilder {
             swarm_builder = swarm_builder.measure(implementation);
         }
         let swarm = Arc::new(swarm_builder.build());
+        let local_did = swarm.did();
 
         Ok(Processor {
             swarm,
             session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
             onion_process_epoch,
-            onion_entry_guards: Arc::new(OnionEntryGuards::new(onion_entry_guard_storage)),
+            onion_entry_guards: Arc::new(OnionEntryGuards::new_for_did(
+                onion_entry_guard_storage,
+                local_did,
+            )),
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
             measure,

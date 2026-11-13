@@ -75,19 +75,16 @@ pub(crate) const fn default_online_node_ttl_secs() -> u64 {
 }
 
 /// Default runtime family advertised in the online-node registry.
+///
+/// FFI providers override this explicitly at runtime via [`ProcessorConfig::online_node_type`] so
+/// building the workspace with `--features ffi` or `--all-features` never taints native daemon
+/// descriptors.
 pub(crate) fn default_online_node_type() -> OnlineNodeType {
-    #[cfg(feature = "ffi")]
-    {
-        OnlineNodeType::Ffi
-    }
-    #[cfg(all(not(feature = "ffi"), feature = "browser", target_family = "wasm"))]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     {
         OnlineNodeType::Browser
     }
-    #[cfg(all(
-        not(feature = "ffi"),
-        not(all(feature = "browser", target_family = "wasm"))
-    ))]
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     {
         OnlineNodeType::Native
     }

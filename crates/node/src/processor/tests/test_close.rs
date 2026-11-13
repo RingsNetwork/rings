@@ -382,3 +382,28 @@ async fn test_close_reports_provider_still_shared_when_store_release_times_out()
     .await
     .expect("the store reopens once the held store drops");
 }
+
+/// Dropping the last `Provider` after `set_backend()` without calling `Provider::close()` must not
+/// keep `Processor` or its stores alive via an `Arc` cycle through `Backend::serve`.
+#[tokio::test]
+async fn test_dropping_provider_after_set_backend_releases_processor_and_stores() {
+    let root = tempfile::tempdir().unwrap();
+    let processor = node_under(root.path()).await;
+    let released = processor.stores_released();
+    let weak_processor = Arc::downgrade(&processor);
+    let provider = Provider::from_processor(processor);
+    provider.set_backend().expect("set_backend succeeds");
+
+    drop(provider);
+    assert!(
+        weak_processor.upgrade().is_none(),
+        "Backend::serve must hold Processor weakly so dropping Provider releases Processor"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), released.into_future())
+        .await
+        .expect("stores must be released once Provider is dropped");
+    NodeStores::open_under(root.path())
+        .await
+        .expect("stores reopen immediately after Provider drop");
+}

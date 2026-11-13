@@ -347,7 +347,7 @@ async fn start_headless_node_inner(
     );
     let built = build_headless_node(&account, node_settings).await?;
     if !generation.is_current() {
-        built.stop();
+        let _ = built.close().await;
         return Ok("background node start cancelled".to_string());
     }
     set_headless_starting_for_generation(
@@ -359,11 +359,11 @@ async fn start_headless_node_inner(
     );
     let my_did = built.provider.address();
     if let Err(error) = register_headless_protocols(&built, &my_did) {
-        built.stop();
+        let _ = built.close().await;
         return Err(error);
     }
     if !generation.is_current() {
-        built.stop();
+        let _ = built.close().await;
         return Ok("background node start cancelled".to_string());
     }
 
@@ -488,19 +488,23 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
         return headless_snapshot_js(false, String::new(), &[], None, message, false, None);
     };
 
-    let provider = node.provider.clone();
-    let cleanup = node::disconnect_all(&provider).fuse();
-    let timeout = sleep(Duration::from_secs(2)).fuse();
-    futures::pin_mut!(cleanup, timeout);
-    let message = futures::select! {
-        result = cleanup => match result {
-            Ok(0) => "background node stopped".to_string(),
-            Ok(count) => format!("background node stopped; closed {count} peer links"),
-            Err(error) => format!("background node stopped; peer cleanup failed: {error}"),
-        },
-        _ = timeout => "background node stopped; peer cleanup timed out".to_string(),
+    let message = {
+        let cleanup = node::disconnect_all(&node.provider).fuse();
+        let timeout = sleep(Duration::from_secs(2)).fuse();
+        futures::pin_mut!(cleanup, timeout);
+        futures::select! {
+            result = cleanup => match result {
+                Ok(0) => "background node stopped".to_string(),
+                Ok(count) => format!("background node stopped; closed {count} peer links"),
+                Err(error) => format!("background node stopped; peer cleanup failed: {error}"),
+            },
+            _ = timeout => "background node stopped; peer cleanup timed out".to_string(),
+        }
     };
-    node.stop();
+    let message = match node.close().await {
+        Ok(()) => message,
+        Err(error) => format!("{message}; storage release failed: {error}"),
+    };
     {
         let mut state = state.borrow_mut();
         if stop_generation.is_current() {
