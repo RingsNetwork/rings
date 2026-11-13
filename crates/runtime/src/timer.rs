@@ -103,29 +103,103 @@ impl Iterator for TimeoutSegments {
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 mod browser {
+    use std::cell::Cell;
+    use std::cell::RefCell;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::rc::Rc;
+    use std::task::Context;
+    use std::task::Poll;
+    use std::task::Waker;
+
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
-    use wasm_bindgen::JsValue;
 
     use super::TimerError;
     use crate::global::global;
+    use crate::global::Global;
+
+    struct TimeoutShared {
+        fired: Cell<bool>,
+        waker: RefCell<Option<Waker>>,
+    }
+
+    /// A one-shot browser `setTimeout` future whose [`Drop`] cancels the host timer and frees its
+    /// [`Closure`] whenever the wait ends before the timeout fires.
+    struct BrowserTimeout {
+        scope: Global,
+        millis: i32,
+        handle: Option<i32>,
+        callback: Option<Closure<dyn FnMut()>>,
+        shared: Rc<TimeoutShared>,
+    }
+
+    impl BrowserTimeout {
+        fn new(millis: i32) -> Result<Self, TimerError> {
+            let scope = global().ok_or(TimerError::NoGlobalScope)?;
+            Ok(Self {
+                scope,
+                millis,
+                handle: None,
+                callback: None,
+                shared: Rc::new(TimeoutShared {
+                    fired: Cell::new(false),
+                    waker: RefCell::new(None),
+                }),
+            })
+        }
+    }
+
+    impl Future for BrowserTimeout {
+        type Output = Result<(), TimerError>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.shared.fired.get() {
+                self.handle = None;
+                self.callback = None;
+                return Poll::Ready(Ok(()));
+            }
+            *self.shared.waker.borrow_mut() = Some(cx.waker().clone());
+            if self.handle.is_none() {
+                let shared = Rc::clone(&self.shared);
+                let callback = Closure::wrap(Box::new(move || {
+                    shared.fired.set(true);
+                    let waker = shared.waker.borrow_mut().take();
+                    if let Some(waker) = waker {
+                        waker.wake();
+                    }
+                }) as Box<dyn FnMut()>);
+                match self
+                    .scope
+                    .set_timeout_0(callback.as_ref().unchecked_ref(), self.millis)
+                {
+                    Ok(handle) => {
+                        self.handle = Some(handle);
+                        self.callback = Some(callback);
+                    }
+                    Err(error) => {
+                        return Poll::Ready(Err(TimerError::Rejected(format!("{error:?}"))));
+                    }
+                }
+            }
+            Poll::Pending
+        }
+    }
+
+    impl Drop for BrowserTimeout {
+        fn drop(&mut self) {
+            if !self.shared.fired.get() {
+                if let Some(handle) = self.handle.take() {
+                    self.scope.clear_timeout(handle);
+                }
+            }
+            self.callback = None;
+        }
+    }
 
     /// Resolve after one `setTimeout` of `millis` on the current global scope.
     pub(super) async fn set_timeout(millis: i32) -> Result<(), TimerError> {
-        let scope = global().ok_or(TimerError::NoGlobalScope)?;
-        let promise = js_sys::Promise::new(&mut |resolve, reject| {
-            let wake = Closure::once_into_js(move || {
-                // Resolving a fresh promise from its own executor cannot throw.
-                let _ = resolve.call0(&JsValue::NULL);
-            });
-            if let Err(error) = scope.set_timeout_0(wake.unchecked_ref(), millis) {
-                let _ = reject.call1(&JsValue::NULL, &error);
-            }
-        });
-        wasm_bindgen_futures::JsFuture::from(promise)
-            .await
-            .map(drop)
-            .map_err(|error| TimerError::Rejected(format!("{error:?}")))
+        BrowserTimeout::new(millis)?.await
     }
 }
 
@@ -224,5 +298,17 @@ mod browser_tests {
     #[wasm_bindgen_test]
     async fn test_browser_zero_sleep_yields_and_resolves() {
         sleep(Duration::ZERO).await.unwrap();
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_browser_dropped_sleep_cancels_scheduled_timeout() {
+        use futures::FutureExt;
+
+        for _ in 0..256 {
+            let mut pending_sleep = Box::pin(sleep(Duration::from_secs(60)));
+            assert!(pending_sleep.as_mut().now_or_never().is_none());
+            drop(pending_sleep);
+        }
+        sleep(Duration::from_millis(20)).await.unwrap();
     }
 }

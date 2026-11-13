@@ -86,6 +86,15 @@ impl<T: Clone> ChannelPool<T> {
         pool.push(item);
         Ok(())
     }
+
+    /// Apply `visit` to every pooled resource in creation order.
+    pub fn for_each(&self, mut visit: impl FnMut(&T)) -> Result<()> {
+        let pool = self.pool.read().map_err(|_| {
+            Error::RwLockRead("Failed to read channel pool when iterating it".to_string())
+        })?;
+        pool.iter().for_each(&mut visit);
+        Ok(())
+    }
 }
 
 impl<T: Clone> LanePool<T> for ChannelPool<T> {

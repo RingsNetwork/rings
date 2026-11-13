@@ -175,5 +175,5 @@ impl Future for Drained {
     }
 }
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod test_task_set;

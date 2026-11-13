@@ -76,6 +76,18 @@ struct LaneQueue {
     draining: bool,
 }
 
+/// Queued peer-connection state transitions for one connection, drained in arrival order off the
+/// adapter callback so reentrant closes never deadlock and rapid transitions (`Connected` then
+/// `Closed`) never overtake each other.
+#[cfg(rings_transport_runtime)]
+#[derive(Default)]
+struct PeerStateQueue {
+    /// State transitions in arrival order.
+    states: VecDeque<WebrtcConnectionState>,
+    /// Whether a drainer task currently owns the queue.
+    draining: bool,
+}
+
 /// Wraps a transport callback with handling bound to one connection.
 pub struct InnerTransportCallback {
     pub(super) cid: Arc<str>,
@@ -86,6 +98,9 @@ pub struct InnerTransportCallback {
     /// The per-lane FIFOs between admission and the protocol callback.
     #[cfg(rings_transport_runtime)]
     lanes: Mutex<PerLane<LaneQueue>>,
+    /// Arrival-ordered FIFO of peer-connection state transitions.
+    #[cfg(rings_transport_runtime)]
+    peer_states: Mutex<PeerStateQueue>,
     #[cfg(any(test, rings_transport_runtime))]
     pub(super) invalid_frame_report_state: AtomicUsize,
 }
@@ -175,6 +190,30 @@ macro_rules! define_shared_inbound_frame_paths {
                 );
             }
         }
+
+        /// Synchronously record terminal credit/data-channel wakeup effects for `state`, then
+        /// enqueue `state` for strictly serialized, arrival-ordered callback dispatch.
+        pub fn dispatch_peer_connection_state(self: &$shared<Self>, state: WebrtcConnectionState) {
+            if state.is_terminal() {
+                self.close_link_credit();
+                self.data_channel_state_notifier.wake();
+            }
+            if !self.enqueue_peer_state(state) {
+                return;
+            }
+            let callback = $shared::clone(self);
+            if rings_runtime::spawn_detached(async move { callback.drain_peer_states().await })
+                .is_err()
+            {
+                let mut queue = lock_recover(&self.peer_states);
+                queue.draining = false;
+                queue.states.clear();
+                tracing::error!(
+                    peer = %self.cid,
+                    "peer-connection state dispatch requires a runtime; queued state changes were dropped"
+                );
+            }
+        }
     };
 }
 
@@ -196,6 +235,8 @@ impl InnerTransportCallback {
             data_channel_state_notifier,
             #[cfg(rings_transport_runtime)]
             lanes: Mutex::default(),
+            #[cfg(rings_transport_runtime)]
+            peer_states: Mutex::default(),
             #[cfg(any(test, rings_transport_runtime))]
             invalid_frame_report_state: AtomicUsize::new(0),
         }
@@ -367,6 +408,24 @@ impl InnerTransportCallback {
         }
     }
 
+    #[cfg(rings_transport_runtime)]
+    fn enqueue_peer_state(&self, state: WebrtcConnectionState) -> bool {
+        let mut queue = lock_recover(&self.peer_states);
+        queue.states.push_back(state);
+        !mem::replace(&mut queue.draining, true)
+    }
+
+    #[cfg(rings_transport_runtime)]
+    async fn drain_peer_states(&self) {
+        let mut drainer = PeerStateDrainer {
+            callback: self,
+            finished: false,
+        };
+        while let Some(state) = drainer.next() {
+            self.on_peer_connection_state_change(state).await;
+        }
+    }
+
     /// Dispatch one admitted frame and transfer its credit permit to the callback.
     pub async fn handle_admitted_frame(&self, frame: AdmittedInboundFrame) {
         // Law (admission ownership). Admission draws the permit from this callback's link
@@ -399,10 +458,50 @@ impl InnerTransportCallback {
     ) {
         if s.is_terminal() {
             self.close_link_credit();
+            self.data_channel_state_notifier.wake();
         }
         if let Err(e) = self.callback.on_peer_connection_state_change(cid, s).await {
             tracing::error!("Callback on_peer_connection_state_change failed: {e:?}");
         }
+    }
+}
+
+/// Exclusive claim of a running drainer task over [`PeerStateQueue`].
+#[cfg(rings_transport_runtime)]
+struct PeerStateDrainer<'a> {
+    callback: &'a InnerTransportCallback,
+    finished: bool,
+}
+
+#[cfg(rings_transport_runtime)]
+impl PeerStateDrainer<'_> {
+    fn next(&mut self) -> Option<WebrtcConnectionState> {
+        let mut queue = lock_recover(&self.callback.peer_states);
+        let next = queue.states.pop_front();
+        if next.is_none() {
+            queue.draining = false;
+            self.finished = true;
+        }
+        next
+    }
+}
+
+#[cfg(rings_transport_runtime)]
+impl Drop for PeerStateDrainer<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let abandoned = {
+            let mut queue = lock_recover(&self.callback.peer_states);
+            queue.draining = false;
+            mem::take(&mut queue.states)
+        };
+        tracing::warn!(
+            peer = %self.callback.cid,
+            states = abandoned.len(),
+            "a peer-connection state drainer ended mid-dispatch; queued state changes were dropped"
+        );
     }
 }
 

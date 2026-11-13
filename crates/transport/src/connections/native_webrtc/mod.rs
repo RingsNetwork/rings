@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
@@ -473,6 +472,10 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
+        let _ = self
+            .webrtc_data_channel
+            .for_each(|tracked| tracked.delivery.close());
+        self.webrtc_data_channel_state_notifier.wake();
         self.callback.close_link_credit();
     }
 
@@ -584,7 +587,7 @@ async fn create_peer_connection(
     let external_addresses = external_address_candidates(transport.external_address.as_deref());
     let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
     let sdp_extra_host_candidates = sdp_extra_host_candidates(&external_addresses);
-    setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+    setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
     if !nat_host_candidates.is_empty() {
         tracing::debug!(
             external_addresses = ?nat_host_candidates,
@@ -628,7 +631,13 @@ impl FrameSink for WebrtcConnection {
                 pool.send_with_retirement_fence(frame, lane, permit, retirement_fence, lifecycle)
                     .await
             },
-            close_failed_native_send(connection, physical_close_completed),
+            close_failed_native_send(
+                connection,
+                self.webrtc_data_channel.clone(),
+                self.webrtc_data_channel_state_notifier.clone(),
+                self.callback.clone(),
+                physical_close_completed,
+            ),
         )
         .await
     }
@@ -734,8 +743,14 @@ async fn run_native_close_with_witness(
 /// The detached close task retains the separate physical-completion witness.
 async fn close_failed_native_send(
     connection: Arc<RTCPeerConnection>,
+    channel_pool: Arc<ChannelPool<TrackedChannel>>,
+    data_channel_notifier: Notifier,
+    callback: Arc<InnerTransportCallback>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
+    let _ = channel_pool.for_each(|tracked| tracked.delivery.close());
+    data_channel_notifier.wake();
+    callback.close_link_credit();
     let runtime = native_send_runtime()?;
     close_failed_native_send_with_witness(
         &runtime,
@@ -791,9 +806,17 @@ fn wire_received_data_channels(
         // and a custom frame is queued on its lane, never waiting on the protocol.
         channel.on_message(Box::new(move |msg: DataChannelMessage| {
             let bytes = msg.data.len();
+            if msg.is_string {
+                tracing::warn!(
+                    peer = %message_cb.cid(),
+                    bytes,
+                    "rejected text data-channel message on binary channel"
+                );
+                message_cb.report_invalid_inbound_frame();
+                return Box::pin(async {});
+            }
             tracing::debug!(
                 peer = %message_cb.cid(),
-                is_string = msg.is_string,
                 bytes,
                 "received data-channel message"
             );
@@ -804,113 +827,16 @@ fn wire_received_data_channels(
     }));
 }
 
-/// Queued peer-connection state transitions for one native connection, drained in arrival order
-/// off the `webrtc-rs` callback task so reentrant `close()` calls never deadlock on the
-/// upstream state-handler mutex.
-#[derive(Default)]
-struct PeerStateQueue {
-    /// State transitions in arrival order.
-    states: VecDeque<WebrtcConnectionState>,
-    /// Whether a drainer task currently owns the queue.
-    draining: bool,
-}
-
-/// Exclusive claim of a running drainer task over [`PeerStateQueue`].
-struct PeerStateDrainer<'a> {
-    queue: &'a std::sync::Mutex<PeerStateQueue>,
-    callback: &'a InnerTransportCallback,
-    finished: bool,
-}
-
-impl PeerStateDrainer<'_> {
-    fn next(&mut self) -> Option<WebrtcConnectionState> {
-        let mut queue = lock_recover(self.queue);
-        let next = queue.states.pop_front();
-        if next.is_none() {
-            queue.draining = false;
-            self.finished = true;
-        }
-        next
-    }
-}
-
-impl Drop for PeerStateDrainer<'_> {
-    fn drop(&mut self) {
-        if self.finished {
-            return;
-        }
-        let abandoned = {
-            let mut queue = lock_recover(self.queue);
-            queue.draining = false;
-            std::mem::take(&mut queue.states)
-        };
-        tracing::warn!(
-            peer = %self.callback.cid(),
-            states = abandoned.len(),
-            "a peer-connection state drainer ended mid-dispatch; queued state changes were dropped"
-        );
-    }
-}
-
-fn enqueue_peer_connection_state(
-    queue: &std::sync::Mutex<PeerStateQueue>,
-    state: WebrtcConnectionState,
-) -> bool {
-    let mut queue = lock_recover(queue);
-    queue.states.push_back(state);
-    !std::mem::replace(&mut queue.draining, true)
-}
-
-async fn drain_peer_connection_states(
-    queue: Arc<std::sync::Mutex<PeerStateQueue>>,
-    inner_cb: Arc<InnerTransportCallback>,
-) {
-    let mut drainer = PeerStateDrainer {
-        queue: &queue,
-        callback: &inner_cb,
-        finished: false,
-    };
-    while let Some(state) = drainer.next() {
-        inner_cb.on_peer_connection_state_change(state).await;
-    }
-}
-
-fn dispatch_peer_connection_state(
-    queue: &Arc<std::sync::Mutex<PeerStateQueue>>,
-    inner_cb: &Arc<InnerTransportCallback>,
-    connection_state: &ConnectionStateCell,
-    state: RTCPeerConnectionState,
-) {
-    tracing::debug!("Peer Connection State has changed: {state:?}");
-    let state_change: WebrtcConnectionState = state.into();
-    connection_state.observe_webrtc(state_change);
-    if state_change.is_terminal() {
-        inner_cb.close_link_credit();
-    }
-    if !enqueue_peer_connection_state(queue, state_change) {
-        return;
-    }
-    let queue_clone = Arc::clone(queue);
-    let cb = Arc::clone(inner_cb);
-    if rings_runtime::spawn_detached(drain_peer_connection_states(queue_clone, cb)).is_err() {
-        let mut guard = lock_recover(queue);
-        guard.draining = false;
-        guard.states.clear();
-        tracing::error!(
-            peer = %inner_cb.cid(),
-            "peer-connection state dispatch requires a runtime; queued state changes were dropped"
-        );
-    }
-}
-
 fn wire_peer_connection_state(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
     connection_state: ConnectionStateCell,
 ) {
-    let queue = Arc::new(std::sync::Mutex::new(PeerStateQueue::default()));
     webrtc_conn.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
-        dispatch_peer_connection_state(&queue, &inner_cb, &connection_state, state);
+        tracing::debug!("Peer Connection State has changed: {state:?}");
+        let state_change: WebrtcConnectionState = state.into();
+        connection_state.observe_webrtc(state_change);
+        inner_cb.dispatch_peer_connection_state(state_change);
         Box::pin(async {})
     }));
 }
