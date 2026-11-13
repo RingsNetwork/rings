@@ -1,6 +1,7 @@
 //! Foreground privileged helper for Unix TUN/utun and route configuration.
 
 use std::fs::FileType;
+use std::io::Read;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
@@ -28,8 +29,8 @@ use tokio::signal::unix::SignalKind;
 
 use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
-use super::transport::read_request;
 use super::transport::send_response;
+use super::transport::MAX_FRAME_BYTES;
 use crate::bindings::NativeTunnelControl;
 use crate::bindings::NativeTunnelLease;
 use crate::bindings::NativeTunnelOptions;
@@ -156,10 +157,18 @@ struct ShutdownSignals {
 
 impl ShutdownSignals {
     fn register(runtime: &tokio::runtime::Runtime) -> Result<Self, GatewayError> {
+        Self::register_with_kinds(runtime, SignalKind::interrupt(), SignalKind::terminate())
+    }
+
+    fn register_with_kinds(
+        runtime: &tokio::runtime::Runtime,
+        first_kind: SignalKind,
+        second_kind: SignalKind,
+    ) -> Result<Self, GatewayError> {
         let _guard = runtime.enter();
-        let sigint = signal(SignalKind::interrupt())
+        let sigint = signal(first_kind)
             .map_err(|error| GatewayError::platform("register-unix-helper-sigint", error))?;
-        let sigterm = signal(SignalKind::terminate())
+        let sigterm = signal(second_kind)
             .map_err(|error| GatewayError::platform("register-unix-helper-sigterm", error))?;
         Ok(Self { sigint, sigterm })
     }
@@ -170,7 +179,7 @@ impl ShutdownSignals {
                 biased;
                 _ = self.sigint.recv() => true,
                 _ = self.sigterm.recv() => true,
-                _ = std::future::ready(()) => false,
+                () = tokio::time::sleep(Duration::from_millis(1)) => false,
             }
         })
     }
@@ -186,6 +195,12 @@ enum AcceptOutcome {
     SignalShutdown,
 }
 
+enum FrameReadOutcome {
+    Request(UnixConfigRequest),
+    Disconnected,
+    SignalShutdown,
+}
+
 fn wait_readable_or_signal(
     fd: BorrowedFd<'_>,
     runtime: &tokio::runtime::Runtime,
@@ -196,8 +211,25 @@ fn wait_readable_or_signal(
         if signals.poll_triggered(runtime) {
             return Ok(WaitOutcome::SignalShutdown);
         }
+        let poll_timeout_ms = match read_deadline {
+            Some(deadline) => {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return Err(GatewayError::platform(
+                        "read-helper-request",
+                        std::io::Error::from(std::io::ErrorKind::TimedOut),
+                    ));
+                };
+                u16::try_from(
+                    remaining
+                        .as_millis()
+                        .clamp(1, u128::from(SIGNAL_POLL_TIMEOUT_MS)),
+                )
+                .unwrap_or(SIGNAL_POLL_TIMEOUT_MS)
+            }
+            None => SIGNAL_POLL_TIMEOUT_MS,
+        };
         let mut poll_fds = [PollFd::new(fd, PollFlags::POLLIN)];
-        match poll(&mut poll_fds, PollTimeout::from(SIGNAL_POLL_TIMEOUT_MS)) {
+        match poll(&mut poll_fds, PollTimeout::from(poll_timeout_ms)) {
             Ok(ready) if ready > 0 => return Ok(WaitOutcome::Readable),
             Ok(_) | Err(nix::errno::Errno::EINTR) => {
                 if signals.poll_triggered(runtime) {
@@ -215,6 +247,77 @@ fn wait_readable_or_signal(
             Err(error) => return Err(GatewayError::platform("poll-unix-helper", error)),
         }
     }
+}
+
+fn read_request_with_deadline(
+    stream: &mut UnixStream,
+    runtime: &tokio::runtime::Runtime,
+    signals: &mut ShutdownSignals,
+    frame_timeout: Duration,
+) -> Result<FrameReadOutcome, GatewayError> {
+    let deadline = Instant::now() + frame_timeout;
+    let mut length = [0_u8; 4];
+    let mut prefix_filled = 0usize;
+    while prefix_filled < length.len() {
+        match wait_readable_or_signal(stream.as_fd(), runtime, signals, Some(deadline))? {
+            WaitOutcome::Readable => {}
+            WaitOutcome::SignalShutdown => return Ok(FrameReadOutcome::SignalShutdown),
+        }
+        let target = length
+            .get_mut(prefix_filled..)
+            .ok_or_else(|| GatewayError::Platform {
+                operation: "read-helper-request",
+                message: format!("invalid frame prefix offset {prefix_filled}"),
+            })?;
+        match stream.read(target) {
+            Ok(0) if prefix_filled == 0 => return Ok(FrameReadOutcome::Disconnected),
+            Ok(0) => {
+                return Err(GatewayError::platform(
+                    "read-helper-request",
+                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                ));
+            }
+            Ok(read) => prefix_filled = prefix_filled.saturating_add(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(GatewayError::platform("read-helper-request", error)),
+        }
+    }
+    let payload_len = usize::try_from(u32::from_be_bytes(length))
+        .map_err(|error| GatewayError::platform("read-helper-request", error))?;
+    if payload_len > MAX_FRAME_BYTES {
+        return Err(GatewayError::Platform {
+            operation: "read-helper-request",
+            message: format!("helper frame is {payload_len} bytes; limit is {MAX_FRAME_BYTES}"),
+        });
+    }
+    let mut payload = vec![0_u8; payload_len];
+    let mut payload_filled = 0usize;
+    while payload_filled < payload.len() {
+        match wait_readable_or_signal(stream.as_fd(), runtime, signals, Some(deadline))? {
+            WaitOutcome::Readable => {}
+            WaitOutcome::SignalShutdown => return Ok(FrameReadOutcome::SignalShutdown),
+        }
+        let target = payload
+            .get_mut(payload_filled..)
+            .ok_or_else(|| GatewayError::Platform {
+                operation: "read-helper-request",
+                message: format!("invalid frame payload offset {payload_filled}"),
+            })?;
+        match stream.read(target) {
+            Ok(0) => {
+                return Err(GatewayError::platform(
+                    "read-helper-request",
+                    std::io::Error::from(std::io::ErrorKind::UnexpectedEof),
+                ));
+            }
+            Ok(read) => payload_filled = payload_filled.saturating_add(read),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(GatewayError::platform("read-helper-request", error)),
+        }
+    }
+    let request = serde_json::from_slice(&payload)
+        .map_err(|error| GatewayError::platform("read-helper-request", error))?;
+    Ok(FrameReadOutcome::Request(request))
 }
 
 fn teardown_active_on_signal(
@@ -265,11 +368,14 @@ fn serve_connection(
             WaitOutcome::Readable => {}
             WaitOutcome::SignalShutdown => return Ok(HelperConnectionExit::SignalShutdown),
         }
-        let request = match read_request(stream) {
-            Ok(Some(request)) => request,
-            Ok(None) => return Ok(HelperConnectionExit::Disconnected),
-            Err(error) => return Err(error),
-        };
+        let request =
+            match read_request_with_deadline(stream, runtime, signals, HELPER_READ_TIMEOUT)? {
+                FrameReadOutcome::Request(request) => request,
+                FrameReadOutcome::Disconnected => return Ok(HelperConnectionExit::Disconnected),
+                FrameReadOutcome::SignalShutdown => {
+                    return Ok(HelperConnectionExit::SignalShutdown)
+                }
+            };
         match request {
             UnixConfigRequest::Establish { plan } => {
                 if establish_or_resume(runtime, control, active, stream, plan)? {
@@ -391,14 +497,7 @@ fn send_established(
         lease_id: active.lease_id.clone(),
         interface_name: active.interface_name.clone(),
     };
-    send_response(stream, &response, Some(transfer.as_raw_fd()))?;
-    clear_lease_read_timeout(stream)
-}
-
-fn clear_lease_read_timeout(stream: &UnixStream) -> Result<(), GatewayError> {
-    stream
-        .set_read_timeout(None)
-        .map_err(|error| GatewayError::platform("clear-unix-helper-read-timeout", error))
+    send_response(stream, &response, Some(transfer.as_raw_fd()))
 }
 
 fn accept_authorized(
@@ -613,15 +712,18 @@ impl Drop for SocketGuard {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixListener;
     use std::os::unix::net::UnixStream;
+    use std::time::Duration;
 
     use nix::unistd::Uid;
+    use tokio::signal::unix::SignalKind;
 
     use super::accept_authorized;
-    use super::clear_lease_read_timeout;
     use super::peer_uid;
+    use super::read_request_with_deadline;
     use super::remove_stale_socket;
     use super::secure_child_path;
     use super::AcceptOutcome;
@@ -681,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn active_lease_connection_has_no_idle_read_deadline() {
+    fn active_lease_retains_per_frame_deadline_and_services_signals() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("helper.sock");
         let listener = UnixListener::bind(&path).expect("bind fixture");
@@ -689,12 +791,17 @@ mod tests {
             .enable_all()
             .build()
             .expect("build helper test runtime");
-        let mut signals = ShutdownSignals::register(&runtime).expect("register signals");
+        let mut signals = ShutdownSignals::register_with_kinds(
+            &runtime,
+            SignalKind::user_defined1(),
+            SignalKind::user_defined2(),
+        )
+        .expect("register test signals");
         let client_path = path.clone();
         let client =
             std::thread::spawn(move || UnixStream::connect(client_path).expect("connect fixture"));
 
-        let server =
+        let mut server =
             match accept_authorized(&listener, Uid::effective().as_raw(), &runtime, &mut signals)
                 .expect("accept authorized client")
             {
@@ -706,11 +813,39 @@ mod tests {
             server.read_timeout().expect("read timeout"),
             Some(super::HELPER_READ_TIMEOUT)
         );
-        clear_lease_read_timeout(&server).expect("clear active lease read timeout");
-        assert_eq!(server.read_timeout().expect("cleared read timeout"), None);
         assert!(server.write_timeout().expect("write timeout").is_some());
+
+        let mut client_stream = client.join().expect("client thread");
+        client_stream
+            .write_all(&[0x00])
+            .expect("write partial frame prefix");
+        client_stream.flush().expect("flush partial frame prefix");
+
+        let partial_error = match read_request_with_deadline(
+            &mut server,
+            &runtime,
+            &mut signals,
+            Duration::from_millis(40),
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("partial frame must time out at frame deadline"),
+        };
+        assert!(
+            partial_error.to_string().contains("timed out"),
+            "unexpected partial frame error: {partial_error}"
+        );
+
+        let status = std::process::Command::new("kill")
+            .args(["-USR1", &std::process::id().to_string()])
+            .status()
+            .expect("send SIGUSR1 to current process");
+        assert!(status.success(), "kill -USR1 exited with {status}");
+        assert!(
+            signals.poll_triggered(&runtime),
+            "current_thread signal reactor must observe raised signal"
+        );
         drop(server);
-        drop(client.join().expect("client thread"));
+        drop(client_stream);
     }
 
     #[test]

@@ -22,7 +22,7 @@ use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
 use crate::GatewayError;
 
-const MAX_FRAME_BYTES: usize = 64 * 1024;
+pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RESPONSE_MARKER: u8 = 0x52;
 
 pub(crate) fn write_request(
@@ -32,6 +32,7 @@ pub(crate) fn write_request(
     write_frame(stream, request, "write-helper-request")
 }
 
+#[cfg(test)]
 pub(crate) fn read_request(
     stream: &mut UnixStream,
 ) -> Result<Option<UnixConfigRequest>, GatewayError> {

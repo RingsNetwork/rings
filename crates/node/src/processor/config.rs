@@ -296,6 +296,10 @@ pub(in crate::processor) fn validate_onion_role_config(
             service: service.clone(),
         });
     }
+    #[cfg(rings_browser)]
+    if let Some(offer) = onion_role.exit() {
+        offer.policy().validate_browser_targets()?;
+    }
     if onion_role.registers_relay() && !advertise_presence {
         return Err(Error::InvalidConfig(
             "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"

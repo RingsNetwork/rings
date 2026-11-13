@@ -1029,7 +1029,7 @@ where V: DeserializeOwned + Serialize + Sized
             unique_keys.insert(key.as_str());
         }
         let mut reclaimed_bytes = 0_u64;
-        if self.byte_cap.is_some() {
+        let used_before = if self.byte_cap.is_some() {
             for key in &unique_keys {
                 let existing_raw = scope.row(key).await?;
                 if !(existing_raw.is_undefined() || existing_raw.is_null()) {
@@ -1038,13 +1038,15 @@ where V: DeserializeOwned + Serialize + Sized
                     }
                 }
             }
-        }
+            Some(scope.used_bytes_record().await?.unwrap_or(0))
+        } else {
+            None
+        };
         let mut requests = Vec::with_capacity(unique_keys.len() + 1);
         for key in unique_keys {
             requests.push(scope.queue_delete_row(key)?);
         }
-        if self.byte_cap.is_some() {
-            let used = scope.used_bytes_record().await?.unwrap_or(0);
+        if let Some(used) = used_before {
             requests.push(scope.queue_write_used_bytes(used.saturating_sub(reclaimed_bytes))?);
         }
         request::requests(&requests).await?;

@@ -368,6 +368,7 @@ impl Provider {
             let signer = wrapped_signer(signer);
             let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
                 .map_err(JsError::from)?;
+            policy.validate_browser_targets().map_err(JsError::from)?;
             let offer =
                 OnionExitOffer::new(https_onion_exit_services(), policy).map_err(JsError::from)?;
             let delegatee_key =

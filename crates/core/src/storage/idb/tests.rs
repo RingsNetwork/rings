@@ -1002,4 +1002,12 @@ async fn test_idb_byte_budget_lru_evicts_and_retained_refuses() {
         .await
         .unwrap();
     retained.put("k3", &"ijkl".to_owned()).await.unwrap();
+    crate::storage::KvStorageScan::<String>::remove_batch(&retained, &[
+        "k2".to_owned(),
+        "k3".to_owned(),
+    ])
+    .await
+    .unwrap();
+    retained.put("k4", &"mnop".to_owned()).await.unwrap();
+    retained.put("k5", &"qrst".to_owned()).await.unwrap();
 }

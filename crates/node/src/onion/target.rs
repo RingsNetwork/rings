@@ -169,22 +169,39 @@ fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSele
     }
 }
 
+/// Validate that `target`'s host is an explicit public IPv4 or IPv6 literal.
+///
+/// Browser `fetch()` cannot pin resolved DNS addresses before connecting, so browser HTTPS exits
+/// only admit public IP-literal destinations.
+pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()> {
+    let ip = target
+        .host()
+        .parse::<std::net::IpAddr>()
+        .map_err(|_| Error::NoPermission)?;
+    if rings_network_policy::is_public_ip(ip) {
+        Ok(())
+    } else {
+        Err(Error::NoPermission)
+    }
+}
+
 /// Validate that an HTTPS exit request URL parses as an `https://` target without embedded
-/// credentials, satisfies the shared public-host policy (both public domains and public IP
-/// literals), and matches `target`'s canonical host and port.
+/// credentials, targets an explicit public IP literal, and matches `target`'s canonical host and
+/// port.
 #[cfg(any(all(feature = "browser", target_family = "wasm"), test))]
 pub(crate) fn validate_public_https_url(url: &str, target: &OnionProxyTarget) -> Result<()> {
+    validate_public_ip_literal(target)?;
     let parsed = Url::parse(url).map_err(|_| Error::NoPermission)?;
     if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(Error::NoPermission);
     }
-    rings_network_policy::validate_public_url_host(&parsed).map_err(|_| Error::NoPermission)?;
     if parsed.port_or_known_default() != Some(target.port()) {
         return Err(Error::NoPermission);
     }
     let parsed_host = parsed.host_str().ok_or(Error::NoPermission)?;
     let parsed_target =
         OnionProxyTarget::new(parsed_host, target.port()).map_err(|_| Error::NoPermission)?;
+    validate_public_ip_literal(&parsed_target)?;
     if parsed_target != *target {
         return Err(Error::NoPermission);
     }
@@ -301,21 +318,21 @@ mod tests {
         assert_eq!(idna.host(), "xn--bcher-kva.example");
         assert_eq!(idna.authority(), "xn--bcher-kva.example:443");
 
-        assert!(super::validate_public_https_url(
-            "https://xn--bcher-kva.example/index.html",
-            &idna,
-        )
-        .is_ok());
-        assert!(
-            super::validate_public_https_url("https://bücher.example:443/index.html", &idna,)
-                .is_ok()
-        );
-
         let public_ip = super::OnionProxyTarget::parse_authority("1.1.1.1:443").expect("public ip");
         assert!(super::validate_public_https_url("https://1.1.1.1/dns-query", &public_ip).is_ok());
+        let public_ipv6 =
+            super::OnionProxyTarget::parse_authority("[2606:4700:4700::1111]:443").expect("ipv6");
+        assert!(super::validate_public_https_url(
+            "https://[2606:4700:4700::1111]:443/dns-query",
+            &public_ipv6,
+        )
+        .is_ok());
 
         for denied_authority in [
+            "xn--bcher-kva.example:443",
+            "service.example.com:443",
             "127.0.0.1:443",
+            "10.0.0.1:443",
             "[::1]:443",
             "localhost:443",
             "service.local:443",

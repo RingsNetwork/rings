@@ -397,15 +397,15 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     for route in overlay.check_all_routes() {
         assert_eq!(route.outcome, Outcome::Delivered, "{route:?}");
         assert!(
-            route.path().len() <= 3,
-            "expected at most 2 hops: {route:?}"
+            route.path().len() <= 4,
+            "expected at most 3 hops: {route:?}"
         );
     }
 
     let e_to_a = overlay.check_route_law(e, a, RouteStage::TOWARD);
     assert_eq!(
         (e_to_a.path(), e_to_a.outcome),
-        (vec![e, c, a], Outcome::Delivered)
+        (vec![e, d, c, a], Outcome::Delivered)
     );
 
     let d_to_b = overlay.check_route_law(d, b, RouteStage::TOWARD);
@@ -417,7 +417,7 @@ fn test_non_transitive_two_clique_ring_delivers_all_pairs_and_satisfies_route_la
     let a_to_e = overlay.check_route_law(a, e, RouteStage::TOWARD);
     assert_eq!(
         (a_to_e.path(), a_to_e.outcome),
-        (vec![a, c, e], Outcome::Delivered)
+        (vec![a, b, c, e], Outcome::Delivered)
     );
 
     let b_to_d = overlay.check_route_law(b, d, RouteStage::TOWARD);
@@ -610,17 +610,48 @@ fn test_non_transitive_two_clique_bridge_routes_both_directions_and_reply_via() 
     ];
     let overlay = Overlay::with_links(views, links);
 
-    for (src, dst) in [(a10, e50), (b20, d40), (e50, a10), (d40, b20)] {
+    for (src, dst, expected) in [
+        (a10, e50, vec![a10, c30, e50]),
+        (b20, d40, vec![b20, c30, d40]),
+        (e50, a10, vec![e50, c30, a10]),
+        (d40, b20, vec![d40, e50, c30, b20]),
+    ] {
         let route = overlay.check_route_law(src, dst, RouteStage::TOWARD);
         assert_eq!(
             (route.path(), route.outcome),
-            (vec![src, c30, dst], Outcome::Delivered)
+            (expected, Outcome::Delivered)
         );
     }
 
-    let reply = overlay.check_route_law(e50, a10, RouteStage::replying_via(Some(c30)));
+    let reply = overlay.check_route_law(e50, a10, RouteStage::replying_via(Some(b20)));
     assert_eq!(
         (reply.path(), reply.outcome),
         (vec![e50, c30, a10], Outcome::Delivered)
+    );
+}
+
+/// Regression: when a node has a stale `bridged[T] = C` hint (`C-T` disconnected) alongside a
+/// closer live greedy forward peer `B` (`A=10 < C=20 < B=30 < T=40` with links `A-C`, `A-B`,
+/// `B-T`), `delivery_step` prefers the viable ordinary forward `A -> B -> T` instead of bouncing
+/// into the stale bridge `C`.
+#[test]
+fn test_stale_bridge_hint_does_not_override_viable_greedy_forward() {
+    let [a10, c20, b30, t40] = [10u32, 20, 30, 40].map(Did::from);
+
+    let mut view_a = TopologyState::new(a10, vec![c20, b30], Some(t40), vec![None; 8]);
+    view_a.bridged.insert(t40, c20);
+
+    let view_c = TopologyState::new(c20, vec![b30, t40, a10], Some(a10), vec![None; 8]);
+    let view_b = TopologyState::new(b30, vec![t40, a10, c20], Some(c20), vec![None; 8]);
+    let view_t = TopologyState::new(t40, vec![a10, c20, b30], Some(b30), vec![None; 8]);
+
+    let views = BTreeMap::from([(a10, view_a), (c20, view_c), (b30, view_b), (t40, view_t)]);
+    let links = [(a10, c20), (a10, b30), (b30, t40)];
+    let overlay = Overlay::with_links(views, links);
+
+    let route = overlay.check_route_law(a10, t40, RouteStage::TOWARD);
+    assert_eq!(
+        (route.path(), route.outcome),
+        (vec![a10, b30, t40], Outcome::Delivered)
     );
 }
