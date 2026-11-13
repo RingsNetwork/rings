@@ -7,9 +7,6 @@ use reqwest::Url;
 
 use super::Result;
 use super::RpcError;
-#[cfg(target_family = "wasm")]
-use super::DEFAULT_RPC_REQUEST_TIMEOUT;
-use super::MAX_RPC_RESPONSE_BYTES;
 
 /// Parse a credential destination without including its potentially sensitive URL in errors.
 ///
@@ -88,24 +85,36 @@ pub(super) async fn send(
         .map(Url::as_str)
         .unwrap_or(endpoint);
     #[cfg(target_family = "wasm")]
-    {
-        let _ = client;
+    if let Some(token) = token {
         return browser::send(endpoint, token, body).await;
+    }
+    // Build the payload before adding the optional credential header.
+    let request = client
+        .post(endpoint)
+        .header("content-type", "application/json")
+        .header("accept", "application/json")
+        .body(body);
+    // The private token can reach this header only after validation.
+    let request = match token {
+        Some(token) => request.bearer_auth(token),
+        None => request,
+    };
+    // A redirect response is rejected rather than interpreted as a JSON-RPC result.
+    #[cfg(target_family = "wasm")]
+    {
+        let built = request
+            .build()
+            .map_err(|error| RpcError::Client(error.to_string()))?;
+        let body = built
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or_default()
+            .to_owned();
+        return browser::send_unauthenticated(endpoint, body).await;
     }
     #[cfg(not(target_family = "wasm"))]
     {
-        // Build the payload before adding the optional credential header.
-        let request = client
-            .post(endpoint)
-            .header("content-type", "application/json")
-            .header("accept", "application/json")
-            .body(body);
-        // The private token can reach this header only after validation.
-        let request = match token {
-            Some(token) => request.bearer_auth(token),
-            None => request,
-        };
-        // A redirect response is rejected rather than interpreted as a JSON-RPC result.
         let response = request.send().await.map_err(|error| {
             if error.is_timeout() {
                 RpcError::Timeout
@@ -120,9 +129,10 @@ pub(super) async fn send(
             .error_for_status()
             .map_err(|error| RpcError::Client(error.to_string()))?;
         if let Some(length) = response.content_length() {
-            if length > MAX_RPC_RESPONSE_BYTES as u64 {
+            if length > super::MAX_RPC_RESPONSE_BYTES as u64 {
                 return Err(RpcError::Client(format!(
-                    "RPC response length {length} exceeds maximum {MAX_RPC_RESPONSE_BYTES} bytes"
+                    "RPC response length {length} exceeds maximum {} bytes",
+                    super::MAX_RPC_RESPONSE_BYTES
                 )));
             }
         }
@@ -132,9 +142,10 @@ pub(super) async fn send(
             .await
             .map_err(|error| RpcError::Client(error.to_string()))?
         {
-            if collected.len().saturating_add(chunk.len()) > MAX_RPC_RESPONSE_BYTES {
+            if collected.len().saturating_add(chunk.len()) > super::MAX_RPC_RESPONSE_BYTES {
                 return Err(RpcError::Client(format!(
-                    "RPC response exceeds maximum {MAX_RPC_RESPONSE_BYTES} bytes"
+                    "RPC response exceeds maximum {} bytes",
+                    super::MAX_RPC_RESPONSE_BYTES
                 )));
             }
             collected.extend_from_slice(&chunk);
@@ -151,10 +162,10 @@ mod browser {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
+    use super::super::DEFAULT_RPC_REQUEST_TIMEOUT;
+    use super::super::MAX_RPC_RESPONSE_BYTES;
     use super::Result;
     use super::RpcError;
-    use super::DEFAULT_RPC_REQUEST_TIMEOUT;
-    use super::MAX_RPC_RESPONSE_BYTES;
 
     mod futures_lite_or_pin {
         pub(super) use core::future::Future;
@@ -200,8 +211,22 @@ mod browser {
         .await
     }
 
+    /// Send credentials with redirect mode `error`, before a redirect can emit another request.
+    pub(super) async fn send(endpoint: &str, token: &str, body: String) -> Result<Vec<u8>> {
+        send_with_optional_token(endpoint, Some(token), body).await
+    }
+
+    /// Send an unauthenticated RPC request with bounded timeout and response size.
+    pub(super) async fn send_unauthenticated(endpoint: &str, body: String) -> Result<Vec<u8>> {
+        send_with_optional_token(endpoint, None, body).await
+    }
+
     /// Send an RPC request with redirect mode `error`, bounded timeout, and bounded response size.
-    pub(super) async fn send(endpoint: &str, token: Option<&str>, body: String) -> Result<Vec<u8>> {
+    async fn send_with_optional_token(
+        endpoint: &str,
+        token: Option<&str>,
+        body: String,
+    ) -> Result<Vec<u8>> {
         let has_token = token.is_some();
         let abort_controller =
             web_sys::AbortController::new().map_err(|_| RpcError::BrowserTransport)?;

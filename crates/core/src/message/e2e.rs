@@ -319,7 +319,7 @@ impl E2eStreamEncryptor {
         let ephemeral_public_key =
             PublicKey::from(&NonIdentityPoint::generator_mul(&ephemeral_scalar));
         let shared_secret = recipient_point.shared_secret(&ephemeral_scalar);
-        let (key, nonce) = derive_e2e_key_and_nonce(shared_secret.as_slice(), true)?;
+        let derived = derive_e2e_key_and_nonce(shared_secret.as_slice(), true)?;
         let aad = e2e_ecies_aad(
             self.stream_id,
             self.sender_public_key,
@@ -328,9 +328,9 @@ impl E2eStreamEncryptor {
             sequence,
             is_final,
         );
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(derived.key.as_slice()));
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce), Payload {
+            .encrypt(Nonce::from_slice(derived.nonce.as_slice()), Payload {
                 msg: plaintext,
                 aad: aad.as_slice(),
             })
@@ -544,7 +544,7 @@ fn decrypt_ecies_frame(
 ) -> Result<Vec<u8>> {
     let ephemeral_point = NonIdentityPoint::<Secp256k1>::try_from(frame.ephemeral_public_key)?;
     let shared_secret = ephemeral_point.shared_secret(recipient_scalar);
-    let (key, nonce) = derive_e2e_key_and_nonce(shared_secret.as_slice(), false)?;
+    let derived = derive_e2e_key_and_nonce(shared_secret.as_slice(), false)?;
     let aad = e2e_ecies_aad(
         frame.stream_id,
         frame.sender_public_key,
@@ -553,20 +553,25 @@ fn decrypt_ecies_frame(
         frame.sequence,
         frame.is_final,
     );
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(derived.key.as_slice()));
     cipher
-        .decrypt(Nonce::from_slice(&nonce), Payload {
+        .decrypt(Nonce::from_slice(derived.nonce.as_slice()), Payload {
             msg: frame.ciphertext.as_slice(),
             aad: aad.as_slice(),
         })
         .map_err(|_| Error::MessageDecryptionFailed("E2E AEAD open failed".to_string()))
 }
 
+struct E2eDerivedMaterial {
+    key: Zeroizing<[u8; E2E_AEAD_KEY_LEN]>,
+    nonce: Zeroizing<[u8; E2E_AEAD_NONCE_LEN]>,
+}
+
 fn derive_e2e_key_and_nonce(
     shared_secret: &[u8],
     encrypt_side: bool,
-) -> Result<(Zeroizing<[u8; E2E_AEAD_KEY_LEN]>, [u8; E2E_AEAD_NONCE_LEN])> {
-    let mut okm = Zeroizing::new([0u8; E2E_AEAD_KEY_LEN + E2E_AEAD_NONCE_LEN]);
+) -> Result<E2eDerivedMaterial> {
+    let mut okm = Zeroizing::new(vec![u8::default(); E2E_AEAD_KEY_LEN + E2E_AEAD_NONCE_LEN]);
     Hkdf::<Sha256>::new(Some(E2E_ECIES_SALT), shared_secret)
         .expand(E2E_ECIES_INFO, okm.as_mut_slice())
         .map_err(|_| {
@@ -576,15 +581,12 @@ fn derive_e2e_key_and_nonce(
                 Error::MessageDecryptionFailed("E2E key derivation failed".to_string())
             }
         })?;
-    let mut key = Zeroizing::new([0u8; E2E_AEAD_KEY_LEN]);
-    let mut nonce = [0u8; E2E_AEAD_NONCE_LEN];
-    if let Some(key_bytes) = okm.get(..E2E_AEAD_KEY_LEN) {
-        key.copy_from_slice(key_bytes);
-    }
-    if let Some(nonce_bytes) = okm.get(E2E_AEAD_KEY_LEN..) {
-        nonce.copy_from_slice(nonce_bytes);
-    }
-    Ok((key, nonce))
+    let (key_bytes, nonce_bytes) = okm.split_at(E2E_AEAD_KEY_LEN);
+    let mut key = Zeroizing::<[u8; E2E_AEAD_KEY_LEN]>::default();
+    key.copy_from_slice(key_bytes);
+    let mut nonce = Zeroizing::<[u8; E2E_AEAD_NONCE_LEN]>::default();
+    nonce.copy_from_slice(nonce_bytes);
+    Ok(E2eDerivedMaterial { key, nonce })
 }
 
 fn e2e_ecies_aad(
