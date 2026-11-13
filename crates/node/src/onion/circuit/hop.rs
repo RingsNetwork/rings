@@ -9,9 +9,9 @@
 //!   │ no
 //!   ▼
 //! peel χ under d_i (α, ECDH, γ)                                        else Dropped(Peel)
-//! admit(tk, e, x, ν)                                                   else Dropped(Admission)
 //! relay ∧ this node relays nothing                                     ⇒ Dropped(NotRelay)
 //! relay ∧ next is no live link                                         ⇒ Dropped(NextNotLive)
+//! admit(tk, e, x, ν)                                                   else Dropped(Admission)
 //! step (AEZ layer off, or the consumer's open)                         else Dropped(Step)
 //!   ├─ relay   ⇒ Relayed(next, cell)
 //!   └─ f ∈ Σ_W ⇒ Consumed(f, ā, v, υ)
@@ -111,22 +111,24 @@ pub(crate) fn hop(
             cell: charged.settle(),
         };
     }
-    let admitted = match charged.peel(keys) {
-        Ok(peeled) => match peeled.admit(admission, now_ms) {
-            Ok(admitted) => admitted,
-            Err(rejection) => return OnionHopOutcome::Dropped(OnionHopDrop::Admission(rejection)),
-        },
+    let peeled = match charged.peel(keys) {
+        Ok(peeled) => peeled,
         Err(error) => return OnionHopOutcome::Dropped(error.into()),
     };
-    if admitted.head().application == OnionLayerApplication::Relay {
+    if peeled.value().head().application == OnionLayerApplication::Relay {
         if !relays {
             return OnionHopOutcome::Dropped(OnionHopDrop::NotRelay);
         }
-        // Decided on the head, before the carry step deciphers the slot for nothing.
-        if admission.live_link(admitted.head().next).is_none() {
+        // Decided on the head before replay admission and carry decipherment so an unforwardable
+        // relay cell neither burns `(x, ν)` in the replay filter nor deciphers the slot.
+        if admission.live_link(peeled.value().head().next).is_none() {
             return OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive);
         }
     }
+    let admitted = match peeled.admit(admission, now_ms) {
+        Ok(admitted) => admitted,
+        Err(rejection) => return OnionHopOutcome::Dropped(OnionHopDrop::Admission(rejection)),
+    };
     admitted.step().map_or_else(
         |error| OnionHopOutcome::Dropped(error.into()),
         OnionHopOutcome::Stepped,

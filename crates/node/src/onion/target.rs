@@ -1,12 +1,13 @@
 //! Target authority parsing shared by onion policy and proxy adapters.
 
-#[cfg(rings_browser)]
-use std::net::IpAddr;
 #[cfg(any(test, rings_native))]
 use std::net::SocketAddr;
 
 #[cfg(rings_native)]
 use tokio::net::lookup_host;
+use url::Host;
+#[cfg(any(all(feature = "browser", target_family = "wasm"), test))]
+use url::Url;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -33,6 +34,9 @@ pub enum OnionProxyTargetError {
     /// exit patterns `*`, `*:*` and `*:port` are recognised before any host is parsed).
     #[error("onion proxy target host must not contain '*'")]
     WildcardHost,
+    /// Host is not a syntactically valid domain or IP literal.
+    #[error("onion proxy target host is invalid")]
+    InvalidHost,
     /// Port is not a valid `u16`.
     #[error("onion proxy target has an invalid port")]
     InvalidPort,
@@ -165,23 +169,31 @@ fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSele
     }
 }
 
-/// Browser exits cannot pin a hostname to the address admitted by this node.
-/// Only a public literal address is therefore safe in that environment.
-#[cfg(rings_browser)]
-pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()> {
-    let address = target
-        .host()
-        .parse::<IpAddr>()
-        .map_err(|_| Error::NoPermission)?;
-    if rings_network_policy::is_public_ip(address) {
-        Ok(())
-    } else {
-        Err(Error::NoPermission)
+/// Validate that an HTTPS exit request URL parses as an `https://` target without embedded
+/// credentials, satisfies the shared public-host policy (both public domains and public IP
+/// literals), and matches `target`'s canonical host and port.
+#[cfg(any(all(feature = "browser", target_family = "wasm"), test))]
+pub(crate) fn validate_public_https_url(url: &str, target: &OnionProxyTarget) -> Result<()> {
+    let parsed = Url::parse(url).map_err(|_| Error::NoPermission)?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(Error::NoPermission);
     }
+    rings_network_policy::validate_public_url_host(&parsed).map_err(|_| Error::NoPermission)?;
+    if parsed.port_or_known_default() != Some(target.port()) {
+        return Err(Error::NoPermission);
+    }
+    let parsed_host = parsed.host_str().ok_or(Error::NoPermission)?;
+    let parsed_target =
+        OnionProxyTarget::new(parsed_host, target.port()).map_err(|_| Error::NoPermission)?;
+    if parsed_target != *target {
+        return Err(Error::NoPermission);
+    }
+    Ok(())
 }
 
-/// The canonical host: trimmed, without trailing dots, lowercase; empty, whitespace and `*`
-/// are refused.
+/// The canonical host: trimmed, without trailing dots, canonicalized via `url::Host::parse`
+/// (IDNA Punycode lowercase ASCII for domains, canonical dotted-quad / compressed IPv6 for IP
+/// literals); empty, whitespace, `*`, and syntactically invalid hosts are refused.
 fn normalize_host(host: &str) -> Result<String> {
     let host = host.trim().trim_end_matches('.');
     if host.is_empty() {
@@ -193,7 +205,17 @@ fn normalize_host(host: &str) -> Result<String> {
     if host.contains('*') {
         return Err(OnionProxyTargetError::WildcardHost.into());
     }
-    Ok(host.to_ascii_lowercase())
+    let parsed = if host.contains(':') && !host.starts_with('[') {
+        Host::parse(&format!("[{host}]"))
+    } else {
+        Host::parse(host)
+    }
+    .map_err(|_| OnionProxyTargetError::InvalidHost)?;
+    Ok(match parsed {
+        Host::Domain(domain) => domain,
+        Host::Ipv4(ipv4) => ipv4.to_string(),
+        Host::Ipv6(ipv6) => ipv6.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -268,6 +290,46 @@ mod tests {
             assert!(
                 rings_network_policy::is_public_ip(address),
                 "rejected public address {address}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_idna_punycode_canonicalization_and_public_https_url_validation() {
+        let idna = super::OnionProxyTarget::parse_authority("Bücher.Example.:443")
+            .expect("valid IDNA authority");
+        assert_eq!(idna.host(), "xn--bcher-kva.example");
+        assert_eq!(idna.authority(), "xn--bcher-kva.example:443");
+
+        assert!(super::validate_public_https_url(
+            "https://xn--bcher-kva.example/index.html",
+            &idna,
+        )
+        .is_ok());
+        assert!(
+            super::validate_public_https_url("https://bücher.example:443/index.html", &idna,)
+                .is_ok()
+        );
+
+        let public_ip = super::OnionProxyTarget::parse_authority("1.1.1.1:443").expect("public ip");
+        assert!(super::validate_public_https_url("https://1.1.1.1/dns-query", &public_ip).is_ok());
+
+        for denied_authority in [
+            "127.0.0.1:443",
+            "[::1]:443",
+            "localhost:443",
+            "service.local:443",
+            "metadata.google.internal:443",
+        ] {
+            let target =
+                super::OnionProxyTarget::parse_authority(denied_authority).expect("authority");
+            let url = format!("https://{}/", target.authority());
+            assert!(
+                matches!(
+                    super::validate_public_https_url(&url, &target),
+                    Err(crate::error::Error::NoPermission)
+                ),
+                "unexpectedly allowed {url}"
             );
         }
     }

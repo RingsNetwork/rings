@@ -267,6 +267,10 @@ impl Processor {
         self.onion_entry_guards.as_ref()
     }
 
+    pub(crate) fn onion_entry_guards_arc(&self) -> Arc<OnionEntryGuards> {
+        Arc::clone(&self.onion_entry_guards)
+    }
+
     /// Return the onion symbols this process registers (#834 D2).
     pub const fn onion_role(&self) -> &OnionRole<OnionExitOffer> {
         &self.onion_role

@@ -166,12 +166,14 @@ fn test_a_loop_runs_to_its_symbol_and_returns_to_the_client() {
     );
 }
 
-/// Adjacency: a relay layer whose `next` is not a live link of the hop is dropped after
-/// admission, so a layer cannot make a node emit toward a peer it has no link to (#895 H1).
+/// Adjacency: a relay layer whose `next` is not a live link of the hop is dropped before replay
+/// admission, so it neither makes the hop emit toward an unlinked peer nor burns the layer's
+/// replay nonce before that link finishes opening (#895 H1, #1262).
 #[test]
 fn test_a_relay_layer_to_a_peer_with_no_link_is_dropped() {
     let mut fixture = Fixture::new();
     let built = fixture.build(5, b"value");
+    let cell_bytes = built.cell.into_bytes();
     let r02 = fixture.hops[1].did();
     let guard = &mut fixture.hops[0];
     guard
@@ -179,8 +181,29 @@ fn test_a_relay_layer_to_a_peer_with_no_link_is_dropped() {
         .link_closed(NOW_MS, OnionAdmissionLink::new(r02, 0));
 
     assert!(matches!(
-        guard.step(Did::from(CLIENT), built.cell),
+        guard.step(
+            Did::from(CLIENT),
+            OnionCell::parse(&cell_bytes).expect("width"),
+        ),
         OnionHopOutcome::Dropped(OnionHopDrop::NextNotLive)
+    ));
+    assert_eq!(
+        guard.admission.sender_units(Did::from(CLIENT)),
+        1,
+        "Paid still charges u(b) on NextNotLive"
+    );
+
+    // Once the link to `next` opens, the unburned cell succeeds instead of failing Replayed.
+    guard
+        .admission
+        .link_opened(NOW_MS, OnionAdmissionLink::new(r02, 1))
+        .expect("reopen link");
+    assert!(matches!(
+        guard.step(
+            Did::from(CLIENT),
+            OnionCell::parse(&cell_bytes).expect("width"),
+        ),
+        OnionHopOutcome::Stepped(OnionStep::Relayed { next, .. }) if next == r02
     ));
 }
 

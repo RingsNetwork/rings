@@ -107,41 +107,73 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     }
 
     async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
-        match &self.endpoint {
-            None => self.processor.lookup_online_nodes(false).await,
-            Some(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)?
-                    .lookup_online_nodes(&LookupOnlineNodesRequest {
-                        include_expired: false,
-                    })
-                    .await
-                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-                Ok(crate::rpc_dto::online_node_descriptors_from_infos(
-                    response.nodes,
-                    self.processor.clock().now_ms(),
-                    self.processor.swarm.network_id(),
-                ))
+        let local = self.processor.lookup_online_nodes(false).await;
+        let Some(endpoint) = &self.endpoint else {
+            return local;
+        };
+        let remote = async {
+            let response = authenticated_rpc_client(endpoint)?
+                .lookup_online_nodes(&LookupOnlineNodesRequest {
+                    include_expired: false,
+                })
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            Ok::<_, Error>(crate::rpc_dto::online_node_descriptors_from_infos(
+                response.nodes,
+                self.processor.clock().now_ms(),
+                self.processor.swarm.network_id(),
+            ))
+        }
+        .await;
+        match (local, remote) {
+            (Ok(local_nodes), Ok(remote_nodes)) => {
+                Ok(merge_online_node_descriptors(local_nodes, remote_nodes))
             }
+            (Ok(local_nodes), Err(remote_error)) => {
+                if local_nodes.is_empty() {
+                    Err(remote_error)
+                } else {
+                    Ok(local_nodes)
+                }
+            }
+            (Err(_), Ok(remote_nodes)) => Ok(remote_nodes),
+            (Err(_), Err(remote_error)) => Err(remote_error),
         }
     }
 
     async fn live_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
-        match &self.endpoint {
-            None => self.processor.lookup_onion_exits(service, false).await,
-            Some(endpoint) => {
-                let response = authenticated_rpc_client(endpoint)?
-                    .lookup_onion_exits(&LookupOnionExitsRequest {
-                        service: service.to_string(),
-                        include_expired: false,
-                    })
-                    .await
-                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
-                Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
-                    response.exits,
-                    self.processor.clock().now_ms(),
-                    self.processor.swarm.network_id(),
-                ))
+        let local = self.processor.lookup_onion_exits(service, false).await;
+        let Some(endpoint) = &self.endpoint else {
+            return local;
+        };
+        let remote = async {
+            let response = authenticated_rpc_client(endpoint)?
+                .lookup_onion_exits(&LookupOnionExitsRequest {
+                    service: service.to_string(),
+                    include_expired: false,
+                })
+                .await
+                .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+            Ok::<_, Error>(crate::rpc_dto::onion_exit_descriptors_from_infos(
+                response.exits,
+                self.processor.clock().now_ms(),
+                self.processor.swarm.network_id(),
+            ))
+        }
+        .await;
+        match (local, remote) {
+            (Ok(local_exits), Ok(remote_exits)) => {
+                Ok(merge_onion_exit_descriptors(local_exits, remote_exits))
             }
+            (Ok(local_exits), Err(remote_error)) => {
+                if local_exits.is_empty() {
+                    Err(remote_error)
+                } else {
+                    Ok(local_exits)
+                }
+            }
+            (Err(_), Ok(remote_exits)) => Ok(remote_exits),
+            (Err(_), Err(remote_error)) => Err(remote_error),
         }
     }
 
@@ -177,35 +209,78 @@ async fn build_browser_route_from_reader(
     directory::build_onion_proxy_route(reader, OnionProxyProtocol::HttpsProxy, target).await
 }
 
+fn merge_online_node_descriptors(
+    local: Vec<OnlineNodeDescriptor>,
+    remote: Vec<OnlineNodeDescriptor>,
+) -> Vec<OnlineNodeDescriptor> {
+    let mut merged = std::collections::BTreeMap::new();
+    for descriptor in remote.into_iter().chain(local) {
+        let rank = (
+            descriptor.expires_at_ms,
+            descriptor.started_at_ms,
+            descriptor.heartbeat_at_ms,
+        );
+        match merged.entry(descriptor.did) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(descriptor);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let existing = slot.get();
+                let existing_rank = (
+                    existing.expires_at_ms,
+                    existing.started_at_ms,
+                    existing.heartbeat_at_ms,
+                );
+                if rank >= existing_rank {
+                    slot.insert(descriptor);
+                }
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
+fn merge_onion_exit_descriptors(
+    local: Vec<OnionExitDescriptor>,
+    remote: Vec<OnionExitDescriptor>,
+) -> Vec<OnionExitDescriptor> {
+    let mut merged = std::collections::BTreeMap::new();
+    for descriptor in remote.into_iter().chain(local) {
+        let rank = (
+            descriptor.expires_at_ms,
+            descriptor.started_at_ms,
+            descriptor.heartbeat_at_ms,
+        );
+        match merged.entry((descriptor.did, descriptor.service.clone())) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(descriptor);
+            }
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let existing = slot.get();
+                let existing_rank = (
+                    existing.expires_at_ms,
+                    existing.started_at_ms,
+                    existing.heartbeat_at_ms,
+                );
+                if rank >= existing_rank {
+                    slot.insert(descriptor);
+                }
+            }
+        }
+    }
+    merged.into_values().collect()
+}
+
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     target: OnionProxyTarget,
     directory_endpoint: Option<BrowserDirectoryEndpoint>,
 ) -> NodeResult<OnionProxyRoute> {
-    if let Some(endpoint) = directory_endpoint {
-        let remote_reader = BrowserOnionDirectoryReader {
-            processor: processor.clone(),
-            endpoint: Some(endpoint),
-        };
-        match build_browser_route_from_reader(&remote_reader, target.clone()).await {
-            Ok(route) => return Ok(route),
-            Err(remote_error) => {
-                let local_reader = BrowserOnionDirectoryReader {
-                    processor,
-                    endpoint: None,
-                };
-                return build_browser_route_from_reader(&local_reader, target)
-                    .await
-                    .map_err(|_| remote_error);
-            }
-        }
-    }
-
-    let local_reader = BrowserOnionDirectoryReader {
+    let reader = BrowserOnionDirectoryReader {
         processor,
-        endpoint: None,
+        endpoint: directory_endpoint,
     };
-    build_browser_route_from_reader(&local_reader, target).await
+    build_browser_route_from_reader(&reader, target).await
 }
 
 #[wasm_export]

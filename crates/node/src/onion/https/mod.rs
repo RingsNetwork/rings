@@ -288,6 +288,30 @@ async fn fetch(
     .await
 }
 
+/// Return whether the HTTPS exit transport, rather than the onion client, owns this request header.
+///
+/// The validated session target is the sole authority source, and message framing / hop-by-hop
+/// headers belong to the exit's HTTP client (`reqwest` on native, `fetch` on browser).
+pub(crate) fn is_transport_managed_header(name: &str) -> bool {
+    [
+        "host",
+        ":authority",
+        "connection",
+        "proxy-connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "content-length",
+        "upgrade",
+        "expect",
+    ]
+    .iter()
+    .any(|managed| name.eq_ignore_ascii_case(managed))
+}
+
 /// The canonical form of a method: trimmed, upper case, `GET` when empty.
 fn normalize_method(method: &str) -> String {
     let method = method.trim();

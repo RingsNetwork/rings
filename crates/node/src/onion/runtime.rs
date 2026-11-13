@@ -4,6 +4,7 @@
 
 use std::num::NonZeroUsize;
 use std::pin::pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::select;
@@ -34,6 +35,7 @@ use super::session::serve::OnionExitSessions;
 use super::signature::OnionBackendName;
 use super::signature::OnionInvokeShape;
 use super::sphinx::class::OnionLoopClass;
+use super::OnionEntryGuards;
 use super::OnionExitOffer;
 use super::OnionRouteError;
 use super::OnionServiceName;
@@ -51,6 +53,10 @@ pub(crate) struct OnionRuntime {
     loops: OnionLoopClient,
     /// Shared `(shape, backend)` interpretation table for intermediate `invoke` evaluations.
     invokes: OnionInvokeRegistry,
+    /// Shared entry-guard manager so stuck first-hop guards rotate on consecutive timeouts.
+    entry_guards: Arc<OnionEntryGuards>,
+    /// Network identifier scoping entry-guard state.
+    network_id: u32,
     /// The witness of the data plane's link table.
     #[cfg(all(test, rings_native))]
     links: OnionLinkWitness,
@@ -117,6 +123,8 @@ impl OnionRuntime {
                 tracing::warn!(%error, "onion data plane could not reconcile its link table");
             }
         })?;
+        let entry_guards = core.onion_entry_guards();
+        let network_id = core.network_id();
         Ok(Self {
             scope,
             loops: OnionLoopClient::new_with_capabilities(
@@ -127,6 +135,8 @@ impl OnionRuntime {
                 rng,
             ),
             invokes,
+            entry_guards,
+            network_id,
             #[cfg(all(test, rings_native))]
             links,
             #[cfg(all(test, rings_native))]
@@ -153,7 +163,10 @@ impl OnionRuntime {
 
     /// Open one session over its selected route and wait for the exit's answer.
     pub(crate) async fn open(&self, request: OnionSessionRequest) -> Result<OnionClientStream> {
-        dial::open(self.loops.clone(), self.scope.clone(), request).await
+        let guard = request.route.hops().guard().did;
+        let result = dial::open(self.loops.clone(), self.scope.clone(), request).await;
+        self.record_guard_result(guard, &result).await;
+        result
     }
 
     /// Evaluate a one-shot Kleisli `pipeline` over `route` at its L3-minimal loop class, waiting
@@ -166,24 +179,55 @@ impl OnionRuntime {
         input: &[u8],
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>> {
-        let (receiver, tag, expiry) = self
-            .loops
-            .send_pipeline(&self.scope, route, pipeline, class, input)
-            .await?;
-        let remaining_expiry_ms =
-            u64::try_from(expiry.as_ms().saturating_sub(self.loops.clock().now_ms()))
-                .unwrap_or(u64::MAX);
-        let expiry_bound = Duration::from_millis(remaining_expiry_ms);
-        let wait_bound = timeout.map_or(expiry_bound, |requested| requested.min(expiry_bound));
-        match select(pin!(receiver), pin!(sleep(wait_bound))).await {
-            Either::Left((Ok(output), _)) => Ok(output),
-            Either::Left((Err(_), _)) => {
-                self.loops.remove_tag(&tag);
-                Err(Error::OnionRouteError(OnionRouteError::PipelineFailed))
+        let guard = route.hops().guard().did;
+        let result = async {
+            let (receiver, tag, expiry) = self
+                .loops
+                .send_pipeline(&self.scope, route, pipeline, class, input)
+                .await?;
+            let remaining_expiry_ms =
+                u64::try_from(expiry.as_ms().saturating_sub(self.loops.clock().now_ms()))
+                    .unwrap_or(u64::MAX);
+            let expiry_bound = Duration::from_millis(remaining_expiry_ms);
+            let wait_bound = timeout.map_or(expiry_bound, |requested| requested.min(expiry_bound));
+            match select(pin!(receiver), pin!(sleep(wait_bound))).await {
+                Either::Left((Ok(output), _)) => Ok(output),
+                Either::Left((Err(_), _)) => {
+                    self.loops.remove_tag(&tag);
+                    Err(Error::OnionRouteError(OnionRouteError::PipelineFailed))
+                }
+                Either::Right((_, _)) => {
+                    self.loops.remove_tag(&tag);
+                    Err(Error::OnionRouteError(OnionRouteError::PipelineTimedOut))
+                }
             }
-            Either::Right((_, _)) => {
-                self.loops.remove_tag(&tag);
-                Err(Error::OnionRouteError(OnionRouteError::PipelineTimedOut))
+        }
+        .await;
+        self.record_guard_result(guard, &result).await;
+        result
+    }
+
+    async fn record_guard_result<T>(&self, guard: rings_core::dht::Did, result: &Result<T>) {
+        let outcome = match result {
+            Ok(_) => Some(false),
+            Err(
+                Error::OnionProxyRequestTimedOut
+                | Error::OnionRouteError(
+                    OnionRouteError::PipelineTimedOut
+                    | OnionRouteError::LinkSendTimedOut
+                    | OnionRouteError::TcpOpenTimedOut,
+                ),
+            ) => Some(true),
+            Err(_) => None,
+        };
+        if let Some(timed_out) = outcome {
+            let now_ms = self.loops.clock().now_ms();
+            if let Err(error) = self
+                .entry_guards
+                .record_route_outcome(self.network_id, guard, timed_out, now_ms)
+                .await
+            {
+                tracing::warn!(%error, %guard, "failed to record onion entry-guard route outcome");
             }
         }
     }

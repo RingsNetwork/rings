@@ -209,6 +209,11 @@ impl<T> Default for OrderedSendState<T> {
 }
 
 impl<T> OrderedSendState<T> {
+    /// Whether `peer` currently has an open outbound lane.
+    pub(super) fn has_lane(&self, peer: Did) -> bool {
+        self.lanes.contains_key(&peer)
+    }
+
     /// The link to `peer` is up at `now`: give it a lane, with the clock it had if it closed
     /// less than `V` ago, and return the epoch of the emitter to spawn if it had none. Nothing
     /// opens after a shutdown.

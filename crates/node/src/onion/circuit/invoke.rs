@@ -272,13 +272,6 @@ impl OnionInvokeRegistry {
             );
             return Ok(());
         };
-        let Ok(lease) =
-            self.accounting
-                .admit(shape, &backend, &policy, input.from, input.received_at_ms)
-        else {
-            tracing::debug!(?shape, %backend, "drop onion invoke exceeding quota");
-            return Ok(());
-        };
         let latency = shape.latency().duration();
         let release_at_ms = input
             .received_at_ms
@@ -287,6 +280,25 @@ impl OnionInvokeRegistry {
             tracing::debug!(?shape, %backend, "drop onion invoke expiring before release");
             return Ok(());
         }
+        if !self
+            .link_sender
+            .has_lane(OnionLink::new(input.surb.next()))?
+        {
+            tracing::debug!(
+                ?shape,
+                %backend,
+                next = %input.surb.next(),
+                "drop onion invoke whose SURB next hop has no live outbound lane"
+            );
+            return Ok(());
+        }
+        let Ok(lease) =
+            self.accounting
+                .admit(shape, &backend, &policy, input.from, input.received_at_ms)
+        else {
+            tracing::debug!(?shape, %backend, "drop onion invoke exceeding quota");
+            return Ok(());
+        };
 
         let carried_input = input.value.as_slice().to_vec();
         let surb = input.surb;

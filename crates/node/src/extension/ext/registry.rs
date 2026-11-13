@@ -190,6 +190,16 @@ impl Core {
         self.processor.onion_process_epoch()
     }
 
+    /// The entry-guard manager shared across this node's onion route builders.
+    pub(crate) fn onion_entry_guards(&self) -> Arc<crate::onion::OnionEntryGuards> {
+        self.processor.onion_entry_guards_arc()
+    }
+
+    /// Network identifier of this node's swarm.
+    pub(crate) fn network_id(&self) -> u32 {
+        self.processor.swarm.network_id()
+    }
+
     /// The injected [`SharedClock`](rings_core::utils::SharedClock) of this node.
     pub(crate) fn clock(&self) -> &rings_core::utils::SharedClock {
         self.processor.clock()
