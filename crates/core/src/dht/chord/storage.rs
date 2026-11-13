@@ -604,8 +604,9 @@ impl PeerRing {
     /// find_storage_owner(placement)
     ///   ├─ Some(owner) ─▶ [live value stored here?] ── yes ─▶ Found(value)
     ///   │                        │ no
-    ///   │                        ├─ owner ≠ self ─────────────────────▶ Remote(owner)
-    ///   │                        └─ owner = self ─▶ [fallback ∧ virtual nodes ∧ ∃ head]
+    ///   │                        ├─ ¬virtual nodes ──────────────────▶ Missed(placement, self)
+    ///   │                        ├─ owner ≠ self ────────────────────▶ Remote(owner)
+    ///   │                        └─ owner = self ─▶ [fallback ∧ ∃ head]
     ///   │                                              ├─ yes ─▶ Remote(head)
     ///   │                                              └─ no  ─▶ Missed(placement, self)
     ///   └─ RemoteAction(next, FindSuccessor(id)) ──────────────────▶ Remote(next) for id

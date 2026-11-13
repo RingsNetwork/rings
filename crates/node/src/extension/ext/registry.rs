@@ -122,6 +122,11 @@ pub(crate) trait Handler {
 #[derive(Clone)]
 pub(crate) struct Core {
     processor: std::sync::Weak<Processor>,
+    /// Retained only when constructed standalone via [`Extensions::new`] without an enclosing
+    /// [`Provider`](crate::provider::Provider) owning the [`Processor`]. [`Provider`] builds its
+    /// registry via [`Extensions::new_weak`] so spawned [`Backend::serve`] / protocol tasks never
+    /// form a strong `Arc<Processor>` cycle.
+    _standalone_owner: Option<Arc<Processor>>,
     did: Did,
     network_id: u32,
     tasks: NodeTasks,
@@ -645,8 +650,23 @@ pub struct Extensions {
 }
 
 impl Extensions {
-    /// Empty registry over a processor (the source of overlay `send` / `did`).
+    /// Empty registry over a processor (the source of overlay `send` / `did`), retaining
+    /// `processor` for standalone callers that do not wrap it in a [`Provider`](crate::provider::Provider).
     pub fn new(processor: Arc<Processor>) -> Self {
+        Self::from_processor_parts(&processor, Some(Arc::clone(&processor)))
+    }
+
+    /// Empty registry holding `processor` weakly so an enclosing [`Provider`](crate::provider::Provider)
+    /// remains the sole strong owner and background [`Backend::serve`](crate::extension::Backend::serve)
+    /// tasks never keep `Processor` or its stores alive after `Provider` drops.
+    pub(crate) fn new_weak(processor: &Arc<Processor>) -> Self {
+        Self::from_processor_parts(processor, None)
+    }
+
+    fn from_processor_parts(
+        processor: &Arc<Processor>,
+        standalone_owner: Option<Arc<Processor>>,
+    ) -> Self {
         let did = processor.did();
         let network_id = processor.swarm.network_id();
         let tasks = processor.tasks().clone();
@@ -658,7 +678,8 @@ impl Extensions {
         let rng = processor.rng().clone();
         Self {
             core: Core {
-                processor: Arc::downgrade(&processor),
+                processor: Arc::downgrade(processor),
+                _standalone_owner: standalone_owner,
                 did,
                 network_id,
                 tasks,

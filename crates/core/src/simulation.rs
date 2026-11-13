@@ -173,6 +173,7 @@ struct SimulationRuntimeState {
     elapsed_ms: u128,
     uuid_seed: u64,
     next_uuid_sequence: u64,
+    entropy_rng_state: u64,
     schedule_rng_state: u64,
     protection: ProtectionProfile,
     observations: ProtectionObservations,
@@ -206,6 +207,7 @@ impl SimulationRuntimeState {
             elapsed_ms: 0,
             uuid_seed: dummy_controlled::mix_seed(seed),
             next_uuid_sequence: 0,
+            entropy_rng_state: dummy_controlled::mix_seed(seed ^ 0x9e37_79b9_7f4a_7c15),
             schedule_rng_state: seed,
             protection,
             observations: ProtectionObservations::default(),
@@ -672,6 +674,22 @@ pub(crate) fn next_uuid_override() -> Option<uuid::Uuid> {
             .borrow_mut()
             .as_mut()
             .map(SimulationRuntimeState::next_uuid)
+    })
+}
+
+/// Fill `dest` from the active simulation entropy stream when a simulation guard is installed.
+pub(crate) fn try_fill_entropy_bytes(dest: &mut [u8]) -> bool {
+    RUNTIME.with(|runtime| {
+        let mut guard = runtime.borrow_mut();
+        let Some(state) = guard.as_mut() else {
+            return false;
+        };
+        for chunk in dest.chunks_mut(8) {
+            state.entropy_rng_state = dummy_controlled::mix_seed(state.entropy_rng_state);
+            let bytes = state.entropy_rng_state.to_le_bytes();
+            chunk.copy_from_slice(&bytes[..chunk.len()]);
+        }
+        true
     })
 }
 

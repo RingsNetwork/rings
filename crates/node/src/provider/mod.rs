@@ -317,7 +317,7 @@ pub(crate) struct ProviderStores {
 impl Provider {
     /// Create provider from processor directly
     pub fn from_processor(processor: Arc<Processor>) -> Self {
-        let extensions = crate::extension::ext::Extensions::new(processor.clone());
+        let extensions = crate::extension::ext::Extensions::new_weak(&processor);
         #[cfg(all(feature = "browser", target_family = "wasm"))]
         let pagehide = browser::provider::listener::PagehideListener::register(&processor)
             .map(std::rc::Rc::new);

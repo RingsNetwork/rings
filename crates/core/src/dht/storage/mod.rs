@@ -427,6 +427,9 @@ impl PeerRing {
         if owner == state.local {
             return None;
         }
+        if state.predecessor == Some(owner) || state.predecessors.contains(&owner) {
+            return Some(owner);
+        }
         if let Some(&via) = state
             .bridged
             .get(&owner)

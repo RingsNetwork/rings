@@ -546,7 +546,16 @@ impl RelayNeighborhood {
         from: Did,
         previous: Vec<PreviousHolder>,
     ) -> bool {
-        (state.predecessor == Some(from) || state.predecessors.contains(&from))
+        let admitted_sender = state.predecessor == Some(from)
+            || (state.predecessors.contains(&from)
+                && state
+                    .predecessor
+                    .is_some_and(|primary| !self.holds(primary))
+                && self
+                    .passed
+                    .as_ref()
+                    .is_none_or(|existing| Some(existing.from) != state.predecessor));
+        admitted_sender
             .then(|| previous.first().copied())
             .flatten()
             .filter(|&nearest| self.admits_nearest_previous(state, from, nearest))
@@ -671,14 +680,22 @@ impl RelayNeighborhood {
     /// holder itself, with this node as its head, and a storage-less one lies on its run.
     fn previous_holders_in(&self, state: &TopologyState) -> Option<&Passed> {
         let passed = self.passed.as_ref()?;
-        let predecessor = state
-            .predecessor
-            .filter(|predecessor| *predecessor == passed.from)?;
-        let nearest = passed.previous.first()?;
-        let agrees = if self.holds(predecessor) {
-            predecessor == nearest.holder && nearest.run_start == state.local
+        let primary = state.predecessor?;
+        let sender = if passed.from == primary {
+            primary
+        } else if !self.holds(primary)
+            && state.predecessors.contains(&passed.from)
+            && in_arc(passed.from, primary, state.local)
+        {
+            passed.from
         } else {
-            predecessor == nearest.run_start || in_arc(nearest.run_start, predecessor, state.local)
+            return None;
+        };
+        let nearest = passed.previous.first()?;
+        let agrees = if self.holds(sender) {
+            sender == nearest.holder && nearest.run_start == state.local
+        } else {
+            sender == nearest.run_start || in_arc(nearest.run_start, sender, state.local)
         };
         agrees.then_some(passed)
     }
@@ -734,6 +751,16 @@ impl RelayNeighborhood {
                             holds: false,
                         });
                     }
+                }
+                if let Some(primary) = state.predecessor.filter(|&primary| {
+                    passed.is_some_and(|p| p.from != primary)
+                        && !self.holds(primary)
+                        && nodes.last().is_none_or(|last| last.did != primary)
+                }) {
+                    nodes.push(RelayNode {
+                        did: primary,
+                        holds: false,
+                    });
                 }
             }
             (None, Some(predecessor)) => nodes.push(self.node(predecessor)),

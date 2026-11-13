@@ -496,6 +496,40 @@ fn test_physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
 }
 
 #[test]
+fn test_physical_owner_route_prefers_direct_predecessor_over_clockwise_successor() -> Result<()> {
+    let local = Did::from(10u32);
+    let successor = Did::from(20u32);
+    let far_successor = Did::from(30u32);
+    let secondary_predecessor = Did::from(5u32);
+    let primary_predecessor = Did::from(8u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        2,
+        Box::new(MemStorage::new()),
+        4,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.admit_connected(successor, None)?;
+    let _ = node.admit_connected(far_successor, None)?;
+    assert_eq!(
+        node.notify_within_topology(primary_predecessor)?,
+        Some(primary_predecessor)
+    );
+    assert_eq!(
+        node.notify_within_topology(secondary_predecessor)?,
+        Some(primary_predecessor)
+    );
+
+    for pred in [primary_predecessor, secondary_predecessor] {
+        let destination = StorageSyncDestination::PhysicalOwner(pred);
+        assert_eq!(node.next_hop_for_storage_sync(destination)?, Some(pred));
+        assert!(node.storage_sync_route_still_permits(destination, pred)?);
+        assert!(!node.storage_sync_route_still_permits(destination, successor)?);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(10u32);
