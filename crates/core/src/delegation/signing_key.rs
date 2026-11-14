@@ -112,10 +112,11 @@ impl DelegateeKey {
         ttl_ms: u64,
     ) -> Result<Self> {
         let delegatee_did = Did::from(delegatee_key.address());
-        let proof = super::model::pack_delegation(delegatee_did, ts_ms, ttl_ms);
+        let delegator = super::Account::Secp256k1(account_key.address().into());
+        let proof = super::model::pack_delegation(&delegator, delegatee_did, ts_ms, ttl_ms);
         let delegation = Delegation {
             delegatee_did,
-            delegator: super::Account::Secp256k1(account_key.address().into()),
+            delegator,
             ttl_ms,
             ts_ms,
             delegator_signature: account_key.sign(&proof)?.to_vec(),

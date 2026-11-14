@@ -4,8 +4,10 @@
 use super::witness;
 use crate::Aez;
 use crate::DecryptError;
+use crate::EncryptError;
 use crate::Inauthentic;
 use crate::Tweak;
+use crate::ZeroExpansion;
 use crate::KEY_BYTES;
 
 /// The fixture: one vector per line, `key nonce ad tau message ciphertext`.
@@ -72,17 +74,36 @@ fn reference() -> Vec<Vector> {
 }
 
 witness! {
-    /// Law: `encrypt = Encrypt_ref` and `decrypt = Decrypt_ref` on every vector, for any
-    /// initial slot content.
+    /// Law: `encrypt = Encrypt_ref` and `decrypt = Decrypt_ref` on every `τ > 0` vector (for any
+    /// initial slot content), and `encipher` / `decipher` agree with `Encrypt_ref` / `Decrypt_ref`
+    /// on every `τ = 0` vector while `encrypt` / `decrypt` refuse `τ = 0`.
     fn encrypt_and_decrypt_agree_with_the_reference_code() {
         for (index, vector) in reference().iter().enumerate() {
             vector.with(|aez, tweak| {
-                let mut buffer = vector.message.clone();
-                buffer.resize(vector.message.len() + vector.expansion, 0xa5);
-                aez.encrypt(tweak, vector.expansion, &mut buffer).unwrap();
-                assert_eq!(buffer, vector.ciphertext, "encrypt, vector {index}");
-                let plaintext = aez.decrypt(tweak, vector.expansion, &mut buffer).unwrap();
-                assert_eq!(plaintext, vector.message.as_slice(), "decrypt, vector {index}");
+                if vector.expansion == 0 {
+                    let mut buffer = vector.message.clone();
+                    assert_eq!(
+                        aez.encrypt(tweak, 0, &mut buffer),
+                        Err(EncryptError::ZeroExpansion(ZeroExpansion)),
+                        "encrypt zero refusal, vector {index}"
+                    );
+                    assert_eq!(
+                        aez.decrypt(tweak, 0, &mut buffer).map(|_| ()),
+                        Err(DecryptError::ZeroExpansion(ZeroExpansion)),
+                        "decrypt zero refusal, vector {index}"
+                    );
+                    aez.encipher(tweak, &mut buffer);
+                    assert_eq!(buffer, vector.ciphertext, "encipher, vector {index}");
+                    aez.decipher(tweak, &mut buffer);
+                    assert_eq!(buffer, vector.message, "decipher, vector {index}");
+                } else {
+                    let mut buffer = vector.message.clone();
+                    buffer.resize(vector.message.len() + vector.expansion, 0xa5);
+                    aez.encrypt(tweak, vector.expansion, &mut buffer).unwrap();
+                    assert_eq!(buffer, vector.ciphertext, "encrypt, vector {index}");
+                    let plaintext = aez.decrypt(tweak, vector.expansion, &mut buffer).unwrap();
+                    assert_eq!(plaintext, vector.message.as_slice(), "decrypt, vector {index}");
+                }
             });
         }
     }

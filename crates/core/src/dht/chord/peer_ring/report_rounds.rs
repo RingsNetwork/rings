@@ -210,16 +210,64 @@ impl PeerRing {
 /// the successor list, and each operation here reads the list under the same
 /// lock it uses to touch the tokens.
 impl PeerRing {
-    /// Operate on the sync tokens and the successor list they are judged
-    /// against, from one committed topology.
+    /// Operate on the sync tokens and the topology-referenced peer list they
+    /// are judged against, from one committed topology.
     fn with_successor_sync<T>(
         &self,
         operate: impl FnOnce(&mut topology::SuccessorSyncState, &[Did]) -> T,
     ) -> Result<T> {
         let _transition = self.lock_transition()?;
-        let successors = self.successor_seq.list()?;
+        let referenced: Vec<Did> = self
+            .snapshot_unlocked()?
+            .referenced_peers()
+            .into_iter()
+            .collect();
         let mut pending = self.lock_pending_successor_sync()?;
-        Ok(operate(&mut pending, &successors))
+        Ok(operate(&mut pending, &referenced))
+    }
+
+    /// Select the next connected non-head topology peer in round-robin order and register a
+    /// `QueryFor::SyncSuccessor` token `(peer, request_id)` for periodic bridge-hint refresh.
+    pub(crate) fn begin_next_non_head_bridge_sync(
+        &self,
+        mut is_connected: impl FnMut(Did) -> bool,
+    ) -> Result<Option<(Did, uuid::Uuid)>> {
+        let snapshot = self.topology_state()?;
+        let head = topology::successor_head(&snapshot);
+        let connected_candidates: Vec<Did> = snapshot
+            .referenced_peers()
+            .into_iter()
+            .filter(|&peer| Some(peer) != head && is_connected(peer))
+            .collect();
+        if connected_candidates.is_empty() {
+            return Ok(None);
+        }
+        let request_id = self.rng.next_uuid();
+        let _transition = self.lock_transition()?;
+        let current = self.snapshot_unlocked()?;
+        let current_head = topology::successor_head(&current);
+        let referenced: Vec<Did> = current.referenced_peers().into_iter().collect();
+        let candidates: Vec<Did> = connected_candidates
+            .into_iter()
+            .filter(|peer| Some(*peer) != current_head && referenced.contains(peer))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        let start = self
+            .bridge_sync_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % candidates.len();
+        let mut pending = self.lock_pending_successor_sync()?;
+        for offset in 0..candidates.len() {
+            let Some(&peer) = candidates.get((start + offset) % candidates.len()) else {
+                continue;
+            };
+            if pending.begin(&referenced, peer, request_id) {
+                return Ok(Some((peer, request_id)));
+            }
+        }
+        Ok(None)
     }
 
     /// Register one sync token for a current successor.

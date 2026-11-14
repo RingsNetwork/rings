@@ -69,7 +69,8 @@ fn test_secp256r1_sign_and_verify() {
 
     // Check our sign and verify work right
     let our_sig = sign(&sk, &hash(msg.as_bytes())).unwrap();
-    assert!(verify(msg.as_bytes(), &pk.address(), our_sig, &pk));
+    assert!(verify(msg.as_bytes(), &address(&pk), our_sig, &pk));
+    assert!(!verify(msg.as_bytes(), &pk.address(), our_sig, &pk));
 
     let hash_msg: [u8; 32] =
         hex::decode("5e230abb2ae1cb0717986854d6e16b998da03b827b736c9ac32f6ec9e47e3670")
@@ -79,7 +80,7 @@ fn test_secp256r1_sign_and_verify() {
     let hashed = hash(msg.as_bytes());
     assert_eq!(hashed, hash_msg, "hash ret not equal");
 
-    assert!(verify(msg.as_bytes(), &pk.address(), sig, &pk));
+    assert!(verify(msg.as_bytes(), &address(&pk), sig, &pk));
 }
 
 #[test]
@@ -101,7 +102,7 @@ fn test_secp256r1_rejects_high_s_signature() -> Result<()> {
     let high_s = ecdsa::Signature::<p256::NistP256>::from_scalars(r.to_bytes(), (-s).to_bytes())?;
 
     assert!(super::super::ecdsa_signature_s_is_high(&high_s));
-    assert!(!verify(msg, &pk.address(), high_s.to_bytes(), &pk));
+    assert!(!verify(msg, &address(&pk), high_s.to_bytes(), &pk));
     Ok(())
 }
 
@@ -125,7 +126,7 @@ fn test_secp256r1_normalizes_high_s_signature() -> Result<()> {
     let normalized = normalize_signature(high_s.to_bytes())?;
 
     assert_eq!(normalized, low_s.to_bytes().as_slice());
-    assert!(verify(msg, &pk.address(), normalized, &pk));
+    assert!(verify(msg, &address(&pk), normalized, &pk));
     Ok(())
 }
 
@@ -134,5 +135,5 @@ fn test_invalid_public_key_does_not_verify() {
     let pk = PublicKey([0u8; 33]);
     let sig = [0u8; 64];
 
-    assert!(!verify(b"msg", &pk.address(), sig, &pk));
+    assert!(!verify(b"msg", &address(&pk), sig, &pk));
 }

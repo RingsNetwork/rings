@@ -114,48 +114,79 @@ pub(crate) trait Handler {
 /// The router-internal capability. Cloneable and `'static` so a long-running engine task can
 /// keep a copy and feed events back via [`inject`](Core::inject). Not handed to extension
 /// shells — they get a namespace-scoped [`Scope`] instead.
+///
+/// Holds [`Processor`] weakly so background tasks spawned onto [`NodeTasks`] (such as
+/// [`Backend::serve`](crate::extension::Backend::serve)) never form an `Arc` cycle that keeps the
+/// swarm, its application inbox sender, or browser IndexedDB locks alive after the last
+/// [`Provider`](crate::provider::Provider) is dropped.
 #[derive(Clone)]
 pub(crate) struct Core {
-    processor: Arc<Processor>,
+    processor: std::sync::Weak<Processor>,
+    /// Retained only when constructed standalone via [`Extensions::new`] without an enclosing
+    /// [`Provider`](crate::provider::Provider) owning the [`Processor`]. [`Provider`] builds its
+    /// registry via [`Extensions::new_weak`] so spawned [`Backend::serve`] / protocol tasks never
+    /// form a strong `Arc<Processor>` cycle.
+    _standalone_owner: Option<Arc<Processor>>,
+    did: Did,
+    network_id: u32,
+    tasks: NodeTasks,
+    slot_roster: Arc<rings_core::message::SlotRoster>,
+    onion_role: crate::onion::OnionRole<crate::onion::OnionExitOffer>,
+    onion_idle_floor: crate::onion::circuit::OnionIdleFloor,
+    onion_process_epoch: crate::onion::OnionProcessEpochCell,
+    clock: rings_core::utils::SharedClock,
+    rng: rings_core::utils::SharedRng,
     handlers: Arc<HandlerMap>,
 }
 
 impl Core {
+    fn upgrade_processor(&self) -> Result<Arc<Processor>> {
+        self.processor
+            .upgrade()
+            .ok_or_else(|| Error::ExtensionError("node processor is closed".to_string()))
+    }
+
     /// This node's DID.
     pub fn did(&self) -> Did {
-        self.processor.did()
+        self.did
     }
 
     /// The node's tasks, onto which every engine and shell task is spawned (`crate::tasks`).
     pub(crate) fn tasks(&self) -> &NodeTasks {
-        self.processor.tasks()
+        &self.tasks
     }
 
     /// Whether `peer`'s link generation is admitted now; `false` when the lifecycle cannot be
-    /// read.
+    /// read or the processor has been dropped.
     pub(crate) fn peer_admitted(&self, peer: Did) -> bool {
-        self.processor.swarm.is_peer_admitted(peer).unwrap_or(false)
+        self.processor
+            .upgrade()
+            .and_then(|processor| processor.swarm.is_peer_admitted(peer).ok())
+            .unwrap_or(false)
     }
 
     /// The peers whose link generation is admitted now, each read under the lifecycle lock.
     pub(crate) fn admitted_peers(&self) -> Vec<Did> {
-        self.processor
+        let Some(processor) = self.processor.upgrade() else {
+            return Vec::new();
+        };
+        processor
             .swarm
             .peer_dids()
             .into_iter()
-            .filter(|peer| self.peer_admitted(*peer))
+            .filter(|peer| processor.swarm.is_peer_admitted(*peer).unwrap_or(false))
             .collect()
     }
 
     /// The read-only view of the Application lane's send credit of `peer`'s sendable
     /// connection generation, or `None` without one (`Swarm::application_credit`, #913).
     pub(crate) fn application_credit(&self, peer: Did) -> Option<LaneCreditView> {
-        self.processor.swarm.application_credit(peer)
+        self.processor.upgrade()?.swarm.application_credit(peer)
     }
 
     /// `𝓡`, the capacity of the swarm's connection registry (#723).
     pub(crate) fn connection_registry_capacity(&self) -> Result<usize> {
-        self.processor
+        self.upgrade_processor()?
             .swarm
             .connection_registry_capacity()
             .map_err(Error::InternalError)
@@ -163,7 +194,7 @@ impl Core {
 
     /// The node's shared connection-slot roster (`PeerRing::edges`, #1183).
     pub(crate) fn slot_roster(&self) -> Arc<rings_core::message::SlotRoster> {
-        Arc::clone(self.processor.swarm.dht().edges())
+        Arc::clone(&self.slot_roster)
     }
 
     /// This node's active session key followed by any retained unexpired previous keys at
@@ -172,45 +203,60 @@ impl Core {
         &self,
         now_ms: u128,
     ) -> Vec<rings_core::delegation::DelegateeKey> {
-        self.processor.decryption_keys_at(now_ms)
+        self.processor
+            .upgrade()
+            .map(|processor| processor.decryption_keys_at(now_ms))
+            .unwrap_or_default()
     }
 
     /// This process's onion role (#834 D2).
     pub(crate) fn onion_role(&self) -> &crate::onion::OnionRole<crate::onion::OnionExitOffer> {
-        self.processor.onion_role()
+        &self.onion_role
     }
 
     /// The cover floor of this node's idle onion links (#880).
     pub(crate) fn onion_idle_floor(&self) -> crate::onion::circuit::OnionIdleFloor {
-        self.processor.onion_idle_floor()
+        self.onion_idle_floor
     }
 
     /// The onion process epoch cell of this node (#834 D2).
     pub(crate) fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpochCell {
-        self.processor.onion_process_epoch()
+        self.onion_process_epoch.clone()
+    }
+
+    /// The entry-guard manager shared across this node's onion route builders.
+    pub(crate) fn onion_entry_guards(&self) -> Result<Arc<crate::onion::OnionEntryGuards>> {
+        Ok(self.upgrade_processor()?.onion_entry_guards_arc())
+    }
+
+    /// Network identifier of this node's swarm.
+    pub(crate) fn network_id(&self) -> u32 {
+        self.network_id
     }
 
     /// The injected [`SharedClock`](rings_core::utils::SharedClock) of this node.
     pub(crate) fn clock(&self) -> &rings_core::utils::SharedClock {
-        self.processor.clock()
+        &self.clock
     }
 
     /// The injected [`SharedRng`](rings_core::utils::SharedRng) of this node.
     pub(crate) fn rng(&self) -> &rings_core::utils::SharedRng {
-        self.processor.rng()
+        &self.rng
     }
 
     /// Put a message on the overlay to `to` under `namespace`.
     pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
+        let processor = self.upgrade_processor()?;
         let envelope = Envelope::new(namespace, payload);
-        self.processor.send_envelope(to, &envelope).await?;
+        processor.send_envelope(to, &envelope).await?;
         Ok(())
     }
 
     /// Put a message on an already-connected transport edge without Chord route selection.
     async fn send_direct(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
+        let processor = self.upgrade_processor()?;
         let envelope = Envelope::new(namespace, payload);
-        self.processor.send_direct_envelope(to, &envelope).await?;
+        processor.send_direct_envelope(to, &envelope).await?;
         Ok(())
     }
 
@@ -604,11 +650,45 @@ pub struct Extensions {
 }
 
 impl Extensions {
-    /// Empty registry over a processor (the source of overlay `send` / `did`).
+    /// Empty registry over a processor (the source of overlay `send` / `did`), retaining
+    /// `processor` for standalone callers that do not wrap it in a [`Provider`](crate::provider::Provider).
     pub fn new(processor: Arc<Processor>) -> Self {
+        Self::from_processor_parts(&processor, Some(Arc::clone(&processor)))
+    }
+
+    /// Empty registry holding `processor` weakly so an enclosing [`Provider`](crate::provider::Provider)
+    /// remains the sole strong owner and background [`Backend::serve`](crate::extension::Backend::serve)
+    /// tasks never keep `Processor` or its stores alive after `Provider` drops.
+    pub(crate) fn new_weak(processor: &Arc<Processor>) -> Self {
+        Self::from_processor_parts(processor, None)
+    }
+
+    fn from_processor_parts(
+        processor: &Arc<Processor>,
+        standalone_owner: Option<Arc<Processor>>,
+    ) -> Self {
+        let did = processor.did();
+        let network_id = processor.swarm.network_id();
+        let tasks = processor.tasks().clone();
+        let slot_roster = Arc::clone(processor.swarm.dht().edges());
+        let onion_role = processor.onion_role().clone();
+        let onion_idle_floor = processor.onion_idle_floor();
+        let onion_process_epoch = processor.onion_process_epoch();
+        let clock = processor.clock().clone();
+        let rng = processor.rng().clone();
         Self {
             core: Core {
-                processor,
+                processor: Arc::downgrade(processor),
+                _standalone_owner: standalone_owner,
+                did,
+                network_id,
+                tasks,
+                slot_roster,
+                onion_role,
+                onion_idle_floor,
+                onion_process_epoch,
+                clock,
+                rng,
                 handlers: Arc::new(RwLock::new(HashMap::new())),
             },
         }
@@ -710,8 +790,9 @@ impl Extensions {
             }
         }
         // All free: publish the declarations and insert the batch under the same write lock.
+        let processor = self.core.upgrade_processor()?;
         delegation::publish(
-            &self.core.processor.swarm,
+            &processor.swarm,
             prepared
                 .iter()
                 .map(|(namespace, delegates, _)| (namespace.as_str(), *delegates)),
@@ -736,10 +817,8 @@ impl Extensions {
                 "namespace {namespace:?} is already registered"
             )));
         }
-        delegation::publish(&self.core.processor.swarm, [(
-            namespace.as_str(),
-            delegates,
-        )])?;
+        let processor = self.core.upgrade_processor()?;
+        delegation::publish(&processor.swarm, [(namespace.as_str(), delegates)])?;
         handlers.insert(namespace, runner);
         Ok(())
     }
@@ -757,14 +836,20 @@ impl Extensions {
     /// [`Protocol::delegates_admission`].
     #[cfg(all(test, rings_native))]
     pub(crate) fn delegates_admission(&self, envelope: &[u8]) -> bool {
-        self.core.processor.swarm.delegates_admission(envelope)
+        self.core
+            .processor
+            .upgrade()
+            .is_some_and(|processor| processor.swarm.delegates_admission(envelope))
     }
 
     /// Whether an encoded envelope's namespace delegates its replay, as core reads it; see
     /// [`Protocol::delegates_replay`].
     #[cfg(all(test, rings_native))]
     pub(crate) fn delegates_replay(&self, envelope: &[u8]) -> bool {
-        self.core.processor.swarm.delegates_replay(envelope)
+        self.core
+            .processor
+            .upgrade()
+            .is_some_and(|processor| processor.swarm.delegates_replay(envelope))
     }
 }
 

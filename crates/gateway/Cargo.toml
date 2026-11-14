@@ -31,8 +31,9 @@ tokio = { version = "1.13.0", features = ["io-util", "macros", "rt", "sync", "ti
 tracing = "0.1.37"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-nix = { version = "0.31.3", features = ["fs", "socket", "uio", "user"] }
+nix = { version = "0.31.3", features = ["fs", "poll", "socket", "uio", "user"] }
 route_manager = "0.2.13"
+tokio = { version = "1.13.0", features = ["net", "signal"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
 serde_json = "1"

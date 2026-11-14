@@ -51,8 +51,7 @@ pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 /// Default Chord stabilization interval in seconds.
 pub const DEFAULT_STABILIZE_INTERVAL: u64 = 15;
-/// Default storage capacity in bytes for native storage backends.
-pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
+pub use crate::consts::DEFAULT_STORAGE_CAPACITY;
 /// Default interval for refreshing gateway status.
 pub const DEFAULT_GATEWAY_STATUS_REFRESH_SECS: u64 = 2;
 
@@ -345,6 +344,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             onion_exit_ttl_secs: config.onion_exit_ttl_secs,
             onion_exit_services: config.onion_exit_services,
             onion_exit_policy: config.onion_exit_policy,
+            onion_invoke_offer: None,
             remote_rpc_proxy_url: config.remote_rpc_proxy_url,
         })
     }
@@ -428,6 +428,12 @@ impl Config {
                 source,
             }
         })?;
+        io::Write::flush(&mut f_writer).map_err(|e| Error::CreateFileError(e.to_string()))?;
+        let f = f_writer
+            .into_inner()
+            .map_err(|e| Error::CreateFileError(e.into_error().to_string()))?;
+        f.sync_all()
+            .map_err(|e| Error::CreateFileError(e.to_string()))?;
         path.to_str()
             .map(str::to_owned)
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))

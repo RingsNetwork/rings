@@ -170,9 +170,10 @@ sample_message_body!(E2eHandshakeResponse, |fixture| E2eHandshakeResponse {
 sample_message_body!(E2eStreamFrame, |fixture| E2eStreamFrame {
     stream_id: uuid::Uuid::nil(),
     sender_public_key: fixture.public_key,
+    ephemeral_public_key: fixture.public_key,
     sequence: 0,
     is_final: true,
-    ciphertext: vec![(fixture.public_key, fixture.public_key)],
+    ciphertext: vec![0u8; 16],
 });
 sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
     did: fixture.did,

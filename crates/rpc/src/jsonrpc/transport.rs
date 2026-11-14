@@ -100,31 +100,79 @@ pub(super) async fn send(
         None => request,
     };
     // A redirect response is rejected rather than interpreted as a JSON-RPC result.
-    let response = request
-        .send()
-        .await
-        .map_err(|error| RpcError::Client(error.to_string()))?;
-    if response.status().is_redirection() {
-        return Err(RpcError::RedirectRejected);
+    #[cfg(target_family = "wasm")]
+    {
+        let built = request
+            .build()
+            .map_err(|error| RpcError::Client(error.to_string()))?;
+        let body = built
+            .body()
+            .and_then(reqwest::Body::as_bytes)
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or_default()
+            .to_owned();
+        return browser::send_unauthenticated(endpoint, body).await;
     }
-    response
-        .error_for_status()
-        .map_err(|error| RpcError::Client(error.to_string()))?
-        .bytes()
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|error| RpcError::Client(error.to_string()))
+    #[cfg(not(target_family = "wasm"))]
+    {
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                RpcError::Timeout
+            } else {
+                RpcError::Client(error.to_string())
+            }
+        })?;
+        if response.status().is_redirection() {
+            return Err(RpcError::RedirectRejected);
+        }
+        let mut response = response
+            .error_for_status()
+            .map_err(|error| RpcError::Client(error.to_string()))?;
+        if let Some(length) = response.content_length() {
+            if length > super::MAX_RPC_RESPONSE_BYTES as u64 {
+                return Err(RpcError::Client(format!(
+                    "RPC response length {length} exceeds maximum {} bytes",
+                    super::MAX_RPC_RESPONSE_BYTES
+                )));
+            }
+        }
+        let mut collected = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|error| RpcError::Client(error.to_string()))?
+        {
+            if collected.len().saturating_add(chunk.len()) > super::MAX_RPC_RESPONSE_BYTES {
+                return Err(RpcError::Client(format!(
+                    "RPC response exceeds maximum {} bytes",
+                    super::MAX_RPC_RESPONSE_BYTES
+                )));
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        Ok(collected)
+    }
 }
 
-/// Browser Fetch adapter with a pre-network redirect prohibition.
+/// Browser Fetch adapter with a pre-network redirect prohibition, bounded timeout, and response size cap.
 #[cfg(target_family = "wasm")]
 mod browser {
+    use futures_lite_or_pin::*;
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
 
+    use super::super::DEFAULT_RPC_REQUEST_TIMEOUT;
+    use super::super::MAX_RPC_RESPONSE_BYTES;
     use super::Result;
     use super::RpcError;
+
+    mod futures_lite_or_pin {
+        pub(super) use core::future::Future;
+        pub(super) use core::pin::Pin;
+        pub(super) use core::task::Context;
+        pub(super) use core::task::Poll;
+    }
 
     #[wasm_bindgen]
     extern "C" {
@@ -133,51 +181,139 @@ mod browser {
         fn fetch(request: &web_sys::Request) -> std::result::Result<js_sys::Promise, JsValue>;
     }
 
+    fn transport_error(has_token: bool, detail: impl Into<String>) -> RpcError {
+        if has_token {
+            RpcError::BrowserTransport
+        } else {
+            RpcError::Client(detail.into())
+        }
+    }
+
+    async fn race_with_abort_timeout<F, T>(
+        future: F,
+        abort_controller: &web_sys::AbortController,
+    ) -> std::result::Result<T, Option<JsValue>>
+    where
+        F: Future<Output = std::result::Result<T, JsValue>>,
+    {
+        let mut future = core::pin::pin!(future);
+        let mut deadline = core::pin::pin!(rings_runtime::sleep(DEFAULT_RPC_REQUEST_TIMEOUT));
+        core::future::poll_fn(|cx: &mut Context<'_>| {
+            if let Poll::Ready(result) = future.as_mut().poll(cx) {
+                return Poll::Ready(result.map_err(Some));
+            }
+            if Pin::new(&mut deadline).poll(cx).is_ready() {
+                abort_controller.abort();
+                return Poll::Ready(Err(None));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
     /// Send credentials with redirect mode `error`, before a redirect can emit another request.
     pub(super) async fn send(endpoint: &str, token: &str, body: String) -> Result<Vec<u8>> {
-        // Request construction carries the browser redirect prohibition.
-        let request = credential_request(endpoint, token, &body)?;
-        // Fetch resolves only after its built-in redirect and TLS checks succeed.
-        let response = JsFuture::from(fetch(&request).map_err(|_| RpcError::BrowserTransport)?)
-            .await
-            .map_err(|_| RpcError::BrowserTransport)?
-            .dyn_into::<web_sys::Response>()
-            .map_err(|_| RpcError::BrowserTransport)?;
+        send_with_optional_token(endpoint, Some(token), body).await
+    }
+
+    /// Send an unauthenticated RPC request with bounded timeout and response size.
+    pub(super) async fn send_unauthenticated(endpoint: &str, body: String) -> Result<Vec<u8>> {
+        send_with_optional_token(endpoint, None, body).await
+    }
+
+    /// Send an RPC request with redirect mode `error`, bounded timeout, and bounded response size.
+    async fn send_with_optional_token(
+        endpoint: &str,
+        token: Option<&str>,
+        body: String,
+    ) -> Result<Vec<u8>> {
+        let has_token = token.is_some();
+        let abort_controller =
+            web_sys::AbortController::new().map_err(|_| RpcError::BrowserTransport)?;
+        let request = build_request(endpoint, token, &body, Some(&abort_controller.signal()))?;
+        let fetch_promise =
+            fetch(&request).map_err(|_| transport_error(has_token, "browser RPC fetch failed"))?;
+        let response =
+            match race_with_abort_timeout(JsFuture::from(fetch_promise), &abort_controller).await {
+                Ok(value) => value
+                    .dyn_into::<web_sys::Response>()
+                    .map_err(|_| transport_error(has_token, "invalid browser RPC response"))?,
+                Err(None) => return Err(RpcError::Timeout),
+                Err(Some(_)) => {
+                    return Err(transport_error(has_token, "browser RPC fetch rejected"));
+                }
+            };
         if !response.ok() {
-            return Err(RpcError::BrowserTransport);
+            return Err(transport_error(
+                has_token,
+                format!("HTTP {}", response.status()),
+            ));
         }
-        // Only a successful response is decoded into JSON-RPC bytes.
-        let buffer = JsFuture::from(
-            response
-                .array_buffer()
-                .map_err(|_| RpcError::BrowserTransport)?,
+        if let Ok(Some(length_str)) = response.headers().get("content-length") {
+            if let Ok(length) = length_str.trim().parse::<usize>() {
+                if length > MAX_RPC_RESPONSE_BYTES {
+                    return Err(transport_error(
+                        has_token,
+                        format!("RPC response exceeds maximum {MAX_RPC_RESPONSE_BYTES} bytes"),
+                    ));
+                }
+            }
+        }
+        let buffer_promise = response
+            .array_buffer()
+            .map_err(|_| transport_error(has_token, "failed to read browser RPC body"))?;
+        let buffer = match race_with_abort_timeout(
+            JsFuture::from(buffer_promise),
+            &abort_controller,
         )
         .await
-        .map_err(|_| RpcError::BrowserTransport)?;
-        Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+        {
+            Ok(buffer) => buffer,
+            Err(None) => return Err(RpcError::Timeout),
+            Err(Some(_)) => {
+                return Err(transport_error(has_token, "browser RPC body read failed"));
+            }
+        };
+        let bytes = js_sys::Uint8Array::new(&buffer);
+        let len = usize::try_from(bytes.byte_length()).unwrap_or(usize::MAX);
+        if len > MAX_RPC_RESPONSE_BYTES {
+            return Err(transport_error(
+                has_token,
+                format!("RPC response exceeds maximum {MAX_RPC_RESPONSE_BYTES} bytes"),
+            ));
+        }
+        Ok(bytes.to_vec())
     }
 
     /// Build the browser request whose redirect mode prevents any second-hop disclosure.
-    fn credential_request(endpoint: &str, token: &str, body: &str) -> Result<web_sys::Request> {
+    fn build_request(
+        endpoint: &str,
+        token: Option<&str>,
+        body: &str,
+        signal: Option<&web_sys::AbortSignal>,
+    ) -> Result<web_sys::Request> {
+        let has_token = token.is_some();
         // The browser enforces TLS certificate validation and rejects any redirect.
         let options = web_sys::RequestInit::new();
         options.set_method("POST");
         options.set_redirect(web_sys::RequestRedirect::Error);
         options.set_body(&JsValue::from_str(body));
+        options.set_signal(signal);
         // Invalid URLs or header values fail before invoking Fetch.
         let request = web_sys::Request::new_with_str_and_init(endpoint, &options)
-            .map_err(|_| RpcError::BrowserTransport)?;
-        // These are the sole credential-bearing headers controlled by this adapter.
+            .map_err(|_| transport_error(has_token, "invalid browser RPC endpoint"))?;
         let headers = request.headers();
         headers
             .set("Content-Type", "application/json")
-            .map_err(|_| RpcError::BrowserTransport)?;
+            .map_err(|_| transport_error(has_token, "failed to set Content-Type"))?;
         headers
             .set("Accept", "application/json")
-            .map_err(|_| RpcError::BrowserTransport)?;
-        headers
-            .set("Authorization", &format!("Bearer {token}"))
-            .map_err(|_| RpcError::BrowserTransport)?;
+            .map_err(|_| transport_error(has_token, "failed to set Accept"))?;
+        if let Some(token) = token {
+            headers
+                .set("Authorization", &format!("Bearer {token}"))
+                .map_err(|_| RpcError::BrowserTransport)?;
+        }
         Ok(request)
     }
 
@@ -194,7 +330,12 @@ mod browser {
         #[wasm_bindgen_test]
         fn authenticated_fetch_disallows_redirects() -> Result<()> {
             // Request construction carries the browser redirect prohibition.
-            let request = credential_request("https://example.com/rpc", "synthetic-token", "{}")?;
+            let request = build_request(
+                "https://example.com/rpc",
+                Some("synthetic-token"),
+                "{}",
+                None,
+            )?;
             assert_eq!(request.redirect(), web_sys::RequestRedirect::Error);
             assert_eq!(request.method(), "POST");
             assert_eq!(

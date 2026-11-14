@@ -2,6 +2,8 @@ use rings_core::dht::default_storage_virtual_positions_per_owner;
 use rings_core::dht::VirtualNodeConfig;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use rings_core::utils::SharedClock;
+use rings_core::utils::SystemClock;
 
 use super::*;
 use crate::remote_endpoint::RemoteRpcProxy;
@@ -46,6 +48,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) onion_exit_ttl: Duration,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(crate) remote_rpc_proxy: Option<RemoteRpcProxy>,
+    /// Epoch clock capability injected into this node's runtime subsystems.
+    pub(in crate::processor) clock: SharedClock,
 }
 
 #[wasm_export]
@@ -79,6 +83,7 @@ impl ProcessorConfig {
             ),
             onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
             remote_rpc_proxy: None,
+            clock: Arc::new(SystemClock),
         }
     }
 
@@ -102,9 +107,27 @@ impl ProcessorConfig {
         self.dht_virtual_nodes = positions_per_peer;
         self
     }
+
+    /// Enable or disable onion relay advertisement on this node.
+    ///
+    /// When enabling relay while currently `Client`, upgrades the role to `Relay`; when disabling
+    /// relay, resets the role to `Client`.
+    pub fn advertise_onion_relay(mut self, enabled: bool) -> Self {
+        self.onion_role = match (enabled, self.onion_role) {
+            (true, OnionRole::Client) => OnionRole::Relay,
+            (true, role) => role,
+            (false, _) => OnionRole::Client,
+        };
+        self
+    }
 }
 
 impl ProcessorConfig {
+    /// Override the runtime family advertised in the online-node registry.
+    pub fn online_node_type(mut self, node_type: OnlineNodeType) -> Self {
+        self.online_node_type = node_type;
+        self
+    }
     /// Returns the validated native WebRTC UDP port range, when configured.
     pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
@@ -140,6 +163,17 @@ impl ProcessorConfig {
     /// `proxy` instead of connecting directly.
     pub fn remote_rpc_proxy(mut self, proxy: RemoteRpcProxy) -> Self {
         self.remote_rpc_proxy = Some(proxy);
+        self
+    }
+
+    /// Return the [`SharedClock`] capability configured for this node.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Inject a custom [`SharedClock`] capability for deterministic node time.
+    pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
         self
     }
 }
@@ -209,6 +243,9 @@ pub struct ProcessorConfigSerialized {
     /// Exit policy advertised by this node.
     #[serde(default = "default_onion_exit_policy")]
     pub(crate) onion_exit_policy: OnionExitPolicy,
+    /// Optional intermediate `invoke` offer advertised by this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) onion_invoke_offer: Option<crate::onion::OnionInvokeOffer>,
     /// Optional HTTP(S) proxy URL for remote JSON-RPC endpoints on native targets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) remote_rpc_proxy_url: Option<String>,
@@ -259,6 +296,10 @@ pub(in crate::processor) fn validate_onion_role_config(
             service: service.clone(),
         });
     }
+    #[cfg(rings_browser)]
+    if let Some(offer) = onion_role.exit() {
+        offer.policy().validate_browser_targets()?;
+    }
     if onion_role.registers_relay() && !advertise_presence {
         return Err(Error::InvalidConfig(
             "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"
@@ -299,6 +340,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
                 .onion_role
                 .exit()
                 .map_or_else(default_onion_exit_policy, |offer| offer.policy().clone()),
+            onion_invoke_offer: ins.onion_role.invoke().cloned(),
             remote_rpc_proxy_url: ins
                 .remote_rpc_proxy
                 .as_ref()
@@ -337,15 +379,29 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             advertise_presence: ins.advertise_presence,
             dht_virtual_nodes: ins.dht_virtual_nodes,
             origin_quota: ins.origin_quota,
-            onion_role: OnionRole::from_flags(
-                ins.advertise_onion_relay,
-                ins.advertise_onion_exit,
-                ins.onion_exit_services,
-                ins.onion_exit_policy,
-            )?,
+            onion_role: {
+                let role = OnionRole::from_flags(
+                    ins.advertise_onion_relay,
+                    ins.advertise_onion_exit,
+                    ins.onion_exit_services,
+                    ins.onion_exit_policy,
+                )?;
+                match ins.onion_invoke_offer {
+                    Some(invoke) => {
+                        if !ins.advertise_onion_relay {
+                            return Err(Error::InvalidConfig(
+                                "onion_invoke_offer requires advertise_onion_relay".to_string(),
+                            ));
+                        }
+                        role.with_invoke(invoke)
+                    }
+                    None => role,
+                }
+            },
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
             remote_rpc_proxy,
+            clock: Arc::new(SystemClock),
         })
     }
 }

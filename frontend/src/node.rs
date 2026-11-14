@@ -58,6 +58,22 @@ impl DemoNode {
         self.listener.stop();
     }
 
+    /// Stop the background listener, close the underlying [`Provider`], and release its
+    /// IndexedDB Web Lock.
+    pub async fn close(self) -> Result<(), String> {
+        self.listener.stop();
+        drop(self.webview);
+        drop(self.listener);
+        match Arc::unwrap_or_clone(self.provider).close().await {
+            Ok(()) => Ok(()),
+            Err(rings_node::error::Error::ProviderStillShared { released }) => {
+                released.await;
+                Ok(())
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     /// Return the controlled webview gateway attached to this browser node.
     pub fn webview(&self) -> WebviewResult<WebviewNode> {
         self.webview.clone().ok_or_else(|| {
@@ -126,6 +142,19 @@ pub enum WebviewHost {
     Extension,
 }
 
+fn scoped_storage_name(base: &str, did: rings_node::prelude::rings_core::dht::Did) -> String {
+    let trimmed = base.trim();
+    if trimmed.is_empty() {
+        return base.to_string();
+    }
+    let suffix = format!("-{did}");
+    if trimmed.ends_with(&suffix) {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}{suffix}")
+    }
+}
+
 /// Build a browser provider from a wallet-authorized delegatee key.
 ///
 /// The browser provider is used only on the single-threaded wasm event loop, but
@@ -144,6 +173,7 @@ pub async fn build_node(
     let delegatee_key = builder
         .build()
         .map_err(|error| format!("delegatee key rejected: {error}"))?;
+    let storage_name = scoped_storage_name(&settings.storage_name, delegatee_key.delegator_did());
     let config = ProcessorConfig::new(
         settings.network_id,
         settings.ice_servers,
@@ -151,7 +181,7 @@ pub async fn build_node(
         settings.stabilize_interval,
     );
     let provider = Arc::new(
-        Provider::new_browser_provider_with_storage(config, settings.storage_name)
+        Provider::new_browser_provider_with_storage(config, storage_name)
             .await
             .map_err(|error| format!("build provider: {error}"))?,
     );
@@ -159,8 +189,14 @@ pub async fn build_node(
     let webview = match webview_host {
         WebviewHost::CurrentWindow => WebviewNode::for_current_window(provider.clone()),
         WebviewHost::Extension => WebviewNode::for_extension(provider.clone()).map(Some),
-    }
-    .map_err(|error| format!("initialize webview: {error}"))?;
+    };
+    let webview = match webview {
+        Ok(webview) => webview,
+        Err(error) => {
+            let _ = Arc::unwrap_or_clone(provider).close().await;
+            return Err(format!("initialize webview: {error}"));
+        }
+    };
     let listener = provider.listen();
 
     Ok(DemoNode {

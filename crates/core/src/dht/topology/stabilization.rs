@@ -71,22 +71,26 @@ pub fn successor_head(state: &TopologyState) -> Option<Did> {
         .find(|successor| *successor != state.local)
 }
 
-/// The remote peers notified when `state.local` departs voluntarily (#1057): `predecessor`
-/// followed by `successor_head`, deduplicated and excluding `state.local`.
+/// The remote peers notified when `state.local` departs voluntarily (#1057): `predecessor`,
+/// `successor_head`, and any retained secondary `predecessors`, deduplicated and excluding
+/// `state.local`.
 ///
-/// Law: returns at most 2 distinct remote peers (`predecessor` and `successor_head`), empty
-/// when the node stands alone, and length 1 on a 2-node ring where
-/// `predecessor == successor_head`.
+/// Law: returns at most `capacity + 1` distinct remote peers, empty when the node stands alone,
+/// and length 1 on a 2-node ring where `predecessor == successor_head`.
 pub fn leave_targets(state: &TopologyState) -> Vec<Did> {
     state
         .predecessor
         .into_iter()
         .chain(successor_head(state))
+        .chain(state.predecessors.iter().copied())
         .filter(|&candidate| candidate != state.local)
-        .fold(Vec::with_capacity(2), |mut targets, candidate| {
-            push_unique(&mut targets, candidate);
-            targets
-        })
+        .fold(
+            Vec::with_capacity(state.predecessors.len().saturating_add(2)),
+            |mut targets, candidate| {
+                push_unique(&mut targets, candidate);
+                targets
+            },
+        )
 }
 
 impl TopologyState {
@@ -456,8 +460,8 @@ pub(super) const fn bridged_total_capacity(capacity: usize) -> usize {
 }
 
 /// Prune `state.bridged` so every target is a non-local unreferenced peer, every `via` bridge
-/// is a current successor in `state.successors` (not equal to `excluded_peer`), and the total
-/// map size is bounded by `2 * capacity^2`.
+/// is a current topology-referenced peer (`state.referenced_peers()`, not equal to
+/// `excluded_peer`), and the total map size is bounded by `2 * capacity^2`.
 pub(super) fn prune_bridged(
     state: &mut TopologyState,
     excluded_peer: Option<Did>,
@@ -465,13 +469,12 @@ pub(super) fn prune_bridged(
 ) {
     let local = state.local;
     let referenced = state.referenced_peers();
-    let successors = state.successors.clone();
     state.bridged.retain(|&target, &mut via| {
         target != local
             && excluded_peer != Some(target)
             && excluded_peer != Some(via)
             && !referenced.contains(&target)
-            && successors.contains(&via)
+            && referenced.contains(&via)
     });
     let max_total = bridged_total_capacity(capacity);
     while state.bridged.len() > max_total {
@@ -487,7 +490,7 @@ pub(super) fn prune_bridged(
 }
 
 /// Record passive 1-hop bridge reachability hints for unconfirmed peers advertised by an
-/// admitted successor reporter (`reporter`), enforcing per-reporter (`2K`) and total (`2K^2`)
+/// admitted topology reporter (`reporter`), enforcing per-reporter (`2K`) and total (`2K^2`)
 /// capacity bounds.
 pub(super) fn step_record_bridged_peers(
     state: &TopologyState,
@@ -495,7 +498,7 @@ pub(super) fn step_record_bridged_peers(
     unconfirmed: &[Did],
     capacity: usize,
 ) -> TopologyStep {
-    if capacity == 0 || reporter == state.local || !state.successors.contains(&reporter) {
+    if capacity == 0 || reporter == state.local || !state.references(reporter) {
         let mut next_state = state.clone();
         prune_bridged(&mut next_state, None, capacity);
         return TopologyStep {
@@ -520,7 +523,7 @@ pub(super) fn step_record_bridged_peers(
     for peer in bounded_unconfirmed {
         let keep_existing = next_state.bridged.get(&peer).is_some_and(|&existing_via| {
             existing_via != reporter
-                && next_state.successors.contains(&existing_via)
+                && next_state.references(existing_via)
                 && dist(state.local, existing_via) < dist(state.local, reporter)
         });
         if !keep_existing {

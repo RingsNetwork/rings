@@ -626,9 +626,11 @@ const E2E_TEST_FRAME_SECRET: &str =
 /// A stream frame at `sequence` with no payload; only sequence and finality matter here, so the
 /// stream id and sender key are fixed.
 fn e2e_test_frame(sequence: u64, is_final: bool) -> E2eStreamFrame {
+    let public_key = SecretKey::try_from(E2E_TEST_FRAME_SECRET).unwrap().pubkey();
     E2eStreamFrame {
         stream_id: uuid::Uuid::nil(),
-        sender_public_key: SecretKey::try_from(E2E_TEST_FRAME_SECRET).unwrap().pubkey(),
+        sender_public_key: public_key,
+        ephemeral_public_key: public_key,
         sequence,
         is_final,
         ciphertext: Vec::new(),

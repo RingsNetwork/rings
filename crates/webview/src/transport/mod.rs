@@ -283,9 +283,10 @@ impl GatewayResponsePolicy {
             }
         }
         let rewritten = match rewrite_kind {
-            RewriteKind::Html | RewriteKind::Xhtml | RewriteKind::Svg => {
+            RewriteKind::Html | RewriteKind::Xhtml => {
                 ctx.rewrite_html_with_limit(text, MAX_GATEWAY_BODY_BYTES)?
             }
+            RewriteKind::Svg => ctx.rewrite_svg_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
             RewriteKind::Css => ctx.rewrite_css_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
         };
         Ok(rewritten.into_bytes())
@@ -366,9 +367,7 @@ fn rewrite_kind_for_response(content_type: Option<&str>, body: &[u8]) -> Option<
 }
 
 fn is_inert_navigation_media_type(media_type: &str) -> bool {
-    media_type.starts_with("text/")
-        || media_type == "application/xml"
-        || media_type.ends_with("+xml")
+    media_type == "text/plain"
         || media_type == "application/json"
         || media_type.ends_with("+json")
         || matches!(

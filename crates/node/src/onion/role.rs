@@ -124,9 +124,61 @@ impl<X, I> OnionRole<X, I> {
 
 /// What a node offers for intermediate `invoke` evaluation: a non-empty map from `(shape, backend)`
 /// pairs in `Σ_I × Ω` to their signed `quota(n, f, ω)` policies (#834 D2).
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    try_from = "Vec<SerializedOnionInvokeEntry>",
+    into = "Vec<SerializedOnionInvokeEntry>"
+)]
 pub struct OnionInvokeOffer {
     entries: BTreeMap<(OnionInvokeShape, OnionBackendName), OnionInvokePolicy>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+struct SerializedOnionInvokeEntry {
+    shape: OnionInvokeShape,
+    backend: OnionBackendName,
+    #[serde(default)]
+    policy: OnionInvokePolicy,
+}
+
+impl From<OnionInvokeOffer> for Vec<SerializedOnionInvokeEntry> {
+    fn from(offer: OnionInvokeOffer) -> Self {
+        offer
+            .entries
+            .into_iter()
+            .map(|((shape, backend), policy)| SerializedOnionInvokeEntry {
+                shape,
+                backend,
+                policy,
+            })
+            .collect()
+    }
+}
+
+impl TryFrom<Vec<SerializedOnionInvokeEntry>> for OnionInvokeOffer {
+    type Error = Error;
+
+    fn try_from(entries: Vec<SerializedOnionInvokeEntry>) -> Result<Self> {
+        let mut collected = BTreeMap::new();
+        for entry in entries {
+            if collected
+                .insert((entry.shape, entry.backend.clone()), entry.policy)
+                .is_some()
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "duplicate onion invoke entry for ({}, {:?})",
+                    entry.shape,
+                    entry.backend.as_str()
+                )));
+            }
+        }
+        if collected.is_empty() {
+            return Err(Error::InvalidConfig(
+                "an onion invoke offer requires at least one (shape, backend) entry".to_string(),
+            ));
+        }
+        Ok(Self { entries: collected })
+    }
 }
 
 impl OnionInvokeOffer {

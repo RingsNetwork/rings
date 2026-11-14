@@ -9,7 +9,6 @@ use futures_util::future::LocalBoxFuture;
 use futures_util::future::Shared;
 use futures_util::FutureExt;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::RtcPeerConnection;
 
 use crate::core::send::actor;
 use crate::core::send::lifecycle::Retirement;
@@ -79,12 +78,12 @@ impl BrowserLifecycle {
     pub(super) fn new(
         acceptance: SendAcceptance,
         connection_state: ConnectionStateCell,
-        connection: RtcPeerConnection,
+        close_connection: impl FnOnce() + 'static,
     ) -> Rc<Self> {
         // Browser close is synchronous. Success means the local API returned,
         // not that a remote endpoint acknowledged closure or drained queued data.
         let close = async move {
-            connection.close();
+            close_connection();
             Ok(())
         };
         Self::spawn(acceptance, connection_state, close).0

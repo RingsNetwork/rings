@@ -107,13 +107,31 @@ async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_befo
         .expect("first RTCPeerConnection::close must enter Closed state callback");
     assert!(!witness.is_complete());
 
+    struct NoopCallback;
+    impl crate::core::callback::TransportCallback for NoopCallback {}
+
     let second_completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let second_close = tokio::spawn({
         let webrtc_conn = Arc::clone(&webrtc_conn);
         let physical_close_completed = physical_close_completed.clone();
         let second_completed = Arc::clone(&second_completed);
         async move {
-            let result = close_failed_native_send(webrtc_conn, physical_close_completed).await;
+            let channel_pool = Arc::new(ChannelPool::from_vec(Vec::new()));
+            let data_channel_notifier = Notifier::default();
+            let inner_cb = Arc::new(InnerTransportCallback::new(
+                "peer",
+                Box::new(NoopCallback),
+                data_channel_notifier.clone(),
+                NodeFramePool::new(),
+            ));
+            let result = close_failed_native_send(
+                webrtc_conn,
+                channel_pool,
+                data_channel_notifier,
+                inner_cb,
+                physical_close_completed,
+            )
+            .await;
             second_completed.store(true, Ordering::Release);
             result
         }
@@ -238,14 +256,13 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
         NodeFramePool::new(),
     ));
     let connection_state = ConnectionStateCell::new();
-    let queue = Arc::new(std::sync::Mutex::new(PeerStateQueue::default()));
+    let observe_and_dispatch = |state: RTCPeerConnectionState| {
+        let state_change: WebrtcConnectionState = state.into();
+        connection_state.observe_webrtc(state_change);
+        inner_cb.dispatch_peer_connection_state(state_change);
+    };
 
-    dispatch_peer_connection_state(
-        &queue,
-        &inner_cb,
-        &connection_state,
-        RTCPeerConnectionState::Connecting,
-    );
+    observe_and_dispatch(RTCPeerConnectionState::Connecting);
     assert_eq!(
         connection_state.snapshot().webrtc(),
         WebrtcConnectionState::Connecting
@@ -254,32 +271,17 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
         .await
         .expect("first state callback must start on runtime");
 
-    dispatch_peer_connection_state(
-        &queue,
-        &inner_cb,
-        &connection_state,
-        RTCPeerConnectionState::Connected,
-    );
+    observe_and_dispatch(RTCPeerConnectionState::Connected);
     assert_eq!(
         connection_state.snapshot().webrtc(),
         WebrtcConnectionState::Connected
     );
-    dispatch_peer_connection_state(
-        &queue,
-        &inner_cb,
-        &connection_state,
-        RTCPeerConnectionState::Failed,
-    );
+    observe_and_dispatch(RTCPeerConnectionState::Failed);
     assert_eq!(
         connection_state.snapshot().webrtc(),
         WebrtcConnectionState::Failed
     );
-    dispatch_peer_connection_state(
-        &queue,
-        &inner_cb,
-        &connection_state,
-        RTCPeerConnectionState::Closed,
-    );
+    observe_and_dispatch(RTCPeerConnectionState::Closed);
     assert_eq!(
         connection_state.snapshot().webrtc(),
         WebrtcConnectionState::Closed

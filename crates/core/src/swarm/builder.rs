@@ -73,7 +73,7 @@ impl SwarmBuilder {
             ice_servers: ice_servers.to_string(),
             external_address: None,
             webrtc_udp_port_range: None,
-            dht_succ_max: 3,
+            dht_succ_max: crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY as u8,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
@@ -257,11 +257,14 @@ impl SwarmBuilder {
             delegatee_key: self.delegatee_key,
             dht: dht.clone(),
             measure: self.measure,
-            transaction_replay: Arc::new(TransactionReplay::new_with_quota(
-                self.replay_storage,
-                self.origin_quota,
-                TableAccounting::new(RECEIVER_STREAM_SHARES),
-            )),
+            transaction_replay: Arc::new(
+                TransactionReplay::new_with_quota(
+                    self.replay_storage,
+                    self.origin_quota,
+                    TableAccounting::new(RECEIVER_STREAM_SHARES),
+                )
+                .with_clock(self.clock.clone()),
+            ),
             settings: SwarmTransportSettings::new(
                 self.dht_storage_redundancy,
                 storage_virtual_node_config,

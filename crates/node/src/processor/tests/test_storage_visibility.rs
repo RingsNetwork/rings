@@ -10,7 +10,7 @@
 //! Admitting C makes it B's successor head, so B forwards every placement to C at once; the
 //! hand-off of B's replicas waits for a storage repair round, and no node here runs the
 //! stabilizer. Before #982 the writer's lookup answered the empty registry; with it, the writer
-//! reads its own write from its cache.
+//! reads its own write from its cache and read-repairs C once C settles the miss (#1256).
 
 use rings_core::dht::entry::EntryKind;
 use rings_core::dht::Chord;
@@ -155,6 +155,12 @@ async fn test_writer_lists_its_registry_write_after_the_owner_moves() -> Result<
         .map(|descriptor| descriptor.did)
         .collect::<BTreeSet<_>>();
     assert_eq!(listed, expected);
-    assert!(!stores_any(&later_owner, placements.as_slice()).await?);
+    wait_for_online_node_dids_in_storage(
+        &later_owner,
+        placements.as_slice(),
+        &expected,
+        "the writer's lookup read-repairs the missed later owner from its cache",
+    )
+    .await?;
     Ok(())
 }

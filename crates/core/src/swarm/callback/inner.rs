@@ -370,16 +370,17 @@ impl BoundCallback {
         authorization: PerSlot<DelegatorAuthorization>,
     ) -> Result<Option<PreparedInboundFrame>, TransportCallbackError> {
         let network_id = self.processor.logical.transport.network_id;
+        let now_ms = self.processor.now_ms();
         // Law (expiry in flight): the hop answers only for its own delegation, so a frame whose
         // only defect is an origin delegation that expired in flight is not charged to it.
-        if origin_expired_in_flight(network_id, &payload, self.processor.now_ms()) {
+        if origin_expired_in_flight(network_id, &payload, now_ms) {
             tracing::debug!(
                 peer = ?peer,
                 "dropping message; its origin delegation expired in flight"
             );
             return Ok(None);
         }
-        match prepare_resolved_frame(network_id, peer, payload, wire_len, authorization) {
+        match prepare_resolved_frame(network_id, now_ms, peer, payload, wire_len, authorization) {
             Ok(prepared) => Ok(Some(prepared)),
             Err(error) => {
                 self.processor.record_receive_failure_now(peer).await;

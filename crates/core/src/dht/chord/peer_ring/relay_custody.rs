@@ -325,11 +325,13 @@ impl PeerRing {
         hold: EntryOperation,
         target: Option<Did>,
     ) -> Result<()> {
+        let now_ms = self.clock.now_ms();
         let mut kept = self.lock_unacknowledged_relay_holds()?;
         if let Some(known) = kept.get_mut(&digest) {
             known.target = target;
             return Ok(());
         }
+        kept.retain(|_, known| known.hold.hold_is_live_at(now_ms));
         if kept.len() >= UNACKNOWLEDGED_RELAY_HOLDS_MAX {
             return Err(Error::RelayHoldsUnacknowledgedFull);
         }

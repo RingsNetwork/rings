@@ -202,6 +202,7 @@ impl ExternalRpcHandler {
     ) -> Result<serde_json::Value>
     where
         P: HandleRpc<AnswerOfferRequest, AnswerOfferResponse>
+            + HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse>
             + HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse>
             + HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse>
             + HandleRpc<NodeInfoRequest, NodeInfoResponse>
@@ -216,6 +217,12 @@ impl ExternalRpcHandler {
         match method {
             Method::AnswerOffer => {
                 let req = serde_json::from_value::<AnswerOfferRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::AcceptAnswer => {
+                let req = serde_json::from_value::<AcceptAnswerRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

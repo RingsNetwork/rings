@@ -33,6 +33,15 @@ impl Global {
             }
         }
     }
+
+    /// Cancel a previously scheduled timeout handle on this global scope.
+    pub fn clear_timeout(&self, handle: i32) {
+        match self {
+            Global::Window(global) => global.clear_timeout_with_handle(handle),
+            Global::Worker(global) => global.clear_timeout_with_handle(handle),
+            Global::ServiceWorker(global) => global.clear_timeout_with_handle(handle),
+        }
+    }
 }
 
 /// Detect the current JavaScript global scope; `None` outside the three scopes above.

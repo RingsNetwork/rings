@@ -138,6 +138,9 @@ pub trait CurveGroup {
 
     /// Element equality.
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool;
+
+    /// Wipe a native scalar in place.
+    fn zeroize_scalar(scalar: &mut Self::Scalar);
 }
 
 /// Curve-specific scalar-field operations implemented by curve markers.
@@ -209,8 +212,8 @@ pub trait CurveScalarField: CurveGroup {
 /// exposes the same cryptographic capability through the element carrier so
 /// algorithms do not need to know the curve marker type.
 pub trait CyclicModule: AbelianGroup + Sized {
-    /// Scalar field for the module action.
-    type Scalar: AlgebraField;
+    /// Scalar field for the module action, wiped on drop when held as secret key material.
+    type Scalar: AlgebraField + Zeroize;
 
     /// Distinguished generator for the cyclic subgroup used by the algorithm.
     fn generator() -> Self;
@@ -284,9 +287,11 @@ impl<C: CurveGroup> Scalar<C> {
         &self.inner
     }
 
-    /// Unwrap into the curve-native scalar type.
-    pub fn into_inner(self) -> C::Scalar {
-        self.inner
+    /// Unwrap into the curve-native scalar type, wiping the carrier's copy before drop.
+    pub fn into_inner(mut self) -> C::Scalar {
+        let out = self.inner.clone();
+        C::zeroize_scalar(&mut self.inner);
+        out
     }
 }
 
@@ -309,11 +314,10 @@ impl<C: CurveGroup> Clone for Scalar<C> {
     }
 }
 
-impl<C> Copy for Scalar<C>
-where
-    C: CurveGroup,
-    C::Scalar: Copy,
-{
+impl<C: CurveGroup> Drop for Scalar<C> {
+    fn drop(&mut self) {
+        C::zeroize_scalar(&mut self.inner);
+    }
 }
 
 impl<C: CurveGroup> Add for Point<C> {
@@ -477,7 +481,8 @@ macro_rules! impl_curve_group_adapter {
             scalar_neg: $scalar_neg:expr,
             scalar_mul: $scalar_mul:expr,
             scalar_inverse: $scalar_inverse:expr,
-            scalar_eq: $scalar_eq:expr $(,)?
+            scalar_eq: $scalar_eq:expr,
+            scalar_zeroize: $scalar_zeroize:expr $(,)?
         }
     ) => {
         impl CurveGroup for $curve {
@@ -506,6 +511,10 @@ macro_rules! impl_curve_group_adapter {
 
             fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
                 ($eq)(lhs, rhs)
+            }
+
+            fn zeroize_scalar(scalar: &mut Self::Scalar) {
+                ($scalar_zeroize)(scalar)
             }
         }
 
@@ -593,6 +602,10 @@ impl CurveGroup for Secp256k1 {
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
         lhs == rhs
     }
+
+    fn zeroize_scalar(scalar: &mut Self::Scalar) {
+        scalar.zeroize();
+    }
 }
 
 impl CurveScalarField for Secp256k1 {
@@ -657,6 +670,7 @@ impl_curve_group_adapter! {
         scalar_mul: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| *lhs * *rhs,
         scalar_inverse: |scalar: &Secp256r1ScalarField| scalar.invert().into_option(),
         scalar_eq: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| lhs == rhs,
+        scalar_zeroize: |scalar: &mut Secp256r1ScalarField| scalar.zeroize(),
     }
 }
 
@@ -687,6 +701,7 @@ impl_curve_group_adapter! {
         scalar_mul: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs * *rhs,
         scalar_inverse: |scalar: &Bls12381ScalarField| scalar.inverse(),
         scalar_eq: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| lhs == rhs,
+        scalar_zeroize: |scalar: &mut Bls12381ScalarField| scalar.0.0.zeroize(),
     }
 }
 
@@ -726,6 +741,7 @@ impl_curve_group_adapter! {
             }
         },
         scalar_eq: |lhs: &Ristretto255ScalarField, rhs: &Ristretto255ScalarField| lhs == rhs,
+        scalar_zeroize: |scalar: &mut Ristretto255ScalarField| scalar.zeroize(),
     }
 }
 
@@ -758,12 +774,10 @@ impl TryFrom<PublicKey<33>> for Point<Secp256k1> {
     }
 }
 
-impl<C: CurveGroup> Zeroize for Scalar<C>
-where C::Scalar: Zeroize
-{
+impl<C: CurveGroup> Zeroize for Scalar<C> {
     /// Zeroizes the native scalar.
     fn zeroize(&mut self) {
-        self.inner.zeroize();
+        C::zeroize_scalar(&mut self.inner);
     }
 }
 

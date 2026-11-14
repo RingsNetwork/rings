@@ -718,7 +718,15 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
         message: error.to_string(),
     })?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = File::create(&temporary)
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(&temporary)
         .map_err(|error| GatewayError::platform("create-route-ledger", error))?;
     file.write_all(&bytes)
         .map_err(|error| GatewayError::platform("write-route-ledger", error))?;

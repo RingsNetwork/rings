@@ -65,14 +65,25 @@ pub(crate) struct PagehideListener {
 
 impl PagehideListener {
     /// Register a `pagehide` listener on the global `window`, if one exists in this JS realm.
+    ///
+    /// When the page is entering the browser back-forward cache (`PageTransitionEvent::persisted()`
+    /// is `true`), `leave()` is skipped so the frozen tab does not evict itself from the overlay;
+    /// on genuine tab unload, both voluntary departure and measurement flush are dispatched.
     pub(crate) fn register(processor: &Arc<Processor>) -> Option<Self> {
         web_sys::window().and_then(|window| {
             let weak = Arc::downgrade(processor);
-            let callback = Closure::wrap(Box::new(move |_event: web_sys::Event| {
+            let callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
+                let persisted = event
+                    .dyn_ref::<web_sys::PageTransitionEvent>()
+                    .is_some_and(web_sys::PageTransitionEvent::persisted);
+                if persisted {
+                    return;
+                }
                 weak.upgrade().into_iter().for_each(|processor| {
                     let tasks = processor.tasks().clone();
                     let _ = tasks.spawn(async move {
                         let _ = processor.leave().await;
+                        let _ = processor.flush_measurements().await;
                     });
                 });
             }) as Box<dyn FnMut(web_sys::Event)>);

@@ -76,7 +76,7 @@ where T: Into<Location<'a>>
         Self {
             file: lo.file().to_string(),
             line: lo.line().to_string(),
-            column: lo.file().to_string(),
+            column: lo.column().to_string(),
         }
     }
 }

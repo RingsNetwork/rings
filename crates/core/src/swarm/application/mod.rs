@@ -161,7 +161,7 @@ impl ApplicationData {
         match self {
             Self::Custom(CustomMessage(bytes)) => bytes.len(),
             Self::E2eHandshakeRequest(_) | Self::E2eHandshakeResponse(_) => 0,
-            Self::E2eStreamFrame(frame) => std::mem::size_of_val(frame.ciphertext.as_slice()),
+            Self::E2eStreamFrame(frame) => frame.ciphertext.len(),
         }
     }
 }

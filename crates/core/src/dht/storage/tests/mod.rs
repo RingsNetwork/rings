@@ -496,6 +496,40 @@ fn test_physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
 }
 
 #[test]
+fn test_physical_owner_route_prefers_direct_predecessor_over_clockwise_successor() -> Result<()> {
+    let local = Did::from(10u32);
+    let successor = Did::from(20u32);
+    let far_successor = Did::from(30u32);
+    let secondary_predecessor = Did::from(5u32);
+    let primary_predecessor = Did::from(8u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        2,
+        Box::new(MemStorage::new()),
+        4,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.admit_connected(successor, None)?;
+    let _ = node.admit_connected(far_successor, None)?;
+    assert_eq!(
+        node.notify_within_topology(primary_predecessor)?,
+        Some(primary_predecessor)
+    );
+    assert_eq!(
+        node.notify_within_topology(secondary_predecessor)?,
+        Some(primary_predecessor)
+    );
+
+    for pred in [primary_predecessor, secondary_predecessor] {
+        let destination = StorageSyncDestination::PhysicalOwner(pred);
+        assert_eq!(node.next_hop_for_storage_sync(destination)?, Some(pred));
+        assert!(node.storage_sync_route_still_permits(destination, pred)?);
+        assert!(!node.storage_sync_route_still_permits(destination, successor)?);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(10u32);
@@ -1748,5 +1782,75 @@ async fn test_issue_1220_signed_data_mutation_authenticates_swarm_sync_and_local
             .await,
         Err(Error::DataEntryWriteUnauthorized)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_non_virtual_local_miss_settles_without_forwarding_to_successor_head() -> Result<()> {
+    let n10 = Did::from(10u32);
+    let n20 = Did::from(20u32);
+    let ring = PeerRing::new_with_storage(n10, 4, Box::new(MemStorage::new()));
+    let _ = ring.admit_connected(n20, None)?;
+
+    let missing = Did::from(15u32);
+    let expected =
+        PeerRingAction::MultiActions(vec![PeerRingAction::EntryMisses(vec![PlacementMiss::new(
+            missing, n10,
+        )])]);
+    assert_eq!(ring.entry_lookup(missing, 1).await?, expected);
+    assert_eq!(ring.entry_lookup_for_fetch(missing, 1).await?, expected);
+    Ok(())
+}
+
+#[test]
+fn test_non_transitive_cliques_share_virtual_node_ring_and_bridge_storage_sync() -> Result<()> {
+    let [a10, b20, c30, d40, e50] = [10u32, 20, 30, 40, 50].map(Did::from);
+    let vcfg = VirtualNodeConfig::new(7, 2);
+
+    let ring_a = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        a10,
+        4,
+        Box::new(MemStorage::new()),
+        8,
+        vcfg,
+    );
+    let _ = ring_a.admit_connected(b20, None)?;
+    let _ = ring_a.admit_connected(c30, None)?;
+    ring_a.record_bridged_peers(c30, vec![d40, e50])?;
+
+    let ring_c = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        c30,
+        4,
+        Box::new(MemStorage::new()),
+        8,
+        vcfg,
+    );
+    for peer in [a10, b20, d40, e50] {
+        let _ = ring_c.admit_connected(peer, None)?;
+    }
+
+    let ring_e = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        e50,
+        4,
+        Box::new(MemStorage::new()),
+        8,
+        vcfg,
+    );
+    let _ = ring_e.admit_connected(c30, None)?;
+    let _ = ring_e.admit_connected(d40, None)?;
+    ring_e.record_bridged_peers(c30, vec![a10, b20])?;
+
+    for idx in 1u32..=32 {
+        let key = Did::from(idx.saturating_mul(1_000_003));
+        let owner_a = ring_a.observed_storage_virtual_owner(key)?;
+        let owner_c = ring_c.observed_storage_virtual_owner(key)?;
+        let owner_e = ring_e.observed_storage_virtual_owner(key)?;
+        assert_eq!(owner_a, owner_c);
+        assert_eq!(owner_c, owner_e);
+    }
+
+    let dest_e = crate::dht::StorageSyncDestination::PhysicalOwner(e50);
+    assert_eq!(ring_a.next_hop_for_storage_sync(dest_e)?, Some(c30));
+    assert!(ring_a.storage_sync_route_still_permits(dest_e, c30)?);
     Ok(())
 }

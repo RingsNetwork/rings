@@ -170,12 +170,21 @@ impl PoolState {
         }
     }
 
-    /// Count `p_e ← p_e − before + after` for `edge`.
+    /// Count `p_e ← p_e − before + after` for `edge`, adjusting `self.used` by the exact delta
+    /// of `share.held` so `used == Σ share.held` holds unconditionally even if `edge` was already
+    /// released.
     fn count(&mut self, (edge, link): (EdgeKey, &Weak<LinkCredit>), (before, after): (u64, u64)) {
+        let mut prev_held = 0;
+        let mut next_held = 0;
         self.update((edge, link), |share| {
+            prev_held = share.held;
             share.held = share.held.saturating_sub(before).saturating_add(after);
+            next_held = share.held;
         });
-        self.used = self.used.saturating_sub(before).saturating_add(after);
+        self.used = self
+            .used
+            .saturating_sub(prev_held)
+            .saturating_add(next_held);
     }
 
     /// The next demand to serve, with the holdings visited to find it (pure): the earliest of
@@ -326,7 +335,12 @@ impl NodeFramePool {
                 ((edge, index), link.unwrap_or_default())
             };
             let (edge, index) = next;
-            let want = link.upgrade().map_or(0, |link| link.want(index));
+            let Some(upgraded) = link.upgrade() else {
+                self.lock()
+                    .update((edge, &Weak::new()), |share| share.demands.clear());
+                continue;
+            };
+            let want = upgraded.want(index);
             let (lent, starved, full) = {
                 let mut state = self.lock();
                 let room = state.claim().saturating_sub(state.held(edge));
@@ -341,17 +355,13 @@ impl NodeFramePool {
                 let starved = lent < want.min(room) && state.held(edge) < state.share();
                 (lent, starved, lent == free)
             };
-            match link.upgrade() {
-                Some(link) => {
-                    if lent > 0 {
-                        link.lend(index, lent);
-                    }
-                    if lent == want {
-                        link.served(index);
-                    }
-                }
-                None => self.lock().count((edge, &link), (lent, 0)),
+            if lent > 0 {
+                upgraded.lend(index, lent);
             }
+            if lent == want {
+                upgraded.served(index);
+            }
+            drop(upgraded);
             if starved {
                 self.rebalance();
             }
@@ -426,5 +436,56 @@ impl NodeFramePool {
 impl Default for NodeFramePool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(all(test, any(feature = "dummy", feature = "native-webrtc")))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Weak;
+
+    use super::NodeFramePool;
+    use crate::callback::link_credit::LinkCredit;
+    use crate::core::credit::credit_index;
+    use crate::core::pool::ChannelLane;
+
+    /// Regression test (#1259): releasing an edge and applying a stale shrink/rollback count on it
+    /// must never subtract from another live edge's pooled credit (`used == Σ share.held`).
+    #[test]
+    fn test_release_and_stale_count_never_underflow_another_edges_used_pool() {
+        let pool = NodeFramePool::with_capacity(64);
+        let live = Arc::new(LinkCredit::new(Arc::from("live"), pool.clone()));
+        let dying = Arc::new(LinkCredit::new(Arc::from("dying"), pool.clone()));
+
+        let data_lane = ChannelLane::new(1);
+        let _permit_live = live.admit(data_lane).expect("live admit");
+        let _permit_dying = dying.admit(data_lane).expect("dying admit");
+        assert!(pool.held_by(&live) > 0);
+        let live_held = pool.held_by(&live);
+        let dying_edge = dying.edge();
+        let dying_held = pool.held_by(&dying);
+        assert!(dying_held > 0);
+
+        drop(_permit_dying);
+        drop(dying);
+        assert_eq!(pool.used(), live_held);
+
+        // Even if a stale rollback `(dying_held, 0)` runs after `release(dying_edge)`, `used`
+        // stays equal to `live_held` instead of double-subtracting `dying_held`.
+        pool.lock()
+            .count((dying_edge, &Weak::new()), (dying_held, 0));
+        assert_eq!(pool.used(), live_held);
+
+        // Queueing a dead demand and serving clears the orphan demand without lending or corrupting
+        // `used`.
+        {
+            let mut state = pool.lock();
+            state.update((dying_edge, &Weak::new()), |share| {
+                share.demands.insert(999, credit_index(data_lane));
+            });
+        }
+        pool.serve();
+        assert_eq!(pool.waiting(), 0);
+        assert_eq!(pool.used(), live_held);
     }
 }

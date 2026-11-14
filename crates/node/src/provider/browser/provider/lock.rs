@@ -88,6 +88,20 @@ extern "C" {
     ) -> std::result::Result<Promise, JsValue>;
 }
 
+/// Validate that `storage_name` is a single non-empty namespace segment free of path separators
+/// and control characters so `rings-node/<storage_name>` cannot alias any sub-store name
+/// `<other>/<substore>`.
+pub(crate) fn validate_storage_name(storage_name: &str) -> NodeResult<()> {
+    if storage_name.is_empty()
+        || storage_name.contains('/')
+        || storage_name.contains('\\')
+        || storage_name.chars().any(char::is_control)
+    {
+        return Err(Error::InvalidBrowserStorageName(storage_name.to_owned()));
+    }
+    Ok(())
+}
+
 /// The Web Lock name of `storage_name` (pure): `rings-node/<storage_name>`.
 pub(crate) fn lock_name(storage_name: &str) -> String {
     format!("{BROWSER_STORAGE_LOCK_PREFIX}/{storage_name}")
@@ -182,6 +196,7 @@ impl Drop for BrowserStorageLock {
 pub(crate) async fn lock_browser_storage(
     storage_name: &str,
 ) -> NodeResult<(BrowserStorageLock, BrowserLockRelease)> {
+    validate_storage_name(storage_name)?;
     let locks = lock_manager()?;
     let options = Object::new();
     Reflect::set(
@@ -272,14 +287,15 @@ impl LockedBrowserStorage {
         Self { inner, _lock: lock }
     }
 
-    /// Open an [`IdbStorage`] of `(cap, name, authority)` and bind it to `lock`.
-    pub(crate) async fn open(
+    /// Open an [`IdbStorage`] of `(cap, byte_cap, name, authority)` and bind it to `lock`.
+    pub(crate) async fn open_with_byte_cap(
         cap: u32,
+        byte_cap: u32,
         name: &str,
         authority: RecordAuthority,
         lock: &Rc<BrowserStorageLock>,
     ) -> NodeResult<Self> {
-        IdbStorage::new_with_cap_name_and_authority(cap, name, authority)
+        IdbStorage::new_with_byte_cap_name_and_authority(cap, byte_cap, name, authority)
             .await
             .map(|storage| Self::new(storage, Rc::clone(lock)))
             .map_err(|source| Error::BrowserStorageOpen {
@@ -288,16 +304,17 @@ impl LockedBrowserStorage {
             })
     }
 
-    /// Open an [`IdbStorage`] of `(cap, name, authority)` bound to `lock`, logging `fallback_warning`
-    /// and returning `None` if IndexedDB cannot open.
-    pub(crate) async fn open_or_warn(
+    /// Open an [`IdbStorage`] of `(cap, byte_cap, name, authority)` bound to `lock`, logging
+    /// `fallback_warning` and returning `None` if IndexedDB cannot open.
+    pub(crate) async fn open_with_byte_cap_or_warn(
         cap: u32,
+        byte_cap: u32,
         name: &str,
         authority: RecordAuthority,
         lock: &Rc<BrowserStorageLock>,
         fallback_warning: &'static str,
     ) -> Option<Self> {
-        match Self::open(cap, name, authority, lock).await {
+        match Self::open_with_byte_cap(cap, byte_cap, name, authority, lock).await {
             Ok(storage) => Some(storage),
             Err(error) => {
                 tracing::warn!(storage_name = %name, %error, "{fallback_warning}");
@@ -362,5 +379,31 @@ where V: DeserializeOwned + Serialize + Sized
 
     async fn remove_batch(&self, keys: &[String]) -> CoreResult<()> {
         <IdbStorage as KvStorageScan<V>>::remove_batch(&self.inner, keys).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::validate_storage_name;
+    use crate::error::Error;
+
+    #[wasm_bindgen_test]
+    fn storage_name_validation_rejects_empty_and_hierarchical_names() {
+        assert!(validate_storage_name("rings-node").is_ok());
+        assert!(validate_storage_name("rings-frontend-123").is_ok());
+        for invalid in [
+            "",
+            "rings-node/relay-inbox",
+            "rings-node\\entries",
+            "bad\0name",
+            "bad\nname",
+        ] {
+            assert!(matches!(
+                validate_storage_name(invalid),
+                Err(Error::InvalidBrowserStorageName(rejected)) if rejected == invalid
+            ));
+        }
     }
 }

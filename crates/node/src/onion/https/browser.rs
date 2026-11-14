@@ -12,7 +12,9 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::AbortController;
+use web_sys::Headers;
 
+use super::is_transport_managed_header;
 use super::limits::drive_cancellable_https_fetch;
 use super::limits::CancellableHttpsFetch;
 use super::limits::FetchCancelTarget;
@@ -22,7 +24,7 @@ use super::OnionHttpsResponse;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
-use crate::onion::target::validate_public_ip_literal;
+use crate::onion::target::validate_public_https_url;
 
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -130,7 +132,7 @@ pub(super) async fn execute_https_request(
     max_body_bytes: u64,
     record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<OnionHttpsResponse> {
-    validate_public_ip_literal(target)?;
+    validate_public_https_url(url, target)?;
     let global = js_sys::global();
     let fetch = Reflect::get(global.as_ref(), JsValue::from_str("fetch").as_ref())
         .map_err(js_error)?
@@ -178,14 +180,14 @@ fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
         JsValue::from_str(normalize_method(&request.method).as_str()).as_ref(),
     )
     .map_err(js_error)?;
-    let headers = Object::new();
+    let headers = Headers::new().map_err(js_error)?;
     for (name, value) in &request.headers {
-        Reflect::set(
-            headers.as_ref(),
-            JsValue::from_str(name).as_ref(),
-            JsValue::from_str(value).as_ref(),
-        )
-        .map_err(js_error)?;
+        if is_transport_managed_header(name) {
+            continue;
+        }
+        headers
+            .append(name.as_str(), value.as_str())
+            .map_err(js_error)?;
     }
     Reflect::set(
         init.as_ref(),
@@ -208,7 +210,7 @@ fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     Reflect::set(
         init.as_ref(),
         JsValue::from_str("redirect").as_ref(),
-        JsValue::from_str("error").as_ref(),
+        JsValue::from_str("manual").as_ref(),
     )
     .map_err(js_error)?;
     Reflect::set(init.as_ref(), JsValue::from_str("signal").as_ref(), signal).map_err(js_error)?;

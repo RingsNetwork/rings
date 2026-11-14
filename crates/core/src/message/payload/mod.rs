@@ -41,6 +41,7 @@ use crate::message::verify_message_under;
 use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::MessageKind;
+#[cfg(test)]
 use crate::utils::get_epoch_ms;
 
 mod frame;
@@ -83,11 +84,15 @@ fn next_test_transaction_sequence(key: StreamKey) -> Result<u64> {
     Ok(next)
 }
 
-/// The digest both signatures of a payload cover: every signed field of the transaction.
+/// The digest both signatures of a payload cover: every signed field of the transaction,
+/// bound to the origin delegator DID so swapping the delegation slot for another delegator
+/// sharing the same delegatee key invalidates the transaction signature.
 ///
-/// `reply_via` is encoded as a presence byte followed by the DID when present, before the
-/// variable-length `data`, so the encoding stays injective.
+/// `origin` and `destination` are fixed-width 20-byte DIDs, and `reply_via` is encoded as a
+/// presence byte followed by the DID when present, before the variable-length `data`, so the
+/// encoding stays injective.
 fn hash_transaction(
+    origin: Did,
     destination: Did,
     tx_id: uuid::Uuid,
     sequence: u64,
@@ -96,6 +101,7 @@ fn hash_transaction(
 ) -> [u8; 32] {
     let mut msg = vec![];
 
+    msg.extend_from_slice(origin.as_bytes());
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
     msg.extend_from_slice(&sequence.to_be_bytes());
@@ -198,7 +204,14 @@ impl Transaction {
         T: Serialize,
     {
         let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, sequence, reply_via, &data);
+        let msg_hash = hash_transaction(
+            signer.delegator_did(),
+            destination,
+            tx_id,
+            sequence,
+            reply_via,
+            &data,
+        );
         let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
         Ok(Self {
             destination,
@@ -213,6 +226,7 @@ impl Transaction {
     /// The digest both the origin's and each hop's signature cover.
     fn signed_hash(&self) -> [u8; 32] {
         hash_transaction(
+            self.origin(),
             self.destination,
             self.tx_id,
             self.sequence,
@@ -391,19 +405,29 @@ impl MessagePayload {
     }
 
     /// Verify both the immutable origin transaction and the current payload carrier.
+    #[cfg(test)]
     pub(crate) fn verify_transaction_and_payload(&self, network_id: u32) -> bool {
-        self.verify_transaction_and_payload_under(network_id, PerSlot::full_verification())
+        self.verify_transaction_and_payload_at(network_id, get_epoch_ms())
     }
 
-    /// [`Self::verify_transaction_and_payload`] with each slot's delegator authorization treated
+    /// Verify both the immutable origin transaction and the current payload carrier at `now_ms`.
+    pub(crate) fn verify_transaction_and_payload_at(&self, network_id: u32, now_ms: u128) -> bool {
+        self.verify_transaction_and_payload_under_at(
+            network_id,
+            now_ms,
+            PerSlot::full_verification(),
+        )
+    }
+
+    /// [`Self::verify_transaction_and_payload_at`] with each slot's delegator authorization treated
     /// as `authorization` says: the origin slot's for the transaction, the hop slot's for the
     /// carrier.
-    pub(crate) fn verify_transaction_and_payload_under(
+    pub(crate) fn verify_transaction_and_payload_under_at(
         &self,
         network_id: u32,
+        now_ms: u128,
         authorization: PerSlot<DelegatorAuthorization>,
     ) -> bool {
-        let now_ms = get_epoch_ms();
         verify_message_under(&self.transaction, network_id, now_ms, authorization.origin)
             && verify_message_under(self, network_id, now_ms, authorization.hop)
             && self.relay_destination_matches_transaction()
@@ -661,12 +685,14 @@ pub trait PayloadSender {
         self.forward_by_relay(payload, relay).await
     }
 
-    /// Reset the destination to a secp DID.
+    /// Reset the destination to a secp DID, routing via a live intermediate hop when the target
+    /// is not directly connected.
     async fn reset_destination(&self, payload: &MessagePayload, next_hop: Did) -> Result<()> {
+        let hop = self.next_hop_toward(next_hop, RouteStage::TOWARD)?;
         let relay = payload
             .relay
             .reset_destination(next_hop)
-            .forward(self.dht().did, NextHop::toward(next_hop))?;
+            .forward(self.dht().did, hop)?;
         self.forward_by_relay(payload, relay).await
     }
 }

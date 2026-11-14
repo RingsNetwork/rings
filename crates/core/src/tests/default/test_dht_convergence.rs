@@ -131,7 +131,7 @@ use crate::error::Result;
 use crate::storage::MemStorage;
 
 /// Successor-list capacity; matches `SwarmBuilder::dht_succ_max` (production).
-pub(super) const K: usize = 3;
+pub(super) const K: usize = crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
 /// Ring bit-width; `Did` is `Z/2^160`, the finger table has one slot per bit.
 const BITS: usize = 160;
 

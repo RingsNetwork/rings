@@ -39,6 +39,10 @@ impl RngCore for SystemEntropy {
     }
 
     fn fill_bytes(&mut self, dest: &mut [u8]) {
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if crate::simulation::try_fill_entropy_bytes(dest) {
+            return;
+        }
         #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
         if crate::dummy_simulation::try_fill_entropy_bytes(dest) {
             return;
@@ -47,6 +51,10 @@ impl RngCore for SystemEntropy {
     }
 
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if crate::simulation::try_fill_entropy_bytes(dest) {
+            return Ok(());
+        }
         #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
         if crate::dummy_simulation::try_fill_entropy_bytes(dest) {
             return Ok(());

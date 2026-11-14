@@ -210,8 +210,7 @@ fn test_declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> 
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     for content_type in [
         "text/plain",
-        "text/xml",
-        "application/xml",
+        "application/json",
         "application/problem+json",
         "image/png",
     ] {
@@ -228,6 +227,35 @@ fn test_declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> 
         assert_eq!(
             response.body, body,
             "declared {content_type} must stay inert"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_xml_and_active_text_navigation_media_types_are_rejected_as_unsafe() -> Result<()> {
+    let target = TargetUrl::parse("https://example.com/index")?.into_url();
+    for content_type in [
+        "text/xml",
+        "application/xml",
+        "application/rss+xml",
+        "text/xsl",
+        "text/vtt",
+    ] {
+        let gateway =
+            ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
+                content_type: Some(content_type),
+                body: b"<?xml version=\"1.0\"?><doc/>".to_vec(),
+            });
+
+        assert!(
+            matches!(
+                futures::executor::block_on(
+                    gateway.send(GatewayRequest::navigation(target.clone()))
+                ),
+                Err(WebviewError::UnsafeNavigationMediaType { .. })
+            ),
+            "{content_type} must be rejected at navigation boundary"
         );
     }
     Ok(())

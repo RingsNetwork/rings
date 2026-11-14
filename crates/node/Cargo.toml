@@ -140,6 +140,8 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "AbortSignal",
     "Event",
     "EventTarget",
+    "Headers",
+    "PageTransitionEvent",
     "Window",
 ] }
 

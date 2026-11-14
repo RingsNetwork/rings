@@ -6,6 +6,8 @@
 //! It integrates the use of random number generation for key creation and provides conversions
 //! between different key types.
 
+use std::collections::BTreeSet;
+
 use ark_bls12_381::fr::Fr;
 use ark_bls12_381::g2::Config as G2Config;
 use ark_bls12_381::Bls12_381;
@@ -17,10 +19,13 @@ use ark_ec::hashing::HashToCurve;
 use ark_ec::pairing::Pairing;
 use ark_ec::PrimeGroup;
 use ark_ff::fields::field_hashers::DefaultFieldHasher;
+use ark_ff::PrimeField;
+use ark_ff::Zero;
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
-use ark_std::UniformRand;
+use hkdf::Hkdf;
 use rand::RngCore;
+use zeroize::Zeroizing;
 
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
@@ -30,6 +35,8 @@ use crate::utils::SystemEntropy;
 
 /// this is from `<https://docs.rs/bls-signatures/latest/src/bls_signatures/signature.rs.html#24>`
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+const BLS_KEYGEN_SALT: &[u8] = b"BLS-SIG-KEYGEN-SALT-";
+const BLS_KEYGEN_INFO: &[u8] = b"rings-core:bls12-381:keygen:v1";
 
 /// Adapter over `sha2::Sha256` (0.11) for `ark-ff` 0.6's [`DefaultFieldHasher`], which bounds its
 /// hash by `digest` 0.10's `FixedOutputReset`.
@@ -72,7 +79,7 @@ pub struct Signature(pub [u8; 96]);
 
 /// Generate a random BLS secret key from an explicit RNG.
 pub fn random_sk_with_rng(rng: &mut impl RngCore) -> Result<SecretKey> {
-    Fr::rand(rng).try_into()
+    Ok(SecretKey::random_with_rng(rng))
 }
 
 /// this function is used to generate a random secret key
@@ -98,8 +105,19 @@ impl TryFrom<&SecretKey> for Fr {
     type Error = Error;
 
     fn try_from(sk: &SecretKey) -> Result<Fr> {
-        let data = sk.ser();
-        from_compressed(&data)
+        let ikm = sk.ser();
+        let hkdf = Hkdf::<sha2::Sha256>::new(Some(BLS_KEYGEN_SALT), ikm.as_slice());
+        for counter in 0u8..=u8::MAX {
+            let mut okm = Zeroizing::new([0u8; 48]);
+            let info = [BLS_KEYGEN_INFO, &[0, counter]].concat();
+            hkdf.expand(&info, okm.as_mut_slice())
+                .map_err(|_| Error::PrivateKeyBadFormat)?;
+            let scalar = Fr::from_be_bytes_mod_order(okm.as_slice());
+            if !scalar.is_zero() {
+                return Ok(scalar);
+            }
+        }
+        Err(Error::ZeroScalar)
     }
 }
 
@@ -114,13 +132,20 @@ impl TryFrom<Fr> for SecretKey {
 impl TryFrom<Signature> for G2Projective {
     type Error = Error;
     fn try_from(s: Signature) -> Result<Self> {
-        from_compressed(&s.0)
+        let point: Self = from_compressed(&s.0)?;
+        if point.is_zero() {
+            return Err(Error::IdentityElement);
+        }
+        Ok(point)
     }
 }
 
 impl TryFrom<G2Projective> for Signature {
     type Error = Error;
     fn try_from(s: G2Projective) -> Result<Self> {
+        if s.is_zero() {
+            return Err(Error::IdentityElement);
+        }
         Ok(Signature(to_compressed(&s)?))
     }
 }
@@ -128,6 +153,9 @@ impl TryFrom<G2Projective> for Signature {
 impl TryFrom<G1Projective> for PublicKey<48> {
     type Error = Error;
     fn try_from(p: G1Projective) -> Result<Self> {
+        if p.is_zero() {
+            return Err(Error::IdentityElement);
+        }
         Ok(PublicKey(to_compressed::<G1Projective, 48>(&p)?))
     }
 }
@@ -137,6 +165,9 @@ impl TryFrom<PublicKey<48>> for G1Projective {
     fn try_from(pk: PublicKey<48>) -> Result<Self> {
         let data: [u8; 48] = pk.0;
         let ret: Self = from_compressed(&data)?;
+        if ret.is_zero() {
+            return Err(Error::IdentityElement);
+        }
         Ok(ret)
     }
 }
@@ -174,9 +205,21 @@ pub fn sign(sk: &SecretKey, msg: &[u8]) -> Result<Signature> {
 
 /// Verifies that the signature is the actual aggregated signature of hashes - pubkeys. Calculated by
 /// e(g1, signature) == \prod_{i = 0}^n e(pk_i, hash_i).
+///
+/// Follows RFC 9380 / IETF BLS basic-scheme `CoreAggregateVerify`: all message hashes in a
+/// multi-signer aggregate (`hashes.len() > 1`) must be distinct, and identity points in `G1` or
+/// `G2` are rejected.
 pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<bool> {
     if hashes.is_empty() || hashes.len() != pks.len() {
         return Err(Error::BlsInputLengthMismatch);
+    }
+    if hashes.len() > 1 {
+        let mut unique = BTreeSet::new();
+        for hash in hashes {
+            if !unique.insert(hash.as_slice()) {
+                return Ok(false);
+            }
+        }
     }
     let sig: G2Projective = sig.clone().try_into()?;
     let g1 = G1Projective::generator();
@@ -184,7 +227,13 @@ pub fn verify_hash(hashes: &[[u8; 96]], sig: &Signature, pks: &[PublicKey<48>]) 
 
     let hashes: Vec<G2Projective> = hashes
         .iter()
-        .map(from_compressed)
+        .map(|hash| {
+            let point: G2Projective = from_compressed(hash)?;
+            if point.is_zero() {
+                return Err(Error::IdentityElement);
+            }
+            Ok(point)
+        })
         .collect::<Result<Vec<G2Projective>>>()?;
 
     let pks: Vec<G1Projective> = pks

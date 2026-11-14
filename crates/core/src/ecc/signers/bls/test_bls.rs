@@ -95,3 +95,50 @@ fn test_aggregate_rejects_a_missing_member_key() {
     ));
     assert!(!verify(&messages, &aggregate, &[pks[0], pks[0]]).unwrap());
 }
+
+#[test]
+fn test_bls_key_derivation_never_fails_and_rejects_identity_and_duplicate_hashes() {
+    use rand::SeedableRng;
+    use rand_hc::Hc128Rng;
+
+    let mut rng = Hc128Rng::seed_from_u64(0x1255);
+    for _ in 0..64 {
+        let sk = SecretKey::random_with_rng(&mut rng);
+        let pk = public_key(&sk).unwrap();
+        let sig = sign(&sk, b"bls-hkdf-derivation").unwrap();
+        assert!(verify(&[b"bls-hkdf-derivation".as_slice()], &sig, &[pk]).unwrap());
+    }
+
+    // Compressed BLS12-381 G1/G2 point-at-infinity has prefix 0xc0 followed by zeros.
+    let mut g1_inf = [0u8; 48];
+    g1_inf[0] = 0xc0;
+    let mut g2_inf = [0u8; 96];
+    g2_inf[0] = 0xc0;
+    let valid_sk = random_sk_with_rng(&mut rng).unwrap();
+    let valid_pk = public_key(&valid_sk).unwrap();
+    let valid_sig = sign(&valid_sk, b"msg").unwrap();
+    let valid_h = hash_to_curve(b"msg").unwrap();
+
+    assert!(matches!(
+        verify_hash(&[valid_h], &valid_sig, &[PublicKey(g1_inf)]),
+        Err(crate::error::Error::IdentityElement)
+    ));
+    assert!(matches!(
+        verify_hash(&[valid_h], &Signature(g2_inf), &[valid_pk]),
+        Err(crate::error::Error::IdentityElement)
+    ));
+    assert!(matches!(
+        verify_hash(&[g2_inf], &valid_sig, &[valid_pk]),
+        Err(crate::error::Error::IdentityElement)
+    ));
+
+    // Rogue-key aggregate verification with duplicate message hashes must return Ok(false).
+    let sk2 = random_sk_with_rng(&mut rng).unwrap();
+    let pk2 = public_key(&sk2).unwrap();
+    let sig_agg = aggregate(&[
+        sign_hash(&valid_sk, &valid_h).unwrap(),
+        sign_hash(&sk2, &valid_h).unwrap(),
+    ])
+    .unwrap();
+    assert!(!verify_hash(&[valid_h, valid_h], &sig_agg, &[valid_pk, pk2]).unwrap());
+}

@@ -337,7 +337,7 @@ impl TransportSpec {
         let delegatee_key = DelegateeKey::new_with_seckey(&self.key)?;
         let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
             delegatee_key.delegator_did(),
-            3,
+            crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY as u8,
             self.storage,
             DEFAULT_FINGER_TABLE_SIZE,
         ));

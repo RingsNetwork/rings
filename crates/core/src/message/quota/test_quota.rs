@@ -246,18 +246,22 @@ fn table_reuses_only_a_fully_replenished_oldest_record() {
 
 /// Acceptance of #888. One neighbour's Application record under the default limits carries
 /// a delegated namespace at 98 messages/s of 16 KiB, the floor itself, and another namespace
-/// at 20 messages/s for half an hour, interleaved on one simulated clock. The delegated
-/// traffic is never refused, and the other namespace still is, beyond `burst + 8·T`.
+/// at 80 messages/s for half an hour, interleaved on one simulated clock. The delegated
+/// traffic is never refused, and the other namespace still is, beyond `burst + rate·T`.
 #[test]
 fn delegated_namespace_is_never_refused_while_another_namespace_still_is() {
     let config = OriginQuotaLaneConfig::default();
     let seconds: u128 = 1_800;
+    let enforced_rate_per_second: u128 = 80;
     let message_bytes = DELEGATED_MIN_CHARGE;
     let mut schedule: Vec<(u128, MessageLimit)> = (0..98 * seconds)
         .map(|index| (index * NANOS_PER_SECOND / 98, MessageLimit::Delegated))
-        .chain(
-            (0..20 * seconds).map(|index| (index * NANOS_PER_SECOND / 20, MessageLimit::Enforced)),
-        )
+        .chain((0..enforced_rate_per_second * seconds).map(|index| {
+            (
+                index * NANOS_PER_SECOND / enforced_rate_per_second,
+                MessageLimit::Enforced,
+            )
+        }))
         .collect();
     schedule.sort_by_key(|(at, _)| *at);
 
@@ -277,8 +281,13 @@ fn delegated_namespace_is_never_refused_while_another_namespace_still_is() {
     }
 
     assert_eq!(delegated_refused, 0);
-    assert!(enforced_admitted <= 32 + 8 * seconds + 1);
-    assert!(enforced_admitted < 20 * seconds);
+    assert!(
+        enforced_admitted
+            <= u128::from(config.message_burst())
+                + u128::from(config.message_rate_per_second()) * seconds
+                + 1
+    );
+    assert!(enforced_admitted < enforced_rate_per_second * seconds);
 }
 
 /// A delegated admission neither needs nor consumes a message token, and still pays bytes:
@@ -451,7 +460,7 @@ fn multiple_origins_on_same_slot_are_isolated_within_slot_accounting_bound() {
 
     table
         .reserve(
-            key(2_000, MessageCategory::DhtControl),
+            key(50_000, MessageCategory::DhtControl),
             honest_slot,
             MessageLimit::Enforced,
             10,
@@ -514,12 +523,14 @@ fn rotating_over_1024_origins_on_one_slot_occupies_one_record_and_never_evicts_h
 /// within its floor, [`Principal::Local`], or [`Principal::Inbox`] (#1178).
 #[test]
 fn unreplenished_sybil_rotation_on_one_slot_preserves_other_slots_local_and_inbox() {
-    let lane = config(1, 2_048, 1, 2_048, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
+    let lane = config(1, 8_192, 1, 8_192, DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE);
     let mut table = OriginQuotaTable::new(OriginQuotaConfig::new(lane, lane, lane, lane));
     let now = OriginQuotaInstant::ZERO;
     let attacker_slot = Principal::Slot(0);
     let honest_slot = Principal::Slot(1);
     let max_attacker_records = ORIGIN_QUOTA_SHARES.floor + ORIGIN_QUOTA_SHARES.pool;
+    let sybil_attempts =
+        u32::try_from(DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE + 50).expect("record bound fits u32");
 
     for category in [
         MessageCategory::DhtControl,
@@ -533,7 +544,7 @@ fn unreplenished_sybil_rotation_on_one_slot_preserves_other_slots_local_and_inbo
             .expect("honest slot admits its first floor record");
 
         let mut admitted_by_attacker = 0_usize;
-        for origin in 1..=1_050_u32 {
+        for origin in 1..=sybil_attempts {
             match table.reserve(
                 key(origin, category),
                 attacker_slot,

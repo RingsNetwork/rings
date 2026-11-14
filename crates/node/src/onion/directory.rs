@@ -127,7 +127,11 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     }
     let policy_exits = protocol_exits
         .into_iter()
-        .filter(|exit| exit.policy.allows_target(&target))
+        .filter(|exit| {
+            exit.policy.allows_target(&target)
+                && (exit.node_type != crate::online::OnlineNodeType::Browser
+                    || super::target::validate_public_ip_literal(&target).is_ok())
+        })
         .collect::<Vec<_>>();
     if policy_exits.is_empty() {
         return Err(Error::OnionRouteError(

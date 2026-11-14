@@ -915,7 +915,7 @@ async fn test_cancelled_write_or_touch_preserves_access_clock_invariant() {
         {
             let scope = instance.scope(IdbTransactionMode::Readwrite).unwrap();
             let data = js_value::serialize(&"cancelled".to_owned()).unwrap();
-            let mut fut = Box::pin(scope.put_stamped("k1".to_owned(), data));
+            let mut fut = Box::pin(scope.put_stamped("k1".to_owned(), None, data, None));
             let _ = fut.as_mut().now_or_never();
             next_task().await;
             let _ = fut.as_mut().now_or_never();
@@ -948,4 +948,178 @@ async fn test_cancelled_write_or_touch_preserves_access_clock_invariant() {
         assert!(seed_stamp < after_stamp);
         assert!(after_stamp < clock);
     }
+}
+
+#[wasm_bindgen_test]
+async fn test_idb_byte_budget_lru_evicts_and_retained_refuses() {
+    let entry_bytes = rings_codec::serialize(&("k1", &"abcd".to_owned()))
+        .unwrap()
+        .len() as u32;
+    let two_entries_cap = entry_bytes * 2;
+
+    let cache_name = format!("rings-idb-byte-cache-{}", uuid::Uuid::new_v4());
+    let cache = IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        two_entries_cap,
+        &cache_name,
+        RecordAuthority::DurableCache,
+    )
+    .await
+    .unwrap();
+    cache.put("k1", &"abcd".to_owned()).await.unwrap();
+    cache.put("k2", &"efgh".to_owned()).await.unwrap();
+    assert_eq!(
+        get_string(&cache, "k1").await.unwrap().as_deref(),
+        Some("abcd")
+    );
+    cache.put("k3", &"ijkl".to_owned()).await.unwrap();
+    assert_eq!(get_string(&cache, "k2").await.unwrap(), None);
+    assert_eq!(
+        get_string(&cache, "k1").await.unwrap().as_deref(),
+        Some("abcd")
+    );
+    assert_eq!(
+        get_string(&cache, "k3").await.unwrap().as_deref(),
+        Some("ijkl")
+    );
+
+    let retained_name = format!("rings-idb-byte-retained-{}", uuid::Uuid::new_v4());
+    let retained = IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        two_entries_cap,
+        &retained_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .unwrap();
+    retained.put("k1", &"abcd".to_owned()).await.unwrap();
+    retained.put("k2", &"efgh".to_owned()).await.unwrap();
+    assert!(matches!(
+        retained.put("k3", &"ijkl".to_owned()).await,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+    <IdbStorage as KvStorageInterface<String>>::remove(&retained, "k1")
+        .await
+        .unwrap();
+    retained.put("k3", &"ijkl".to_owned()).await.unwrap();
+    crate::storage::KvStorageScan::<String>::remove_batch(&retained, &[
+        "k2".to_owned(),
+        "k3".to_owned(),
+    ])
+    .await
+    .unwrap();
+    retained.put("k4", &"mnop".to_owned()).await.unwrap();
+    retained.put("k5", &"qrst".to_owned()).await.unwrap();
+}
+
+#[wasm_bindgen_test]
+async fn test_idb_byte_budget_migrates_legacy_rows_and_fails_closed_when_oversized_or_unmeasurable()
+{
+    let payload = "x".repeat(4096);
+    let legacy_bytes = rings_codec::serialize(&("legacy", &payload)).unwrap().len() as u32;
+
+    // 1. Store populated via `new_with_cap_name_and_authority` must be charged when reopened
+    //    under `new_with_byte_cap_name_and_authority`.
+    let cap_only_name = format!("rings-idb-legacy-cap-only-{}", uuid::Uuid::new_v4());
+    let old =
+        IdbStorage::new_with_cap_name_and_authority(16, &cap_only_name, RecordAuthority::Retained)
+            .await
+            .unwrap();
+    old.put("legacy", &payload).await.unwrap();
+    drop(old);
+
+    assert!(matches!(
+        IdbStorage::new_with_byte_cap_name_and_authority(
+            16,
+            128,
+            &cap_only_name,
+            RecordAuthority::Retained,
+        )
+        .await,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+
+    // 2. Pre-PR schema-v2 row written with `byte_len: None` is migrated in place and charged
+    //    against the byte budget on open and subsequent writes/removals.
+    let raw_legacy_name = format!("rings-idb-legacy-none-{}", uuid::Uuid::new_v4());
+    let seed = IdbStorage::new_with_cap_name_and_authority(
+        16,
+        &raw_legacy_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .unwrap();
+    {
+        let scope = seed.scope(IdbTransactionMode::Readwrite).unwrap();
+        let data = js_value::serialize_storage(&payload).unwrap();
+        scope
+            .put_stamped("legacy".to_owned(), None, data, None)
+            .await
+            .unwrap();
+        scope.done().await.unwrap();
+    }
+    assert!(raw_row(&seed, "legacy").await.get("byte_len").is_none());
+    drop(seed);
+
+    assert!(matches!(
+        IdbStorage::new_with_byte_cap_name_and_authority(
+            16,
+            128,
+            &raw_legacy_name,
+            RecordAuthority::Retained,
+        )
+        .await,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+
+    let reopened = IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        legacy_bytes + 32,
+        &raw_legacy_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        raw_row(&reopened, "legacy").await["byte_len"].as_u64(),
+        Some(u64::from(legacy_bytes))
+    );
+    assert!(matches!(
+        reopened.put("extra", &"y".repeat(64)).await,
+        Err(crate::error::Error::StorageBudgetExhausted { .. })
+    ));
+    <IdbStorage as KvStorageInterface<String>>::remove(&reopened, "legacy")
+        .await
+        .unwrap();
+    reopened.put("extra", &"y".repeat(64)).await.unwrap();
+    drop(reopened);
+
+    // 3. Legacy row with `byte_len: None` whose payload cannot be measured refuses to open.
+    let bad_legacy_name = format!("rings-idb-legacy-bad-{}", uuid::Uuid::new_v4());
+    let bad_seed = IdbStorage::new_with_cap_name_and_authority(
+        16,
+        &bad_legacy_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .unwrap();
+    {
+        let scope = bad_seed.scope(IdbTransactionMode::Readwrite).unwrap();
+        let unmeasurable: JsValue = js_sys::Date::new_0().into();
+        scope
+            .put_stamped("bad".to_owned(), None, unmeasurable, None)
+            .await
+            .unwrap();
+        scope.done().await.unwrap();
+    }
+    drop(bad_seed);
+
+    assert!(IdbStorage::new_with_byte_cap_name_and_authority(
+        16,
+        4096,
+        &bad_legacy_name,
+        RecordAuthority::Retained,
+    )
+    .await
+    .is_err());
 }

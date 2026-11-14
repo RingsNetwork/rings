@@ -34,6 +34,7 @@ use crate::GatewayState;
 use crate::GatewayStatusHandle;
 use crate::OnionStreamConnector;
 use crate::PacketDisposition;
+use crate::PacketDropReason;
 use crate::PacketIo;
 use crate::PacketIoError;
 use crate::PacketOutcome;
@@ -44,7 +45,8 @@ use crate::TcpStackError;
 
 const TCP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const BRIDGE_IO_CHUNK_BYTES: usize = 16 * 1_024;
-const EVENTS_PER_FLOW: usize = 3;
+const MAX_CAPTURED_PACKET_BYTES: usize = 65_536;
+const EVENTS_PER_FLOW: usize = 4;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum RuntimeControl {
@@ -111,6 +113,7 @@ struct RuntimeFlow {
     client_to_onion_buffer: Option<Vec<u8>>,
     pending_to_client: VecDeque<PendingChunk>,
     client_eof_sent: bool,
+    client_write_flushed: bool,
     onion_eof_seen: bool,
     client_write_closed: bool,
 }
@@ -123,6 +126,7 @@ impl RuntimeFlow {
             client_to_onion_buffer: Some(vec![0_u8; chunk_bytes]),
             pending_to_client: VecDeque::new(),
             client_eof_sent: false,
+            client_write_flushed: false,
             onion_eof_seen: false,
             client_write_closed: false,
         }
@@ -249,7 +253,7 @@ impl GatewayRuntime {
             return Err(GatewayError::PacketAdmissionClosed(self.server.state()));
         }
         let started = MonotonicInstant::now();
-        let mut packet = vec![0_u8; usize::from(self.config.plan.mtu.get())];
+        let mut packet = vec![0_u8; MAX_CAPTURED_PACKET_BYTES];
         let mut interval = tcp_poll_interval();
         let result = loop {
             if should_stop() {
@@ -385,6 +389,9 @@ impl GatewayRuntime {
         packet: Vec<u8>,
         elapsed: Duration,
     ) -> Result<PacketOutcome, GatewayFatal> {
+        if packet.len() > usize::from(self.config.plan.mtu.get()) {
+            return Ok(PacketOutcome::Dropped(PacketDropReason::OversizedPacket));
+        }
         let segment = match crate::classify_ipv4_packet(&packet) {
             PacketDisposition::Tcp(segment) => segment,
             PacketDisposition::Drop(reason) => return Ok(PacketOutcome::Dropped(reason)),
@@ -498,6 +505,13 @@ impl GatewayRuntime {
                 self.publish_status();
                 Ok(ReconcileScope::Flow(flow))
             }
+            BridgeEvent::WriteClosed(flow) => {
+                let Some(runtime) = self.flows.get_mut(&flow) else {
+                    return Ok(ReconcileScope::None);
+                };
+                runtime.client_write_flushed = true;
+                Ok(ReconcileScope::Flow(flow))
+            }
             BridgeEvent::Failed { flow, error } => {
                 if !self.flows.contains_key(&flow) {
                     return Ok(ReconcileScope::None);
@@ -599,7 +613,6 @@ impl GatewayRuntime {
                 Ok(()) => {
                     self.tcp.commit_application_read(flow, length)?;
                     self.tcp.poll(elapsed);
-                    return Ok(());
                 }
                 Err(mpsc::error::TrySendError::Full(command)) => match command {
                     BridgeCommand::Data(mut buffer) => {
@@ -724,6 +737,13 @@ impl GatewayRuntime {
         if !graceful {
             let closure = self.tcp.endpoint_closure(flow, elapsed)?;
             return self.fail_flow(flow, closure_reason(&self.phase(flow), closure), elapsed);
+        }
+        let client_write_flushed = self
+            .flows
+            .get(&flow)
+            .is_some_and(|runtime| runtime.client_write_flushed);
+        if !client_write_flushed {
+            return Ok(());
         }
         if let Some(runtime) = self.flows.remove(&flow) {
             if let Some(bridge) = runtime.bridge {

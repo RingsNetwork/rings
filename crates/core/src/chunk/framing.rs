@@ -37,9 +37,14 @@ impl Chunk {
     /// a degenerate value still terminates. Empty input yields no chunks. Reassembly is the
     /// receiver's job: see [`super::MessageReassembler`].
     pub fn stream(bytes: Bytes, chunk_size: usize) -> impl Iterator<Item = Chunk> {
+        Self::stream_at(bytes, chunk_size, get_epoch_ms())
+    }
+
+    /// [`Self::stream`] stamped with the caller's epoch timestamp `now_ms`.
+    pub fn stream_at(bytes: Bytes, chunk_size: usize, now_ms: u128) -> impl Iterator<Item = Chunk> {
         let chunk_size = chunk_size.max(1);
         let total = bytes.len().div_ceil(chunk_size);
-        let meta = ChunkMeta::default();
+        let meta = ChunkMeta::new_at(now_ms);
         (0..total).map(move |i| {
             let start = i * chunk_size;
             let end = start.saturating_add(chunk_size).min(bytes.len());
@@ -75,13 +80,20 @@ pub struct ChunkMeta {
     pub ttl_ms: u64,
 }
 
-impl Default for ChunkMeta {
-    fn default() -> Self {
+impl ChunkMeta {
+    /// Construct chunk metadata stamped at `ts_ms`.
+    pub fn new_at(ts_ms: u128) -> Self {
         Self {
             id: crate::utils::new_uuid(),
-            ts_ms: get_epoch_ms(),
+            ts_ms,
             ttl_ms: DEFAULT_TTL_MS,
         }
+    }
+}
+
+impl Default for ChunkMeta {
+    fn default() -> Self {
+        Self::new_at(get_epoch_ms())
     }
 }
 
