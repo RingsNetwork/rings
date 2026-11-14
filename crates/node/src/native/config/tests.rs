@@ -509,6 +509,42 @@ fn test_delegator_key_defaults_to_none_and_resolves_relative_to_config_dir() {
     );
 }
 
+#[test]
+fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signature() {
+    let root = std::env::temp_dir().join(format!("rings-config-turn-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).expect("create temp config dir");
+
+    let delegator = SecretKey::random();
+    let did = crate::prelude::rings_core::dht::Did::from(delegator.address());
+    let delegatee =
+        DelegateeKey::new_with_seckey_at(&delegator, 60_000, 1_700_000_000_000).unwrap();
+
+    let delegatee_path = root.join("delegatee_key");
+    let delegator_path = root.join("ecdsa_key");
+    fs::write(&delegatee_path, delegatee.dump().unwrap()).expect("write delegatee key");
+    fs::write(&delegator_path, delegator.to_string()).expect("write delegator key");
+
+    let mut config = Config::new(&delegatee_path);
+    config.delegator_key = Some(delegator_path.to_string_lossy().into_owned());
+    config.ice_servers = "stun://stun.l.google.com:19302;turn://turn.rings.rs:3478".to_string();
+
+    let serialized =
+        ProcessorConfigSerialized::try_from(config).expect("serialize processor config");
+    let _ = fs::remove_dir_all(&root);
+
+    let expected_creds = delegator
+        .turn_credentials()
+        .expect("direct DID turn credentials");
+    assert_eq!(
+        serialized.ice_servers,
+        format!(
+            "stun://stun.l.google.com:19302;turn://{}:{}@turn.rings.rs:3478",
+            expected_creds.username, expected_creds.credential
+        )
+    );
+    assert!(expected_creds.username.starts_with(&format!("{did}.")));
+}
+
 /// Malformed YAML, here a quoted scalar left open, reports the scanner's error and where
 /// the document breaks.
 #[test]
