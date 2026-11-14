@@ -432,7 +432,7 @@ impl NativePhysicalCloseWitness {
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebrtcTransport {
-    ice_servers: Vec<IceServer>,
+    ice_servers: std::sync::RwLock<Vec<IceServer>>,
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
@@ -539,12 +539,22 @@ impl WebrtcTransport {
         let ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
 
         Self {
-            ice_servers,
+            ice_servers: std::sync::RwLock::new(ice_servers),
             external_address,
             udp_port_range,
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
         }
+    }
+
+    /// Replace the ICE server list used for subsequent peer connections (for example after
+    /// rotating a [`DelegateeKey`](https://docs.rs) whose TURN credentials changed).
+    pub fn set_ice_servers(&self, ice_servers: &str) {
+        let parsed = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
+        *self
+            .ice_servers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
     }
 }
 
@@ -573,6 +583,8 @@ async fn create_peer_connection(
 ) -> Result<(RTCPeerConnection, Vec<String>)> {
     let ice_servers = transport
         .ice_servers
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
         .cloned()
         .map(RTCIceServer::from)

@@ -319,6 +319,22 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             Error::OpenFileError(format!("{}: {error}", delegatee_key_path.display()))
         })?;
 
+        let ice_servers = config
+            .delegator_key
+            .as_deref()
+            .and_then(|path| super::horizon::read_delegator_secret_key(path).ok())
+            .filter(|delegator_key| {
+                delegatee_key
+                    .trim()
+                    .parse::<crate::prelude::DelegateeKey>()
+                    .is_ok_and(|parsed| {
+                        crate::prelude::rings_core::dht::Did::from(delegator_key.address())
+                            == parsed.delegator_did()
+                    })
+            })
+            .and_then(|delegator_key| delegator_key.sign_ice_servers(&config.ice_servers).ok())
+            .unwrap_or(config.ice_servers);
+
         let udp_range = crate::processor::parse_webrtc_udp_port_range(
             config.webrtc_udp_port_min,
             config.webrtc_udp_port_max,
@@ -326,7 +342,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 
         Ok(Self {
             network_id: config.network_id,
-            ice_servers: config.ice_servers,
+            ice_servers,
             external_address: config.external_ip,
             webrtc_udp_port_min: udp_range.map(|range| range.min()),
             webrtc_udp_port_max: udp_range.map(|range| range.max()),
