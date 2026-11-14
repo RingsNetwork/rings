@@ -109,7 +109,9 @@ metadata protection, separate from payload encryption.
 The overlay layer provides authenticated DID routing and E2E stream encryption, while the
 privacy layer provides anonymous Sphinx onion circuits
 ([layer contracts](./SECURITY.md#layer-contracts)). Connections are established peer-to-peer
-over WebRTC with optional TURN relay support. Supporting crates: `rpc` (JSON-RPC), `measure`
+over WebRTC with optional TURN relay support (`crates/turn` / `rings-turn` provides a
+stateless signature-authenticated TURN server for Symmetric NAT and strict firewall
+environments with no user/password database). Supporting crates: `rpc` (JSON-RPC), `measure`
 (local peer credit), `gateway` (TUN over onion), `webview` (onion browsing), `network-policy`
 (exit egress policy), `codec`, and `derive`.
 
