@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::PoisonError;
+use std::sync::Weak;
 
 use async_trait::async_trait;
 use rand::Rng;
@@ -67,12 +68,14 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use turn::allocation::allocation_manager::Manager;
 use turn::allocation::allocation_manager::ManagerConfig;
+use turn::allocation::channel_bind::ChannelBind;
 use turn::allocation::five_tuple::FiveTuple;
 use turn::allocation::permission::Permission;
 use turn::allocation::Allocation;
 use turn::allocation::AllocationInfo;
 use turn::auth::AuthHandler;
 use turn::proto::chandata::ChannelData;
+use turn::proto::channum::ChannelNumber;
 use turn::proto::data::Data;
 use turn::proto::evenport::EvenPort;
 use turn::proto::lifetime::Lifetime;
@@ -194,15 +197,12 @@ impl Conn for PolicyRelayConn {
 
     async fn recv_from(&self, _buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
         // `turn::allocation::Allocation::packet_handler` calls `Conn::recv_from` with a fixed
-        // 1500-byte buffer (`RTP_MTU`), which truncates >1500-byte datagrams on Unix. Park that
-        // loop until the allocation closes while `relay_packet_handler` reads complete UDP
-        // datagrams up to `INBOUND_MTU` (65,535 bytes) via `PolicyRelayConn::recv_datagram`.
-        let notified = self.closed_notify.notified();
-        if self.clone_inner().is_err() {
-            return Err(webrtc_util::Error::Other("relay socket closed".to_string()));
-        }
-        notified.await;
-        Err(webrtc_util::Error::Other("relay socket closed".to_string()))
+        // 1500-byte buffer (`RTP_MTU`), and its `Err(_)` branch removes `five_tuple` from the
+        // manager's map without checking allocation identity. Keep this future pending forever so
+        // `Allocation::packet_handler` only exits via its `drop_rx` arm when the `Allocation` is
+        // dropped, while `relay_packet_handler` reads complete UDP datagrams up to `INBOUND_MTU`
+        // (65,535 bytes) via `PolicyRelayConn::recv_datagram`.
+        std::future::pending().await
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
@@ -769,7 +769,7 @@ const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
 }
 
 async fn relay_packet_handler(
-    alloc: Arc<Allocation>,
+    alloc: Weak<Allocation>,
     relay_conn: Arc<PolicyRelayConn>,
     turn_socket: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
@@ -779,6 +779,14 @@ async fn relay_packet_handler(
         let Some(payload) = buffer.get(..n) else {
             continue;
         };
+        let Some(alloc) = alloc.upgrade() else {
+            break;
+        };
+        // RFC 5766 Section 10.3: always verify that an active permission exists for the peer's IP
+        // before forwarding via either ChannelData or DataIndication.
+        if !alloc.has_permission(&src_addr).await {
+            continue;
+        }
         if let Some(number) = alloc.get_channel_number(&src_addr).await {
             let mut channel_data = ChannelData {
                 data: payload.to_vec(),
@@ -787,7 +795,7 @@ async fn relay_packet_handler(
             };
             channel_data.encode();
             let _ = turn_socket.send_to(&channel_data.raw, client_addr).await;
-        } else if alloc.has_permission(&src_addr).await {
+        } else {
             let peer_address_attr = PeerAddress {
                 ip: src_addr.ip(),
                 port: src_addr.port(),
@@ -809,6 +817,30 @@ async fn relay_packet_handler(
     }
 }
 
+async fn check_permission_budget(
+    alloc: &Allocation,
+    permission_tracker: &mut HashMap<FiveTuple, HashSet<IpAddr>>,
+    five_tuple: FiveTuple,
+    candidate_ips: &[IpAddr],
+    max_permissions_per_allocation: usize,
+) -> Option<HashSet<IpAddr>> {
+    let tracked = permission_tracker.entry(five_tuple).or_default();
+    let existing_ips: Vec<IpAddr> = tracked.iter().copied().collect();
+    for ip in existing_ips {
+        if !alloc.has_permission(&SocketAddr::new(ip, 0)).await {
+            tracked.remove(&ip);
+        }
+    }
+    let mut projected = tracked.clone();
+    for &ip in candidate_ips {
+        projected.insert(ip);
+    }
+    if projected.len() > max_permissions_per_allocation {
+        return None;
+    }
+    Some(projected)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -816,6 +848,7 @@ async fn handle_authenticated_allocate(
     require_even_port: &AtomicBool,
     last_allocated_conn: &SyncMutex<Option<Arc<PolicyRelayConn>>>,
     allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
+    permission_tracker: &mut HashMap<FiveTuple, HashSet<IpAddr>>,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
     m: &Message,
@@ -910,7 +943,9 @@ async fn handle_authenticated_allocate(
         return;
     }
 
-    let mut use_ipv4 = relay_is_ipv4;
+    // RFC 6156 Section 4.1: If REQUESTED-ADDRESS-FAMILY is absent, the default requested relay
+    // family is IPv4; if the relay cannot provide that family, return 440.
+    let mut requested_ipv4 = true;
     if m.contains(ATTR_REQUESTED_ADDRESS_FAMILY) {
         let mut req_family = RequestedAddressFamily::default();
         match req_family.get_from(m) {
@@ -941,24 +976,24 @@ async fn handle_authenticated_allocate(
                 return;
             }
             Ok(()) => {
-                let requested_ipv4 = req_family == REQUESTED_FAMILY_IPV4;
-                if requested_ipv4 != relay_is_ipv4 {
-                    send_authenticated_error(
-                        conn,
-                        src_addr,
-                        m,
-                        CODE_ADDR_FAMILY_NOT_SUPPORTED,
-                        b"Address Family Not Supported",
-                        None,
-                        mi_key,
-                    )
-                    .await;
-                    return;
-                }
-                use_ipv4 = requested_ipv4;
+                requested_ipv4 = req_family == REQUESTED_FAMILY_IPV4;
             }
         }
     }
+    if requested_ipv4 != relay_is_ipv4 {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_ADDR_FAMILY_NOT_SUPPORTED,
+            b"Address Family Not Supported",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+    let use_ipv4 = requested_ipv4;
 
     let mut need_even_port = false;
     if m.contains(ATTR_EVEN_PORT) {
@@ -1034,7 +1069,7 @@ async fn handle_authenticated_allocate(
 
     if let Some(relay_conn) = allocated_relay_conn {
         tokio::spawn(relay_packet_handler(
-            Arc::clone(&alloc),
+            Arc::downgrade(&alloc),
             relay_conn,
             Arc::clone(conn),
             src_addr,
@@ -1074,18 +1109,23 @@ async fn handle_authenticated_allocate(
     if let Some(raw) = built {
         let active = allocation_manager.get_allocations_info(None).await;
         allocate_responses.retain(|tuple, _| active.contains_key(tuple));
+        permission_tracker.retain(|tuple, _| active.contains_key(tuple));
+        permission_tracker.remove(&five_tuple);
         allocate_responses.insert(five_tuple, (m.transaction_id, raw.clone()));
         let _ = conn.send_to(&raw, src_addr).await;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_create_permission(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocation_manager: &Manager,
+    permission_tracker: &mut HashMap<FiveTuple, HashSet<IpAddr>>,
     five_tuple: FiveTuple,
     relay_addr: SocketAddr,
     m: &Message,
     peer_policy: RelayPeerPolicy,
+    max_permissions_per_allocation: usize,
     mi_key: Vec<u8>,
 ) {
     let src_addr = five_tuple.src_addr;
@@ -1129,6 +1169,7 @@ async fn handle_authenticated_create_permission(
         return;
     }
 
+    let mut candidate_ips = Vec::with_capacity(peer_addrs.len());
     for peer_addr in &peer_addrs {
         if peer_addr.ip.is_ipv4() != relay_addr.is_ipv4() {
             send_authenticated_error(
@@ -1147,7 +1188,30 @@ async fn handle_authenticated_create_permission(
             send_forbidden_error(conn, src_addr, m, mi_key).await;
             return;
         }
+        candidate_ips.push(peer_addr.ip);
     }
+
+    let Some(projected) = check_permission_budget(
+        &alloc,
+        permission_tracker,
+        five_tuple,
+        &candidate_ips,
+        max_permissions_per_allocation,
+    )
+    .await
+    else {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Permission Quota Reached",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    };
 
     for peer_addr in peer_addrs {
         alloc
@@ -1157,6 +1221,7 @@ async fn handle_authenticated_create_permission(
             )))
             .await;
     }
+    permission_tracker.insert(five_tuple, projected);
 
     let built = {
         let mut resp = Message::new();
@@ -1167,6 +1232,122 @@ async fn handle_authenticated_create_permission(
             }),
             Box::new(MessageType::new(
                 METHOD_CREATE_PERMISSION,
+                CLASS_SUCCESS_RESPONSE,
+            )),
+            Box::new(MessageIntegrity(mi_key)),
+            Box::new(FINGERPRINT),
+        ];
+        resp.build(&setters).is_ok().then_some(resp.raw)
+    };
+    if let Some(raw) = built {
+        let _ = conn.send_to(&raw, src_addr).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_authenticated_channel_bind(
+    conn: &Arc<dyn Conn + Send + Sync>,
+    allocation_manager: &Manager,
+    permission_tracker: &mut HashMap<FiveTuple, HashSet<IpAddr>>,
+    five_tuple: FiveTuple,
+    relay_addr: SocketAddr,
+    m: &Message,
+    peer_policy: RelayPeerPolicy,
+    channel_bind_timeout: Duration,
+    max_permissions_per_allocation: usize,
+    mi_key: Vec<u8>,
+) {
+    let src_addr = five_tuple.src_addr;
+    let Some(alloc) = allocation_manager.get_allocation(&five_tuple).await else {
+        return;
+    };
+
+    let mut channel = ChannelNumber::default();
+    let mut peer_addr = PeerAddress::default();
+    if channel.get_from(m).is_err() || peer_addr.get_from(m).is_err() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_BAD_REQUEST,
+            b"Missing or Malformed ChannelBind Attribute",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    if peer_addr.ip.is_ipv4() != relay_addr.is_ipv4() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_PEER_ADDR_FAMILY_MISMATCH,
+            b"Peer Address Family Mismatch",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    let target_sock = SocketAddr::new(peer_addr.ip, peer_addr.port);
+    if !peer_policy.is_allowed_addr(target_sock) {
+        send_forbidden_error(conn, src_addr, m, mi_key).await;
+        return;
+    }
+
+    let Some(projected) = check_permission_budget(
+        &alloc,
+        permission_tracker,
+        five_tuple,
+        &[peer_addr.ip],
+        max_permissions_per_allocation,
+    )
+    .await
+    else {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Permission Quota Reached",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    };
+
+    if alloc
+        .add_channel_bind(ChannelBind::new(channel, target_sock), channel_bind_timeout)
+        .await
+        .is_err()
+    {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_BAD_REQUEST,
+            b"ChannelBind Conflict",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+    permission_tracker.insert(five_tuple, projected);
+
+    let built = {
+        let mut resp = Message::new();
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(Message {
+                transaction_id: m.transaction_id,
+                ..Default::default()
+            }),
+            Box::new(MessageType::new(
+                METHOD_CHANNEL_BIND,
                 CLASS_SUCCESS_RESPONSE,
             )),
             Box::new(MessageIntegrity(mi_key)),
@@ -1253,6 +1434,7 @@ impl TurnServer {
             channel_bind_timeout,
             config.peer_policy,
             config.max_nonces.max(1),
+            config.max_permissions_per_allocation.max(1),
             relay_is_ipv4,
             require_even_port,
             last_allocated_conn,
@@ -1280,6 +1462,7 @@ impl TurnServer {
         channel_bind_timeout: Duration,
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
+        max_permissions_per_allocation: usize,
         relay_is_ipv4: bool,
         require_even_port: Arc<AtomicBool>,
         last_allocated_conn: Arc<SyncMutex<Option<Arc<PolicyRelayConn>>>>,
@@ -1311,6 +1494,7 @@ impl TurnServer {
         let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
             Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
         let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
+        let mut permission_tracker: HashMap<FiveTuple, HashSet<IpAddr>> = HashMap::new();
         let mut closed_guard: Option<Arc<mpsc::Receiver<()>>> = None;
 
         loop {
@@ -1369,6 +1553,7 @@ impl TurnServer {
                     .remove(&five_tuple);
                 if existing_alloc.is_none() {
                     allocate_responses.remove(&five_tuple);
+                    permission_tracker.remove(&five_tuple);
                 }
 
                 if decoded_msg.typ.method == METHOD_ALLOCATE {
@@ -1410,6 +1595,7 @@ impl TurnServer {
                                 &require_even_port,
                                 &last_allocated_conn,
                                 &mut allocate_responses,
+                                &mut permission_tracker,
                                 five_tuple,
                                 addr,
                                 &decoded_msg,
@@ -1445,10 +1631,12 @@ impl TurnServer {
                             handle_authenticated_create_permission(
                                 &recording_conn_dyn,
                                 &allocation_manager,
+                                &mut permission_tracker,
                                 five_tuple,
                                 info.relay_addr,
                                 &decoded_msg,
                                 peer_policy,
+                                max_permissions_per_allocation,
                                 mi_key,
                             )
                             .await;
@@ -1457,20 +1645,31 @@ impl TurnServer {
                     }
                 }
 
-                if decoded_msg.typ.method == METHOD_CHANNEL_BIND
-                    && existing_alloc.is_some()
-                    && !check_message_peer_addresses(&decoded_msg, peer_policy)
-                {
-                    let client_nonces = extract_client_nonces(&nonces, addr).await;
-                    if let Some(mi_key) = verify_authenticated_request(
-                        &decoded_msg,
-                        &client_nonces,
-                        &auth_handler,
-                        addr,
-                    ) {
-                        auth_handler.set_expected_allocation_owner(addr, None);
-                        send_forbidden_error(&recording_conn_dyn, addr, &decoded_msg, mi_key).await;
-                        continue;
+                if decoded_msg.typ.method == METHOD_CHANNEL_BIND {
+                    if let Some(info) = &existing_alloc {
+                        let client_nonces = extract_client_nonces(&nonces, addr).await;
+                        if let Some(mi_key) = verify_authenticated_request(
+                            &decoded_msg,
+                            &client_nonces,
+                            &auth_handler,
+                            addr,
+                        ) {
+                            auth_handler.set_expected_allocation_owner(addr, None);
+                            handle_authenticated_channel_bind(
+                                &recording_conn_dyn,
+                                &allocation_manager,
+                                &mut permission_tracker,
+                                five_tuple,
+                                info.relay_addr,
+                                &decoded_msg,
+                                peer_policy,
+                                channel_bind_timeout,
+                                max_permissions_per_allocation,
+                                mi_key,
+                            )
+                            .await;
+                            continue;
+                        }
                     }
                 }
             }

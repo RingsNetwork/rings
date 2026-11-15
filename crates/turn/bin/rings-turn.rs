@@ -17,6 +17,7 @@ use rings_turn::TurnAdmissionPolicy;
 use rings_turn::TurnServer;
 use rings_turn::TurnServerConfig;
 use rings_turn::DEFAULT_MAX_NONCES;
+use rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 use rings_turn::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use rings_turn::DEFAULT_TURN_REALM;
 use tracing_subscriber::EnvFilter;
@@ -71,6 +72,14 @@ struct Cli {
         default_value_t = DEFAULT_MAX_NONCES
     )]
     max_nonces: usize,
+
+    /// Maximum number of active peer IP permissions per TURN allocation.
+    #[arg(
+        long,
+        env = "RINGS_TURN_MAX_PERMISSIONS_PER_ALLOCATION",
+        default_value_t = DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION
+    )]
+    max_permissions_per_allocation: usize,
 
     /// ChannelBind timeout in seconds (0 uses the RFC 5766 default of 600s).
     #[arg(
@@ -147,6 +156,7 @@ impl Cli {
             relay,
             peer_policy,
             max_nonces: self.max_nonces.max(1),
+            max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
             clock: Arc::new(SystemClock),

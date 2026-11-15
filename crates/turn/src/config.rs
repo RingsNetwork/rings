@@ -25,6 +25,9 @@ pub const DEFAULT_PORT_RANGE_MAX_RETRIES: u16 = 32;
 /// Default maximum number of active TURN nonce challenges stored concurrently.
 pub const DEFAULT_MAX_NONCES: usize = 4096;
 
+/// Default maximum number of active peer IP permissions per TURN allocation.
+pub const DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION: usize = 64;
+
 /// Destination IP policy enforced on TURN relay permissions, channel bindings, and datagrams.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RelayPeerPolicy {
@@ -242,6 +245,8 @@ pub struct TurnServerConfig {
     pub peer_policy: RelayPeerPolicy,
     /// Maximum number of active TURN nonce challenges retained concurrently.
     pub max_nonces: usize,
+    /// Maximum number of active peer IP permissions retained concurrently per allocation.
+    pub max_permissions_per_allocation: usize,
     /// ChannelBind lifetime (`Duration::ZERO` uses the RFC 5766 default of 10 minutes).
     pub channel_bind_timeout: Duration,
     /// Admission policy for verified delegator DIDs.
@@ -259,6 +264,10 @@ impl std::fmt::Debug for TurnServerConfig {
             .field("relay", &self.relay)
             .field("peer_policy", &self.peer_policy)
             .field("max_nonces", &self.max_nonces)
+            .field(
+                "max_permissions_per_allocation",
+                &self.max_permissions_per_allocation,
+            )
             .field("channel_bind_timeout", &self.channel_bind_timeout)
             .field("admission", &self.admission)
             .finish()
@@ -274,6 +283,7 @@ impl Default for TurnServerConfig {
             relay: RelayAddressConfig::default(),
             peer_policy: RelayPeerPolicy::PublicOnly,
             max_nonces: DEFAULT_MAX_NONCES,
+            max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::default(),
             clock: Arc::new(SystemClock),
@@ -296,6 +306,7 @@ impl TurnServerConfig {
             },
             peer_policy: RelayPeerPolicy::AllowLocalAndPrivate,
             max_nonces: DEFAULT_MAX_NONCES,
+            max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::AllowAnyDelegation,
             clock: Arc::new(SystemClock),

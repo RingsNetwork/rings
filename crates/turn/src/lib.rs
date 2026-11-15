@@ -25,6 +25,7 @@ pub use config::RelayAddressConfig;
 pub use config::RelayPeerPolicy;
 pub use config::TurnServerConfig;
 pub use config::DEFAULT_MAX_NONCES;
+pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 pub use config::DEFAULT_TURN_PORT;
 pub use config::DEFAULT_TURN_REALM;
@@ -46,6 +47,7 @@ pub use server::TurnServer;
 mod tests {
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::Arc;
@@ -63,6 +65,7 @@ mod tests {
     use stun::attributes::ATTR_RESERVATION_TOKEN;
     use stun::attributes::ATTR_USERNAME;
     use stun::error_code::ErrorCodeAttribute;
+    use stun::error_code::CODE_ADDR_FAMILY_NOT_SUPPORTED;
     use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
     use stun::fingerprint::FINGERPRINT;
     use stun::integrity::MessageIntegrity;
@@ -75,6 +78,7 @@ mod tests {
     use stun::message::CLASS_REQUEST;
     use stun::message::CLASS_SUCCESS_RESPONSE;
     use stun::message::METHOD_ALLOCATE;
+    use stun::message::METHOD_CHANNEL_BIND;
     use stun::message::METHOD_CREATE_PERMISSION;
     use stun::message::METHOD_DATA;
     use stun::message::METHOD_REFRESH;
@@ -87,10 +91,12 @@ mod tests {
     use turn::auth::generate_auth_key;
     use turn::client::Client;
     use turn::client::ClientConfig;
+    use turn::proto::channum::ChannelNumber;
     use turn::proto::data::Data;
     use turn::proto::lifetime::Lifetime;
     use turn::proto::peeraddr::PeerAddress;
     use turn::proto::relayaddr::RelayedAddress;
+    use turn::proto::reqfamily::REQUESTED_FAMILY_IPV6;
     use turn::proto::reqtrans::RequestedTransport;
     use turn::proto::rsrvtoken::ReservationToken;
     use turn::proto::PROTO_UDP;
@@ -1254,6 +1260,389 @@ mod tests {
         assert_eq!(echoed_data.0, large_payload);
 
         server.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_bounds_permissions_preserves_reallocated_five_tuple_and_honors_default_ipv4_family(
+    ) -> Result<()> {
+        let mut config = TurnServerConfig::loopback_ephemeral();
+        config.max_permissions_per_allocation = 2;
+        let server_pubkey = config.server_key.pubkey();
+        let server = TurnServer::start(config).await?;
+        let server_addr = server.local_addr();
+
+        let client_key = SecretKey::random();
+        let creds = client_key.turn_credentials(server_pubkey)?;
+
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut recv_buf = vec![0u8; 4096];
+
+        // 1. Challenge and initial Allocate.
+        let unauth_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&unauth_alloc_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut challenge = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge.decode().unwrap();
+        let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+        nonce_attr.get_from(&challenge).unwrap();
+        let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+        realm_attr.get_from(&challenge).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm_attr.text, &creds.credential);
+
+        let alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&alloc_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut alloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 2. Delete the allocation via Refresh(0) and immediately reallocate on the exact same
+        // client socket (same 5-tuple). The previous allocation's background reader must NOT
+        // asynchronously delete the replacement allocation.
+        let refresh_zero_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+                Box::new(Lifetime(Duration::ZERO)),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&refresh_zero_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut refresh_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        refresh_resp.decode().unwrap();
+        assert_eq!(refresh_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        let realloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&realloc_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut realloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        realloc_resp.decode().unwrap();
+        assert_eq!(realloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            server.allocations_info(None).await?.len(),
+            1,
+            "replacement allocation on the same 5-tuple must remain active"
+        );
+
+        // 3. Enforce max_permissions_per_allocation = 2 across CreatePermission and ChannelBind.
+        let perm_two_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                    port: 4001,
+                }),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 2)),
+                    port: 4002,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&perm_two_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut perm_two_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        perm_two_resp.decode().unwrap();
+        assert_eq!(perm_two_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // Refreshing an existing permitted IP via ChannelBind must succeed even at the quota cap.
+        let chbind_existing_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                Box::new(ChannelNumber(0x4000)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                    port: 4001,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&chbind_existing_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut chbind_existing_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        chbind_existing_resp.decode().unwrap();
+        assert_eq!(chbind_existing_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // Adding a 3rd distinct peer IP via CreatePermission must be rejected with 508.
+        let perm_third_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 3)),
+                    port: 4003,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&perm_third_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut perm_third_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        perm_third_resp.decode().unwrap();
+        assert_eq!(perm_third_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&perm_third_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+
+        // Adding a 3rd distinct peer IP via ChannelBind must also be rejected with 508.
+        let chbind_third_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                Box::new(ChannelNumber(0x4001)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4)),
+                    port: 4004,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&chbind_third_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut chbind_third_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        chbind_third_resp.decode().unwrap();
+        assert_eq!(chbind_third_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&chbind_third_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+
+        server.close().await?;
+
+        // 4. Verify RFC 6156 §4.1 default IPv4 requested family on an IPv6-configured relay:
+        // omitting REQUESTED-ADDRESS-FAMILY must return 440, while requesting IPv6 succeeds.
+        let ipv6_localhost = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        let mut v6_config = TurnServerConfig::loopback_ephemeral();
+        v6_config.relay = RelayAddressConfig::Static {
+            relay_ip: ipv6_localhost,
+            bind_ip: ipv6_localhost,
+        };
+        let v6_server_pubkey = v6_config.server_key.pubkey();
+        let v6_server = TurnServer::start(v6_config).await?;
+        let v6_server_addr = v6_server.local_addr();
+        let v6_creds = client_key.turn_credentials(v6_server_pubkey)?;
+
+        let v6_client_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        v6_client_socket
+            .send_to(&unauth_alloc_raw, v6_server_addr)
+            .await?;
+        let (n, _) = v6_client_socket.recv_from(&mut recv_buf).await?;
+        let mut v6_challenge = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        v6_challenge.decode().unwrap();
+        let mut v6_nonce = Nonce::new(ATTR_NONCE, String::new());
+        v6_nonce.get_from(&v6_challenge).unwrap();
+        let mut v6_realm = Realm::new(ATTR_REALM, String::new());
+        v6_realm.get_from(&v6_challenge).unwrap();
+        let v6_mi_key = generate_auth_key(&v6_creds.username, &v6_realm.text, &v6_creds.credential);
+
+        let default_v4_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, v6_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, v6_realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, v6_nonce.text.clone())),
+                Box::new(MessageIntegrity(v6_mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        v6_client_socket
+            .send_to(&default_v4_alloc_raw, v6_server_addr)
+            .await?;
+        let (n, _) = v6_client_socket.recv_from(&mut recv_buf).await?;
+        let mut default_v4_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        default_v4_resp.decode().unwrap();
+        assert_eq!(default_v4_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&default_v4_resp).unwrap();
+        assert!(err_code.code == CODE_ADDR_FAMILY_NOT_SUPPORTED);
+
+        let explicit_v6_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(REQUESTED_FAMILY_IPV6),
+                Box::new(Username::new(ATTR_USERNAME, v6_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, v6_realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, v6_nonce.text.clone())),
+                Box::new(MessageIntegrity(v6_mi_key)),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        v6_client_socket
+            .send_to(&explicit_v6_alloc_raw, v6_server_addr)
+            .await?;
+        let (n, _) = v6_client_socket.recv_from(&mut recv_buf).await?;
+        let mut explicit_v6_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        explicit_v6_resp.decode().unwrap();
+        assert_eq!(explicit_v6_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        v6_server.close().await?;
         Ok(())
     }
 }
