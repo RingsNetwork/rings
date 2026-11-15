@@ -1408,6 +1408,24 @@ mod tests {
             "replacement allocation on the same 5-tuple must remain active"
         );
 
+        // A delayed duplicate of the earlier Refresh(0) must replay its 200 OK response
+        // without deleting the replacement allocation.
+        client_socket
+            .send_to(&refresh_zero_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut dup_refresh_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        dup_refresh_resp.decode().unwrap();
+        assert_eq!(dup_refresh_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        assert_eq!(
+            server.allocations_info(None).await?.len(),
+            1,
+            "replayed Refresh(0) must not delete the replacement allocation"
+        );
+
         // 3. Enforce max_permissions_per_allocation = 2 across CreatePermission and ChannelBind.
         let perm_two_raw = {
             let mut msg = Message::new();

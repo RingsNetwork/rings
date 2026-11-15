@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -99,6 +100,7 @@ const STUN_ATTR_HEADER_BYTES: usize = 4;
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
+const MAX_DELETION_TXS_PER_TUPLE: usize = 16;
 
 struct PolicyRelayConn {
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
@@ -160,17 +162,26 @@ impl PolicyRelayConn {
         inner.send_to(buf, target).await
     }
 
-    async fn close(&self) -> webrtc_util::Result<()> {
+    fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
         let taken = self
             .inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.closed_notify.notify_waiters();
+        taken
+    }
+
+    async fn finish_close(&self, taken: Option<Arc<dyn Conn + Send + Sync>>) {
         let _guard = self.recv_lock.lock().await;
         if let Some(inner) = taken {
             let _ = inner.close().await;
         }
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        let taken = self.begin_close();
+        self.finish_close(taken).await;
         Ok(())
     }
 }
@@ -350,9 +361,13 @@ impl ManagedAllocation {
         let _ = self.expiry_tx.send_replace(Instant::now() + lifetime);
     }
 
-    async fn close(&self) {
+    fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
         let _ = self.expiry_tx.send_replace(Instant::now());
-        let _ = self.relay_conn.close().await;
+        self.relay_conn.begin_close()
+    }
+
+    async fn finish_close(&self, taken: Option<Arc<dyn Conn + Send + Sync>>) {
+        self.relay_conn.finish_close(taken).await;
     }
 
     fn has_permission(&self, ip: IpAddr) -> bool {
@@ -868,24 +883,148 @@ const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
     }
 }
 
+async fn close_allocations(removed: Vec<Arc<ManagedAllocation>>) {
+    if removed.is_empty() {
+        return;
+    }
+    let closing: Vec<_> = removed
+        .into_iter()
+        .map(|alloc| {
+            let taken = alloc.begin_close();
+            (alloc, taken)
+        })
+        .collect();
+    let _ = tokio::spawn(async move {
+        for (alloc, taken) in closing {
+            alloc.finish_close(taken).await;
+        }
+    })
+    .await;
+}
+
+struct CompletedDeletionEntry {
+    username: String,
+    transaction_id: TransactionId,
+    response_raw: Vec<u8>,
+    completed_at: Instant,
+}
+
+async fn evict_nonces_up_to(
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    client_addr: SocketAddr,
+    cutoff: Instant,
+) {
+    let mut guard = nonces.lock().await;
+    guard.retain(|_, (owner_addr, created_at)| *owner_addr != client_addr || *created_at > cutoff);
+}
+
+async fn prune_completed_deletions(
+    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    max_tuples: usize,
+) {
+    let now = Instant::now();
+    let mut evicted_cutoffs: Vec<(SocketAddr, Instant)> = Vec::new();
+    completed_deletions.retain(|tuple, entries| {
+        while let Some(front) = entries.front() {
+            if now
+                .checked_duration_since(front.completed_at)
+                .unwrap_or_default()
+                >= NONCE_LIFETIME
+            {
+                if let Some(evicted) = entries.pop_front() {
+                    evicted_cutoffs.push((tuple.src_addr, evicted.completed_at));
+                }
+            } else {
+                break;
+            }
+        }
+        !entries.is_empty()
+    });
+    while completed_deletions.len() > max_tuples {
+        let Some(oldest_tuple) = completed_deletions
+            .iter()
+            .min_by_key(|(_, entries)| entries.back().map_or_else(Instant::now, |e| e.completed_at))
+            .map(|(t, _)| *t)
+        else {
+            break;
+        };
+        if let Some(entries) = completed_deletions.remove(&oldest_tuple) {
+            if let Some(last) = entries.back() {
+                evicted_cutoffs.push((oldest_tuple.src_addr, last.completed_at));
+            }
+        }
+    }
+    for (addr, cutoff) in evicted_cutoffs {
+        evict_nonces_up_to(nonces, addr, cutoff).await;
+    }
+}
+
+async fn find_completed_deletion(
+    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    five_tuple: &FiveTuple,
+    username: &str,
+    transaction_id: TransactionId,
+    max_tuples: usize,
+) -> Option<Vec<u8>> {
+    prune_completed_deletions(completed_deletions, nonces, max_tuples).await;
+    let entries = completed_deletions.get(five_tuple)?;
+    entries
+        .iter()
+        .find(|e| e.username == username && e.transaction_id == transaction_id)
+        .map(|e| e.response_raw.clone())
+}
+
+async fn record_completed_deletion(
+    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    five_tuple: FiveTuple,
+    username: String,
+    transaction_id: TransactionId,
+    response_raw: Vec<u8>,
+    max_tuples: usize,
+) {
+    prune_completed_deletions(completed_deletions, nonces, max_tuples.saturating_sub(1)).await;
+    let entries = completed_deletions.entry(five_tuple).or_default();
+    while entries.len() >= MAX_DELETION_TXS_PER_TUPLE {
+        if let Some(evicted) = entries.pop_front() {
+            evict_nonces_up_to(nonces, five_tuple.src_addr, evicted.completed_at).await;
+        }
+    }
+    entries.push_back(CompletedDeletionEntry {
+        username,
+        transaction_id,
+        response_raw,
+        completed_at: Instant::now(),
+    });
+}
+
+fn is_zero_lifetime_refresh(msg: &Message) -> bool {
+    if msg.typ.method != METHOD_REFRESH || !msg.contains(ATTR_LIFETIME) {
+        return false;
+    }
+    let mut lt = Lifetime::default();
+    lt.get_from(msg).is_ok() && lt.0.is_zero()
+}
+
 async fn remove_allocation_if_current(
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
     alloc: &Arc<ManagedAllocation>,
 ) {
-    let should_close = {
+    let removed = {
         let mut guard = allocations.lock().await;
         if guard
             .get(&alloc.five_tuple)
             .is_some_and(|current| Arc::ptr_eq(current, alloc))
         {
-            guard.remove(&alloc.five_tuple);
-            true
+            guard.remove(&alloc.five_tuple)
         } else {
-            false
+            None
         }
     };
-    if should_close {
-        alloc.close().await;
+    if let Some(removed) = removed {
+        close_allocations(vec![removed]).await;
     }
 }
 
@@ -893,21 +1032,20 @@ async fn try_expire_allocation_if_current(
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
     alloc: &Arc<ManagedAllocation>,
 ) -> bool {
-    let should_close = {
+    let removed = {
         let mut guard = allocations.lock().await;
         match guard.get(&alloc.five_tuple) {
             Some(current) if Arc::ptr_eq(current, alloc) => {
                 if !current.is_expired() {
                     return false;
                 }
-                guard.remove(&alloc.five_tuple);
-                true
+                guard.remove(&alloc.five_tuple)
             }
             _ => return true,
         }
     };
-    if should_close {
-        alloc.close().await;
+    if let Some(removed) = removed {
+        close_allocations(vec![removed]).await;
     }
     true
 }
@@ -931,7 +1069,7 @@ async fn try_refresh_allocation(
         }
     };
     if let Some(expired) = expired_to_close {
-        expired.close().await;
+        close_allocations(vec![expired]).await;
     }
     false
 }
@@ -949,7 +1087,7 @@ async fn get_active_allocation(
         guard.remove(five_tuple)
     };
     if let Some(alloc) = expired {
-        alloc.close().await;
+        close_allocations(vec![alloc]).await;
     }
     None
 }
@@ -971,9 +1109,7 @@ async fn active_allocation_count(
             .collect();
         guard.len()
     };
-    for alloc in expired {
-        alloc.close().await;
-    }
+    close_allocations(expired).await;
     count
 }
 
@@ -1332,10 +1468,14 @@ async fn handle_authenticated_allocate(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_refresh(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
     allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
+    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    max_allocations: usize,
     alloc: Arc<ManagedAllocation>,
     m: &Message,
     mi_key: Vec<u8>,
@@ -1393,6 +1533,18 @@ async fn handle_authenticated_refresh(
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
     if let Some(raw) = built {
+        if lifetime_duration.is_zero() {
+            record_completed_deletion(
+                completed_deletions,
+                nonces,
+                alloc.five_tuple,
+                alloc.username.clone(),
+                m.transaction_id,
+                raw.clone(),
+                max_allocations,
+            )
+            .await;
+        }
         let _ = conn.send_to(&raw, src_addr).await;
     }
 }
@@ -1610,9 +1762,7 @@ async fn delete_all_allocations(allocations: &Mutex<HashMap<FiveTuple, Arc<Manag
         let mut guard = allocations.lock().await;
         guard.drain().map(|(_, alloc)| alloc).collect()
     };
-    for alloc in removed {
-        alloc.close().await;
-    }
+    close_allocations(removed).await;
 }
 
 /// A running Rings TURN server backed by [`DelegationAuthHandler`].
@@ -1734,6 +1884,8 @@ impl TurnServer {
         let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
             Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
         let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
+        let mut completed_deletions: HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>> =
+            HashMap::new();
 
         loop {
             if *shutdown_rx.borrow_and_update() {
@@ -1870,8 +2022,21 @@ impl TurnServer {
                 || decoded_msg.typ.method == METHOD_CREATE_PERMISSION
                 || decoded_msg.typ.method == METHOD_CHANNEL_BIND
             {
-                if let Some(alloc) = &existing_alloc {
-                    auth_handler.set_expected_allocation_owner(addr, Some(alloc.username.clone()));
+                let expected_owner = if is_zero_lifetime_refresh(&decoded_msg) {
+                    completed_deletions
+                        .get(&five_tuple)
+                        .and_then(|q| {
+                            q.iter()
+                                .rev()
+                                .find(|entry| entry.transaction_id == decoded_msg.transaction_id)
+                                .map(|entry| entry.username.clone())
+                        })
+                        .or_else(|| existing_alloc.as_ref().map(|alloc| alloc.username.clone()))
+                } else {
+                    existing_alloc.as_ref().map(|alloc| alloc.username.clone())
+                };
+                if let Some(owner) = expected_owner {
+                    auth_handler.set_expected_allocation_owner(addr, Some(owner));
                 }
             }
 
@@ -1932,6 +2097,21 @@ impl TurnServer {
                     .await;
                 }
                 METHOD_REFRESH => {
+                    if is_zero_lifetime_refresh(&decoded_msg) {
+                        if let Some(cached_resp) = find_completed_deletion(
+                            &mut completed_deletions,
+                            &nonces,
+                            &five_tuple,
+                            &username_attr.text,
+                            decoded_msg.transaction_id,
+                            max_allocations,
+                        )
+                        .await
+                        {
+                            let _ = recording_conn.send_to(&cached_resp, addr).await;
+                            continue;
+                        }
+                    }
                     let Some(alloc) = existing_alloc else {
                         send_authenticated_error(
                             &recording_conn_dyn,
@@ -1948,7 +2128,10 @@ impl TurnServer {
                     handle_authenticated_refresh(
                         &recording_conn_dyn,
                         &allocations,
+                        &nonces,
                         &mut allocate_responses,
+                        &mut completed_deletions,
+                        max_allocations,
                         alloc,
                         &decoded_msg,
                         mi_key,
@@ -2097,9 +2280,7 @@ impl TurnServer {
                 }
             }
         }
-        for alloc in expired {
-            alloc.close().await;
-        }
+        close_allocations(expired).await;
         Ok(infos)
     }
 
@@ -2114,9 +2295,7 @@ impl TurnServer {
                 .collect();
             keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
         };
-        for alloc in removed {
-            alloc.close().await;
-        }
+        close_allocations(removed).await;
         Ok(())
     }
 
