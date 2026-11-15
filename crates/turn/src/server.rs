@@ -1,21 +1,29 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use std::sync::PoisonError;
 
 use async_trait::async_trait;
 use rand::Rng;
 use rings_core::delegation::format_turn_server_url;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
+use stun::agent::TransactionId;
 use stun::attributes::ATTR_EVEN_PORT;
 use stun::attributes::ATTR_MESSAGE_INTEGRITY;
+use stun::attributes::ATTR_NONCE;
+use stun::attributes::ATTR_REALM;
 use stun::attributes::ATTR_USERNAME;
 use stun::attributes::ATTR_XOR_PEER_ADDRESS;
 use stun::error_code::ErrorCodeAttribute;
 use stun::error_code::CODE_FORBIDDEN;
+use stun::fingerprint::FINGERPRINT;
+use stun::integrity::MessageIntegrity;
 use stun::message::Getter;
 use stun::message::Message;
 use stun::message::MessageType;
@@ -28,6 +36,8 @@ use stun::message::METHOD_CHANNEL_BIND;
 use stun::message::METHOD_CREATE_PERMISSION;
 use stun::message::METHOD_REFRESH;
 use stun::message::METHOD_SEND;
+use stun::textattrs::Nonce;
+use stun::textattrs::Realm;
 use stun::textattrs::Username;
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
@@ -40,6 +50,7 @@ use turn::allocation::allocation_manager::Manager;
 use turn::allocation::allocation_manager::ManagerConfig;
 use turn::allocation::five_tuple::FiveTuple;
 use turn::allocation::AllocationInfo;
+use turn::auth::AuthHandler;
 use turn::proto::lifetime::DEFAULT_LIFETIME;
 use turn::proto::peeraddr::PeerAddress;
 use turn::proto::PROTO_UDP;
@@ -276,13 +287,92 @@ impl RelayAddressGenerator for PolicyRelayAddressGenerator {
     }
 }
 
+struct RecordingConn {
+    inner: Arc<dyn Conn + Send + Sync>,
+    recording: AtomicBool,
+    last_sent: SyncMutex<Option<Vec<u8>>>,
+}
+
+impl RecordingConn {
+    fn new(inner: Arc<dyn Conn + Send + Sync>) -> Self {
+        Self {
+            inner,
+            recording: AtomicBool::new(false),
+            last_sent: SyncMutex::new(None),
+        }
+    }
+
+    fn set_recording(&self, enabled: bool) {
+        if enabled {
+            *self
+                .last_sent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = None;
+        }
+        self.recording.store(enabled, Ordering::Release);
+    }
+
+    fn take_last_sent(&self) -> Option<Vec<u8>> {
+        self.recording.store(false, Ordering::Release);
+        self.last_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+}
+
+#[async_trait]
+impl Conn for RecordingConn {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
+        self.inner.connect(addr).await
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        self.inner.recv(buf).await
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        self.inner.recv_from(buf).await
+    }
+
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+        self.inner.send(buf).await
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        if self.recording.load(Ordering::Acquire) {
+            *self
+                .last_sent
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(buf.to_vec());
+        }
+        self.inner.send_to(buf, target).await
+    }
+
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.inner.remote_addr()
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        self.inner.close().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
 #[derive(Clone)]
 enum ServerCommand {
     Close(Arc<mpsc::Receiver<()>>),
 }
 
 async fn prune_and_bound_nonces(
-    nonces: &Mutex<HashMap<String, Instant>>,
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
     max_nonces: usize,
     reserve_one: bool,
 ) {
@@ -292,7 +382,7 @@ async fn prune_and_bound_nonces(
         return;
     }
     let now = Instant::now();
-    guard.retain(|_, created_at| {
+    guard.retain(|_, (_, created_at)| {
         now.checked_duration_since(*created_at).unwrap_or_default() < NONCE_LIFETIME
     });
     let target_cap = if reserve_one {
@@ -303,7 +393,7 @@ async fn prune_and_bound_nonces(
     while guard.len() > target_cap {
         let Some(oldest_key) = guard
             .iter()
-            .min_by_key(|(_, &created_at)| created_at)
+            .min_by_key(|(_, (_, created_at))| *created_at)
             .map(|(k, _)| k.clone())
         else {
             break;
@@ -312,7 +402,47 @@ async fn prune_and_bound_nonces(
     }
 }
 
+async fn extract_client_nonces(
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    client_addr: SocketAddr,
+) -> HashMap<String, Instant> {
+    let now = Instant::now();
+    let guard = nonces.lock().await;
+    guard
+        .iter()
+        .filter(|(_, (owner_addr, created_at))| {
+            *owner_addr == client_addr
+                && now.checked_duration_since(*created_at).unwrap_or_default() < NONCE_LIFETIME
+        })
+        .map(|(nonce, (_, created_at))| (nonce.clone(), *created_at))
+        .collect()
+}
+
+async fn sync_client_nonces(
+    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    client_addr: SocketAddr,
+    before_keys: &HashSet<String>,
+    after_map: HashMap<String, Instant>,
+    max_nonces: usize,
+) {
+    {
+        let mut guard = nonces.lock().await;
+        for key in before_keys {
+            if !after_map.contains_key(key) {
+                guard.remove(key);
+            }
+        }
+        for (nonce, created_at) in after_map {
+            if !before_keys.contains(&nonce) {
+                guard.insert(nonce, (client_addr, created_at));
+            }
+        }
+    }
+    prune_and_bound_nonces(nonces, max_nonces, false).await;
+}
+
 fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bool {
+    let ignore_port = m.typ.method == METHOD_CREATE_PERMISSION;
     for attr in &m.attributes.0 {
         if attr.typ != ATTR_XOR_PEER_ADDRESS {
             continue;
@@ -326,14 +456,59 @@ fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bo
         if peer_addr.get_from(&single).is_err() {
             return false;
         }
-        if !peer_policy.is_allowed_addr(SocketAddr::new(peer_addr.ip, peer_addr.port)) {
+        let allowed = if ignore_port {
+            peer_policy.is_allowed_ip(peer_addr.ip)
+        } else {
+            peer_policy.is_allowed_addr(SocketAddr::new(peer_addr.ip, peer_addr.port))
+        };
+        if !allowed {
             return false;
         }
     }
     true
 }
 
-async fn send_forbidden_error(conn: &Arc<dyn Conn + Send + Sync>, dst: SocketAddr, m: &Message) {
+fn verify_authenticated_request(
+    m: &Message,
+    client_nonces: &HashMap<String, Instant>,
+    auth_handler: &DelegationAuthHandler,
+    src_addr: SocketAddr,
+) -> Option<Vec<u8>> {
+    if !m.contains(ATTR_MESSAGE_INTEGRITY) {
+        return None;
+    }
+    let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+    nonce_attr.get_from(m).ok()?;
+    let created_at = client_nonces.get(&nonce_attr.text)?;
+    if Instant::now()
+        .checked_duration_since(*created_at)
+        .unwrap_or_default()
+        >= NONCE_LIFETIME
+    {
+        return None;
+    }
+    let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+    realm_attr.get_from(m).ok()?;
+    let mut username_attr = Username::new(ATTR_USERNAME, String::new());
+    username_attr.get_from(m).ok()?;
+    let key = auth_handler
+        .auth_handle(
+            &username_attr.to_string(),
+            &realm_attr.to_string(),
+            src_addr,
+        )
+        .ok()?;
+    let mi = MessageIntegrity(key.clone());
+    mi.check(&mut m.clone()).ok()?;
+    Some(key)
+}
+
+async fn send_forbidden_error(
+    conn: &Arc<dyn Conn + Send + Sync>,
+    dst: SocketAddr,
+    m: &Message,
+    mi_key: Vec<u8>,
+) {
     let built = {
         let mut err_msg = Message::new();
         let msg_type = MessageType::new(m.typ.method, CLASS_ERROR_RESPONSE);
@@ -348,6 +523,8 @@ async fn send_forbidden_error(conn: &Arc<dyn Conn + Send + Sync>, dst: SocketAdd
             }),
             Box::new(msg_type),
             Box::new(err_attr),
+            Box::new(MessageIntegrity(mi_key)),
+            Box::new(FINGERPRINT),
         ];
         err_msg.build(&setters).is_ok().then_some(err_msg.raw)
     };
@@ -362,7 +539,7 @@ pub struct TurnServer {
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     allocation_manager: Arc<Manager>,
-    nonces: Arc<Mutex<HashMap<String, Instant>>>,
+    nonces: Arc<Mutex<HashMap<String, (SocketAddr, Instant)>>>,
     command_tx: Mutex<Option<broadcast::Sender<ServerCommand>>>,
 }
 
@@ -386,9 +563,10 @@ impl TurnServer {
             config.peer_policy,
             Arc::clone(&require_even_port),
         ));
+        let (alloc_close_tx, alloc_close_rx) = mpsc::channel(256);
         let allocation_manager = Arc::new(Manager::new(ManagerConfig {
             relay_addr_generator,
-            alloc_close_notify: None,
+            alloc_close_notify: Some(alloc_close_tx),
         }));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
         let (command_tx, command_rx) = broadcast::channel(16);
@@ -408,6 +586,7 @@ impl TurnServer {
             config.peer_policy,
             config.max_nonces.max(1),
             require_even_port,
+            alloc_close_rx,
             command_rx,
         ));
 
@@ -425,13 +604,14 @@ impl TurnServer {
     async fn read_loop(
         conn: Arc<dyn Conn + Send + Sync>,
         allocation_manager: Arc<Manager>,
-        nonces: Arc<Mutex<HashMap<String, Instant>>>,
+        nonces: Arc<Mutex<HashMap<String, (SocketAddr, Instant)>>>,
         auth_handler: Arc<DelegationAuthHandler>,
         realm: String,
         channel_bind_timeout: Duration,
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
         require_even_port: Arc<AtomicBool>,
+        mut alloc_close_rx: mpsc::Receiver<AllocationInfo>,
         mut command_rx: broadcast::Receiver<ServerCommand>,
     ) {
         let mut buf = vec![0u8; INBOUND_MTU];
@@ -456,10 +636,17 @@ impl TurnServer {
         let Ok(local_dst_addr) = conn.local_addr() else {
             return;
         };
-        let mut established_usernames: HashMap<SocketAddr, String> = HashMap::new();
+        let recording_conn = Arc::new(RecordingConn::new(Arc::clone(&conn)));
+        let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
+            Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
+        let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
         let mut closed_guard: Option<Arc<mpsc::Receiver<()>>> = None;
 
         loop {
+            while let Ok(closed_info) = alloc_close_rx.try_recv() {
+                allocate_responses.remove(&closed_info.five_tuple);
+            }
+
             let (n, addr) = tokio::select! {
                 v = conn.recv_from(&mut buf) => {
                     match v {
@@ -469,6 +656,10 @@ impl TurnServer {
                             break;
                         }
                     }
+                }
+                Some(closed_info) = alloc_close_rx.recv() => {
+                    allocate_responses.remove(&closed_info.five_tuple);
+                    continue;
                 }
                 res = &mut close_rx => {
                     closed_guard = res.ok().flatten();
@@ -484,75 +675,113 @@ impl TurnServer {
                 ..Default::default()
             };
             let is_stun_msg = decoded_msg.decode().is_ok();
-            let mut established_user: Option<String> = None;
-            let mut allocate_username: Option<String> = None;
             let five_tuple = FiveTuple {
                 src_addr: addr,
                 dst_addr: local_dst_addr,
                 protocol: PROTO_UDP,
             };
 
-            if is_stun_msg {
-                let is_peer_bearing_msg = (decoded_msg.typ.class == CLASS_REQUEST
-                    && (decoded_msg.typ.method == METHOD_CREATE_PERMISSION
-                        || decoded_msg.typ.method == METHOD_CHANNEL_BIND))
-                    || (decoded_msg.typ.class == CLASS_INDICATION
-                        && decoded_msg.typ.method == METHOD_SEND);
-                if is_peer_bearing_msg && !check_message_peer_addresses(&decoded_msg, peer_policy) {
-                    if decoded_msg.typ.class == CLASS_REQUEST {
-                        send_forbidden_error(&conn, addr, &decoded_msg).await;
-                    }
-                    continue;
+            if is_stun_msg
+                && decoded_msg.typ.class == CLASS_INDICATION
+                && decoded_msg.typ.method == METHOD_SEND
+                && !check_message_peer_addresses(&decoded_msg, peer_policy)
+            {
+                continue;
+            }
+
+            let mut is_fresh_allocate = false;
+
+            if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
+                let has_mi = decoded_msg.contains(ATTR_MESSAGE_INTEGRITY);
+                prune_and_bound_nonces(&nonces, max_nonces, !has_mi).await;
+
+                let existing_alloc = allocation_manager
+                    .get_allocations_info(Some(vec![five_tuple]))
+                    .await
+                    .remove(&five_tuple);
+                if existing_alloc.is_none() {
+                    allocate_responses.remove(&five_tuple);
                 }
 
-                if decoded_msg.typ.class == CLASS_REQUEST {
-                    let has_mi = decoded_msg.contains(ATTR_MESSAGE_INTEGRITY);
-                    prune_and_bound_nonces(&nonces, max_nonces, !has_mi).await;
-
-                    if decoded_msg.typ.method == METHOD_ALLOCATE {
-                        require_even_port
-                            .store(decoded_msg.contains(ATTR_EVEN_PORT), Ordering::Release);
-                        let mut username_attr = Username::new(ATTR_USERNAME, String::new());
-                        if username_attr.get_from(&decoded_msg).is_ok() {
-                            allocate_username = Some(username_attr.text);
-                        }
-                    } else {
-                        require_even_port.store(false, Ordering::Release);
-                    }
-
-                    if decoded_msg.typ.method == METHOD_REFRESH
-                        || decoded_msg.typ.method == METHOD_CREATE_PERMISSION
-                        || decoded_msg.typ.method == METHOD_CHANNEL_BIND
-                    {
-                        let mut username_attr = Username::new(ATTR_USERNAME, String::new());
-                        if username_attr.get_from(&decoded_msg).is_ok() {
-                            if allocation_manager
-                                .get_allocation(&five_tuple)
-                                .await
-                                .is_some()
-                            {
-                                if established_usernames.get(&addr) == Some(&username_attr.text) {
-                                    auth_handler.set_established_allocation(
-                                        addr,
-                                        username_attr.text.clone(),
-                                        true,
-                                    );
-                                    established_user = Some(username_attr.text);
+                if decoded_msg.typ.method == METHOD_ALLOCATE {
+                    require_even_port
+                        .store(decoded_msg.contains(ATTR_EVEN_PORT), Ordering::Release);
+                    if let Some(info) = &existing_alloc {
+                        if let Some((saved_tx_id, cached_resp)) =
+                            allocate_responses.get(&five_tuple)
+                        {
+                            if *saved_tx_id == decoded_msg.transaction_id {
+                                let client_nonces = extract_client_nonces(&nonces, addr).await;
+                                auth_handler.set_expected_allocation_owner(
+                                    addr,
+                                    Some(info.username.clone()),
+                                );
+                                let valid_retransmit = verify_authenticated_request(
+                                    &decoded_msg,
+                                    &client_nonces,
+                                    &auth_handler,
+                                    addr,
+                                )
+                                .is_some();
+                                auth_handler.set_expected_allocation_owner(addr, None);
+                                if valid_retransmit {
+                                    require_even_port.store(false, Ordering::Release);
+                                    let _ = conn.send_to(cached_resp, addr).await;
+                                    continue;
                                 }
-                            } else {
-                                established_usernames.remove(&addr);
                             }
                         }
+                    } else {
+                        is_fresh_allocate = true;
+                        recording_conn.set_recording(true);
+                    }
+                } else {
+                    require_even_port.store(false, Ordering::Release);
+                }
+
+                if decoded_msg.typ.method == METHOD_REFRESH
+                    || decoded_msg.typ.method == METHOD_CREATE_PERMISSION
+                    || decoded_msg.typ.method == METHOD_CHANNEL_BIND
+                {
+                    if let Some(info) = &existing_alloc {
+                        auth_handler
+                            .set_expected_allocation_owner(addr, Some(info.username.clone()));
+                    }
+                }
+
+                if (decoded_msg.typ.method == METHOD_CREATE_PERMISSION
+                    || decoded_msg.typ.method == METHOD_CHANNEL_BIND)
+                    && existing_alloc.is_some()
+                    && !check_message_peer_addresses(&decoded_msg, peer_policy)
+                {
+                    let client_nonces = extract_client_nonces(&nonces, addr).await;
+                    if let Some(mi_key) = verify_authenticated_request(
+                        &decoded_msg,
+                        &client_nonces,
+                        &auth_handler,
+                        addr,
+                    ) {
+                        auth_handler.set_expected_allocation_owner(addr, None);
+                        send_forbidden_error(&conn, addr, &decoded_msg, mi_key).await;
+                        continue;
                     }
                 }
             }
 
+            let client_nonces = if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
+                extract_client_nonces(&nonces, addr).await
+            } else {
+                HashMap::new()
+            };
+            let before_nonce_keys: HashSet<String> = client_nonces.keys().cloned().collect();
+            let req_nonces = Arc::new(Mutex::new(client_nonces));
+
             let mut r = Request {
-                conn: Arc::clone(&conn),
+                conn: Arc::clone(&recording_conn_dyn),
                 src_addr: addr,
                 buff: payload.to_vec(),
                 allocation_manager: Arc::clone(&allocation_manager),
-                nonces: Arc::clone(&nonces),
+                nonces: Arc::clone(&req_nonces),
                 auth_handler: Arc::clone(&auth_handler)
                     as Arc<dyn turn::auth::AuthHandler + Send + Sync>,
                 realm: realm.clone(),
@@ -564,29 +793,25 @@ impl TurnServer {
             }
 
             require_even_port.store(false, Ordering::Release);
-            if let Some(username) = established_user {
-                auth_handler.set_established_allocation(addr, username, false);
-            }
-            if let Some(username) = allocate_username {
-                if allocation_manager
-                    .get_allocation(&five_tuple)
-                    .await
-                    .is_some()
-                {
-                    established_usernames.insert(addr, username);
+            auth_handler.set_expected_allocation_owner(addr, None);
+
+            if is_fresh_allocate {
+                let recorded = recording_conn.take_last_sent();
+                if let Some(resp_bytes) = recorded {
+                    if allocation_manager
+                        .get_allocations_info(Some(vec![five_tuple]))
+                        .await
+                        .contains_key(&five_tuple)
+                    {
+                        allocate_responses
+                            .insert(five_tuple, (decoded_msg.transaction_id, resp_bytes));
+                    }
                 }
-            } else if is_stun_msg
-                && decoded_msg.typ.class == CLASS_REQUEST
-                && decoded_msg.typ.method == METHOD_REFRESH
-                && allocation_manager
-                    .get_allocation(&five_tuple)
-                    .await
-                    .is_none()
-            {
-                established_usernames.remove(&addr);
             }
+
             if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
-                prune_and_bound_nonces(&nonces, max_nonces, false).await;
+                let after_map = req_nonces.lock().await.clone();
+                sync_client_nonces(&nonces, addr, &before_nonce_keys, after_map, max_nonces).await;
             }
         }
 

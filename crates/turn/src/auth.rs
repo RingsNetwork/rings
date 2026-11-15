@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -108,7 +109,7 @@ pub struct DelegationAuthHandler {
     server_key: SecretKey,
     clock: SharedClock,
     cache: Mutex<VerifiedAuthCache>,
-    established_allocations: Mutex<BTreeSet<(SocketAddr, String)>>,
+    expected_allocation_owners: Mutex<HashMap<SocketAddr, String>>,
 }
 
 impl Default for DelegationAuthHandler {
@@ -143,7 +144,7 @@ impl DelegationAuthHandler {
             cache: Mutex::new(VerifiedAuthCache::new(
                 DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY,
             )),
-            established_allocations: Mutex::new(BTreeSet::new()),
+            expected_allocation_owners: Mutex::new(HashMap::new()),
         }
     }
 
@@ -162,28 +163,28 @@ impl DelegationAuthHandler {
         self.server_key.pubkey()
     }
 
-    pub(crate) fn set_established_allocation(
+    pub(crate) fn set_expected_allocation_owner(
         &self,
         src_addr: SocketAddr,
-        username: String,
-        is_established: bool,
+        owner_username: Option<String>,
     ) {
-        let mut set = self
-            .established_allocations
+        let mut map = self
+            .expected_allocation_owners
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if is_established {
-            set.insert((src_addr, username));
+        if let Some(owner) = owner_username {
+            map.insert(src_addr, owner);
         } else {
-            set.remove(&(src_addr, username));
+            map.remove(&src_addr);
         }
     }
 
-    fn is_established_allocation(&self, src_addr: SocketAddr, username: &str) -> bool {
-        self.established_allocations
+    fn expected_allocation_owner(&self, src_addr: SocketAddr) -> Option<String> {
+        self.expected_allocation_owners
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .contains(&(src_addr, username.to_string()))
+            .get(&src_addr)
+            .cloned()
     }
 
     /// Verify a TURN `username` and `realm` at the handler's current clock instant and compute
@@ -252,7 +253,18 @@ impl AuthHandler for DelegationAuthHandler {
         realm: &str,
         src_addr: SocketAddr,
     ) -> std::result::Result<Vec<u8>, turn::Error> {
-        let established_allocation = self.is_established_allocation(src_addr, username);
+        let established_allocation = match self.expected_allocation_owner(src_addr) {
+            Some(expected_owner) if expected_owner == username => true,
+            Some(_) => {
+                tracing::debug!(
+                    %src_addr,
+                    %realm,
+                    "rejected TURN request: username does not match established allocation owner"
+                );
+                return Err(turn::Error::ErrNoSuchUser);
+            }
+            None => false,
+        };
         match self.verify_and_derive_key_for_allocation(username, realm, established_allocation) {
             Ok((verified, key)) => {
                 match &verified.identity {

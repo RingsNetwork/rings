@@ -107,7 +107,7 @@ impl RelayPeerPolicy {
         }
         let segments = v6.segments();
         let octets = v6.octets();
-        // IPv4-compatible `::a.b.c.d` or NAT64 `64:ff9b::/96` / `64:ff9b:1::/48`
+        // IPv4-compatible `::a.b.c.d` or Well-Known NAT64 `64:ff9b::/96` (RFC 6052)
         let is_v4_compat = segments[0] == 0
             && segments[1] == 0
             && segments[2] == 0
@@ -115,31 +115,44 @@ impl RelayPeerPolicy {
             && segments[4] == 0
             && segments[5] == 0
             && !v6.is_loopback();
-        let is_nat64 = segments[0] == 0x0064
+        let is_well_known_nat64 = segments[0] == 0x0064
             && segments[1] == 0xff9b
-            && ((segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0)
-                || (segments[2] == 1 && segments[3] == 0 && segments[4] == 0));
-        if is_v4_compat || is_nat64 {
+            && segments[2] == 0
+            && segments[3] == 0
+            && segments[4] == 0
+            && segments[5] == 0;
+        if is_v4_compat || is_well_known_nat64 {
             let embedded_v4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
             return self.is_allowed_ipv4(embedded_v4);
+        }
+        // Any other address under 64:ff9b::/32 (including the entire 64:ff9b:1::/48 local-use
+        // translation block, RFC 8215, whose suffix layout is deployment-defined) is local-use.
+        if segments[0] == 0x0064 && segments[1] == 0xff9b {
+            return matches!(self, Self::AllowLocalAndPrivate);
         }
 
         match self {
             Self::AllowLocalAndPrivate => true,
             Self::PublicOnly => {
-                if v6.is_loopback() {
+                // Only Global Unicast 2000::/3 (RFC 4291) is routable on the public Internet.
+                if (segments[0] & 0xe000) != 0x2000 {
                     return false;
                 }
-                // fc00::/7 (Unique Local, RFC 4193)
-                if (segments[0] & 0xfe00) == 0xfc00 {
-                    return false;
+                // 2002::/16 (6to4, RFC 3056) embeds an IPv4 address in octets 2..6.
+                if segments[0] == 0x2002 {
+                    let embedded_v4 = Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]);
+                    return self.is_allowed_ipv4(embedded_v4);
                 }
-                // fe80::/10 (Link-Local, RFC 4291)
-                if (segments[0] & 0xffc0) == 0xfe80 {
-                    return false;
-                }
-                // 2001:db8::/32 (Documentation, RFC 3849)
-                if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+                // 2001:0000::/32 (Teredo, RFC 4380), 2001:0002::/48 (Benchmarking, RFC 5180),
+                // 2001:0010::/28 & 2001:0020::/28 (ORCHID, RFC 4843 / RFC 7343),
+                // 2001:0db8::/32 (Documentation, RFC 3849).
+                if segments[0] == 0x2001
+                    && (segments[1] == 0x0000
+                        || (segments[1] == 0x0002 && segments[2] == 0)
+                        || (segments[1] & 0xfff0) == 0x0010
+                        || (segments[1] & 0xfff0) == 0x0020
+                        || segments[1] == 0x0db8)
+                {
                     return false;
                 }
                 true

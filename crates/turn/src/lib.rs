@@ -57,15 +57,31 @@ mod tests {
     use rings_core::utils::Clock;
     use rings_core::utils::ManualClock;
     use stun::agent::TransactionId;
+    use stun::attributes::ATTR_NONCE;
+    use stun::attributes::ATTR_REALM;
+    use stun::attributes::ATTR_USERNAME;
+    use stun::fingerprint::FINGERPRINT;
+    use stun::integrity::MessageIntegrity;
+    use stun::message::Getter;
     use stun::message::Message;
     use stun::message::MessageType;
     use stun::message::Setter;
+    use stun::message::CLASS_ERROR_RESPONSE;
     use stun::message::CLASS_REQUEST;
+    use stun::message::CLASS_SUCCESS_RESPONSE;
     use stun::message::METHOD_ALLOCATE;
+    use stun::message::METHOD_CREATE_PERMISSION;
+    use stun::message::METHOD_REFRESH;
+    use stun::textattrs::Nonce;
+    use stun::textattrs::Realm;
+    use stun::textattrs::Username;
     use tokio::net::UdpSocket;
     use tokio::sync::mpsc;
+    use turn::auth::generate_auth_key;
     use turn::client::Client;
     use turn::client::ClientConfig;
+    use turn::proto::lifetime::Lifetime;
+    use turn::proto::peeraddr::PeerAddress;
     use turn::proto::reqtrans::RequestedTransport;
     use turn::proto::PROTO_UDP;
     use webrtc_util::Conn;
@@ -480,5 +496,310 @@ mod tests {
                 max_port: 49153,
             })
         ));
+    }
+
+    #[test]
+    fn relay_peer_policy_rejects_local_use_nat64_and_allows_public_ipv6() {
+        let local_use_nat64: IpAddr = "64:ff9b:1:1::a00:1".parse().unwrap();
+        let well_known_private_nat64: IpAddr = "64:ff9b::a00:1".parse().unwrap();
+        let well_known_public_nat64: IpAddr = "64:ff9b::808:808".parse().unwrap();
+        let public_v6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
+
+        assert!(!RelayPeerPolicy::PublicOnly.is_allowed_ip(local_use_nat64));
+        assert!(!RelayPeerPolicy::PublicOnly.is_allowed_ip(well_known_private_nat64));
+        assert!(RelayPeerPolicy::PublicOnly.is_allowed_ip(well_known_public_nat64));
+        assert!(RelayPeerPolicy::PublicOnly.is_allowed_ip(public_v6));
+    }
+
+    #[tokio::test]
+    async fn turn_server_binds_nonces_to_client_and_replays_idempotent_allocate_retransmission(
+    ) -> Result<()> {
+        let server = TurnServer::start(TurnServerConfig::loopback_ephemeral()).await?;
+        let server_addr = server.local_addr();
+        let server_pubkey = server.server_pubkey();
+
+        let client_key = SecretKey::random();
+        let creds = client_key.turn_credentials(server_pubkey)?;
+
+        let client_a = UdpSocket::bind("127.0.0.1:0").await?;
+        let client_b = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut recv_buf = vec![0u8; 1500];
+
+        // 1. Send unauthenticated Allocate from client_a to obtain a nonce bound to client_a.
+        let challenge_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_a.send_to(&challenge_raw, server_addr).await?;
+        let (n, _) = client_a.recv_from(&mut recv_buf).await?;
+        let mut challenge_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge_resp.decode().unwrap();
+        let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+        nonce_attr.get_from(&challenge_resp).unwrap();
+        let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+        realm_attr.get_from(&challenge_resp).unwrap();
+
+        // 2. Build an authenticated Allocate request using client_a's nonce.
+        let tx_id = TransactionId::new();
+        let mi_key = generate_auth_key(&creds.username, &realm_attr.text, &creds.credential);
+        let auth_allocate_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: tx_id,
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+
+        // 3. Replaying the captured packet from client_b must fail with 438 Stale Nonce and not
+        //    create an allocation.
+        client_b.send_to(&auth_allocate_raw, server_addr).await?;
+        let (n, _) = client_b.recv_from(&mut recv_buf).await?;
+        let mut replay_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        replay_resp.decode().unwrap();
+        assert_eq!(replay_resp.typ.class, CLASS_ERROR_RESPONSE);
+        assert!(server.allocations_info(None).await?.is_empty());
+
+        // 4. Sending the packet from client_a succeeds (200 Allocate Success).
+        client_a.send_to(&auth_allocate_raw, server_addr).await?;
+        let (n1, _) = client_a.recv_from(&mut recv_buf).await?;
+        let first_resp_bytes = recv_buf[..n1].to_vec();
+        let mut alloc_resp = Message {
+            raw: first_resp_bytes.clone(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 5. Retransmitting the exact same Allocate request from client_a replays the cached
+        //    200 Allocate Success response instead of failing with 437 Allocation Mismatch.
+        client_a.send_to(&auth_allocate_raw, server_addr).await?;
+        let (n2, _) = client_a.recv_from(&mut recv_buf).await?;
+        assert_eq!(&recv_buf[..n2], first_resp_bytes.as_slice());
+
+        server.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_enforces_allocation_ownership_and_accepts_port_zero_create_permission(
+    ) -> Result<()> {
+        let mut config = TurnServerConfig::loopback_ephemeral();
+        config.peer_policy = RelayPeerPolicy::PublicOnly;
+        let server = TurnServer::start(config).await?;
+        let server_addr = server.local_addr();
+        let server_pubkey = server.server_pubkey();
+
+        let owner_key = SecretKey::random();
+        let owner_creds = owner_key.turn_credentials(server_pubkey)?;
+        let attacker_key = SecretKey::random();
+        let attacker_creds = attacker_key.turn_credentials(server_pubkey)?;
+
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut recv_buf = vec![0u8; 1500];
+
+        // Obtain nonce and create allocation as `owner_creds`.
+        let challenge_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&challenge_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut challenge_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge_resp.decode().unwrap();
+        let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+        nonce_attr.get_from(&challenge_resp).unwrap();
+        let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+        realm_attr.get_from(&challenge_resp).unwrap();
+
+        let owner_mi_key = generate_auth_key(
+            &owner_creds.username,
+            &realm_attr.text,
+            &owner_creds.credential,
+        );
+        let allocate_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, owner_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(owner_mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&allocate_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut alloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // Attacker spoofing the same 5-tuple with `attacker_creds` cannot delete the allocation
+        // via Refresh(0).
+        let attacker_mi_key = generate_auth_key(
+            &attacker_creds.username,
+            &realm_attr.text,
+            &attacker_creds.credential,
+        );
+        let spoofed_refresh_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+                Box::new(Lifetime(Duration::ZERO)),
+                Box::new(Username::new(
+                    ATTR_USERNAME,
+                    attacker_creds.username.clone(),
+                )),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(attacker_mi_key)),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&spoofed_refresh_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut refresh_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        refresh_resp.decode().unwrap();
+        assert_eq!(refresh_resp.typ.class, CLASS_ERROR_RESPONSE);
+        assert_eq!(server.allocations_info(None).await?.len(), 1);
+
+        // Owner sending CreatePermission with port 0 for a public IPv4 peer succeeds.
+        let create_perm_public_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    port: 0,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, owner_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(owner_mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&create_perm_public_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut perm_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        perm_resp.decode().unwrap();
+        assert_eq!(perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // Owner sending CreatePermission for a forbidden private IP receives a 403 error response
+        // protected by a valid MESSAGE-INTEGRITY attribute.
+        let create_perm_private_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    port: 0,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, owner_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(owner_mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&create_perm_private_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut forbidden_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        forbidden_resp.decode().unwrap();
+        assert_eq!(forbidden_resp.typ.class, CLASS_ERROR_RESPONSE);
+        assert!(MessageIntegrity(owner_mi_key)
+            .check(&mut forbidden_resp)
+            .is_ok());
+
+        server.close().await?;
+        Ok(())
     }
 }
