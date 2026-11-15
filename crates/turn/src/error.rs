@@ -40,6 +40,17 @@ pub enum TurnError {
         /// Configured local relay socket bind IP.
         bind_ip: std::net::IpAddr,
     },
+
+    /// Configured advertised listener `advertised_ip` and local `listen_ip` belong to different address families.
+    #[error(
+        "Listener address family mismatch: advertised_ip={advertised_ip}, listen_ip={listen_ip}"
+    )]
+    ListenerAddressFamilyMismatch {
+        /// Configured external/advertised listener IP.
+        advertised_ip: std::net::IpAddr,
+        /// Configured local listener bind IP.
+        listen_ip: std::net::IpAddr,
+    },
 }
 
 /// Result alias for `rings-turn`.

@@ -242,7 +242,12 @@ mod test_send_cancellation;
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
-    webrtc_conn: Arc<RTCPeerConnection>,
+    webrtc_conn: std::sync::RwLock<Arc<RTCPeerConnection>>,
+    configured_ice_servers: std::sync::RwLock<Vec<IceServer>>,
+    transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
+    external_address: Option<String>,
+    udp_port_range: Option<WebrtcUdpPortRange>,
+    reconfigure_lock: Mutex<()>,
     webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
@@ -432,7 +437,7 @@ impl NativePhysicalCloseWitness {
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebrtcTransport {
-    ice_servers: std::sync::RwLock<Vec<IceServer>>,
+    ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
@@ -441,8 +446,13 @@ pub struct WebrtcTransport {
 }
 
 impl WebrtcConnection {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         webrtc_conn: RTCPeerConnection,
+        configured_ice_servers: Vec<IceServer>,
+        transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
+        external_address: Option<String>,
+        udp_port_range: Option<WebrtcUdpPortRange>,
         webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
@@ -453,7 +463,12 @@ impl WebrtcConnection {
         let retirement_fence =
             NativeRetirementFence::new(connection_state.clone(), cancel_token.clone());
         Self {
-            webrtc_conn: Arc::new(webrtc_conn),
+            webrtc_conn: std::sync::RwLock::new(Arc::new(webrtc_conn)),
+            configured_ice_servers: std::sync::RwLock::new(configured_ice_servers),
+            transport_ice_servers,
+            external_address,
+            udp_port_range,
+            reconfigure_lock: Mutex::new(()),
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             connection_state,
@@ -464,6 +479,101 @@ impl WebrtcConnection {
             physical_close_completed: PhysicalCloseCompletion::new(),
             callback,
         }
+    }
+
+    fn webrtc_conn(&self) -> Arc<RTCPeerConnection> {
+        Arc::clone(
+            &self
+                .webrtc_conn
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    async fn refresh_ice_servers(&self) -> Result<()> {
+        let _guard = self.reconfigure_lock.lock().await;
+        if self.cancel_token.is_cancelled()
+            || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
+        {
+            return Ok(());
+        }
+
+        let desired = self
+            .transport_ice_servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let already_configured = *self
+            .configured_ice_servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == desired;
+        if already_configured {
+            return Ok(());
+        }
+
+        let current_conn = self.webrtc_conn();
+        let is_unnegotiated = current_conn.local_description().await.is_none()
+            && current_conn.remote_description().await.is_none()
+            && self.connection_state.snapshot().webrtc() == WebrtcConnectionState::New;
+
+        if is_unnegotiated {
+            let (new_webrtc_conn, _) = create_peer_connection_with_config(
+                &desired,
+                self.external_address.as_deref(),
+                self.udp_port_range,
+            )
+            .await?;
+            wire_received_data_channels(&new_webrtc_conn, Arc::clone(&self.callback));
+            wire_peer_connection_state(
+                &new_webrtc_conn,
+                Arc::clone(&self.callback),
+                self.connection_state.clone(),
+            );
+            let new_channels = build_outbound_data_channels(
+                &new_webrtc_conn,
+                &self.webrtc_data_channel,
+                &self.callback,
+                &self.connection_state,
+            )
+            .await?;
+            let old_channels = self.webrtc_data_channel.replace_all(new_channels)?;
+            *self
+                .webrtc_conn
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_webrtc_conn);
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
+
+            current_conn.on_peer_connection_state_change(Box::new(|_| Box::pin(async {})));
+            current_conn.on_data_channel(Box::new(|_| Box::pin(async {})));
+            for tracked in old_channels {
+                tracked.channel.on_open(Box::new(|| Box::pin(async {})));
+                tracked.channel.on_close(Box::new(|| Box::pin(async {})));
+                tracked.channel.on_error(Box::new(|_| Box::pin(async {})));
+            }
+            let _ = current_conn.close().await;
+            return Ok(());
+        }
+
+        let rtc_ice_servers: Vec<RTCIceServer> =
+            desired.iter().cloned().map(RTCIceServer::from).collect();
+        let mut cfg = current_conn.get_configuration().await;
+        cfg.ice_servers = rtc_ice_servers;
+        if let Err(error) = current_conn.set_configuration(cfg).await {
+            tracing::debug!(
+                %error,
+                "Skipped set_configuration on native peer connection"
+            );
+        } else {
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
+        }
+        Ok(())
     }
 
     pub(crate) fn physical_close_witness(&self) -> NativePhysicalCloseWitness {
@@ -502,7 +612,7 @@ impl WebrtcConnection {
         }
 
         let sdp = self
-            .webrtc_conn
+            .webrtc_conn()
             .local_description()
             .await
             .ok_or(Error::WebrtcLocalSdpGenerationError(
@@ -539,7 +649,7 @@ impl WebrtcTransport {
         let ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
 
         Self {
-            ice_servers: std::sync::RwLock::new(ice_servers),
+            ice_servers: Arc::new(std::sync::RwLock::new(ice_servers)),
             external_address,
             udp_port_range,
             pool: Pool::new(),
@@ -548,29 +658,24 @@ impl WebrtcTransport {
     }
 
     /// Replace the ICE server list used for subsequent peer connections and update active
-    /// native peer connections in place via `RTCPeerConnection::set_configuration`.
+    /// native peer connections (rebuilding pre-gather peer connections so their ICE gatherers
+    /// pick up renewed credentials, or updating negotiated connections via `set_configuration`).
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let parsed = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
         *self
             .ice_servers
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
 
-        let rtc_ice_servers: Vec<RTCIceServer> =
-            parsed.into_iter().map(RTCIceServer::from).collect();
         let active_connections = self.pool.connections();
         if !active_connections.is_empty() {
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 for conn in active_connections {
-                    let webrtc_conn = Arc::clone(&conn.webrtc_conn);
-                    let rtc_ice_servers = rtc_ice_servers.clone();
                     runtime.spawn(async move {
-                        let mut cfg = webrtc_conn.get_configuration().await;
-                        cfg.ice_servers = rtc_ice_servers;
-                        if let Err(error) = webrtc_conn.set_configuration(cfg).await {
+                        if let Err(error) = conn.refresh_ice_servers().await {
                             tracing::debug!(
                                 %error,
-                                "Skipped set_configuration on native peer connection"
+                                "Skipped ICE server refresh on native peer connection"
                             );
                         }
                     });
@@ -602,11 +707,27 @@ fn set_udp_network_range(
 
 async fn create_peer_connection(
     transport: &WebrtcTransport,
-) -> Result<(RTCPeerConnection, Vec<String>)> {
+) -> Result<(RTCPeerConnection, Vec<String>, Vec<IceServer>)> {
     let ice_servers = transport
         .ice_servers
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let (connection, sdp_extra_host_candidates) = create_peer_connection_with_config(
+        &ice_servers,
+        transport.external_address.as_deref(),
+        transport.udp_port_range,
+    )
+    .await?;
+    Ok((connection, sdp_extra_host_candidates, ice_servers))
+}
+
+async fn create_peer_connection_with_config(
+    ice_servers: &[IceServer],
+    external_address: Option<&str>,
+    udp_port_range: Option<WebrtcUdpPortRange>,
+) -> Result<(RTCPeerConnection, Vec<String>)> {
+    let ice_servers = ice_servers
         .iter()
         .cloned()
         .map(RTCIceServer::from)
@@ -617,8 +738,8 @@ async fn create_peer_connection(
     };
 
     let mut setting = webrtc::api::setting_engine::SettingEngine::default();
-    set_udp_network_range(&mut setting, transport.udp_port_range)?;
-    let external_addresses = external_address_candidates(transport.external_address.as_deref());
+    set_udp_network_range(&mut setting, udp_port_range)?;
+    let external_addresses = external_address_candidates(external_address);
     let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
     let sdp_extra_host_candidates = sdp_extra_host_candidates(&external_addresses);
     setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
@@ -654,7 +775,7 @@ impl FrameSink for WebrtcConnection {
         let runtime = native_send_runtime()?;
         let acceptance = permit.acceptance();
         let pool = self.webrtc_data_channel.clone();
-        let connection = self.webrtc_conn.clone();
+        let connection = self.webrtc_conn();
         let physical_close_completed = self.physical_close_completed.clone();
         let retirement_fence = self.retirement_fence.clone();
         run_send_with_retirement(
@@ -693,9 +814,11 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        let setting_offer = self.webrtc_conn.create_offer(None).await?;
-        let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
-        self.webrtc_conn
+        self.refresh_ice_servers().await?;
+        let webrtc_conn = self.webrtc_conn();
+        let setting_offer = webrtc_conn.create_offer(None).await?;
+        let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
+        webrtc_conn
             .set_local_description(setting_offer.clone())
             .await?;
 
@@ -704,18 +827,18 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
+        self.refresh_ice_servers().await?;
+        let webrtc_conn = self.webrtc_conn();
         // Read the negotiated limit from the SDP text, but record it only after the *whole* answer
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer)?;
         let offer = RTCSessionDescription::offer(offer)?;
-        self.webrtc_conn.set_remote_description(offer).await?;
+        webrtc_conn.set_remote_description(offer).await?;
 
-        let answer = self.webrtc_conn.create_answer(None).await?;
-        let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
-        self.webrtc_conn
-            .set_local_description(answer.clone())
-            .await?;
+        let answer = webrtc_conn.create_answer(None).await?;
+        let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
+        webrtc_conn.set_local_description(answer.clone()).await?;
         let local_sdp = self.webrtc_gather(gathering_complete_promise).await?;
 
         self.remote_max_message_size
@@ -727,7 +850,7 @@ impl ConnectionInterface for WebrtcConnection {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
         let answer = RTCSessionDescription::answer(answer)?;
-        self.webrtc_conn.set_remote_description(answer).await?;
+        self.webrtc_conn().set_remote_description(answer).await?;
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
@@ -744,11 +867,11 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn close(&self) -> Result<()> {
         self.request_close();
-        close_native_connection(
-            self.webrtc_conn.clone(),
-            self.physical_close_completed.clone(),
-        )
-        .await
+        let webrtc_conn = {
+            let _guard = self.reconfigure_lock.lock().await;
+            self.webrtc_conn()
+        };
+        close_native_connection(webrtc_conn, self.physical_close_completed.clone()).await
     }
 }
 
@@ -897,12 +1020,13 @@ async fn wire_delivery_events(channel: &Arc<RTCDataChannel>, delivery: &Arc<Deli
     }));
 }
 
-async fn create_outbound_data_channels(
+async fn build_outbound_data_channels(
     webrtc_conn: &RTCPeerConnection,
     channel_pool: &Arc<ChannelPool<TrackedChannel>>,
     inner_cb: &Arc<InnerTransportCallback>,
     connection_state: &ConnectionStateCell,
-) -> Result<()> {
+) -> Result<Vec<TrackedChannel>> {
+    let mut channels = Vec::with_capacity(usize::from(DATA_CHANNEL_POOL_SIZE));
     for index in 0..DATA_CHANNEL_POOL_SIZE {
         let channel = webrtc_conn
             .create_data_channel(&data_channel_label(ChannelLane::new(index)), None)
@@ -947,12 +1071,24 @@ async fn create_outbound_data_channels(
             })
         }));
 
-        channel_pool.push(TrackedChannel {
+        channels.push(TrackedChannel {
             channel,
             delivery,
             send_lock: Arc::new(Mutex::new(())),
-        })?;
+        });
     }
+    Ok(channels)
+}
+
+async fn create_outbound_data_channels(
+    webrtc_conn: &RTCPeerConnection,
+    channel_pool: &Arc<ChannelPool<TrackedChannel>>,
+    inner_cb: &Arc<InnerTransportCallback>,
+    connection_state: &ConnectionStateCell,
+) -> Result<()> {
+    let channels =
+        build_outbound_data_channels(webrtc_conn, channel_pool, inner_cb, connection_state).await?;
+    let _ = channel_pool.replace_all(channels)?;
     Ok(())
 }
 
@@ -968,7 +1104,8 @@ impl TransportInterface for WebrtcTransport {
     ) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.ensure_peer_slot_available(cid)?;
 
-        let (webrtc_conn, sdp_extra_host_candidates) = create_peer_connection(self).await?;
+        let (webrtc_conn, sdp_extra_host_candidates, configured_ice_servers) =
+            create_peer_connection(self).await?;
 
         //
         // Set callbacks
@@ -1002,6 +1139,10 @@ impl TransportInterface for WebrtcTransport {
         //
         let conn = WebrtcConnection::new(
             webrtc_conn,
+            configured_ice_servers,
+            Arc::clone(&self.ice_servers),
+            self.external_address.clone(),
+            self.udp_port_range,
             channel_pool,
             webrtc_data_channel_state_notifier,
             connection_state,

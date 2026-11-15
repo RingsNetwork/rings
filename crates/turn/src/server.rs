@@ -31,6 +31,7 @@ use stun::attributes::ATTR_XOR_PEER_ADDRESS;
 use stun::error_code::ErrorCode;
 use stun::error_code::ErrorCodeAttribute;
 use stun::error_code::CODE_ADDR_FAMILY_NOT_SUPPORTED;
+use stun::error_code::CODE_ALLOC_MISMATCH;
 use stun::error_code::CODE_BAD_REQUEST;
 use stun::error_code::CODE_FORBIDDEN;
 use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
@@ -1402,14 +1403,30 @@ impl TurnServer {
     /// Bind the UDP listener socket and start the TURN server with [`DelegationAuthHandler`].
     pub async fn start(config: TurnServerConfig) -> Result<Self> {
         config.relay.validate()?;
+        if let Some(advertised_ip) = config.advertised_ip {
+            if advertised_ip.is_ipv4() != config.listen_addr.ip().is_ipv4() {
+                return Err(crate::error::TurnError::ListenerAddressFamilyMismatch {
+                    advertised_ip,
+                    listen_ip: config.listen_addr.ip(),
+                });
+            }
+        }
 
         let socket = UdpSocket::bind(config.listen_addr).await?;
         let local_addr = socket.local_addr()?;
-        let advertised_ip = match config.relay.advertised_ip() {
-            ip if !ip.is_unspecified() => ip,
+        let relay_advertised = config.relay.advertised_ip();
+        let advertised_ip = match config.advertised_ip {
+            Some(ip) if !ip.is_unspecified() => ip,
             _ if !local_addr.ip().is_unspecified() => local_addr.ip(),
-            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
-            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            _ if !relay_advertised.is_unspecified()
+                && relay_advertised.is_ipv4() == local_addr.ip().is_ipv4() =>
+            {
+                relay_advertised
+            }
+            _ => match local_addr.ip() {
+                IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            },
         };
         let advertised_addr = SocketAddr::new(advertised_ip, local_addr.port());
         let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
@@ -1574,55 +1591,55 @@ impl TurnServer {
                 }
 
                 if decoded_msg.typ.method == METHOD_ALLOCATE {
-                    if let Some(info) = &existing_alloc {
-                        if let Some((saved_tx_id, cached_resp)) =
-                            allocate_responses.get(&five_tuple)
-                        {
-                            if *saved_tx_id == decoded_msg.transaction_id {
-                                let client_nonces = extract_client_nonces(&nonces, addr).await;
-                                auth_handler.set_expected_allocation_owner(
-                                    addr,
-                                    Some(info.username.clone()),
-                                );
-                                let valid_retransmit = verify_authenticated_request(
-                                    &decoded_msg,
-                                    &client_nonces,
-                                    &auth_handler,
-                                    addr,
-                                )
-                                .is_some();
-                                auth_handler.set_expected_allocation_owner(addr, None);
-                                if valid_retransmit {
-                                    let _ = recording_conn.send_to(cached_resp, addr).await;
-                                    continue;
+                    let client_nonces = extract_client_nonces(&nonces, addr).await;
+                    if let Some(mi_key) = verify_authenticated_request(
+                        &decoded_msg,
+                        &client_nonces,
+                        &auth_handler,
+                        addr,
+                    ) {
+                        if let Some(info) = &existing_alloc {
+                            let mut username_attr = Username::new(ATTR_USERNAME, String::new());
+                            let same_owner = username_attr.get_from(&decoded_msg).is_ok()
+                                && username_attr.text == info.username;
+                            if same_owner {
+                                if let Some((saved_tx_id, cached_resp)) =
+                                    allocate_responses.get(&five_tuple)
+                                {
+                                    if *saved_tx_id == decoded_msg.transaction_id {
+                                        let _ = recording_conn.send_to(cached_resp, addr).await;
+                                        continue;
+                                    }
                                 }
                             }
-                        }
-                    } else {
-                        let client_nonces = extract_client_nonces(&nonces, addr).await;
-                        if let Some(mi_key) = verify_authenticated_request(
-                            &decoded_msg,
-                            &client_nonces,
-                            &auth_handler,
-                            addr,
-                        ) {
-                            handle_authenticated_allocate(
+                            send_authenticated_error(
                                 &recording_conn_dyn,
-                                &allocation_manager,
-                                &require_even_port,
-                                &last_allocated_conn,
-                                &mut allocate_responses,
-                                &mut permission_tracker,
-                                max_allocations,
-                                five_tuple,
                                 addr,
                                 &decoded_msg,
-                                relay_is_ipv4,
+                                CODE_ALLOC_MISMATCH,
+                                b"Allocation Mismatch",
+                                None,
                                 mi_key,
                             )
                             .await;
                             continue;
                         }
+                        handle_authenticated_allocate(
+                            &recording_conn_dyn,
+                            &allocation_manager,
+                            &require_even_port,
+                            &last_allocated_conn,
+                            &mut allocate_responses,
+                            &mut permission_tracker,
+                            max_allocations,
+                            five_tuple,
+                            addr,
+                            &decoded_msg,
+                            relay_is_ipv4,
+                            mi_key,
+                        )
+                        .await;
+                        continue;
                     }
                 }
 

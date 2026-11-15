@@ -1645,6 +1645,11 @@ mod tests {
         let v6_server_pubkey = v6_config.server_key.pubkey();
         let v6_server = TurnServer::start(v6_config).await?;
         let v6_server_addr = v6_server.local_addr();
+        assert_eq!(
+            v6_server.advertised_addr(),
+            v6_server_addr,
+            "listener bound to 127.0.0.1 must advertise 127.0.0.1 even when relay is IPv6"
+        );
         let v6_creds = client_key.turn_credentials(v6_server_pubkey)?;
 
         let v6_client_socket = UdpSocket::bind("127.0.0.1:0").await?;

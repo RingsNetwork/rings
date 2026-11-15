@@ -253,6 +253,13 @@ impl RelayAddressConfig {
 pub struct TurnServerConfig {
     /// UDP socket address the TURN server listens on.
     pub listen_addr: SocketAddr,
+    /// Optional external/public IP advertised for the TURN listener in [`crate::TurnServer::advertised_addr`]
+    /// and [`crate::TurnServer::ice_server_base_url`].
+    ///
+    /// When `None`, the listener's concrete bound IP is used if non-unspecified; if `listen_addr`
+    /// is unspecified (`0.0.0.0` or `::`), the relay's advertised IP is used when it shares the
+    /// listener's address family, falling back to loopback of the listener's family.
+    pub advertised_ip: Option<IpAddr>,
     /// Realm advertised in TURN 401/438 challenges.
     pub realm: String,
     /// Secp256k1 server keypair used for Diffie-Hellman TURN credential derivation.
@@ -279,6 +286,7 @@ impl std::fmt::Debug for TurnServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnServerConfig")
             .field("listen_addr", &self.listen_addr)
+            .field("advertised_ip", &self.advertised_ip)
             .field("realm", &self.realm)
             .field("server_pubkey", &self.server_key.pubkey())
             .field("relay", &self.relay)
@@ -299,6 +307,7 @@ impl Default for TurnServerConfig {
     fn default() -> Self {
         Self {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), DEFAULT_TURN_PORT),
+            advertised_ip: None,
             realm: DEFAULT_TURN_REALM.to_string(),
             server_key: SecretKey::random(),
             relay: RelayAddressConfig::default(),
@@ -320,6 +329,7 @@ impl TurnServerConfig {
         let localhost = IpAddr::V4(Ipv4Addr::LOCALHOST);
         Self {
             listen_addr: SocketAddr::new(localhost, 0),
+            advertised_ip: None,
             realm: DEFAULT_TURN_REALM.to_string(),
             server_key: SecretKey::random(),
             relay: RelayAddressConfig::Static {

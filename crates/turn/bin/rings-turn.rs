@@ -45,9 +45,14 @@ struct Cli {
     server_key: Option<String>,
 
     /// Public IPv4/IPv6 address advertised in XOR-RELAYED-ADDRESS.
-    /// Defaults to the listener IP (or 127.0.0.1 when listening on 0.0.0.0).
+    /// Defaults to the relay bind IP (or localhost of the relay bind IP's family when unspecified).
     #[arg(long, env = "RINGS_TURN_PUBLIC_IP")]
     public_ip: Option<IpAddr>,
+
+    /// Optional public IPv4/IPv6 address advertised for the TURN UDP listener URL.
+    /// Defaults to `--public-ip` when its address family matches `--listen`, or the listener IP.
+    #[arg(long, env = "RINGS_TURN_ADVERTISED_IP")]
+    advertised_ip: Option<IpAddr>,
 
     /// Local IPv4/IPv6 address bound when allocating relay UDP sockets.
     /// Defaults to the listener IP.
@@ -126,6 +131,18 @@ impl Cli {
             IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
         });
+        if let Some(advertised_ip) = self.advertised_ip {
+            if advertised_ip.is_ipv4() != self.listen.ip().is_ipv4() {
+                return Err(format!(
+                    "--advertised-ip ({advertised_ip}) must match the address family of --listen ({})",
+                    self.listen.ip()
+                ));
+            }
+        }
+        let advertised_ip = self.advertised_ip.or_else(|| {
+            self.public_ip
+                .filter(|ip| ip.is_ipv4() == self.listen.ip().is_ipv4())
+        });
 
         let relay = match (self.min_port, self.max_port) {
             (None, None) => RelayAddressConfig::Static { relay_ip, bind_ip },
@@ -159,6 +176,7 @@ impl Cli {
 
         Ok(TurnServerConfig {
             listen_addr: self.listen,
+            advertised_ip,
             realm: self.realm,
             server_key,
             relay,

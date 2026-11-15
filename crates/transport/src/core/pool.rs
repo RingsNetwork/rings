@@ -87,6 +87,15 @@ impl<T: Clone> ChannelPool<T> {
         Ok(())
     }
 
+    /// Atomically replace the pooled resources and return the previous entries.
+    pub fn replace_all(&self, resources: Vec<T>) -> Result<Vec<T>> {
+        let mut pool = self
+            .pool
+            .write()
+            .map_err(|_| Error::RwLockWrite("Failed to write channel pool".to_string()))?;
+        Ok(std::mem::replace(&mut *pool, resources))
+    }
+
     /// Apply `visit` to every pooled resource in creation order.
     pub fn for_each(&self, mut visit: impl FnMut(&T)) -> Result<()> {
         let pool = self.pool.read().map_err(|_| {
