@@ -547,14 +547,36 @@ impl WebrtcTransport {
         }
     }
 
-    /// Replace the ICE server list used for subsequent peer connections (for example after
-    /// rotating a [`DelegateeKey`](https://docs.rs) whose TURN credentials changed).
+    /// Replace the ICE server list used for subsequent peer connections and update active
+    /// native peer connections in place via `RTCPeerConnection::set_configuration`.
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let parsed = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
         *self
             .ice_servers
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed.clone();
+
+        let rtc_ice_servers: Vec<RTCIceServer> =
+            parsed.into_iter().map(RTCIceServer::from).collect();
+        let active_connections = self.pool.connections();
+        if !active_connections.is_empty() {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                for conn in active_connections {
+                    let webrtc_conn = Arc::clone(&conn.webrtc_conn);
+                    let rtc_ice_servers = rtc_ice_servers.clone();
+                    runtime.spawn(async move {
+                        let mut cfg = webrtc_conn.get_configuration().await;
+                        cfg.ice_servers = rtc_ice_servers;
+                        if let Err(error) = webrtc_conn.set_configuration(cfg).await {
+                            tracing::debug!(
+                                %error,
+                                "Skipped set_configuration on native peer connection"
+                            );
+                        }
+                    });
+                }
+            }
+        }
     }
 }
 

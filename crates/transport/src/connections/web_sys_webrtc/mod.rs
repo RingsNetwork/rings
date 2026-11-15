@@ -421,10 +421,30 @@ impl WebSysWebrtcTransport {
         }
     }
 
-    /// Replace the ICE server list used for subsequent peer connections.
+    /// Replace the ICE server list used for subsequent peer connections and update active
+    /// browser peer connections in place via `RTCPeerConnection.setConfiguration`.
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let parsed = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
-        *self.ice_servers.borrow_mut() = parsed;
+        *self.ice_servers.borrow_mut() = parsed.clone();
+
+        let config = RtcConfiguration::new();
+        let js_ice_servers: js_sys::Array =
+            js_sys::Array::from_iter(parsed.into_iter().map(RtcIceServer::from));
+        config.set_ice_servers(&js_ice_servers.into());
+
+        for conn in self.pool.connections() {
+            if conn.webrtc_conn.connection_state() != RtcPeerConnectionState::Closed {
+                if let Err(error) = conn
+                    .webrtc_conn
+                    .set_configuration_with_configuration(&config)
+                {
+                    tracing::debug!(
+                        ?error,
+                        "Skipped setConfiguration on active browser peer connection"
+                    );
+                }
+            }
+        }
     }
 }
 

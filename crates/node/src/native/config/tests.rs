@@ -526,14 +526,20 @@ fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signatu
 
     let mut config = Config::new(&delegatee_path);
     config.delegator_key = Some(delegator_path.to_string_lossy().into_owned());
-    config.ice_servers = "stun://stun.l.google.com:19302;turn://turn.rings.rs:3478".to_string();
+    let turn_server_pubkey = SecretKey::random().pubkey();
+    let turn_url = crate::prelude::rings_core::delegation::format_turn_server_url(
+        "turn://turn.rings.rs:3478",
+        turn_server_pubkey,
+    )
+    .expect("format turn server url");
+    config.ice_servers = format!("stun://stun.l.google.com:19302;{turn_url}");
 
     let serialized =
         ProcessorConfigSerialized::try_from(config).expect("serialize processor config");
     let _ = fs::remove_dir_all(&root);
 
     let expected_creds = delegator
-        .turn_credentials()
+        .turn_credentials(turn_server_pubkey)
         .expect("direct DID turn credentials");
     assert_eq!(
         serialized.ice_servers,
@@ -543,6 +549,7 @@ fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signatu
         )
     );
     assert!(expected_creds.username.starts_with(&format!("{did}.")));
+    assert!(!expected_creds.username.contains(&expected_creds.credential));
 }
 
 /// Malformed YAML, here a quoted scalar left open, reports the scanner's error and where

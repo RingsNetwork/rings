@@ -4182,8 +4182,10 @@ version = "1.0.0-pre.3"
 dependencies = [
  "async-trait",
  "clap",
+ "rand 0.8.6",
  "rings-core",
  "serde",
+ "stun",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

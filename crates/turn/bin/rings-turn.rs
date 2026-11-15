@@ -3,16 +3,20 @@
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use rings_core::dht::Did;
+use rings_core::ecc::SecretKey;
 use rings_core::utils::SystemClock;
 use rings_turn::RelayAddressConfig;
+use rings_turn::RelayPeerPolicy;
 use rings_turn::TurnAdmissionPolicy;
 use rings_turn::TurnServer;
 use rings_turn::TurnServerConfig;
+use rings_turn::DEFAULT_MAX_NONCES;
 use rings_turn::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use rings_turn::DEFAULT_TURN_REALM;
 use tracing_subscriber::EnvFilter;
@@ -32,6 +36,11 @@ struct Cli {
     #[arg(long, env = "RINGS_TURN_REALM", default_value = DEFAULT_TURN_REALM)]
     realm: String,
 
+    /// Optional hex-encoded 32-byte secp256k1 server secret key used for ECDH TURN authentication.
+    /// When omitted, an ephemeral secp256k1 keypair is generated on startup.
+    #[arg(long, env = "RINGS_TURN_SERVER_KEY")]
+    server_key: Option<String>,
+
     /// Public IPv4/IPv6 address advertised in XOR-RELAYED-ADDRESS.
     /// Defaults to the listener IP (or 127.0.0.1 when listening on 0.0.0.0).
     #[arg(long, env = "RINGS_TURN_PUBLIC_IP")]
@@ -49,6 +58,19 @@ struct Cli {
     /// Inclusive upper bound for allocated relay UDP ports.
     #[arg(long, env = "RINGS_TURN_MAX_PORT")]
     max_port: Option<u16>,
+
+    /// Allow relaying traffic to loopback, link-local, and RFC 1918 private network addresses
+    /// (disabled by default for SSRF protection).
+    #[arg(long, env = "RINGS_TURN_ALLOW_PRIVATE_PEERS", default_value_t = false)]
+    allow_private_peers: bool,
+
+    /// Maximum number of active TURN nonce challenges stored concurrently.
+    #[arg(
+        long,
+        env = "RINGS_TURN_MAX_NONCES",
+        default_value_t = DEFAULT_MAX_NONCES
+    )]
+    max_nonces: usize,
 
     /// ChannelBind timeout in seconds (0 uses the RFC 5766 default of 600s).
     #[arg(
@@ -70,6 +92,15 @@ struct Cli {
 
 impl Cli {
     fn into_config(self) -> Result<TurnServerConfig, String> {
+        let server_key = match self.server_key {
+            Some(ref raw) => {
+                let trimmed = raw.trim().trim_start_matches("0x").trim_start_matches("0X");
+                SecretKey::from_str(trimmed)
+                    .map_err(|e| format!("invalid --server-key hex scalar: {e}"))?
+            }
+            None => SecretKey::random(),
+        };
+
         let bind_ip = self.relay_bind_ip.unwrap_or_else(|| self.listen.ip());
         let relay_ip = self.public_ip.unwrap_or_else(|| {
             if self.listen.ip().is_unspecified() {
@@ -97,6 +128,12 @@ impl Cli {
         };
         relay.validate().map_err(|e| e.to_string())?;
 
+        let peer_policy = if self.allow_private_peers {
+            RelayPeerPolicy::AllowLocalAndPrivate
+        } else {
+            RelayPeerPolicy::PublicOnly
+        };
+
         let admission = if self.allow_dids.is_empty() {
             TurnAdmissionPolicy::AllowAnyDelegation
         } else {
@@ -106,7 +143,10 @@ impl Cli {
         Ok(TurnServerConfig {
             listen_addr: self.listen,
             realm: self.realm,
+            server_key,
             relay,
+            peer_policy,
+            max_nonces: self.max_nonces.max(1),
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
             clock: Arc::new(SystemClock),
@@ -136,9 +176,18 @@ async fn main() {
         }
     };
 
+    let ice_url = server
+        .ice_server_base_url()
+        .unwrap_or_else(|_| format!("turn://{}", server.local_addr()));
+    let server_pubkey = server
+        .server_pubkey()
+        .to_base58_string()
+        .unwrap_or_default();
     tracing::info!(
         listen_addr = %server.local_addr(),
         realm = %server.realm(),
+        %server_pubkey,
+        %ice_url,
         "rings-turn server started; waiting for Ctrl-C"
     );
 

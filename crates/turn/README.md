@@ -16,47 +16,50 @@ WebRTC peers normally establish direct UDP datachannels via STUN hole-punching (
 4. **Private / Permissioned Overlay Relays**:
    Operators running private or consortium Rings overlays can pass `--allow-did <did1,did2,...>` (`RINGS_TURN_ALLOW_DIDS`) so only authorized DIDs (or session delegations issued by those DIDs) may allocate TURN relay sockets.
 
-## How Signature-as-Password Works
+## How Signature + ECDH Authentication Works
 
-Standard WebRTC clients (both browser `RTCPeerConnection` and native `webrtc-rs`) authenticate to TURN servers using the RFC 5389 / RFC 5766 long-term credential mechanism:
+Standard WebRTC clients (both browser `RTCPeerConnection` and native `webrtc-rs`) authenticate to TURN servers using the RFC 5389 / RFC 5766 long-term credential mechanism. Because STUN/TURN `USERNAME` attributes are transmitted in cleartext over UDP, `rings-turn` combines a public identity signature in `USERNAME` with a **secp256k1 Diffie-Hellman (ECDH) derived password** in `credential`:
 
 ```text
-  Client (Native / Browser)                                   rings-turn Server
-  ─────────────────────────                                   ─────────────────
-  1. Sign TURN transcript with DelegateeKey or DID key:
+  Client (Native / Browser)                                   rings-turn Server (server_sk, server_pk)
+  ─────────────────────────                                   ────────────────────────────────────────
+  1. Sign TURN transcript bound to server_pk & derive ECDH password:
      - Direct DID:   username   = "<0x_did>.<base58(sig)>"
-                     credential = "<base58(sig)>"
+                     credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(did_sk, server_pk) || sig))
      - Delegation:   username   = "<base58(delegation)>.<base58(sig)>"
-                     credential = "<base58(sig)>"
-     - Account:      username   = "<base58(account)>.<base58(sig)>"
-                     credential = "<base58(sig)>"
+                     credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(delegatee_sk, server_pk) || sig))
+     - Account:      username   = "<base58(account)>.<base58(ephemeral_pk)>.<base58(sig)>"
+                     credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(ephemeral_sk, server_pk) || sig))
 
   2. Send STUN/TURN Allocate Request ───────────────────────▶ 3. DelegationAuthHandler::auth_handle(username, realm):
      - USERNAME = username (cleartext)                           - Decode identity & sig from USERNAME
      - MESSAGE-INTEGRITY =                                       - Verify DID/Account signature OR Delegation
-         HMAC-SHA1(MD5(username : realm : credential), pkt)        (delegator sig + TTL window + delegatee sig)
+         HMAC-SHA1(MD5(username : realm : credential), pkt)        (bound to server_pk) & recover client secp256k1 pubkey
                                                                  - Check TurnAdmissionPolicy (AllowAny / Allowlist)
-                                                                 - Derive MD5(username : realm : sig_b58)
+                                                                 - Compute ECDH(server_sk, client_pk) -> credential
+                                                                 - Derive MD5(username : realm : credential)
                                                                  - Verify MESSAGE-INTEGRITY & allocate relay
 ```
+
+Because `credential` depends on the ECDH shared secret `x(client_sk · server_pk) == x(server_sk · client_pk)`, passive on-path UDP observers who see `USERNAME` in cleartext cannot recover `credential` or impersonate the client on a new TURN allocation.
 
 Two signing modes are supported via `TurnCredentials`:
 
 - **Direct DID / Account Signature (Non-Expiring)**:
   - **Secp256k1 `SecretKey` / `Did`**:
     - `username`: `<0x_did>.<base58(did_sig)>`
-    - `credential`: `<base58(did_sig)>`
-    - Signed transcript: `"rings-turn-auth-v1\nsecp256k1\n<0x_did>"` (`pack_turn_did_auth`)
+    - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || did_sig))`
+    - Signed transcript: `"rings-turn-auth-v1\nsecp256k1\n<0x_did>\n<base58(server_pubkey)>"` (`pack_turn_did_auth`)
   - **Any `Account` (`EIP191`, `BIP137`, `Secp256r1`, `Ed25519`, `Bls12381`)**:
-    - `username`: `<base58(codec(account))>.<base58(account_sig)>`
-    - `credential`: `<base58(account_sig)>`
-    - Signed transcript: `"rings-turn-auth-v1\n<algorithm>\n<did>"` (`pack_turn_account_auth`)
+    - `username`: `<base58(codec(account))>.<base58(ephemeral_pubkey)>.<base58(account_sig)>`
+    - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || account_sig))`
+    - Signed transcript: `"rings-turn-auth-v1\n<algorithm>\n<did>\n<base58(server_pubkey)>\n<base58(ephemeral_pubkey)>"` (`pack_turn_account_auth`)
   - Carries no delegation TTL and **never expires** when a node's session `DelegateeKey` rotates.
 - **Session `DelegateeKey` Signature (Bounded by Delegation TTL)**:
   - `username`: `<base58(codec(delegation))>.<base58(delegatee_sig)>`
-  - `credential`: `<base58(delegatee_sig)>`
-  - Signed transcript: `"rings-turn-auth-v1\n<hex(delegation.digest())>"` (`pack_turn_auth`)
-  - Ideal for browser tabs and nodes that keep their root `delegator_key` offline; when a running node renews its `DelegateeKey`, `SwarmTransport` automatically refreshes its TURN credentials.
+  - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || delegatee_sig))`
+  - Signed transcript: `"rings-turn-auth-v1\n<hex(delegation.digest())>\n<base58(server_pubkey)>"` (`pack_turn_auth`)
+  - Ideal for browser tabs and nodes that keep their root `delegator_key` offline; when a running node renews its `DelegateeKey`, `SwarmTransport` automatically refreshes its TURN credentials and updates active peer connections while `rings-turn` keeps existing established 5-tuple allocations alive across renewal.
 <!-- ANCHOR_END: model -->
 
 ## Standalone Binary (`rings-turn`)
@@ -102,10 +105,21 @@ Options:
       --channel-bind-timeout-secs <CHANNEL_BIND_TIMEOUT_SECS>
           ChannelBind timeout in seconds (0 uses the RFC 5766 default of 600s)
           [env: RINGS_TURN_CHANNEL_BIND_TIMEOUT_SECS=] [default: 0]
+      --server-key <SERVER_KEY>
+          Hex-encoded 32-byte secp256k1 secret key for TURN ECDH credential derivation.
+          When omitted, an ephemeral key is generated on startup and its public key is logged
+          [env: RINGS_TURN_SERVER_KEY=]
       --allow-did <ALLOW_DIDS>
           Optional comma-separated allowlist of DIDs allowed to allocate TURN relays.
           When omitted, any cryptographically valid Rings signature is admitted
           [env: RINGS_TURN_ALLOW_DIDS=]
+      --allow-private-peers
+          Allow relay sockets to exchange UDP packets with loopback, link-local, or private
+          peer addresses (disabled by default to prevent SSRF / local-network amplification)
+          [env: RINGS_TURN_ALLOW_PRIVATE_PEERS=]
+      --max-nonces <MAX_NONCES>
+          Maximum number of active nonce challenges tracked concurrently
+          [env: RINGS_TURN_MAX_NONCES=] [default: 4096]
   -h, --help
           Print help
   -V, --version
@@ -121,25 +135,28 @@ Options:
      --public-ip 203.0.113.10 \
      --relay-bind-ip 0.0.0.0 \
      --min-port 49152 \
-     --max-port 65535
+     --max-port 65535 \
+     --server-key 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318
    ```
+   On startup, `rings-turn` prints its compressed secp256k1 public key (`pubkey=<base58(server_pubkey)>`) and ready-to-use `turn://...?pubkey=<base58(server_pubkey)>` URL.
 
 2. **Private TURN server restricted to specific DIDs**:
    ```bash
    rings-turn \
      --listen 0.0.0.0:3478 \
      --public-ip 203.0.113.10 \
+     --server-key 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318 \
      --allow-did 0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222
    ```
 
 ## Configuring Rings Nodes to Use `rings-turn`
 
-In a Rings node's `config.yaml` (or `--ice-servers` CLI flag), add a bare `turn://` URL without username or password:
+In a Rings node's `config.yaml` (or `--ice-servers` CLI flag), add the `turn://` URL with its `?pubkey=<base58(server_pubkey)>` query parameter (and no username or password):
 
 ```yaml
-ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478
+ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d
 ```
 
-- If `delegator_key` is configured in `config.yaml`, the node automatically signs the bare `turn://` URL using a **non-expiring direct DID signature** (`<0x_did>.<sig>:<sig>@`).
-- Otherwise, `SwarmTransport` automatically signs the bare `turn://` URL using the node's `DelegateeKey` (`<delegation>.<sig>:<sig>@`) and refreshes it whenever `DelegateeKey` is renewed in process.
+- If `delegator_key` is configured in `config.yaml`, the node automatically signs the `turn://...?pubkey=<server_pubkey>` URL using a **non-expiring direct DID signature + ECDH credential** and strips `?pubkey=...` before passing the standard `turn://user:pass@host:port` URI to WebRTC.
+- Otherwise, `SwarmTransport` automatically signs the `turn://...?pubkey=<server_pubkey>` URL using the node's `DelegateeKey` and refreshes it whenever `DelegateeKey` is renewed in process.
 - Explicit credentials (`turn://user:pass@other-turn.example.org:3478`) are preserved as-is for compatibility with third-party TURN servers.

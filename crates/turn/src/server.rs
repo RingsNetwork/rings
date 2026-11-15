@@ -1,62 +1,369 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use rand::Rng;
+use rings_core::delegation::format_turn_server_url;
 use rings_core::delegation::DelegateeKey;
+use rings_core::ecc::PublicKey;
+use stun::attributes::ATTR_EVEN_PORT;
+use stun::attributes::ATTR_MESSAGE_INTEGRITY;
+use stun::attributes::ATTR_USERNAME;
+use stun::attributes::ATTR_XOR_PEER_ADDRESS;
+use stun::error_code::ErrorCodeAttribute;
+use stun::error_code::CODE_FORBIDDEN;
+use stun::message::Getter;
+use stun::message::Message;
+use stun::message::MessageType;
+use stun::message::Setter;
+use stun::message::CLASS_ERROR_RESPONSE;
+use stun::message::CLASS_INDICATION;
+use stun::message::CLASS_REQUEST;
+use stun::message::METHOD_ALLOCATE;
+use stun::message::METHOD_CHANNEL_BIND;
+use stun::message::METHOD_CREATE_PERMISSION;
+use stun::message::METHOD_REFRESH;
+use stun::message::METHOD_SEND;
+use stun::textattrs::Username;
 use tokio::net::UdpSocket;
+use tokio::sync::broadcast;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio::sync::Mutex;
+use tokio::time::Duration;
+use tokio::time::Instant;
+use turn::allocation::allocation_manager::Manager;
+use turn::allocation::allocation_manager::ManagerConfig;
 use turn::allocation::five_tuple::FiveTuple;
 use turn::allocation::AllocationInfo;
-use turn::relay::relay_none::RelayAddressGeneratorNone;
-use turn::relay::relay_range::RelayAddressGeneratorRanges;
-use turn::relay::relay_static::RelayAddressGeneratorStatic;
+use turn::proto::lifetime::DEFAULT_LIFETIME;
+use turn::proto::peeraddr::PeerAddress;
+use turn::proto::PROTO_UDP;
 use turn::relay::RelayAddressGenerator;
-use turn::server::config::ConnConfig;
-use turn::server::config::ServerConfig;
-use turn::server::Server;
+use turn::server::request::Request;
 use webrtc_util::vnet::net::Net;
+use webrtc_util::Conn;
 
 use crate::auth::DelegationAuthHandler;
 use crate::config::RelayAddressConfig;
+use crate::config::RelayPeerPolicy;
 use crate::config::TurnServerConfig;
+use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::error::Result;
+
+const INBOUND_MTU: usize = 1500;
+const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
+
+struct PolicyRelayConn {
+    inner: Arc<dyn Conn + Send + Sync>,
+    peer_policy: RelayPeerPolicy,
+}
+
+#[async_trait]
+impl Conn for PolicyRelayConn {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
+        if !self.peer_policy.is_allowed_addr(addr) {
+            return Err(webrtc_util::Error::Other(
+                "relay destination address denied by policy".to_string(),
+            ));
+        }
+        self.inner.connect(addr).await
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        self.inner.recv(buf).await
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        loop {
+            let (n, src_addr) = self.inner.recv_from(buf).await?;
+            if self.peer_policy.is_allowed_addr(src_addr) {
+                return Ok((n, src_addr));
+            }
+        }
+    }
+
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+        self.inner.send(buf).await
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        if !self.peer_policy.is_allowed_addr(target) {
+            return Err(webrtc_util::Error::Other(
+                "relay destination address denied by policy".to_string(),
+            ));
+        }
+        self.inner.send_to(buf, target).await
+    }
+
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.inner.remote_addr()
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        self.inner.close().await
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
+struct PolicyRelayAddressGenerator {
+    relay: RelayAddressConfig,
+    peer_policy: RelayPeerPolicy,
+    require_even_port: Arc<AtomicBool>,
+    net: Arc<Net>,
+}
+
+impl PolicyRelayAddressGenerator {
+    fn new(
+        relay: RelayAddressConfig,
+        peer_policy: RelayPeerPolicy,
+        require_even_port: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            relay,
+            peer_policy,
+            require_even_port,
+            net: Arc::new(Net::new(None)),
+        }
+    }
+
+    async fn bind_port(
+        &self,
+        use_ipv4: bool,
+        bind_ip: IpAddr,
+        relay_ip_override: Option<IpAddr>,
+        port: u16,
+    ) -> std::result::Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
+        let addr = self
+            .net
+            .resolve_addr(use_ipv4, &format!("{bind_ip}:{port}"))
+            .await?;
+        let conn = self.net.bind(addr).await?;
+        let mut relay_addr = conn.local_addr()?;
+        if let Some(relay_ip) = relay_ip_override {
+            relay_addr.set_ip(relay_ip);
+        }
+        let wrapped: Arc<dyn Conn + Send + Sync> = Arc::new(PolicyRelayConn {
+            inner: conn,
+            peer_policy: self.peer_policy,
+        });
+        Ok((wrapped, relay_addr))
+    }
+}
+
+#[async_trait]
+impl RelayAddressGenerator for PolicyRelayAddressGenerator {
+    fn validate(&self) -> std::result::Result<(), turn::Error> {
+        self.relay
+            .validate()
+            .map_err(|_| turn::Error::ErrMaxPortLessThanMinPort)
+    }
+
+    async fn allocate_conn(
+        &self,
+        use_ipv4: bool,
+        requested_port: u16,
+    ) -> std::result::Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
+        let need_even = requested_port == 0 && self.require_even_port.swap(false, Ordering::AcqRel);
+        match self.relay {
+            RelayAddressConfig::None { bind_ip } => {
+                if requested_port != 0 {
+                    return self
+                        .bind_port(use_ipv4, bind_ip, None, requested_port)
+                        .await;
+                }
+                let max_attempts = if need_even {
+                    DEFAULT_PORT_RANGE_MAX_RETRIES
+                } else {
+                    1
+                };
+                for _ in 0..max_attempts {
+                    let (conn, addr) = self.bind_port(use_ipv4, bind_ip, None, 0).await?;
+                    if !need_even || addr.port() % 2 == 0 {
+                        return Ok((conn, addr));
+                    }
+                    let _ = conn.close().await;
+                }
+                Err(turn::Error::ErrMaxRetriesExceeded)
+            }
+            RelayAddressConfig::Static { relay_ip, bind_ip } => {
+                if requested_port != 0 {
+                    return self
+                        .bind_port(use_ipv4, bind_ip, Some(relay_ip), requested_port)
+                        .await;
+                }
+                let max_attempts = if need_even {
+                    DEFAULT_PORT_RANGE_MAX_RETRIES
+                } else {
+                    1
+                };
+                for _ in 0..max_attempts {
+                    let (conn, addr) = self.bind_port(use_ipv4, bind_ip, Some(relay_ip), 0).await?;
+                    if !need_even || addr.port() % 2 == 0 {
+                        return Ok((conn, addr));
+                    }
+                    let _ = conn.close().await;
+                }
+                Err(turn::Error::ErrMaxRetriesExceeded)
+            }
+            RelayAddressConfig::Range {
+                relay_ip,
+                bind_ip,
+                min_port,
+                max_port,
+                max_retries,
+            } => {
+                if requested_port != 0 {
+                    if requested_port < min_port || requested_port > max_port {
+                        return Err(turn::Error::ErrMaxRetriesExceeded);
+                    }
+                    return self
+                        .bind_port(use_ipv4, bind_ip, Some(relay_ip), requested_port)
+                        .await;
+                }
+                let retries = if max_retries == 0 {
+                    DEFAULT_PORT_RANGE_MAX_RETRIES
+                } else {
+                    max_retries
+                };
+                if need_even {
+                    let first_even = if min_port % 2 == 0 {
+                        min_port
+                    } else {
+                        min_port.saturating_add(1)
+                    };
+                    if first_even > max_port {
+                        return Err(turn::Error::ErrMaxRetriesExceeded);
+                    }
+                    let even_count = (max_port - first_even) / 2 + 1;
+                    for _ in 0..retries {
+                        let offset = rand::thread_rng().gen_range(0..even_count);
+                        let port = first_even + offset * 2;
+                        if let Ok(bound) = self
+                            .bind_port(use_ipv4, bind_ip, Some(relay_ip), port)
+                            .await
+                        {
+                            return Ok(bound);
+                        }
+                    }
+                    return Err(turn::Error::ErrMaxRetriesExceeded);
+                }
+                let span = u32::from(max_port) - u32::from(min_port) + 1;
+                for _ in 0..retries {
+                    let offset = u16::try_from(rand::thread_rng().gen_range(0..span)).unwrap_or(0);
+                    let port = min_port + offset;
+                    if let Ok(bound) = self
+                        .bind_port(use_ipv4, bind_ip, Some(relay_ip), port)
+                        .await
+                    {
+                        return Ok(bound);
+                    }
+                }
+                Err(turn::Error::ErrMaxRetriesExceeded)
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ServerCommand {
+    Close(Arc<mpsc::Receiver<()>>),
+}
+
+async fn prune_and_bound_nonces(
+    nonces: &Mutex<HashMap<String, Instant>>,
+    max_nonces: usize,
+    reserve_one: bool,
+) {
+    let mut guard = nonces.lock().await;
+    if max_nonces == 0 {
+        guard.clear();
+        return;
+    }
+    let now = Instant::now();
+    guard.retain(|_, created_at| {
+        now.checked_duration_since(*created_at).unwrap_or_default() < NONCE_LIFETIME
+    });
+    let target_cap = if reserve_one {
+        max_nonces.saturating_sub(1)
+    } else {
+        max_nonces
+    };
+    while guard.len() > target_cap {
+        let Some(oldest_key) = guard
+            .iter()
+            .min_by_key(|(_, &created_at)| created_at)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        guard.remove(&oldest_key);
+    }
+}
+
+fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bool {
+    for attr in &m.attributes.0 {
+        if attr.typ != ATTR_XOR_PEER_ADDRESS {
+            continue;
+        }
+        let mut single = Message {
+            transaction_id: m.transaction_id,
+            ..Default::default()
+        };
+        single.attributes.0.push(attr.clone());
+        let mut peer_addr = PeerAddress::default();
+        if peer_addr.get_from(&single).is_err() {
+            return false;
+        }
+        if !peer_policy.is_allowed_addr(SocketAddr::new(peer_addr.ip, peer_addr.port)) {
+            return false;
+        }
+    }
+    true
+}
+
+async fn send_forbidden_error(conn: &Arc<dyn Conn + Send + Sync>, dst: SocketAddr, m: &Message) {
+    let built = {
+        let mut err_msg = Message::new();
+        let msg_type = MessageType::new(m.typ.method, CLASS_ERROR_RESPONSE);
+        let err_attr = ErrorCodeAttribute {
+            code: CODE_FORBIDDEN,
+            reason: b"Peer Address Forbidden".to_vec(),
+        };
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(Message {
+                transaction_id: m.transaction_id,
+                ..Default::default()
+            }),
+            Box::new(msg_type),
+            Box::new(err_attr),
+        ];
+        err_msg.build(&setters).is_ok().then_some(err_msg.raw)
+    };
+    if let Some(raw) = built {
+        let _ = conn.send_to(&raw, dst).await;
+    }
+}
 
 /// A running Rings TURN server backed by [`DelegationAuthHandler`].
 pub struct TurnServer {
-    inner: Server,
     local_addr: SocketAddr,
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
-}
-
-fn build_relay_generator(
-    relay: &RelayAddressConfig,
-) -> Box<dyn RelayAddressGenerator + Send + Sync> {
-    let net = Arc::new(Net::new(None));
-    match *relay {
-        RelayAddressConfig::None { bind_ip } => Box::new(RelayAddressGeneratorNone {
-            address: bind_ip.to_string(),
-            net,
-        }),
-        RelayAddressConfig::Static { relay_ip, bind_ip } => Box::new(RelayAddressGeneratorStatic {
-            relay_address: relay_ip,
-            address: bind_ip.to_string(),
-            net,
-        }),
-        RelayAddressConfig::Range {
-            relay_ip,
-            bind_ip,
-            min_port,
-            max_port,
-            max_retries,
-        } => Box::new(RelayAddressGeneratorRanges {
-            relay_address: relay_ip,
-            min_port,
-            max_port,
-            max_retries,
-            address: bind_ip.to_string(),
-            net,
-        }),
-    }
+    allocation_manager: Arc<Manager>,
+    nonces: Arc<Mutex<HashMap<String, Instant>>>,
+    command_tx: Mutex<Option<broadcast::Sender<ServerCommand>>>,
 }
 
 impl TurnServer {
@@ -66,33 +373,226 @@ impl TurnServer {
 
         let socket = UdpSocket::bind(config.listen_addr).await?;
         let local_addr = socket.local_addr()?;
-        let conn = Arc::new(socket);
+        let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
 
-        let auth_handler = Arc::new(DelegationAuthHandler::with_clock(
+        let auth_handler = Arc::new(DelegationAuthHandler::with_server_key_and_clock(
             config.admission,
+            config.server_key,
             config.clock,
         ));
-        let relay_addr_generator = build_relay_generator(&config.relay);
-
-        let inner = Server::new(ServerConfig {
-            conn_configs: vec![ConnConfig {
-                conn,
-                relay_addr_generator,
-            }],
-            realm: config.realm.clone(),
-            auth_handler: Arc::clone(&auth_handler)
-                as Arc<dyn turn::auth::AuthHandler + Send + Sync>,
-            channel_bind_timeout: config.channel_bind_timeout,
+        let require_even_port = Arc::new(AtomicBool::new(false));
+        let relay_addr_generator = Box::new(PolicyRelayAddressGenerator::new(
+            config.relay,
+            config.peer_policy,
+            Arc::clone(&require_even_port),
+        ));
+        let allocation_manager = Arc::new(Manager::new(ManagerConfig {
+            relay_addr_generator,
             alloc_close_notify: None,
-        })
-        .await?;
+        }));
+        let nonces = Arc::new(Mutex::new(HashMap::new()));
+        let (command_tx, command_rx) = broadcast::channel(16);
+        let channel_bind_timeout = if config.channel_bind_timeout.is_zero() {
+            DEFAULT_LIFETIME
+        } else {
+            config.channel_bind_timeout
+        };
+
+        tokio::spawn(Self::read_loop(
+            conn,
+            Arc::clone(&allocation_manager),
+            Arc::clone(&nonces),
+            Arc::clone(&auth_handler),
+            config.realm.clone(),
+            channel_bind_timeout,
+            config.peer_policy,
+            config.max_nonces.max(1),
+            require_even_port,
+            command_rx,
+        ));
 
         Ok(Self {
-            inner,
             local_addr,
             realm: config.realm,
             auth_handler,
+            allocation_manager,
+            nonces,
+            command_tx: Mutex::new(Some(command_tx)),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn read_loop(
+        conn: Arc<dyn Conn + Send + Sync>,
+        allocation_manager: Arc<Manager>,
+        nonces: Arc<Mutex<HashMap<String, Instant>>>,
+        auth_handler: Arc<DelegationAuthHandler>,
+        realm: String,
+        channel_bind_timeout: Duration,
+        peer_policy: RelayPeerPolicy,
+        max_nonces: usize,
+        require_even_port: Arc<AtomicBool>,
+        mut command_rx: broadcast::Receiver<ServerCommand>,
+    ) {
+        let mut buf = vec![0u8; INBOUND_MTU];
+        let (close_tx, mut close_rx) = oneshot::channel::<Option<Arc<mpsc::Receiver<()>>>>();
+
+        tokio::spawn(async move {
+            loop {
+                match command_rx.recv().await {
+                    Ok(ServerCommand::Close(closed_rx)) => {
+                        let _ = close_tx.send(Some(closed_rx));
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let _ = close_tx.send(None);
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+
+        let Ok(local_dst_addr) = conn.local_addr() else {
+            return;
+        };
+        let mut established_usernames: HashMap<SocketAddr, String> = HashMap::new();
+        let mut closed_guard: Option<Arc<mpsc::Receiver<()>>> = None;
+
+        loop {
+            let (n, addr) = tokio::select! {
+                v = conn.recv_from(&mut buf) => {
+                    match v {
+                        Ok(v) => v,
+                        Err(err) => {
+                            tracing::debug!("exit TURN read loop on socket error: {err}");
+                            break;
+                        }
+                    }
+                }
+                res = &mut close_rx => {
+                    closed_guard = res.ok().flatten();
+                    break;
+                }
+            };
+
+            let Some(payload) = buf.get(..n) else {
+                continue;
+            };
+            let mut decoded_msg = Message {
+                raw: payload.to_vec(),
+                ..Default::default()
+            };
+            let is_stun_msg = decoded_msg.decode().is_ok();
+            let mut established_user: Option<String> = None;
+            let mut allocate_username: Option<String> = None;
+            let five_tuple = FiveTuple {
+                src_addr: addr,
+                dst_addr: local_dst_addr,
+                protocol: PROTO_UDP,
+            };
+
+            if is_stun_msg {
+                let is_peer_bearing_msg = (decoded_msg.typ.class == CLASS_REQUEST
+                    && (decoded_msg.typ.method == METHOD_CREATE_PERMISSION
+                        || decoded_msg.typ.method == METHOD_CHANNEL_BIND))
+                    || (decoded_msg.typ.class == CLASS_INDICATION
+                        && decoded_msg.typ.method == METHOD_SEND);
+                if is_peer_bearing_msg && !check_message_peer_addresses(&decoded_msg, peer_policy) {
+                    if decoded_msg.typ.class == CLASS_REQUEST {
+                        send_forbidden_error(&conn, addr, &decoded_msg).await;
+                    }
+                    continue;
+                }
+
+                if decoded_msg.typ.class == CLASS_REQUEST {
+                    let has_mi = decoded_msg.contains(ATTR_MESSAGE_INTEGRITY);
+                    prune_and_bound_nonces(&nonces, max_nonces, !has_mi).await;
+
+                    if decoded_msg.typ.method == METHOD_ALLOCATE {
+                        require_even_port
+                            .store(decoded_msg.contains(ATTR_EVEN_PORT), Ordering::Release);
+                        let mut username_attr = Username::new(ATTR_USERNAME, String::new());
+                        if username_attr.get_from(&decoded_msg).is_ok() {
+                            allocate_username = Some(username_attr.text);
+                        }
+                    } else {
+                        require_even_port.store(false, Ordering::Release);
+                    }
+
+                    if decoded_msg.typ.method == METHOD_REFRESH
+                        || decoded_msg.typ.method == METHOD_CREATE_PERMISSION
+                        || decoded_msg.typ.method == METHOD_CHANNEL_BIND
+                    {
+                        let mut username_attr = Username::new(ATTR_USERNAME, String::new());
+                        if username_attr.get_from(&decoded_msg).is_ok() {
+                            if allocation_manager
+                                .get_allocation(&five_tuple)
+                                .await
+                                .is_some()
+                            {
+                                if established_usernames.get(&addr) == Some(&username_attr.text) {
+                                    auth_handler.set_established_allocation(
+                                        addr,
+                                        username_attr.text.clone(),
+                                        true,
+                                    );
+                                    established_user = Some(username_attr.text);
+                                }
+                            } else {
+                                established_usernames.remove(&addr);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut r = Request {
+                conn: Arc::clone(&conn),
+                src_addr: addr,
+                buff: payload.to_vec(),
+                allocation_manager: Arc::clone(&allocation_manager),
+                nonces: Arc::clone(&nonces),
+                auth_handler: Arc::clone(&auth_handler)
+                    as Arc<dyn turn::auth::AuthHandler + Send + Sync>,
+                realm: realm.clone(),
+                channel_bind_timeout,
+            };
+
+            if let Err(err) = r.handle_request().await {
+                tracing::debug!(%addr, %err, "TURN request handling returned error");
+            }
+
+            require_even_port.store(false, Ordering::Release);
+            if let Some(username) = established_user {
+                auth_handler.set_established_allocation(addr, username, false);
+            }
+            if let Some(username) = allocate_username {
+                if allocation_manager
+                    .get_allocation(&five_tuple)
+                    .await
+                    .is_some()
+                {
+                    established_usernames.insert(addr, username);
+                }
+            } else if is_stun_msg
+                && decoded_msg.typ.class == CLASS_REQUEST
+                && decoded_msg.typ.method == METHOD_REFRESH
+                && allocation_manager
+                    .get_allocation(&five_tuple)
+                    .await
+                    .is_none()
+            {
+                established_usernames.remove(&addr);
+            }
+            if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
+                prune_and_bound_nonces(&nonces, max_nonces, false).await;
+            }
+        }
+
+        let _ = allocation_manager.close().await;
+        let _ = conn.close().await;
+        drop(closed_guard);
     }
 
     /// Return the local UDP [`SocketAddr`] this TURN server is bound to.
@@ -105,15 +605,33 @@ impl TurnServer {
         &self.realm
     }
 
+    /// Return the server's compressed secp256k1 [`PublicKey<33>`].
+    pub fn server_pubkey(&self) -> PublicKey<33> {
+        self.auth_handler.server_pubkey()
+    }
+
     /// Return a reference to the server's [`DelegationAuthHandler`].
     pub const fn auth_handler(&self) -> &Arc<DelegationAuthHandler> {
         &self.auth_handler
     }
 
+    /// Return the unsigned `turn://<local_addr>?pubkey=<base58(server_pubkey)>` URL for this
+    /// server, suitable for passing to [`DelegateeKey::sign_ice_servers`] or
+    /// [`SecretKey::sign_ice_servers`](rings_core::ecc::SecretKey::sign_ice_servers).
+    pub fn ice_server_base_url(&self) -> Result<String> {
+        let base_url = format!("turn://{}", self.local_addr);
+        Ok(format_turn_server_url(&base_url, self.server_pubkey())?)
+    }
+
     /// Build a complete signed `turn://<username>:<credential>@<local_addr>` URL for `delegatee_key`.
     pub fn ice_server_url_for(&self, delegatee_key: &DelegateeKey) -> Result<String> {
-        let base_url = format!("turn://{}", self.local_addr);
+        let base_url = self.ice_server_base_url()?;
         Ok(delegatee_key.sign_ice_servers(&base_url)?)
+    }
+
+    /// Return the current number of active challenge nonces held in memory.
+    pub async fn active_nonce_count(&self) -> usize {
+        self.nonces.lock().await.len()
     }
 
     /// Query active TURN allocations managed by this server.
@@ -121,16 +639,39 @@ impl TurnServer {
         &self,
         five_tuples: Option<Vec<FiveTuple>>,
     ) -> Result<HashMap<FiveTuple, AllocationInfo>> {
-        Ok(self.inner.get_allocations_info(five_tuples).await?)
+        if let Some(ref tuples) = five_tuples {
+            if tuples.is_empty() {
+                return Ok(HashMap::new());
+            }
+        }
+        Ok(self
+            .allocation_manager
+            .get_allocations_info(five_tuples)
+            .await)
     }
 
     /// Delete all active TURN allocations associated with `username`.
     pub async fn delete_allocations_by_username(&self, username: String) -> Result<()> {
-        Ok(self.inner.delete_allocations_by_username(username).await?)
+        self.allocation_manager
+            .delete_allocations_by_username(&username)
+            .await;
+        Ok(())
     }
 
     /// Gracefully stop the TURN server and close all managed connections and relay allocations.
     pub async fn close(&self) -> Result<()> {
-        Ok(self.inner.close().await?)
+        let tx = {
+            let mut command_tx = self.command_tx.lock().await;
+            command_tx.take()
+        };
+        if let Some(tx) = tx {
+            if tx.receiver_count() > 0 {
+                let (closed_tx, closed_rx) = mpsc::channel(1);
+                let _ = tx.send(ServerCommand::Close(Arc::new(closed_rx)));
+                closed_tx.closed().await;
+            }
+        }
+        let _ = self.allocation_manager.close().await;
+        Ok(())
     }
 }

@@ -58,6 +58,8 @@ pub use digest::DelegationDigest;
 pub use model::Delegation;
 pub(crate) use model::DelegatorAuthorization;
 pub use signing_key::DelegateeKey;
+pub use turn_auth::extract_turn_server_pubkey;
+pub use turn_auth::format_turn_server_url;
 pub use turn_auth::pack_turn_account_auth;
 pub use turn_auth::pack_turn_auth;
 pub use turn_auth::pack_turn_did_auth;

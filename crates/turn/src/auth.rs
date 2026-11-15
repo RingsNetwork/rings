@@ -11,6 +11,8 @@ use rings_core::delegation::TurnCredentials;
 use rings_core::delegation::VerifiedTurnAuth;
 use rings_core::dht::Did;
 use rings_core::ecc::keccak256;
+use rings_core::ecc::PublicKey;
+use rings_core::ecc::SecretKey;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SystemClock;
 use turn::auth::generate_auth_key;
@@ -92,18 +94,21 @@ impl VerifiedAuthCache {
     }
 }
 
-/// Stateless signature-verifying [`AuthHandler`] backed by Rings [`DelegateeKey`](rings_core::delegation::DelegateeKey)
-/// and direct [`Did`] / [`Account`](rings_core::delegation::Account) credentials.
+/// Stateless signature- and ECDH-verifying [`AuthHandler`] backed by Rings
+/// [`DelegateeKey`](rings_core::delegation::DelegateeKey) and direct [`Did`] /
+/// [`Account`](rings_core::delegation::Account) credentials.
 ///
 /// For every incoming TURN request (`Allocate`, `Refresh`, `CreatePermission`, `ChannelBind`),
 /// [`DelegationAuthHandler`] extracts the [`TurnAuthIdentity`] and signature from `username`,
-/// verifies signatures (and delegation liveness at `clock.now_ms()` when using a `Delegation`),
-/// checks [`TurnAdmissionPolicy`], and derives the RFC 5389 long-term key
-/// `MD5(username : realm : credential)`.
+/// verifies signatures against `server_key.pubkey()`, computes the Diffie-Hellman shared secret
+/// using `server_key` to derive `credential`, checks [`TurnAdmissionPolicy`], and derives the
+/// RFC 5389 long-term key `MD5(username : realm : credential)`.
 pub struct DelegationAuthHandler {
     policy: TurnAdmissionPolicy,
+    server_key: SecretKey,
     clock: SharedClock,
     cache: Mutex<VerifiedAuthCache>,
+    established_allocations: Mutex<BTreeSet<(SocketAddr, String)>>,
 }
 
 impl Default for DelegationAuthHandler {
@@ -113,25 +118,72 @@ impl Default for DelegationAuthHandler {
 }
 
 impl DelegationAuthHandler {
-    /// Create a new [`DelegationAuthHandler`] with `policy` and the system clock.
+    /// Create a new [`DelegationAuthHandler`] with `policy`, a random server [`SecretKey`], and
+    /// the system clock.
     pub fn new(policy: TurnAdmissionPolicy) -> Self {
         Self::with_clock(policy, Arc::new(SystemClock))
     }
 
-    /// Create a new [`DelegationAuthHandler`] with an explicit [`SharedClock`].
+    /// Create a new [`DelegationAuthHandler`] with `policy`, a random server [`SecretKey`], and
+    /// an explicit [`SharedClock`].
     pub fn with_clock(policy: TurnAdmissionPolicy, clock: SharedClock) -> Self {
+        Self::with_server_key_and_clock(policy, SecretKey::random(), clock)
+    }
+
+    /// Create a new [`DelegationAuthHandler`] with an explicit `server_key` and [`SharedClock`].
+    pub fn with_server_key_and_clock(
+        policy: TurnAdmissionPolicy,
+        server_key: SecretKey,
+        clock: SharedClock,
+    ) -> Self {
         Self {
             policy,
+            server_key,
             clock,
             cache: Mutex::new(VerifiedAuthCache::new(
                 DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY,
             )),
+            established_allocations: Mutex::new(BTreeSet::new()),
         }
     }
 
     /// Return the configured [`TurnAdmissionPolicy`].
     pub fn policy(&self) -> &TurnAdmissionPolicy {
         &self.policy
+    }
+
+    /// Borrow the server's secp256k1 [`SecretKey`].
+    pub const fn server_key(&self) -> &SecretKey {
+        &self.server_key
+    }
+
+    /// Return the server's compressed secp256k1 [`PublicKey<33>`].
+    pub fn server_pubkey(&self) -> PublicKey<33> {
+        self.server_key.pubkey()
+    }
+
+    pub(crate) fn set_established_allocation(
+        &self,
+        src_addr: SocketAddr,
+        username: String,
+        is_established: bool,
+    ) {
+        let mut set = self
+            .established_allocations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if is_established {
+            set.insert((src_addr, username));
+        } else {
+            set.remove(&(src_addr, username));
+        }
+    }
+
+    fn is_established_allocation(&self, src_addr: SocketAddr, username: &str) -> bool {
+        self.established_allocations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&(src_addr, username.to_string()))
     }
 
     /// Verify a TURN `username` and `realm` at the handler's current clock instant and compute
@@ -141,8 +193,21 @@ impl DelegationAuthHandler {
         username: &str,
         realm: &str,
     ) -> Result<(VerifiedTurnAuth, Vec<u8>)> {
+        self.verify_and_derive_key_for_allocation(username, realm, false)
+    }
+
+    fn verify_and_derive_key_for_allocation(
+        &self,
+        username: &str,
+        realm: &str,
+        established_allocation: bool,
+    ) -> Result<(VerifiedTurnAuth, Vec<u8>)> {
         let now_ms = self.clock.now_ms();
-        let (identity, _, _) = TurnCredentials::decode_username_parts(username)?;
+        let (identity, _, _, _) = TurnCredentials::decode_username_parts(username)?;
+        let verification_ts_ms = match (&identity, established_allocation) {
+            (TurnAuthIdentity::Delegation(delegation), true) => delegation.created_at_ms(),
+            _ => now_ms,
+        };
         let cache_entry = match &identity {
             TurnAuthIdentity::Delegation(delegation) => {
                 CacheEntry::Delegation(delegation.digest()?)
@@ -159,9 +224,10 @@ impl DelegationAuthHandler {
             .contains(&cache_entry);
 
         let verified = if is_cached {
-            TurnCredentials::verify_established_at(username, now_ms)?
+            TurnCredentials::verify_established_at(username, &self.server_key, verification_ts_ms)?
         } else {
-            let verified = TurnCredentials::verify_at(username, now_ms)?;
+            let verified =
+                TurnCredentials::verify_at(username, &self.server_key, verification_ts_ms)?;
             self.cache
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -186,7 +252,8 @@ impl AuthHandler for DelegationAuthHandler {
         realm: &str,
         src_addr: SocketAddr,
     ) -> std::result::Result<Vec<u8>, turn::Error> {
-        match self.verify_and_derive_key(username, realm) {
+        let established_allocation = self.is_established_allocation(src_addr, username);
+        match self.verify_and_derive_key_for_allocation(username, realm, established_allocation) {
             Ok((verified, key)) => {
                 match &verified.identity {
                     TurnAuthIdentity::Delegation(delegation) => {
@@ -195,6 +262,7 @@ impl AuthHandler for DelegationAuthHandler {
                             delegatee = %delegation.delegatee_did(),
                             %src_addr,
                             %realm,
+                            established_allocation,
                             "admitted TURN request via Delegation signature"
                         );
                     }
