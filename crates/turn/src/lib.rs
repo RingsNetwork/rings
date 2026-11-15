@@ -1477,6 +1477,65 @@ mod tests {
         chbind_existing_resp.decode().unwrap();
         assert_eq!(chbind_existing_resp.typ.class, CLASS_SUCCESS_RESPONSE);
 
+        // Repeatedly refreshing the same ChannelBind and sending a CreatePermission with
+        // many duplicate XOR-PEER-ADDRESS attributes must complete immediately without blocking.
+        for _ in 0..8 {
+            client_socket
+                .send_to(&chbind_existing_raw, server_addr)
+                .await?;
+            let (n, _) = tokio::time::timeout(
+                Duration::from_secs(2),
+                client_socket.recv_from(&mut recv_buf),
+            )
+            .await
+            .expect("ChannelBind refresh should not block")?;
+            let mut resp = Message {
+                raw: recv_buf[..n].to_vec(),
+                ..Default::default()
+            };
+            resp.decode().unwrap();
+            assert_eq!(resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        }
+        let dup_perm_raw = {
+            let mut msg = Message::new();
+            let mut setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+            ];
+            for _ in 0..16 {
+                setters.push(Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                    port: 4001,
+                }));
+            }
+            setters.push(Box::new(Username::new(
+                ATTR_USERNAME,
+                creds.username.clone(),
+            )));
+            setters.push(Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())));
+            setters.push(Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())));
+            setters.push(Box::new(MessageIntegrity(mi_key.clone())));
+            setters.push(Box::new(FINGERPRINT));
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&dup_perm_raw, server_addr).await?;
+        let (n, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            client_socket.recv_from(&mut recv_buf),
+        )
+        .await
+        .expect("batched duplicate CreatePermission should not deadlock")?;
+        let mut dup_perm_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        dup_perm_resp.decode().unwrap();
+        assert_eq!(dup_perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
         // Adding a 3rd distinct peer IP via CreatePermission must be rejected with 508.
         let perm_third_raw = {
             let mut msg = Message::new();

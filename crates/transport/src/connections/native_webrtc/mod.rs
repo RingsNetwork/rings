@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -247,6 +248,7 @@ pub struct WebrtcConnection {
     transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
+    negotiation_started: AtomicBool,
     reconfigure_lock: Mutex<()>,
     webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
@@ -468,6 +470,7 @@ impl WebrtcConnection {
             transport_ice_servers,
             external_address,
             udp_port_range,
+            negotiation_started: AtomicBool::new(false),
             reconfigure_lock: Mutex::new(()),
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
@@ -492,6 +495,10 @@ impl WebrtcConnection {
 
     async fn refresh_ice_servers(&self) -> Result<()> {
         let _guard = self.reconfigure_lock.lock().await;
+        self.refresh_ice_servers_locked().await
+    }
+
+    async fn refresh_ice_servers_locked(&self) -> Result<()> {
         if self.cancel_token.is_cancelled()
             || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
         {
@@ -513,7 +520,8 @@ impl WebrtcConnection {
         }
 
         let current_conn = self.webrtc_conn();
-        let is_unnegotiated = current_conn.local_description().await.is_none()
+        let is_unnegotiated = !self.negotiation_started.load(Ordering::Acquire)
+            && current_conn.local_description().await.is_none()
             && current_conn.remote_description().await.is_none()
             && self.connection_state.snapshot().webrtc() == WebrtcConnectionState::New;
 
@@ -814,31 +822,41 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        self.refresh_ice_servers().await?;
-        let webrtc_conn = self.webrtc_conn();
-        let setting_offer = webrtc_conn.create_offer(None).await?;
-        let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
-        webrtc_conn
-            .set_local_description(setting_offer.clone())
-            .await?;
+        let gathering_complete_promise = {
+            let _guard = self.reconfigure_lock.lock().await;
+            self.refresh_ice_servers_locked().await?;
+            self.negotiation_started.store(true, Ordering::Release);
+            let webrtc_conn = self.webrtc_conn();
+            let setting_offer = webrtc_conn.create_offer(None).await?;
+            let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
+            webrtc_conn
+                .set_local_description(setting_offer.clone())
+                .await?;
+            gathering_complete_promise
+        };
 
         self.webrtc_gather(gathering_complete_promise).await
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
         tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
-        self.refresh_ice_servers().await?;
-        let webrtc_conn = self.webrtc_conn();
         // Read the negotiated limit from the SDP text, but record it only after the *whole* answer
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer)?;
         let offer = RTCSessionDescription::offer(offer)?;
-        webrtc_conn.set_remote_description(offer).await?;
+        let gathering_complete_promise = {
+            let _guard = self.reconfigure_lock.lock().await;
+            self.refresh_ice_servers_locked().await?;
+            self.negotiation_started.store(true, Ordering::Release);
+            let webrtc_conn = self.webrtc_conn();
+            webrtc_conn.set_remote_description(offer).await?;
 
-        let answer = webrtc_conn.create_answer(None).await?;
-        let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
-        webrtc_conn.set_local_description(answer.clone()).await?;
+            let answer = webrtc_conn.create_answer(None).await?;
+            let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
+            webrtc_conn.set_local_description(answer.clone()).await?;
+            gathering_complete_promise
+        };
         let local_sdp = self.webrtc_gather(gathering_complete_promise).await?;
 
         self.remote_max_message_size
@@ -850,7 +868,11 @@ impl ConnectionInterface for WebrtcConnection {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
         let answer = RTCSessionDescription::answer(answer)?;
-        self.webrtc_conn().set_remote_description(answer).await?;
+        {
+            let _guard = self.reconfigure_lock.lock().await;
+            self.negotiation_started.store(true, Ordering::Release);
+            self.webrtc_conn().set_remote_description(answer).await?;
+        }
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
