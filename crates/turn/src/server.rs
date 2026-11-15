@@ -16,14 +16,25 @@ use rings_core::delegation::format_turn_server_url;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
 use stun::agent::TransactionId;
+use stun::attributes::AttrType;
+use stun::attributes::ATTR_DONT_FRAGMENT;
 use stun::attributes::ATTR_EVEN_PORT;
 use stun::attributes::ATTR_MESSAGE_INTEGRITY;
 use stun::attributes::ATTR_NONCE;
 use stun::attributes::ATTR_REALM;
+use stun::attributes::ATTR_REQUESTED_ADDRESS_FAMILY;
+use stun::attributes::ATTR_RESERVATION_TOKEN;
 use stun::attributes::ATTR_USERNAME;
 use stun::attributes::ATTR_XOR_PEER_ADDRESS;
+use stun::error_code::ErrorCode;
 use stun::error_code::ErrorCodeAttribute;
+use stun::error_code::CODE_ADDR_FAMILY_NOT_SUPPORTED;
+use stun::error_code::CODE_BAD_REQUEST;
 use stun::error_code::CODE_FORBIDDEN;
+use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
+use stun::error_code::CODE_PEER_ADDR_FAMILY_MISMATCH;
+use stun::error_code::CODE_UNKNOWN_ATTRIBUTE;
+use stun::error_code::CODE_UNSUPPORTED_TRANS_PROTO;
 use stun::fingerprint::FINGERPRINT;
 use stun::integrity::MessageIntegrity;
 use stun::message::Getter;
@@ -42,6 +53,8 @@ use stun::message::METHOD_SEND;
 use stun::textattrs::Nonce;
 use stun::textattrs::Realm;
 use stun::textattrs::Username;
+use stun::uattrs::UnknownAttributes;
+use stun::xoraddr::XorMappedAddress;
 use tokio::net::UdpSocket;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -53,10 +66,18 @@ use tokio::time::Instant;
 use turn::allocation::allocation_manager::Manager;
 use turn::allocation::allocation_manager::ManagerConfig;
 use turn::allocation::five_tuple::FiveTuple;
+use turn::allocation::permission::Permission;
 use turn::allocation::AllocationInfo;
 use turn::auth::AuthHandler;
+use turn::proto::evenport::EvenPort;
+use turn::proto::lifetime::Lifetime;
 use turn::proto::lifetime::DEFAULT_LIFETIME;
 use turn::proto::peeraddr::PeerAddress;
+use turn::proto::relayaddr::RelayedAddress;
+use turn::proto::reqfamily::RequestedAddressFamily;
+use turn::proto::reqfamily::REQUESTED_FAMILY_IPV4;
+use turn::proto::reqtrans::RequestedTransport;
+use turn::proto::rsrvtoken::ReservationToken;
 use turn::proto::PROTO_UDP;
 use turn::relay::RelayAddressGenerator;
 use turn::server::request::Request;
@@ -70,7 +91,8 @@ use crate::config::TurnServerConfig;
 use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::error::Result;
 
-const INBOUND_MTU: usize = 1500;
+const INBOUND_MTU: usize = 65_535;
+const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 
 struct PolicyRelayConn {
@@ -119,11 +141,22 @@ impl Conn for PolicyRelayConn {
 
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
         let _guard = self.recv_lock.lock().await;
-        let notified = self.closed_notify.notified();
-        let inner = self.clone_inner()?;
-        tokio::select! {
-            _ = notified => Err(webrtc_util::Error::Other("relay socket closed".to_string())),
-            res = inner.recv(buf) => res,
+        loop {
+            let notified = self.closed_notify.notified();
+            let inner = self.clone_inner()?;
+            let res = tokio::select! {
+                _ = notified => return Err(webrtc_util::Error::Other("relay socket closed".to_string())),
+                res = inner.recv(buf) => res,
+            };
+            match res {
+                Ok(n) => return Ok(n),
+                Err(err) => {
+                    if self.clone_inner().is_err() {
+                        return Err(err);
+                    }
+                    tracing::debug!("ignoring transient relay recv error: {err}");
+                }
+            }
         }
     }
 
@@ -132,9 +165,19 @@ impl Conn for PolicyRelayConn {
         loop {
             let notified = self.closed_notify.notified();
             let inner = self.clone_inner()?;
-            let (n, src_addr) = tokio::select! {
+            let res = tokio::select! {
                 _ = notified => return Err(webrtc_util::Error::Other("relay socket closed".to_string())),
-                res = inner.recv_from(buf) => res?,
+                res = inner.recv_from(buf) => res,
+            };
+            let (n, src_addr) = match res {
+                Ok(v) => v,
+                Err(err) => {
+                    if self.clone_inner().is_err() {
+                        return Err(err);
+                    }
+                    tracing::debug!("ignoring transient relay recv_from error: {err}");
+                    continue;
+                }
             };
             if self.peer_policy.is_allowed_addr(src_addr) {
                 return Ok((n, src_addr));
@@ -216,10 +259,10 @@ impl PolicyRelayAddressGenerator {
         relay_ip_override: Option<IpAddr>,
         port: u16,
     ) -> std::result::Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), turn::Error> {
-        let addr = self
-            .net
-            .resolve_addr(use_ipv4, &format!("{bind_ip}:{port}"))
-            .await?;
+        if use_ipv4 != bind_ip.is_ipv4() {
+            return Err(turn::Error::ErrInvalidRequestedFamilyValue);
+        }
+        let addr = SocketAddr::new(bind_ip, port);
         let conn = self.net.bind(addr).await?;
         let bound_local_addr = conn.local_addr()?;
         let mut relay_addr = bound_local_addr;
@@ -352,8 +395,6 @@ impl RelayAddressGenerator for PolicyRelayAddressGenerator {
 struct RecordingConn {
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
     local_addr: SocketAddr,
-    expected_target: SyncMutex<Option<(SocketAddr, TransactionId)>>,
-    last_sent: SyncMutex<Option<Vec<u8>>>,
 }
 
 impl RecordingConn {
@@ -361,8 +402,6 @@ impl RecordingConn {
         Self {
             inner: SyncMutex::new(Some(inner)),
             local_addr,
-            expected_target: SyncMutex::new(None),
-            last_sent: SyncMutex::new(None),
         }
     }
 
@@ -374,26 +413,11 @@ impl RecordingConn {
             .ok_or_else(|| webrtc_util::Error::Other("TURN listener closed".to_string()))
     }
 
-    fn start_recording(&self, dst: SocketAddr, tx_id: TransactionId) {
-        *self
-            .last_sent
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
-        *self
-            .expected_target
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some((dst, tx_id));
-    }
-
-    fn take_last_sent(&self) -> Option<Vec<u8>> {
-        *self
-            .expected_target
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = None;
-        self.last_sent
+    fn is_closed(&self) -> bool {
+        self.inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .take()
+            .is_none()
     }
 
     async fn shutdown_listener(&self) {
@@ -431,28 +455,6 @@ impl Conn for RecordingConn {
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
-        let expected = *self
-            .expected_target
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some((expected_dst, expected_tx_id)) = expected {
-            if target == expected_dst {
-                let mut candidate = Message {
-                    raw: buf.to_vec(),
-                    ..Default::default()
-                };
-                if candidate.decode().is_ok()
-                    && candidate.typ.class == CLASS_SUCCESS_RESPONSE
-                    && candidate.typ.method == METHOD_ALLOCATE
-                    && candidate.transaction_id == expected_tx_id
-                {
-                    *self
-                        .last_sent
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(buf.to_vec());
-                }
-            }
-        }
         let inner = self.clone_inner()?;
         inner.send_to(buf, target).await
     }
@@ -618,33 +620,415 @@ fn verify_authenticated_request(
     Some(key)
 }
 
-async fn send_forbidden_error(
+async fn send_authenticated_error(
     conn: &Arc<dyn Conn + Send + Sync>,
     dst: SocketAddr,
     m: &Message,
+    code: ErrorCode,
+    reason: &[u8],
+    unknown_attrs: Option<Vec<AttrType>>,
     mi_key: Vec<u8>,
 ) {
     let built = {
         let mut err_msg = Message::new();
         let msg_type = MessageType::new(m.typ.method, CLASS_ERROR_RESPONSE);
         let err_attr = ErrorCodeAttribute {
-            code: CODE_FORBIDDEN,
-            reason: b"Peer Address Forbidden".to_vec(),
+            code,
+            reason: reason.to_vec(),
         };
-        let setters: Vec<Box<dyn Setter>> = vec![
+        let mut setters: Vec<Box<dyn Setter>> = vec![
             Box::new(Message {
                 transaction_id: m.transaction_id,
                 ..Default::default()
             }),
             Box::new(msg_type),
             Box::new(err_attr),
-            Box::new(MessageIntegrity(mi_key)),
-            Box::new(FINGERPRINT),
         ];
+        if let Some(unknown) = unknown_attrs {
+            setters.push(Box::new(UnknownAttributes(unknown)));
+        }
+        setters.push(Box::new(MessageIntegrity(mi_key)));
+        setters.push(Box::new(FINGERPRINT));
         err_msg.build(&setters).is_ok().then_some(err_msg.raw)
     };
     if let Some(raw) = built {
         let _ = conn.send_to(&raw, dst).await;
+    }
+}
+
+async fn send_forbidden_error(
+    conn: &Arc<dyn Conn + Send + Sync>,
+    dst: SocketAddr,
+    m: &Message,
+    mi_key: Vec<u8>,
+) {
+    send_authenticated_error(
+        conn,
+        dst,
+        m,
+        CODE_FORBIDDEN,
+        b"Peer Address Forbidden",
+        None,
+        mi_key,
+    )
+    .await;
+}
+
+const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
+    match *relay {
+        RelayAddressConfig::None { bind_ip }
+        | RelayAddressConfig::Static { bind_ip, .. }
+        | RelayAddressConfig::Range { bind_ip, .. } => bind_ip.is_ipv4(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_authenticated_allocate(
+    conn: &Arc<dyn Conn + Send + Sync>,
+    allocation_manager: &Manager,
+    require_even_port: &AtomicBool,
+    allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
+    five_tuple: FiveTuple,
+    src_addr: SocketAddr,
+    m: &Message,
+    relay_is_ipv4: bool,
+    mi_key: Vec<u8>,
+) {
+    let mut username_attr = Username::new(ATTR_USERNAME, String::new());
+    if username_attr.get_from(m).is_err() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_BAD_REQUEST,
+            b"Missing Username",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    let mut requested_transport = RequestedTransport::default();
+    if requested_transport.get_from(m).is_err() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_BAD_REQUEST,
+            b"Missing or Malformed Requested-Transport",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+    if requested_transport.protocol != PROTO_UDP {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_UNSUPPORTED_TRANS_PROTO,
+            b"Unsupported Transport Protocol",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    if m.contains(ATTR_DONT_FRAGMENT) {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_UNKNOWN_ATTRIBUTE,
+            b"Unknown Attribute",
+            Some(vec![ATTR_DONT_FRAGMENT]),
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    if m.contains(ATTR_RESERVATION_TOKEN) {
+        let mut reservation_token_attr = ReservationToken::default();
+        if reservation_token_attr.get_from(m).is_err()
+            || m.contains(ATTR_EVEN_PORT)
+            || m.contains(ATTR_REQUESTED_ADDRESS_FAMILY)
+        {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_BAD_REQUEST,
+                b"Invalid Reservation-Token Request",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Port Reservation Not Supported",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    let mut use_ipv4 = relay_is_ipv4;
+    if m.contains(ATTR_REQUESTED_ADDRESS_FAMILY) {
+        let mut req_family = RequestedAddressFamily::default();
+        match req_family.get_from(m) {
+            Err(stun::Error::Other(_)) => {
+                send_authenticated_error(
+                    conn,
+                    src_addr,
+                    m,
+                    CODE_ADDR_FAMILY_NOT_SUPPORTED,
+                    b"Address Family Not Supported",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            Err(_) => {
+                send_authenticated_error(
+                    conn,
+                    src_addr,
+                    m,
+                    CODE_BAD_REQUEST,
+                    b"Malformed Requested-Address-Family",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            Ok(()) => {
+                let requested_ipv4 = req_family == REQUESTED_FAMILY_IPV4;
+                if requested_ipv4 != relay_is_ipv4 {
+                    send_authenticated_error(
+                        conn,
+                        src_addr,
+                        m,
+                        CODE_ADDR_FAMILY_NOT_SUPPORTED,
+                        b"Address Family Not Supported",
+                        None,
+                        mi_key,
+                    )
+                    .await;
+                    return;
+                }
+                use_ipv4 = requested_ipv4;
+            }
+        }
+    }
+
+    let mut need_even_port = false;
+    if m.contains(ATTR_EVEN_PORT) {
+        let mut even_port = EvenPort::default();
+        if even_port.get_from(m).is_err() {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_BAD_REQUEST,
+                b"Malformed Even-Port Attribute",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        if even_port != EvenPort::default() {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Paired Port Reservation Not Supported",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        need_even_port = true;
+    }
+
+    let mut lifetime_duration = DEFAULT_LIFETIME;
+    let mut lifetime = Lifetime::default();
+    if lifetime.get_from(m).is_ok() && lifetime.0 < MAXIMUM_ALLOCATION_LIFETIME {
+        lifetime_duration = lifetime.0;
+    }
+
+    require_even_port.store(need_even_port, Ordering::Release);
+    let create_res = allocation_manager
+        .create_allocation(
+            five_tuple,
+            Arc::clone(conn),
+            0,
+            lifetime_duration,
+            username_attr,
+            use_ipv4,
+        )
+        .await;
+    require_even_port.store(false, Ordering::Release);
+
+    if create_res.is_err() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Insufficient Capacity",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    let Some(alloc_info) = allocation_manager
+        .get_allocations_info(Some(vec![five_tuple]))
+        .await
+        .remove(&five_tuple)
+    else {
+        return;
+    };
+
+    let built = {
+        let mut resp = Message::new();
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(Message {
+                transaction_id: m.transaction_id,
+                ..Default::default()
+            }),
+            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_SUCCESS_RESPONSE)),
+            Box::new(RelayedAddress {
+                ip: alloc_info.relay_addr.ip(),
+                port: alloc_info.relay_addr.port(),
+            }),
+            Box::new(Lifetime(lifetime_duration)),
+            Box::new(XorMappedAddress {
+                ip: src_addr.ip(),
+                port: src_addr.port(),
+            }),
+            Box::new(MessageIntegrity(mi_key)),
+            Box::new(FINGERPRINT),
+        ];
+        resp.build(&setters).is_ok().then_some(resp.raw)
+    };
+    if let Some(raw) = built {
+        let active = allocation_manager.get_allocations_info(None).await;
+        allocate_responses.retain(|tuple, _| active.contains_key(tuple));
+        allocate_responses.insert(five_tuple, (m.transaction_id, raw.clone()));
+        let _ = conn.send_to(&raw, src_addr).await;
+    }
+}
+
+async fn handle_authenticated_create_permission(
+    conn: &Arc<dyn Conn + Send + Sync>,
+    allocation_manager: &Manager,
+    five_tuple: FiveTuple,
+    relay_addr: SocketAddr,
+    m: &Message,
+    peer_policy: RelayPeerPolicy,
+    mi_key: Vec<u8>,
+) {
+    let src_addr = five_tuple.src_addr;
+    let Some(alloc) = allocation_manager.get_allocation(&five_tuple).await else {
+        return;
+    };
+
+    let mut peer_addrs = Vec::new();
+    let mut malformed = false;
+    for attr in &m.attributes.0 {
+        if attr.typ != ATTR_XOR_PEER_ADDRESS {
+            continue;
+        }
+        let mut single = Message {
+            transaction_id: m.transaction_id,
+            ..Default::default()
+        };
+        single.attributes.0.push(attr.clone());
+        let mut peer_addr = PeerAddress::default();
+        if peer_addr.get_from(&single).is_err() {
+            malformed = true;
+            break;
+        }
+        peer_addrs.push(peer_addr);
+    }
+
+    if malformed || peer_addrs.is_empty() {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_BAD_REQUEST,
+            b"Missing or Malformed XOR-PEER-ADDRESS",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
+    for peer_addr in &peer_addrs {
+        if peer_addr.ip.is_ipv4() != relay_addr.is_ipv4() {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_PEER_ADDR_FAMILY_MISMATCH,
+                b"Peer Address Family Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        if !peer_policy.is_allowed_ip(peer_addr.ip) {
+            send_forbidden_error(conn, src_addr, m, mi_key).await;
+            return;
+        }
+    }
+
+    for peer_addr in peer_addrs {
+        alloc
+            .add_permission(Permission::new(SocketAddr::new(
+                peer_addr.ip,
+                peer_addr.port,
+            )))
+            .await;
+    }
+
+    let built = {
+        let mut resp = Message::new();
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(Message {
+                transaction_id: m.transaction_id,
+                ..Default::default()
+            }),
+            Box::new(MessageType::new(
+                METHOD_CREATE_PERMISSION,
+                CLASS_SUCCESS_RESPONSE,
+            )),
+            Box::new(MessageIntegrity(mi_key)),
+            Box::new(FINGERPRINT),
+        ];
+        resp.build(&setters).is_ok().then_some(resp.raw)
+    };
+    if let Some(raw) = built {
+        let _ = conn.send_to(&raw, src_addr).await;
     }
 }
 
@@ -692,6 +1076,7 @@ impl TurnServer {
             config.server_key,
             config.clock,
         ));
+        let relay_is_ipv4 = relay_bind_ip_is_ipv4(&config.relay);
         let require_even_port = Arc::new(AtomicBool::new(false));
         let relay_addr_generator = Box::new(PolicyRelayAddressGenerator::new(
             config.relay,
@@ -719,6 +1104,7 @@ impl TurnServer {
             channel_bind_timeout,
             config.peer_policy,
             config.max_nonces.max(1),
+            relay_is_ipv4,
             require_even_port,
             command_rx,
         ));
@@ -744,6 +1130,7 @@ impl TurnServer {
         channel_bind_timeout: Duration,
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
+        relay_is_ipv4: bool,
         require_even_port: Arc<AtomicBool>,
         mut command_rx: broadcast::Receiver<ServerCommand>,
     ) {
@@ -781,8 +1168,12 @@ impl TurnServer {
                     match v {
                         Ok(v) => v,
                         Err(err) => {
-                            tracing::debug!("exit TURN read loop on socket error: {err}");
-                            break;
+                            if recording_conn.is_closed() {
+                                tracing::debug!("exit TURN read loop on closed listener: {err}");
+                                break;
+                            }
+                            tracing::debug!("ignoring transient TURN listener recv_from error: {err}");
+                            continue;
                         }
                     }
                 }
@@ -814,8 +1205,6 @@ impl TurnServer {
                 continue;
             }
 
-            let mut is_fresh_allocate = false;
-
             if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
                 let has_mi = decoded_msg.contains(ATTR_MESSAGE_INTEGRITY);
                 prune_and_bound_nonces(&nonces, max_nonces, !has_mi).await;
@@ -829,8 +1218,6 @@ impl TurnServer {
                 }
 
                 if decoded_msg.typ.method == METHOD_ALLOCATE {
-                    require_even_port
-                        .store(decoded_msg.contains(ATTR_EVEN_PORT), Ordering::Release);
                     if let Some(info) = &existing_alloc {
                         if let Some((saved_tx_id, cached_resp)) =
                             allocate_responses.get(&five_tuple)
@@ -850,18 +1237,34 @@ impl TurnServer {
                                 .is_some();
                                 auth_handler.set_expected_allocation_owner(addr, None);
                                 if valid_retransmit {
-                                    require_even_port.store(false, Ordering::Release);
                                     let _ = recording_conn.send_to(cached_resp, addr).await;
                                     continue;
                                 }
                             }
                         }
                     } else {
-                        is_fresh_allocate = true;
-                        recording_conn.start_recording(addr, decoded_msg.transaction_id);
+                        let client_nonces = extract_client_nonces(&nonces, addr).await;
+                        if let Some(mi_key) = verify_authenticated_request(
+                            &decoded_msg,
+                            &client_nonces,
+                            &auth_handler,
+                            addr,
+                        ) {
+                            handle_authenticated_allocate(
+                                &recording_conn_dyn,
+                                &allocation_manager,
+                                &require_even_port,
+                                &mut allocate_responses,
+                                five_tuple,
+                                addr,
+                                &decoded_msg,
+                                relay_is_ipv4,
+                                mi_key,
+                            )
+                            .await;
+                            continue;
+                        }
                     }
-                } else {
-                    require_even_port.store(false, Ordering::Release);
                 }
 
                 if decoded_msg.typ.method == METHOD_REFRESH
@@ -874,8 +1277,32 @@ impl TurnServer {
                     }
                 }
 
-                if (decoded_msg.typ.method == METHOD_CREATE_PERMISSION
-                    || decoded_msg.typ.method == METHOD_CHANNEL_BIND)
+                if decoded_msg.typ.method == METHOD_CREATE_PERMISSION {
+                    if let Some(info) = &existing_alloc {
+                        let client_nonces = extract_client_nonces(&nonces, addr).await;
+                        if let Some(mi_key) = verify_authenticated_request(
+                            &decoded_msg,
+                            &client_nonces,
+                            &auth_handler,
+                            addr,
+                        ) {
+                            auth_handler.set_expected_allocation_owner(addr, None);
+                            handle_authenticated_create_permission(
+                                &recording_conn_dyn,
+                                &allocation_manager,
+                                five_tuple,
+                                info.relay_addr,
+                                &decoded_msg,
+                                peer_policy,
+                                mi_key,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                }
+
+                if decoded_msg.typ.method == METHOD_CHANNEL_BIND
                     && existing_alloc.is_some()
                     && !check_message_peer_addresses(&decoded_msg, peer_policy)
                 {
@@ -919,18 +1346,6 @@ impl TurnServer {
 
             require_even_port.store(false, Ordering::Release);
             auth_handler.set_expected_allocation_owner(addr, None);
-
-            if is_fresh_allocate {
-                let recorded = recording_conn.take_last_sent();
-                if let Some(resp_bytes) = recorded {
-                    let active = allocation_manager.get_allocations_info(None).await;
-                    allocate_responses.retain(|tuple, _| active.contains_key(tuple));
-                    if active.contains_key(&five_tuple) {
-                        allocate_responses
-                            .insert(five_tuple, (decoded_msg.transaction_id, resp_bytes));
-                    }
-                }
-            }
 
             if is_stun_msg && decoded_msg.typ.class == CLASS_REQUEST {
                 let after_map = req_nonces.lock().await.clone();

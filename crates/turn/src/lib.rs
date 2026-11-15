@@ -57,9 +57,13 @@ mod tests {
     use rings_core::utils::Clock;
     use rings_core::utils::ManualClock;
     use stun::agent::TransactionId;
+    use stun::attributes::ATTR_EVEN_PORT;
     use stun::attributes::ATTR_NONCE;
     use stun::attributes::ATTR_REALM;
+    use stun::attributes::ATTR_RESERVATION_TOKEN;
     use stun::attributes::ATTR_USERNAME;
+    use stun::error_code::ErrorCodeAttribute;
+    use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
     use stun::fingerprint::FINGERPRINT;
     use stun::integrity::MessageIntegrity;
     use stun::message::Getter;
@@ -67,11 +71,13 @@ mod tests {
     use stun::message::MessageType;
     use stun::message::Setter;
     use stun::message::CLASS_ERROR_RESPONSE;
+    use stun::message::CLASS_INDICATION;
     use stun::message::CLASS_REQUEST;
     use stun::message::CLASS_SUCCESS_RESPONSE;
     use stun::message::METHOD_ALLOCATE;
     use stun::message::METHOD_CREATE_PERMISSION;
     use stun::message::METHOD_REFRESH;
+    use stun::message::METHOD_SEND;
     use stun::textattrs::Nonce;
     use stun::textattrs::Realm;
     use stun::textattrs::Username;
@@ -80,13 +86,31 @@ mod tests {
     use turn::auth::generate_auth_key;
     use turn::client::Client;
     use turn::client::ClientConfig;
+    use turn::proto::data::Data;
     use turn::proto::lifetime::Lifetime;
     use turn::proto::peeraddr::PeerAddress;
+    use turn::proto::relayaddr::RelayedAddress;
     use turn::proto::reqtrans::RequestedTransport;
+    use turn::proto::rsrvtoken::ReservationToken;
     use turn::proto::PROTO_UDP;
     use webrtc_util::Conn;
 
     use super::*;
+
+    struct TestEvenPort {
+        reserve_port: bool,
+    }
+
+    impl Setter for TestEvenPort {
+        fn add_to(&self, m: &mut Message) -> std::result::Result<(), stun::Error> {
+            m.add(ATTR_EVEN_PORT, &[if self.reserve_port {
+                0x80
+            } else {
+                0x00
+            }]);
+            Ok(())
+        }
+    }
 
     #[tokio::test]
     async fn turn_server_relays_udp_traffic_authenticated_by_delegatee_key() -> Result<()> {
@@ -895,6 +919,247 @@ mod tests {
 
         let _ = client.close().await;
         let _ = second_client.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_handles_oversized_datagrams_batched_permissions_and_even_port_reservations(
+    ) -> Result<()> {
+        let config = TurnServerConfig::loopback_ephemeral();
+        let server = TurnServer::start(config).await?;
+        let server_addr = server.local_addr();
+        let server_pubkey = server.server_pubkey();
+
+        // 1. Sending an oversized UDP datagram (> 1500 bytes) must not stop the listener.
+        let raw_sender = UdpSocket::bind("127.0.0.1:0").await?;
+        let oversized_payload = vec![0xA5u8; 4096];
+        raw_sender.send_to(&oversized_payload, server_addr).await?;
+
+        let client_key = SecretKey::random();
+        let creds = client_key.turn_credentials(server_pubkey)?;
+        let client_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut recv_buf = vec![0u8; 2048];
+
+        // Obtain challenge nonce from the still-running listener.
+        let challenge_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&challenge_raw, server_addr).await?;
+        let (n, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_socket.recv_from(&mut recv_buf),
+        )
+        .await
+        .expect("TURN listener should remain responsive after oversized UDP datagram")?;
+        let mut challenge_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge_resp.decode().unwrap();
+        let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+        nonce_attr.get_from(&challenge_resp).unwrap();
+        let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+        realm_attr.get_from(&challenge_resp).unwrap();
+
+        let mi_key = generate_auth_key(&creds.username, &realm_attr.text, &creds.credential);
+
+        // 2. Allocate with EVEN-PORT (reserve_port = true) must be rejected with 508 Insufficient Capacity.
+        let reserve_even_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(TestEvenPort { reserve_port: true }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&reserve_even_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut reserve_even_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        reserve_even_resp.decode().unwrap();
+        assert_eq!(reserve_even_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&reserve_even_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+        assert!(MessageIntegrity(mi_key.clone())
+            .check(&mut reserve_even_resp)
+            .is_ok());
+
+        // 3. Allocate with RESERVATION-TOKEN must also be rejected with 508 Insufficient Capacity.
+        let token_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(ReservationToken(b"12345678".to_vec())),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&token_alloc_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut token_alloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        token_alloc_resp.decode().unwrap();
+        assert_eq!(token_alloc_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&token_alloc_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+        assert!(MessageIntegrity(mi_key.clone())
+            .check(&mut token_alloc_resp)
+            .is_ok());
+
+        // 4. Allocate with EVEN-PORT (reserve_port = false) succeeds with an even port and no
+        //    RESERVATION-TOKEN attribute.
+        let even_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(TestEvenPort {
+                    reserve_port: false,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket.send_to(&even_alloc_raw, server_addr).await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut even_alloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        even_alloc_resp.decode().unwrap();
+        assert_eq!(even_alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        assert!(!even_alloc_resp.contains(ATTR_RESERVATION_TOKEN));
+        let mut relayed_attr = RelayedAddress::default();
+        relayed_attr.get_from(&even_alloc_resp).unwrap();
+        assert_eq!(relayed_attr.port % 2, 0);
+
+        // 5. Batched CreatePermission with two distinct peer IPs (8.8.8.8 first, 127.0.0.1 second)
+        //    must install permissions for both peers so SendIndication to the second peer succeeds.
+        let peer_two_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let peer_two_addr = peer_two_socket.local_addr()?;
+
+        let batched_perm_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    port: 53,
+                }),
+                Box::new(PeerAddress {
+                    ip: peer_two_addr.ip(),
+                    port: peer_two_addr.port(),
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&batched_perm_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut batched_perm_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        batched_perm_resp.decode().unwrap();
+        assert_eq!(batched_perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        let send_indication_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
+                Box::new(PeerAddress {
+                    ip: peer_two_addr.ip(),
+                    port: peer_two_addr.port(),
+                }),
+                Box::new(Data(b"batched second peer payload".to_vec())),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&send_indication_raw, server_addr)
+            .await?;
+        let (n, from_relay) = tokio::time::timeout(
+            Duration::from_secs(5),
+            peer_two_socket.recv_from(&mut recv_buf),
+        )
+        .await
+        .expect("second peer in batched CreatePermission should receive relayed packet")?;
+        assert_eq!(from_relay.port(), relayed_attr.port);
+        assert_eq!(&recv_buf[..n], b"batched second peer payload");
+
+        server.close().await?;
         Ok(())
     }
 }
