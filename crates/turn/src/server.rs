@@ -78,6 +78,7 @@ struct PolicyRelayConn {
     local_addr: SocketAddr,
     peer_policy: RelayPeerPolicy,
     closed_notify: Notify,
+    recv_lock: Mutex<()>,
 }
 
 impl PolicyRelayConn {
@@ -91,6 +92,7 @@ impl PolicyRelayConn {
             local_addr,
             peer_policy,
             closed_notify: Notify::new(),
+            recv_lock: Mutex::new(()),
         }
     }
 
@@ -116,6 +118,7 @@ impl Conn for PolicyRelayConn {
     }
 
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        let _guard = self.recv_lock.lock().await;
         let notified = self.closed_notify.notified();
         let inner = self.clone_inner()?;
         tokio::select! {
@@ -125,6 +128,7 @@ impl Conn for PolicyRelayConn {
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        let _guard = self.recv_lock.lock().await;
         loop {
             let notified = self.closed_notify.notified();
             let inner = self.clone_inner()?;
@@ -172,6 +176,7 @@ impl Conn for PolicyRelayConn {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         self.closed_notify.notify_waiters();
+        let _guard = self.recv_lock.lock().await;
         if let Some(inner) = taken {
             let _ = inner.close().await;
         }
@@ -390,6 +395,17 @@ impl RecordingConn {
             .unwrap_or_else(PoisonError::into_inner)
             .take()
     }
+
+    async fn shutdown_listener(&self) {
+        let taken = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(inner) = taken {
+            let _ = inner.close().await;
+        }
+    }
 }
 
 #[async_trait]
@@ -454,14 +470,9 @@ impl Conn for RecordingConn {
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {
-        let taken = self
-            .inner
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(inner) = taken {
-            let _ = inner.close().await;
-        }
+        // `turn::allocation::Allocation::close` invokes `turn_socket.close()`. Keep this a no-op
+        // so closing a single client allocation does not tear down the shared server listener;
+        // `shutdown_listener` is called explicitly when `TurnServer::read_loop` exits.
         Ok(())
     }
 
@@ -687,10 +698,9 @@ impl TurnServer {
             config.peer_policy,
             Arc::clone(&require_even_port),
         ));
-        let (alloc_close_tx, alloc_close_rx) = mpsc::channel(256);
         let allocation_manager = Arc::new(Manager::new(ManagerConfig {
             relay_addr_generator,
-            alloc_close_notify: Some(alloc_close_tx),
+            alloc_close_notify: None,
         }));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
         let (command_tx, command_rx) = broadcast::channel(16);
@@ -710,7 +720,6 @@ impl TurnServer {
             config.peer_policy,
             config.max_nonces.max(1),
             require_even_port,
-            alloc_close_rx,
             command_rx,
         ));
 
@@ -736,7 +745,6 @@ impl TurnServer {
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
         require_even_port: Arc<AtomicBool>,
-        mut alloc_close_rx: mpsc::Receiver<AllocationInfo>,
         mut command_rx: broadcast::Receiver<ServerCommand>,
     ) {
         let mut buf = vec![0u8; INBOUND_MTU];
@@ -768,10 +776,6 @@ impl TurnServer {
         let mut closed_guard: Option<Arc<mpsc::Receiver<()>>> = None;
 
         loop {
-            while let Ok(closed_info) = alloc_close_rx.try_recv() {
-                allocate_responses.remove(&closed_info.five_tuple);
-            }
-
             let (n, addr) = tokio::select! {
                 v = recording_conn.recv_from(&mut buf) => {
                     match v {
@@ -781,10 +785,6 @@ impl TurnServer {
                             break;
                         }
                     }
-                }
-                Some(closed_info) = alloc_close_rx.recv() => {
-                    allocate_responses.remove(&closed_info.five_tuple);
-                    continue;
                 }
                 res = &mut close_rx => {
                     closed_guard = res.ok().flatten();
@@ -923,11 +923,9 @@ impl TurnServer {
             if is_fresh_allocate {
                 let recorded = recording_conn.take_last_sent();
                 if let Some(resp_bytes) = recorded {
-                    if allocation_manager
-                        .get_allocations_info(Some(vec![five_tuple]))
-                        .await
-                        .contains_key(&five_tuple)
-                    {
+                    let active = allocation_manager.get_allocations_info(None).await;
+                    allocate_responses.retain(|tuple, _| active.contains_key(tuple));
+                    if active.contains_key(&five_tuple) {
                         allocate_responses
                             .insert(five_tuple, (decoded_msg.transaction_id, resp_bytes));
                     }
@@ -940,9 +938,8 @@ impl TurnServer {
             }
         }
 
-        alloc_close_rx.close();
         delete_all_allocations(&allocation_manager).await;
-        let _ = recording_conn.close().await;
+        recording_conn.shutdown_listener().await;
         drop(conn);
         drop(closed_guard);
     }

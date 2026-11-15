@@ -836,8 +836,8 @@ mod tests {
         let client = Client::new(ClientConfig {
             stun_serv_addr: local_target.to_string(),
             turn_serv_addr: local_target.to_string(),
-            username: creds.username,
-            password: creds.credential,
+            username: creds.username.clone(),
+            password: creds.credential.clone(),
             realm: String::new(),
             software: String::new(),
             rto_in_ms: 0,
@@ -846,7 +846,36 @@ mod tests {
         })
         .await?;
         client.listen().await?;
-        let relay_conn = client.allocate().await?;
+        let first_relay = client.allocate().await?;
+        let first_relay_port = first_relay.local_addr()?.port();
+
+        // Deleting one allocation must not close the shared listener; a second client can still
+        // allocate on the same server.
+        server
+            .delete_allocations_by_username(creds.username.clone())
+            .await?;
+        let rebound_first = UdpSocket::bind(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            first_relay_port,
+        ))
+        .await?;
+        drop(rebound_first);
+
+        let second_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let second_client = Client::new(ClientConfig {
+            stun_serv_addr: local_target.to_string(),
+            turn_serv_addr: local_target.to_string(),
+            username: creds.username,
+            password: creds.credential,
+            realm: String::new(),
+            software: String::new(),
+            rto_in_ms: 0,
+            conn: second_socket,
+            vnet: None,
+        })
+        .await?;
+        second_client.listen().await?;
+        let relay_conn = second_client.allocate().await?;
         let relay_port = relay_conn.local_addr()?.port();
 
         // Closing the server while `server` remains in scope must release both the listener
@@ -865,6 +894,7 @@ mod tests {
         drop(rebound_listener);
 
         let _ = client.close().await;
+        let _ = second_client.close().await;
         Ok(())
     }
 }

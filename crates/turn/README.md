@@ -28,8 +28,8 @@ Standard WebRTC clients (both browser `RTCPeerConnection` and native `webrtc-rs`
                      credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(did_sk, server_pk) || sig))
      - Delegation:   username   = "<base58(delegation)>.<base58(sig)>"
                      credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(delegatee_sk, server_pk) || sig))
-     - Account:      username   = "<base58(account)>.<base58(ephemeral_pk)>.<base58(sig)>"
-                     credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(ephemeral_sk, server_pk) || sig))
+     - Account:      username   = "<base58(codec(AccountSessionClaim))>.<base58(sig)>"
+                     credential = base58(keccak256("rings-turn-credential-v1\n" || ECDH(session_sk, server_pk) || sig))
 
   2. Send STUN/TURN Allocate Request ───────────────────────▶ 3. DelegationAuthHandler::auth_handle(username, realm):
      - USERNAME = username (cleartext)                           - Decode identity & sig from USERNAME
@@ -49,16 +49,16 @@ Two signing modes are supported via `TurnCredentials`:
   - **Secp256k1 `SecretKey` / `Did`**:
     - `username`: `<0x_did>.<base58(did_sig)>`
     - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || did_sig))`
-    - Signed transcript: `"rings-turn-auth-v1\nsecp256k1\n<0x_did>\n<base58(server_pubkey)>"` (`pack_turn_did_auth`)
+    - Signed transcript: `"rings-turn-auth-v1\nsecp256k1\n<0x_did>\n<hex(server_pubkey)>"` (`pack_turn_did_auth`)
   - **Any `Account` (`EIP191`, `BIP137`, `Secp256r1`, `Ed25519`, `Bls12381`)**:
-    - `username`: `<base58(codec(account))>.<base58(ephemeral_pubkey)>.<base58(account_sig)>`
+    - `username`: `<base58(codec(AccountSessionClaim))>.<base58(account_sig)>`
     - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || account_sig))`
-    - Signed transcript: `"rings-turn-auth-v1\n<algorithm>\n<did>\n<base58(server_pubkey)>\n<base58(ephemeral_pubkey)>"` (`pack_turn_account_auth`)
+    - Signed transcript: `"rings-turn-auth-v1\n<algorithm>\n<did>\n<hex(session_pubkey)>\n<hex(server_pubkey)>"` (`pack_turn_account_auth`)
   - Carries no delegation TTL and **never expires** when a node's session `DelegateeKey` rotates.
 - **Session `DelegateeKey` Signature (Bounded by Delegation TTL)**:
   - `username`: `<base58(codec(delegation))>.<base58(delegatee_sig)>`
   - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || delegatee_sig))`
-  - Signed transcript: `"rings-turn-auth-v1\n<hex(delegation.digest())>\n<base58(server_pubkey)>"` (`pack_turn_auth`)
+  - Signed transcript: `"rings-turn-auth-v1\n<hex(delegation.digest())>\n<hex(server_pubkey)>"` (`pack_turn_auth`)
   - Ideal for browser tabs and nodes that keep their root `delegator_key` offline; when a running node renews its `DelegateeKey`, `SwarmTransport` automatically refreshes its TURN credentials and updates active peer connections while `rings-turn` keeps existing established 5-tuple allocations alive across renewal.
 <!-- ANCHOR_END: model -->
 
