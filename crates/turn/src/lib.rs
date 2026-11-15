@@ -881,6 +881,13 @@ mod tests {
         client.listen().await?;
         let first_relay = client.allocate().await?;
         let first_relay_port = first_relay.local_addr()?.port();
+        let active_infos = server.allocations_info(None).await?;
+        assert_eq!(active_infos.len(), 1);
+        let recorded_tuple = active_infos.keys().next().copied().unwrap();
+        assert_eq!(
+            recorded_tuple.dst_addr, local_target,
+            "wildcard listener must record concrete packet destination address in FiveTuple"
+        );
 
         // Deleting one allocation must not close the shared listener; a second client can still
         // allocate on the same server.
@@ -1384,6 +1391,7 @@ mod tests {
                 Box::new(RequestedTransport {
                     protocol: PROTO_UDP,
                 }),
+                Box::new(Lifetime(Duration::from_secs(7200))),
                 Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
                 Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
                 Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
@@ -1401,12 +1409,48 @@ mod tests {
         };
         realloc_resp.decode().unwrap();
         assert_eq!(realloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut realloc_lt = Lifetime::default();
+        realloc_lt.get_from(&realloc_resp).unwrap();
+        assert_eq!(realloc_lt.0, Duration::from_secs(3600));
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(
             server.allocations_info(None).await?.len(),
             1,
             "replacement allocation on the same 5-tuple must remain active"
         );
+
+        // Nonzero Refresh below 600s must clamp up to the 600s default lifetime (RFC 5766 §7.2).
+        let short_refresh_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+                Box::new(Lifetime(Duration::from_secs(60))),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&short_refresh_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut short_refresh_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        short_refresh_resp.decode().unwrap();
+        assert_eq!(short_refresh_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut short_refresh_lt = Lifetime::default();
+        short_refresh_lt.get_from(&short_refresh_resp).unwrap();
+        assert_eq!(short_refresh_lt.0, Duration::from_secs(600));
 
         // A delayed duplicate of the earlier Refresh(0) must replay its 200 OK response
         // without deleting the replacement allocation.

@@ -450,10 +450,8 @@ impl ManagedAllocation {
     fn outbound_channel_peer(&self, channel: ChannelNumber) -> Option<SocketAddr> {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
         state.channel_bindings.retain(|_, (_, exp)| *exp > now);
-        let &(peer, _) = state.channel_bindings.get(&channel)?;
-        state.permissions.contains_key(&peer.ip()).then_some(peer)
+        state.channel_bindings.get(&channel).map(|&(peer, _)| peer)
     }
 }
 
@@ -556,7 +554,7 @@ fn generate_nonce() -> String {
 }
 
 async fn prune_and_bound_nonces(
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_nonces: usize,
     reserve_one: bool,
 ) {
@@ -702,20 +700,21 @@ async fn send_unauthenticated_error(
 #[allow(clippy::too_many_arguments)]
 async fn issue_nonce_challenge(
     conn: &Arc<dyn Conn + Send + Sync>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_nonces: usize,
     realm: &str,
-    src_addr: SocketAddr,
+    five_tuple: FiveTuple,
     m: &Message,
     code: ErrorCode,
     reason: &[u8],
 ) {
+    let src_addr = five_tuple.src_addr;
     prune_and_bound_nonces(nonces, max_nonces, true).await;
     let nonce = generate_nonce();
     nonces
         .lock()
         .await
-        .insert(nonce.clone(), (src_addr, Instant::now()));
+        .insert(nonce.clone(), (five_tuple, Instant::now()));
     let built = {
         let mut resp = Message::new();
         let setters: Vec<Box<dyn Setter>> = vec![
@@ -741,20 +740,21 @@ async fn issue_nonce_challenge(
 
 async fn authenticate_turn_request(
     conn: &Arc<dyn Conn + Send + Sync>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_nonces: usize,
     auth_handler: &DelegationAuthHandler,
     realm: &str,
-    src_addr: SocketAddr,
+    five_tuple: FiveTuple,
     m: &Message,
 ) -> Option<(Username, Vec<u8>)> {
+    let src_addr = five_tuple.src_addr;
     if !m.contains(ATTR_MESSAGE_INTEGRITY) {
         issue_nonce_challenge(
             conn,
             nonces,
             max_nonces,
             realm,
-            src_addr,
+            five_tuple,
             m,
             CODE_UNAUTHORIZED,
             b"Unauthorized",
@@ -779,7 +779,7 @@ async fn authenticate_turn_request(
     let nonce_valid = {
         let mut guard = nonces.lock().await;
         match guard.get(&nonce_attr.text).copied() {
-            Some((owner_addr, created_at)) if owner_addr == src_addr => {
+            Some((owner_tuple, created_at)) if owner_tuple == five_tuple => {
                 if Instant::now()
                     .checked_duration_since(created_at)
                     .unwrap_or_default()
@@ -800,7 +800,7 @@ async fn authenticate_turn_request(
             nonces,
             max_nonces,
             realm,
-            src_addr,
+            five_tuple,
             m,
             CODE_STALE_NONCE,
             b"Stale Nonce",
@@ -883,6 +883,20 @@ const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
     }
 }
 
+const fn relay_bind_ip(relay: &RelayAddressConfig) -> IpAddr {
+    match *relay {
+        RelayAddressConfig::None { bind_ip }
+        | RelayAddressConfig::Static { bind_ip, .. }
+        | RelayAddressConfig::Range { bind_ip, .. } => bind_ip,
+    }
+}
+
+fn clamp_allocation_lifetime(requested: Duration) -> Duration {
+    requested
+        .min(MAXIMUM_ALLOCATION_LIFETIME)
+        .max(DEFAULT_LIFETIME)
+}
+
 async fn close_allocations(removed: Vec<Arc<ManagedAllocation>>) {
     if removed.is_empty() {
         return;
@@ -910,21 +924,21 @@ struct CompletedDeletionEntry {
 }
 
 async fn evict_nonces_up_to(
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
-    client_addr: SocketAddr,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
+    five_tuple: FiveTuple,
     cutoff: Instant,
 ) {
     let mut guard = nonces.lock().await;
-    guard.retain(|_, (owner_addr, created_at)| *owner_addr != client_addr || *created_at > cutoff);
+    guard.retain(|_, (owner_tuple, created_at)| *owner_tuple != five_tuple || *created_at > cutoff);
 }
 
 async fn prune_completed_deletions(
     completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_tuples: usize,
 ) {
     let now = Instant::now();
-    let mut evicted_cutoffs: Vec<(SocketAddr, Instant)> = Vec::new();
+    let mut evicted_cutoffs: Vec<(FiveTuple, Instant)> = Vec::new();
     completed_deletions.retain(|tuple, entries| {
         while let Some(front) = entries.front() {
             if now
@@ -933,7 +947,7 @@ async fn prune_completed_deletions(
                 >= NONCE_LIFETIME
             {
                 if let Some(evicted) = entries.pop_front() {
-                    evicted_cutoffs.push((tuple.src_addr, evicted.completed_at));
+                    evicted_cutoffs.push((*tuple, evicted.completed_at));
                 }
             } else {
                 break;
@@ -951,18 +965,18 @@ async fn prune_completed_deletions(
         };
         if let Some(entries) = completed_deletions.remove(&oldest_tuple) {
             if let Some(last) = entries.back() {
-                evicted_cutoffs.push((oldest_tuple.src_addr, last.completed_at));
+                evicted_cutoffs.push((oldest_tuple, last.completed_at));
             }
         }
     }
-    for (addr, cutoff) in evicted_cutoffs {
-        evict_nonces_up_to(nonces, addr, cutoff).await;
+    for (tuple, cutoff) in evicted_cutoffs {
+        evict_nonces_up_to(nonces, tuple, cutoff).await;
     }
 }
 
 async fn find_completed_deletion(
     completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     five_tuple: &FiveTuple,
     username: &str,
     transaction_id: TransactionId,
@@ -978,7 +992,7 @@ async fn find_completed_deletion(
 
 async fn record_completed_deletion(
     completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     five_tuple: FiveTuple,
     username: String,
     transaction_id: TransactionId,
@@ -989,7 +1003,7 @@ async fn record_completed_deletion(
     let entries = completed_deletions.entry(five_tuple).or_default();
     while entries.len() >= MAX_DELETION_TXS_PER_TUPLE {
         if let Some(evicted) = entries.pop_front() {
-            evict_nonces_up_to(nonces, five_tuple.src_addr, evicted.completed_at).await;
+            evict_nonces_up_to(nonces, five_tuple, evicted.completed_at).await;
         }
     }
     entries.push_back(CompletedDeletionEntry {
@@ -1381,9 +1395,7 @@ async fn handle_authenticated_allocate(
             .await;
             return;
         }
-        if !lifetime.0.is_zero() && lifetime.0 < MAXIMUM_ALLOCATION_LIFETIME {
-            lifetime_duration = lifetime.0;
-        }
+        lifetime_duration = clamp_allocation_lifetime(lifetime.0);
     }
 
     if active_allocation_count(allocations).await >= max_allocations {
@@ -1472,7 +1484,7 @@ async fn handle_authenticated_allocate(
 async fn handle_authenticated_refresh(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
-    nonces: &Mutex<HashMap<String, (SocketAddr, Instant)>>,
+    nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
     completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
     max_allocations: usize,
@@ -1497,7 +1509,11 @@ async fn handle_authenticated_refresh(
             .await;
             return;
         }
-        lifetime_duration = lifetime.0.min(MAXIMUM_ALLOCATION_LIFETIME);
+        lifetime_duration = if lifetime.0.is_zero() {
+            Duration::ZERO
+        } else {
+            clamp_allocation_lifetime(lifetime.0)
+        };
     }
 
     if lifetime_duration.is_zero() {
@@ -1765,6 +1781,145 @@ async fn delete_all_allocations(allocations: &Mutex<HashMap<FiveTuple, Arc<Manag
     close_allocations(removed).await;
 }
 
+fn collect_concrete_listener_candidates(
+    use_ipv4: bool,
+    extra_local_ips: &[IpAddr],
+) -> Vec<SocketAddr> {
+    let mut candidates = Vec::new();
+    let loopback_ip = if use_ipv4 {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        IpAddr::V6(Ipv6Addr::LOCALHOST)
+    };
+    candidates.push(SocketAddr::new(loopback_ip, 0));
+
+    for &ip in extra_local_ips {
+        if ip.is_ipv4() == use_ipv4 && !ip.is_unspecified() && !ip.is_multicast() {
+            let sa = SocketAddr::new(ip, 0);
+            if !candidates.contains(&sa) {
+                candidates.push(sa);
+            }
+        }
+    }
+
+    if let Ok(ifaces) = webrtc_util::ifaces::ifaces() {
+        for iface in ifaces {
+            if let Some(mut sa) = iface.addr {
+                if sa.is_ipv4() == use_ipv4 && !sa.ip().is_unspecified() && !sa.ip().is_multicast()
+                {
+                    sa.set_port(0);
+                    if !candidates.contains(&sa) {
+                        candidates.push(sa);
+                    }
+                }
+            }
+        }
+    }
+    candidates
+}
+
+async fn bind_listener_sockets(
+    listen_addr: SocketAddr,
+    extra_local_ips: &[IpAddr],
+) -> Result<(SocketAddr, Vec<Arc<RecordingConn>>)> {
+    if !listen_addr.ip().is_unspecified() {
+        let socket = UdpSocket::bind(listen_addr).await?;
+        let local_addr = socket.local_addr()?;
+        let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
+        return Ok((local_addr, vec![Arc::new(RecordingConn::new(
+            conn, local_addr,
+        ))]));
+    }
+
+    let candidates = collect_concrete_listener_candidates(listen_addr.is_ipv4(), extra_local_ips);
+    if listen_addr.port() != 0 {
+        let port = listen_addr.port();
+        let mut listeners = Vec::new();
+        let mut first_err: Option<std::io::Error> = None;
+        for mut cand in candidates {
+            cand.set_port(port);
+            match UdpSocket::bind(cand).await {
+                Ok(sock) => {
+                    let concrete_addr = sock.local_addr()?;
+                    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
+                    listeners.push(Arc::new(RecordingConn::new(conn, concrete_addr)));
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::AddrInUse
+                        || err.kind() == std::io::ErrorKind::PermissionDenied
+                        || cand.ip().is_loopback() =>
+                {
+                    return Err(err.into());
+                }
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+        if listeners.is_empty() {
+            return Err(first_err
+                .unwrap_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::AddrNotAvailable,
+                        "no bindable concrete TURN listener address",
+                    )
+                })
+                .into());
+        }
+        return Ok((SocketAddr::new(listen_addr.ip(), port), listeners));
+    }
+
+    let mut last_err: Option<std::io::Error> = None;
+    for _ in 0..DEFAULT_PORT_RANGE_MAX_RETRIES {
+        let probe = UdpSocket::bind(SocketAddr::new(listen_addr.ip(), 0)).await?;
+        let port = probe.local_addr()?.port();
+        drop(probe);
+
+        let mut listeners = Vec::new();
+        let mut conflict = false;
+        for mut cand in candidates.iter().copied() {
+            cand.set_port(port);
+            match UdpSocket::bind(cand).await {
+                Ok(sock) => {
+                    let concrete_addr = sock.local_addr()?;
+                    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
+                    listeners.push(Arc::new(RecordingConn::new(conn, concrete_addr)));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(err);
+                    conflict = true;
+                    break;
+                }
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::PermissionDenied
+                        || cand.ip().is_loopback() =>
+                {
+                    return Err(err.into());
+                }
+                Err(err) => {
+                    if last_err.is_none() {
+                        last_err = Some(err);
+                    }
+                }
+            }
+        }
+        if !conflict && !listeners.is_empty() {
+            return Ok((SocketAddr::new(listen_addr.ip(), port), listeners));
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "failed to bind concrete TURN listener sockets",
+            )
+        })
+        .into())
+}
+
 /// A running Rings TURN server backed by [`DelegationAuthHandler`].
 pub struct TurnServer {
     local_addr: SocketAddr,
@@ -1772,7 +1927,7 @@ pub struct TurnServer {
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-    nonces: Arc<Mutex<HashMap<String, (SocketAddr, Instant)>>>,
+    nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
     shutdown_tx: watch::Sender<bool>,
     done_rx: watch::Receiver<bool>,
 }
@@ -1790,9 +1945,12 @@ impl TurnServer {
             }
         }
 
-        let socket = UdpSocket::bind(config.listen_addr).await?;
-        let local_addr = socket.local_addr()?;
         let relay_advertised = config.relay.advertised_ip();
+        let mut extra_ips = vec![relay_bind_ip(&config.relay), relay_advertised];
+        if let Some(adv) = config.advertised_ip {
+            extra_ips.push(adv);
+        }
+        let (local_addr, listeners) = bind_listener_sockets(config.listen_addr, &extra_ips).await?;
         let advertised_ip = match config.advertised_ip {
             Some(ip) if !ip.is_unspecified() => ip,
             _ if !local_addr.ip().is_unspecified() => local_addr.ip(),
@@ -1807,7 +1965,6 @@ impl TurnServer {
             },
         };
         let advertised_addr = SocketAddr::new(advertised_ip, local_addr.port());
-        let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
 
         let auth_handler = Arc::new(DelegationAuthHandler::with_server_key_and_clock(
             config.admission,
@@ -1830,7 +1987,7 @@ impl TurnServer {
         };
 
         tokio::spawn(Self::read_loop(
-            conn,
+            listeners,
             Arc::clone(&allocations),
             relay_generator,
             Arc::clone(&nonces),
@@ -1860,10 +2017,10 @@ impl TurnServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn read_loop(
-        conn: Arc<dyn Conn + Send + Sync>,
+        listeners: Vec<Arc<RecordingConn>>,
         allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
         relay_generator: Arc<PolicyRelayAddressGenerator>,
-        nonces: Arc<Mutex<HashMap<String, (SocketAddr, Instant)>>>,
+        nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
         auth_handler: Arc<DelegationAuthHandler>,
         realm: String,
         channel_bind_timeout: Duration,
@@ -1875,14 +2032,60 @@ impl TurnServer {
         mut shutdown_rx: watch::Receiver<bool>,
         done_tx: watch::Sender<bool>,
     ) {
-        let mut buf = vec![0u8; INBOUND_MTU];
-        let Ok(local_dst_addr) = conn.local_addr() else {
-            let _ = done_tx.send_replace(true);
-            return;
-        };
-        let recording_conn = Arc::new(RecordingConn::new(Arc::clone(&conn), local_dst_addr));
-        let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
-            Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
+        let (pkt_tx, mut pkt_rx) =
+            tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr, Arc<RecordingConn>)>(256);
+        let mut reader_handles = Vec::with_capacity(listeners.len());
+        for listener in &listeners {
+            let listener = Arc::clone(listener);
+            let pkt_tx = pkt_tx.clone();
+            let mut reader_shutdown = shutdown_rx.clone();
+            reader_handles.push(tokio::spawn(async move {
+                let mut buf = vec![0u8; INBOUND_MTU];
+                loop {
+                    if *reader_shutdown.borrow_and_update() {
+                        break;
+                    }
+                    let (n, src_addr) = tokio::select! {
+                        v = listener.recv_from(&mut buf) => {
+                            match v {
+                                Ok(v) => v,
+                                Err(err) => {
+                                    if listener.is_closed() {
+                                        tracing::debug!("exit TURN listener reader on closed socket: {err}");
+                                        break;
+                                    }
+                                    tracing::debug!("ignoring transient TURN listener recv_from error: {err}");
+                                    continue;
+                                }
+                            }
+                        }
+                        res = reader_shutdown.changed() => {
+                            if res.is_err() || *reader_shutdown.borrow() {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let Some(payload) = buf.get(..n).map(<[u8]>::to_vec) else {
+                        continue;
+                    };
+                    tokio::select! {
+                        res = pkt_tx.send((payload, src_addr, Arc::clone(&listener))) => {
+                            if res.is_err() {
+                                break;
+                            }
+                        }
+                        res = reader_shutdown.changed() => {
+                            if res.is_err() || *reader_shutdown.borrow() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        drop(pkt_tx);
+
         let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
         let mut completed_deletions: HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>> =
             HashMap::new();
@@ -1891,19 +2094,12 @@ impl TurnServer {
             if *shutdown_rx.borrow_and_update() {
                 break;
             }
-            let (n, addr) = tokio::select! {
-                v = recording_conn.recv_from(&mut buf) => {
-                    match v {
-                        Ok(v) => v,
-                        Err(err) => {
-                            if recording_conn.is_closed() {
-                                tracing::debug!("exit TURN read loop on closed listener: {err}");
-                                break;
-                            }
-                            tracing::debug!("ignoring transient TURN listener recv_from error: {err}");
-                            continue;
-                        }
-                    }
+            let (payload, addr, recording_conn) = tokio::select! {
+                maybe_pkt = pkt_rx.recv() => {
+                    let Some(pkt) = maybe_pkt else {
+                        break;
+                    };
+                    pkt
                 }
                 res = shutdown_rx.changed() => {
                     if res.is_err() || *shutdown_rx.borrow() {
@@ -1912,19 +2108,18 @@ impl TurnServer {
                     continue;
                 }
             };
-
-            let Some(payload) = buf.get(..n) else {
-                continue;
-            };
+            let local_dst_addr = recording_conn.local_addr;
+            let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
+                Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
             let five_tuple = FiveTuple {
                 src_addr: addr,
                 dst_addr: local_dst_addr,
                 protocol: PROTO_UDP,
             };
 
-            if ChannelData::is_channel_data(payload) {
+            if ChannelData::is_channel_data(&payload) {
                 let mut channel_data = ChannelData {
-                    raw: payload.to_vec(),
+                    raw: payload,
                     ..Default::default()
                 };
                 if channel_data.decode().is_ok() {
@@ -1938,7 +2133,7 @@ impl TurnServer {
             }
 
             let mut decoded_msg = Message {
-                raw: payload.to_vec(),
+                raw: payload,
                 ..Default::default()
             };
             if decoded_msg.decode().is_err() || !sanitize_authenticated_message(&mut decoded_msg) {
@@ -2046,7 +2241,7 @@ impl TurnServer {
                 max_nonces,
                 &auth_handler,
                 &realm,
-                addr,
+                five_tuple,
                 &decoded_msg,
             )
             .await;
@@ -2191,9 +2386,15 @@ impl TurnServer {
             }
         }
 
+        drop(pkt_rx);
         delete_all_allocations(&allocations).await;
-        recording_conn.shutdown_listener().await;
-        drop(conn);
+        for listener in &listeners {
+            listener.shutdown_listener().await;
+        }
+        for handle in reader_handles {
+            let _ = handle.await;
+        }
+        drop(listeners);
         let _ = done_tx.send_replace(true);
     }
 
