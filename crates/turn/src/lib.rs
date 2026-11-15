@@ -76,6 +76,7 @@ mod tests {
     use stun::message::CLASS_SUCCESS_RESPONSE;
     use stun::message::METHOD_ALLOCATE;
     use stun::message::METHOD_CREATE_PERMISSION;
+    use stun::message::METHOD_DATA;
     use stun::message::METHOD_REFRESH;
     use stun::message::METHOD_SEND;
     use stun::textattrs::Nonce;
@@ -1089,11 +1090,82 @@ mod tests {
         relayed_attr.get_from(&even_alloc_resp).unwrap();
         assert_eq!(relayed_attr.port % 2, 0);
 
-        // 5. Batched CreatePermission with two distinct peer IPs (8.8.8.8 first, 127.0.0.1 second)
-        //    must install permissions for both peers so SendIndication to the second peer succeeds.
+        // 5. An on-path attacker appending a trailing XOR-PEER-ADDRESS (127.0.0.1) after
+        //    MESSAGE-INTEGRITY on a CreatePermission for 8.8.8.8 must NOT authorize 127.0.0.1.
         let peer_two_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let peer_two_addr = peer_two_socket.local_addr()?;
 
+        let tampered_perm_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    port: 53,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                // Appended after MESSAGE-INTEGRITY without recomputing HMAC:
+                Box::new(PeerAddress {
+                    ip: peer_two_addr.ip(),
+                    port: peer_two_addr.port(),
+                }),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&tampered_perm_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut tampered_perm_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        tampered_perm_resp.decode().unwrap();
+        assert_eq!(tampered_perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // Sending to `peer_two_addr` must still be dropped because the trailing attribute after
+        // MESSAGE-INTEGRITY was ignored.
+        let probe_indication_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
+                Box::new(PeerAddress {
+                    ip: peer_two_addr.ip(),
+                    port: peer_two_addr.port(),
+                }),
+                Box::new(Data(b"should be dropped".to_vec())),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&probe_indication_raw, server_addr)
+            .await?;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                peer_two_socket.recv_from(&mut recv_buf),
+            )
+            .await
+            .is_err(),
+            "trailing XOR-PEER-ADDRESS after MESSAGE-INTEGRITY must not install permission"
+        );
+
+        // 6. Batched CreatePermission with two distinct peer IPs (8.8.8.8 first, 127.0.0.1 second)
+        //    inside the authenticated prefix must install permissions for both peers, and >1500-byte
+        //    UDP payloads must round-trip without truncation in both directions.
         let batched_perm_raw = {
             let mut msg = Message::new();
             let setters: Vec<Box<dyn Setter>> = vec![
@@ -1130,6 +1202,7 @@ mod tests {
         batched_perm_resp.decode().unwrap();
         assert_eq!(batched_perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
 
+        let large_payload: Vec<u8> = (0..3000u16).map(|i| (i % 251) as u8).collect();
         let send_indication_raw = {
             let mut msg = Message::new();
             let setters: Vec<Box<dyn Setter>> = vec![
@@ -1142,7 +1215,7 @@ mod tests {
                     ip: peer_two_addr.ip(),
                     port: peer_two_addr.port(),
                 }),
-                Box::new(Data(b"batched second peer payload".to_vec())),
+                Box::new(Data(large_payload.clone())),
             ];
             msg.build(&setters).unwrap();
             msg.raw
@@ -1150,14 +1223,35 @@ mod tests {
         client_socket
             .send_to(&send_indication_raw, server_addr)
             .await?;
+        let mut large_recv_buf = vec![0u8; 8192];
         let (n, from_relay) = tokio::time::timeout(
             Duration::from_secs(5),
-            peer_two_socket.recv_from(&mut recv_buf),
+            peer_two_socket.recv_from(&mut large_recv_buf),
         )
         .await
         .expect("second peer in batched CreatePermission should receive relayed packet")?;
         assert_eq!(from_relay.port(), relayed_attr.port);
-        assert_eq!(&recv_buf[..n], b"batched second peer payload");
+        assert_eq!(&large_recv_buf[..n], large_payload.as_slice());
+
+        // Echo the 3000-byte payload from the peer back to the relay port and verify the client
+        // receives the full >1500-byte payload in DataIndication without truncation.
+        peer_two_socket.send_to(&large_payload, from_relay).await?;
+        let (n_back, _) = tokio::time::timeout(
+            Duration::from_secs(5),
+            client_socket.recv_from(&mut large_recv_buf),
+        )
+        .await
+        .expect("client should receive DataIndication for >1500-byte peer datagram")?;
+        let mut data_ind = Message {
+            raw: large_recv_buf[..n_back].to_vec(),
+            ..Default::default()
+        };
+        data_ind.decode().unwrap();
+        assert_eq!(data_ind.typ.class, CLASS_INDICATION);
+        assert_eq!(data_ind.typ.method, METHOD_DATA);
+        let mut echoed_data = Data::default();
+        echoed_data.get_from(&data_ind).unwrap();
+        assert_eq!(echoed_data.0, large_payload);
 
         server.close().await?;
         Ok(())

@@ -19,6 +19,7 @@ use stun::agent::TransactionId;
 use stun::attributes::AttrType;
 use stun::attributes::ATTR_DONT_FRAGMENT;
 use stun::attributes::ATTR_EVEN_PORT;
+use stun::attributes::ATTR_FINGERPRINT;
 use stun::attributes::ATTR_MESSAGE_INTEGRITY;
 use stun::attributes::ATTR_NONCE;
 use stun::attributes::ATTR_REALM;
@@ -48,6 +49,7 @@ use stun::message::CLASS_SUCCESS_RESPONSE;
 use stun::message::METHOD_ALLOCATE;
 use stun::message::METHOD_CHANNEL_BIND;
 use stun::message::METHOD_CREATE_PERMISSION;
+use stun::message::METHOD_DATA;
 use stun::message::METHOD_REFRESH;
 use stun::message::METHOD_SEND;
 use stun::textattrs::Nonce;
@@ -67,8 +69,11 @@ use turn::allocation::allocation_manager::Manager;
 use turn::allocation::allocation_manager::ManagerConfig;
 use turn::allocation::five_tuple::FiveTuple;
 use turn::allocation::permission::Permission;
+use turn::allocation::Allocation;
 use turn::allocation::AllocationInfo;
 use turn::auth::AuthHandler;
+use turn::proto::chandata::ChannelData;
+use turn::proto::data::Data;
 use turn::proto::evenport::EvenPort;
 use turn::proto::lifetime::Lifetime;
 use turn::proto::lifetime::DEFAULT_LIFETIME;
@@ -92,6 +97,8 @@ use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::error::Result;
 
 const INBOUND_MTU: usize = 65_535;
+const STUN_HEADER_BYTES: usize = 20;
+const STUN_ATTR_HEADER_BYTES: usize = 4;
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 
@@ -124,6 +131,31 @@ impl PolicyRelayConn {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
             .ok_or_else(|| webrtc_util::Error::Other("relay socket closed".to_string()))
+    }
+
+    async fn recv_datagram(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        let _guard = self.recv_lock.lock().await;
+        loop {
+            let notified = self.closed_notify.notified();
+            let inner = self.clone_inner()?;
+            let res = tokio::select! {
+                _ = notified => return Err(webrtc_util::Error::Other("relay socket closed".to_string())),
+                res = inner.recv_from(buf) => res,
+            };
+            let (n, src_addr) = match res {
+                Ok(v) => v,
+                Err(err) => {
+                    if self.clone_inner().is_err() {
+                        return Err(err);
+                    }
+                    tracing::debug!("ignoring transient relay recv_from error: {err}");
+                    continue;
+                }
+            };
+            if self.peer_policy.is_allowed_addr(src_addr) {
+                return Ok((n, src_addr));
+            }
+        }
     }
 }
 
@@ -160,29 +192,17 @@ impl Conn for PolicyRelayConn {
         }
     }
 
-    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
-        let _guard = self.recv_lock.lock().await;
-        loop {
-            let notified = self.closed_notify.notified();
-            let inner = self.clone_inner()?;
-            let res = tokio::select! {
-                _ = notified => return Err(webrtc_util::Error::Other("relay socket closed".to_string())),
-                res = inner.recv_from(buf) => res,
-            };
-            let (n, src_addr) = match res {
-                Ok(v) => v,
-                Err(err) => {
-                    if self.clone_inner().is_err() {
-                        return Err(err);
-                    }
-                    tracing::debug!("ignoring transient relay recv_from error: {err}");
-                    continue;
-                }
-            };
-            if self.peer_policy.is_allowed_addr(src_addr) {
-                return Ok((n, src_addr));
-            }
+    async fn recv_from(&self, _buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        // `turn::allocation::Allocation::packet_handler` calls `Conn::recv_from` with a fixed
+        // 1500-byte buffer (`RTP_MTU`), which truncates >1500-byte datagrams on Unix. Park that
+        // loop until the allocation closes while `relay_packet_handler` reads complete UDP
+        // datagrams up to `INBOUND_MTU` (65,535 bytes) via `PolicyRelayConn::recv_datagram`.
+        let notified = self.closed_notify.notified();
+        if self.clone_inner().is_err() {
+            return Err(webrtc_util::Error::Other("relay socket closed".to_string()));
         }
+        notified.await;
+        Err(webrtc_util::Error::Other("relay socket closed".to_string()))
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
@@ -235,6 +255,7 @@ struct PolicyRelayAddressGenerator {
     relay: RelayAddressConfig,
     peer_policy: RelayPeerPolicy,
     require_even_port: Arc<AtomicBool>,
+    last_allocated_conn: Arc<SyncMutex<Option<Arc<PolicyRelayConn>>>>,
     net: Arc<Net>,
 }
 
@@ -243,11 +264,13 @@ impl PolicyRelayAddressGenerator {
         relay: RelayAddressConfig,
         peer_policy: RelayPeerPolicy,
         require_even_port: Arc<AtomicBool>,
+        last_allocated_conn: Arc<SyncMutex<Option<Arc<PolicyRelayConn>>>>,
     ) -> Self {
         Self {
             relay,
             peer_policy,
             require_even_port,
+            last_allocated_conn,
             net: Arc::new(Net::new(None)),
         }
     }
@@ -269,11 +292,16 @@ impl PolicyRelayAddressGenerator {
         if let Some(relay_ip) = relay_ip_override {
             relay_addr.set_ip(relay_ip);
         }
-        let wrapped: Arc<dyn Conn + Send + Sync> = Arc::new(PolicyRelayConn::new(
+        let policy_conn = Arc::new(PolicyRelayConn::new(
             conn,
             bound_local_addr,
             self.peer_policy,
         ));
+        *self
+            .last_allocated_conn
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Arc::clone(&policy_conn));
+        let wrapped: Arc<dyn Conn + Send + Sync> = policy_conn;
         Ok((wrapped, relay_addr))
     }
 }
@@ -558,9 +586,67 @@ async fn sync_client_nonces(
     prune_and_bound_nonces(nonces, max_nonces, false).await;
 }
 
+const fn padded_attr_value_len(len: usize) -> usize {
+    (len + 3) & !3
+}
+
+fn truncate_message_attributes(m: &mut Message, keep_count: usize) {
+    if m.attributes.0.len() <= keep_count {
+        return;
+    }
+    let mut removed_bytes = 0usize;
+    for attr in m.attributes.0.iter().skip(keep_count) {
+        removed_bytes += STUN_ATTR_HEADER_BYTES + padded_attr_value_len(usize::from(attr.length));
+    }
+    m.attributes.0.truncate(keep_count);
+    m.length = m
+        .length
+        .saturating_sub(u32::try_from(removed_bytes).unwrap_or(u32::MAX));
+    m.write_length();
+    let new_raw_len = STUN_HEADER_BYTES + usize::try_from(m.length).unwrap_or(0);
+    if m.raw.len() > new_raw_len {
+        m.raw.truncate(new_raw_len);
+    }
+}
+
+/// Enforce RFC 5389 Section 15.4 & 15.5 on messages carrying `MESSAGE-INTEGRITY`:
+/// `FINGERPRINT` must not precede `MESSAGE-INTEGRITY`, and any attribute following
+/// `MESSAGE-INTEGRITY` other than an immediately-following valid `FINGERPRINT` is
+/// ignored (stripped from both `m.attributes` and `m.raw`) before dispatch.
+fn sanitize_authenticated_message(m: &mut Message) -> bool {
+    let Some(mi_idx) = m
+        .attributes
+        .0
+        .iter()
+        .position(|attr| attr.typ == ATTR_MESSAGE_INTEGRITY)
+    else {
+        return true;
+    };
+    if m.attributes
+        .0
+        .iter()
+        .take(mi_idx)
+        .any(|attr| attr.typ == ATTR_FINGERPRINT)
+    {
+        return false;
+    }
+    if m.attributes.0.get(mi_idx + 1).map(|a| a.typ) == Some(ATTR_FINGERPRINT) {
+        truncate_message_attributes(m, mi_idx + 2);
+        if FINGERPRINT.check(m).is_err() {
+            return false;
+        }
+    } else {
+        truncate_message_attributes(m, mi_idx + 1);
+    }
+    true
+}
+
 fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bool {
     let ignore_port = m.typ.method == METHOD_CREATE_PERMISSION;
     for attr in &m.attributes.0 {
+        if attr.typ == ATTR_MESSAGE_INTEGRITY {
+            break;
+        }
         if attr.typ != ATTR_XOR_PEER_ADDRESS {
             continue;
         }
@@ -682,11 +768,53 @@ const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
     }
 }
 
+async fn relay_packet_handler(
+    alloc: Arc<Allocation>,
+    relay_conn: Arc<PolicyRelayConn>,
+    turn_socket: Arc<dyn Conn + Send + Sync>,
+    client_addr: SocketAddr,
+) {
+    let mut buffer = vec![0u8; INBOUND_MTU];
+    while let Ok((n, src_addr)) = relay_conn.recv_datagram(&mut buffer).await {
+        let Some(payload) = buffer.get(..n) else {
+            continue;
+        };
+        if let Some(number) = alloc.get_channel_number(&src_addr).await {
+            let mut channel_data = ChannelData {
+                data: payload.to_vec(),
+                number,
+                raw: Vec::new(),
+            };
+            channel_data.encode();
+            let _ = turn_socket.send_to(&channel_data.raw, client_addr).await;
+        } else if alloc.has_permission(&src_addr).await {
+            let peer_address_attr = PeerAddress {
+                ip: src_addr.ip(),
+                port: src_addr.port(),
+            };
+            let data_attr = Data(payload.to_vec());
+            let mut msg = Message::new();
+            if msg
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_DATA, CLASS_INDICATION)),
+                    Box::new(peer_address_attr),
+                    Box::new(data_attr),
+                ])
+                .is_ok()
+            {
+                let _ = turn_socket.send_to(&msg.raw, client_addr).await;
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocation_manager: &Manager,
     require_even_port: &AtomicBool,
+    last_allocated_conn: &SyncMutex<Option<Arc<PolicyRelayConn>>>,
     allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
@@ -870,6 +998,9 @@ async fn handle_authenticated_allocate(
         lifetime_duration = lifetime.0;
     }
 
+    *last_allocated_conn
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = None;
     require_even_port.store(need_even_port, Ordering::Release);
     let create_res = allocation_manager
         .create_allocation(
@@ -882,8 +1013,12 @@ async fn handle_authenticated_allocate(
         )
         .await;
     require_even_port.store(false, Ordering::Release);
+    let allocated_relay_conn = last_allocated_conn
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
 
-    if create_res.is_err() {
+    let Ok(alloc) = create_res else {
         send_authenticated_error(
             conn,
             src_addr,
@@ -895,6 +1030,15 @@ async fn handle_authenticated_allocate(
         )
         .await;
         return;
+    };
+
+    if let Some(relay_conn) = allocated_relay_conn {
+        tokio::spawn(relay_packet_handler(
+            Arc::clone(&alloc),
+            relay_conn,
+            Arc::clone(conn),
+            src_addr,
+        ));
     }
 
     let Some(alloc_info) = allocation_manager
@@ -952,6 +1096,9 @@ async fn handle_authenticated_create_permission(
     let mut peer_addrs = Vec::new();
     let mut malformed = false;
     for attr in &m.attributes.0 {
+        if attr.typ == ATTR_MESSAGE_INTEGRITY {
+            break;
+        }
         if attr.typ != ATTR_XOR_PEER_ADDRESS {
             continue;
         }
@@ -1078,10 +1225,12 @@ impl TurnServer {
         ));
         let relay_is_ipv4 = relay_bind_ip_is_ipv4(&config.relay);
         let require_even_port = Arc::new(AtomicBool::new(false));
+        let last_allocated_conn = Arc::new(SyncMutex::new(None));
         let relay_addr_generator = Box::new(PolicyRelayAddressGenerator::new(
             config.relay,
             config.peer_policy,
             Arc::clone(&require_even_port),
+            Arc::clone(&last_allocated_conn),
         ));
         let allocation_manager = Arc::new(Manager::new(ManagerConfig {
             relay_addr_generator,
@@ -1106,6 +1255,7 @@ impl TurnServer {
             config.max_nonces.max(1),
             relay_is_ipv4,
             require_even_port,
+            last_allocated_conn,
             command_rx,
         ));
 
@@ -1132,6 +1282,7 @@ impl TurnServer {
         max_nonces: usize,
         relay_is_ipv4: bool,
         require_even_port: Arc<AtomicBool>,
+        last_allocated_conn: Arc<SyncMutex<Option<Arc<PolicyRelayConn>>>>,
         mut command_rx: broadcast::Receiver<ServerCommand>,
     ) {
         let mut buf = vec![0u8; INBOUND_MTU];
@@ -1191,6 +1342,9 @@ impl TurnServer {
                 ..Default::default()
             };
             let is_stun_msg = decoded_msg.decode().is_ok();
+            if is_stun_msg && !sanitize_authenticated_message(&mut decoded_msg) {
+                continue;
+            }
             let five_tuple = FiveTuple {
                 src_addr: addr,
                 dst_addr: local_dst_addr,
@@ -1254,6 +1408,7 @@ impl TurnServer {
                                 &recording_conn_dyn,
                                 &allocation_manager,
                                 &require_even_port,
+                                &last_allocated_conn,
                                 &mut allocate_responses,
                                 five_tuple,
                                 addr,
@@ -1327,11 +1482,16 @@ impl TurnServer {
             };
             let before_nonce_keys: HashSet<String> = client_nonces.keys().cloned().collect();
             let req_nonces = Arc::new(Mutex::new(client_nonces));
+            let request_buff = if is_stun_msg {
+                decoded_msg.raw.clone()
+            } else {
+                payload.to_vec()
+            };
 
             let mut r = Request {
                 conn: Arc::clone(&recording_conn_dyn),
                 src_addr: addr,
-                buff: payload.to_vec(),
+                buff: request_buff,
                 allocation_manager: Arc::clone(&allocation_manager),
                 nonces: Arc::clone(&req_nonces),
                 auth_handler: Arc::clone(&auth_handler)
