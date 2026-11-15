@@ -849,6 +849,7 @@ async fn handle_authenticated_allocate(
     last_allocated_conn: &SyncMutex<Option<Arc<PolicyRelayConn>>>,
     allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
     permission_tracker: &mut HashMap<FiveTuple, HashSet<IpAddr>>,
+    max_allocations: usize,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
     m: &Message,
@@ -1031,6 +1032,20 @@ async fn handle_authenticated_allocate(
     let mut lifetime = Lifetime::default();
     if lifetime.get_from(m).is_ok() && lifetime.0 < MAXIMUM_ALLOCATION_LIFETIME {
         lifetime_duration = lifetime.0;
+    }
+
+    if allocation_manager.get_allocations_info(None).await.len() >= max_allocations {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Allocation Capacity Reached",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
     }
 
     *last_allocated_conn
@@ -1264,7 +1279,7 @@ async fn handle_authenticated_channel_bind(
 
     let mut channel = ChannelNumber::default();
     let mut peer_addr = PeerAddress::default();
-    if channel.get_from(m).is_err() || peer_addr.get_from(m).is_err() {
+    if channel.get_from(m).is_err() || !channel.valid() || peer_addr.get_from(m).is_err() {
         send_authenticated_error(
             conn,
             src_addr,
@@ -1434,6 +1449,7 @@ impl TurnServer {
             channel_bind_timeout,
             config.peer_policy,
             config.max_nonces.max(1),
+            config.max_allocations.max(1),
             config.max_permissions_per_allocation.max(1),
             relay_is_ipv4,
             require_even_port,
@@ -1462,6 +1478,7 @@ impl TurnServer {
         channel_bind_timeout: Duration,
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
+        max_allocations: usize,
         max_permissions_per_allocation: usize,
         relay_is_ipv4: bool,
         require_even_port: Arc<AtomicBool>,
@@ -1596,6 +1613,7 @@ impl TurnServer {
                                 &last_allocated_conn,
                                 &mut allocate_responses,
                                 &mut permission_tracker,
+                                max_allocations,
                                 five_tuple,
                                 addr,
                                 &decoded_msg,

@@ -31,6 +31,15 @@ pub enum TurnError {
         /// Configured maximum relay port.
         max_port: u16,
     },
+
+    /// Configured advertised `relay_ip` and local `bind_ip` belong to different address families.
+    #[error("Relay address family mismatch: relay_ip={relay_ip}, bind_ip={bind_ip}")]
+    RelayAddressFamilyMismatch {
+        /// Configured external/advertised relay IP.
+        relay_ip: std::net::IpAddr,
+        /// Configured local relay socket bind IP.
+        bind_ip: std::net::IpAddr,
+    },
 }
 
 /// Result alias for `rings-turn`.

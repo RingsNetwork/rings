@@ -25,6 +25,9 @@ pub const DEFAULT_PORT_RANGE_MAX_RETRIES: u16 = 32;
 /// Default maximum number of active TURN nonce challenges stored concurrently.
 pub const DEFAULT_MAX_NONCES: usize = 4096;
 
+/// Default maximum number of active TURN relay allocations stored concurrently.
+pub const DEFAULT_MAX_ALLOCATIONS: usize = 1024;
+
 /// Default maximum number of active peer IP permissions per TURN allocation.
 pub const DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION: usize = 64;
 
@@ -212,21 +215,36 @@ impl RelayAddressConfig {
         }
     }
 
-    /// Validate port-range invariants before starting the TURN server.
+    /// Validate address-family and port-range invariants before starting the TURN server.
     ///
     /// A configured range must satisfy `0 < min_port < max_port` so `[min_port, max_port]`
     /// contains at least one even and one odd port (required to service `EVEN-PORT` requests
-    /// without stalling).
+    /// without stalling), and `relay_ip` must match the IP version of `bind_ip`.
     pub fn validate(&self) -> Result<()> {
-        if let Self::Range {
-            min_port, max_port, ..
-        } = *self
-        {
-            if min_port == 0 || max_port == 0 || min_port >= max_port {
-                return Err(TurnError::InvalidPortRange { min_port, max_port });
+        match *self {
+            Self::None { .. } => Ok(()),
+            Self::Static { relay_ip, bind_ip } => {
+                if relay_ip.is_ipv4() != bind_ip.is_ipv4() {
+                    return Err(TurnError::RelayAddressFamilyMismatch { relay_ip, bind_ip });
+                }
+                Ok(())
+            }
+            Self::Range {
+                relay_ip,
+                bind_ip,
+                min_port,
+                max_port,
+                ..
+            } => {
+                if relay_ip.is_ipv4() != bind_ip.is_ipv4() {
+                    return Err(TurnError::RelayAddressFamilyMismatch { relay_ip, bind_ip });
+                }
+                if min_port == 0 || max_port == 0 || min_port >= max_port {
+                    return Err(TurnError::InvalidPortRange { min_port, max_port });
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 }
 
@@ -245,6 +263,8 @@ pub struct TurnServerConfig {
     pub peer_policy: RelayPeerPolicy,
     /// Maximum number of active TURN nonce challenges retained concurrently.
     pub max_nonces: usize,
+    /// Maximum number of active TURN relay allocations retained concurrently.
+    pub max_allocations: usize,
     /// Maximum number of active peer IP permissions retained concurrently per allocation.
     pub max_permissions_per_allocation: usize,
     /// ChannelBind lifetime (`Duration::ZERO` uses the RFC 5766 default of 10 minutes).
@@ -264,6 +284,7 @@ impl std::fmt::Debug for TurnServerConfig {
             .field("relay", &self.relay)
             .field("peer_policy", &self.peer_policy)
             .field("max_nonces", &self.max_nonces)
+            .field("max_allocations", &self.max_allocations)
             .field(
                 "max_permissions_per_allocation",
                 &self.max_permissions_per_allocation,
@@ -283,6 +304,7 @@ impl Default for TurnServerConfig {
             relay: RelayAddressConfig::default(),
             peer_policy: RelayPeerPolicy::PublicOnly,
             max_nonces: DEFAULT_MAX_NONCES,
+            max_allocations: DEFAULT_MAX_ALLOCATIONS,
             max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::default(),
@@ -306,6 +328,7 @@ impl TurnServerConfig {
             },
             peer_policy: RelayPeerPolicy::AllowLocalAndPrivate,
             max_nonces: DEFAULT_MAX_NONCES,
+            max_allocations: DEFAULT_MAX_ALLOCATIONS,
             max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::AllowAnyDelegation,

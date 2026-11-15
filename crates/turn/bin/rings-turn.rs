@@ -2,6 +2,7 @@
 
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use rings_turn::RelayPeerPolicy;
 use rings_turn::TurnAdmissionPolicy;
 use rings_turn::TurnServer;
 use rings_turn::TurnServerConfig;
+use rings_turn::DEFAULT_MAX_ALLOCATIONS;
 use rings_turn::DEFAULT_MAX_NONCES;
 use rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 use rings_turn::DEFAULT_PORT_RANGE_MAX_RETRIES;
@@ -73,6 +75,14 @@ struct Cli {
     )]
     max_nonces: usize,
 
+    /// Maximum number of active TURN relay allocations stored concurrently.
+    #[arg(
+        long,
+        env = "RINGS_TURN_MAX_ALLOCATIONS",
+        default_value_t = DEFAULT_MAX_ALLOCATIONS
+    )]
+    max_allocations: usize,
+
     /// Maximum number of active peer IP permissions per TURN allocation.
     #[arg(
         long,
@@ -111,12 +121,10 @@ impl Cli {
         };
 
         let bind_ip = self.relay_bind_ip.unwrap_or_else(|| self.listen.ip());
-        let relay_ip = self.public_ip.unwrap_or_else(|| {
-            if self.listen.ip().is_unspecified() {
-                IpAddr::V4(Ipv4Addr::LOCALHOST)
-            } else {
-                self.listen.ip()
-            }
+        let relay_ip = self.public_ip.unwrap_or_else(|| match bind_ip {
+            ip if !ip.is_unspecified() => ip,
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
         });
 
         let relay = match (self.min_port, self.max_port) {
@@ -156,6 +164,7 @@ impl Cli {
             relay,
             peer_policy,
             max_nonces: self.max_nonces.max(1),
+            max_allocations: self.max_allocations.max(1),
             max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
@@ -210,5 +219,32 @@ async fn main() {
     if let Err(error) = server.close().await {
         tracing::error!(%error, "error while closing rings-turn server");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_into_config_preserves_wildcard_listener_address_family() {
+        let v6_cli = Cli::parse_from(["rings-turn", "--listen", "[::]:3478"]);
+        let v6_config = v6_cli
+            .into_config()
+            .expect("IPv6 wildcard listener config should be valid");
+        assert_eq!(v6_config.relay, RelayAddressConfig::Static {
+            relay_ip: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            bind_ip: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+        });
+
+        let mismatched_cli = Cli::parse_from([
+            "rings-turn",
+            "--listen",
+            "[::]:3478",
+            "--public-ip",
+            "127.0.0.1",
+        ]);
+        assert!(mismatched_cli.into_config().is_err());
     }
 }

@@ -24,6 +24,7 @@ pub use auth::DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY;
 pub use config::RelayAddressConfig;
 pub use config::RelayPeerPolicy;
 pub use config::TurnServerConfig;
+pub use config::DEFAULT_MAX_ALLOCATIONS;
 pub use config::DEFAULT_MAX_NONCES;
 pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
@@ -66,6 +67,7 @@ mod tests {
     use stun::attributes::ATTR_USERNAME;
     use stun::error_code::ErrorCodeAttribute;
     use stun::error_code::CODE_ADDR_FAMILY_NOT_SUPPORTED;
+    use stun::error_code::CODE_BAD_REQUEST;
     use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
     use stun::fingerprint::FINGERPRINT;
     use stun::integrity::MessageIntegrity;
@@ -1267,6 +1269,7 @@ mod tests {
     async fn turn_server_bounds_permissions_preserves_reallocated_five_tuple_and_honors_default_ipv4_family(
     ) -> Result<()> {
         let mut config = TurnServerConfig::loopback_ephemeral();
+        config.max_allocations = 1;
         config.max_permissions_per_allocation = 2;
         let server_pubkey = config.server_key.pubkey();
         let server = TurnServer::start(config).await?;
@@ -1543,6 +1546,90 @@ mod tests {
         assert_eq!(chbind_third_resp.typ.class, CLASS_ERROR_RESPONSE);
         let mut err_code = ErrorCodeAttribute::default();
         err_code.get_from(&chbind_third_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+
+        // An out-of-range channel number (0x0001) must be rejected with 400 Bad Request.
+        let chbind_invalid_num_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                Box::new(ChannelNumber(0x0001)),
+                Box::new(PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+                    port: 4001,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        client_socket
+            .send_to(&chbind_invalid_num_raw, server_addr)
+            .await?;
+        let (n, _) = client_socket.recv_from(&mut recv_buf).await?;
+        let mut chbind_invalid_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        chbind_invalid_resp.decode().unwrap();
+        assert_eq!(chbind_invalid_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&chbind_invalid_resp).unwrap();
+        assert!(err_code.code == CODE_BAD_REQUEST);
+
+        // A second concurrent client socket must be rejected with 508 when max_allocations = 1.
+        let second_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        second_socket
+            .send_to(&unauth_alloc_raw, server_addr)
+            .await?;
+        let (n, _) = second_socket.recv_from(&mut recv_buf).await?;
+        let mut second_challenge = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        second_challenge.decode().unwrap();
+        let mut second_nonce = Nonce::new(ATTR_NONCE, String::new());
+        second_nonce.get_from(&second_challenge).unwrap();
+        let second_alloc_raw = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, second_nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        second_socket
+            .send_to(&second_alloc_raw, server_addr)
+            .await?;
+        let (n, _) = second_socket.recv_from(&mut recv_buf).await?;
+        let mut second_alloc_resp = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        second_alloc_resp.decode().unwrap();
+        assert_eq!(second_alloc_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&second_alloc_resp).unwrap();
         assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
 
         server.close().await?;
