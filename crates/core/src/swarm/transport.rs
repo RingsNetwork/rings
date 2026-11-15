@@ -199,6 +199,7 @@ pub(crate) struct SwarmTransportParts {
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
+    raw_ice_servers: String,
     transport: Transport,
     delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
@@ -349,10 +350,15 @@ impl SwarmTransport {
             rng,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
+        let raw_ice_servers = webrtc.ice_servers;
+        let signed_ice_servers = delegatee_key
+            .sign_ice_servers(&raw_ice_servers)
+            .unwrap_or_else(|_| raw_ice_servers.clone());
         Self {
             network_id,
+            raw_ice_servers,
             transport: Transport::new(
-                &webrtc.ice_servers,
+                &signed_ice_servers,
                 webrtc.external_address,
                 webrtc.udp_port_range,
             ),
@@ -575,6 +581,9 @@ impl SwarmTransport {
             crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
         if next_horizon <= current_horizon {
             return Err(Error::DelegationExpiresWithinMargin);
+        }
+        if let Ok(signed_ice_servers) = delegatee_key.sign_ice_servers(&self.raw_ice_servers) {
+            self.transport.set_ice_servers(&signed_ice_servers);
         }
         *current = delegatee_key;
         Ok(())

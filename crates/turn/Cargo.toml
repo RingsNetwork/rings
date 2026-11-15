@@ -1,0 +1,37 @@
+[package]
+name = "rings-turn"
+default-run = "rings-turn"
+description = "Signature-authenticated TURN server for Rings Network using Delegation credentials"
+readme = "README.md"
+keywords = ["turn", "webrtc", "p2p", "delegation", "rings"]
+categories = ["network-programming", "cryptography"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["cli"]
+cli = ["dep:clap", "dep:tracing-subscriber"]
+
+[dependencies]
+async-trait = { workspace = true }
+clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
+rings-core = { workspace = true, features = ["default"] }
+serde = { version = "1.0.136", features = ["derive"] }
+thiserror = "1"
+tokio = { version = "1.32.0", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.15", features = ["ansi", "env-filter"], optional = true }
+turn = "0.17.1"
+webrtc-util = "0.17.1"
+
+[[bin]]
+name = "rings-turn"
+path = "bin/rings-turn.rs"
+required-features = ["cli"]

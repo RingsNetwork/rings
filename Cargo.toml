@@ -35,6 +35,7 @@ rings-rpc = { path = "crates/rpc", version = "1.0.0-pre.3", default-features = f
 rings-runtime = { path = "crates/runtime", version = "1.0.0-pre.3", default-features = false }
 rings-test-support = { path = "crates/test-support" }
 rings-transport = { path = "crates/transport", version = "1.0.0-pre.3", default-features = false }
+rings-turn = { path = "crates/turn", version = "1.0.0-pre.3" }
 serde-wasm-bindgen = "0.6.5"
 wasm-bindgen = "0.2.121"
 wasm-bindgen-futures = "0.4.71"

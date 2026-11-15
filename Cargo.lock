@@ -4177,6 +4177,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-turn"
+version = "1.0.0-pre.3"
+dependencies = [
+ "async-trait",
+ "clap",
+ "rings-core",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "turn",
+ "webrtc-util",
+]
+
+[[package]]
 name = "rings-webview"
 version = "1.0.0-pre.3"
 dependencies = [

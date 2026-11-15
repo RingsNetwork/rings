@@ -106,10 +106,10 @@ and defaults to the value shown above (or `null` / empty when omitted by `rings 
   `rings init` leaves this unset so the account private key is not stored unless the operator opts
   into online renewal; see [Delegations and keys](../cli.md#delegations-and-keys).
 * `ice_servers` *(required)*: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
-  STUN is ordinary discovery; TURN is optional and never a gateway prerequisite.
+  STUN is ordinary discovery; TURN is optional (needed when both peers are behind Symmetric NATs or UDP-restricted firewalls) and never a gateway prerequisite. Bare `turn://` URLs without `user:pass@` are automatically signed with the node's `delegator_key` (non-expiring direct DID signature) or `delegatee_key` (`Delegation` signature) for [`rings-turn`](../turn-server.md), while explicit `user:pass@` credentials are preserved for third-party TURN servers.
 
   ```yaml
-  ice_servers: turn://user:pass@turn.example.org:3478;stun://stun.l.google.com:19302
+  ice_servers: stun://stun.l.google.com:19302;turn://turn.example.org:3478
   ```
 
 * `stabilize_interval` *(required)*: seconds between Chord stabilization rounds.

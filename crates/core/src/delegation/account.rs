@@ -61,6 +61,11 @@ impl TryFrom<(String, String)> for Account {
 }
 
 impl Account {
+    /// Return the [`Did`] represented by this account.
+    pub fn did(&self) -> Did {
+        self.account_verifier().did()
+    }
+
     pub(super) fn account_verifier(&self) -> AccountVerifier {
         match self {
             Self::Secp256k1(did) => AccountVerifier::Recoverable {
@@ -80,6 +85,25 @@ impl Account {
             }
             Self::Ed25519(pk) => AccountVerifier::PublicKey(VerificationPublicKey::Ed25519(*pk)),
             Self::Bls12381(pk) => AccountVerifier::PublicKey(VerificationPublicKey::Bls12381(*pk)),
+        }
+    }
+}
+
+impl From<Did> for Account {
+    fn from(did: Did) -> Self {
+        Self::Secp256k1(did)
+    }
+}
+
+impl From<VerificationPublicKey> for Account {
+    fn from(public_key: VerificationPublicKey) -> Self {
+        match public_key {
+            VerificationPublicKey::Secp256k1(pk) => Self::Secp256k1(pk.address().into()),
+            VerificationPublicKey::Eip191(pk) => Self::EIP191(pk.address().into()),
+            VerificationPublicKey::Bip137(pk) => Self::BIP137(pk.address().into()),
+            VerificationPublicKey::Secp256r1(pk) => Self::Secp256r1(pk),
+            VerificationPublicKey::Ed25519(pk) => Self::Ed25519(pk),
+            VerificationPublicKey::Bls12381(pk) => Self::Bls12381(pk),
         }
     }
 }

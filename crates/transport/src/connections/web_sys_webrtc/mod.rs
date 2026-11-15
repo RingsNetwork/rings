@@ -303,7 +303,7 @@ impl Drop for WebSysWebrtcConnection {
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebSysWebrtcTransport {
-    ice_servers: Vec<IceServer>,
+    ice_servers: RefCell<Vec<IceServer>>,
     pool: Pool<WebSysWebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -415,10 +415,16 @@ impl WebSysWebrtcTransport {
         let ice_servers = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
 
         Self {
-            ice_servers,
+            ice_servers: RefCell::new(ice_servers),
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
         }
+    }
+
+    /// Replace the ICE server list used for subsequent peer connections.
+    pub fn set_ice_servers(&self, ice_servers: &str) {
+        let parsed = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
+        *self.ice_servers.borrow_mut() = parsed;
     }
 }
 
@@ -724,8 +730,13 @@ impl TransportInterface for WebSysWebrtcTransport {
         // Setup webrtc connection env
         //
         let config = RtcConfiguration::new();
-        let ice_servers: js_sys::Array =
-            js_sys::Array::from_iter(self.ice_servers.iter().cloned().map(RtcIceServer::from));
+        let ice_servers: js_sys::Array = js_sys::Array::from_iter(
+            self.ice_servers
+                .borrow()
+                .iter()
+                .cloned()
+                .map(RtcIceServer::from),
+        );
         config.set_ice_servers(&ice_servers.into());
 
         //

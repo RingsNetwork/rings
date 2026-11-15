@@ -50,6 +50,7 @@ mod builder;
 mod digest;
 mod model;
 mod signing_key;
+mod turn_auth;
 
 pub use account::Account;
 pub use builder::DelegationBuilder;
@@ -57,6 +58,14 @@ pub use digest::DelegationDigest;
 pub use model::Delegation;
 pub(crate) use model::DelegatorAuthorization;
 pub use signing_key::DelegateeKey;
+pub use turn_auth::pack_turn_account_auth;
+pub use turn_auth::pack_turn_auth;
+pub use turn_auth::pack_turn_did_auth;
+pub use turn_auth::TurnAuthIdentity;
+pub use turn_auth::TurnCredentials;
+pub use turn_auth::VerifiedTurnAuth;
+pub use turn_auth::MAX_STUN_USERNAME_BYTES;
+pub use turn_auth::TURN_AUTH_DOMAIN;
 
 #[cfg(test)]
 mod test_delegation;

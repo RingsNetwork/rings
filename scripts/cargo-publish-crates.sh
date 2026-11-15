@@ -6,14 +6,14 @@ set -euo pipefail
 # `rings-aez`, `rings-network-policy`, `rings-dns-relay`, and `rings-gateway` must ship
 # before their dependents; `rings-webview` depends on `rings-network-policy` and has no
 # workspace dependents.
-DEFAULT_CRATES="rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-rpc rings-node"
+DEFAULT_CRATES="rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-turn rings-rpc rings-node"
 CRATES="${RINGS_PUBLISH_CRATES:-$DEFAULT_CRATES}"
 
 # Internal crates that appear as `{ workspace = true }` dependencies of a publishable
 # crate; used to validate workspace dependency metadata and to gate publishing on
 # crates.io indexing. `rings-webview` is omitted: it is published but never depended on,
 # so it has no `[workspace.dependencies]` entry to validate.
-DEFAULT_INTERNAL_CRATES="rings-aez rings-codec rings-core rings-derive rings-dns-relay rings-gateway rings-measure rings-network-policy rings-node rings-rpc rings-runtime rings-transport"
+DEFAULT_INTERNAL_CRATES="rings-aez rings-codec rings-core rings-derive rings-dns-relay rings-gateway rings-measure rings-network-policy rings-node rings-rpc rings-runtime rings-transport rings-turn"
 INTERNAL_CRATES="${RINGS_INTERNAL_CRATES:-$DEFAULT_INTERNAL_CRATES}"
 ROOT_MANIFEST="Cargo.toml"
 
@@ -41,6 +41,7 @@ manifest_for() {
     rings-rpc) echo "crates/rpc/Cargo.toml" ;;
     rings-runtime) echo "crates/runtime/Cargo.toml" ;;
     rings-transport) echo "crates/transport/Cargo.toml" ;;
+    rings-turn) echo "crates/turn/Cargo.toml" ;;
     rings-webview) echo "crates/webview/Cargo.toml" ;;
     *) echo "unknown crate: $1" >&2; return 1 ;;
   esac
