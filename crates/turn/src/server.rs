@@ -62,9 +62,6 @@ use stun::textattrs::Username;
 use stun::uattrs::UnknownAttributes;
 use stun::xoraddr::XorMappedAddress;
 use tokio::net::UdpSocket;
-use tokio::sync::broadcast;
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -533,11 +530,6 @@ impl Conn for RecordingConn {
     }
 }
 
-#[derive(Clone)]
-enum ServerCommand {
-    Close(Arc<mpsc::Receiver<()>>),
-}
-
 fn generate_nonce() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill(&mut bytes);
@@ -897,6 +889,53 @@ async fn remove_allocation_if_current(
     }
 }
 
+async fn try_expire_allocation_if_current(
+    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+    alloc: &Arc<ManagedAllocation>,
+) -> bool {
+    let should_close = {
+        let mut guard = allocations.lock().await;
+        match guard.get(&alloc.five_tuple) {
+            Some(current) if Arc::ptr_eq(current, alloc) => {
+                if !current.is_expired() {
+                    return false;
+                }
+                guard.remove(&alloc.five_tuple);
+                true
+            }
+            _ => return true,
+        }
+    };
+    if should_close {
+        alloc.close().await;
+    }
+    true
+}
+
+async fn try_refresh_allocation(
+    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+    alloc: &Arc<ManagedAllocation>,
+    lifetime: Duration,
+) -> bool {
+    let expired_to_close = {
+        let mut guard = allocations.lock().await;
+        match guard.get(&alloc.five_tuple) {
+            Some(current) if Arc::ptr_eq(current, alloc) => {
+                if !current.is_expired() {
+                    current.refresh(lifetime);
+                    return true;
+                }
+                guard.remove(&alloc.five_tuple)
+            }
+            _ => None,
+        }
+    };
+    if let Some(expired) = expired_to_close {
+        expired.close().await;
+    }
+    false
+}
+
 async fn get_active_allocation(
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
     five_tuple: &FiveTuple,
@@ -949,15 +988,18 @@ async fn relay_packet_handler(
     loop {
         let deadline = *expiry_rx.borrow_and_update();
         if deadline <= Instant::now() {
-            break;
+            if try_expire_allocation_if_current(&allocations, &alloc).await {
+                return;
+            }
+            continue;
         }
         let sleep = tokio::time::sleep_until(deadline);
         tokio::pin!(sleep);
 
         tokio::select! {
             _ = &mut sleep => {
-                if *expiry_rx.borrow() <= Instant::now() {
-                    break;
+                if try_expire_allocation_if_current(&allocations, &alloc).await {
+                    return;
                 }
             }
             changed = expiry_rx.changed() => {
@@ -970,7 +1012,10 @@ async fn relay_packet_handler(
                     break;
                 };
                 if *expiry_rx.borrow() <= Instant::now() {
-                    break;
+                    if try_expire_allocation_if_current(&allocations, &alloc).await {
+                        return;
+                    }
+                    continue;
                 }
                 let Some(payload) = buffer.get(..n) else {
                     continue;
@@ -1318,8 +1363,19 @@ async fn handle_authenticated_refresh(
     if lifetime_duration.is_zero() {
         allocate_responses.remove(&alloc.five_tuple);
         remove_allocation_if_current(allocations, &alloc).await;
-    } else {
-        alloc.refresh(lifetime_duration);
+    } else if !try_refresh_allocation(allocations, &alloc, lifetime_duration).await {
+        allocate_responses.remove(&alloc.five_tuple);
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_ALLOC_MISMATCH,
+            b"Allocation Mismatch",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
     }
 
     let built = {
@@ -1567,7 +1623,8 @@ pub struct TurnServer {
     auth_handler: Arc<DelegationAuthHandler>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     nonces: Arc<Mutex<HashMap<String, (SocketAddr, Instant)>>>,
-    command_tx: Mutex<Option<broadcast::Sender<ServerCommand>>>,
+    shutdown_tx: watch::Sender<bool>,
+    done_rx: watch::Receiver<bool>,
 }
 
 impl TurnServer {
@@ -1614,7 +1671,8 @@ impl TurnServer {
         ));
         let allocations = Arc::new(Mutex::new(HashMap::new()));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
-        let (command_tx, command_rx) = broadcast::channel(16);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (done_tx, done_rx) = watch::channel(false);
         let channel_bind_timeout = if config.channel_bind_timeout.is_zero() {
             DEFAULT_LIFETIME
         } else {
@@ -1634,7 +1692,8 @@ impl TurnServer {
             config.max_allocations.max(1),
             config.max_permissions_per_allocation.max(1),
             relay_is_ipv4,
-            command_rx,
+            shutdown_rx,
+            done_tx,
         ));
 
         Ok(Self {
@@ -1644,7 +1703,8 @@ impl TurnServer {
             auth_handler,
             allocations,
             nonces,
-            command_tx: Mutex::new(Some(command_tx)),
+            shutdown_tx,
+            done_rx,
         })
     }
 
@@ -1662,37 +1722,23 @@ impl TurnServer {
         max_allocations: usize,
         max_permissions_per_allocation: usize,
         relay_is_ipv4: bool,
-        mut command_rx: broadcast::Receiver<ServerCommand>,
+        mut shutdown_rx: watch::Receiver<bool>,
+        done_tx: watch::Sender<bool>,
     ) {
         let mut buf = vec![0u8; INBOUND_MTU];
-        let (close_tx, mut close_rx) = oneshot::channel::<Option<Arc<mpsc::Receiver<()>>>>();
-
-        tokio::spawn(async move {
-            loop {
-                match command_rx.recv().await {
-                    Ok(ServerCommand::Close(closed_rx)) => {
-                        let _ = close_tx.send(Some(closed_rx));
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        let _ = close_tx.send(None);
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                }
-            }
-        });
-
         let Ok(local_dst_addr) = conn.local_addr() else {
+            let _ = done_tx.send_replace(true);
             return;
         };
         let recording_conn = Arc::new(RecordingConn::new(Arc::clone(&conn), local_dst_addr));
         let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
             Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
         let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
-        let mut closed_guard: Option<Arc<mpsc::Receiver<()>>> = None;
 
         loop {
+            if *shutdown_rx.borrow_and_update() {
+                break;
+            }
             let (n, addr) = tokio::select! {
                 v = recording_conn.recv_from(&mut buf) => {
                     match v {
@@ -1707,9 +1753,11 @@ impl TurnServer {
                         }
                     }
                 }
-                res = &mut close_rx => {
-                    closed_guard = res.ok().flatten();
-                    break;
+                res = shutdown_rx.changed() => {
+                    if res.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                    continue;
                 }
             };
 
@@ -1963,7 +2011,7 @@ impl TurnServer {
         delete_all_allocations(&allocations).await;
         recording_conn.shutdown_listener().await;
         drop(conn);
-        drop(closed_guard);
+        let _ = done_tx.send_replace(true);
     }
 
     /// Return the local UDP [`SocketAddr`] this TURN server is bound to.
@@ -2074,17 +2122,9 @@ impl TurnServer {
 
     /// Gracefully stop the TURN server and close all managed connections and relay allocations.
     pub async fn close(&self) -> Result<()> {
-        let tx = {
-            let mut command_tx = self.command_tx.lock().await;
-            command_tx.take()
-        };
-        if let Some(tx) = tx {
-            if tx.receiver_count() > 0 {
-                let (closed_tx, closed_rx) = mpsc::channel(1);
-                let _ = tx.send(ServerCommand::Close(Arc::new(closed_rx)));
-                closed_tx.closed().await;
-            }
-        }
+        let _ = self.shutdown_tx.send_replace(true);
+        let mut done_rx = self.done_rx.clone();
+        let _ = done_rx.wait_for(|&done| done).await;
         delete_all_allocations(&self.allocations).await;
         Ok(())
     }

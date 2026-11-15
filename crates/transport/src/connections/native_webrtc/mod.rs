@@ -243,13 +243,13 @@ mod test_send_cancellation;
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
-    webrtc_conn: std::sync::RwLock<Arc<RTCPeerConnection>>,
+    webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
     configured_ice_servers: std::sync::RwLock<Vec<IceServer>>,
     transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
     negotiation_started: AtomicBool,
-    reconfigure_lock: Mutex<()>,
+    reconfigure_lock: Arc<Mutex<()>>,
     webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
@@ -465,13 +465,13 @@ impl WebrtcConnection {
         let retirement_fence =
             NativeRetirementFence::new(connection_state.clone(), cancel_token.clone());
         Self {
-            webrtc_conn: std::sync::RwLock::new(Arc::new(webrtc_conn)),
+            webrtc_conn: Arc::new(std::sync::RwLock::new(Arc::new(webrtc_conn))),
             configured_ice_servers: std::sync::RwLock::new(configured_ice_servers),
             transport_ice_servers,
             external_address,
             udp_port_range,
             negotiation_started: AtomicBool::new(false),
-            reconfigure_lock: Mutex::new(()),
+            reconfigure_lock: Arc::new(Mutex::new(())),
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             connection_state,
@@ -545,6 +545,20 @@ impl WebrtcConnection {
                 &self.connection_state,
             )
             .await?;
+            if self.cancel_token.is_cancelled()
+                || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
+            {
+                new_webrtc_conn.on_peer_connection_state_change(Box::new(|_| Box::pin(async {})));
+                new_webrtc_conn.on_data_channel(Box::new(|_| Box::pin(async {})));
+                for tracked in new_channels {
+                    tracked.delivery.close();
+                    tracked.channel.on_open(Box::new(|| Box::pin(async {})));
+                    tracked.channel.on_close(Box::new(|| Box::pin(async {})));
+                    tracked.channel.on_error(Box::new(|_| Box::pin(async {})));
+                }
+                let _ = new_webrtc_conn.close().await;
+                return Ok(());
+            }
             let old_channels = self.webrtc_data_channel.replace_all(new_channels)?;
             *self
                 .webrtc_conn
@@ -889,14 +903,40 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn close(&self) -> Result<()> {
         self.request_close();
-        let webrtc_conn = {
-            let _guard = self.reconfigure_lock.lock().await;
-            self.webrtc_conn()
-        };
-        close_native_connection(webrtc_conn, self.physical_close_completed.clone()).await
+        close_reconfigurable_native_connection(
+            Arc::clone(&self.reconfigure_lock),
+            Arc::clone(&self.webrtc_conn),
+            self.physical_close_completed.clone(),
+        )
+        .await
     }
 }
 
+async fn close_reconfigurable_native_connection(
+    reconfigure_lock: Arc<Mutex<()>>,
+    webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
+    physical_close_completed: PhysicalCloseCompletion,
+) -> Result<()> {
+    let runtime = native_send_runtime()?;
+    run_native_close_with_witness(
+        &runtime,
+        async move {
+            let connection = {
+                let _guard = reconfigure_lock.lock().await;
+                Arc::clone(
+                    &webrtc_conn
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                )
+            };
+            connection.close().await.map_err(Into::into)
+        },
+        physical_close_completed,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn close_native_connection(
     connection: Arc<RTCPeerConnection>,
     physical_close_completed: PhysicalCloseCompletion,
