@@ -201,6 +201,14 @@ impl Default for RelayAddressConfig {
 }
 
 impl RelayAddressConfig {
+    /// Return the external/advertised IP address configured for relay allocations.
+    pub const fn advertised_ip(&self) -> IpAddr {
+        match *self {
+            Self::None { bind_ip } => bind_ip,
+            Self::Static { relay_ip, .. } | Self::Range { relay_ip, .. } => relay_ip,
+        }
+    }
+
     /// Validate port-range invariants before starting the TURN server.
     ///
     /// A configured range must satisfy `0 < min_port < max_port` so `[min_port, max_port]`

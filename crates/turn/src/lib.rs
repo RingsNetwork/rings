@@ -802,4 +802,69 @@ mod tests {
         server.close().await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn turn_server_close_releases_sockets_and_advertises_public_url() -> Result<()> {
+        let mut config = TurnServerConfig::loopback_ephemeral();
+        config.listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        config.relay = RelayAddressConfig::Static {
+            relay_ip: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        };
+
+        let server = TurnServer::start(config).await?;
+        let bound_port = server.local_addr().port();
+        assert_eq!(
+            server.advertised_addr(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), bound_port)
+        );
+        let base_url = server.ice_server_base_url()?;
+        let pubkey_str = server.server_pubkey().to_base58_string().unwrap();
+        assert_eq!(
+            base_url,
+            format!("turn://203.0.113.10:{bound_port}?pubkey={pubkey_str}")
+        );
+        assert_eq!(
+            extract_turn_server_pubkey(&base_url),
+            Some(server.server_pubkey())
+        );
+
+        let local_target = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bound_port);
+        let client_key = SecretKey::random();
+        let creds = client_key.turn_credentials(server.server_pubkey())?;
+        let client_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let client = Client::new(ClientConfig {
+            stun_serv_addr: local_target.to_string(),
+            turn_serv_addr: local_target.to_string(),
+            username: creds.username,
+            password: creds.credential,
+            realm: String::new(),
+            software: String::new(),
+            rto_in_ms: 0,
+            conn: client_socket,
+            vnet: None,
+        })
+        .await?;
+        client.listen().await?;
+        let relay_conn = client.allocate().await?;
+        let relay_port = relay_conn.local_addr()?.port();
+
+        // Closing the server while `server` remains in scope must release both the listener
+        // socket and the allocated relay socket.
+        server.close().await?;
+        assert!(server.allocations_info(None).await?.is_empty());
+
+        let rebound_relay =
+            UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), relay_port)).await?;
+        drop(rebound_relay);
+        let rebound_listener = UdpSocket::bind(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            bound_port,
+        ))
+        .await?;
+        drop(rebound_listener);
+
+        let _ = client.close().await;
+        Ok(())
+    }
 }

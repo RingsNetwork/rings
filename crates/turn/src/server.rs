@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -31,6 +33,7 @@ use stun::message::Setter;
 use stun::message::CLASS_ERROR_RESPONSE;
 use stun::message::CLASS_INDICATION;
 use stun::message::CLASS_REQUEST;
+use stun::message::CLASS_SUCCESS_RESPONSE;
 use stun::message::METHOD_ALLOCATE;
 use stun::message::METHOD_CHANNEL_BIND;
 use stun::message::METHOD_CREATE_PERMISSION;
@@ -44,6 +47,7 @@ use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use turn::allocation::allocation_manager::Manager;
@@ -70,8 +74,33 @@ const INBOUND_MTU: usize = 1500;
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 
 struct PolicyRelayConn {
-    inner: Arc<dyn Conn + Send + Sync>,
+    inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
+    local_addr: SocketAddr,
     peer_policy: RelayPeerPolicy,
+    closed_notify: Notify,
+}
+
+impl PolicyRelayConn {
+    fn new(
+        inner: Arc<dyn Conn + Send + Sync>,
+        local_addr: SocketAddr,
+        peer_policy: RelayPeerPolicy,
+    ) -> Self {
+        Self {
+            inner: SyncMutex::new(Some(inner)),
+            local_addr,
+            peer_policy,
+            closed_notify: Notify::new(),
+        }
+    }
+
+    fn clone_inner(&self) -> webrtc_util::Result<Arc<dyn Conn + Send + Sync>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| webrtc_util::Error::Other("relay socket closed".to_string()))
+    }
 }
 
 #[async_trait]
@@ -82,16 +111,27 @@ impl Conn for PolicyRelayConn {
                 "relay destination address denied by policy".to_string(),
             ));
         }
-        self.inner.connect(addr).await
+        let inner = self.clone_inner()?;
+        inner.connect(addr).await
     }
 
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
-        self.inner.recv(buf).await
+        let notified = self.closed_notify.notified();
+        let inner = self.clone_inner()?;
+        tokio::select! {
+            _ = notified => Err(webrtc_util::Error::Other("relay socket closed".to_string())),
+            res = inner.recv(buf) => res,
+        }
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
         loop {
-            let (n, src_addr) = self.inner.recv_from(buf).await?;
+            let notified = self.closed_notify.notified();
+            let inner = self.clone_inner()?;
+            let (n, src_addr) = tokio::select! {
+                _ = notified => return Err(webrtc_util::Error::Other("relay socket closed".to_string())),
+                res = inner.recv_from(buf) => res?,
+            };
             if self.peer_policy.is_allowed_addr(src_addr) {
                 return Ok((n, src_addr));
             }
@@ -99,7 +139,8 @@ impl Conn for PolicyRelayConn {
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
-        self.inner.send(buf).await
+        let inner = self.clone_inner()?;
+        inner.send(buf).await
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
@@ -108,19 +149,33 @@ impl Conn for PolicyRelayConn {
                 "relay destination address denied by policy".to_string(),
             ));
         }
-        self.inner.send_to(buf, target).await
+        let inner = self.clone_inner()?;
+        inner.send_to(buf, target).await
     }
 
     fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
-        self.inner.local_addr()
+        Ok(self.local_addr)
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        self.inner.remote_addr()
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|c| c.remote_addr())
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {
-        self.inner.close().await
+        let taken = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        self.closed_notify.notify_waiters();
+        if let Some(inner) = taken {
+            let _ = inner.close().await;
+        }
+        Ok(())
     }
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
@@ -161,14 +216,16 @@ impl PolicyRelayAddressGenerator {
             .resolve_addr(use_ipv4, &format!("{bind_ip}:{port}"))
             .await?;
         let conn = self.net.bind(addr).await?;
-        let mut relay_addr = conn.local_addr()?;
+        let bound_local_addr = conn.local_addr()?;
+        let mut relay_addr = bound_local_addr;
         if let Some(relay_ip) = relay_ip_override {
             relay_addr.set_ip(relay_ip);
         }
-        let wrapped: Arc<dyn Conn + Send + Sync> = Arc::new(PolicyRelayConn {
-            inner: conn,
-            peer_policy: self.peer_policy,
-        });
+        let wrapped: Arc<dyn Conn + Send + Sync> = Arc::new(PolicyRelayConn::new(
+            conn,
+            bound_local_addr,
+            self.peer_policy,
+        ));
         Ok((wrapped, relay_addr))
     }
 }
@@ -288,32 +345,46 @@ impl RelayAddressGenerator for PolicyRelayAddressGenerator {
 }
 
 struct RecordingConn {
-    inner: Arc<dyn Conn + Send + Sync>,
-    recording: AtomicBool,
+    inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
+    local_addr: SocketAddr,
+    expected_target: SyncMutex<Option<(SocketAddr, TransactionId)>>,
     last_sent: SyncMutex<Option<Vec<u8>>>,
 }
 
 impl RecordingConn {
-    fn new(inner: Arc<dyn Conn + Send + Sync>) -> Self {
+    fn new(inner: Arc<dyn Conn + Send + Sync>, local_addr: SocketAddr) -> Self {
         Self {
-            inner,
-            recording: AtomicBool::new(false),
+            inner: SyncMutex::new(Some(inner)),
+            local_addr,
+            expected_target: SyncMutex::new(None),
             last_sent: SyncMutex::new(None),
         }
     }
 
-    fn set_recording(&self, enabled: bool) {
-        if enabled {
-            *self
-                .last_sent
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = None;
-        }
-        self.recording.store(enabled, Ordering::Release);
+    fn clone_inner(&self) -> webrtc_util::Result<Arc<dyn Conn + Send + Sync>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| webrtc_util::Error::Other("TURN listener closed".to_string()))
+    }
+
+    fn start_recording(&self, dst: SocketAddr, tx_id: TransactionId) {
+        *self
+            .last_sent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .expected_target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((dst, tx_id));
     }
 
     fn take_last_sent(&self) -> Option<Vec<u8>> {
-        self.recording.store(false, Ordering::Release);
+        *self
+            .expected_target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         self.last_sent
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -324,41 +395,74 @@ impl RecordingConn {
 #[async_trait]
 impl Conn for RecordingConn {
     async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
-        self.inner.connect(addr).await
+        let inner = self.clone_inner()?;
+        inner.connect(addr).await
     }
 
     async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
-        self.inner.recv(buf).await
+        let inner = self.clone_inner()?;
+        inner.recv(buf).await
     }
 
     async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
-        self.inner.recv_from(buf).await
+        let inner = self.clone_inner()?;
+        inner.recv_from(buf).await
     }
 
     async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
-        self.inner.send(buf).await
+        let inner = self.clone_inner()?;
+        inner.send(buf).await
     }
 
     async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
-        if self.recording.load(Ordering::Acquire) {
-            *self
-                .last_sent
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(buf.to_vec());
+        let expected = *self
+            .expected_target
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some((expected_dst, expected_tx_id)) = expected {
+            if target == expected_dst {
+                let mut candidate = Message {
+                    raw: buf.to_vec(),
+                    ..Default::default()
+                };
+                if candidate.decode().is_ok()
+                    && candidate.typ.class == CLASS_SUCCESS_RESPONSE
+                    && candidate.typ.method == METHOD_ALLOCATE
+                    && candidate.transaction_id == expected_tx_id
+                {
+                    *self
+                        .last_sent
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(buf.to_vec());
+                }
+            }
         }
-        self.inner.send_to(buf, target).await
+        let inner = self.clone_inner()?;
+        inner.send_to(buf, target).await
     }
 
     fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
-        self.inner.local_addr()
+        Ok(self.local_addr)
     }
 
     fn remote_addr(&self) -> Option<SocketAddr> {
-        self.inner.remote_addr()
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|c| c.remote_addr())
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {
-        self.inner.close().await
+        let taken = self
+            .inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(inner) = taken {
+            let _ = inner.close().await;
+        }
+        Ok(())
     }
 
     fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
@@ -533,9 +637,22 @@ async fn send_forbidden_error(
     }
 }
 
+async fn delete_all_allocations(allocation_manager: &Manager) {
+    let tuples: Vec<FiveTuple> = allocation_manager
+        .get_allocations_info(None)
+        .await
+        .into_keys()
+        .collect();
+    for five_tuple in tuples {
+        allocation_manager.delete_allocation(&five_tuple).await;
+    }
+    let _ = allocation_manager.close().await;
+}
+
 /// A running Rings TURN server backed by [`DelegationAuthHandler`].
 pub struct TurnServer {
     local_addr: SocketAddr,
+    advertised_addr: SocketAddr,
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     allocation_manager: Arc<Manager>,
@@ -550,6 +667,13 @@ impl TurnServer {
 
         let socket = UdpSocket::bind(config.listen_addr).await?;
         let local_addr = socket.local_addr()?;
+        let advertised_ip = match config.relay.advertised_ip() {
+            ip if !ip.is_unspecified() => ip,
+            _ if !local_addr.ip().is_unspecified() => local_addr.ip(),
+            IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        };
+        let advertised_addr = SocketAddr::new(advertised_ip, local_addr.port());
         let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
 
         let auth_handler = Arc::new(DelegationAuthHandler::with_server_key_and_clock(
@@ -592,6 +716,7 @@ impl TurnServer {
 
         Ok(Self {
             local_addr,
+            advertised_addr,
             realm: config.realm,
             auth_handler,
             allocation_manager,
@@ -636,7 +761,7 @@ impl TurnServer {
         let Ok(local_dst_addr) = conn.local_addr() else {
             return;
         };
-        let recording_conn = Arc::new(RecordingConn::new(Arc::clone(&conn)));
+        let recording_conn = Arc::new(RecordingConn::new(Arc::clone(&conn), local_dst_addr));
         let recording_conn_dyn: Arc<dyn Conn + Send + Sync> =
             Arc::clone(&recording_conn) as Arc<dyn Conn + Send + Sync>;
         let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
@@ -648,7 +773,7 @@ impl TurnServer {
             }
 
             let (n, addr) = tokio::select! {
-                v = conn.recv_from(&mut buf) => {
+                v = recording_conn.recv_from(&mut buf) => {
                     match v {
                         Ok(v) => v,
                         Err(err) => {
@@ -726,14 +851,14 @@ impl TurnServer {
                                 auth_handler.set_expected_allocation_owner(addr, None);
                                 if valid_retransmit {
                                     require_even_port.store(false, Ordering::Release);
-                                    let _ = conn.send_to(cached_resp, addr).await;
+                                    let _ = recording_conn.send_to(cached_resp, addr).await;
                                     continue;
                                 }
                             }
                         }
                     } else {
                         is_fresh_allocate = true;
-                        recording_conn.set_recording(true);
+                        recording_conn.start_recording(addr, decoded_msg.transaction_id);
                     }
                 } else {
                     require_even_port.store(false, Ordering::Release);
@@ -762,7 +887,7 @@ impl TurnServer {
                         addr,
                     ) {
                         auth_handler.set_expected_allocation_owner(addr, None);
-                        send_forbidden_error(&conn, addr, &decoded_msg, mi_key).await;
+                        send_forbidden_error(&recording_conn_dyn, addr, &decoded_msg, mi_key).await;
                         continue;
                     }
                 }
@@ -815,14 +940,21 @@ impl TurnServer {
             }
         }
 
-        let _ = allocation_manager.close().await;
-        let _ = conn.close().await;
+        alloc_close_rx.close();
+        delete_all_allocations(&allocation_manager).await;
+        let _ = recording_conn.close().await;
+        drop(conn);
         drop(closed_guard);
     }
 
     /// Return the local UDP [`SocketAddr`] this TURN server is bound to.
     pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Return the external/connectable UDP [`SocketAddr`] advertised for this TURN server.
+    pub const fn advertised_addr(&self) -> SocketAddr {
+        self.advertised_addr
     }
 
     /// Return the configured TURN authentication realm.
@@ -840,15 +972,15 @@ impl TurnServer {
         &self.auth_handler
     }
 
-    /// Return the unsigned `turn://<local_addr>?pubkey=<base58(server_pubkey)>` URL for this
+    /// Return the unsigned `turn://<advertised_addr>?pubkey=<base58(server_pubkey)>` URL for this
     /// server, suitable for passing to [`DelegateeKey::sign_ice_servers`] or
     /// [`SecretKey::sign_ice_servers`](rings_core::ecc::SecretKey::sign_ice_servers).
     pub fn ice_server_base_url(&self) -> Result<String> {
-        let base_url = format!("turn://{}", self.local_addr);
+        let base_url = format!("turn://{}", self.advertised_addr);
         Ok(format_turn_server_url(&base_url, self.server_pubkey())?)
     }
 
-    /// Build a complete signed `turn://<username>:<credential>@<local_addr>` URL for `delegatee_key`.
+    /// Build a complete signed `turn://<username>:<credential>@<advertised_addr>` URL for `delegatee_key`.
     pub fn ice_server_url_for(&self, delegatee_key: &DelegateeKey) -> Result<String> {
         let base_url = self.ice_server_base_url()?;
         Ok(delegatee_key.sign_ice_servers(&base_url)?)
@@ -896,7 +1028,7 @@ impl TurnServer {
                 closed_tx.closed().await;
             }
         }
-        let _ = self.allocation_manager.close().await;
+        delete_all_allocations(&self.allocation_manager).await;
         Ok(())
     }
 }

@@ -178,13 +178,14 @@ async fn main() {
 
     let ice_url = server
         .ice_server_base_url()
-        .unwrap_or_else(|_| format!("turn://{}", server.local_addr()));
+        .unwrap_or_else(|_| format!("turn://{}", server.advertised_addr()));
     let server_pubkey = server
         .server_pubkey()
         .to_base58_string()
         .unwrap_or_default();
     tracing::info!(
         listen_addr = %server.local_addr(),
+        advertised_addr = %server.advertised_addr(),
         realm = %server.realm(),
         %server_pubkey,
         %ice_url,

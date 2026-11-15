@@ -78,7 +78,7 @@ pub fn pack_turn_did_auth(did: Did, server_pubkey: PublicKey<33>) -> Vec<u8> {
 /// Attach `?pubkey=<base58(server_pubkey)>` (or `&pubkey=...`) to a `turn://` or `turns://` URL.
 pub fn format_turn_server_url(raw_url: &str, server_pubkey: PublicKey<33>) -> Result<String> {
     let _ = NonIdentityPoint::<Secp256k1>::try_from(server_pubkey)?;
-    let pk_b58 = base58_monero::encode(&server_pubkey.0).map_err(|_| Error::Encode)?;
+    let pk_b58 = server_pubkey.to_base58_string()?;
     let trimmed = raw_url.trim();
     if trimmed.contains('?') {
         Ok(format!("{trimmed}&pubkey={pk_b58}"))
@@ -121,9 +121,13 @@ pub fn extract_turn_server_pubkey(raw_url: &str) -> Option<PublicKey<33>> {
 }
 
 fn decode_secp256k1_pubkey_b58(encoded: &str) -> Option<PublicKey<33>> {
-    let bytes = base58_monero::decode(encoded).ok()?;
-    let arr: [u8; 33] = bytes.try_into().ok()?;
-    let pk = PublicKey(arr);
+    let pk = if let Ok(pk) = PublicKey::<33>::try_from_b58t(encoded) {
+        pk
+    } else {
+        let bytes = base58_monero::decode(encoded).ok()?;
+        let arr: [u8; 33] = bytes.try_into().ok()?;
+        PublicKey(arr)
+    };
     NonIdentityPoint::<Secp256k1>::try_from(pk).ok()?;
     Some(pk)
 }
