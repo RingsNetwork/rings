@@ -70,6 +70,8 @@
 //! observations bounded by lookup round, TTL, and capacity, so a miss owner is a
 //! fresh lookup witness rather than persistent routing state.
 
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
 use super::StorageSyncDestination;
@@ -78,6 +80,7 @@ use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::ChordStorageRepair;
@@ -208,8 +211,20 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let now_ms = self.epoch_ms();
-        let mut actions = Vec::new();
+        let mut by_entry = Vec::<Entry>::new();
+        let mut index_by_key = BTreeMap::<(EntryKind, Did), usize>::new();
         for (_, entry) in self.live_storage_entries(now_ms).await? {
+            let key = (entry.kind, entry.did);
+            if let Some(&idx) = index_by_key.get(&key) {
+                by_entry[idx] = by_entry[idx].join(entry)?;
+            } else {
+                let idx = by_entry.len();
+                index_by_key.insert(key, idx);
+                by_entry.push(entry);
+            }
+        }
+        let mut actions = Vec::new();
+        for entry in by_entry {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }

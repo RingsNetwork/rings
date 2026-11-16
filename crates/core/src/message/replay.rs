@@ -186,6 +186,29 @@ const TRANSACTION_REPLAY_PAIR_CAPACITY: usize = 4096;
 /// fails closed at this bound whichever class it belongs to.
 pub const TRANSACTION_REPLAY_STREAM_CAPACITY: usize =
     MessageCategory::COUNT * TRANSACTION_REPLAY_PAIR_CAPACITY;
+/// Persistent DID encoding for [`StreamKey`]: always encodes as the 42-character `0x`-prefixed
+/// hex string (`ethereum_types::H160`) so authoritative `ReplayStore` records and storage keys
+/// remain invariant across wire-encoding upgrades (#1282).
+mod persisted_did {
+    use ethereum_types::H160;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serialize;
+    use serde::Serializer;
+
+    use crate::dht::Did;
+
+    pub(super) fn serialize<S>(did: &Did, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: Serializer {
+        H160::from(*did).serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Did, D::Error>
+    where D: Deserializer<'de> {
+        H160::deserialize(deserializer).map(Did::from)
+    }
+}
+
 /// A destination-scoped transaction stream of one traffic class (#898).
 ///
 /// Sequences are ordered only per class. The outbound scheduler preserves order inside a
@@ -199,8 +222,10 @@ pub struct StreamKey {
     /// Overlay in which the transaction signature is valid.
     pub network_id: u32,
     /// Account DID recovered from the transaction's delegation.
+    #[serde(with = "persisted_did")]
     pub origin_account: Did,
     /// Final logical destination of the transaction.
+    #[serde(with = "persisted_did")]
     pub destination: Did,
     /// Traffic class implied by the transaction's signed data.
     pub class: MessageCategory,

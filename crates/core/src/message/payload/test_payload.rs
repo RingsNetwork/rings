@@ -792,7 +792,8 @@ fn test_compressed_payload_is_restricted_to_dht_control_and_storage() -> Result<
         payload.verification.sig = vec![0x42; 512];
         let uncompressed_body = rings_codec::serialize(&WirePayload::inline(&payload))
             .map_err(Error::CodecSerialize)?;
-        let compressed_body = lz4_flex::block::compress(&uncompressed_body);
+        let compressed_body =
+            lz4_flex::block::compress_with_dict(&uncompressed_body, super::WIRE_COMPRESSION_DICT);
         assert!(compressed_body.len() < uncompressed_body.len());
 
         let forged = super::frame::frame_bytes(
@@ -859,7 +860,8 @@ fn test_compressed_payload_rejects_bombs_corrupted_blocks_and_non_shrinking_fram
     };
     let wire_view = WirePayload::view(&payload, sessions);
     let raw_body = rings_codec::serialize(&wire_view).map_err(Error::CodecSerialize)?;
-    let compressed_body = lz4_flex::block::compress(&raw_body);
+    let compressed_body =
+        lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
     assert!(
         compressed_body.len() >= raw_body.len(),
         "high-entropy referenced frame must not shrink under LZ4"
@@ -900,7 +902,8 @@ fn test_compressed_payload_rejects_bombs_corrupted_blocks_and_non_shrinking_fram
     // is rejected before allocating beyond the frame ceiling, including the exact +1 byte boundary.
     for excess in [1usize, MAX_COMPRESSED_PAYLOAD_BYTES * 7] {
         let bomb_uncompressed = vec![0u8; MAX_COMPRESSED_PAYLOAD_BYTES + excess];
-        let bomb_compressed = lz4_flex::block::compress(&bomb_uncompressed);
+        let bomb_compressed =
+            lz4_flex::block::compress_with_dict(&bomb_uncompressed, super::WIRE_COMPRESSION_DICT);
         assert!(bomb_compressed.len() < 4096);
         let bomb_frame = super::frame::frame_bytes(
             super::frame::FrameKind::CompressedPayload,
@@ -984,5 +987,70 @@ fn test_compressed_payload_preserves_canonical_signatures_across_slot_encodings(
             assert!(resolved.verify_transaction_and_payload(TEST_NETWORK_ID));
         }
     }
+    Ok(())
+}
+
+/// Witness for #1282:
+/// - `PublicKey<33>` and `PublicKey<48>` encode to exact 33 and 48 raw bytes in `rings_codec`
+///   (`postcard`) while preserving Base58-check strings in `serde_json`.
+/// - `WIRE_COMPRESSION_DICT` shrinks a single-message WebRTC SDP `ConnectNodeSend` frame even
+///   further than dictionary-free LZ4.
+#[test]
+fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames() -> Result<()> {
+    use crate::ecc::PublicKey;
+
+    let pk33 = SecretKey::random().pubkey();
+    let pk33_wire = rings_codec::serialize(&pk33).map_err(Error::CodecSerialize)?;
+    assert_eq!(pk33_wire.len(), 33);
+    assert_eq!(
+        rings_codec::deserialize::<PublicKey<33>>(&pk33_wire).map_err(Error::CodecDeserialize)?,
+        pk33
+    );
+    let pk33_json = serde_json::to_string(&pk33).map_err(Error::Serialize)?;
+    assert!(pk33_json.len() > 40);
+    assert_eq!(
+        serde_json::from_str::<PublicKey<33>>(&pk33_json).map_err(Error::Deserialize)?,
+        pk33
+    );
+
+    let pk48 = PublicKey([0x5a; 48]);
+    let pk48_wire = rings_codec::serialize(&pk48).map_err(Error::CodecSerialize)?;
+    assert_eq!(pk48_wire.len(), 48);
+    assert_eq!(
+        rings_codec::deserialize::<PublicKey<48>>(&pk48_wire).map_err(Error::CodecDeserialize)?,
+        pk48
+    );
+
+    let sdp = concat!(
+        "v=0\r\no=- 8473928174 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n",
+        "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
+        "a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n",
+        "a=ice-options:trickle\r\n",
+        "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\n",
+        "a=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
+        "a=candidate:1 1 udp 2130706431 192.0.2.10 54321 typ host generation 0\r\n",
+    );
+    let next_hop: Did = SecretKey::random().address().into();
+    let payload = new_payload(
+        Message::ConnectNodeSend(crate::message::ConnectNodeSend {
+            sdp: sdp.to_owned(),
+            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            relay_custody: crate::dht::RelayCustody::Holds,
+        }),
+        next_hop,
+    );
+    let raw_body =
+        rings_codec::serialize(&WirePayload::inline(&payload)).map_err(Error::CodecSerialize)?;
+    let without_dict = lz4_flex::block::compress(&raw_body);
+    let with_dict = lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
+    assert!(
+        with_dict.len() < without_dict.len(),
+        "static protocol dictionary must compress a single SDP frame more than dictionary-free LZ4 ({} >= {})",
+        with_dict.len(),
+        without_dict.len()
+    );
+    let wire = payload.to_wire()?;
+    assert_eq!(MessagePayload::from_wire(&wire)?, payload);
     Ok(())
 }

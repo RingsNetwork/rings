@@ -66,8 +66,108 @@ use crate::error::Result;
 ///
 /// Law: parsing, display, serialization, and conversion through [`H160`]
 /// preserve the same 20-byte canonical encoding.
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct Did(H160);
+
+struct DidVisitor;
+
+struct DidNewtypeVisitor;
+
+impl Serialize for Did {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if serializer.is_human_readable() {
+            self.0.serialize(serializer)
+        } else {
+            serializer.serialize_newtype_struct("Did", &self.to_be_bytes())
+        }
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DidVisitor {
+    type Value = Did;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(
+            formatter,
+            "a 0x-prefixed 20-byte hex string or 20 canonical DID bytes"
+        )
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where E: serde::de::Error {
+        let stripped = value.strip_prefix("0x").unwrap_or(value);
+        if stripped.len() != Did::BYTE_LEN * 2 {
+            return Err(E::invalid_length(stripped.len(), &self));
+        }
+        let mut bytes = [0u8; Did::BYTE_LEN];
+        hex::decode_to_slice(stripped, &mut bytes).map_err(E::custom)?;
+        Ok(Did::from_be_bytes(bytes))
+    }
+
+    fn visit_bytes<E>(self, value: &[u8]) -> std::result::Result<Self::Value, E>
+    where E: serde::de::Error {
+        let bytes: [u8; Did::BYTE_LEN] = value
+            .try_into()
+            .map_err(|_| E::invalid_length(value.len(), &self))?;
+        Ok(Did::from_be_bytes(bytes))
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where A: serde::de::SeqAccess<'de> {
+        let mut bytes = [0u8; Did::BYTE_LEN];
+        for (index, slot) in bytes.iter_mut().enumerate() {
+            *slot = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(index, &self))?;
+        }
+        Ok(Did::from_be_bytes(bytes))
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
+    type Value = Did;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        DidVisitor.expecting(formatter)
+    }
+
+    fn visit_newtype_struct<D>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_tuple(Did::BYTE_LEN, DidVisitor)
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where E: serde::de::Error {
+        DidVisitor.visit_str(value)
+    }
+
+    fn visit_bytes<E>(self, value: &[u8]) -> std::result::Result<Self::Value, E>
+    where E: serde::de::Error {
+        DidVisitor.visit_bytes(value)
+    }
+
+    fn visit_seq<A>(self, seq: A) -> std::result::Result<Self::Value, A::Error>
+    where A: serde::de::SeqAccess<'de> {
+        DidVisitor.visit_seq(seq)
+    }
+}
+
+impl<'de> Deserialize<'de> for Did {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(DidVisitor)
+        } else {
+            deserializer.deserialize_newtype_struct("Did", DidNewtypeVisitor)
+        }
+    }
+}
 
 impl std::fmt::Display for Did {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -554,5 +654,11 @@ mod tests {
             format!("{did:?}"),
             "Did(0x11e807fcc88dd319270493fb2e822e388fe36ab0)"
         );
+
+        // Binary rings_codec (postcard) encodes Did as 20 canonical bytes instead of 43-byte hex.
+        let wire_bytes = rings_codec::serialize(&did).unwrap();
+        assert_eq!(wire_bytes.len(), 20);
+        assert_eq!(wire_bytes.as_slice(), did.as_bytes());
+        assert_eq!(rings_codec::deserialize::<Did>(&wire_bytes).unwrap(), did);
     }
 }
