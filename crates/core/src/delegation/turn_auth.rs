@@ -752,16 +752,11 @@ mod tests {
         for key in keys {
             let expected_did = key.public_key().unwrap().did();
             let creds = key.turn_credentials(server_pubkey).unwrap();
-            assert!(
-                creds.username.len() <= MAX_STUN_USERNAME_BYTES,
-                "algorithm {} username length {} exceeds limit",
-                key.algorithm(),
-                creds.username.len()
-            );
+            assert!(creds.username.len() <= MAX_STUN_USERNAME_BYTES);
             assert!(!creds.username.contains(&creds.credential));
             let verified =
                 TurnCredentials::verify_at(&creds.username, &server_key, u128::MAX).unwrap();
-            assert_eq!(verified.did(), expected_did, "{}", key.algorithm());
+            assert_eq!(verified.did(), expected_did);
             assert_eq!(verified.credential, creds.credential);
         }
     }
@@ -771,12 +766,7 @@ mod tests {
         let server_pubkey = SecretKey::random().pubkey();
         let widest_key = Delegation::widest_key_for_test();
         let creds = TurnCredentials::from_delegatee_key(&widest_key, server_pubkey).unwrap();
-        assert!(
-            creds.username.len() <= MAX_STUN_USERNAME_BYTES,
-            "widest username length {} exceeds STUN limit {}",
-            creds.username.len(),
-            MAX_STUN_USERNAME_BYTES
-        );
+        assert!(creds.username.len() <= MAX_STUN_USERNAME_BYTES);
     }
 
     #[test]
