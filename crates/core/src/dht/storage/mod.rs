@@ -12,6 +12,7 @@ use serde::Serialize;
 use super::chord::PeerRing;
 use super::chord::PeerRingAction;
 use super::chord::RemoteAction;
+use super::entry::EntryKind;
 use super::entry::PlacedEntry;
 use super::topology;
 use super::topology::FindSuccessorStep;
@@ -235,17 +236,17 @@ impl PeerRingAction {
     /// placement identity, and physical-owner batches still let the receiver
     /// validate each placement independently before acking.
     pub(crate) fn coalesced_storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
-        let mut by_route =
-            BTreeMap::<(StorageSyncPurpose, StorageSyncDestination), Vec<PlacedEntry>>::new();
+        let mut by_route = BTreeMap::<
+            (StorageSyncPurpose, StorageSyncDestination),
+            (Vec<PlacedEntry>, BTreeMap<(Did, EntryKind, Did), usize>),
+        >::new();
         for delivery in self.storage_sync_deliveries()? {
             let (purpose, destination, data) = delivery.into_message_parts();
-            let route_entries = by_route.entry((purpose, destination)).or_default();
+            let (route_entries, index_by_key) = by_route.entry((purpose, destination)).or_default();
             for placed in data {
-                if let Some(existing) = route_entries.iter_mut().find(|existing| {
-                    existing.key == placed.key
-                        && existing.entry.kind == placed.entry.kind
-                        && existing.entry.did == placed.entry.did
-                }) {
+                let lookup_key = (placed.key, placed.entry.kind, placed.entry.did);
+                if let Some(&idx) = index_by_key.get(&lookup_key) {
+                    let existing = &mut route_entries[idx];
                     let next_incarnation = placed.custody_incarnation();
                     existing.entry = existing.entry.join(placed.entry)?;
                     if let Some(incarnation) = next_incarnation {
@@ -255,13 +256,15 @@ impl PeerRingAction {
                         *existing = existing.clone().with_custody_incarnation(merged);
                     }
                 } else {
+                    let idx = route_entries.len();
+                    index_by_key.insert(lookup_key, idx);
                     route_entries.push(placed);
                 }
             }
         }
 
         let mut deliveries = Vec::new();
-        for ((purpose, destination), data) in by_route {
+        for ((purpose, destination), (data, _)) in by_route {
             for batch in sync::sync_entries_batches(data, sync::SYNC_BATCH_MAX_BYTES)? {
                 deliveries.push(StorageSyncDelivery::from_parts(purpose, destination, batch));
             }

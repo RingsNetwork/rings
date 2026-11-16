@@ -96,9 +96,7 @@ impl<'de> serde::de::Visitor<'de> for DidVisitor {
 
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
     where E: serde::de::Error {
-        let stripped = value
-            .strip_prefix("0x")
-            .ok_or_else(|| E::invalid_value(serde::de::Unexpected::Str(value), &self))?;
+        let stripped = value.strip_prefix("0x").unwrap_or(value);
         if stripped.len() != Did::BYTE_LEN * 2 {
             return Err(E::invalid_length(stripped.len(), &self));
         }
