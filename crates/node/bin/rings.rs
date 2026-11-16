@@ -834,6 +834,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
+        Command::Tui(args) => rings_tui::run_from_args(args).await.map_err(Into::into),
     }
 }
 

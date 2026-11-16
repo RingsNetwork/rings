@@ -114,6 +114,10 @@ pub(crate) enum Command {
         about = "Show information of swarm. Include transport table, successors, predecessor, and finger table."
     )]
     Inspect(InspectCommand),
+    #[command(
+        about = "Launches the interactive Terminal User Interface (TUI) for monitoring, status inspection, and button commands."
+    )]
+    Tui(rings_tui::config::TuiArgs),
 }
 
 #[derive(Args, Debug)]

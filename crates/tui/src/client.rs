@@ -1,0 +1,1133 @@
+//! Asynchronous client adapter for querying and controlling a `rings-node` instance.
+
+use std::fs;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+use async_trait::async_trait;
+use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
+use reqwest::header::AUTHORIZATION;
+use reqwest::StatusCode;
+use rings_rpc::jsonrpc::Client as RpcClient;
+use rings_rpc::protos::rings_node::AcceptAnswerRequest;
+use rings_rpc::protos::rings_node::AnswerOfferRequest;
+use rings_rpc::protos::rings_node::ConnectPeerViaHttpRequest;
+use rings_rpc::protos::rings_node::ConnectWithDidRequest;
+use rings_rpc::protos::rings_node::ConnectWithSeedRequest;
+use rings_rpc::protos::rings_node::CreateOfferRequest;
+use rings_rpc::protos::rings_node::DhtInfo;
+use rings_rpc::protos::rings_node::DisconnectRequest;
+use rings_rpc::protos::rings_node::FetchTopicMessagesRequest;
+use rings_rpc::protos::rings_node::FingerTableRange;
+use rings_rpc::protos::rings_node::ListPeerMeasurementsRequest;
+use rings_rpc::protos::rings_node::ListPeersRequest;
+use rings_rpc::protos::rings_node::LookupOnionExitsRequest;
+use rings_rpc::protos::rings_node::LookupOnlineNodesRequest;
+use rings_rpc::protos::rings_node::LookupServiceRequest;
+use rings_rpc::protos::rings_node::NodeDidRequest;
+use rings_rpc::protos::rings_node::NodeInfoRequest;
+use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
+use rings_rpc::protos::rings_node::OnionExitPolicyInfo;
+use rings_rpc::protos::rings_node::OnlineNodeCapabilitiesInfo;
+use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
+use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
+use rings_rpc::protos::rings_node::PeerCreditInfo;
+use rings_rpc::protos::rings_node::PeerInfo;
+use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
+use rings_rpc::protos::rings_node::PeerMeasurementInfo;
+use rings_rpc::protos::rings_node::PeerMeasurementRequest;
+use rings_rpc::protos::rings_node::PeerReliabilityInfo;
+use rings_rpc::protos::rings_node::PublishMessageToTopicRequest;
+use rings_rpc::protos::rings_node::RegisterServiceRequest;
+use rings_rpc::protos::rings_node::SeedPeer;
+use rings_rpc::protos::rings_node::SendBackendMessageRequest;
+use rings_rpc::protos::rings_node::StorageInfo;
+use rings_rpc::protos::rings_node::StorageItem;
+use rings_rpc::protos::rings_node::StorageValue;
+use rings_rpc::protos::rings_node::SwarmInfo;
+use serde::Deserialize;
+
+use crate::config::expand_home;
+use crate::config::ResolvedTuiConfig;
+use crate::error::Result;
+use crate::error::TuiError;
+use crate::types::decode_storage_element;
+use crate::types::resolve_dht_key_did;
+use crate::types::DhtKeyLookupReport;
+use crate::types::DhtLookupSnapshotDto;
+use crate::types::GatewayStatusDto;
+use crate::types::HealthSnapshotDto;
+use crate::types::LatencyBucketDto;
+use crate::types::MailboxSnapshotDto;
+use crate::types::MessageTotalsDto;
+use crate::types::NodeSnapshot;
+use crate::types::ObservabilityStatusDto;
+use crate::types::OperatorSnapshotDto;
+use crate::types::RecentMessageEventDto;
+use crate::types::SessionKeySnapshotDto;
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Abstract interface for interacting with a Rings node, enabling both live HTTP/JSON-RPC
+/// connections and deterministic in-memory test doubles.
+#[async_trait]
+pub trait NodeClient: Send + Sync {
+    /// Collect a combined status, observability, gateway, and directory snapshot.
+    async fn fetch_snapshot(&self, include_expired_directory: bool) -> Result<NodeSnapshot>;
+
+    /// Connect to a remote peer via its HTTP RPC endpoint.
+    async fn connect_peer_via_http(
+        &self,
+        url: &str,
+        remote_api_token: Option<String>,
+    ) -> Result<String>;
+
+    /// Connect to a peer by DID over the Chord DHT.
+    async fn connect_with_did(&self, did: &str) -> Result<()>;
+
+    /// Connect to one or more seed peers from a seed file path or `did@url` specification.
+    async fn connect_with_seed(&self, source: &str) -> Result<usize>;
+
+    /// Disconnect from the specified peer DID.
+    async fn disconnect(&self, did: &str) -> Result<()>;
+
+    /// Create a manual WebRTC offer targeting `did`.
+    async fn create_offer(&self, did: &str) -> Result<String>;
+
+    /// Answer a peer's manual WebRTC offer.
+    async fn answer_offer(&self, offer: &str) -> Result<String>;
+
+    /// Accept a peer's manual WebRTC answer.
+    async fn accept_answer(&self, answer: &str) -> Result<()>;
+
+    /// Send a namespaced backend message (`data` is UTF-8 text that will be base64-encoded).
+    async fn send_backend_message(
+        &self,
+        destination_did: &str,
+        namespace: &str,
+        data: &str,
+    ) -> Result<()>;
+
+    /// Publish a message to a DHT-backed PubSub topic.
+    async fn publish_topic_message(&self, topic: &str, data: &str) -> Result<()>;
+
+    /// Fetch messages from a DHT-backed PubSub topic starting at index `skip`.
+    async fn fetch_topic_messages(&self, topic: &str, skip: i64) -> Result<Vec<String>>;
+
+    /// Register the local node as a provider for service `name`.
+    async fn register_service(&self, name: &str) -> Result<()>;
+
+    /// Look up provider DIDs for service `name`.
+    async fn lookup_service(&self, name: &str) -> Result<Vec<String>>;
+
+    /// Query detailed local transport measurements for a single peer.
+    async fn peer_measurement(&self, did: &str) -> Result<Option<PeerMeasurementInfo>>;
+
+    /// Perform a Chord DHT key lookup by topic/service name or raw hex `Did` (`0x...`),
+    /// combining live network fetch with local persistent and cache storage inspection.
+    async fn dht_lookup_key(&self, key: &str) -> Result<DhtKeyLookupReport>;
+}
+
+/// Live HTTP + JSON-RPC client talking to a native `rings-node` internal listener.
+pub struct HttpNodeClient {
+    endpoint_url: String,
+    bearer_token: Option<String>,
+    rpc: RpcClient,
+    http: reqwest::Client,
+}
+
+impl HttpNodeClient {
+    /// Construct an [`HttpNodeClient`] from a resolved TUI configuration.
+    pub fn from_config(config: &ResolvedTuiConfig) -> Result<Self> {
+        Self::new(&config.endpoint_url, config.api_token.clone())
+    }
+
+    /// Construct an [`HttpNodeClient`] targeting `endpoint_url` with an optional Bearer token.
+    pub fn new(endpoint_url: &str, bearer_token: Option<String>) -> Result<Self> {
+        let trimmed_url = endpoint_url.trim_end_matches('/').to_string();
+        let rpc_builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
+        let rpc = RpcClient::with_http_client_builder(&trimmed_url, rpc_builder)?;
+        let rpc = match &bearer_token {
+            Some(token) => rpc.with_bearer_token(token.clone())?,
+            None => rpc,
+        };
+
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
+
+        Ok(Self {
+            endpoint_url: trimmed_url,
+            bearer_token,
+            rpc,
+            http,
+        })
+    }
+
+    fn auth_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(token) = &self.bearer_token {
+            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                headers.insert(AUTHORIZATION, val);
+            }
+        }
+        headers
+    }
+
+    async fn fetch_observability(&self) -> Result<ObservabilityStatusDto> {
+        let url = format!("{}/status?view=observability", self.endpoint_url);
+        let response = self
+            .http
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?;
+        let response = response.error_for_status()?;
+        Ok(response.json::<ObservabilityStatusDto>().await?)
+    }
+
+    async fn fetch_gateway_status(&self) -> Result<Option<GatewayStatusDto>> {
+        let url = format!("{}/gateway/status", self.endpoint_url);
+        let response = self
+            .http
+            .get(&url)
+            .headers(self.auth_headers())
+            .send()
+            .await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let response = response.error_for_status()?;
+        Ok(Some(response.json::<GatewayStatusDto>().await?))
+    }
+}
+
+/// Seed document structure compatible with JSON and YAML seed files.
+#[derive(Deserialize)]
+struct SeedDocument {
+    peers: Vec<SeedPeer>,
+}
+
+/// Parse a seed input which may either be a `did@http://host:port` shorthand, inline JSON/YAML,
+/// or a path to a seed file on disk.
+pub fn parse_seed_input(input: &str) -> Result<Vec<SeedPeer>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(TuiError::InvalidInput(
+            "seed source cannot be empty".to_string(),
+        ));
+    }
+
+    if let Some((did, url)) = trimmed.split_once('@') {
+        if !did.trim().is_empty() && (url.starts_with("http://") || url.starts_with("https://")) {
+            return Ok(vec![SeedPeer {
+                did: did.trim().to_string(),
+                url: url.trim().to_string(),
+                api_token: None,
+            }]);
+        }
+    }
+
+    let path = expand_home(trimmed.strip_prefix("file://").unwrap_or(trimmed));
+    let raw = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(_) => trimmed.to_string(),
+    };
+
+    if let Ok(doc) = serde_json::from_str::<SeedDocument>(&raw) {
+        return Ok(doc.peers);
+    }
+    if let Ok(doc) = serde_saphyr::from_str::<SeedDocument>(&raw) {
+        return Ok(doc.peers);
+    }
+
+    Err(TuiError::InvalidInput(
+        "expected a seed file path, JSON/YAML with `peers: [...]`, or `<did>@<http-url>`"
+            .to_string(),
+    ))
+}
+
+#[async_trait]
+impl NodeClient for HttpNodeClient {
+    async fn fetch_snapshot(&self, include_expired_directory: bool) -> Result<NodeSnapshot> {
+        let started = Instant::now();
+        let mut snapshot = NodeSnapshot {
+            fetched_at_ms: now_epoch_ms(),
+            ..NodeSnapshot::default()
+        };
+
+        let did_req = NodeDidRequest {};
+        let info_req = NodeInfoRequest {};
+        let peers_req = ListPeersRequest {};
+        let meas_req = ListPeerMeasurementsRequest {
+            limit: Some(64),
+            cursor: None,
+        };
+        let online_req = LookupOnlineNodesRequest {
+            include_expired: include_expired_directory,
+        };
+        let exits_req = LookupOnionExitsRequest {
+            service: String::new(),
+            include_expired: include_expired_directory,
+        };
+
+        let (did_res, info_res, peers_res, meas_res, obs_res, gw_res, online_res, exits_res) = tokio::join!(
+            self.rpc.node_did(&did_req),
+            self.rpc.node_info(&info_req),
+            self.rpc.list_peers(&peers_req),
+            self.rpc.list_peer_measurements(&meas_req),
+            self.fetch_observability(),
+            self.fetch_gateway_status(),
+            self.rpc.lookup_online_nodes(&online_req),
+            self.rpc.lookup_onion_exits(&exits_req),
+        );
+
+        let mut any_succeeded = false;
+        let mut first_err: Option<TuiError> = None;
+
+        match did_res {
+            Ok(resp) => {
+                any_succeeded = true;
+                snapshot.did = Some(resp.did);
+                snapshot.wire_version = resp.wire_version;
+            }
+            Err(err) => {
+                first_err.get_or_insert_with(|| TuiError::from(err));
+            }
+        }
+
+        match info_res {
+            Ok(info) => {
+                any_succeeded = true;
+                snapshot.apply_node_info(info);
+            }
+            Err(err) => {
+                first_err.get_or_insert_with(|| TuiError::from(err));
+            }
+        }
+
+        if let Ok(peers) = peers_res {
+            any_succeeded = true;
+            snapshot.peers = peers.peers;
+        }
+
+        if let Ok(meas) = meas_res {
+            any_succeeded = true;
+            snapshot.measurements = meas.measurements;
+        }
+
+        match obs_res {
+            Ok(obs) => {
+                any_succeeded = true;
+                if snapshot.version.is_none() {
+                    snapshot.version = Some(obs.version);
+                }
+                snapshot.observability = Some(obs.observability);
+            }
+            Err(err) => {
+                first_err.get_or_insert(err);
+            }
+        }
+
+        if let Ok(gw) = gw_res {
+            snapshot.gateway = gw;
+        }
+
+        if let Ok(online) = online_res {
+            snapshot.online_nodes = online.nodes;
+        }
+
+        if let Ok(exits) = exits_res {
+            snapshot.onion_exits = exits.exits;
+        }
+
+        if !any_succeeded {
+            return Err(first_err.unwrap_or_else(|| {
+                TuiError::InvalidInput("unable to reach rings-node endpoint".to_string())
+            }));
+        }
+
+        snapshot.poll_latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok(snapshot)
+    }
+
+    async fn connect_peer_via_http(
+        &self,
+        url: &str,
+        remote_api_token: Option<String>,
+    ) -> Result<String> {
+        let resp = self
+            .rpc
+            .connect_peer_via_http(&ConnectPeerViaHttpRequest {
+                url: url.trim().to_string(),
+                api_token: remote_api_token.filter(|s| !s.trim().is_empty()),
+            })
+            .await?;
+        Ok(resp.did)
+    }
+
+    async fn connect_with_did(&self, did: &str) -> Result<()> {
+        self.rpc
+            .connect_with_did(&ConnectWithDidRequest {
+                did: did.trim().to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn connect_with_seed(&self, source: &str) -> Result<usize> {
+        let peers = parse_seed_input(source)?;
+        let count = peers.len();
+        self.rpc
+            .connect_with_seed(&ConnectWithSeedRequest { peers })
+            .await?;
+        Ok(count)
+    }
+
+    async fn disconnect(&self, did: &str) -> Result<()> {
+        self.rpc
+            .disconnect(&DisconnectRequest {
+                did: did.trim().to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn create_offer(&self, did: &str) -> Result<String> {
+        let resp = self
+            .rpc
+            .create_offer(&CreateOfferRequest {
+                did: did.trim().to_string(),
+            })
+            .await?;
+        Ok(resp.offer)
+    }
+
+    async fn answer_offer(&self, offer: &str) -> Result<String> {
+        let resp = self
+            .rpc
+            .answer_offer(&AnswerOfferRequest {
+                offer: offer.trim().to_string(),
+            })
+            .await?;
+        Ok(resp.answer)
+    }
+
+    async fn accept_answer(&self, answer: &str) -> Result<()> {
+        self.rpc
+            .accept_answer(&AcceptAnswerRequest {
+                answer: answer.trim().to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn send_backend_message(
+        &self,
+        destination_did: &str,
+        namespace: &str,
+        data: &str,
+    ) -> Result<()> {
+        self.rpc
+            .send_backend_message(&SendBackendMessageRequest {
+                destination_did: destination_did.trim().to_string(),
+                namespace: namespace.trim().to_string(),
+                data: base64::encode(data.as_bytes()),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn publish_topic_message(&self, topic: &str, data: &str) -> Result<()> {
+        self.rpc
+            .publish_message_to_topic(&PublishMessageToTopicRequest {
+                topic: topic.trim().to_string(),
+                data: data.to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn fetch_topic_messages(&self, topic: &str, skip: i64) -> Result<Vec<String>> {
+        let resp = self
+            .rpc
+            .fetch_topic_messages(&FetchTopicMessagesRequest {
+                topic: topic.trim().to_string(),
+                skip,
+            })
+            .await?;
+        Ok(resp.data)
+    }
+
+    async fn register_service(&self, name: &str) -> Result<()> {
+        self.rpc
+            .register_service(&RegisterServiceRequest {
+                name: name.trim().to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn lookup_service(&self, name: &str) -> Result<Vec<String>> {
+        let resp = self
+            .rpc
+            .lookup_service(&LookupServiceRequest {
+                name: name.trim().to_string(),
+            })
+            .await?;
+        Ok(resp.dids)
+    }
+
+    async fn peer_measurement(&self, did: &str) -> Result<Option<PeerMeasurementInfo>> {
+        let resp = self
+            .rpc
+            .peer_measurement(&PeerMeasurementRequest {
+                did: did.trim().to_string(),
+            })
+            .await?;
+        Ok(resp.measurement)
+    }
+
+    async fn dht_lookup_key(&self, key: &str) -> Result<DhtKeyLookupReport> {
+        let started = Instant::now();
+        let trimmed = key.trim();
+        if trimmed.is_empty() {
+            return Err(TuiError::InvalidInput(
+                "DHT lookup key cannot be empty".to_string(),
+            ));
+        }
+        let target_did = resolve_dht_key_did(trimmed);
+
+        let fetch_req = FetchTopicMessagesRequest {
+            topic: trimmed.to_string(),
+            skip: 0,
+        };
+        let info_req = NodeInfoRequest {};
+        let (fetch_res, info_res) = tokio::join!(
+            self.rpc.fetch_topic_messages(&fetch_req),
+            self.rpc.node_info(&info_req),
+        );
+
+        let mut sources = Vec::new();
+        let mut elements = Vec::new();
+        let mut record_kind = "Unknown".to_string();
+        let mut route_peer = None;
+
+        if let Ok(fetched) = fetch_res {
+            if !fetched.data.is_empty() {
+                sources.push("Live DHT Network".to_string());
+                record_kind = "Data/Append".to_string();
+                elements.extend(fetched.data);
+            }
+        }
+
+        if let Ok(info) = info_res {
+            if let Some(swarm) = info.swarm {
+                if let Some(dht) = &swarm.dht {
+                    route_peer = dht
+                        .successors
+                        .first()
+                        .cloned()
+                        .or_else(|| dht.finger_table_ranges.iter().find_map(|r| r.did.clone()));
+                }
+                for (tier_label, storage_opt) in [
+                    ("Persistent Storage", swarm.persistence_storage.as_ref()),
+                    ("Cache Storage", swarm.cache_storage.as_ref()),
+                ] {
+                    let Some(storage) = storage_opt else {
+                        continue;
+                    };
+                    for item in &storage.items {
+                        let key_matches = item.key.eq_ignore_ascii_case(trimmed)
+                            || item.key.eq_ignore_ascii_case(&target_did)
+                            || item.key.contains(trimmed);
+                        let did_matches = item.value.as_ref().is_some_and(|v| {
+                            v.did.eq_ignore_ascii_case(trimmed)
+                                || v.did.eq_ignore_ascii_case(&target_did)
+                        });
+                        if key_matches || did_matches {
+                            if !sources.iter().any(|s| s == tier_label) {
+                                sources.push(tier_label.to_string());
+                            }
+                            if let Some(val) = &item.value {
+                                record_kind.clone_from(&val.kind);
+                                for raw_b64 in &val.data {
+                                    let decoded = decode_storage_element(raw_b64);
+                                    if !elements.contains(&decoded) {
+                                        elements.push(decoded);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if sources.is_empty() {
+            record_kind = "NotFound".to_string();
+        }
+
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok(DhtKeyLookupReport {
+            query_key: trimmed.to_string(),
+            target_did,
+            route_peer,
+            sources,
+            record_kind,
+            elements,
+            duration_ms,
+        })
+    }
+}
+
+/// Return current wall-clock time in Unix milliseconds.
+pub fn now_epoch_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_millis()
+}
+
+/// Built-in simulated node client (`--demo`) that produces live-updating telemetry, Chord DHT
+/// ring state, peer credit metrics, and interactive command responses without requiring a running
+/// daemon.
+pub struct DemoNodeClient {
+    started_at_ms: u128,
+    tick: AtomicU64,
+    peers: Mutex<Vec<PeerInfo>>,
+    topics: Mutex<Vec<(String, String)>>,
+    services: Mutex<Vec<String>>,
+}
+
+impl Default for DemoNodeClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DemoNodeClient {
+    /// Construct a new simulated [`DemoNodeClient`].
+    pub fn new() -> Self {
+        Self {
+            started_at_ms: now_epoch_ms().saturating_sub(142_000),
+            tick: AtomicU64::new(1),
+            peers: Mutex::new(vec![
+                PeerInfo {
+                    did: "0x9f1c2e3a4b5d6e7f8091a2b3c4d5e6f708192a3b".to_string(),
+                    state: "Connected".to_string(),
+                },
+                PeerInfo {
+                    did: "0x4a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b".to_string(),
+                    state: "Connected".to_string(),
+                },
+                PeerInfo {
+                    did: "0x77c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6".to_string(),
+                    state: "Connected".to_string(),
+                },
+            ]),
+            topics: Mutex::new(vec![
+                (
+                    "rings-chat".to_string(),
+                    "Welcome to Rings P2P overlay topic!".to_string(),
+                ),
+                (
+                    "rings-chat".to_string(),
+                    "Onion circuit hop established (3 relays)".to_string(),
+                ),
+            ]),
+            services: Mutex::new(vec!["ipfs-gateway".to_string(), "turn-stun".to_string()]),
+        }
+    }
+}
+
+#[async_trait]
+impl NodeClient for DemoNodeClient {
+    async fn fetch_snapshot(&self, _include_expired_directory: bool) -> Result<NodeSnapshot> {
+        let step = self.tick.fetch_add(1, Ordering::Relaxed);
+        let now_ms = now_epoch_ms();
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+
+        let sent = 240 + step * 7 + (step % 5) * 3;
+        let received = 310 + step * 9 + (step % 4) * 4;
+        let forwarded = 128 + step * 4 + (step % 3) * 2;
+        let stored = 18 + step / 2;
+        let failed = 2 + step / 15;
+
+        let measurements = peers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| PeerMeasurementInfo {
+                did: p.did.clone(),
+                counters: PeerMeasurementCountersInfo {
+                    connected: 1,
+                    disconnected: 0,
+                    sent: 80 + step * (3 + i as u64),
+                    failed_to_send: u64::from(i == 2),
+                    received: 95 + step * (4 + i as u64),
+                    failed_to_receive: 0,
+                },
+                credit: Some(PeerCreditInfo {
+                    bytes_sent_to_peer: (128_000 + step * 8_192) * (i as u64 + 1),
+                    bytes_received_from_peer: (192_000 + step * 11_264) * (i as u64 + 1),
+                    last_seen_seconds: u64::try_from(now_ms / 1_000).unwrap_or(0),
+                    score: 4.2 + (i as f64) * 1.3,
+                }),
+                reliability: if i == 2 {
+                    PeerReliabilityInfo::Unknown
+                } else {
+                    PeerReliabilityInfo::Healthy
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let recent_messages = (0..10_u64)
+            .map(|idx| {
+                let seq = step.saturating_mul(2).saturating_add(idx);
+                let (action, category, class) = match seq % 4 {
+                    0 => ("sent", "application", "CustomBackendMessage"),
+                    1 => ("received", "dht_control", "FindSuccessorReport"),
+                    2 => ("forwarded", "e2e", "OnionCircuitFrame"),
+                    _ => ("stored", "storage", "VNodeStoreAppend"),
+                };
+                RecentMessageEventDto {
+                    sequence: seq,
+                    observed_at_ms: now_ms.saturating_sub(u128::from((10 - idx) * 650)),
+                    action: action.to_string(),
+                    category: category.to_string(),
+                    message_class: class.to_string(),
+                    outcome: "succeeded".to_string(),
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let local_did = "0x55a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e".to_string();
+        let succ_did = peers
+            .first()
+            .map(|p| p.did.clone())
+            .unwrap_or_else(|| local_did.clone());
+        let pred_did = peers.last().map(|p| p.did.clone());
+
+        Ok(NodeSnapshot {
+            did: Some(local_did.clone()),
+            wire_version: Some(1),
+            version: Some("1.0.0-pre.3".to_string()),
+            swarm: Some(SwarmInfo {
+                peers: peers.clone(),
+                dht: Some(DhtInfo {
+                    did: local_did.clone(),
+                    successors: peers.iter().map(|p| p.did.clone()).collect(),
+                    predecessor: pred_did,
+                    finger_table_ranges: vec![
+                        FingerTableRange {
+                            did: Some(succ_did.clone()),
+                            start: 0,
+                            end: 31,
+                        },
+                        FingerTableRange {
+                            did: peers.get(1).map(|p| p.did.clone()),
+                            start: 32,
+                            end: 95,
+                        },
+                        FingerTableRange {
+                            did: peers.get(2).map(|p| p.did.clone()),
+                            start: 96,
+                            end: 159,
+                        },
+                    ],
+                }),
+                persistence_storage: Some(StorageInfo {
+                    items: vec![
+                        StorageItem {
+                            key: "vnode:registry:online_nodes".to_string(),
+                            value: Some(StorageValue {
+                                did: local_did.clone(),
+                                kind: "Map".to_string(),
+                                data: vec!["dGVzdA==".to_string(), "ZGF0YQ==".to_string()],
+                            }),
+                        },
+                        StorageItem {
+                            key: "vnode:topic:rings-chat".to_string(),
+                            value: Some(StorageValue {
+                                did: succ_did.clone(),
+                                kind: "Append".to_string(),
+                                data: vec!["bXNnMQ==".to_string()],
+                            }),
+                        },
+                    ],
+                }),
+                cache_storage: Some(StorageInfo {
+                    items: vec![StorageItem {
+                        key: "cache:service:ipfs-gateway".to_string(),
+                        value: Some(StorageValue {
+                            did: succ_did,
+                            kind: "Append".to_string(),
+                            data: vec!["cHJvdmlkZXI=".to_string()],
+                        }),
+                    }],
+                }),
+            }),
+            peers,
+            measurements,
+            observability: Some(OperatorSnapshotDto {
+                schema_version: 1,
+                generated_at_ms: now_ms,
+                process_started_at_ms: self.started_at_ms,
+                counter_scope: "node_local_process_lifetime".to_string(),
+                messages: MessageTotalsDto {
+                    sent,
+                    received,
+                    forwarded,
+                    stored,
+                    failed,
+                },
+                recent_messages,
+                session_key: SessionKeySnapshotDto {
+                    valid: true,
+                    created_at_ms: self.started_at_ms,
+                    expires_at_ms: self.started_at_ms + 2_592_000_000,
+                    remaining_ms: 2_310_000_000,
+                    rotation_succeeded_total: 2,
+                    rotation_failed_total: 0,
+                    runtime_rotation_supported: true,
+                },
+                mailboxes: MailboxSnapshotDto {
+                    registered: 3,
+                    held_messages: 5,
+                    stored_total: stored,
+                },
+                dht_lookups: DhtLookupSnapshotDto {
+                    total: 84 + step * 2,
+                    succeeded: 81 + step * 2,
+                    failed: 1,
+                    timed_out: 2,
+                    in_flight: step % 2,
+                    latency_sum_ms: 3_120 + u128::from(step * 42),
+                    latency_count: 84 + step * 2,
+                    latency_buckets: vec![
+                        LatencyBucketDto {
+                            le_ms: 5,
+                            count: 14,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 10,
+                            count: 32,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 25,
+                            count: 58,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 50,
+                            count: 72,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 100,
+                            count: 80,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 250,
+                            count: 82 + step,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 500,
+                            count: 83 + step * 2,
+                        },
+                        LatencyBucketDto {
+                            le_ms: 1_000,
+                            count: 84 + step * 2,
+                        },
+                    ],
+                },
+                peer_ratings: Vec::new(),
+                health: HealthSnapshotDto {
+                    process_api_healthy: true,
+                    admitted_peer_count: 3,
+                    has_admitted_peer: true,
+                    has_successor: true,
+                    has_predecessor: true,
+                    overlay_ready: true,
+                },
+            }),
+            gateway: Some(GatewayStatusDto {
+                health: "active".to_string(),
+                interface: Some("utun8".to_string()),
+                capture_routes: vec!["198.18.0.0/15".to_string()],
+                exit_availability: "available".to_string(),
+                active_flows: 6,
+                reason: None,
+                last_flow_reset: None,
+            }),
+            online_nodes: vec![
+                OnlineNodeDescriptorInfo {
+                    did: local_did,
+                    public_key: serde_json::Value::Null,
+                    delegatee_public_key: serde_json::Value::Null,
+                    node_type: OnlineNodeTypeInfo::Native,
+                    network_id: 1,
+                    storage_redundancy: 3,
+                    dht_virtual_nodes: 16,
+                    capabilities: OnlineNodeCapabilitiesInfo {
+                        onion_relay: Some(serde_json::json!(1)),
+                        holds_relay_mail: true,
+                    },
+                    endpoint_hint: Some("https://node1.rings.rs".to_string()),
+                    started_at_ms: u64::try_from(self.started_at_ms).unwrap_or(0),
+                    heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
+                    fresh_for_ms: 60_000,
+                    expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
+                    version: "1.0.0-pre.3".to_string(),
+                    signature: serde_json::Value::Null,
+                },
+                OnlineNodeDescriptorInfo {
+                    did: "0x9f1c2e3a4b5d6e7f8091a2b3c4d5e6f708192a3b".to_string(),
+                    public_key: serde_json::Value::Null,
+                    delegatee_public_key: serde_json::Value::Null,
+                    node_type: OnlineNodeTypeInfo::Native,
+                    network_id: 1,
+                    storage_redundancy: 3,
+                    dht_virtual_nodes: 16,
+                    capabilities: OnlineNodeCapabilitiesInfo {
+                        onion_relay: Some(serde_json::json!(2)),
+                        holds_relay_mail: true,
+                    },
+                    endpoint_hint: Some("https://relay2.rings.rs".to_string()),
+                    started_at_ms: u64::try_from(self.started_at_ms).unwrap_or(0),
+                    heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
+                    fresh_for_ms: 60_000,
+                    expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
+                    version: "1.0.0-pre.3".to_string(),
+                    signature: serde_json::Value::Null,
+                },
+            ],
+            onion_exits: vec![OnionExitDescriptorInfo {
+                did: "0x4a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b".to_string(),
+                public_key: serde_json::Value::Null,
+                delegatee_public_key: serde_json::Value::Null,
+                process_epoch: serde_json::json!(1),
+                node_type: OnlineNodeTypeInfo::Native,
+                network_id: 1,
+                service: "tcp".to_string(),
+                policy: OnionExitPolicyInfo {
+                    allowed_targets: vec!["*:443".to_string(), "*:80".to_string()],
+                    denied_targets: vec!["127.0.0.0/8:*".to_string()],
+                    max_sessions: 128,
+                    max_bytes_per_minute: 104_857_600,
+                },
+                started_at_ms: u64::try_from(self.started_at_ms).unwrap_or(0),
+                heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
+                fresh_for_ms: 60_000,
+                expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
+                version: "1.0.0-pre.3".to_string(),
+                signature: serde_json::Value::Null,
+            }],
+            fetched_at_ms: now_ms,
+            poll_latency_ms: 2,
+        })
+    }
+
+    async fn connect_peer_via_http(
+        &self,
+        url: &str,
+        _remote_api_token: Option<String>,
+    ) -> Result<String> {
+        let new_did = format!("0xdemo{:036x}", url.len());
+        self.peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(PeerInfo {
+                did: new_did.clone(),
+                state: "Connected".to_string(),
+            });
+        Ok(new_did)
+    }
+
+    async fn connect_with_did(&self, did: &str) -> Result<()> {
+        let mut peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !peers.iter().any(|p| p.did == did) {
+            peers.push(PeerInfo {
+                did: did.trim().to_string(),
+                state: "Connected".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn connect_with_seed(&self, source: &str) -> Result<usize> {
+        let parsed = parse_seed_input(source)?;
+        let mut peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for sp in &parsed {
+            if !peers.iter().any(|p| p.did == sp.did) {
+                peers.push(PeerInfo {
+                    did: sp.did.clone(),
+                    state: "Connected".to_string(),
+                });
+            }
+        }
+        Ok(parsed.len())
+    }
+
+    async fn disconnect(&self, did: &str) -> Result<()> {
+        self.peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|p| p.did != did.trim());
+        Ok(())
+    }
+
+    async fn create_offer(&self, did: &str) -> Result<String> {
+        Ok(format!("5KDemoOfferBase58PayloadForPeer{}", did.trim()))
+    }
+
+    async fn answer_offer(&self, offer: &str) -> Result<String> {
+        Ok(format!("5KDemoAnswerBase58ReplyTo{}", offer.len()))
+    }
+
+    async fn accept_answer(&self, _answer: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn send_backend_message(
+        &self,
+        _destination_did: &str,
+        _namespace: &str,
+        _data: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn publish_topic_message(&self, topic: &str, data: &str) -> Result<()> {
+        self.topics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((topic.trim().to_string(), data.to_string()));
+        Ok(())
+    }
+
+    async fn fetch_topic_messages(&self, topic: &str, skip: i64) -> Result<Vec<String>> {
+        let skip_usize = usize::try_from(skip.max(0)).unwrap_or(0);
+        let list = self
+            .topics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(t, _)| t == topic.trim())
+            .skip(skip_usize)
+            .map(|(_, m)| m.clone())
+            .collect();
+        Ok(list)
+    }
+
+    async fn register_service(&self, name: &str) -> Result<()> {
+        self.services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(name.trim().to_string());
+        Ok(())
+    }
+
+    async fn lookup_service(&self, _name: &str) -> Result<Vec<String>> {
+        Ok(vec![
+            "0x55a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e".to_string(),
+            "0x9f1c2e3a4b5d6e7f8091a2b3c4d5e6f708192a3b".to_string(),
+        ])
+    }
+
+    async fn peer_measurement(&self, did: &str) -> Result<Option<PeerMeasurementInfo>> {
+        Ok(Some(PeerMeasurementInfo {
+            did: did.trim().to_string(),
+            counters: PeerMeasurementCountersInfo {
+                connected: 1,
+                disconnected: 0,
+                sent: 142,
+                failed_to_send: 0,
+                received: 158,
+                failed_to_receive: 0,
+            },
+            credit: Some(PeerCreditInfo {
+                bytes_sent_to_peer: 262_144,
+                bytes_received_from_peer: 524_288,
+                last_seen_seconds: u64::try_from(now_epoch_ms() / 1_000).unwrap_or(0),
+                score: 5.8,
+            }),
+            reliability: PeerReliabilityInfo::Healthy,
+        }))
+    }
+
+    async fn dht_lookup_key(&self, key: &str) -> Result<DhtKeyLookupReport> {
+        let trimmed = key.trim();
+        let target_did = resolve_dht_key_did(trimmed);
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let route_peer = peers.first().map(|p| p.did.clone());
+
+        let mut elements = Vec::new();
+        for (t, msg) in self
+            .topics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            if t == trimmed || trimmed.contains(t) {
+                elements.push(msg.clone());
+            }
+        }
+        if elements.is_empty() {
+            elements.push(format!(
+                "vnode-record: key='{trimmed}' target_did={target_did}"
+            ));
+            elements.push("owner=0x55a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e".to_string());
+        }
+
+        Ok(DhtKeyLookupReport {
+            query_key: trimmed.to_string(),
+            target_did,
+            route_peer,
+            sources: vec!["Live DHT Network".to_string(), "Cache Storage".to_string()],
+            record_kind: "Data/Append".to_string(),
+            elements,
+            duration_ms: 6,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_shorthand_and_json_seed_inputs() {
+        let peers =
+            parse_seed_input("0x1111222233334444555566667777888899990000@http://127.0.0.1:50001")
+                .expect("shorthand seed");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].url, "http://127.0.0.1:50001");
+
+        let json_peers =
+            parse_seed_input(r#"{"peers":[{"did":"0xaaaa","url":"https://node.example.com"}]}"#)
+                .expect("json seed");
+        assert_eq!(json_peers.len(), 1);
+        assert_eq!(json_peers[0].did, "0xaaaa");
+    }
+}

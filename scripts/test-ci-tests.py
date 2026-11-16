@@ -203,7 +203,7 @@ class PublishGraphGuards(unittest.TestCase):
 
     def test_out_of_order_publish_list_fails(self):
         result = self.run_publish_check(
-            RINGS_PUBLISH_CRATES="rings-node rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-turn rings-rpc"
+            RINGS_PUBLISH_CRATES="rings-node rings-derive rings-codec rings-measure rings-runtime rings-aez rings-network-policy rings-dns-relay rings-gateway rings-webview rings-transport rings-core rings-turn rings-rpc rings-tui"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("publish order violation", result.stderr)
