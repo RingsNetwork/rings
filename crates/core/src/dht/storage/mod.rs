@@ -239,10 +239,25 @@ impl PeerRingAction {
             BTreeMap::<(StorageSyncPurpose, StorageSyncDestination), Vec<PlacedEntry>>::new();
         for delivery in self.storage_sync_deliveries()? {
             let (purpose, destination, data) = delivery.into_message_parts();
-            by_route
-                .entry((purpose, destination))
-                .or_default()
-                .extend(data);
+            let route_entries = by_route.entry((purpose, destination)).or_default();
+            for placed in data {
+                if let Some(existing) = route_entries.iter_mut().find(|existing| {
+                    existing.key == placed.key
+                        && existing.entry.kind == placed.entry.kind
+                        && existing.entry.did == placed.entry.did
+                }) {
+                    let next_incarnation = placed.custody_incarnation();
+                    existing.entry = existing.entry.join(placed.entry)?;
+                    if let Some(incarnation) = next_incarnation {
+                        let merged = existing
+                            .custody_incarnation()
+                            .map_or(incarnation, |current| current.max(incarnation));
+                        *existing = existing.clone().with_custody_incarnation(merged);
+                    }
+                } else {
+                    route_entries.push(placed);
+                }
+            }
         }
 
         let mut deliveries = Vec::new();

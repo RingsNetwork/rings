@@ -208,8 +208,19 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let now_ms = self.epoch_ms();
-        let mut actions = Vec::new();
+        let mut by_entry = Vec::<Entry>::new();
         for (_, entry) in self.live_storage_entries(now_ms).await? {
+            if let Some(existing) = by_entry
+                .iter_mut()
+                .find(|existing| existing.kind == entry.kind && existing.did == entry.did)
+            {
+                *existing = existing.join(entry)?;
+            } else {
+                by_entry.push(entry);
+            }
+        }
+        let mut actions = Vec::new();
+        for entry in by_entry {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }

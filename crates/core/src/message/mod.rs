@@ -31,6 +31,8 @@ pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
 pub use payload::WireVersionMismatch;
 pub(crate) use payload::MAX_COMPRESSED_FRAME_WIRE_BYTES;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use payload::WIRE_COMPRESSION_DICT;
 pub use payload::WIRE_VERSION;
 
 mod admission_delegation;

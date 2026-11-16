@@ -787,7 +787,10 @@ async fn compressed_storage_frames_charge_decompressed_bytes_and_reject_invalid_
         .custom_payload(&measured_transport, &[0x55; 1024])?
         .to_wire()?
         .to_vec();
-    let compressed_app_body = lz4_flex::block::compress(&forged_app[9..]);
+    let compressed_app_body = lz4_flex::block::compress_with_dict(
+        &forged_app[9..],
+        crate::message::WIRE_COMPRESSION_DICT,
+    );
     forged_app.truncate(9);
     forged_app[8] = 2;
     forged_app.extend_from_slice(&compressed_app_body);

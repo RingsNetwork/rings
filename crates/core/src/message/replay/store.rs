@@ -85,8 +85,8 @@ use crate::storage::UndecodableRecord;
 /// Common prefix of the storage key of every stream record.
 const RECORD_KEY_PREFIX: &str = "rings-core:transaction-replay:stream";
 /// Largest canonical encoding of a [`StreamKey`]: the network id as a `u32` varint (5), two
-/// DIDs (43 each: a one-byte length and 42 hex characters) and the class tag (1).
-const STREAM_KEY_MAX_BYTES: usize = 5 + 2 * 43 + 1;
+/// DIDs (20 canonical bytes each) and the class tag (1).
+const STREAM_KEY_MAX_BYTES: usize = 5 + 2 * 20 + 1;
 /// Largest canonical encoding of a `u64` varint.
 const U64_MAX_BYTES: usize = 10;
 /// Largest canonical encoding of a [`SequenceState`]: `high`, then each window slot as a
@@ -694,8 +694,8 @@ mod tests {
             TRANSACTION_REPLAY_STORE_MAX_BYTES
         );
         // The figures the replay documentation states.
-        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 5_089);
-        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 28_692_288);
+        assert_eq!(TRANSACTION_REPLAY_RECORD_MAX_BYTES, 5_043);
+        assert_eq!(TRANSACTION_REPLAY_STORE_MAX_BYTES, 24_170_304);
         Ok(())
     }
 

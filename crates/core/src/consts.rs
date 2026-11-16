@@ -70,7 +70,7 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// `test_chunk_envelope_reserves_are_the_widest_framed_chunk`: a larger reserve wastes the same
 /// bytes in every chunk frame (#925), a smaller one lets a frame overflow the channel. A field
 /// the framer sets differently changes the witness, which then re-derives this value.
-pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 907;
+pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 742;
 /// Bytes a whole `MessagePayload` encodes beyond its message's own encoding, at most: the
 /// envelope reserve of a payload sent unchunked, such as a storage hand-off batch.
 ///
@@ -81,7 +81,7 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 907;
 /// DID's 20 canonical bytes, #952), and the length prefix of a message of up to
 /// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
 /// `test_payload_envelope_reserve_is_the_widest_envelope`.
-pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2220;
+pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2009;
 /// Maximum bytes of the serialized session description (`ConnectNodeSend.sdp` and
 /// `ConnectNodeReport.sdp`), enforced at creation, deserialization, and handshake admission
 /// (#1130).
@@ -96,7 +96,7 @@ pub const MAX_SDP_BYTES: usize = 4096;
 /// witnessed with equality by `test_min_max_message_size_fits_widest_control_payloads_whole`.
 pub const CONNECT_NODE_WIRE_MAX: usize = MAX_SDP_BYTES + 15;
 /// Control-frame law (#1130): the transport's [`MIN_MAX_MESSAGE_SIZE`] floor equals the widest
-/// `ConnectNodeSend` / `ConnectNodeReport` payload (`CONNECT_NODE_WIRE_MAX` plus the 2219-byte
+/// `ConnectNodeSend` / `ConnectNodeReport` payload (`CONNECT_NODE_WIRE_MAX` plus the 2008-byte
 /// envelope around a `< 16 KiB` message, whose 2-byte `transaction.data` length prefix is one
 /// byte shorter than [`MAX_PAYLOAD_ENVELOPE_OVERHEAD`]) wrapped in [`TRANSPORT_CUSTOM_OVERHEAD`],
 /// so `WireReserves::PRODUCTION.plan` keeps every DHT control frame `Framing::Whole`.
@@ -155,14 +155,14 @@ pub const REMOVAL_STORE_MAX_REMOVES: usize = crate::dht::REMOVAL_SHARES.bound(
     crate::dht::topology::edge_slots(crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY),
 );
 /// Encoded bytes a key-value store files per unstable item of the removal store, at most: the
-/// pair of a storage key (a DID string, 43) and a record that holds that one item (its DID, 43;
+/// pair of a storage key (a DID string, 43) and a record that holds that one item (its DID, 20;
 /// an absent register, 1; the removes' length prefix, 1; one remove, [`ENTRY_TOMBSTONE_WIRE_MAX`];
 /// and its charge, a principal's tag and a slot varint, 4). A record of one remove is the widest
 /// per item: a register alone is narrower, and further removes share the key and the DID.
 /// So a removal store holds [`REMOVAL_STORE_MAX_REMOVES`] items in at most
-/// `REMOVAL_STORE_MAX_REMOVES · REMOVAL_STORED_ITEM_WIRE_MAX` bytes, about 19.6 MB; witnessed
+/// `REMOVAL_STORE_MAX_REMOVES · REMOVAL_STORED_ITEM_WIRE_MAX` bytes, about 13.9 MB; witnessed
 /// with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
-pub const REMOVAL_STORED_ITEM_WIRE_MAX: usize = 43 + 43 + 1 + 1 + ENTRY_TOMBSTONE_WIRE_MAX + 4;
+pub const REMOVAL_STORED_ITEM_WIRE_MAX: usize = 43 + 20 + 1 + 1 + ENTRY_TOMBSTONE_WIRE_MAX + 4;
 /// Encoded bytes of one element's length prefix, at most: the varint of
 /// [`ENTRY_PAYLOAD_MAX_BYTES`].
 ///
@@ -172,22 +172,22 @@ pub const ENTRY_ELEMENT_PREFIX_WIRE_MAX: usize = 3;
 /// Encoded bytes of one element dot, at most.
 ///
 /// Derivation: a version (a varint `u128` time, 19 bytes at its maximum; a varint `u32` counter,
-/// 5 bytes; two DIDs encoded as `0x`-prefixed hex strings, a one-byte length and 42 characters
-/// each) and a varint `u32` index (5 bytes), `19 + 5 + 43 + 43 + 5 = 115`; witnessed with
-/// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
-pub const ENTRY_DOT_WIRE_MAX: usize = 115;
-/// Encoded bytes of one remove, at most: its 32-byte digest and its dot, `32 + 115 = 147`;
+/// 5 bytes; two DIDs encoded as 20 canonical bytes each) and a varint `u32` index (5 bytes),
+/// `19 + 5 + 20 + 20 + 5 = 69`; witnessed with equality by
+/// `test_carrier_wire_suprema_are_the_widest_encodings`.
+pub const ENTRY_DOT_WIRE_MAX: usize = 69;
+/// Encoded bytes of one remove, at most: its 32-byte digest and its dot, `32 + 69 = 101`;
 /// witnessed with equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
 pub const ENTRY_TOMBSTONE_WIRE_MAX: usize = 32 + ENTRY_DOT_WIRE_MAX;
 /// Encoded bytes of a carrier's register, at most: the option tag and a version,
-/// `1 + 19 + 5 + 43 + 43 = 111`; witnessed with equality by
+/// `1 + 19 + 5 + 20 + 20 = 65`; witnessed with equality by
 /// `test_carrier_wire_suprema_are_the_widest_encodings`.
-pub const ENTRY_REGISTER_WIRE_MAX: usize = 111;
-/// Encoded bytes of a full data carrier's fixed fields, at most: its DID (43), the length
+pub const ENTRY_REGISTER_WIRE_MAX: usize = 65;
+/// Encoded bytes of a full data carrier's fixed fields, at most: its DID (20), the length
 /// prefixes of its elements, dots, and removes (2 each at 1024), its kind (1), and its retention
-/// bound (an option tag and a varint `u128`, 20), `43 + 2 + 1 + 2 + 2 + 20 = 70`; witnessed with
+/// bound (an option tag and a varint `u128`, 20), `20 + 2 + 1 + 2 + 2 + 20 = 47`; witnessed with
 /// equality by `test_carrier_wire_suprema_are_the_widest_encodings`.
-pub const ENTRY_CARRIER_HEADER_WIRE_MAX: usize = 70;
+pub const ENTRY_CARRIER_HEADER_WIRE_MAX: usize = 47;
 /// Encoded bytes of a data carrier, at most (#921; removal-stability paper, Prop. 4): every
 /// element at [`ENTRY_PAYLOAD_MAX_BYTES`] with its prefix and dot, [`DATA_TOMBSTONE_MAX_LEN`]
 /// removes and a register, `W = w_0 + D_max (P_max + λ + w_D) + T_max w_T + w_ρ`, about 33.83 MB.
