@@ -71,13 +71,33 @@ use crate::error::Result;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct Did(H160);
 
+struct DidNewtypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
+    type Value = Did;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(formatter, "20 canonical DID bytes")
+    }
+
+    fn visit_newtype_struct<D>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <[u8; Did::BYTE_LEN]>::deserialize(deserializer).map(Did::from_be_bytes)
+    }
+}
+
 impl Serialize for Did {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::Serializer {
         if serializer.is_human_readable() {
             self.0.serialize(serializer)
         } else {
-            self.to_be_bytes().serialize(serializer)
+            serializer.serialize_newtype_struct("Did", &self.to_be_bytes())
         }
     }
 }
@@ -88,7 +108,7 @@ impl<'de> Deserialize<'de> for Did {
         if deserializer.is_human_readable() {
             H160::deserialize(deserializer).map(Self)
         } else {
-            <[u8; Self::BYTE_LEN]>::deserialize(deserializer).map(Self::from_be_bytes)
+            deserializer.deserialize_newtype_struct("Did", DidNewtypeVisitor)
         }
     }
 }
