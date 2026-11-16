@@ -74,6 +74,7 @@ hex = "0.4.3"
 # on drop, so the HMAC state inside `Hkdf` (the PRK's ipad/opad chaining values) is wiped with it.
 hkdf = "0.13.0"
 k256 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables"] }
+lz4_flex = { workspace = true }
 num-bigint = "0.4.3"
 p256 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables"] }
 primeorder = { version = "0.14.0", features = ["std"] }

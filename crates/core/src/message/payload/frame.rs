@@ -4,7 +4,7 @@
 //!   frame        = MAGIC ‖ wire_version ‖ rest(wire_version)
 //!   MAGIC        = "RINGS\0"                      fixed forever
 //!   wire_version = u16, big-endian                fixed forever, read before any codec
-//!   rest(1)      = kind ‖ codec(body)             kind: 0 payload, 1 link control
+//!   rest(4)      = kind ‖ body(kind)              kind: 0 payload, 1 link control, 2 compressed payload
 //! ```
 //!
 //! Law (frame header): every version reads `MAGIC ‖ wire_version` the same way, and decodes
@@ -49,7 +49,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// The wire version of this build; see the bump rule.
-pub const WIRE_VERSION: u16 = 3;
+pub const WIRE_VERSION: u16 = 4;
 
 /// The opening of every frame, fixed forever (the frame-header law).
 const FRAME_MAGIC: &[u8] = b"RINGS\0";
@@ -70,6 +70,8 @@ pub(super) enum FrameKind {
     Payload,
     /// A link-control frame.
     LinkControl,
+    /// An LZ4-block-compressed message payload (`MessageCategory::DhtControl | MessageCategory::Storage`).
+    CompressedPayload,
 }
 
 impl FrameKind {
@@ -78,6 +80,7 @@ impl FrameKind {
         match self {
             Self::Payload => 0,
             Self::LinkControl => 1,
+            Self::CompressedPayload => 2,
         }
     }
 
@@ -86,6 +89,7 @@ impl FrameKind {
         match byte {
             0 => Some(Self::Payload),
             1 => Some(Self::LinkControl),
+            2 => Some(Self::CompressedPayload),
             _ => None,
         }
     }
@@ -209,4 +213,14 @@ pub(super) fn split_frame(bytes: &[u8]) -> Result<(FrameKind, &[u8])> {
     };
     let kind = FrameKind::from_byte(*kind).ok_or(Error::UnmarkedFrame)?;
     Ok((kind, body))
+}
+
+/// Whether `bytes` (or a leading chunk prefix of `bytes`) can open a
+/// [`FrameKind::CompressedPayload`] frame of this wire version.
+pub(crate) fn may_start_compressed_payload(bytes: &[u8]) -> bool {
+    if bytes.len() < FRAME_HEADER_LEN {
+        let prefix_len = bytes.len().min(FRAME_MAGIC.len());
+        return bytes.get(..prefix_len) == FRAME_MAGIC.get(..prefix_len);
+    }
+    matches!(split_frame(bytes), Ok((FrameKind::CompressedPayload, _)))
 }

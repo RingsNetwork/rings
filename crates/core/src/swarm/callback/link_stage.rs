@@ -74,13 +74,14 @@ impl BoundCallback {
         let in_flight = self.processor.logical.transport.frames_for_test().arrive();
 
         let peer = Did::from_str(cid).ok();
-        let frame = match LinkFrame::from_wire(msg.as_ref()) {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.processor.record_receive_failure_now(peer).await;
-                return Err(error.into());
-            }
-        };
+        let (frame, uncompressed_bytes) =
+            match LinkFrame::from_wire_with_uncompressed_len(msg.as_ref()) {
+                Ok(decoded) => decoded,
+                Err(error) => {
+                    self.processor.record_receive_failure_now(peer).await;
+                    return Err(error.into());
+                }
+            };
         let frame = match frame {
             LinkFrame::Control(control) => {
                 self.handle_link_control(peer, control);
@@ -90,6 +91,7 @@ impl BoundCallback {
         };
         let lease = InboundFrameLease {
             bytes: msg,
+            uncompressed_bytes,
             transport_credit,
             carrier,
             #[cfg(test)]
@@ -130,7 +132,7 @@ impl BoundCallback {
         // authorization (`SlotEncoding::delegator_authorization`).
         let authorization = encoding.map(SlotEncoding::delegator_authorization);
         let Some(prepared) = self
-            .verify_frame(peer, payload, lease.bytes.len(), authorization)
+            .verify_frame(peer, payload, lease.uncompressed_bytes, authorization)
             .await?
         else {
             return Ok(());
@@ -164,7 +166,7 @@ impl BoundCallback {
             .verify_frame(
                 peer,
                 payload,
-                lease.bytes.len(),
+                lease.uncompressed_bytes,
                 PerSlot::full_verification(),
             )
             .await?

@@ -290,6 +290,11 @@ impl<C> MessageReassembler<C> {
         self.pending.len()
     }
 
+    /// Maximum reassembled message length in bytes configured on this reassembler.
+    pub(crate) const fn max_message_bytes(&self) -> usize {
+        self.limits.max_message_bytes
+    }
+
     /// Drop messages whose TTL has elapsed, with their charges, and evict completed-id
     /// tombstones that have likewise expired (a retransmit past its expiry is rejected anyway).
     pub fn remove_expired(&mut self) {

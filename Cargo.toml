@@ -22,6 +22,7 @@ homepage = "https://rings.rs"
 async-trait = "0.1.77"
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 rings-aez = { path = "crates/aez", version = "1.0.0-pre.3" }
 rings-codec = { path = "crates/codec", version = "1.0.0-pre.3" }
 rings-core = { path = "crates/core", version = "1.0.0-pre.3", default-features = false }

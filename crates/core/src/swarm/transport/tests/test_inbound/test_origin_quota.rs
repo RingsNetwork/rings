@@ -680,3 +680,123 @@ async fn intermediate_redirecting_hop_does_not_charge_local_admission() -> Resul
     assert_eq!(transport.origin_quota_record_count_for_test().await, 0);
     Ok(())
 }
+
+/// Issue #1280: Compressed `Storage` frames (`FrameKind::CompressedPayload`) charge their full
+/// decompressed `transaction.data.len()` against `OriginQuota` so high-ratio LZ4 compression
+/// cannot bypass byte-rate limits, and invalid `CompressedPayload` frames (wrong category or
+/// decompression bombs) record `FailedToReceive` against the sending peer.
+#[tokio::test]
+async fn compressed_storage_frames_charge_decompressed_bytes_and_reject_invalid_frames_as_failed_receive(
+) -> Result<()> {
+    use crate::dht::entry::EntryKind;
+    use crate::dht::entry::EntryOperation;
+    use crate::dht::entry::PlacedEntryOperation;
+    use crate::swarm::transport::tests::failed_receive_count;
+    use crate::swarm::transport::tests::transport_with_measure;
+    use crate::swarm::transport::tests::RecordingMeasure;
+
+    let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let local_did = local.delegator_did();
+    let sample_entry = crate::tests::live_entry(
+        local_did,
+        vec![Bytes::from(vec![b'A'; 8192])],
+        EntryKind::Data,
+    );
+    let sample_msg = Message::OperateEntry(PlacedEntryOperation {
+        placement: local_did,
+        op: EntryOperation::Extend(sample_entry),
+        report: false,
+    });
+    let sample_tx = Transaction::new(
+        local_did,
+        crate::utils::new_uuid(),
+        0,
+        None,
+        sample_msg.clone(),
+        MessageSigner::new(&local, TEST_NETWORK_ID),
+    )?;
+    let decompressed_cost =
+        u64::try_from(sample_tx.data.len()).map_err(|_| Error::MessageSizeOverflow)?;
+    // Allow one decompressed Storage frame, but less than two, while easily fitting many
+    // compressed frames if compressed wire bytes were mistakenly charged.
+    let byte_burst = decompressed_cost + decompressed_cost / 2;
+    let lane = OriginQuotaLaneConfig::new(10, 10, 1, byte_burst, 8)
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
+    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .origin_quota(quota)
+        .build();
+    let transport = Arc::clone(&swarm.transport);
+    let relay = pending_peer(&transport).await?;
+    relay.activate(&transport)?;
+
+    let make_storage_wire = |sequence: u64| -> Result<Bytes> {
+        let entry = crate::tests::live_entry(
+            local_did,
+            vec![Bytes::from(vec![b'A'; 8192])],
+            EntryKind::Data,
+        );
+        let msg = Message::OperateEntry(PlacedEntryOperation {
+            placement: local_did,
+            op: EntryOperation::Extend(entry),
+            report: false,
+        });
+        MessagePayload::new_send_with_sequence(
+            msg,
+            MessageSigner::new(&relay.session, TEST_NETWORK_ID),
+            NextHop::toward(local_did),
+            local_did,
+            sequence,
+            None,
+        )?
+        .to_wire()
+    };
+
+    let first_wire = make_storage_wire(0)?;
+    let second_wire = make_storage_wire(1)?;
+    assert_eq!(
+        first_wire[8], 2,
+        "Storage frame must use FrameKind::CompressedPayload"
+    );
+    assert!(
+        (first_wire.len() as u64) * 4 < byte_burst,
+        "compressed wire size ({}) is far smaller than byte_burst ({byte_burst})",
+        first_wire.len()
+    );
+
+    relay.receive(&first_wire).await?;
+    let err = relay
+        .callback
+        .on_admitted_message_for_test(&relay.peer.to_string(), &second_wire)
+        .await
+        .expect_err("second compressed storage frame must exhaust decompressed byte burst");
+    assert!(matches!(
+        err.downcast_ref::<Error>(),
+        Some(Error::OriginQuota(
+            OriginQuotaError::ByteRateExhausted { .. }
+        ))
+    ));
+
+    // Also verify that a forged CompressedPayload frame on a connection records FailedToReceive.
+    let measure = Arc::new(RecordingMeasure::default());
+    let measured_transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer = pending_peer(&measured_transport).await?;
+    peer.admit(&measured_transport).await?;
+    let mut forged_app = peer
+        .custom_payload(&measured_transport, &[0x55; 1024])?
+        .to_wire()?
+        .to_vec();
+    let compressed_app_body = lz4_flex::block::compress(&forged_app[9..]);
+    forged_app.truncate(9);
+    forged_app[8] = 2;
+    forged_app.extend_from_slice(&compressed_app_body);
+
+    assert!(peer
+        .callback
+        .on_admitted_message_for_test(&peer.peer.to_string(), &forged_app)
+        .await
+        .is_err());
+    assert_eq!(failed_receive_count(&measure, peer.peer)?, 1);
+    Ok(())
+}

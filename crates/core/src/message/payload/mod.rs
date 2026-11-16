@@ -1,4 +1,5 @@
 #![deny(missing_docs)]
+#![forbid(unsafe_code)]
 
 use std::borrow::Borrow;
 use std::fmt;
@@ -47,6 +48,7 @@ use crate::utils::get_epoch_ms;
 mod frame;
 mod wire;
 
+pub(crate) use self::frame::may_start_compressed_payload;
 pub use self::frame::PeerWireVersion;
 pub use self::frame::WireVersionMismatch;
 pub use self::frame::WIRE_VERSION;
@@ -56,6 +58,9 @@ pub(crate) use self::wire::LinkFrame;
 pub(crate) use self::wire::PerSlot;
 pub(crate) use self::wire::SlotEncoding;
 pub(crate) use self::wire::WirePayload;
+pub(crate) use self::wire::MAX_COMPRESSED_FRAME_WIRE_BYTES;
+#[cfg(test)]
+pub(crate) use self::wire::MAX_COMPRESSED_PAYLOAD_BYTES;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =
@@ -363,9 +368,16 @@ impl MessagePayload {
     /// and is refused here with [`Error::DelegationReferenceUnresolved`]; a link resolves such
     /// frames before they reach a `MessagePayload`.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
-        match LinkFrame::from_wire(data)? {
-            LinkFrame::Payload(frame) => frame.into_self_contained(),
-            LinkFrame::Control(_) => Err(Error::LinkControlOutsideLink),
+        Self::from_wire_with_uncompressed_len(data).map(|(payload, _)| payload)
+    }
+
+    /// [`Self::from_wire`], together with the uncompressed wire frame length in bytes.
+    pub(crate) fn from_wire_with_uncompressed_len(data: &[u8]) -> Result<(Self, usize)> {
+        match LinkFrame::from_wire_with_uncompressed_len(data)? {
+            (LinkFrame::Payload(frame), uncompressed_len) => {
+                Ok((frame.into_self_contained()?, uncompressed_len))
+            }
+            (LinkFrame::Control(_), _) => Err(Error::LinkControlOutsideLink),
         }
     }
 
@@ -375,8 +387,10 @@ impl MessagePayload {
         WirePayload::inline(self).to_wire()
     }
 
-    /// The exact length of [`Self::to_wire`], without allocating the wire buffer. A link may
-    /// send fewer bytes (a referenced session is shorter than an inline one), never more.
+    /// The uncompressed length of [`Self::to_wire`], without allocating the wire buffer. A link
+    /// may send fewer bytes (a referenced session is shorter than an inline one, and a
+    /// compressible `DhtControl` or `Storage` frame travels as `FrameKind::CompressedPayload`),
+    /// never more.
     pub(crate) fn wire_size(&self) -> Result<usize> {
         WirePayload::inline(self).wire_size()
     }

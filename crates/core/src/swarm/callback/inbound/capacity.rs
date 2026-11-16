@@ -47,6 +47,13 @@ const _: () = {
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
     assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
+    assert!(
+        memory_reservation(crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES)
+            <= INBOUND_RESERVED_BYTES_PER_LANE
+    );
+    assert!(
+        memory_reservation(crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES) <= OPEN_SHARES.floor
+    );
     // The largest honest message fits the open-message pool alone, and the open messages of
     // every slot of the default topology fit the mailbox (load-bounds paper, Def. 6).
     assert!(

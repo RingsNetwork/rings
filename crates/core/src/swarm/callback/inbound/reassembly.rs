@@ -21,18 +21,23 @@ impl InboundProcessor {
         chunk: crate::chunk::Chunk,
         charge: Option<HeldCharge>,
         carrier: Option<ChannelLane>,
-    ) -> ReassemblyOutcome<Option<HeldCharge>> {
+    ) -> (ReassemblyOutcome<Option<HeldCharge>>, usize) {
         let now_ms = self.reassembly_clock.now_ms();
         let credit = self.carrier_credit();
-        let (outcome, expired) = self.reassembler.lock().await.handle_charged_at(
-            chunk,
-            charge,
-            (now_ms, credit),
-            matches!(authentication, Authentication::Authenticated),
-            carrier,
-        );
+        let (outcome, expired, max_message_bytes) = {
+            let mut reassembler = self.reassembler.lock().await;
+            let max_message_bytes = reassembler.max_message_bytes();
+            let (outcome, expired) = reassembler.handle_charged_at(
+                chunk,
+                charge,
+                (now_ms, credit),
+                matches!(authentication, Authentication::Authenticated),
+                carrier,
+            );
+            (outcome, expired, max_message_bytes)
+        };
         self.record_expired_reassembly_failures(peer, expired).await;
-        outcome
+        (outcome, max_message_bytes)
     }
 
     /// The credit this connection's peer holds unused on each carrier, for the rate floor of
@@ -147,7 +152,7 @@ async fn advance_chunk_event(
     // The chunk's charge moves into the reassembler: a first chunk's is the whole message's,
     // any other chunk's is covered and holds nothing.
     let charge = event.permit.take();
-    let outcome = processor
+    let (outcome, max_message_bytes) = processor
         .handle_chunk(
             (event.peer, event.authentication),
             chunk,
@@ -180,9 +185,15 @@ async fn advance_chunk_event(
     let carrier = retained.carrier();
     let (bytes, charge) = retained.into_parts();
     event.permit.restore(charge);
-    let payload = processor
+    let (payload, uncompressed_wire_bytes) = processor
         .decode_verified_payload(event.peer, event.authentication, bytes.as_ref())
         .await?;
+    if uncompressed_wire_bytes > max_message_bytes {
+        processor
+            .record_receive_failure(event.peer, event.authentication)
+            .await;
+        return Err(Error::InvalidChunkMessage);
+    }
     let message = match payload.transaction.data::<crate::message::Message>() {
         Ok(message) => message,
         Err(error) => {
