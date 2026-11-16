@@ -6,18 +6,30 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 
-/// PublicKey for ECDSA and EdDSA.
+/// Fixed-width compressed public-key representation (`[u8; SIZE]`).
+///
+/// Law (Format-Indexed Representation):
+/// - Human-readable formats (`is_human_readable() == true`): Base58-check string (`base58_monero`).
+/// - Binary formats (`is_human_readable() == false`): fixed `SIZE`-element byte tuple (`[u8; SIZE]`).
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct PublicKey<const SIZE: usize>(pub [u8; SIZE]);
 
 struct PublicKeyVisitor<const SIZE: usize>;
-// /// twist handling reference for compressed elliptic-curve public keys.
+
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::ser::Serializer {
-        serializer.serialize_str(
-            &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
-        )
+        if serializer.is_human_readable() {
+            serializer.serialize_str(
+                &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
+            )
+        } else {
+            let mut tuple = serializer.serialize_tuple(SIZE)?;
+            for byte in &self.0 {
+                serde::ser::SerializeTuple::serialize_element(&mut tuple, byte)?;
+            }
+            serde::ser::SerializeTuple::end(tuple)
+        }
     }
 }
 
@@ -109,7 +121,10 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
     type Value = PublicKey<SIZE>;
 
     fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-        write!(formatter, "a base58-check public key with length {SIZE}")
+        write!(
+            formatter,
+            "a base58-check public key or {SIZE} canonical public-key bytes"
+        )
     }
 
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
@@ -122,11 +137,31 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
         }
         PublicKey::from_exact_u8(&value).map_err(E::custom)
     }
+
+    fn visit_bytes<E>(self, value: &[u8]) -> std::result::Result<Self::Value, E>
+    where E: serde::de::Error {
+        PublicKey::from_exact_u8(value).map_err(E::custom)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where A: serde::de::SeqAccess<'de> {
+        let mut data = [0u8; SIZE];
+        for (index, slot) in data.iter_mut().enumerate() {
+            *slot = seq
+                .next_element()?
+                .ok_or_else(|| serde::de::Error::invalid_length(index, &self))?;
+        }
+        Ok(PublicKey(data))
+    }
 }
 
 impl<'de, const SIZE: usize> Deserialize<'de> for PublicKey<SIZE> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where D: serde::de::Deserializer<'de> {
-        deserializer.deserialize_str(PublicKeyVisitor)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(PublicKeyVisitor)
+        } else {
+            deserializer.deserialize_tuple(SIZE, PublicKeyVisitor)
+        }
     }
 }

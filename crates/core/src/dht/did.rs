@@ -65,9 +65,53 @@ use crate::error::Result;
 /// operations of the underlying 160-bit ring.
 ///
 /// Law: parsing, display, serialization, and conversion through [`H160`]
-/// preserve the same 20-byte canonical encoding.
-#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
+/// preserve the same 20-byte canonical encoding:
+/// - Human-readable formats (`is_human_readable() == true`): $\text{Did} \cong \text{H160}$ (`0x`-prefixed 40-hex-character string).
+/// - Binary formats (`is_human_readable() == false`): $\text{Did} \cong [\text{u8}; 20]$ (20 big-endian bytes).
+#[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct Did(H160);
+
+struct DidNewtypeVisitor;
+
+impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
+    type Value = Did;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(formatter, "20 canonical DID bytes")
+    }
+
+    fn visit_newtype_struct<D>(
+        self,
+        deserializer: D,
+    ) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <[u8; Did::BYTE_LEN]>::deserialize(deserializer).map(Did::from_be_bytes)
+    }
+}
+
+impl Serialize for Did {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where S: serde::Serializer {
+        if serializer.is_human_readable() {
+            self.0.serialize(serializer)
+        } else {
+            serializer.serialize_newtype_struct("Did", &self.to_be_bytes())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Did {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        if deserializer.is_human_readable() {
+            H160::deserialize(deserializer).map(Self)
+        } else {
+            deserializer.deserialize_newtype_struct("Did", DidNewtypeVisitor)
+        }
+    }
+}
 
 impl std::fmt::Display for Did {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -554,5 +598,11 @@ mod tests {
             format!("{did:?}"),
             "Did(0x11e807fcc88dd319270493fb2e822e388fe36ab0)"
         );
+
+        // Binary rings_codec (postcard) encodes Did as 20 canonical bytes instead of 43-byte hex.
+        let wire_bytes = rings_codec::serialize(&did).unwrap();
+        assert_eq!(wire_bytes.len(), 20);
+        assert_eq!(wire_bytes.as_slice(), did.as_bytes());
+        assert_eq!(rings_codec::deserialize::<Did>(&wire_bytes).unwrap(), did);
     }
 }

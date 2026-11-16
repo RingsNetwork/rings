@@ -65,6 +65,46 @@ pub(crate) const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_
 pub(crate) const MAX_COMPRESSED_FRAME_WIRE_BYTES: usize =
     FRAME_HEADER_LEN + MAX_COMPRESSED_PAYLOAD_BYTES;
 
+/// Pre-shared compile-time protocol dictionary for [`FrameKind::CompressedPayload`] (#1282).
+///
+/// Contains canonical WebRTC SDP boilerplate lines, ICE candidate tokens, and Rings protocol
+/// strings so even the first occurrence inside a small `DhtControl` or `Storage` frame matches
+/// against the static dictionary window.
+pub(crate) const WIRE_COMPRESSION_DICT: &[u8] = concat!(
+    "v=0\r\no=- ",
+    " 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n",
+    "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
+    "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
+    "a=ice-ufrag:",
+    "\r\na=ice-pwd:",
+    "\r\na=ice-options:trickle\r\n",
+    "a=fingerprint:sha-256 ",
+    "\r\na=setup:actpass\r\na=setup:active\r\na=setup:passive\r\n",
+    "a=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
+    "a=candidate:",
+    " 1 udp 2130706431 ",
+    " 1 tcp 1518280447 ",
+    " typ host generation 0\r\n",
+    " typ srflx raddr 0.0.0.0 rport 0 generation 0\r\n",
+    " typ relay raddr 0.0.0.0 rport 0 generation 0\r\n",
+    "rings-delegation-v1\nsecp256k1\n0x",
+    "rings-delegation-v1\ned25519\n0x",
+    "rings-core:message-verification:transaction",
+    "rings-core:message-verification:payload",
+    "https://",
+    "wss://",
+    "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+)
+.as_bytes();
+
+/// Compile-time invariant: [`WIRE_COMPRESSION_DICT`] is non-empty and fits within a single 64 KiB
+/// LZ4 history window (`u16::MAX + 1`), ensuring every dictionary byte is addressable by a 16-bit
+/// LZ4 match offset.
+const _: () = assert!(
+    !WIRE_COMPRESSION_DICT.is_empty() && WIRE_COMPRESSION_DICT.len() <= 64 * 1024,
+    "WIRE_COMPRESSION_DICT must fit within a single 64 KiB LZ4 history window",
+);
+
 /// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
 /// Every per-slot quantity (a reference, an encoding, a room) is carried in this
@@ -330,7 +370,7 @@ impl<'a> WirePayload<'a> {
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
         if body.len() <= MAX_COMPRESSED_PAYLOAD_BYTES && self.permits_wire_compression() {
-            let compressed = lz4_flex::block::compress(&body);
+            let compressed = lz4_flex::block::compress_with_dict(&body, WIRE_COMPRESSION_DICT);
             if compressed.len() < body.len() {
                 return frame_bytes(FrameKind::CompressedPayload, &compressed);
             }
@@ -469,12 +509,16 @@ impl LinkFrame {
                         "compressed payload frame body length is out of bounds".to_owned(),
                     ));
                 }
-                let decompressed = lz4_flex::block::decompress(body, MAX_COMPRESSED_PAYLOAD_BYTES)
-                    .map_err(|error| {
-                        Error::InvalidMessage(format!(
-                            "compressed payload frame failed LZ4 decompression: {error}"
-                        ))
-                    })?;
+                let decompressed = lz4_flex::block::decompress_with_dict(
+                    body,
+                    MAX_COMPRESSED_PAYLOAD_BYTES,
+                    WIRE_COMPRESSION_DICT,
+                )
+                .map_err(|error| {
+                    Error::InvalidMessage(format!(
+                        "compressed payload frame failed LZ4 decompression: {error}"
+                    ))
+                })?;
                 if body.len() >= decompressed.len() {
                     return Err(Error::InvalidMessage(
                         "compressed payload frame did not shrink body".to_owned(),

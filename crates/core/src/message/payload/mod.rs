@@ -61,6 +61,8 @@ pub(crate) use self::wire::WirePayload;
 pub(crate) use self::wire::MAX_COMPRESSED_FRAME_WIRE_BYTES;
 #[cfg(test)]
 pub(crate) use self::wire::MAX_COMPRESSED_PAYLOAD_BYTES;
+#[cfg(test)]
+pub(crate) use self::wire::WIRE_COMPRESSION_DICT;
 
 /// Message family of the [`Transaction`] signature: the origin's authorship of a message.
 const TRANSACTION_DOMAIN_TAG: DomainTag =

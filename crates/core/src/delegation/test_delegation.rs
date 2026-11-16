@@ -181,7 +181,7 @@ fn test_delegation_digest_golden_vector() {
     let digest = delegation.digest().expect("fixed delegation must digest");
     assert_eq!(
         hex::encode(digest.into_bytes()),
-        "c76a74b6e1c1f58a80eef20406d66157c64aad28"
+        "d4332cab6619bbc3f62c281aee53094714ffe2b7"
     );
 }
 

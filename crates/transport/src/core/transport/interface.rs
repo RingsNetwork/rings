@@ -74,10 +74,10 @@ pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
 /// `MAX_SDP_BYTES` (`4096`-byte) session description (`4111` message bytes), wrapped in the
 /// widest `MessagePayload` envelope (`2219` bytes for a `< 16 KiB` message, whose 2-byte
 /// `transaction.data` length prefix is one byte shorter than `MAX_PAYLOAD_ENVELOPE_OVERHEAD =
-/// 2220`) and the outer transport frame reserve (`TRANSPORT_CUSTOM_OVERHEAD = 4`),
-/// `4111 + 2219 + 4 = 6334`; witnessed with equality in `rings_core` by
+/// 2009`) and the outer transport frame reserve (`TRANSPORT_CUSTOM_OVERHEAD = 4`),
+/// `4111 + 2008 + 4 = 6123`; witnessed with equality in `rings_core` by
 /// `test_min_max_message_size_fits_widest_control_payloads_whole`.
-pub const MIN_MAX_MESSAGE_SIZE: usize = 6334;
+pub const MIN_MAX_MESSAGE_SIZE: usize = 6123;
 
 /// Decode the internal `0 = not negotiated` sentinel used by connection backends.
 #[cfg(any(

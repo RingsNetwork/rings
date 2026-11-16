@@ -328,7 +328,7 @@ fn test_aead_fixed_vector_ciphertext_and_round_trip() {
             .try_into()
             .unwrap(),
         ciphertext: hex::decode(
-            "8321782dda3c3539e5e15a858378c202c2d601449176682d6ee48742548f586aeec913c5494845681b98b5bebd68586d75a17a8a576332c0546e21",
+            "8321782dda3c3539e5e15a858378c202c2d601449176682d6ee48742548f586aeec913c5494845681b98b519926381d980e50c707947f184dbf4fb",
         )
         .unwrap(),
     };
