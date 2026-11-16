@@ -6,12 +6,16 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 
-/// PublicKey for ECDSA and EdDSA.
+/// Fixed-width compressed public-key representation (`[u8; SIZE]`).
+///
+/// Law (Format-Indexed Representation):
+/// - Human-readable formats (`is_human_readable() == true`): Base58-check string (`base58_monero`).
+/// - Binary formats (`is_human_readable() == false`): fixed `SIZE`-element byte tuple (`[u8; SIZE]`).
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct PublicKey<const SIZE: usize>(pub [u8; SIZE]);
 
 struct PublicKeyVisitor<const SIZE: usize>;
-// /// twist handling reference for compressed elliptic-curve public keys.
+
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::ser::Serializer {

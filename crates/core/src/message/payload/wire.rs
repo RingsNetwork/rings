@@ -97,6 +97,14 @@ pub(crate) const WIRE_COMPRESSION_DICT: &[u8] = concat!(
 )
 .as_bytes();
 
+/// Compile-time invariant: [`WIRE_COMPRESSION_DICT`] is non-empty and fits within a single 64 KiB
+/// LZ4 history window (`u16::MAX + 1`), ensuring every dictionary byte is addressable by a 16-bit
+/// LZ4 match offset.
+const _: () = assert!(
+    !WIRE_COMPRESSION_DICT.is_empty() && WIRE_COMPRESSION_DICT.len() <= 64 * 1024,
+    "WIRE_COMPRESSION_DICT must fit within a single 64 KiB LZ4 history window",
+);
+
 /// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
 /// Every per-slot quantity (a reference, an encoding, a room) is carried in this

@@ -70,17 +70,15 @@
 //! observations bounded by lookup round, TTL, and capacity, so a miss owner is a
 //! fresh lookup witness rather than persistent routing state.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 
+use super::coalesce_by_key;
 use super::StorageSyncDestination;
 use super::StorageSyncTarget;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::AdmittedEntry;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::ChordStorageRepair;
@@ -211,24 +209,16 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let now_ms = self.epoch_ms();
-        let mut by_entry = BTreeMap::<(EntryKind, Did), (usize, Entry)>::new();
-        for (order, (_, entry)) in self
-            .live_storage_entries(now_ms)
-            .await?
-            .into_iter()
-            .enumerate()
-        {
-            let key = (entry.kind, entry.did);
-            if let Some((_, existing)) = by_entry.get_mut(&key) {
-                *existing = existing.join(entry)?;
-            } else {
-                by_entry.insert(key, (order, entry));
-            }
-        }
-        let mut ordered: Vec<(usize, Entry)> = by_entry.into_values().collect();
-        ordered.sort_by_key(|(order, _)| *order);
+        let entries = coalesce_by_key(
+            self.live_storage_entries(now_ms)
+                .await?
+                .into_iter()
+                .map(|(_, entry)| entry),
+            |entry| (entry.kind, entry.did),
+            Entry::join,
+        )?;
         let mut actions = Vec::new();
-        for (_, entry) in ordered {
+        for entry in entries {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }
