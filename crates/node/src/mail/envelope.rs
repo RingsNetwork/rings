@@ -51,11 +51,11 @@ pub const MAIL_CHUNK_SLICE_MAX: usize = ENTRY_PAYLOAD_MAX_BYTES - MAIL_CHUNK_ELE
 pub const MAIL_CIPHERTEXT_MAX: usize = MAIL_CHUNKS_MAX * MAIL_CHUNK_SLICE_MAX;
 /// Bytes an encoded ciphertext adds to its message, for a message of `2¹⁴ − 16` to `2²¹ − 17`
 /// bytes: its version (1), the length of its wrapped key (1) and the key's two blocks of two
-/// points, each a length-prefixed 51-character base58 string (`2 · 2 · 52`), the nonce (12), the
+/// points, each a 33-byte compressed SEC1 point (`2 · 2 · 33 = 132`), the nonce (12), the
 /// varint length of the sealed message (3) and the AEAD tag (16),
-/// `1 + 1 + 208 + 12 + 3 + 16 = 241`; witnessed with equality by
+/// `1 + 1 + 132 + 12 + 3 + 16 = 165`; witnessed with equality by
 /// `test_the_largest_message_seals_into_the_most_chunks`.
-pub const MAIL_SEAL_OVERHEAD: usize = 241;
+pub const MAIL_SEAL_OVERHEAD: usize = 165;
 /// The largest message one mail carries: its ciphertext is then exactly
 /// [`MAIL_CIPHERTEXT_MAX`].
 pub const MAIL_MESSAGE_MAX: usize = MAIL_CIPHERTEXT_MAX - MAIL_SEAL_OVERHEAD;

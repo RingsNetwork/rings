@@ -827,6 +827,7 @@ fn test_compressed_payload_is_restricted_to_dht_control_and_storage() -> Result<
 ///   corrupted LZ4 blocks are rejected with `Error::InvalidMessage`.
 #[test]
 fn test_compressed_payload_rejects_bombs_corrupted_blocks_and_non_shrinking_frames() -> Result<()> {
+    use rand::RngCore;
     use rand::SeedableRng;
 
     let mut rng = rand_hc::Hc128Rng::seed_from_u64(1280);
@@ -847,13 +848,23 @@ fn test_compressed_payload_rejects_bombs_corrupted_blocks_and_non_shrinking_fram
         }),
         random_did(&mut rng),
     );
+    let mut tx_uuid_bytes = [0u8; 16];
+    rng.fill_bytes(&mut tx_uuid_bytes);
+    payload.transaction.tx_id = uuid::Uuid::from_bytes(tx_uuid_bytes);
+    payload.transaction.sequence = rng.next_u64();
     payload.transaction.destination = random_did(&mut rng);
     payload.relay.destination = random_did(&mut rng);
     payload.relay.next_hop = random_did(&mut rng);
+    payload.transaction.verification.ttl_ms = rng.next_u64();
+    payload.transaction.verification.ts_ms =
+        (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
     payload.transaction.verification.sig = random_sig(&mut rng);
+    payload.verification.ttl_ms = rng.next_u64();
+    payload.verification.ts_ms = (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
     payload.verification.sig = random_sig(&mut rng);
-    let origin_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let hop_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let origin_session =
+        DelegateeKey::new_with_seckey(&SecretKey::from_bytes([0x33; 32]).unwrap())?;
+    let hop_session = DelegateeKey::new_with_seckey(&SecretKey::from_bytes([0x77; 32]).unwrap())?;
     let sessions = PerSlot {
         origin: DelegationRef::Digest(origin_session.delegation().digest()?),
         hop: DelegationRef::Digest(hop_session.delegation().digest()?),
