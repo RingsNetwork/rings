@@ -71,7 +71,7 @@ a=candidate:1 1 udp 2130706431 127.0.0.1 49160 typ host\r\n"
 async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_before_witness(
 ) -> Result<()> {
     let transport = WebrtcTransport::new("", None, None);
-    let (webrtc_conn, _) = create_peer_connection(&transport).await?;
+    let (webrtc_conn, _, _) = create_peer_connection(&transport).await?;
     let webrtc_conn = Arc::new(webrtc_conn);
     let entered_closed_callback = Arc::new(tokio::sync::Notify::new());
     let release_closed_callback = Arc::new(tokio::sync::Notify::new());

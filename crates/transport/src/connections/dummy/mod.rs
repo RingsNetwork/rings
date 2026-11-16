@@ -446,6 +446,11 @@ impl DummyTransport {
         }
     }
 
+    /// Validate and replace the ICE server list used for subsequent peer connections.
+    pub fn set_ice_servers(&self, ice_servers: &str) {
+        let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
+    }
+
     /// Test hook: the payload frames this transport's connections have dispatched, over every
     /// connection it has opened.
     ///

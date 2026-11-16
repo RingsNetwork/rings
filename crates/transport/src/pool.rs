@@ -60,6 +60,14 @@ impl<C> Pool<C> {
         self.connections.iter().map(|kv| kv.key().clone()).collect()
     }
 
+    /// Snapshot all active connections currently held in the pool.
+    pub fn connections(&self) -> Vec<Arc<C>> {
+        self.connections
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
+
     fn insert_if_replaceable(
         &self,
         cid: &str,

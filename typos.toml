@@ -24,6 +24,8 @@ helo = "helo"
 listPendings = "listPendings"
 # Single-use reply blocks (Mixminion, Sphinx), plural as used in papers/rings.tex.
 SURBs = "SURBs"
+# Retransmission timeout field name on `turn::client::ClientConfig`.
+rto_in_ms = "rto_in_ms"
 
 # mdBook's own variable name, which docs/theme/rings.css must spell the same way to override it.
 [type.css]
