@@ -211,20 +211,24 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let now_ms = self.epoch_ms();
-        let mut by_entry = Vec::<Entry>::new();
-        let mut index_by_key = BTreeMap::<(EntryKind, Did), usize>::new();
-        for (_, entry) in self.live_storage_entries(now_ms).await? {
+        let mut by_entry = BTreeMap::<(EntryKind, Did), (usize, Entry)>::new();
+        for (order, (_, entry)) in self
+            .live_storage_entries(now_ms)
+            .await?
+            .into_iter()
+            .enumerate()
+        {
             let key = (entry.kind, entry.did);
-            if let Some(&idx) = index_by_key.get(&key) {
-                by_entry[idx] = by_entry[idx].join(entry)?;
+            if let Some((_, existing)) = by_entry.get_mut(&key) {
+                *existing = existing.join(entry)?;
             } else {
-                let idx = by_entry.len();
-                index_by_key.insert(key, idx);
-                by_entry.push(entry);
+                by_entry.insert(key, (order, entry));
             }
         }
+        let mut ordered: Vec<(usize, Entry)> = by_entry.into_values().collect();
+        ordered.sort_by_key(|(order, _)| *order);
         let mut actions = Vec::new();
-        for entry in by_entry {
+        for (_, entry) in ordered {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }

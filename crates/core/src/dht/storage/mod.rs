@@ -238,15 +238,15 @@ impl PeerRingAction {
     pub(crate) fn coalesced_storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
         let mut by_route = BTreeMap::<
             (StorageSyncPurpose, StorageSyncDestination),
-            (Vec<PlacedEntry>, BTreeMap<(Did, EntryKind, Did), usize>),
+            BTreeMap<(Did, EntryKind, Did), (usize, PlacedEntry)>,
         >::new();
+        let mut next_order = 0usize;
         for delivery in self.storage_sync_deliveries()? {
             let (purpose, destination, data) = delivery.into_message_parts();
-            let (route_entries, index_by_key) = by_route.entry((purpose, destination)).or_default();
+            let route_entries = by_route.entry((purpose, destination)).or_default();
             for placed in data {
                 let lookup_key = (placed.key, placed.entry.kind, placed.entry.did);
-                if let Some(&idx) = index_by_key.get(&lookup_key) {
-                    let existing = &mut route_entries[idx];
+                if let Some((_, existing)) = route_entries.get_mut(&lookup_key) {
                     let next_incarnation = placed.custody_incarnation();
                     existing.entry = existing.entry.join(placed.entry)?;
                     if let Some(incarnation) = next_incarnation {
@@ -256,15 +256,17 @@ impl PeerRingAction {
                         *existing = existing.clone().with_custody_incarnation(merged);
                     }
                 } else {
-                    let idx = route_entries.len();
-                    index_by_key.insert(lookup_key, idx);
-                    route_entries.push(placed);
+                    route_entries.insert(lookup_key, (next_order, placed));
+                    next_order = next_order.saturating_add(1);
                 }
             }
         }
 
         let mut deliveries = Vec::new();
-        for ((purpose, destination), (data, _)) in by_route {
+        for ((purpose, destination), route_entries) in by_route {
+            let mut ordered: Vec<(usize, PlacedEntry)> = route_entries.into_values().collect();
+            ordered.sort_by_key(|(order, _)| *order);
+            let data: Vec<PlacedEntry> = ordered.into_iter().map(|(_, placed)| placed).collect();
             for batch in sync::sync_entries_batches(data, sync::SYNC_BATCH_MAX_BYTES)? {
                 deliveries.push(StorageSyncDelivery::from_parts(purpose, destination, batch));
             }

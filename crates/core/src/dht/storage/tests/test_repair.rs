@@ -198,9 +198,10 @@ async fn test_republish_and_coalesce_deduplicate_multiple_local_placements_of_sa
     node.successors().update(successor)?;
     let entry = data_entry(Did::from(10u32));
     let placements = entry.did.rotate_affine(3)?;
-    let first_key = placements[0];
-    let second_key = placements[1];
-    let third_key = placements[2];
+    let [first_key, second_key, third_key] = placements.as_slice() else {
+        panic!("expected three affine placements");
+    };
+    let (first_key, second_key, third_key) = (*first_key, *second_key, *third_key);
     // Store two affine placements of the same logical entry locally.
     node.storage.put(&first_key.to_string(), &entry).await?;
     node.storage.put(&second_key.to_string(), &entry).await?;
@@ -233,6 +234,6 @@ async fn test_republish_and_coalesce_deduplicate_multiple_local_placements_of_sa
     assert_eq!(coalesced.len(), 1);
     let (_, _, batch) = coalesced.into_iter().next().unwrap().into_message_parts();
     assert_eq!(batch.len(), 1);
-    assert_eq!(batch[0].key, third_key);
+    assert_eq!(batch.first().map(|placed| placed.key), Some(third_key));
     Ok(())
 }
