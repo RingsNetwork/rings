@@ -185,10 +185,15 @@ impl BehaviourJudgement for CountingMeasure {
 
 fn large_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     let mut entries = Vec::new();
+    let mut state = 0x1280_u64;
     for index in 0..48 {
         let topic = format!("chunked storage sync cancellation {index}");
         let entry_did = Entry::gen_did(&topic)?;
-        let payload = format!("payload-{index}-{}", "x".repeat(512));
+        let mut payload = Vec::with_capacity(512);
+        for _ in 0..64 {
+            state = crate::tests::splitmix64(state);
+            payload.extend_from_slice(&state.to_le_bytes());
+        }
         let entry = Entry::new(entry_did, vec![payload.into()], EntryKind::Data);
         entries.push(PlacedEntry::new(entry_did, entry));
     }

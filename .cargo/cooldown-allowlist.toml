@@ -26,3 +26,8 @@ version = "0.7.6"
 [[allow.exact]]
 crate = "ctutils"
 version = "0.4.5"
+
+# GHSA-9pg8-3269-vfrc: out-of-bounds pointer arithmetic fix in lz4_flex (#1280).
+[[allow.exact]]
+crate = "lz4_flex"
+version = "0.14.2"

@@ -18,6 +18,7 @@ pub(crate) use effects::yield_core_actor_step;
 pub(crate) use effects::CORE_ACTOR_BROWSER_YIELD_INTERVAL;
 
 mod payload;
+pub(crate) use payload::may_start_compressed_payload;
 pub(crate) use payload::DelegationRef;
 pub(crate) use payload::LinkControl;
 pub(crate) use payload::LinkFrame;
@@ -29,6 +30,7 @@ pub(crate) use payload::SlotEncoding;
 pub use payload::Transaction;
 pub(crate) use payload::WirePayload;
 pub use payload::WireVersionMismatch;
+pub(crate) use payload::MAX_COMPRESSED_FRAME_WIRE_BYTES;
 pub use payload::WIRE_VERSION;
 
 mod admission_delegation;

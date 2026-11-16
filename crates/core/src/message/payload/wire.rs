@@ -31,6 +31,7 @@
 use std::borrow::Cow;
 
 use bytes::Bytes;
+use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -48,6 +49,21 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::protocols::MessageRelay;
 use crate::message::protocols::MessageVerification;
+use crate::message::MessageCategory;
+use crate::message::MessageKind;
+
+/// Hard upper bound on the uncompressed `WirePayload` body of a
+/// [`FrameKind::CompressedPayload`] frame (#1280).
+///
+/// Decompression allocates at most this ceiling before reading untrusted LZ4 tokens
+/// (`lz4_flex::block::decompress`), defending against decompression bombs without relying on an
+/// attacker-controlled size prefix.
+pub(crate) const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+/// Upper bound on the uncompressed wire length (`FRAME_HEADER_LEN + body`) of a
+/// [`FrameKind::CompressedPayload`] frame.
+pub(crate) const MAX_COMPRESSED_FRAME_WIRE_BYTES: usize =
+    FRAME_HEADER_LEN + MAX_COMPRESSED_PAYLOAD_BYTES;
 
 /// The two delegation slots of a payload, as a product: `PerSlot<T> ≅ T × T`.
 ///
@@ -287,13 +303,42 @@ impl<'a> WirePayload<'a> {
         self.resolve(resolve_inline)
     }
 
+    /// Whether this payload's transaction belongs to a public, cleartext-signed traffic class
+    /// eligible for outer wire-frame compression (`MessageCategory::DhtControl` or
+    /// `MessageCategory::Storage`).
+    ///
+    /// Law (compression boundary, #1280): `MessageCategory::E2e` and
+    /// `MessageCategory::Application` (including fixed-width Onion frames) never compress on the
+    /// wire and are rejected if received as [`FrameKind::CompressedPayload`].
+    pub(crate) fn permits_wire_compression(&self) -> bool {
+        MessageKind::from_wire(self.transaction.data.as_ref()).is_ok_and(|kind| {
+            matches!(
+                kind.class(),
+                MessageCategory::DhtControl | MessageCategory::Storage
+            )
+        })
+    }
+
     /// The frame bytes: the frame header of a payload (`frame`), then the encoded body.
+    ///
+    /// When the carried transaction is `MessageCategory::DhtControl` or
+    /// `MessageCategory::Storage` and the serialized body fits
+    /// [`MAX_COMPRESSED_PAYLOAD_BYTES`], the body is compressed with
+    /// `lz4_flex::block::compress` and emitted as [`FrameKind::CompressedPayload`] iff the
+    /// compressed representation is strictly smaller than the uncompressed body; otherwise it
+    /// travels uncompressed as [`FrameKind::Payload`].
     pub(crate) fn to_wire(&self) -> Result<Bytes> {
         let body = rings_codec::serialize(self).map_err(Error::CodecSerialize)?;
+        if body.len() <= MAX_COMPRESSED_PAYLOAD_BYTES && self.permits_wire_compression() {
+            let compressed = lz4_flex::block::compress(&body);
+            if compressed.len() < body.len() {
+                return frame_bytes(FrameKind::CompressedPayload, &compressed);
+            }
+        }
         frame_bytes(FrameKind::Payload, body.as_slice())
     }
 
-    /// The exact length of [`Self::to_wire`], without allocating it.
+    /// The uncompressed length of [`Self::to_wire`], without allocating it.
     pub(crate) fn wire_size(&self) -> Result<usize> {
         let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
         let body = usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)?;
@@ -397,20 +442,60 @@ impl LinkFrame {
     /// Decode one frame by its header (the frame-header law of `frame`).
     ///
     /// ```text
-    ///   bytes ─┬─ header of this version, payload ─────▶ Payload(decode body)
-    ///          ├─ header of this version, link control ─▶ Control(decode body)
-    ///          ├─ header of another version ───────────▶ IncompatibleWireVersion
-    ///          └─ otherwise ───────────────────────────▶ UnmarkedFrame
+    ///   bytes ─┬─ header of this version, payload ────────────▶ Payload(decode body)
+    ///          ├─ header of this version, compressed payload ─▶ Payload(decompress & decode body)
+    ///          ├─ header of this version, link control ───────▶ Control(decode body)
+    ///          ├─ header of another version ──────────────────▶ IncompatibleWireVersion
+    ///          └─ otherwise ──────────────────────────────────▶ UnmarkedFrame
     /// ```
+    #[cfg(test)]
     pub(crate) fn from_wire(bytes: &[u8]) -> Result<Self> {
+        Self::from_wire_with_uncompressed_len(bytes).map(|(frame, _)| frame)
+    }
+
+    /// Decode one frame and report its uncompressed wire length (`FRAME_HEADER_LEN` plus the
+    /// uncompressed body length), so inbound capacity and reassembly budgets account for the
+    /// decompressed representation (#1280).
+    pub(crate) fn from_wire_with_uncompressed_len(bytes: &[u8]) -> Result<(Self, usize)> {
         let (kind, body) = split_frame(bytes)?;
         match kind {
             FrameKind::Payload => rings_codec::deserialize(body)
                 .map(Box::new)
-                .map(Self::Payload)
+                .map(|payload| (Self::Payload(payload), bytes.len()))
                 .map_err(Error::CodecDeserialize),
+            FrameKind::CompressedPayload => {
+                if body.is_empty() || body.len() >= MAX_COMPRESSED_PAYLOAD_BYTES {
+                    return Err(Error::InvalidMessage(
+                        "compressed payload frame body length is out of bounds".to_owned(),
+                    ));
+                }
+                let decompressed = lz4_flex::block::decompress(body, MAX_COMPRESSED_PAYLOAD_BYTES)
+                    .map_err(|error| {
+                        Error::InvalidMessage(format!(
+                            "compressed payload frame failed LZ4 decompression: {error}"
+                        ))
+                    })?;
+                if body.len() >= decompressed.len() {
+                    return Err(Error::InvalidMessage(
+                        "compressed payload frame did not shrink body".to_owned(),
+                    ));
+                }
+                let uncompressed_len = FRAME_HEADER_LEN
+                    .checked_add(decompressed.len())
+                    .ok_or(Error::MessageSizeOverflow)?;
+                let payload: Box<WirePayload<'static>> = rings_codec::deserialize(&decompressed)
+                    .map(Box::new)
+                    .map_err(Error::CodecDeserialize)?;
+                if !payload.permits_wire_compression() {
+                    return Err(Error::InvalidMessage(
+                        "compressed payload frame carries a message category that forbids compression"
+                            .to_owned(),
+                    ));
+                }
+                Ok((Self::Payload(payload), uncompressed_len))
+            }
             FrameKind::LinkControl => rings_codec::deserialize(body)
-                .map(Self::Control)
+                .map(|control| (Self::Control(control), bytes.len()))
                 .map_err(Error::CodecDeserialize),
         }
     }

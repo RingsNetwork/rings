@@ -186,10 +186,11 @@ pub(super) struct InboundProcessor<L = LogicalInbound> {
 }
 
 /// What the transport handed over with one frame and takes back when the frame is done: the
-/// raw bytes, for their length and their memory accounting, and the transport capacity they
-/// occupy until the inbound actor releases it.
+/// raw bytes, the uncompressed frame length for memory accounting, and the transport capacity
+/// they occupy until the inbound actor releases it.
 pub(super) struct InboundFrameLease {
     bytes: Bytes,
+    uncompressed_bytes: usize,
     transport_credit: Option<InboundCreditLease>,
     /// The transport lane the frame arrived on, whose credit it took.
     carrier: Option<ChannelLane>,

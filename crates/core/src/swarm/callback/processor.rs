@@ -260,23 +260,24 @@ impl InboundProcessor {
         peer: Option<Did>,
         authentication: Authentication,
         msg: &[u8],
-    ) -> crate::error::Result<MessagePayload> {
-        let payload = match MessagePayload::from_wire(msg) {
-            Ok(payload) => payload,
-            Err(e) => {
-                self.record_receive_failure(peer, authentication).await;
-                return Err(e);
-            }
-        };
+    ) -> crate::error::Result<(MessagePayload, usize)> {
+        let (payload, uncompressed_bytes) =
+            match MessagePayload::from_wire_with_uncompressed_len(msg) {
+                Ok(decoded) => decoded,
+                Err(e) => {
+                    self.record_receive_failure(peer, authentication).await;
+                    return Err(e);
+                }
+            };
         let network_id = self.logical.transport.network_id;
         if !payload.verify_transaction_and_payload_at(network_id, self.now_ms()) {
-            log_inbound_verification_failure(peer, &payload, msg.len());
+            log_inbound_verification_failure(peer, &payload, uncompressed_bytes);
             self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message verification failed or message expired".to_string(),
             ));
         }
-        Ok(payload)
+        Ok((payload, uncompressed_bytes))
     }
 
     pub(super) async fn validate_preverified_payload(
@@ -359,13 +360,13 @@ pub(crate) fn prepare_transport_frame_lane_for_test(
     network_id: u32,
     bytes: &[u8],
 ) -> crate::error::Result<InboundLane> {
-    let payload = MessagePayload::from_wire(bytes)?;
+    let (payload, uncompressed_bytes) = MessagePayload::from_wire_with_uncompressed_len(bytes)?;
     prepare_resolved_frame(
         network_id,
         crate::utils::get_epoch_ms(),
         None,
         payload,
-        bytes.len(),
+        uncompressed_bytes,
         PerSlot::full_verification(),
     )
     .map(|prepared| prepared.lane)
