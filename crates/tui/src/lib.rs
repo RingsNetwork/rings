@@ -17,7 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event;
+use crossterm::event::DisableBracketedPaste;
 use crossterm::event::DisableMouseCapture;
+use crossterm::event::EnableBracketedPaste;
 use crossterm::event::EnableMouseCapture;
 use crossterm::event::Event;
 use crossterm::event::KeyEventKind;
@@ -68,7 +70,12 @@ struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let mut stdout = io::stdout();
-        let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+        let _ = execute!(
+            stdout,
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
@@ -268,6 +275,22 @@ fn reap_finished_workers(
     }
 }
 
+/// Route a single [`crossterm::event::Event`] from the terminal input reader into [`App`].
+pub fn apply_terminal_event(app: &mut App, ev: Event) {
+    match ev {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            app.handle_key_event(key);
+        }
+        Event::Mouse(mouse) => {
+            app.handle_mouse_event(mouse);
+        }
+        Event::Paste(text) => {
+            app.handle_paste(&text);
+        }
+        _ => {}
+    }
+}
+
 /// Launch the interactive TUI using a [`ResolvedTuiConfig`].
 pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
     enable_raw_mode()?;
@@ -275,7 +298,12 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
     // restores raw mode on unwind/return.
     let _guard = TerminalGuard;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -355,16 +383,9 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
             }
             maybe_ev = input_rx.recv() => {
                 match maybe_ev {
-                    Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        app.handle_key_event(key);
+                    Some(ev) => {
+                        apply_terminal_event(&mut app, ev);
                     }
-                    Some(Event::Mouse(mouse)) => {
-                        app.handle_mouse_event(mouse);
-                    }
-                    Some(Event::Paste(text)) => {
-                        app.handle_paste(&text);
-                    }
-                    Some(_) => {}
                     None => {
                         // Terminal input stream closed or errored; exit cleanly instead of spinning.
                         app.should_quit = true;
@@ -1288,5 +1309,253 @@ mod tests {
 
         let sliced = ui::visible_field_slice_with_cursor("你好世界Rings节点测试输入", 4, 14, true);
         assert!(sliced.contains('█'));
+        assert!(unicode_width::UnicodeWidthStr::width(sliced.as_str()) <= 14);
+    }
+
+    fn buffer_to_string(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        let area = *buf.area();
+        let mut out = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    out.push_str(cell.symbol());
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn paste_preserves_multiline_payloads_and_normalizes_single_line_fields() {
+        let mut app = App::new(test_config());
+        let _ = app.pop_pending_command();
+
+        // 1. Single-line URL field: trailing/leading newlines are trimmed and internal CRLF becomes a single space.
+        app.trigger_button(ButtonId::ConnectUrl);
+        apply_terminal_event(
+            &mut app,
+            Event::Paste("http://127.0.0.1:50001\r\n".to_string()),
+        );
+        let modal = app.modal.as_ref().expect("connect url modal");
+        assert_eq!(modal.fields[0].value, "http://127.0.0.1:50001");
+        app.submit_modal();
+        assert!(app.modal.is_none());
+        let cmd = app.pop_pending_command().expect("connect command");
+        assert_eq!(cmd.command, NodeCommand::ConnectPeerViaHttp {
+            url: "http://127.0.0.1:50001".to_string(),
+            api_token: None,
+        });
+        app.clear_in_flight();
+
+        // 2. Multi-line SendMessage payload field: embedded `\n` and `\t` are preserved verbatim,
+        // and `\r\n` is normalized to `\n` (not spaces!).
+        app.trigger_button(ButtonId::SendMessage);
+        apply_terminal_event(&mut app, Event::Paste("0x1234".to_string()));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        apply_terminal_event(
+            &mut app,
+            Event::Paste("line1\r\nline2\tindented\nline3".to_string()),
+        );
+        app.submit_modal();
+        assert!(app.modal.is_none());
+        let msg_cmd = app.pop_pending_command().expect("send message command");
+        assert_eq!(msg_cmd.command, NodeCommand::SendBackendMessage {
+            destination_did: "0x1234".to_string(),
+            namespace: "default".to_string(),
+            payload: "line1\nline2\tindented\nline3".to_string(),
+        });
+    }
+
+    #[test]
+    fn word_wrap_reachability_unicode_width_and_help_completeness_hold() {
+        // 1. Four 20-char ASCII words separated by spaces in width 38 wraps onto 4 lines (1 word per line),
+        // not 3 lines (`ceil(83/38) = 3`), so the 4th word is reachable when scrolled to `output_max_scroll`.
+        let four_words =
+            "aaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbb cccccccccccccccccccc dddddddddddddddddddd";
+        let wrapped = ui::wrap_text_for_width(four_words, 38);
+        assert_eq!(wrapped, vec![
+            "aaaaaaaaaaaaaaaaaaaa".to_string(),
+            "bbbbbbbbbbbbbbbbbbbb".to_string(),
+            "cccccccccccccccccccc".to_string(),
+            "dddddddddddddddddddd".to_string(),
+        ]);
+
+        // 2. 114 Latin-1 `'é'` characters (each 1 display column wide) in width 38 wraps into 3 lines,
+        // NOT 6 lines!
+        let latin_e = "é".repeat(114);
+        let wrapped_e = ui::wrap_text_for_width(&latin_e, 38);
+        assert_eq!(wrapped_e.len(), 3);
+
+        // 3. `visible_field_slice_with_cursor` never exceeds `max_cols` display width across ASCII,
+        // Latin-1, combining marks, CJK, and multi-line markers.
+        for sample in [
+            "https://node1.rings.network:50001/jsonrpc",
+            &latin_e,
+            "cafe\u{0301}-combining-mark-test-string",
+            "你好世界Rings节点测试输入长文本切分",
+            "line1\nline2\tindented\nline3-long-payload",
+        ] {
+            for cur in [0, 3, sample.chars().count() / 2, sample.chars().count()] {
+                for max_cols in [8, 14, 24] {
+                    let s = ui::visible_field_slice_with_cursor(sample, cur, max_cols, true);
+                    let width = unicode_width::UnicodeWidthStr::width(s.as_str());
+                    assert!(
+                        width <= max_cols,
+                        "width {width} exceeded max_cols {max_cols} for {s:?}"
+                    );
+                    assert!(s.contains('█'));
+                }
+            }
+        }
+
+        // 4. Help overlay on 80x24 and 120x36 shows all hotkey rows and the close instruction without clipping.
+        let mut app = App::new(test_config());
+        app.show_help = true;
+        for (w, h) in [(80, 24), (120, 36)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| ui::render(frame, &mut app))
+                .expect("draw help");
+            let screen = buffer_to_string(&terminal);
+            assert!(screen.contains("Navigation, Focus & Mouse Support"));
+            assert!(screen.contains("[E] Toggle Expired Dir"));
+            assert!(screen.contains("Press [Esc], [Enter], [?], or Click to close"));
+        }
+    }
+
+    #[test]
+    fn commands_focus_enum_log_pinning_viewport_stability_and_queue_full_modal_work() {
+        let mut app = App::new(test_config());
+        let _ = app.pop_pending_command();
+        app.clear_in_flight();
+
+        // Populate snapshot with failure/timeout metrics and an unmeasured connected peer (R6, R7).
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 1,
+            },
+            outcome: CommandOutcome::Snapshot(Box::new(NodeSnapshot {
+                did: Some("0xlocal".to_string()),
+                peers: vec![PeerInfo {
+                    did: "0xunmeasured_peer".to_string(),
+                    state: "Connected".to_string(),
+                }],
+                observability: Some(OperatorSnapshotDto {
+                    messages: MessageTotalsDto {
+                        sent: 10,
+                        received: 20,
+                        forwarded: 5,
+                        stored: 3,
+                        failed: 99,
+                    },
+                    dht_lookups: DhtLookupSnapshotDto {
+                        total: 50,
+                        succeeded: 40,
+                        failed: 3,
+                        timed_out: 77,
+                        in_flight: 1,
+                        latency_sum_ms: 500,
+                        latency_count: 50,
+                        latency_buckets: Vec::new(),
+                    },
+                    ..OperatorSnapshotDto::default()
+                }),
+                ..NodeSnapshot::default()
+            })),
+        });
+
+        // Verify 80x24 Overview renders Failed:99 and T/O:77 visibly, and 3:Peers renders "Unknown" for unmeasured peer.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("80x24 terminal");
+        app.active_tab = TabId::Overview;
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw overview 80x24");
+        let overview_screen = buffer_to_string(&terminal);
+        assert!(overview_screen.contains("Failed:99"));
+        assert!(overview_screen.contains("T/O:77"));
+
+        app.active_tab = TabId::Peers;
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw peers 80x24");
+        let peers_screen = buffer_to_string(&terminal);
+        assert!(peers_screen.contains("Unknown"));
+
+        // Verify R4: on 6:Commands, select ReloadToken (index 15), click OutputPanel, and press Enter.
+        // Clicking OutputPanel focuses OutputPanel so Enter MUST NOT trigger ReloadToken!
+        app.active_tab = TabId::Commands;
+        app.selected_workbench_idx = 15; // ReloadToken
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw commands");
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 20, // Inside OutputPanel on 80x24
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.commands_focus, crate::app::CommandsFocus::OutputPanel);
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.pending_token_reload);
+
+        // Verify R5: when browsing an older log entry, new logs (e.g. from pressing 'p' or async outcomes)
+        // keep the user's selected_log_id pinned and do not clobber `last_command_output`.
+        app.commands_focus = crate::app::CommandsFocus::Workbench;
+        app.follow_latest_log = true;
+        app.push_log(
+            "createOffer",
+            true,
+            "offer-1".into(),
+            Some("OFFER-PAYLOAD-1".into()),
+            4,
+        );
+        app.push_log(
+            "answerOffer",
+            true,
+            "answer-2".into(),
+            Some("ANSWER-PAYLOAD-2".into()),
+            5,
+        );
+        // Step down to index 1 (`offer-1`), which pins `follow_latest_log = false`:
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE));
+        assert_eq!(app.selected_log_idx, 1);
+        assert!(!app.follow_latest_log);
+        assert_eq!(app.last_command_output.as_deref(), Some("OFFER-PAYLOAD-1"));
+
+        // Now press 'p' (ToggleAutoPoll) which pushes a new log at index 0:
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        // Pinned selection shifts to index 2 (`offer-1`) and output remains `"OFFER-PAYLOAD-1"`!
+        assert_eq!(app.selected_log_idx, 2);
+        assert_eq!(app.last_command_output.as_deref(), Some("OFFER-PAYLOAD-1"));
+
+        // Verify R12: when command queue is full, submitting a modal keeps the modal open and preserves input.
+        for i in 0..crate::app::MAX_PENDING_COMMANDS {
+            app.trigger_button(ButtonId::LookupService);
+            if let Some(m) = &mut app.modal {
+                m.fields[0].value = format!("svc-{i}");
+            }
+            app.submit_modal();
+        }
+        app.trigger_button(ButtonId::CreateOffer);
+        if let Some(m) = &mut app.modal {
+            m.fields[0].value = "0xpreserve_me".to_string();
+        }
+        app.submit_modal();
+        let kept_modal = app
+            .modal
+            .as_ref()
+            .expect("modal must remain open when queue is full");
+        assert_eq!(kept_modal.fields[0].value, "0xpreserve_me");
+        assert!(kept_modal
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Command queue is full"));
     }
 }

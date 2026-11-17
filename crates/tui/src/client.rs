@@ -226,6 +226,52 @@ impl HttpNodeClient {
         let response = response.error_for_status()?;
         Ok(Some(response.json::<GatewayStatusDto>().await?))
     }
+
+    async fn fetch_all_peer_measurements(
+        &self,
+    ) -> Result<(Vec<PeerMeasurementInfo>, Option<String>)> {
+        const PAGE_LIMIT: u32 = 64;
+        const MAX_PAGES: usize = 16;
+        let mut all = Vec::new();
+        let mut cursor: Option<String> = None;
+        for page_idx in 0..MAX_PAGES {
+            let req = ListPeerMeasurementsRequest {
+                limit: Some(PAGE_LIMIT),
+                cursor: cursor.clone(),
+            };
+            match self.rpc.list_peer_measurements(&req).await {
+                Ok(resp) => {
+                    let page_len = resp.measurements.len();
+                    all.extend(resp.measurements);
+                    match resp.next_cursor.filter(|c| !c.is_empty()) {
+                        Some(next) if page_len > 0 => {
+                            if page_idx + 1 == MAX_PAGES {
+                                let total_len = all.len();
+                                return Ok((
+                                    all,
+                                    Some(format!(
+                                        "listPeerMeasurements: truncated after {total_len} records ({MAX_PAGES} pages)"
+                                    )),
+                                ));
+                            }
+                            cursor = Some(next);
+                        }
+                        _ => return Ok((all, None)),
+                    }
+                }
+                Err(err) => {
+                    if page_idx == 0 {
+                        return Err(TuiError::from(err));
+                    }
+                    return Ok((
+                        all,
+                        Some(format!("listPeerMeasurements page {}: {err}", page_idx + 1)),
+                    ));
+                }
+            }
+        }
+        Ok((all, None))
+    }
 }
 
 /// Seed document structure compatible with JSON and YAML seed files.
@@ -305,10 +351,6 @@ impl NodeClient for HttpNodeClient {
         let did_req = NodeDidRequest {};
         let info_req = NodeInfoRequest {};
         let peers_req = ListPeersRequest {};
-        let meas_req = ListPeerMeasurementsRequest {
-            limit: Some(64),
-            cursor: None,
-        };
         let online_req = LookupOnlineNodesRequest {
             include_expired: include_expired_directory,
         };
@@ -321,7 +363,7 @@ impl NodeClient for HttpNodeClient {
             self.rpc.node_did(&did_req),
             self.rpc.node_info(&info_req),
             self.rpc.list_peers(&peers_req),
-            self.rpc.list_peer_measurements(&meas_req),
+            self.fetch_all_peer_measurements(),
             self.fetch_observability(),
             self.fetch_gateway_status(),
             self.rpc.lookup_online_nodes(&online_req),
@@ -364,9 +406,12 @@ impl NodeClient for HttpNodeClient {
         }
 
         match meas_res {
-            Ok(meas) => {
+            Ok((measurements, page_warn)) => {
                 authenticated_succeeded = true;
-                snapshot.measurements = meas.measurements;
+                snapshot.measurements = measurements;
+                if let Some(warn) = page_warn {
+                    snapshot.warnings.push(warn);
+                }
             }
             Err(err) => {
                 snapshot

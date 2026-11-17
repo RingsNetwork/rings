@@ -398,6 +398,7 @@ impl NodeSnapshot {
                 .and_then(|m| m.credit.as_ref().map(|c| c.score))
                 .or_else(|| rating.map(|r| r.credit_score));
 
+            let has_measurement = meas.is_some() || rating.is_some();
             let (sent_ok, sent_fail, recv_ok, recv_fail) = match (meas, rating) {
                 (Some(m), _) => (
                     m.counters.sent,
@@ -413,9 +414,9 @@ impl NodeSnapshot {
                 .and_then(|m| {
                     m.credit
                         .as_ref()
-                        .map(|c| (c.bytes_sent_to_peer, c.bytes_received_from_peer))
+                        .map(|c| (Some(c.bytes_sent_to_peer), Some(c.bytes_received_from_peer)))
                 })
-                .unwrap_or((0, 0));
+                .unwrap_or((None, None));
 
             rows.push(PeerTrafficRow {
                 peer_did: peer.did.clone(),
@@ -423,6 +424,7 @@ impl NodeSnapshot {
                 transport_state: peer.state.clone(),
                 reliability,
                 credit_score,
+                has_measurement,
                 sent_ok,
                 sent_fail,
                 recv_ok,
@@ -447,8 +449,8 @@ impl NodeSnapshot {
             let (bytes_tx, bytes_rx) = m
                 .credit
                 .as_ref()
-                .map(|c| (c.bytes_sent_to_peer, c.bytes_received_from_peer))
-                .unwrap_or((0, 0));
+                .map(|c| (Some(c.bytes_sent_to_peer), Some(c.bytes_received_from_peer)))
+                .unwrap_or((None, None));
 
             rows.push(PeerTrafficRow {
                 peer_did: m.did.clone(),
@@ -456,6 +458,7 @@ impl NodeSnapshot {
                 transport_state: "Offline (Measured)".to_string(),
                 reliability,
                 credit_score: m.credit.as_ref().map(|c| c.score),
+                has_measurement: true,
                 sent_ok: m.counters.sent,
                 sent_fail: m.counters.failed_to_send,
                 recv_ok: m.counters.received,
@@ -552,6 +555,8 @@ pub struct PeerTrafficRow {
     pub reliability: String,
     /// Local resource-priority credit score, if measured.
     pub credit_score: Option<f64>,
+    /// Whether transport counter measurements or ratings were loaded for this peer.
+    pub has_measurement: bool,
     /// Successful sends to this peer.
     pub sent_ok: u64,
     /// Failed sends to this peer.
@@ -560,10 +565,10 @@ pub struct PeerTrafficRow {
     pub recv_ok: u64,
     /// Failed receives from this peer.
     pub recv_fail: u64,
-    /// Verified payload bytes sent to this peer.
-    pub bytes_tx: u64,
-    /// Verified payload bytes received from this peer.
-    pub bytes_rx: u64,
+    /// Verified payload bytes sent to this peer, when credit measurement is available.
+    pub bytes_tx: Option<u64>,
+    /// Verified payload bytes received from this peer, when credit measurement is available.
+    pub bytes_rx: Option<u64>,
 }
 
 /// Summary row for a DHT VNode entry hosted in the local node's storage.

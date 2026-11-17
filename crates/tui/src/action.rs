@@ -279,10 +279,12 @@ pub struct FormField {
     pub cursor: usize,
     /// Whether this field is optional.
     pub optional: bool,
+    /// Whether this field accepts multi-line message payloads (preserving `\n` and `\t` on paste).
+    pub multiline: bool,
 }
 
 impl FormField {
-    /// Construct a new form field with an initial value and cursor placed at the end.
+    /// Construct a new single-line form field with an initial value and cursor placed at the end.
     pub fn new(
         label: &'static str,
         placeholder: &'static str,
@@ -297,7 +299,20 @@ impl FormField {
             value,
             cursor,
             optional,
+            multiline: false,
         }
+    }
+
+    /// Construct a new multi-line payload form field that preserves newlines and tabs on paste.
+    pub fn new_multiline(
+        label: &'static str,
+        placeholder: &'static str,
+        initial: impl Into<String>,
+        optional: bool,
+    ) -> Self {
+        let mut field = Self::new(label, placeholder, initial, optional);
+        field.multiline = true;
+        field
     }
 
     fn byte_index_at_char(&self, char_idx: usize) -> usize {
@@ -306,6 +321,19 @@ impl FormField {
             .nth(char_idx)
             .map(|(byte_idx, _)| byte_idx)
             .unwrap_or(self.value.len())
+    }
+
+    /// Insert a string slice at the current cursor position in $O(n)$ time.
+    pub fn insert_str(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let char_len = self.value.chars().count();
+        let cur = self.cursor.min(char_len);
+        let byte_idx = self.byte_index_at_char(cur);
+        let inserted_chars = text.chars().count();
+        self.value.insert_str(byte_idx, text);
+        self.cursor = cur + inserted_chars;
     }
 }
 
@@ -414,11 +442,11 @@ impl CommandModal {
             ModalKind::SendMessage => ("Send Namespaced Backend Message", vec![
                 FormField::new("Destination Peer DID", "0x...", did_prefill, false),
                 FormField::new("Protocol Namespace", "custom_chat", "default", false),
-                FormField::new("Message Payload (UTF-8)", "Hello Rings!", "", false),
+                FormField::new_multiline("Message Payload (UTF-8)", "Hello Rings!", "", false),
             ]),
             ModalKind::PublishTopic => ("Publish Message to DHT Topic", vec![
                 FormField::new("Topic Name", "rings-chat", topic_prefill, false),
-                FormField::new("Message Content", "Hello topic subscribers!", "", false),
+                FormField::new_multiline("Message Content", "Hello topic subscribers!", "", false),
             ]),
             ModalKind::FetchTopic => ("Fetch Messages from DHT Topic", vec![
                 FormField::new("Topic Name", "rings-chat", topic_prefill, false),
@@ -562,6 +590,51 @@ impl CommandModal {
         if let Some(field) = self.fields.get_mut(self.active_field) {
             field.value.clear();
             field.cursor = 0;
+            self.clear_error_if_active();
+        }
+    }
+
+    /// Paste a string into the currently focused field in $O(n)$ time, preserving newlines and
+    /// tabs for multi-line payload fields (`SendMessage`, `PublishTopic`) while normalizing
+    /// single-line identifier fields.
+    pub fn paste_str(&mut self, pasted: &str) {
+        let Some(field) = self.fields.get_mut(self.active_field) else {
+            return;
+        };
+        let sanitized = if field.multiline {
+            let mut out = String::with_capacity(pasted.len());
+            let mut chars = pasted.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '\r' {
+                    if chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    out.push('\n');
+                } else if ch == '\n' || ch == '\t' || !ch.is_control() {
+                    out.push(ch);
+                }
+            }
+            out
+        } else {
+            let trimmed_newlines = pasted.trim_matches(['\r', '\n']);
+            let mut out = String::with_capacity(trimmed_newlines.len());
+            let mut chars = trimmed_newlines.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if ch == '\r' {
+                    if chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    out.push(' ');
+                } else if ch == '\n' || ch == '\t' {
+                    out.push(' ');
+                } else if !ch.is_control() {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+        if !sanitized.is_empty() {
+            field.insert_str(&sanitized);
             self.clear_error_if_active();
         }
     }
@@ -840,6 +913,8 @@ pub enum CommandOutcome {
 pub struct ActionLogEntry {
     /// Monotonic sequence number in the TUI session.
     pub id: u64,
+    /// Originating asynchronous request ID (`0` for synchronous local toggles).
+    pub request_id: u64,
     /// Command name.
     pub command: &'static str,
     /// Whether the command succeeded.
@@ -852,6 +927,29 @@ pub struct ActionLogEntry {
     pub duration_ms: u64,
 }
 
+impl ActionLogEntry {
+    /// Format the full inspector output body corresponding to this log entry.
+    pub fn formatted_output(&self) -> String {
+        match &self.details {
+            Some(details) if !details.is_empty() => details.clone(),
+            _ => {
+                let status = if self.succeeded {
+                    "SUCCEEDED"
+                } else {
+                    "FAILED"
+                };
+                format!(
+                    "Command: #{id} {cmd}\nStatus:  {status} ({dur}ms)\nResult:  {msg}",
+                    id = self.id,
+                    cmd = self.command,
+                    dur = self.duration_ms,
+                    msg = self.message,
+                )
+            }
+        }
+    }
+}
+
 /// Clickable screen region registered during rendering for mouse interaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickTarget {
@@ -859,8 +957,14 @@ pub enum ClickTarget {
     Tab(TabId),
     /// Toolbar or workbench command button.
     Button(ButtonId),
+    /// Bounding panel of the primary selectable table on tabs `1`–`5`.
+    TablePanel,
     /// Row index in the primary table of the active tab.
     TableRow(usize),
+    /// Bounding panel of the `Interactive Command Workbench` in `6:Commands`.
+    WorkbenchPanel,
+    /// Bounding panel of the `Command Execution Log` table in `6:Commands`.
+    LogPanel,
     /// Row index in the Command Execution Log table of `6:Commands`.
     LogRow(usize),
     /// Scrollable Command Output panel in `6:Commands`.

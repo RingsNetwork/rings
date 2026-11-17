@@ -128,6 +128,18 @@ pub enum InFlightKind {
     ReadOnly,
 }
 
+/// Active keyboard focus pane within the `6:Commands` tab when the global toolbar is not focused.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandsFocus {
+    /// The 4x4 interactive command button grid.
+    #[default]
+    Workbench,
+    /// The scrollable `Command Output` inspector panel.
+    OutputPanel,
+    /// The `Command Execution Log` history table.
+    ExecutionLog,
+}
+
 /// Complete state of a running `rings-tui` session.
 pub struct App {
     /// Resolved node endpoint, config path, and token state.
@@ -150,21 +162,35 @@ pub struct App {
     pub directory_subtab: DirectorySubtab,
     /// Selected row index in the Peers table.
     pub selected_peer_idx: usize,
+    /// Persistent viewport scroll offset for the Peers table.
+    pub peer_table_offset: usize,
     /// Stable DID of the currently selected peer row, preserved across snapshot refreshes.
     pub selected_peer_did: Option<String>,
     /// Selected row index in the Recent Message Events table.
     pub selected_event_idx: usize,
+    /// Persistent viewport scroll offset for the Recent Message Events table.
+    pub event_table_offset: usize,
     /// Selected row index in the DHT / Storage table.
     pub selected_dht_idx: usize,
+    /// Persistent viewport scroll offset for the DHT / Storage table.
+    pub dht_table_offset: usize,
     /// Selected row index in the Directory table.
     pub selected_directory_idx: usize,
+    /// Persistent viewport scroll offset for the Directory table.
+    pub directory_table_offset: usize,
     /// Selected button index in the `6:Commands` workbench grid.
     pub selected_workbench_idx: usize,
     /// Selected row index in the `6:Commands` execution log table.
     pub selected_log_idx: usize,
-    /// Whether keyboard navigation in `6:Commands` currently targets the Execution Log table
-    /// (`true`) instead of the 4x4 Command Workbench button grid (`false`).
-    pub commands_focus_logs: bool,
+    /// Stable sequence ID of the currently selected execution log entry.
+    pub selected_log_id: Option<u64>,
+    /// Whether new log entries automatically advance the selection and output inspector (`true`),
+    /// or whether the user is pinned to a historical log entry (`false`).
+    pub follow_latest_log: bool,
+    /// Persistent viewport scroll offset for the `6:Commands` execution log table.
+    pub log_table_offset: usize,
+    /// Active keyboard focus pane in `6:Commands`.
+    pub commands_focus: CommandsFocus,
     /// Vertical scroll offset (in lines) for the Command Output inspector panel in `6:Commands`.
     pub output_scroll: u16,
     /// Upper bound for `output_scroll` computed from the rendered output line count and panel height.
@@ -175,6 +201,10 @@ pub struct App {
     pub modal: Option<CommandModal>,
     /// Whether the help overlay is open.
     pub show_help: bool,
+    /// Vertical scroll offset (in lines) for the Help overlay when terminal height is compact.
+    pub help_scroll: u16,
+    /// Upper bound for `help_scroll` computed during Help overlay rendering.
+    pub help_max_scroll: u16,
     /// Number of asynchronous commands currently executing in the active client epoch.
     pub in_flight_commands: usize,
     /// Whether a `RefreshSnapshot` request is currently in flight in the active client epoch.
@@ -239,18 +269,27 @@ impl App {
             dht_subtab: DhtSubtab::FingerTable,
             directory_subtab: DirectorySubtab::OnlineNodes,
             selected_peer_idx: 0,
+            peer_table_offset: 0,
             selected_peer_did: None,
             selected_event_idx: 0,
+            event_table_offset: 0,
             selected_dht_idx: 0,
+            dht_table_offset: 0,
             selected_directory_idx: 0,
+            directory_table_offset: 0,
             selected_workbench_idx: 0,
             selected_log_idx: 0,
-            commands_focus_logs: false,
+            selected_log_id: None,
+            follow_latest_log: true,
+            log_table_offset: 0,
+            commands_focus: CommandsFocus::Workbench,
             output_scroll: 0,
             output_max_scroll: 0,
             focused_toolbar_idx: None,
             modal: None,
             show_help: false,
+            help_scroll: 0,
+            help_max_scroll: 0,
             in_flight_commands: 0,
             has_refresh_in_flight: false,
             in_flight_requests: BTreeMap::new(),
@@ -314,22 +353,20 @@ impl App {
         }
     }
 
-    fn enqueue_command(&mut self, command: NodeCommand) {
+    fn enqueue_command(&mut self, command: NodeCommand) -> std::result::Result<(), String> {
         if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
             self.enqueue_refresh();
-            return;
+            return Ok(());
         }
         if self.pending_commands.len() >= MAX_PENDING_COMMANDS {
-            self.push_log(
-                command.title(),
-                false,
-                format!("Command queue is full ({MAX_PENDING_COMMANDS}); try again shortly"),
-                None,
-                0,
+            let msg = format!(
+                "Command queue is full ({MAX_PENDING_COMMANDS}); wait for in-flight RPCs to finish and retry"
             );
-            return;
+            self.push_log(command.title(), false, msg.clone(), None, 0);
+            return Err(msg);
         }
         self.pending_commands.push_back(command);
+        Ok(())
     }
 
     /// Advance to a new client generation after a successful token reload / client rebuild,
@@ -354,7 +391,8 @@ impl App {
         }
         self.in_flight_requests.remove(&meta.request_id);
         self.sync_in_flight_counters();
-        self.push_log(
+        self.push_log_with_request_id(
+            meta.request_id,
             "workerTask",
             false,
             format!(
@@ -530,14 +568,14 @@ impl App {
                         self.last_dht_lookup = Some(*lookup);
                     }
                 }
-                if let Some(out) = &output {
-                    if dispatched.meta.request_id >= self.latest_output_req_id {
-                        self.latest_output_req_id = dispatched.meta.request_id;
-                        self.last_command_output = Some(out.clone());
-                        self.output_scroll = 0;
-                    }
-                }
-                self.push_log(command, true, summary, output, duration_ms);
+                self.push_log_with_request_id(
+                    dispatched.meta.request_id,
+                    command,
+                    true,
+                    summary,
+                    output,
+                    duration_ms,
+                );
                 // Coalesce a snapshot refresh after mutating node state.
                 self.enqueue_refresh();
             }
@@ -546,7 +584,14 @@ impl App {
                 error,
                 duration_ms,
             } => {
-                self.push_log(command, false, error, None, duration_ms);
+                self.push_log_with_request_id(
+                    dispatched.meta.request_id,
+                    command,
+                    false,
+                    error,
+                    None,
+                    duration_ms,
+                );
             }
         }
     }
@@ -560,20 +605,89 @@ impl App {
         details: Option<String>,
         duration_ms: u64,
     ) {
+        self.push_log_with_request_id(0, command, succeeded, message, details, duration_ms);
+    }
+
+    /// Record an entry tagged with its originating `request_id` (`0` for synchronous local toggles),
+    /// preserving any historical log selection when the user is browsing history and keeping the
+    /// selected log row and `last_command_output` synchronized.
+    pub fn push_log_with_request_id(
+        &mut self,
+        request_id: u64,
+        command: &'static str,
+        succeeded: bool,
+        message: String,
+        details: Option<String>,
+        duration_ms: u64,
+    ) {
         let id = self.next_log_id;
         self.next_log_id = self.next_log_id.saturating_add(1);
-        if self.action_logs.len() >= MAX_ACTION_LOGS {
-            self.action_logs.pop_back();
-        }
-        self.action_logs.push_front(ActionLogEntry {
+        let entry = ActionLogEntry {
             id,
+            request_id,
             command,
             succeeded,
             message,
             details,
             duration_ms,
-        });
-        self.selected_log_idx = 0;
+        };
+        let entry_output = entry.formatted_output();
+
+        let is_stale_out_of_order = request_id > 0 && request_id < self.latest_output_req_id;
+        if request_id > self.latest_output_req_id {
+            self.latest_output_req_id = request_id;
+        }
+
+        let insert_pos = if is_stale_out_of_order {
+            self.action_logs
+                .iter()
+                .position(|existing| existing.request_id > 0 && existing.request_id <= request_id)
+                .unwrap_or_else(|| {
+                    self.action_logs
+                        .iter()
+                        .take_while(|existing| existing.request_id > request_id)
+                        .count()
+                })
+        } else {
+            0
+        };
+
+        if self.action_logs.len() >= MAX_ACTION_LOGS {
+            self.action_logs.pop_back();
+        }
+        let clamped_pos = insert_pos.min(self.action_logs.len());
+        self.action_logs.insert(clamped_pos, entry);
+
+        let user_pinned_to_history = !self.follow_latest_log
+            || (self.commands_focus != CommandsFocus::Workbench && self.selected_log_id.is_some());
+
+        if user_pinned_to_history {
+            if clamped_pos <= self.log_table_offset && self.log_table_offset > 0 {
+                self.log_table_offset = self
+                    .log_table_offset
+                    .saturating_add(1)
+                    .min(self.action_logs.len().saturating_sub(1));
+            }
+            if let Some(pinned_id) = self.selected_log_id {
+                if let Some(pos) = self.action_logs.iter().position(|e| e.id == pinned_id) {
+                    self.selected_log_idx = pos;
+                    return;
+                }
+            }
+            // Pinned entry was evicted from the 100-entry ring buffer; clamp to the oldest retained entry.
+            self.clamp_selections();
+            self.load_selected_log_into_output();
+        } else if !is_stale_out_of_order {
+            self.selected_log_idx = 0;
+            self.selected_log_id = Some(id);
+            self.log_table_offset = 0;
+            self.last_command_output = Some(entry_output);
+            self.output_scroll = 0;
+        } else {
+            // Stale out-of-order RPC inserted below index 0: keep index 0 selected.
+            self.selected_log_idx = 0;
+            self.selected_log_id = self.action_logs.front().map(|e| e.id);
+        }
     }
 
     /// Return the DID of the currently selected peer (or directory entry) in the exact same row
@@ -759,6 +873,7 @@ impl App {
             }
             ButtonId::ShowHelp => {
                 self.show_help = !self.show_help;
+                self.help_scroll = 0;
             }
             ButtonId::Quit => {
                 self.should_quit = true;
@@ -766,23 +881,31 @@ impl App {
         }
     }
 
-    /// Submit the currently open modal dialog if its inputs are valid.
+    /// Submit the currently open modal dialog if its inputs are valid and the command queue has space.
     pub fn submit_modal(&mut self) {
-        let Some(modal) = &mut self.modal else {
+        let Some(mut modal) = self.modal.take() else {
             return;
         };
-        if let Ok(cmd) = modal.build_command() {
-            match &cmd {
-                NodeCommand::PublishTopic { topic, .. } | NodeCommand::FetchTopic { topic, .. } => {
-                    self.last_topic_name = Some(topic.clone());
+        match modal.build_command() {
+            Ok(cmd) => match self.enqueue_command(cmd.clone()) {
+                Ok(()) => match &cmd {
+                    NodeCommand::PublishTopic { topic, .. }
+                    | NodeCommand::FetchTopic { topic, .. } => {
+                        self.last_topic_name = Some(topic.clone());
+                    }
+                    NodeCommand::DhtLookupKey { key } => {
+                        self.last_topic_name = Some(key.clone());
+                    }
+                    _ => {}
+                },
+                Err(queue_err) => {
+                    modal.error = Some(queue_err);
+                    self.modal = Some(modal);
                 }
-                NodeCommand::DhtLookupKey { key } => {
-                    self.last_topic_name = Some(key.clone());
-                }
-                _ => {}
+            },
+            Err(_) => {
+                self.modal = Some(modal);
             }
-            self.modal = None;
-            self.enqueue_command(cmd);
         }
     }
 
@@ -795,8 +918,31 @@ impl App {
 
         if self.show_help {
             match key.code {
-                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Enter => {
+                KeyCode::Esc
+                | KeyCode::Char('?')
+                | KeyCode::Char('q')
+                | KeyCode::Char('Q')
+                | KeyCode::Enter => {
                     self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1).min(self.help_max_scroll);
+                }
+                KeyCode::PageUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(5);
+                }
+                KeyCode::PageDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(5).min(self.help_max_scroll);
+                }
+                KeyCode::Home => {
+                    self.help_scroll = 0;
+                }
+                KeyCode::End => {
+                    self.help_scroll = self.help_max_scroll;
                 }
                 _ => {}
             }
@@ -810,7 +956,10 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll = 0;
+            }
             KeyCode::Char('1') => {
                 self.focused_toolbar_idx = None;
                 self.active_tab = TabId::Overview;
@@ -889,10 +1038,14 @@ impl App {
             }
             KeyCode::PageDown => {
                 if self.active_tab == TabId::Commands {
-                    self.output_scroll = self
-                        .output_scroll
-                        .saturating_add(5)
-                        .min(self.output_max_scroll);
+                    if self.commands_focus == CommandsFocus::ExecutionLog {
+                        self.step_log_selection_down(5);
+                    } else {
+                        self.output_scroll = self
+                            .output_scroll
+                            .saturating_add(5)
+                            .min(self.output_max_scroll);
+                    }
                 } else {
                     for _ in 0..5 {
                         self.move_selection_down();
@@ -901,7 +1054,11 @@ impl App {
             }
             KeyCode::PageUp => {
                 if self.active_tab == TabId::Commands {
-                    self.output_scroll = self.output_scroll.saturating_sub(5);
+                    if self.commands_focus == CommandsFocus::ExecutionLog {
+                        self.step_log_selection_up(5);
+                    } else {
+                        self.output_scroll = self.output_scroll.saturating_sub(5);
+                    }
                 } else {
                     for _ in 0..5 {
                         self.move_selection_up();
@@ -923,15 +1080,23 @@ impl App {
                 } else if self.active_tab == TabId::DhtStorage {
                     self.dht_subtab = self.dht_subtab.next();
                     self.selected_dht_idx = 0;
+                    self.dht_table_offset = 0;
                 } else if self.active_tab == TabId::Directory {
                     self.directory_subtab = self.directory_subtab.toggle();
                     self.selected_directory_idx = 0;
+                    self.directory_table_offset = 0;
                 } else if self.active_tab == TabId::Commands {
-                    if self.commands_focus_logs {
-                        self.load_selected_log_into_output();
-                    } else if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
-                    {
-                        self.trigger_button(btn);
+                    match self.commands_focus {
+                        CommandsFocus::Workbench => {
+                            if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
+                            {
+                                self.trigger_button(btn);
+                            }
+                        }
+                        CommandsFocus::ExecutionLog => {
+                            self.load_selected_log_into_output();
+                        }
+                        CommandsFocus::OutputPanel => {}
                     }
                 }
             }
@@ -941,11 +1106,17 @@ impl App {
                         self.trigger_button(btn);
                     }
                 } else if self.active_tab == TabId::Commands {
-                    if self.commands_focus_logs {
-                        self.load_selected_log_into_output();
-                    } else if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
-                    {
-                        self.trigger_button(btn);
+                    match self.commands_focus {
+                        CommandsFocus::Workbench => {
+                            if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
+                            {
+                                self.trigger_button(btn);
+                            }
+                        }
+                        CommandsFocus::ExecutionLog => {
+                            self.load_selected_log_into_output();
+                        }
+                        CommandsFocus::OutputPanel => {}
                     }
                 } else if self.active_tab == TabId::Peers {
                     self.trigger_button(ButtonId::InspectPeer);
@@ -961,7 +1132,7 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.move_selection_right(),
             KeyCode::Esc => {
                 self.focused_toolbar_idx = None;
-                self.commands_focus_logs = false;
+                self.commands_focus = CommandsFocus::Workbench;
             }
             _ => {}
         }
@@ -1047,26 +1218,30 @@ impl App {
         }
     }
 
-    /// Handle bracketed or multi-character pasted text into the active modal field without
-    /// prematurely submitting on embedded newlines.
+    /// Handle bracketed or multi-character pasted text into the active modal field in $O(n)$ time,
+    /// preserving multi-line payload formatting (`\n`, `\t`) on payload fields while normalizing
+    /// single-line identifier fields without prematurely submitting on embedded newlines.
     pub fn handle_paste(&mut self, pasted: &str) {
-        let Some(modal) = &mut self.modal else {
-            return;
-        };
-        for ch in pasted.chars() {
-            match ch {
-                '\r' | '\n' => modal.push_char(' '),
-                c if !c.is_control() => modal.push_char(c),
-                _ => {}
-            }
+        if let Some(modal) = &mut self.modal {
+            modal.paste_str(pasted);
         }
     }
 
     /// Handle a terminal mouse event using the bounding boxes registered in [`HitMap`].
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         if self.show_help {
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-                self.show_help = false;
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    self.show_help = false;
+                    self.help_scroll = 0;
+                }
+                MouseEventKind::ScrollUp => {
+                    self.help_scroll = self.help_scroll.saturating_sub(2);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.help_scroll = self.help_scroll.saturating_add(2).min(self.help_max_scroll);
+                }
+                _ => {}
             }
             return;
         }
@@ -1088,9 +1263,14 @@ impl App {
                             self.focused_toolbar_idx = None;
                             if let Some(pos) = ButtonId::WORKBENCH.iter().position(|&b| b == btn) {
                                 self.selected_workbench_idx = pos;
-                                self.commands_focus_logs = false;
+                                self.commands_focus = CommandsFocus::Workbench;
                             }
                             self.trigger_button(btn);
+                        }
+                    }
+                    ClickTarget::TablePanel => {
+                        if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
                         }
                     }
                     ClickTarget::TableRow(row) => {
@@ -1099,19 +1279,42 @@ impl App {
                             self.select_row(row);
                         }
                     }
+                    ClickTarget::WorkbenchPanel => {
+                        if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
+                            self.commands_focus = CommandsFocus::Workbench;
+                        }
+                    }
+                    ClickTarget::LogPanel => {
+                        if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
+                            self.commands_focus = CommandsFocus::ExecutionLog;
+                            if self.selected_log_id.is_none() {
+                                self.selected_log_id =
+                                    self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+                            }
+                        }
+                    }
                     ClickTarget::LogRow(row) => {
                         if self.modal.is_none() {
                             self.focused_toolbar_idx = None;
-                            self.commands_focus_logs = true;
+                            self.commands_focus = CommandsFocus::ExecutionLog;
                             self.selected_log_idx = row;
                             self.clamp_selections();
+                            self.selected_log_id =
+                                self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+                            self.follow_latest_log = self.selected_log_idx == 0;
                             self.load_selected_log_into_output();
                         }
                     }
                     ClickTarget::OutputPanel => {
                         if self.modal.is_none() {
                             self.focused_toolbar_idx = None;
-                            self.commands_focus_logs = false;
+                            self.commands_focus = CommandsFocus::OutputPanel;
+                            if self.selected_log_id.is_none() {
+                                self.selected_log_id =
+                                    self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+                            }
                         }
                     }
                     ClickTarget::SubViewToggle => {
@@ -1120,9 +1323,11 @@ impl App {
                             if self.active_tab == TabId::DhtStorage {
                                 self.dht_subtab = self.dht_subtab.next();
                                 self.selected_dht_idx = 0;
+                                self.dht_table_offset = 0;
                             } else if self.active_tab == TabId::Directory {
                                 self.directory_subtab = self.directory_subtab.toggle();
                                 self.selected_directory_idx = 0;
+                                self.directory_table_offset = 0;
                             }
                         }
                     }
@@ -1143,36 +1348,48 @@ impl App {
             }
             MouseEventKind::ScrollUp if self.modal.is_none() => {
                 self.focused_toolbar_idx = None;
+                let hit = self.hit_map.hit_test(mouse.column, mouse.row);
                 if self.active_tab == TabId::Commands {
-                    match self.hit_map.hit_test(mouse.column, mouse.row) {
-                        Some(ClickTarget::LogRow(_)) => {
-                            self.commands_focus_logs = true;
+                    match hit {
+                        Some(ClickTarget::LogRow(_)) | Some(ClickTarget::LogPanel) => {
+                            self.commands_focus = CommandsFocus::ExecutionLog;
                             self.step_log_selection_up(1);
                         }
-                        _ => {
+                        Some(ClickTarget::OutputPanel) => {
+                            self.commands_focus = CommandsFocus::OutputPanel;
                             self.output_scroll = self.output_scroll.saturating_sub(2);
                         }
+                        _ => {}
                     }
-                } else {
+                } else if matches!(
+                    hit,
+                    Some(ClickTarget::TableRow(_)) | Some(ClickTarget::TablePanel)
+                ) {
                     self.move_selection_up();
                 }
             }
             MouseEventKind::ScrollDown if self.modal.is_none() => {
                 self.focused_toolbar_idx = None;
+                let hit = self.hit_map.hit_test(mouse.column, mouse.row);
                 if self.active_tab == TabId::Commands {
-                    match self.hit_map.hit_test(mouse.column, mouse.row) {
-                        Some(ClickTarget::LogRow(_)) => {
-                            self.commands_focus_logs = true;
+                    match hit {
+                        Some(ClickTarget::LogRow(_)) | Some(ClickTarget::LogPanel) => {
+                            self.commands_focus = CommandsFocus::ExecutionLog;
                             self.step_log_selection_down(1);
                         }
-                        _ => {
+                        Some(ClickTarget::OutputPanel) => {
+                            self.commands_focus = CommandsFocus::OutputPanel;
                             self.output_scroll = self
                                 .output_scroll
                                 .saturating_add(2)
                                 .min(self.output_max_scroll);
                         }
+                        _ => {}
                     }
-                } else {
+                } else if matches!(
+                    hit,
+                    Some(ClickTarget::TableRow(_)) | Some(ClickTarget::TablePanel)
+                ) {
                     self.move_selection_down();
                 }
             }
@@ -1182,11 +1399,7 @@ impl App {
 
     fn load_selected_log_into_output(&mut self) {
         if let Some(entry) = self.action_logs.get(self.selected_log_idx) {
-            let body = entry
-                .details
-                .clone()
-                .unwrap_or_else(|| format!("[{}] {}", entry.command, entry.message));
-            self.last_command_output = Some(body);
+            self.last_command_output = Some(entry.formatted_output());
             self.output_scroll = 0;
         }
     }
@@ -1194,12 +1407,16 @@ impl App {
     fn step_log_selection_up(&mut self, step: usize) {
         self.selected_log_idx = self.selected_log_idx.saturating_sub(step);
         self.clamp_selections();
+        self.selected_log_id = self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+        self.follow_latest_log = self.selected_log_idx == 0;
         self.load_selected_log_into_output();
     }
 
     fn step_log_selection_down(&mut self, step: usize) {
         self.selected_log_idx = self.selected_log_idx.saturating_add(step);
         self.clamp_selections();
+        self.selected_log_id = self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+        self.follow_latest_log = self.selected_log_idx == 0;
         self.load_selected_log_into_output();
     }
 
@@ -1219,9 +1436,11 @@ impl App {
                 self.selected_directory_idx = row;
             }
             TabId::Commands => {
-                self.commands_focus_logs = true;
+                self.commands_focus = CommandsFocus::ExecutionLog;
                 self.selected_log_idx = row;
                 self.clamp_selections();
+                self.selected_log_id = self.action_logs.get(self.selected_log_idx).map(|e| e.id);
+                self.follow_latest_log = self.selected_log_idx == 0;
                 self.load_selected_log_into_output();
                 return;
             }
@@ -1248,14 +1467,21 @@ impl App {
             TabId::Directory => {
                 self.selected_directory_idx = self.selected_directory_idx.saturating_sub(1);
             }
-            TabId::Commands => {
-                if self.commands_focus_logs {
+            TabId::Commands => match self.commands_focus {
+                CommandsFocus::ExecutionLog => {
                     self.step_log_selection_up(1);
                     return;
-                } else if self.selected_workbench_idx >= 4 {
-                    self.selected_workbench_idx -= 4;
                 }
-            }
+                CommandsFocus::OutputPanel => {
+                    self.output_scroll = self.output_scroll.saturating_sub(1);
+                    return;
+                }
+                CommandsFocus::Workbench => {
+                    if self.selected_workbench_idx >= 4 {
+                        self.selected_workbench_idx -= 4;
+                    }
+                }
+            },
         }
         self.clamp_selections();
     }
@@ -1279,14 +1505,24 @@ impl App {
             TabId::Directory => {
                 self.selected_directory_idx = self.selected_directory_idx.saturating_add(1);
             }
-            TabId::Commands => {
-                if self.commands_focus_logs {
+            TabId::Commands => match self.commands_focus {
+                CommandsFocus::ExecutionLog => {
                     self.step_log_selection_down(1);
                     return;
-                } else if self.selected_workbench_idx + 4 < ButtonId::WORKBENCH.len() {
-                    self.selected_workbench_idx += 4;
                 }
-            }
+                CommandsFocus::OutputPanel => {
+                    self.output_scroll = self
+                        .output_scroll
+                        .saturating_add(1)
+                        .min(self.output_max_scroll);
+                    return;
+                }
+                CommandsFocus::Workbench => {
+                    if self.selected_workbench_idx + 4 < ButtonId::WORKBENCH.len() {
+                        self.selected_workbench_idx += 4;
+                    }
+                }
+            },
         }
         self.clamp_selections();
     }
@@ -1301,18 +1537,24 @@ impl App {
             TabId::DhtStorage => {
                 self.dht_subtab = self.dht_subtab.prev();
                 self.selected_dht_idx = 0;
+                self.dht_table_offset = 0;
             }
             TabId::Directory => {
                 self.directory_subtab = self.directory_subtab.toggle();
                 self.selected_directory_idx = 0;
+                self.directory_table_offset = 0;
             }
-            TabId::Commands => {
-                if self.commands_focus_logs {
-                    self.commands_focus_logs = false;
-                } else {
+            TabId::Commands => match self.commands_focus {
+                CommandsFocus::ExecutionLog => {
+                    self.commands_focus = CommandsFocus::OutputPanel;
+                }
+                CommandsFocus::OutputPanel => {
+                    self.commands_focus = CommandsFocus::Workbench;
+                }
+                CommandsFocus::Workbench => {
                     self.selected_workbench_idx = self.selected_workbench_idx.saturating_sub(1);
                 }
-            }
+            },
             _ => {}
         }
     }
@@ -1327,18 +1569,26 @@ impl App {
             TabId::DhtStorage => {
                 self.dht_subtab = self.dht_subtab.next();
                 self.selected_dht_idx = 0;
+                self.dht_table_offset = 0;
             }
             TabId::Directory => {
                 self.directory_subtab = self.directory_subtab.toggle();
                 self.selected_directory_idx = 0;
+                self.directory_table_offset = 0;
             }
-            TabId::Commands => {
-                if self.selected_workbench_idx + 1 < ButtonId::WORKBENCH.len() {
-                    self.selected_workbench_idx += 1;
-                } else {
-                    self.commands_focus_logs = true;
+            TabId::Commands => match self.commands_focus {
+                CommandsFocus::Workbench => {
+                    if self.selected_workbench_idx + 1 < ButtonId::WORKBENCH.len() {
+                        self.selected_workbench_idx += 1;
+                    } else {
+                        self.commands_focus = CommandsFocus::OutputPanel;
+                    }
                 }
-            }
+                CommandsFocus::OutputPanel => {
+                    self.commands_focus = CommandsFocus::ExecutionLog;
+                }
+                CommandsFocus::ExecutionLog => {}
+            },
             _ => {}
         }
     }
@@ -1356,11 +1606,13 @@ impl App {
         }
         if peer_len == 0 {
             self.selected_peer_idx = 0;
+            self.peer_table_offset = 0;
             self.selected_peer_did = None;
         } else {
             if self.selected_peer_idx >= peer_len {
                 self.selected_peer_idx = peer_len - 1;
             }
+            self.peer_table_offset = self.peer_table_offset.min(self.selected_peer_idx);
             self.selected_peer_did = peer_rows
                 .get(self.selected_peer_idx)
                 .map(|r| r.peer_did.clone());
@@ -1374,8 +1626,12 @@ impl App {
             .unwrap_or(0);
         if event_len == 0 {
             self.selected_event_idx = 0;
-        } else if self.selected_event_idx >= event_len {
-            self.selected_event_idx = event_len - 1;
+            self.event_table_offset = 0;
+        } else {
+            if self.selected_event_idx >= event_len {
+                self.selected_event_idx = event_len - 1;
+            }
+            self.event_table_offset = self.event_table_offset.min(self.selected_event_idx);
         }
 
         let dht_len = match self.dht_subtab {
@@ -1403,8 +1659,12 @@ impl App {
         };
         if dht_len == 0 {
             self.selected_dht_idx = 0;
-        } else if self.selected_dht_idx >= dht_len {
-            self.selected_dht_idx = dht_len - 1;
+            self.dht_table_offset = 0;
+        } else {
+            if self.selected_dht_idx >= dht_len {
+                self.selected_dht_idx = dht_len - 1;
+            }
+            self.dht_table_offset = self.dht_table_offset.min(self.selected_dht_idx);
         }
 
         let dir_len = match self.directory_subtab {
@@ -1413,15 +1673,26 @@ impl App {
         };
         if dir_len == 0 {
             self.selected_directory_idx = 0;
-        } else if self.selected_directory_idx >= dir_len {
-            self.selected_directory_idx = dir_len - 1;
+            self.directory_table_offset = 0;
+        } else {
+            if self.selected_directory_idx >= dir_len {
+                self.selected_directory_idx = dir_len - 1;
+            }
+            self.directory_table_offset =
+                self.directory_table_offset.min(self.selected_directory_idx);
         }
 
         let log_len = self.action_logs.len();
         if log_len == 0 {
             self.selected_log_idx = 0;
-        } else if self.selected_log_idx >= log_len {
-            self.selected_log_idx = log_len - 1;
+            self.selected_log_id = None;
+            self.log_table_offset = 0;
+        } else {
+            if self.selected_log_idx >= log_len {
+                self.selected_log_idx = log_len - 1;
+            }
+            self.log_table_offset = self.log_table_offset.min(self.selected_log_idx);
+            self.selected_log_id = self.action_logs.get(self.selected_log_idx).map(|e| e.id);
         }
     }
 }

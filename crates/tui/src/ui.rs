@@ -20,14 +20,17 @@ use ratatui::widgets::Row;
 use ratatui::widgets::Sparkline;
 use ratatui::widgets::Table;
 use ratatui::widgets::TableState;
-use ratatui::widgets::Wrap;
 use ratatui::Frame;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::action::ButtonId;
 use crate::action::ClickTarget;
 use crate::action::CommandModal;
 use crate::action::TabId;
 use crate::app::App;
+use crate::app::CommandsFocus;
 use crate::app::ConnectionState;
 use crate::app::DhtSubtab;
 use crate::app::DirectorySubtab;
@@ -77,7 +80,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         render_modal(frame, app, &modal, area);
     }
     if app.show_help {
-        render_help_overlay(frame, area);
+        render_help_overlay(frame, app, area);
     }
 }
 
@@ -333,7 +336,7 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
     let peer_rows = app.snapshot.peer_traffic_rows();
     let header = Row::new(vec![
         Cell::from("Peer DID"),
-        Cell::from("Chord Role"),
+        Cell::from("Role"),
         Cell::from("State"),
         Cell::from("Traffic (TX / RX)"),
     ])
@@ -346,11 +349,10 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
     let rows = peer_rows
         .iter()
         .map(|peer| {
-            let traffic = format!(
-                "{} / {}",
-                format_bytes(peer.bytes_tx),
-                format_bytes(peer.bytes_rx)
-            );
+            let traffic = match (peer.bytes_tx, peer.bytes_rx) {
+                (Some(tx), Some(rx)) => format!("{} / {}", format_bytes(tx), format_bytes(rx)),
+                _ => "Unknown".to_string(),
+            };
             Row::new(vec![
                 Cell::from(peer.peer_did.clone()),
                 Cell::from(peer.chord_role.clone()).style(Style::default().fg(Color::Cyan)),
@@ -360,14 +362,30 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
         })
         .collect::<Vec<_>>();
 
-    let table = Table::new(rows, [
-        Constraint::Min(22),
-        Constraint::Length(14),
-        Constraint::Length(11),
-        Constraint::Length(18),
-    ])
-    .header(header)
-    .block(
+    let widths = if area.width < 55 {
+        [
+            Constraint::Min(10),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(11),
+        ]
+    } else if area.width < 70 {
+        [
+            Constraint::Min(16),
+            Constraint::Length(11),
+            Constraint::Length(10),
+            Constraint::Length(16),
+        ]
+    } else {
+        [
+            Constraint::Min(22),
+            Constraint::Length(14),
+            Constraint::Length(11),
+            Constraint::Length(18),
+        ]
+    };
+
+    let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
@@ -412,14 +430,30 @@ fn render_overview_service_consumers(frame: &mut Frame<'_>, app: &App, area: Rec
         })
         .collect::<Vec<_>>();
 
-    let table = Table::new(rows, [
-        Constraint::Min(22),
-        Constraint::Length(16),
-        Constraint::Length(6),
-        Constraint::Length(16),
-    ])
-    .header(header)
-    .block(
+    let widths = if area.width < 55 {
+        [
+            Constraint::Min(10),
+            Constraint::Length(10),
+            Constraint::Length(4),
+            Constraint::Length(10),
+        ]
+    } else if area.width < 70 {
+        [
+            Constraint::Min(16),
+            Constraint::Length(14),
+            Constraint::Length(5),
+            Constraint::Length(14),
+        ]
+    } else {
+        [
+            Constraint::Min(22),
+            Constraint::Length(16),
+            Constraint::Length(6),
+            Constraint::Length(16),
+        ]
+    };
+
+    let table = Table::new(rows, widths).header(header).block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
@@ -462,50 +496,115 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|h| h.has_predecessor)
         .unwrap_or_else(|| dht.is_some_and(|d| d.predecessor.is_some()));
 
-    let lines = vec![
-        kv_line("Process API:", api_label, api_color),
-        kv_line("Overlay Ready:", overlay_label, overlay_color),
-        kv_line(
-            "Admitted Peers:",
-            &format!("{admitted} (listed: {})", app.snapshot.peers.len()),
-            Color::Cyan,
-        ),
-        kv_line(
-            "Chord Ring:",
-            &format!(
-                "Succ: {} | Pred: {}",
-                if has_succ { "YES" } else { "NO" },
-                if has_pred { "YES" } else { "NO" }
+    let lines = if area.height <= 6 {
+        vec![
+            Line::from(vec![
+                Span::styled(" API: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    api_label,
+                    Style::default().fg(api_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" | Overlay: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    overlay_label,
+                    Style::default()
+                        .fg(overlay_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Peers: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{admitted} ({})", app.snapshot.peers.len()),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(" | Succ/Pred: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{}/{}",
+                        if has_succ { "Y" } else { "N" },
+                        if has_pred { "Y" } else { "N" }
+                    ),
+                    Style::default().fg(if has_succ {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Dir: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "{} online / {} exits",
+                        app.snapshot.online_nodes.len(),
+                        app.snapshot.onion_exits.len()
+                    ),
+                    Style::default().fg(Color::LightBlue),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Roles: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!(
+                        "net={} relay={} exit={}",
+                        app.config
+                            .network_id
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        app.config.advertise_onion_relay,
+                        app.config.advertise_onion_exit
+                    ),
+                    Style::default().fg(Color::Gray),
+                ),
+            ]),
+        ]
+    } else {
+        vec![
+            kv_line("Process API:", api_label, api_color),
+            kv_line("Overlay Ready:", overlay_label, overlay_color),
+            kv_line(
+                "Admitted Peers:",
+                &format!("{admitted} (listed: {})", app.snapshot.peers.len()),
+                Color::Cyan,
             ),
-            if has_succ {
-                Color::Green
-            } else {
-                Color::Yellow
-            },
-        ),
-        kv_line(
-            "Online / Exits:",
-            &format!(
-                "{} online | {} onion exits",
-                app.snapshot.online_nodes.len(),
-                app.snapshot.onion_exits.len()
+            kv_line(
+                "Chord Ring:",
+                &format!(
+                    "Succ: {} | Pred: {}",
+                    if has_succ { "YES" } else { "NO" },
+                    if has_pred { "YES" } else { "NO" }
+                ),
+                if has_succ {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                },
             ),
-            Color::LightBlue,
-        ),
-        kv_line(
-            "Network Roles:",
-            &format!(
-                "net_id={} relay={} exit={}",
-                app.config
-                    .network_id
-                    .map(|n| n.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                app.config.advertise_onion_relay,
-                app.config.advertise_onion_exit
+            kv_line(
+                "Online / Exits:",
+                &format!(
+                    "{} online | {} onion exits",
+                    app.snapshot.online_nodes.len(),
+                    app.snapshot.onion_exits.len()
+                ),
+                Color::LightBlue,
             ),
-            Color::Gray,
-        ),
-    ];
+            kv_line(
+                "Network Roles:",
+                &format!(
+                    "net_id={} relay={} exit={}",
+                    app.config
+                        .network_id
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    app.config.advertise_onion_relay,
+                    app.config.advertise_onion_exit
+                ),
+                Color::Gray,
+            ),
+        ]
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -522,9 +621,10 @@ fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    let gauge_len = if inner.height <= 4 { 1 } else { 2 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(3)])
+        .constraints([Constraint::Length(gauge_len), Constraint::Min(2)])
         .split(inner);
 
     let sk = app.snapshot.observability.as_ref().map(|o| &o.session_key);
@@ -542,10 +642,7 @@ fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .bg(Color::DarkGray),
             )
             .ratio(ratio)
-            .label(format!(
-                "TTL Remaining: {remaining_str} ({:.0}%)",
-                ratio * 100.0
-            ));
+            .label(format!("TTL: {remaining_str} ({:.0}%)", ratio * 100.0));
         frame.render_widget(gauge, gauge_rect);
     }
 
@@ -560,9 +657,9 @@ fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 kv_line(
                     "Auto-Rotation:",
                     if s.runtime_rotation_supported {
-                        "ENABLED (delegator_key present)"
+                        "ENABLED"
                     } else {
-                        "DISABLED (fixed horizon)"
+                        "DISABLED"
                     },
                     if s.runtime_rotation_supported {
                         Color::Cyan
@@ -599,30 +696,46 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
                 "failed" => Color::Red,
                 _ => Color::Gray,
             };
-            vec![
-                kv_line("Gateway Health:", &gw.health.to_uppercase(), color),
-                kv_line(
-                    "Interface / Flows:",
-                    &format!(
-                        "{} | {} active flows",
-                        gw.interface.as_deref().unwrap_or("-"),
-                        gw.active_flows
+            if area.height <= 6 {
+                vec![
+                    kv_line(
+                        "Gateway:",
+                        &format!(
+                            "{} ({}, {} flows)",
+                            gw.health.to_uppercase(),
+                            gw.interface.as_deref().unwrap_or("-"),
+                            gw.active_flows
+                        ),
+                        color,
                     ),
-                    Color::Cyan,
-                ),
-                kv_line(
-                    "Onion Exit:",
-                    &format!(
-                        "{} {}",
-                        gw.exit_availability,
-                        gw.reason
-                            .as_deref()
-                            .map(|r| format!("({r})"))
-                            .unwrap_or_default()
+                    kv_line("Onion Exit:", &gw.exit_availability, Color::White),
+                ]
+            } else {
+                vec![
+                    kv_line("Gateway Health:", &gw.health.to_uppercase(), color),
+                    kv_line(
+                        "Interface / Flows:",
+                        &format!(
+                            "{} | {} active flows",
+                            gw.interface.as_deref().unwrap_or("-"),
+                            gw.active_flows
+                        ),
+                        Color::Cyan,
                     ),
-                    Color::White,
-                ),
-            ]
+                    kv_line(
+                        "Onion Exit:",
+                        &format!(
+                            "{} {}",
+                            gw.exit_availability,
+                            gw.reason
+                                .as_deref()
+                                .map(|r| format!("({r})"))
+                                .unwrap_or_default()
+                        ),
+                        Color::White,
+                    ),
+                ]
+            }
         }
         GatewayProbeState::Unknown => vec![
             kv_line("TUN Gateway:", "PROBING...", Color::Yellow),
@@ -656,14 +769,14 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
         Some(mb) => lines.push(kv_line(
             "Relay Mailboxes:",
             &format!(
-                "{} inboxes | {} held | {} total",
+                "{} in | {} held | {} tot",
                 mb.registered, mb.held_messages, mb.stored_total
             ),
             Color::LightMagenta,
         )),
         None => lines.push(kv_line(
             "Relay Mailboxes:",
-            "N/A (observability unavailable)",
+            "N/A (obs unavailable)",
             Color::DarkGray,
         )),
     }
@@ -684,7 +797,49 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
 }
 
 fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let inner_h = area.height.saturating_sub(2);
     let lines = match app.snapshot.observability.as_ref().map(|o| o.messages) {
+        Some(totals) if inner_h <= 1 => vec![Line::from(vec![
+            Span::styled(" Snt:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", totals.sent),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Rcv:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", totals.received),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Fwd:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", totals.forwarded),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Mail:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", totals.stored),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Failed:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}", totals.failed),
+                Style::default()
+                    .fg(if totals.failed == 0 {
+                        Color::Gray
+                    } else {
+                        Color::Red
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])],
         Some(totals) => vec![
             Line::from(vec![
                 Span::styled(" Sent: ", Style::default().fg(Color::Gray)),
@@ -748,9 +903,49 @@ fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let inner_h = area.height.saturating_sub(2);
     let lookups = app.snapshot.observability.as_ref().map(|o| &o.dht_lookups);
 
     let lines = match lookups {
+        Some(l) if inner_h <= 1 => vec![Line::from(vec![
+            Span::styled(" Tot:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", l.total),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("OK:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", l.succeeded),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Fail:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", l.failed),
+                Style::default().fg(if l.failed == 0 {
+                    Color::Gray
+                } else {
+                    Color::Red
+                }),
+            ),
+            Span::styled("T/O:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", l.timed_out),
+                Style::default().fg(if l.timed_out == 0 {
+                    Color::Gray
+                } else {
+                    Color::LightRed
+                }),
+            ),
+            Span::styled("Avg:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{:.1}ms", l.avg_latency_ms()),
+                Style::default().fg(Color::Cyan),
+            ),
+        ])],
         Some(l) => vec![
             Line::from(vec![
                 Span::styled(" Total: ", Style::default().fg(Color::Gray)),
@@ -1050,33 +1245,49 @@ fn render_recent_events_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         .collect::<Vec<_>>();
 
     let event_count = events.len();
-    let mut state = TableState::default();
-    if event_count > 0 {
-        state.select(Some(app.selected_event_idx));
-    }
-
-    let table = Table::new(rows, [
-        Constraint::Length(8),
-        Constraint::Length(10),
-        Constraint::Length(11),
-        Constraint::Length(14),
-        Constraint::Min(18),
-        Constraint::Length(11),
-    ])
-    .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Recent Message Activity ({event_count}) "))
-            .border_style(Style::default().fg(Color::Cyan)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
+    let mut state = stateful_table_state(
+        app.selected_event_idx,
+        event_count,
+        &mut app.event_table_offset,
     );
 
+    let widths = if area.width < 90 {
+        [
+            Constraint::Length(6),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(11),
+            Constraint::Min(14),
+            Constraint::Length(9),
+        ]
+    } else {
+        [
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Length(11),
+            Constraint::Length(14),
+            Constraint::Min(18),
+            Constraint::Length(11),
+        ]
+    };
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Recent Message Activity ({event_count}) "))
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        );
+
     frame.render_stateful_widget(table, area, &mut state);
+    app.event_table_offset = state.offset();
+    app.hit_map.register(area, ClickTarget::TablePanel);
     register_table_row_hits(&mut app.hit_map, area, event_count, state.offset());
 }
 
@@ -1119,32 +1330,47 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .credit_score
                 .map(|s| format!("{s:.2}"))
                 .unwrap_or_else(|| "-".to_string());
-            let bytes_str = format!(
-                "{} / {}",
-                format_bytes(peer.bytes_tx),
-                format_bytes(peer.bytes_rx)
-            );
+            let (sent_str, recv_str) = if peer.has_measurement {
+                (
+                    format!("{}/{}", peer.sent_ok, peer.sent_fail),
+                    format!("{}/{}", peer.recv_ok, peer.recv_fail),
+                )
+            } else {
+                ("Unknown".to_string(), "Unknown".to_string())
+            };
+            let bytes_str = match (peer.bytes_tx, peer.bytes_rx) {
+                (Some(tx), Some(rx)) => format!("{} / {}", format_bytes(tx), format_bytes(rx)),
+                _ => "Unknown".to_string(),
+            };
             Row::new(vec![
                 Cell::from(peer.peer_did.clone()),
                 Cell::from(peer.chord_role.clone()).style(Style::default().fg(Color::LightCyan)),
                 Cell::from(peer.transport_state.clone()).style(Style::default().fg(Color::Cyan)),
                 Cell::from(peer.reliability.clone()).style(Style::default().fg(rel_color)),
                 Cell::from(credit_str),
-                Cell::from(format!("{}/{}", peer.sent_ok, peer.sent_fail)),
-                Cell::from(format!("{}/{}", peer.recv_ok, peer.recv_fail)),
+                Cell::from(sent_str),
+                Cell::from(recv_str),
                 Cell::from(bytes_str),
             ])
         })
         .collect::<Vec<_>>();
 
     if let Some(&table_rect) = chunks.first() {
-        let mut state = TableState::default();
-        if row_count > 0 {
-            state.select(Some(app.selected_peer_idx));
-        }
+        let mut state =
+            stateful_table_state(app.selected_peer_idx, row_count, &mut app.peer_table_offset);
 
-        let table = Table::new(
-            rows,
+        let widths = if table_rect.width < 105 {
+            [
+                Constraint::Min(12),
+                Constraint::Length(8),
+                Constraint::Length(9),
+                Constraint::Length(7),
+                Constraint::Length(6),
+                Constraint::Length(9),
+                Constraint::Length(9),
+                Constraint::Length(12),
+            ]
+        } else {
             [
                 Constraint::Min(24),
                 Constraint::Length(14),
@@ -1154,24 +1380,28 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 Constraint::Length(13),
                 Constraint::Length(13),
                 Constraint::Length(18),
-            ],
-        )
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    " Connected & Measured Peers ({}) — [Enter]/[I] Inspect, [C] +URL, [D] +DID, [X] Disconnect ",
-                    row_count,
-                ))
-                .border_style(Style::default().fg(Color::Cyan)),
-        )
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        );
+            ]
+        };
+
+        let table = Table::new(rows, widths)
+            .header(header)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(
+                        " Connected & Measured Peers ({}) — [Enter]/[I] Inspect, [C] +URL, [D] +DID, [X] Disconnect ",
+                        row_count,
+                    ))
+                    .border_style(Style::default().fg(Color::Cyan)),
+            )
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            );
         frame.render_stateful_widget(table, table_rect, &mut state);
+        app.peer_table_offset = state.offset();
+        app.hit_map.register(table_rect, ClickTarget::TablePanel);
         register_table_row_hits(&mut app.hit_map, table_rect, row_count, state.offset());
     }
 
@@ -1195,54 +1425,72 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             })
             .collect::<Vec<_>>();
 
-        let vnode_table = Table::new(
-            vnode_rows,
+        let vnode_widths = if vnodes_rect.width < 100 {
+            [
+                Constraint::Length(16),
+                Constraint::Length(10),
+                Constraint::Min(18),
+                Constraint::Length(8),
+                Constraint::Length(6),
+            ]
+        } else {
             [
                 Constraint::Length(28),
                 Constraint::Length(14),
                 Constraint::Min(30),
                 Constraint::Length(12),
                 Constraint::Length(10),
-            ],
-        )
-        .header(
-            Row::new(vec![
-                "Storage Key",
-                "Tier",
-                "Entry Key DID (VNode)",
-                "Kind",
-                "Elements",
-            ])
-            .style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
-                    " Hosted VNode Records ({}) | Local Registered Services: [{}] (Relay={} Exit={}) ",
-                    vnodes.len(),
-                    svcs_str,
-                    app.config.advertise_onion_relay,
-                    app.config.advertise_onion_exit
-                ))
-                .border_style(Style::default().fg(Color::Magenta)),
-        );
+            ]
+        };
+
+        let vnode_table = Table::new(vnode_rows, vnode_widths)
+            .header(
+                Row::new(vec![
+                    "Storage Key",
+                    "Tier",
+                    "Entry Key DID (VNode)",
+                    "Kind",
+                    "Elements",
+                ])
+                .style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(
+                        " Hosted VNode Records ({}) | Local Registered Services: [{}] (Relay={} Exit={}) ",
+                        vnodes.len(),
+                        svcs_str,
+                        app.config.advertise_onion_relay,
+                        app.config.advertise_onion_exit
+                    ))
+                    .border_style(Style::default().fg(Color::Magenta)),
+            );
         frame.render_widget(vnode_table, vnodes_rect);
     }
 }
 
 fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let compact = area.height < 18;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5), // Top: Chord Ring Topology + [ / ] DHT Lookup Key button
-            Constraint::Length(7), // Middle: DHT Key Lookup Inspector
-            Constraint::Min(6),    // Bottom: Finger Table / Persistent Storage / Cache Storage
-        ])
+        .constraints(if compact {
+            [
+                Constraint::Length(4), // Compact Chord Ring Topology (2 inner lines)
+                Constraint::Length(4), // Compact DHT Key Lookup Inspector (2 inner lines)
+                Constraint::Min(5),    // Bottom table
+            ]
+        } else {
+            [
+                Constraint::Length(5), // Top: Chord Ring Topology + [ / ] DHT Lookup Key button
+                Constraint::Length(7), // Middle: DHT Key Lookup Inspector
+                Constraint::Min(6),    // Bottom: Finger Table / Persistent Storage / Cache Storage
+            ]
+        })
         .split(area);
 
     let dht = app.snapshot.swarm.as_ref().and_then(|s| s.dht.as_ref());
@@ -1273,31 +1521,60 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     if let Some(&top_rect) = chunks.first() {
         app.hit_map.register(top_rect, ClickTarget::SubViewToggle);
-        let lines = vec![
-            kv_line("Predecessor DID:", pred, Color::Cyan),
-            kv_line("Successors:", &succs, Color::Green),
-            Line::from(vec![
-                Span::styled(
-                    " Sub-View ([Space]/[Left]/[Right]): ",
-                    Style::default().fg(Color::Yellow),
-                ),
-                Span::styled(
-                    format!(" [ {} ] ", app.dht_subtab.title()),
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!("  (Persistent: {p_count} | Cache: {c_count})   ")),
-                Span::styled(
-                    " [Press '/' or 'W' or Enter to Query DHT Key] ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-        ];
+        let lines = if compact {
+            vec![
+                Line::from(vec![
+                    Span::styled(" Pred: ", Style::default().fg(Color::Gray)),
+                    Span::styled(pred, Style::default().fg(Color::Cyan)),
+                    Span::styled(" | Succ: ", Style::default().fg(Color::Gray)),
+                    Span::styled(succs, Style::default().fg(Color::Green)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" View: ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("[{}]", app.dht_subtab.title()),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(" (P:{p_count} C:{c_count}) ")),
+                    Span::styled(
+                        "[/] Query Key",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ]
+        } else {
+            vec![
+                kv_line("Predecessor DID:", pred, Color::Cyan),
+                kv_line("Successors:", &succs, Color::Green),
+                Line::from(vec![
+                    Span::styled(
+                        " Sub-View ([Space]/[Left]/[Right]): ",
+                        Style::default().fg(Color::Yellow),
+                    ),
+                    Span::styled(
+                        format!(" [ {} ] ", app.dht_subtab.title()),
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!("  (Persistent: {p_count} | Cache: {c_count})   ")),
+                    Span::styled(
+                        " [Press '/' or 'W' or Enter to Query DHT Key] ",
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+            ]
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Chord DHT Ring Topology & Key Lookup ")
@@ -1327,42 +1604,87 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 } else {
                     rep.elements.join("  |  ")
                 };
-                vec![
-                    Line::from(vec![
-                        Span::styled(" Query Key: ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            rep.query_key.clone(),
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("   -> Entry Key DID (VNode): ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            rep.target_did.clone(),
-                            Style::default()
-                                .fg(Color::Cyan)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(" Status: ", Style::default().fg(Color::Gray)),
-                        Span::styled(rep.status.label(), Style::default().fg(status_color)),
-                        Span::styled("   Found In: ", Style::default().fg(Color::Gray)),
-                        Span::styled(sources_str, Style::default().fg(Color::Green)),
-                        Span::styled("   Kind: ", Style::default().fg(Color::Gray)),
-                        Span::styled(rep.record_kind.clone(), Style::default().fg(Color::Magenta)),
-                        Span::styled("   Mode: ", Style::default().fg(Color::Gray)),
-                        Span::styled(rep.query_mode.clone(), Style::default().fg(Color::White)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            format!(" Elements ({}): ", rep.elements.len()),
-                            Style::default().fg(Color::Gray),
-                        ),
-                        Span::styled(preview, Style::default().fg(Color::White)),
-                    ]),
-                ]
+                if compact {
+                    vec![
+                        Line::from(vec![
+                            Span::styled(" Key: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                rep.query_key.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" -> ", Style::default().fg(Color::Gray)),
+                            Span::styled(rep.status.label(), Style::default().fg(status_color)),
+                            Span::styled(
+                                format!(" ({sources_str})"),
+                                Style::default().fg(Color::Green),
+                            ),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" Elem({}): ", rep.elements.len()),
+                                Style::default().fg(Color::Gray),
+                            ),
+                            Span::styled(preview, Style::default().fg(Color::White)),
+                        ]),
+                    ]
+                } else {
+                    vec![
+                        Line::from(vec![
+                            Span::styled(" Query Key: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                rep.query_key.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                "   -> Entry Key DID (VNode): ",
+                                Style::default().fg(Color::Gray),
+                            ),
+                            Span::styled(
+                                rep.target_did.clone(),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(" Status: ", Style::default().fg(Color::Gray)),
+                            Span::styled(rep.status.label(), Style::default().fg(status_color)),
+                            Span::styled("   Found In: ", Style::default().fg(Color::Gray)),
+                            Span::styled(sources_str, Style::default().fg(Color::Green)),
+                            Span::styled("   Kind: ", Style::default().fg(Color::Gray)),
+                            Span::styled(
+                                rep.record_kind.clone(),
+                                Style::default().fg(Color::Magenta),
+                            ),
+                            Span::styled("   Mode: ", Style::default().fg(Color::Gray)),
+                            Span::styled(rep.query_mode.clone(), Style::default().fg(Color::White)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(
+                                format!(" Elements ({}): ", rep.elements.len()),
+                                Style::default().fg(Color::Gray),
+                            ),
+                            Span::styled(preview, Style::default().fg(Color::White)),
+                        ]),
+                    ]
+                }
             }
+            None if compact => vec![
+                Line::from(Span::styled(
+                    " Click or press [/] / [Enter] to look up any key or DID in Chord DHT",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    " Supports topics ('rings-chat'), services, or raw 0x... Entry DIDs.",
+                    Style::default().fg(Color::Gray),
+                )),
+            ],
             None => vec![
                 Line::from(Span::styled(
                     " Click here or press [/] (or [W] / [Enter]) to look up any key or DID in the Chord DHT!",
@@ -1414,10 +1736,11 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                let mut state = TableState::default();
-                if range_count > 0 {
-                    state.select(Some(app.selected_dht_idx));
-                }
+                let mut state = stateful_table_state(
+                    app.selected_dht_idx,
+                    range_count,
+                    &mut app.dht_table_offset,
+                );
                 let table = Table::new(rows, [
                     Constraint::Length(10),
                     Constraint::Length(10),
@@ -1439,6 +1762,8 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 )
                 .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, bot_rect, &mut state);
+                app.dht_table_offset = state.offset();
+                app.hit_map.register(bot_rect, ClickTarget::TablePanel);
                 register_table_row_hits(&mut app.hit_map, bot_rect, range_count, state.offset());
             }
             DhtSubtab::PersistentStorage | DhtSubtab::CacheStorage => {
@@ -1468,37 +1793,50 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                let mut state = TableState::default();
-                if item_count > 0 {
-                    state.select(Some(app.selected_dht_idx));
-                }
-                let table = Table::new(rows, [
-                    Constraint::Length(28),
-                    Constraint::Length(30),
-                    Constraint::Length(18),
-                    Constraint::Min(14),
-                ])
-                .header(
-                    Row::new(vec![
-                        "Storage Key",
-                        "Entry Key DID (VNode)",
-                        "Kind",
-                        "Elements",
-                    ])
-                    .style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                )
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(format!(" {} ({item_count} items) ", app.dht_subtab.title()))
-                        .border_style(Style::default().fg(Color::Cyan)),
-                )
-                .row_highlight_style(Style::default().bg(Color::DarkGray));
+                let mut state = stateful_table_state(
+                    app.selected_dht_idx,
+                    item_count,
+                    &mut app.dht_table_offset,
+                );
+                let widths = if bot_rect.width < 95 {
+                    [
+                        Constraint::Length(18),
+                        Constraint::Length(20),
+                        Constraint::Length(10),
+                        Constraint::Min(10),
+                    ]
+                } else {
+                    [
+                        Constraint::Length(28),
+                        Constraint::Length(30),
+                        Constraint::Length(18),
+                        Constraint::Min(14),
+                    ]
+                };
+                let table = Table::new(rows, widths)
+                    .header(
+                        Row::new(vec![
+                            "Storage Key",
+                            "Entry Key DID (VNode)",
+                            "Kind",
+                            "Elements",
+                        ])
+                        .style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    )
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(format!(" {} ({item_count} items) ", app.dht_subtab.title()))
+                            .border_style(Style::default().fg(Color::Cyan)),
+                    )
+                    .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, bot_rect, &mut state);
+                app.dht_table_offset = state.offset();
+                app.hit_map.register(bot_rect, ClickTarget::TablePanel);
                 register_table_row_hits(&mut app.hit_map, bot_rect, item_count, state.offset());
             }
         }
@@ -1573,55 +1911,71 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                let mut state = TableState::default();
-                if node_count > 0 {
-                    state.select(Some(app.selected_directory_idx));
-                }
+                let mut state = stateful_table_state(
+                    app.selected_directory_idx,
+                    node_count,
+                    &mut app.directory_table_offset,
+                );
                 let title = match &app.snapshot.online_nodes_error {
                     Some(err) => {
                         format!(" Online Nodes Directory ({node_count} cached — RPC Error: {err}) ")
                     }
                     None => format!(" Online Nodes Directory ({node_count}) "),
                 };
-                let table = Table::new(rows, [
-                    Constraint::Min(28),
-                    Constraint::Length(9),
-                    Constraint::Length(7),
-                    Constraint::Length(20),
-                    Constraint::Length(11),
-                    Constraint::Length(22),
-                    Constraint::Length(12),
-                ])
-                .header(
-                    Row::new(vec![
-                        "Node DID",
-                        "Runtime",
-                        "NetID",
-                        "Capabilities",
-                        "DHT",
-                        "Endpoint Hint",
-                        "Version",
-                    ])
-                    .style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                )
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(Style::default().fg(
-                            if app.snapshot.online_nodes_error.is_some() {
-                                Color::Red
-                            } else {
-                                Color::Cyan
-                            },
-                        )),
-                )
-                .row_highlight_style(Style::default().bg(Color::DarkGray));
+                let widths = if table_rect.width < 110 {
+                    [
+                        Constraint::Min(14),
+                        Constraint::Length(7),
+                        Constraint::Length(5),
+                        Constraint::Length(14),
+                        Constraint::Length(8),
+                        Constraint::Length(14),
+                        Constraint::Length(8),
+                    ]
+                } else {
+                    [
+                        Constraint::Min(28),
+                        Constraint::Length(9),
+                        Constraint::Length(7),
+                        Constraint::Length(20),
+                        Constraint::Length(11),
+                        Constraint::Length(22),
+                        Constraint::Length(12),
+                    ]
+                };
+                let table = Table::new(rows, widths)
+                    .header(
+                        Row::new(vec![
+                            "Node DID",
+                            "Runtime",
+                            "NetID",
+                            "Capabilities",
+                            "DHT",
+                            "Endpoint Hint",
+                            "Version",
+                        ])
+                        .style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    )
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(Style::default().fg(
+                                if app.snapshot.online_nodes_error.is_some() {
+                                    Color::Red
+                                } else {
+                                    Color::Cyan
+                                },
+                            )),
+                    )
+                    .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, table_rect, &mut state);
+                app.directory_table_offset = state.offset();
+                app.hit_map.register(table_rect, ClickTarget::TablePanel);
                 register_table_row_hits(&mut app.hit_map, table_rect, node_count, state.offset());
             }
             DirectorySubtab::OnionExits => {
@@ -1648,53 +2002,68 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                let mut state = TableState::default();
-                if exit_count > 0 {
-                    state.select(Some(app.selected_directory_idx));
-                }
+                let mut state = stateful_table_state(
+                    app.selected_directory_idx,
+                    exit_count,
+                    &mut app.directory_table_offset,
+                );
                 let title = match &app.snapshot.onion_exits_error {
                     Some(err) => {
                         format!(" Onion Exits Directory ({exit_count} cached — RPC Error: {err}) ")
                     }
                     None => format!(" Onion Exits Directory ({exit_count}) "),
                 };
-                let table = Table::new(rows, [
-                    Constraint::Min(28),
-                    Constraint::Length(10),
-                    Constraint::Length(12),
-                    Constraint::Length(16),
-                    Constraint::Length(18),
-                    Constraint::Length(12),
-                ])
-                .header(
-                    Row::new(vec![
-                        "Exit DID",
-                        "Service",
-                        "Max Sess",
-                        "Rate Limit",
-                        "Target Policy",
-                        "Version",
-                    ])
-                    .style(
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                )
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(title)
-                        .border_style(Style::default().fg(
-                            if app.snapshot.onion_exits_error.is_some() {
-                                Color::Red
-                            } else {
-                                Color::Magenta
-                            },
-                        )),
-                )
-                .row_highlight_style(Style::default().bg(Color::DarkGray));
+                let widths = if table_rect.width < 100 {
+                    [
+                        Constraint::Min(14),
+                        Constraint::Length(7),
+                        Constraint::Length(8),
+                        Constraint::Length(12),
+                        Constraint::Length(14),
+                        Constraint::Length(8),
+                    ]
+                } else {
+                    [
+                        Constraint::Min(28),
+                        Constraint::Length(10),
+                        Constraint::Length(12),
+                        Constraint::Length(16),
+                        Constraint::Length(18),
+                        Constraint::Length(12),
+                    ]
+                };
+                let table = Table::new(rows, widths)
+                    .header(
+                        Row::new(vec![
+                            "Exit DID",
+                            "Service",
+                            "Max Sess",
+                            "Rate Limit",
+                            "Target Policy",
+                            "Version",
+                        ])
+                        .style(
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    )
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .title(title)
+                            .border_style(Style::default().fg(
+                                if app.snapshot.onion_exits_error.is_some() {
+                                    Color::Red
+                                } else {
+                                    Color::Magenta
+                                },
+                            )),
+                    )
+                    .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, table_rect, &mut state);
+                app.directory_table_offset = state.offset();
+                app.hit_map.register(table_rect, ClickTarget::TablePanel);
                 register_table_row_hits(&mut app.hit_map, table_rect, exit_count, state.offset());
             }
         }
@@ -1711,18 +2080,23 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ])
         .split(area);
 
+    let toolbar_focused = app.focused_toolbar_idx.is_some();
+    let workbench_focused = !toolbar_focused && app.commands_focus == CommandsFocus::Workbench;
+    let output_focused = !toolbar_focused && app.commands_focus == CommandsFocus::OutputPanel;
+
     if let Some(&grid_area) = chunks.first() {
+        app.hit_map.register(grid_area, ClickTarget::WorkbenchPanel);
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(if app.commands_focus_logs {
-                " Interactive Command Workbench (Click button, press Left to focus, or press Hotkey) "
-            } else {
+            .title(if workbench_focused {
                 " Interactive Command Workbench [Focused] (Click, Arrows + Enter/Space, or Hotkey) "
-            })
-            .border_style(Style::default().fg(if app.commands_focus_logs {
-                Color::DarkGray
             } else {
+                " Interactive Command Workbench (Click button, press Left to focus, or press Hotkey) "
+            })
+            .border_style(Style::default().fg(if workbench_focused {
                 Color::Magenta
+            } else {
+                Color::DarkGray
             }));
         let inner = block.inner(grid_area);
         frame.render_widget(block, grid_area);
@@ -1761,7 +2135,7 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     continue;
                 };
                 app.hit_map.register(btn_rect, ClickTarget::Button(btn));
-                let is_selected = !app.commands_focus_logs && app.selected_workbench_idx == btn_idx;
+                let is_selected = workbench_focused && app.selected_workbench_idx == btn_idx;
                 let style = if is_selected {
                     Style::default()
                         .fg(Color::Black)
@@ -1805,27 +2179,33 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             );
             let inner_w = usize::from(out_rect.width.saturating_sub(2)).max(1);
             let inner_h = out_rect.height.saturating_sub(2);
-            let wrapped_lines: u16 = text
-                .lines()
-                .map(|line| {
-                    let cols = display_col_width(line).max(1);
-                    u16::try_from(cols.div_ceil(inner_w)).unwrap_or(1)
-                })
-                .fold(0_u16, u16::saturating_add)
-                .max(1);
-            app.output_max_scroll = wrapped_lines.saturating_sub(inner_h);
+            let wrapped_lines = wrap_text_for_width(text, inner_w);
+            let total_lines = u16::try_from(wrapped_lines.len().max(1)).unwrap_or(u16::MAX);
+            app.output_max_scroll = total_lines.saturating_sub(inner_h);
             app.output_scroll = app.output_scroll.min(app.output_max_scroll);
 
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(format!(
+            let title = if output_focused {
+                format!(
+                    " Command Output [Focused] (Line +{}/{} — Up/Down/PgUp/PgDn/`[`/`]`/Wheel) ",
+                    app.output_scroll, app.output_max_scroll
+                )
+            } else {
+                format!(
                     " Command Output (Line +{}/{} — [PgUp/PgDn] / `[`/`]` / Wheel) ",
                     app.output_scroll, app.output_max_scroll
-                ))
-                .border_style(Style::default().fg(Color::Green));
+                )
+            };
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(if output_focused {
+                    Color::Cyan
+                } else {
+                    Color::Green
+                }));
+            let rendered_lines: Vec<Line<'_>> = wrapped_lines.into_iter().map(Line::from).collect();
             frame.render_widget(
-                Paragraph::new(text)
-                    .wrap(Wrap { trim: false })
+                Paragraph::new(rendered_lines)
                     .scroll((app.output_scroll, 0))
                     .block(block),
                 out_rect,
@@ -1860,47 +2240,61 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: 
         })
         .collect::<Vec<_>>();
 
-    let mut state = TableState::default();
-    if log_count > 0 {
-        state.select(Some(app.selected_log_idx));
-    }
+    let mut state =
+        stateful_table_state(app.selected_log_idx, log_count, &mut app.log_table_offset);
 
-    let title = if app.commands_focus_logs {
+    let log_focused =
+        app.focused_toolbar_idx.is_none() && app.commands_focus == CommandsFocus::ExecutionLog;
+    let title = if log_focused {
         format!(" Command Log [Focused] ({log_count} — Up/Down/`{{`/`}}`/Click/Wheel) ")
     } else {
         format!(" Command Log ({log_count} — Click, Wheel, or `{{`/`}}` to Inspect) ")
     };
 
-    let table = Table::new(rows, [
-        Constraint::Length(4),
-        Constraint::Length(4),
-        Constraint::Length(14),
-        Constraint::Length(6),
-        Constraint::Min(12),
-    ])
-    .header(
-        Row::new(vec!["#", "St", "Command", "Time", "Result"]).style(
+    let widths = if area.width < 50 {
+        [
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(10),
+            Constraint::Length(5),
+            Constraint::Min(10),
+        ]
+    } else {
+        [
+            Constraint::Length(4),
+            Constraint::Length(4),
+            Constraint::Length(14),
+            Constraint::Length(6),
+            Constraint::Min(12),
+        ]
+    };
+
+    let table = Table::new(rows, widths)
+        .header(
+            Row::new(vec!["#", "St", "Command", "Time", "Result"]).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        )
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(if log_focused {
+                    Color::Cyan
+                } else {
+                    Color::Blue
+                })),
+        )
+        .row_highlight_style(
             Style::default()
-                .fg(Color::Yellow)
+                .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .border_style(Style::default().fg(if app.commands_focus_logs {
-                Color::Cyan
-            } else {
-                Color::Blue
-            })),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    );
+        );
     frame.render_stateful_widget(table, area, &mut state);
+    app.log_table_offset = state.offset();
+    app.hit_map.register(area, ClickTarget::LogPanel);
     register_log_row_hits(&mut app.hit_map, area, log_count, state.offset());
 }
 
@@ -1989,7 +2383,10 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
         app.hit_map
             .register(field_rect, ClickTarget::ModalField(idx));
         let is_active = modal.active_field == idx;
-        let border_color = if is_active {
+        let is_error = modal.error_field == Some(idx);
+        let border_color = if is_error {
+            Color::Red
+        } else if is_active {
             Color::Cyan
         } else {
             Color::DarkGray
@@ -2077,55 +2474,122 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
     }
 }
 
-fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
-    let rect = centered_rect(76, 23, area);
+fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let rect = centered_rect(78, 22, area);
     frame.render_widget(Clear, rect);
 
-    let lines = vec![
-        Line::from(Span::styled(
-            "Navigation, Focus & Mouse Support",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  • Mouse: Click any Tab, Button, Table Row, Log Row, or Modal Field; Wheel scrolls active panel."),
-        Line::from("  • Views: [1]-[6] or [Tab]/[Shift+Tab] switch tabs; [B] focuses the Quick Command Bar."),
-        Line::from("  • Tables & Grid: [Up]/[Down] (or j/k) move selection; [PgUp]/[PgDn] page tables or Command Output."),
-        Line::from("  • Sub-Views & Actions: [Left]/[Right] or [Space] cycle sub-views (DHT/Directory) or run focused button."),
-        Line::from("  • Commands Tab: `[` / `]` scroll Output; `{` / `}` (or click/wheel on Log) inspect Execution Log history."),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Global Button Command Hotkeys",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from("  [R] Refresh Now           [P] Pause/Resume Auto-Poll"),
-        Line::from("  [C] Connect Peer via URL  [D] Connect Peer via DID (DHT)"),
-        Line::from("  [S] Connect via Seed      [X] Disconnect Selected Peer"),
-        Line::from("  [O] Create WebRTC Offer   [A] Answer WebRTC Offer"),
-        Line::from("  [Y] Accept WebRTC Answer  [M] Send Namespaced Backend Message"),
-        Line::from("  [T] Publish Topic Msg     [F] Fetch Topic Messages"),
-        Line::from("  [G] Register Service      [V] Lookup Service Providers"),
-        Line::from("  [/] or [W] DHT Lookup Key [I] Inspect Peer Measure"),
-        Line::from("  [E] Toggle Expired Dir    [U] Reload API Token      [Q] Quit"),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press [Esc], [Enter], or [?] (or left-click anywhere) to close this help window.",
-            Style::default().fg(Color::Green),
-        )),
+    let inner_w = usize::from(rect.width.saturating_sub(2)).max(1);
+    let inner_h = rect.height.saturating_sub(2);
+
+    let raw_entries: [(Option<Color>, &str); 18] = [
+        (Some(Color::Cyan), "Navigation, Focus & Mouse Support"),
+        (
+            None,
+            "  • Mouse: Click Tabs/Buttons/Rows/Fields; Wheel scrolls panel.",
+        ),
+        (
+            None,
+            "  • Views: [1]-[6] or [Tab]/[Shift+Tab] switch tabs; [B] Toolbar.",
+        ),
+        (
+            None,
+            "  • Tables/Output: [Up]/[Down] (j/k) move; [PgUp]/[PgDn] page 5.",
+        ),
+        (
+            None,
+            "  • Sub-Views: [Left]/[Right] or [Space] cycle DHT/Directory views.",
+        ),
+        (
+            None,
+            "  • Actions: [Enter] or [Space] runs focused Toolbar/Grid button.",
+        ),
+        (
+            None,
+            "  • Commands Tab: `[`/`]` scroll Output; `{`/`}` browse Command Log.",
+        ),
+        (None, ""),
+        (Some(Color::Yellow), "Global Button Command Hotkeys"),
+        (
+            None,
+            "  [R] Refresh Now           [P] Pause/Resume Auto-Poll",
+        ),
+        (
+            None,
+            "  [C] Connect Peer via URL  [D] Connect Peer via DID (DHT)",
+        ),
+        (
+            None,
+            "  [S] Connect via Seed      [X] Disconnect Selected Peer",
+        ),
+        (None, "  [O] Create WebRTC Offer   [A] Answer WebRTC Offer"),
+        (
+            None,
+            "  [Y] Accept WebRTC Answer  [M] Send Namespaced Backend Message",
+        ),
+        (None, "  [T] Publish Topic Msg     [F] Fetch Topic Messages"),
+        (
+            None,
+            "  [G] Register Service      [V] Lookup Service Providers",
+        ),
+        (None, "  [/] or [W] DHT Lookup Key [I] Inspect Peer Measure"),
+        (
+            None,
+            "  [E] Toggle Expired Dir    [U] Reload API Token      [Q] Quit",
+        ),
     ];
+
+    let mut wrapped_lines: Vec<Line<'static>> = Vec::new();
+    for (heading_color, line_str) in raw_entries {
+        if line_str.is_empty() {
+            wrapped_lines.push(Line::from(""));
+            continue;
+        }
+        for chunk in wrap_text_for_width(line_str, inner_w) {
+            if let Some(color) = heading_color {
+                wrapped_lines.push(Line::from(Span::styled(
+                    chunk,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                )));
+            } else {
+                wrapped_lines.push(Line::from(chunk));
+            }
+        }
+    }
+
+    let total_lines = u16::try_from(wrapped_lines.len().max(1)).unwrap_or(u16::MAX);
+    app.help_max_scroll = total_lines.saturating_sub(inner_h);
+    app.help_scroll = app.help_scroll.min(app.help_max_scroll);
 
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" rings-tui Help & Command Reference ")
+        .title_bottom(Line::from(Span::styled(
+            " Press [Esc], [Enter], [?], or Click to close (Up/Down/Wheel to scroll) ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )))
         .border_style(Style::default().fg(Color::Cyan));
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
+        Paragraph::new(wrapped_lines)
+            .scroll((app.help_scroll, 0))
             .block(block),
         rect,
     );
+}
+
+fn stateful_table_state(selected: usize, row_count: usize, offset: &mut usize) -> TableState {
+    if row_count == 0 {
+        *offset = 0;
+        return TableState::default();
+    }
+    let sel = selected.min(row_count - 1);
+    if *offset > sel {
+        *offset = sel;
+    }
+    TableState::default()
+        .with_selected(Some(sel))
+        .with_offset(*offset)
 }
 
 fn register_table_row_hits(
@@ -2185,56 +2649,165 @@ fn register_log_row_hits(
     }
 }
 
-fn char_display_cols(ch: char) -> usize {
-    if ch.is_ascii() {
-        1
-    } else {
-        2
+/// Wrap `text` into visual lines of at most `max_width` terminal display columns, breaking on word
+/// boundaries when possible (preserving leading spaces) and splitting single words wider than
+/// `max_width` along Unicode grapheme cluster boundaries.
+pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
+    let limit = max_width.max(1);
+    let mut result = Vec::new();
+
+    for raw_line in text.split('\n') {
+        let clean_line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        let expanded = if clean_line.contains('\t') {
+            clean_line.replace('\t', "    ")
+        } else {
+            clean_line.to_string()
+        };
+        if expanded.is_empty() {
+            result.push(String::new());
+            continue;
+        }
+
+        let mut tokens: Vec<&str> = Vec::new();
+        let mut token_start = 0_usize;
+        let mut in_ws: Option<bool> = None;
+        for (idx, ch) in expanded.char_indices() {
+            let is_ws = ch.is_whitespace();
+            match in_ws {
+                None => {
+                    in_ws = Some(is_ws);
+                }
+                Some(prev_ws) if prev_ws != is_ws => {
+                    if let Some(slice) = expanded.get(token_start..idx) {
+                        tokens.push(slice);
+                    }
+                    token_start = idx;
+                    in_ws = Some(is_ws);
+                }
+                _ => {}
+            }
+        }
+        if let Some(tail) = expanded.get(token_start..) {
+            if !tail.is_empty() {
+                tokens.push(tail);
+            }
+        }
+
+        let mut current = String::new();
+        let mut current_cols = 0_usize;
+
+        for token in tokens {
+            let token_cols = UnicodeWidthStr::width(token);
+            let is_ws = token.chars().all(char::is_whitespace);
+
+            if current_cols + token_cols <= limit {
+                current.push_str(token);
+                current_cols += token_cols;
+            } else if is_ws {
+                if !current.is_empty() {
+                    result.push(current);
+                    current = String::new();
+                    current_cols = 0;
+                }
+            } else {
+                if !current.is_empty() {
+                    let trimmed = current.trim_end().to_string();
+                    result.push(if trimmed.is_empty() { current } else { trimmed });
+                    current = String::new();
+                    current_cols = 0;
+                }
+                if token_cols <= limit {
+                    current.push_str(token);
+                    current_cols = token_cols;
+                } else {
+                    for g in UnicodeSegmentation::graphemes(token, true) {
+                        let g_cols = UnicodeWidthStr::width(g).max(1);
+                        if current_cols + g_cols > limit && !current.is_empty() {
+                            result.push(current);
+                            current = String::new();
+                            current_cols = 0;
+                        }
+                        current.push_str(g);
+                        current_cols += g_cols;
+                    }
+                }
+            }
+        }
+        if !current.is_empty() {
+            result.push(current);
+        }
     }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
 }
 
-fn display_col_width(s: &str) -> usize {
-    s.chars().map(char_display_cols).sum()
-}
-
-/// Format a single-line modal input value with a visible cursor `█` at `cursor_char_idx`,
-/// horizontally scrolling by terminal display columns (treating non-ASCII wide characters as 2 columns)
-/// so the cursor and surrounding text never overflow `max_cols`.
+/// Format a modal input value onto a single visual line with a cursor `█` at `cursor_char_idx`,
+/// slicing on Unicode grapheme cluster boundaries and accounting for cursor and ellipsis widths via
+/// `unicode-width` so `UnicodeWidthStr::width(&returned)` never exceeds `max_cols`.
 pub fn visible_field_slice_with_cursor(
     value: &str,
     cursor_char_idx: usize,
     max_cols: usize,
     show_cursor: bool,
 ) -> String {
-    let chars: Vec<char> = value.chars().collect();
-    let cur = cursor_char_idx.min(chars.len());
-    let budget = max_cols.saturating_sub(usize::from(show_cursor)).max(2);
+    let limit = max_cols.max(2);
+    // Replace newlines and tabs with single-column visible markers so multi-line payloads remain
+    // inspectable inside the single-line modal input box without breaking layout.
+    let sanitized: String = value
+        .chars()
+        .map(|c| match c {
+            '\n' => '↵',
+            '\t' => '→',
+            ch if ch.is_control() => '?',
+            ch => ch,
+        })
+        .collect();
 
-    // Grow a window `[start..end]` around `cur` within `budget` display columns.
-    let mut start = cur;
-    let mut end = cur;
+    let graphemes: Vec<&str> = UnicodeSegmentation::graphemes(sanitized.as_str(), true).collect();
+    let g_widths: Vec<usize> = graphemes
+        .iter()
+        .map(|&g| UnicodeWidthStr::width(g).max(1))
+        .collect();
+
+    // Map `cursor_char_idx` (character offset in `value`) to the corresponding grapheme index.
+    let mut char_accum = 0_usize;
+    let mut cur_g = graphemes.len();
+    for (g_idx, &g) in graphemes.iter().enumerate() {
+        if cursor_char_idx <= char_accum {
+            cur_g = g_idx;
+            break;
+        }
+        char_accum += g.chars().count();
+    }
+
+    let cursor_cols = usize::from(show_cursor);
+    let mut start = cur_g;
+    let mut end = cur_g;
     let mut used_cols = 0_usize;
 
-    while start > 0 || end < chars.len() {
+    while start > 0 || end < graphemes.len() {
         let mut progressed = false;
         if start > 0 {
-            if let Some(&ch) = chars.get(start - 1) {
-                let w = char_display_cols(ch);
-                if used_cols + w <= budget {
-                    start -= 1;
-                    used_cols += w;
-                    progressed = true;
-                }
+            let next_start = start - 1;
+            let w = g_widths.get(next_start).copied().unwrap_or(1);
+            let ell_cols = usize::from(next_start > 0) + usize::from(end < graphemes.len());
+            if used_cols + w + cursor_cols + ell_cols <= limit {
+                start = next_start;
+                used_cols += w;
+                progressed = true;
             }
         }
-        if end < chars.len() {
-            if let Some(&ch) = chars.get(end) {
-                let w = char_display_cols(ch);
-                if used_cols + w <= budget {
-                    end += 1;
-                    used_cols += w;
-                    progressed = true;
-                }
+        if end < graphemes.len() {
+            let next_end = end + 1;
+            let w = g_widths.get(end).copied().unwrap_or(1);
+            let ell_cols = usize::from(start > 0) + usize::from(next_end < graphemes.len());
+            if used_cols + w + cursor_cols + ell_cols <= limit {
+                end = next_end;
+                used_cols += w;
+                progressed = true;
             }
         }
         if !progressed {
@@ -2246,18 +2819,25 @@ pub fn visible_field_slice_with_cursor(
     if start > 0 {
         out.push('…');
     }
-    for (idx, &ch) in chars.iter().enumerate().take(end).skip(start) {
-        if show_cursor && idx == cur {
+    for (idx, &g) in graphemes.iter().enumerate().take(end).skip(start) {
+        if show_cursor && idx == cur_g {
             out.push('█');
         }
-        out.push(ch);
+        out.push_str(g);
     }
-    if show_cursor && cur == end {
+    if show_cursor && cur_g == end {
         out.push('█');
     }
-    if end < chars.len() {
+    if end < graphemes.len() {
         out.push('…');
     }
+    // Final safety guard in case `limit` is smaller than the cursor + ellipses themselves.
+    while UnicodeWidthStr::width(out.as_str()) > limit {
+        if out.pop().is_none() {
+            break;
+        }
+    }
+    let _ = UnicodeWidthChar::width('█');
     out
 }
 
