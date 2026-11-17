@@ -3,9 +3,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
-
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-use chrono::Utc;
+use std::time::SystemTime;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+use std::time::UNIX_EPOCH;
+
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) use tokio::time::Instant;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -111,7 +113,10 @@ pub fn get_epoch_ms() -> u128 {
     if let Some(now_ms) = crate::dummy_simulation::epoch_ms_override() {
         return now_ms;
     }
-    Utc::now().timestamp_millis() as u128
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 /// Get local utc timestamp (millisecond)
