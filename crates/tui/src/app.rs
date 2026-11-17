@@ -1,7 +1,6 @@
-//! Core application state machine, keyboard/mouse event handling, and command execution.
+//! Pure application state machine, keyboard/mouse event handling, and command scheduling.
 
 use std::collections::VecDeque;
-use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -15,11 +14,13 @@ use crate::action::ButtonId;
 use crate::action::ClickTarget;
 use crate::action::CommandModal;
 use crate::action::CommandOutcome;
+use crate::action::DispatchedCommand;
+use crate::action::DispatchedOutcome;
 use crate::action::HitMap;
 use crate::action::ModalKind;
 use crate::action::NodeCommand;
+use crate::action::RequestMeta;
 use crate::action::TabId;
-use crate::client::NodeClient;
 use crate::config::ResolvedTuiConfig;
 use crate::types::DhtKeyLookupReport;
 use crate::types::NodeSnapshot;
@@ -137,13 +138,13 @@ pub struct App {
     pub modal: Option<CommandModal>,
     /// Whether the help overlay is open.
     pub show_help: bool,
-    /// Number of asynchronous commands currently executing.
+    /// Number of asynchronous commands currently executing in the active client epoch.
     pub in_flight_commands: usize,
     /// Latest multi-line command output (e.g. SDP offer/answer, topic messages, service DIDs).
     pub last_command_output: Option<String>,
     /// Latest Chord DHT key lookup report.
     pub last_dht_lookup: Option<DhtKeyLookupReport>,
-    /// Services registered by this node during this session (or configured).
+    /// Services confirmed registered by this node during this session.
     pub registered_services: Vec<String>,
     /// Last topic name used in PubSub dialogs for convenience.
     pub last_topic_name: Option<String>,
@@ -151,11 +152,17 @@ pub struct App {
     pub action_logs: VecDeque<ActionLogEntry>,
     /// Next sequence ID for action logs.
     next_log_id: u64,
+    /// Monotonic client generation counter incremented when the HTTP client is replaced.
+    pub client_epoch: u64,
+    /// Next monotonic request sequence ID assigned on dispatch.
+    next_request_id: u64,
+    /// Highest `request_id` of any applied `RefreshSnapshot` outcome in the current epoch.
+    latest_applied_snapshot_id: u64,
     /// Screen hit-test map populated during rendering for mouse clicks.
     pub hit_map: HitMap,
     /// Whether the user has requested to exit the TUI.
     pub should_quit: bool,
-    /// Flag Set when the user requests reloading the API token from disk.
+    /// Flag set when the user requests reloading the API token from disk.
     pub pending_token_reload: bool,
     /// Queue of commands ready to be sent to the async node worker.
     pending_commands: VecDeque<NodeCommand>,
@@ -199,6 +206,9 @@ impl App {
             last_topic_name: None,
             action_logs: VecDeque::with_capacity(MAX_ACTION_LOGS),
             next_log_id: 1,
+            client_epoch: 1,
+            next_request_id: 1,
+            latest_applied_snapshot_id: 0,
             hit_map: HitMap::default(),
             should_quit: false,
             pending_token_reload: false,
@@ -206,11 +216,32 @@ impl App {
         }
     }
 
-    /// Drain the next queued [`NodeCommand`] to be dispatched to the worker task.
-    pub fn pop_pending_command(&mut self) -> Option<NodeCommand> {
-        let cmd = self.pending_commands.pop_front()?;
+    /// Advance to a new client generation after a successful token reload / client rebuild,
+    /// invalidating any in-flight outcomes from the previous client epoch.
+    pub fn bump_client_epoch(&mut self) {
+        self.client_epoch = self.client_epoch.saturating_add(1);
+        self.in_flight_commands = 0;
+        self.latest_applied_snapshot_id = 0;
+        self.pending_commands.clear();
+        self.pending_commands
+            .push_back(NodeCommand::RefreshSnapshot {
+                include_expired_directory: self.include_expired_directory,
+            });
+    }
+
+    /// Drain the next queued [`NodeCommand`] wrapped with its [`RequestMeta`] envelope.
+    pub fn pop_pending_command(&mut self) -> Option<DispatchedCommand> {
+        let command = self.pending_commands.pop_front()?;
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
         self.in_flight_commands = self.in_flight_commands.saturating_add(1);
-        Some(cmd)
+        Some(DispatchedCommand {
+            meta: RequestMeta {
+                client_epoch: self.client_epoch,
+                request_id,
+            },
+            command,
+        })
     }
 
     /// Queue a background snapshot refresh if auto-polling is enabled and no command is in flight.
@@ -223,18 +254,40 @@ impl App {
         }
     }
 
-    /// Apply a completed [`CommandOutcome`] from the worker task to the application state.
-    pub fn apply_outcome(&mut self, outcome: CommandOutcome) {
+    /// Apply a [`DispatchedOutcome`] from the worker task if its [`RequestMeta`] matches the active
+    /// client epoch and is not superseded by a newer snapshot request.
+    pub fn apply_outcome(&mut self, dispatched: DispatchedOutcome) {
+        if dispatched.meta.client_epoch != self.client_epoch {
+            return;
+        }
         self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
-        match outcome {
+
+        match dispatched.outcome {
             CommandOutcome::Snapshot(snapshot) => {
+                if dispatched.meta.request_id < self.latest_applied_snapshot_id {
+                    return;
+                }
+                if snapshot.include_expired_directory != self.include_expired_directory {
+                    return;
+                }
+                self.latest_applied_snapshot_id = dispatched.meta.request_id;
                 self.connection_state = ConnectionState::Online;
                 self.history.record(&snapshot);
                 self.snapshot = *snapshot;
                 self.clamp_selections();
             }
-            CommandOutcome::SnapshotError(err) => {
-                self.connection_state = ConnectionState::Offline(err);
+            CommandOutcome::SnapshotError {
+                include_expired_directory,
+                error,
+            } => {
+                if dispatched.meta.request_id < self.latest_applied_snapshot_id {
+                    return;
+                }
+                if include_expired_directory != self.include_expired_directory {
+                    return;
+                }
+                self.latest_applied_snapshot_id = dispatched.meta.request_id;
+                self.connection_state = ConnectionState::Offline(error);
             }
             CommandOutcome::CommandSuccess {
                 command,
@@ -242,8 +295,14 @@ impl App {
                 output,
                 measurement,
                 dht_lookup,
+                registered_service,
                 duration_ms,
             } => {
+                if let Some(svc) = registered_service {
+                    if !self.registered_services.contains(&svc) {
+                        self.registered_services.push(svc);
+                    }
+                }
                 if let Some(meas) = measurement {
                     if let Some(existing) = self
                         .snapshot
@@ -521,11 +580,6 @@ impl App {
                 }
                 NodeCommand::DhtLookupKey { key } => {
                     self.last_topic_name = Some(key.clone());
-                }
-                NodeCommand::RegisterService { name }
-                    if !self.registered_services.contains(name) =>
-                {
-                    self.registered_services.push(name.clone());
                 }
                 _ => {}
             }
@@ -877,11 +931,7 @@ impl App {
     }
 
     fn clamp_selections(&mut self) {
-        let peer_len = self
-            .snapshot
-            .peers
-            .len()
-            .max(self.snapshot.measurements.len());
+        let peer_len = self.snapshot.peer_traffic_rows().len();
         if peer_len == 0 {
             self.selected_peer_idx = 0;
         } else if self.selected_peer_idx >= peer_len {
@@ -946,348 +996,4 @@ impl App {
             self.selected_log_idx = log_len - 1;
         }
     }
-}
-
-/// Execute a single [`NodeCommand`] against `client` and package its [`CommandOutcome`].
-pub async fn execute_node_command(client: &dyn NodeClient, cmd: NodeCommand) -> CommandOutcome {
-    let started = Instant::now();
-    let command_name = cmd.title();
-
-    match cmd {
-        NodeCommand::RefreshSnapshot {
-            include_expired_directory,
-        } => match client.fetch_snapshot(include_expired_directory).await {
-            Ok(snap) => CommandOutcome::Snapshot(Box::new(snap)),
-            Err(err) => CommandOutcome::SnapshotError(err.to_string()),
-        },
-        NodeCommand::ConnectPeerViaHttp { url, api_token } => {
-            match client.connect_peer_via_http(&url, api_token).await {
-                Ok(did) => CommandOutcome::CommandSuccess {
-                    command: command_name,
-                    summary: format!("Connected to {url} -> Peer DID: {did}"),
-                    output: Some(format!("Remote Peer DID: {did}\nEndpoint: {url}")),
-                    measurement: None,
-                    dht_lookup: None,
-                    duration_ms: elapsed_ms(started),
-                },
-                Err(err) => CommandOutcome::CommandError {
-                    command: command_name,
-                    error: err.to_string(),
-                    duration_ms: elapsed_ms(started),
-                },
-            }
-        }
-        NodeCommand::ConnectWithDid { did } => match client.connect_with_did(&did).await {
-            Ok(()) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Dialed peer DID {did} via DHT"),
-                output: None,
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::ConnectWithSeed { source } => match client.connect_with_seed(&source).await {
-            Ok(count) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Connected seed ({count} bootstrap peer(s)) from {source}"),
-                output: None,
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::Disconnect { did } => match client.disconnect(&did).await {
-            Ok(()) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Disconnected peer {did}"),
-                output: None,
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::CreateOffer { did } => match client.create_offer(&did).await {
-            Ok(offer) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Created WebRTC offer for {did} ({} chars)", offer.len()),
-                output: Some(format!(
-                    "=== WebRTC Offer for {did} ===\n{offer}\n\nNext step: pass this offer to peer's Answer Offer ([A])."
-                )),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::AnswerOffer { offer } => match client.answer_offer(&offer).await {
-            Ok(answer) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Generated handshake reply ({} chars)", answer.len()),
-                output: Some(format!(
-                    "=== WebRTC Answer / Reply Payload ===\n{answer}\n\nNext step: return this payload to offerer's Accept Answer ([Y])."
-                )),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::AcceptAnswer { answer } => match client.accept_answer(&answer).await {
-            Ok(()) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: "Accepted WebRTC answer; manual handshake completed!".to_string(),
-                output: Some("Manual WebRTC handshake completed.".to_string()),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::SendBackendMessage {
-            destination_did,
-            namespace,
-            payload,
-        } => match client
-            .send_backend_message(&destination_did, &namespace, &payload)
-            .await
-        {
-            Ok(()) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!(
-                    "Sent {} bytes to {destination_did} [ns: {namespace}]",
-                    payload.len()
-                ),
-                output: Some(format!(
-                    "To: {destination_did}\nNamespace: {namespace}\nPayload: {payload}"
-                )),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::PublishTopic { topic, message } => {
-            match client.publish_topic_message(&topic, &message).await {
-                Ok(()) => CommandOutcome::CommandSuccess {
-                    command: command_name,
-                    summary: format!("Published message to topic '{topic}'"),
-                    output: Some(format!("Topic: {topic}\nPublished: {message}")),
-                    measurement: None,
-                    dht_lookup: None,
-                    duration_ms: elapsed_ms(started),
-                },
-                Err(err) => CommandOutcome::CommandError {
-                    command: command_name,
-                    error: err.to_string(),
-                    duration_ms: elapsed_ms(started),
-                },
-            }
-        }
-        NodeCommand::FetchTopic { topic, skip } => {
-            match client.fetch_topic_messages(&topic, skip).await {
-                Ok(messages) => {
-                    let body = if messages.is_empty() {
-                        format!("Topic '{topic}' (skip={skip}): <no messages>")
-                    } else {
-                        let lines = messages
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, m)| format!("[{}] {}", skip.saturating_add(idx as i64), m))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!("=== Topic '{topic}' ({} messages) ===\n{lines}", messages.len())
-                    };
-                    CommandOutcome::CommandSuccess {
-                        command: command_name,
-                        summary: format!(
-                            "Fetched {} message(s) from topic '{topic}' (skip={skip})",
-                            messages.len()
-                        ),
-                        output: Some(body),
-                        measurement: None,
-                        dht_lookup: None,
-                        duration_ms: elapsed_ms(started),
-                    }
-                }
-                Err(err) => CommandOutcome::CommandError {
-                    command: command_name,
-                    error: err.to_string(),
-                    duration_ms: elapsed_ms(started),
-                },
-            }
-        }
-        NodeCommand::RegisterService { name } => match client.register_service(&name).await {
-            Ok(()) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Registered local service '{name}' in DHT"),
-                output: Some(format!("Service registered: {name}")),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::LookupService { name } => match client.lookup_service(&name).await {
-            Ok(dids) => {
-                let body = if dids.is_empty() {
-                    format!("Service '{name}': no provider DIDs found")
-                } else {
-                    format!(
-                        "=== Providers for Service '{name}' ({}) ===\n{}",
-                        dids.len(),
-                        dids.join("\n")
-                    )
-                };
-                CommandOutcome::CommandSuccess {
-                    command: command_name,
-                    summary: format!("Service '{name}' resolved to {} provider(s)", dids.len()),
-                    output: Some(body),
-                    measurement: None,
-                    dht_lookup: None,
-                    duration_ms: elapsed_ms(started),
-                }
-            }
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::DhtLookupKey { key } => match client.dht_lookup_key(&key).await {
-            Ok(report) => {
-                let sources_str = if report.sources.is_empty() {
-                    "Not Found".to_string()
-                } else {
-                    report.sources.join(" + ")
-                };
-                let elems_body = if report.elements.is_empty() {
-                    "<no elements stored>".to_string()
-                } else {
-                    report
-                        .elements
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, el)| format!("[{idx}] {el}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                };
-                let body = format!(
-                    "=== DHT Lookup Report ===\nQuery Key: {}\nTarget Chord DID: {}\nNext-Hop / Route Peer: {}\nFound In: {}\nKind: {} ({} elements)\n\n{}",
-                    report.query_key,
-                    report.target_did,
-                    report.route_peer.as_deref().unwrap_or("Local / Self"),
-                    sources_str,
-                    report.record_kind,
-                    report.elements.len(),
-                    elems_body
-                );
-                CommandOutcome::CommandSuccess {
-                    command: command_name,
-                    summary: format!(
-                        "DHT Key '{}' -> {} ({} elements, [{}])",
-                        report.query_key,
-                        report.target_did,
-                        report.elements.len(),
-                        sources_str
-                    ),
-                    output: Some(body),
-                    measurement: None,
-                    dht_lookup: Some(Box::new(report)),
-                    duration_ms: elapsed_ms(started),
-                }
-            }
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-        NodeCommand::InspectPeer { did } => match client.peer_measurement(&did).await {
-            Ok(Some(meas)) => {
-                let credit_line = match &meas.credit {
-                    Some(c) => format!(
-                        "Score: {:.2} | Bytes TX: {} | Bytes RX: {} | Last Seen: {}s",
-                        c.score, c.bytes_sent_to_peer, c.bytes_received_from_peer, c.last_seen_seconds
-                    ),
-                    None => "No persistent byte credit record".to_string(),
-                };
-                let details = format!(
-                    "=== Peer Measurement: {} ===\nReliability: {:?}\nConnected: {} | Disconnected: {}\nSent: {} (failed: {}) | Received: {} (failed: {})\n{}",
-                    meas.did,
-                    meas.reliability,
-                    meas.counters.connected,
-                    meas.counters.disconnected,
-                    meas.counters.sent,
-                    meas.counters.failed_to_send,
-                    meas.counters.received,
-                    meas.counters.failed_to_receive,
-                    credit_line
-                );
-                CommandOutcome::CommandSuccess {
-                    command: command_name,
-                    summary: format!(
-                        "Peer {did}: {:?}, sent={}, recv={}",
-                        meas.reliability, meas.counters.sent, meas.counters.received
-                    ),
-                    output: Some(details),
-                    measurement: Some(Box::new(meas)),
-                    dht_lookup: None,
-                    duration_ms: elapsed_ms(started),
-                }
-            }
-            Ok(None) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("No measurement record found for peer {did}"),
-                output: Some(format!("No local measurement record for {did}")),
-                measurement: None,
-                dht_lookup: None,
-                duration_ms: elapsed_ms(started),
-            },
-            Err(err) => CommandOutcome::CommandError {
-                command: command_name,
-                error: err.to_string(),
-                duration_ms: elapsed_ms(started),
-            },
-        },
-    }
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

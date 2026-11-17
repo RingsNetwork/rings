@@ -640,13 +640,46 @@ impl NodeCommand {
     }
 }
 
+/// Metadata tagging every asynchronous command and its outcome with the client epoch and monotonic
+/// request sequence ID so stale or out-of-order responses can be deterministically rejected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RequestMeta {
+    /// Monotonic client generation counter incremented whenever the HTTP/RPC client is replaced.
+    pub client_epoch: u64,
+    /// Monotonic request sequence identifier within the TUI session.
+    pub request_id: u64,
+}
+
+/// Asynchronous command paired with its [`RequestMeta`] envelope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DispatchedCommand {
+    /// Request correlation metadata.
+    pub meta: RequestMeta,
+    /// Command payload to execute.
+    pub command: NodeCommand,
+}
+
+/// Asynchronous command outcome paired with the [`RequestMeta`] of the command that produced it.
+#[derive(Clone, Debug)]
+pub struct DispatchedOutcome {
+    /// Request correlation metadata copied from the originating [`DispatchedCommand`].
+    pub meta: RequestMeta,
+    /// Outcome payload.
+    pub outcome: CommandOutcome,
+}
+
 /// Result of executing a [`NodeCommand`] against a [`crate::client::NodeClient`].
 #[derive(Clone, Debug)]
 pub enum CommandOutcome {
     /// Snapshot refresh completed.
     Snapshot(Box<NodeSnapshot>),
-    /// Snapshot refresh failed.
-    SnapshotError(String),
+    /// Snapshot refresh failed (`include_expired_directory`, error message).
+    SnapshotError {
+        /// Filter flag that was requested by the refresh command.
+        include_expired_directory: bool,
+        /// Error explanation.
+        error: String,
+    },
     /// User-triggered command succeeded with a summary and optional detailed payload.
     CommandSuccess {
         /// Command name.
@@ -659,6 +692,8 @@ pub enum CommandOutcome {
         measurement: Option<Box<PeerMeasurementInfo>>,
         /// Optional structured DHT key lookup report.
         dht_lookup: Option<Box<DhtKeyLookupReport>>,
+        /// Optional service name confirmed registered on the node (`registerService`).
+        registered_service: Option<String>,
         /// Execution time in milliseconds.
         duration_ms: u64,
     },

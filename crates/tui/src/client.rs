@@ -58,9 +58,11 @@ use crate::config::ResolvedTuiConfig;
 use crate::error::Result;
 use crate::error::TuiError;
 use crate::types::decode_storage_element;
-use crate::types::resolve_dht_key_did;
 use crate::types::DhtKeyLookupReport;
 use crate::types::DhtLookupSnapshotDto;
+use crate::types::DhtLookupStatus;
+use crate::types::DhtQueryTarget;
+use crate::types::GatewayProbeState;
 use crate::types::GatewayStatusDto;
 use crate::types::HealthSnapshotDto;
 use crate::types::LatencyBucketDto;
@@ -216,10 +218,10 @@ struct SeedDocument {
     peers: Vec<SeedPeer>,
 }
 
-/// Parse a seed input which may either be a `did@http://host:port` shorthand, inline JSON/YAML,
-/// or a path to a seed file on disk.
-pub fn parse_seed_input(input: &str) -> Result<Vec<SeedPeer>> {
-    let trimmed = input.trim();
+/// Pure parser for a seed specification string (`<did>@<http-url>`, JSON document, or YAML document).
+/// Does not perform any filesystem I/O.
+pub fn parse_seed_str(raw: &str) -> Result<Vec<SeedPeer>> {
+    let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err(TuiError::InvalidInput(
             "seed source cannot be empty".to_string(),
@@ -236,16 +238,10 @@ pub fn parse_seed_input(input: &str) -> Result<Vec<SeedPeer>> {
         }
     }
 
-    let path = expand_home(trimmed.strip_prefix("file://").unwrap_or(trimmed));
-    let raw = match fs::read_to_string(&path) {
-        Ok(contents) => contents,
-        Err(_) => trimmed.to_string(),
-    };
-
-    if let Ok(doc) = serde_json::from_str::<SeedDocument>(&raw) {
+    if let Ok(doc) = serde_json::from_str::<SeedDocument>(trimmed) {
         return Ok(doc.peers);
     }
-    if let Ok(doc) = serde_saphyr::from_str::<SeedDocument>(&raw) {
+    if let Ok(doc) = serde_saphyr::from_str::<SeedDocument>(trimmed) {
         return Ok(doc.peers);
     }
 
@@ -255,11 +251,37 @@ pub fn parse_seed_input(input: &str) -> Result<Vec<SeedPeer>> {
     ))
 }
 
+/// Resolve seed peers from a user-supplied source, which may either be an inline `<did>@<http-url>` /
+/// JSON/YAML literal or a filesystem path to a seed file. Filesystem read errors are surfaced directly.
+pub fn load_seed_peers(source: &str) -> Result<Vec<SeedPeer>> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err(TuiError::InvalidInput(
+            "seed source cannot be empty".to_string(),
+        ));
+    }
+
+    // Try pure inline forms (`did@http...` or inline JSON `{...}`) before touching the filesystem.
+    if trimmed.contains('@') || trimmed.starts_with('{') || trimmed.starts_with("peers:") {
+        return parse_seed_str(trimmed);
+    }
+
+    let path = expand_home(trimmed.strip_prefix("file://").unwrap_or(trimmed));
+    let contents = fs::read_to_string(&path).map_err(|err| {
+        TuiError::InvalidInput(format!(
+            "failed to read seed file {}: {err}",
+            path.display()
+        ))
+    })?;
+    parse_seed_str(&contents)
+}
+
 #[async_trait]
 impl NodeClient for HttpNodeClient {
     async fn fetch_snapshot(&self, include_expired_directory: bool) -> Result<NodeSnapshot> {
         let started = Instant::now();
         let mut snapshot = NodeSnapshot {
+            include_expired_directory,
             fetched_at_ms: now_epoch_ms(),
             ..NodeSnapshot::default()
         };
@@ -290,68 +312,106 @@ impl NodeClient for HttpNodeClient {
             self.rpc.lookup_onion_exits(&exits_req),
         );
 
-        let mut any_succeeded = false;
-        let mut first_err: Option<TuiError> = None;
+        let mut authenticated_succeeded = false;
+        let mut first_auth_err: Option<TuiError> = None;
 
         match did_res {
             Ok(resp) => {
-                any_succeeded = true;
                 snapshot.did = Some(resp.did);
                 snapshot.wire_version = resp.wire_version;
             }
             Err(err) => {
-                first_err.get_or_insert_with(|| TuiError::from(err));
+                snapshot.warnings.push(format!("nodeDid: {err}"));
             }
         }
 
         match info_res {
             Ok(info) => {
-                any_succeeded = true;
+                authenticated_succeeded = true;
                 snapshot.apply_node_info(info);
             }
             Err(err) => {
-                first_err.get_or_insert_with(|| TuiError::from(err));
+                snapshot.warnings.push(format!("nodeInfo: {err}"));
+                first_auth_err.get_or_insert_with(|| TuiError::from(err));
             }
         }
 
-        if let Ok(peers) = peers_res {
-            any_succeeded = true;
-            snapshot.peers = peers.peers;
+        match peers_res {
+            Ok(peers) => {
+                authenticated_succeeded = true;
+                snapshot.peers = peers.peers;
+            }
+            Err(err) => {
+                snapshot.warnings.push(format!("listPeers: {err}"));
+                first_auth_err.get_or_insert_with(|| TuiError::from(err));
+            }
         }
 
-        if let Ok(meas) = meas_res {
-            any_succeeded = true;
-            snapshot.measurements = meas.measurements;
+        match meas_res {
+            Ok(meas) => {
+                authenticated_succeeded = true;
+                snapshot.measurements = meas.measurements;
+            }
+            Err(err) => {
+                snapshot
+                    .warnings
+                    .push(format!("listPeerMeasurements: {err}"));
+            }
         }
 
         match obs_res {
             Ok(obs) => {
-                any_succeeded = true;
+                authenticated_succeeded = true;
                 if snapshot.version.is_none() {
                     snapshot.version = Some(obs.version);
                 }
                 snapshot.observability = Some(obs.observability);
             }
             Err(err) => {
-                first_err.get_or_insert(err);
+                snapshot
+                    .warnings
+                    .push(format!("/status?view=observability: {err}"));
+                first_auth_err.get_or_insert(err);
             }
         }
 
-        if let Ok(gw) = gw_res {
-            snapshot.gateway = gw;
+        match gw_res {
+            Ok(Some(gw)) => {
+                snapshot.gateway = GatewayProbeState::Available(gw);
+            }
+            Ok(None) => {
+                snapshot.gateway = GatewayProbeState::NotMounted;
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                snapshot.warnings.push(format!("/gateway/status: {msg}"));
+                snapshot.gateway = GatewayProbeState::Failed(msg);
+            }
         }
 
-        if let Ok(online) = online_res {
-            snapshot.online_nodes = online.nodes;
+        match online_res {
+            Ok(online) => {
+                snapshot.online_nodes = online.nodes;
+            }
+            Err(err) => {
+                snapshot.warnings.push(format!("lookupOnlineNodes: {err}"));
+            }
         }
 
-        if let Ok(exits) = exits_res {
-            snapshot.onion_exits = exits.exits;
+        match exits_res {
+            Ok(exits) => {
+                snapshot.onion_exits = exits.exits;
+            }
+            Err(err) => {
+                snapshot.warnings.push(format!("lookupOnionExits: {err}"));
+            }
         }
 
-        if !any_succeeded {
-            return Err(first_err.unwrap_or_else(|| {
-                TuiError::InvalidInput("unable to reach rings-node endpoint".to_string())
+        if !authenticated_succeeded {
+            return Err(first_auth_err.unwrap_or_else(|| {
+                TuiError::InvalidInput(
+                    "unable to authenticate or reach rings-node control endpoint".to_string(),
+                )
             }));
         }
 
@@ -384,7 +444,7 @@ impl NodeClient for HttpNodeClient {
     }
 
     async fn connect_with_seed(&self, source: &str) -> Result<usize> {
-        let peers = parse_seed_input(source)?;
+        let peers = load_seed_peers(source)?;
         let count = peers.len();
         self.rpc
             .connect_with_seed(&ConnectWithSeedRequest { peers })
@@ -504,88 +564,145 @@ impl NodeClient for HttpNodeClient {
                 "DHT lookup key cannot be empty".to_string(),
             ));
         }
-        let target_did = resolve_dht_key_did(trimmed);
+        let target = DhtQueryTarget::parse(trimmed);
 
-        let fetch_req = FetchTopicMessagesRequest {
-            topic: trimmed.to_string(),
-            skip: 0,
-        };
-        let info_req = NodeInfoRequest {};
-        let (fetch_res, info_res) = tokio::join!(
-            self.rpc.fetch_topic_messages(&fetch_req),
-            self.rpc.node_info(&info_req),
-        );
-
+        let query_mode = target.mode_label().to_string();
+        let target_did = target.target_entry_did().to_string();
         let mut sources = Vec::new();
         let mut elements = Vec::new();
-        let mut record_kind = "Unknown".to_string();
-        let mut route_peer = None;
+        let mut record_kind = "None".to_string();
+        let mut warnings = Vec::new();
 
-        if let Ok(fetched) = fetch_res {
-            if !fetched.data.is_empty() {
-                sources.push("Live DHT Network".to_string());
-                record_kind = "Data/Append".to_string();
-                elements.extend(fetched.data);
+        match &target {
+            DhtQueryTarget::TopicKey {
+                topic,
+                derived_entry_did,
+            } => {
+                let fetch_req = FetchTopicMessagesRequest {
+                    topic: topic.clone(),
+                    skip: 0,
+                };
+                let info_req = NodeInfoRequest {};
+                let (fetch_res, info_res) = tokio::join!(
+                    self.rpc.fetch_topic_messages(&fetch_req),
+                    self.rpc.node_info(&info_req),
+                );
+
+                if fetch_res.is_err() && info_res.is_err() {
+                    if let Err(err) = fetch_res {
+                        return Err(TuiError::from(err));
+                    }
+                }
+
+                match fetch_res {
+                    Ok(fetched) => {
+                        if !fetched.data.is_empty() {
+                            sources.push("Live DHT Topic Network".to_string());
+                            record_kind = "Data/Append".to_string();
+                            elements.extend(fetched.data);
+                        }
+                    }
+                    Err(err) => {
+                        warnings.push(format!("fetchTopicMessages: {err}"));
+                    }
+                }
+
+                match info_res {
+                    Ok(info) => {
+                        collect_matching_storage_items(
+                            info.swarm.as_ref(),
+                            Some(topic.as_str()),
+                            derived_entry_did.as_str(),
+                            &mut sources,
+                            &mut record_kind,
+                            &mut elements,
+                        );
+                    }
+                    Err(err) => {
+                        warnings.push(format!("nodeInfo: {err}"));
+                    }
+                }
+            }
+            DhtQueryTarget::RawEntryDid { entry_did } => {
+                // Do not call `fetchTopicMessages` on a raw `0x...` Entry DID because the server's
+                // `fetch_text_elements` hashes its string parameter via SHA-1 (`Entry::gen_did`),
+                // which would double-hash the raw DID and query the wrong VNode address.
+                let info_req = NodeInfoRequest {};
+                let info = self.rpc.node_info(&info_req).await?;
+                collect_matching_storage_items(
+                    info.swarm.as_ref(),
+                    None,
+                    entry_did.as_str(),
+                    &mut sources,
+                    &mut record_kind,
+                    &mut elements,
+                );
             }
         }
 
-        if let Ok(info) = info_res {
-            if let Some(swarm) = info.swarm {
-                if let Some(dht) = &swarm.dht {
-                    route_peer = dht
-                        .successors
-                        .first()
-                        .cloned()
-                        .or_else(|| dht.finger_table_ranges.iter().find_map(|r| r.did.clone()));
+        let status = if !warnings.is_empty() {
+            DhtLookupStatus::PartialError
+        } else if !sources.is_empty() {
+            DhtLookupStatus::Found
+        } else {
+            DhtLookupStatus::Absent
+        };
+
+        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        Ok(DhtKeyLookupReport {
+            query_key: trimmed.to_string(),
+            query_mode,
+            target_did,
+            status,
+            sources,
+            record_kind,
+            elements,
+            warning: (!warnings.is_empty()).then(|| warnings.join("; ")),
+            duration_ms,
+        })
+    }
+}
+
+fn collect_matching_storage_items(
+    swarm_opt: Option<&SwarmInfo>,
+    exact_topic_key: Option<&str>,
+    target_entry_did: &str,
+    sources: &mut Vec<String>,
+    record_kind: &mut String,
+    elements: &mut Vec<String>,
+) {
+    let Some(swarm) = swarm_opt else {
+        return;
+    };
+    for (tier_label, storage_opt) in [
+        ("Persistent Storage", swarm.persistence_storage.as_ref()),
+        ("Cache Storage", swarm.cache_storage.as_ref()),
+    ] {
+        let Some(storage) = storage_opt else {
+            continue;
+        };
+        for item in &storage.items {
+            let key_matches = item.key.eq_ignore_ascii_case(target_entry_did)
+                || exact_topic_key.is_some_and(|tk| item.key == tk);
+            let did_matches = item
+                .value
+                .as_ref()
+                .is_some_and(|v| v.did.eq_ignore_ascii_case(target_entry_did));
+            if key_matches || did_matches {
+                if !sources.iter().any(|s| s == tier_label) {
+                    sources.push(tier_label.to_string());
                 }
-                for (tier_label, storage_opt) in [
-                    ("Persistent Storage", swarm.persistence_storage.as_ref()),
-                    ("Cache Storage", swarm.cache_storage.as_ref()),
-                ] {
-                    let Some(storage) = storage_opt else {
-                        continue;
-                    };
-                    for item in &storage.items {
-                        let key_matches = item.key.eq_ignore_ascii_case(trimmed)
-                            || item.key.eq_ignore_ascii_case(&target_did)
-                            || item.key.contains(trimmed);
-                        let did_matches = item.value.as_ref().is_some_and(|v| {
-                            v.did.eq_ignore_ascii_case(trimmed)
-                                || v.did.eq_ignore_ascii_case(&target_did)
-                        });
-                        if key_matches || did_matches {
-                            if !sources.iter().any(|s| s == tier_label) {
-                                sources.push(tier_label.to_string());
-                            }
-                            if let Some(val) = &item.value {
-                                record_kind.clone_from(&val.kind);
-                                for raw_b64 in &val.data {
-                                    let decoded = decode_storage_element(raw_b64);
-                                    if !elements.contains(&decoded) {
-                                        elements.push(decoded);
-                                    }
-                                }
-                            }
+                if let Some(val) = &item.value {
+                    record_kind.clone_from(&val.kind);
+                    for raw_b64 in &val.data {
+                        let decoded = decode_storage_element(raw_b64);
+                        if !elements.contains(&decoded) {
+                            elements.push(decoded);
                         }
                     }
                 }
             }
         }
-
-        if sources.is_empty() {
-            record_kind = "NotFound".to_string();
-        }
-
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        Ok(DhtKeyLookupReport {
-            query_key: trimmed.to_string(),
-            target_did,
-            route_peer,
-            sources,
-            record_kind,
-            elements,
-            duration_ms,
-        })
     }
 }
 
@@ -651,7 +768,7 @@ impl DemoNodeClient {
 
 #[async_trait]
 impl NodeClient for DemoNodeClient {
-    async fn fetch_snapshot(&self, _include_expired_directory: bool) -> Result<NodeSnapshot> {
+    async fn fetch_snapshot(&self, include_expired_directory: bool) -> Result<NodeSnapshot> {
         let step = self.tick.fetch_add(1, Ordering::Relaxed);
         let now_ms = now_epoch_ms();
         let peers = self
@@ -719,6 +836,9 @@ impl NodeClient for DemoNodeClient {
             .map(|p| p.did.clone())
             .unwrap_or_else(|| local_did.clone());
         let pred_did = peers.last().map(|p| p.did.clone());
+        let online_entry_did = crate::types::resolve_dht_key_did("online_nodes");
+        let chat_entry_did = crate::types::resolve_dht_key_did("rings-chat");
+        let svc_entry_did = crate::types::resolve_dht_key_did("ipfs-gateway");
 
         Ok(NodeSnapshot {
             did: Some(local_did.clone()),
@@ -732,7 +852,7 @@ impl NodeClient for DemoNodeClient {
                     predecessor: pred_did,
                     finger_table_ranges: vec![
                         FingerTableRange {
-                            did: Some(succ_did.clone()),
+                            did: Some(succ_did),
                             start: 0,
                             end: 31,
                         },
@@ -751,17 +871,17 @@ impl NodeClient for DemoNodeClient {
                 persistence_storage: Some(StorageInfo {
                     items: vec![
                         StorageItem {
-                            key: "vnode:registry:online_nodes".to_string(),
+                            key: online_entry_did.clone(),
                             value: Some(StorageValue {
-                                did: local_did.clone(),
+                                did: online_entry_did,
                                 kind: "Map".to_string(),
                                 data: vec!["dGVzdA==".to_string(), "ZGF0YQ==".to_string()],
                             }),
                         },
                         StorageItem {
-                            key: "vnode:topic:rings-chat".to_string(),
+                            key: chat_entry_did.clone(),
                             value: Some(StorageValue {
-                                did: succ_did.clone(),
+                                did: chat_entry_did,
                                 kind: "Append".to_string(),
                                 data: vec!["bXNnMQ==".to_string()],
                             }),
@@ -770,9 +890,9 @@ impl NodeClient for DemoNodeClient {
                 }),
                 cache_storage: Some(StorageInfo {
                     items: vec![StorageItem {
-                        key: "cache:service:ipfs-gateway".to_string(),
+                        key: svc_entry_did.clone(),
                         value: Some(StorageValue {
-                            did: succ_did,
+                            did: svc_entry_did,
                             kind: "Append".to_string(),
                             data: vec!["cHJvdmlkZXI=".to_string()],
                         }),
@@ -861,7 +981,7 @@ impl NodeClient for DemoNodeClient {
                     overlay_ready: true,
                 },
             }),
-            gateway: Some(GatewayStatusDto {
+            gateway: GatewayProbeState::Available(GatewayStatusDto {
                 health: "active".to_string(),
                 interface: Some("utun8".to_string()),
                 capture_routes: vec!["198.18.0.0/15".to_string()],
@@ -933,6 +1053,8 @@ impl NodeClient for DemoNodeClient {
                 version: "1.0.0-pre.3".to_string(),
                 signature: serde_json::Value::Null,
             }],
+            include_expired_directory,
+            warnings: Vec::new(),
             fetched_at_ms: now_ms,
             poll_latency_ms: 2,
         })
@@ -969,7 +1091,7 @@ impl NodeClient for DemoNodeClient {
     }
 
     async fn connect_with_seed(&self, source: &str) -> Result<usize> {
-        let parsed = parse_seed_input(source)?;
+        let parsed = load_seed_peers(source)?;
         let mut peers = self
             .peers
             .lock()
@@ -1074,39 +1196,52 @@ impl NodeClient for DemoNodeClient {
 
     async fn dht_lookup_key(&self, key: &str) -> Result<DhtKeyLookupReport> {
         let trimmed = key.trim();
-        let target_did = resolve_dht_key_did(trimmed);
-        let peers = self
-            .peers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let route_peer = peers.first().map(|p| p.did.clone());
+        if trimmed.is_empty() {
+            return Err(TuiError::InvalidInput(
+                "DHT lookup key cannot be empty".to_string(),
+            ));
+        }
+        let target = DhtQueryTarget::parse(trimmed);
+        let query_mode = target.mode_label().to_string();
+        let target_did = target.target_entry_did().to_string();
 
         let mut elements = Vec::new();
-        for (t, msg) in self
-            .topics
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-        {
-            if t == trimmed || trimmed.contains(t) {
-                elements.push(msg.clone());
+        let mut sources = Vec::new();
+        match &target {
+            DhtQueryTarget::TopicKey { topic, .. } => {
+                for (t, msg) in self
+                    .topics
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                {
+                    if t == topic {
+                        elements.push(msg.clone());
+                    }
+                }
+                if !elements.is_empty() {
+                    sources.push("Live DHT Topic Network".to_string());
+                }
             }
+            DhtQueryTarget::RawEntryDid { .. } => {}
         }
+
         if elements.is_empty() {
+            sources.push("Persistent Storage".to_string());
             elements.push(format!(
-                "vnode-record: key='{trimmed}' target_did={target_did}"
+                "vnode-record: key='{trimmed}' entry_did={target_did}"
             ));
-            elements.push("owner=0x55a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e".to_string());
         }
 
         Ok(DhtKeyLookupReport {
             query_key: trimmed.to_string(),
+            query_mode,
             target_did,
-            route_peer,
-            sources: vec!["Live DHT Network".to_string(), "Cache Storage".to_string()],
+            status: DhtLookupStatus::Found,
+            sources,
             record_kind: "Data/Append".to_string(),
             elements,
+            warning: None,
             duration_ms: 6,
         })
     }
@@ -1117,17 +1252,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_shorthand_and_json_seed_inputs() {
+    fn parses_shorthand_and_json_seed_inputs_and_surfaces_file_errors() {
         let peers =
-            parse_seed_input("0x1111222233334444555566667777888899990000@http://127.0.0.1:50001")
+            parse_seed_str("0x1111222233334444555566667777888899990000@http://127.0.0.1:50001")
                 .expect("shorthand seed");
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].url, "http://127.0.0.1:50001");
 
         let json_peers =
-            parse_seed_input(r#"{"peers":[{"did":"0xaaaa","url":"https://node.example.com"}]}"#)
+            parse_seed_str(r#"{"peers":[{"did":"0xaaaa","url":"https://node.example.com"}]}"#)
                 .expect("json seed");
         assert_eq!(json_peers.len(), 1);
         assert_eq!(json_peers[0].did, "0xaaaa");
+
+        let err = load_seed_peers("/nonexistent/rings-seed-file-that-does-not-exist.json")
+            .expect_err("missing seed file must return file error");
+        assert!(err.to_string().contains("failed to read seed file"));
     }
 }

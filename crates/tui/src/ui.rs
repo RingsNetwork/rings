@@ -22,7 +22,6 @@ use ratatui::widgets::Table;
 use ratatui::widgets::TableState;
 use ratatui::widgets::Wrap;
 use ratatui::Frame;
-use rings_rpc::protos::rings_node::PeerReliabilityInfo;
 
 use crate::action::ButtonId;
 use crate::action::ClickTarget;
@@ -32,6 +31,8 @@ use crate::app::App;
 use crate::app::ConnectionState;
 use crate::app::DhtSubtab;
 use crate::app::DirectorySubtab;
+use crate::types::DhtLookupStatus;
+use crate::types::GatewayProbeState;
 
 /// Render the complete TUI frame and populate `app.hit_map` for mouse interactions.
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
@@ -315,6 +316,7 @@ fn render_overview_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let peer_rows = app.snapshot.peer_traffic_rows();
     let header = Row::new(vec![
         Cell::from("Peer DID"),
         Cell::from("Chord Role"),
@@ -327,28 +329,18 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows = app
-        .snapshot
-        .peers
+    let rows = peer_rows
         .iter()
         .map(|peer| {
-            let role = app.snapshot.peer_chord_role(&peer.did);
-            let meas = app.snapshot.measurements.iter().find(|m| m.did == peer.did);
-            let traffic = meas
-                .and_then(|m| {
-                    m.credit.as_ref().map(|c| {
-                        format!(
-                            "{} / {}",
-                            format_bytes(c.bytes_sent_to_peer),
-                            format_bytes(c.bytes_received_from_peer)
-                        )
-                    })
-                })
-                .unwrap_or_else(|| "-".to_string());
+            let traffic = format!(
+                "{} / {}",
+                format_bytes(peer.bytes_tx),
+                format_bytes(peer.bytes_rx)
+            );
             Row::new(vec![
-                Cell::from(peer.did.clone()),
-                Cell::from(role).style(Style::default().fg(Color::Cyan)),
-                Cell::from(peer.state.clone()).style(Style::default().fg(Color::Green)),
+                Cell::from(peer.peer_did.clone()),
+                Cell::from(peer.chord_role.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(peer.transport_state.clone()).style(Style::default().fg(Color::Green)),
                 Cell::from(traffic),
             ])
         })
@@ -365,8 +357,8 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Connected Peers ({}) — [3:Peers] ",
-                app.snapshot.peers.len()
+                " Connected Peers & Traffic ({}) — [3:Peers] ",
+                peer_rows.len()
             ))
             .border_style(Style::default().fg(Color::Cyan)),
     );
@@ -374,17 +366,18 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
 }
 
 fn render_overview_service_consumers(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let consumers = app.snapshot.service_consumers(
-        app.config.advertise_onion_relay,
-        app.config.advertise_onion_exit,
-        &app.registered_services,
-    );
+    let vnodes = app.snapshot.hosted_vnode_rows();
+    let svcs = if app.registered_services.is_empty() {
+        "none".to_string()
+    } else {
+        app.registered_services.join(",")
+    };
 
     let header = Row::new(vec![
-        Cell::from("Consumer DID"),
-        Cell::from("Services Used"),
-        Cell::from("Req In"),
-        Cell::from("Served TX"),
+        Cell::from("Entry Key DID (VNode)"),
+        Cell::from("Tier / Kind"),
+        Cell::from("Elem"),
+        Cell::from("Storage Key"),
     ])
     .style(
         Style::default()
@@ -392,31 +385,32 @@ fn render_overview_service_consumers(frame: &mut Frame<'_>, app: &App, area: Rec
             .add_modifier(Modifier::BOLD),
     );
 
-    let rows = consumers
+    let rows = vnodes
         .iter()
-        .map(|c| {
+        .map(|v| {
             Row::new(vec![
-                Cell::from(c.consumer_did.clone()),
-                Cell::from(c.services_used.clone()).style(Style::default().fg(Color::Magenta)),
-                Cell::from(format!("{}", c.requests_in)).style(Style::default().fg(Color::Cyan)),
-                Cell::from(format_bytes(c.bytes_tx)).style(Style::default().fg(Color::Green)),
+                Cell::from(v.entry_did.clone()),
+                Cell::from(format!("{}/{}", v.storage_tier, v.entry_kind))
+                    .style(Style::default().fg(Color::Magenta)),
+                Cell::from(format!("{}", v.element_count)).style(Style::default().fg(Color::Cyan)),
+                Cell::from(v.storage_key.clone()).style(Style::default().fg(Color::Green)),
             ])
         })
         .collect::<Vec<_>>();
 
     let table = Table::new(rows, [
-        Constraint::Min(20),
-        Constraint::Length(24),
-        Constraint::Length(8),
-        Constraint::Length(11),
+        Constraint::Min(22),
+        Constraint::Length(16),
+        Constraint::Length(6),
+        Constraint::Length(16),
     ])
     .header(header)
     .block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Nodes Using My Services ({}) — [3:Peers] ",
-                consumers.len()
+                " Hosted VNodes ({}) | Local Svc: [{svcs}] ",
+                vnodes.len()
             ))
             .border_style(Style::default().fg(Color::Magenta)),
     );
@@ -587,7 +581,7 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
         .unwrap_or_default();
 
     let mut lines = match &app.snapshot.gateway {
-        Some(gw) => {
+        GatewayProbeState::Available(gw) => {
             let color = match gw.health.as_str() {
                 "active" => Color::Green,
                 "degraded" | "transitioning" => Color::Yellow,
@@ -619,8 +613,8 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
                 ),
             ]
         }
-        None => vec![
-            kv_line("TUN Gateway:", "INACTIVE / NOT MOUNTED", Color::DarkGray),
+        GatewayProbeState::Unknown | GatewayProbeState::NotMounted => vec![
+            kv_line("TUN Gateway:", "NOT MOUNTED (404)", Color::DarkGray),
             kv_line(
                 "HTTP Proxy:",
                 app.config
@@ -629,6 +623,10 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
                     .unwrap_or("disabled"),
                 Color::Cyan,
             ),
+        ],
+        GatewayProbeState::Failed(err) => vec![
+            kv_line("TUN Gateway:", "PROBE ERROR", Color::Red),
+            kv_line("Error:", err, Color::LightRed),
         ],
     };
 
@@ -1043,8 +1041,8 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(52), // Top: Connected Peers table (with Chord Role)
-            Constraint::Percentage(48), // Bottom: Nodes Using My Services (Service Consumers)
+            Constraint::Percentage(55), // Top: Peer Transport & Traffic Table (merged in domain model)
+            Constraint::Percentage(45), // Bottom: Hosted VNode Storage Entries & Local Capabilities
         ])
         .split(area);
 
@@ -1064,109 +1062,37 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let mut rows = Vec::new();
-    let row_count = app
-        .snapshot
-        .peers
-        .len()
-        .max(app.snapshot.measurements.len());
-
-    for peer in &app.snapshot.peers {
-        let role = app.snapshot.peer_chord_role(&peer.did);
-        let meas = app.snapshot.measurements.iter().find(|m| m.did == peer.did);
-        let rating = app
-            .snapshot
-            .observability
-            .as_ref()
-            .and_then(|o| o.peer_ratings.iter().find(|r| r.peer == peer.did));
-
-        let reliability_str = meas
-            .map(|m| match m.reliability {
-                PeerReliabilityInfo::Healthy => "healthy",
-                PeerReliabilityInfo::Unknown => "unknown",
-                PeerReliabilityInfo::Degraded => "degraded",
-            })
-            .or_else(|| rating.map(|r| r.reliability.as_str()))
-            .unwrap_or("unknown");
-
-        let rel_color = match reliability_str {
-            "healthy" => Color::Green,
-            "degraded" => Color::Red,
-            _ => Color::Yellow,
-        };
-
-        let credit_str = meas
-            .and_then(|m| m.credit.as_ref().map(|c| format!("{:.2}", c.score)))
-            .or_else(|| rating.map(|r| format!("{:.2}", r.credit_score)))
-            .unwrap_or_else(|| "-".to_string());
-
-        let sent_str = meas
-            .map(|m| format!("{}/{}", m.counters.sent, m.counters.failed_to_send))
-            .or_else(|| rating.map(|r| format!("{}/{}", r.sent, r.failed_to_send)))
-            .unwrap_or_else(|| "-".to_string());
-
-        let recv_str = meas
-            .map(|m| format!("{}/{}", m.counters.received, m.counters.failed_to_receive))
-            .or_else(|| rating.map(|r| format!("{}/{}", r.received, r.failed_to_receive)))
-            .unwrap_or_else(|| "-".to_string());
-
-        let bytes_str = meas
-            .and_then(|m| {
-                m.credit.as_ref().map(|c| {
-                    format!(
-                        "{} / {}",
-                        format_bytes(c.bytes_sent_to_peer),
-                        format_bytes(c.bytes_received_from_peer)
-                    )
-                })
-            })
-            .unwrap_or_else(|| "-".to_string());
-
-        rows.push(Row::new(vec![
-            Cell::from(peer.did.clone()),
-            Cell::from(role).style(Style::default().fg(Color::LightCyan)),
-            Cell::from(peer.state.clone()).style(Style::default().fg(Color::Cyan)),
-            Cell::from(reliability_str.to_string()).style(Style::default().fg(rel_color)),
-            Cell::from(credit_str),
-            Cell::from(sent_str),
-            Cell::from(recv_str),
-            Cell::from(bytes_str),
-        ]));
-    }
-
-    if rows.is_empty() {
-        for m in &app.snapshot.measurements {
-            rows.push(Row::new(vec![
-                Cell::from(m.did.clone()),
-                Cell::from("Retained").style(Style::default().fg(Color::DarkGray)),
-                Cell::from("offline").style(Style::default().fg(Color::DarkGray)),
-                Cell::from(format!("{:?}", m.reliability)),
-                Cell::from(
-                    m.credit
-                        .as_ref()
-                        .map(|c| format!("{:.2}", c.score))
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-                Cell::from(format!("{}/{}", m.counters.sent, m.counters.failed_to_send)),
-                Cell::from(format!(
-                    "{}/{}",
-                    m.counters.received, m.counters.failed_to_receive
-                )),
-                Cell::from(
-                    m.credit
-                        .as_ref()
-                        .map(|c| {
-                            format!(
-                                "{} / {}",
-                                format_bytes(c.bytes_sent_to_peer),
-                                format_bytes(c.bytes_received_from_peer)
-                            )
-                        })
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ]));
-        }
-    }
+    let peer_rows = app.snapshot.peer_traffic_rows();
+    let row_count = peer_rows.len();
+    let rows = peer_rows
+        .iter()
+        .map(|peer| {
+            let rel_color = match peer.reliability.as_str() {
+                "healthy" => Color::Green,
+                "degraded" => Color::Red,
+                _ => Color::Yellow,
+            };
+            let credit_str = peer
+                .credit_score
+                .map(|s| format!("{s:.2}"))
+                .unwrap_or_else(|| "-".to_string());
+            let bytes_str = format!(
+                "{} / {}",
+                format_bytes(peer.bytes_tx),
+                format_bytes(peer.bytes_rx)
+            );
+            Row::new(vec![
+                Cell::from(peer.peer_did.clone()),
+                Cell::from(peer.chord_role.clone()).style(Style::default().fg(Color::LightCyan)),
+                Cell::from(peer.transport_state.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(peer.reliability.clone()).style(Style::default().fg(rel_color)),
+                Cell::from(credit_str),
+                Cell::from(format!("{}/{}", peer.sent_ok, peer.sent_fail)),
+                Cell::from(format!("{}/{}", peer.recv_ok, peer.recv_fail)),
+                Cell::from(bytes_str),
+            ])
+        })
+        .collect::<Vec<_>>();
 
     if let Some(&table_rect) = chunks.first() {
         register_table_row_hits(&mut app.hit_map, table_rect, row_count);
@@ -1193,8 +1119,8 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    " Connected Peers ({}) — [Enter]/[I] Inspect, [C] +URL, [D] +DID, [X] Disconnect ",
-                    app.snapshot.peers.len(),
+                    " Connected & Measured Peers ({}) — [Enter]/[I] Inspect, [C] +URL, [D] +DID, [X] Disconnect ",
+                    row_count,
                 ))
                 .border_style(Style::default().fg(Color::Cyan)),
         )
@@ -1206,58 +1132,43 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         frame.render_stateful_widget(table, table_rect, &mut state);
     }
 
-    if let Some(&consumers_rect) = chunks.get(1) {
-        let consumers = app.snapshot.service_consumers(
-            app.config.advertise_onion_relay,
-            app.config.advertise_onion_exit,
-            &app.registered_services,
-        );
+    if let Some(&vnodes_rect) = chunks.get(1) {
+        let vnodes = app.snapshot.hosted_vnode_rows();
         let svcs_str = if app.registered_services.is_empty() {
             "None (press [G] to register)".to_string()
         } else {
             app.registered_services.join(", ")
         };
-        let consumer_rows = consumers
+        let vnode_rows = vnodes
             .iter()
-            .map(|c| {
+            .map(|v| {
                 Row::new(vec![
-                    Cell::from(c.consumer_did.clone()),
-                    Cell::from(c.status.clone()).style(Style::default().fg(Color::Green)),
-                    Cell::from(c.services_used.clone()).style(Style::default().fg(Color::Magenta)),
-                    Cell::from(format!("{}", c.requests_in))
-                        .style(Style::default().fg(Color::Cyan)),
-                    Cell::from(format!("{}", c.responses_out)),
-                    Cell::from(format!(
-                        "{} / {}",
-                        format_bytes(c.bytes_rx),
-                        format_bytes(c.bytes_tx)
-                    )),
-                    Cell::from(format!("{:.2}", c.credit_score)),
+                    Cell::from(v.storage_key.clone()),
+                    Cell::from(v.storage_tier.clone()).style(Style::default().fg(Color::Green)),
+                    Cell::from(v.entry_did.clone()).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(v.entry_kind.clone()).style(Style::default().fg(Color::Magenta)),
+                    Cell::from(format!("{}", v.element_count)),
                 ])
             })
             .collect::<Vec<_>>();
 
-        let consumer_table = Table::new(
-            consumer_rows,
+        let vnode_table = Table::new(
+            vnode_rows,
             [
-                Constraint::Min(24),
-                Constraint::Length(18),
-                Constraint::Length(26),
+                Constraint::Length(28),
+                Constraint::Length(14),
+                Constraint::Min(30),
+                Constraint::Length(12),
                 Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Length(18),
-                Constraint::Length(8),
             ],
         )
         .header(
             Row::new(vec![
-                "Consumer Peer DID",
-                "Status",
-                "Services Used on My Node",
-                "Req In",
-                "Resp Out",
-                "Bytes In / Served",
-                "Credit",
+                "Storage Key",
+                "Tier",
+                "Entry Key DID (VNode)",
+                "Kind",
+                "Elements",
             ])
             .style(
                 Style::default()
@@ -1269,15 +1180,15 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    " Nodes Using My Services ({}) | My Registered Services: [{}] (Relay={} Exit={}) ",
-                    consumers.len(),
+                    " Hosted VNode Records ({}) | Local Registered Services: [{}] (Relay={} Exit={}) ",
+                    vnodes.len(),
                     svcs_str,
                     app.config.advertise_onion_relay,
                     app.config.advertise_onion_exit
                 ))
                 .border_style(Style::default().fg(Color::Magenta)),
         );
-        frame.render_widget(consumer_table, consumers_rect);
+        frame.render_widget(vnode_table, vnodes_rect);
     }
 }
 
@@ -1357,12 +1268,19 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let lines = match &app.last_dht_lookup {
             Some(rep) => {
                 let sources_str = if rep.sources.is_empty() {
-                    "Not Found".to_string()
+                    rep.status.label().to_string()
                 } else {
                     rep.sources.join(" + ")
                 };
+                let status_color = match rep.status {
+                    DhtLookupStatus::Found => Color::Green,
+                    DhtLookupStatus::Absent => Color::Yellow,
+                    DhtLookupStatus::PartialError => Color::Red,
+                };
                 let preview = if rep.elements.is_empty() {
-                    "<no elements>".to_string()
+                    rep.warning
+                        .clone()
+                        .unwrap_or_else(|| "<no elements>".to_string())
                 } else {
                     rep.elements.join("  |  ")
                 };
@@ -1375,7 +1293,7 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled("   -> Chord Target DID: ", Style::default().fg(Color::Gray)),
+                        Span::styled("   -> Entry Key DID (VNode): ", Style::default().fg(Color::Gray)),
                         Span::styled(
                             rep.target_did.clone(),
                             Style::default()
@@ -1384,15 +1302,14 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ),
                     ]),
                     Line::from(vec![
-                        Span::styled(" Found In: ", Style::default().fg(Color::Gray)),
+                        Span::styled(" Status: ", Style::default().fg(Color::Gray)),
+                        Span::styled(rep.status.label(), Style::default().fg(status_color)),
+                        Span::styled("   Found In: ", Style::default().fg(Color::Gray)),
                         Span::styled(sources_str, Style::default().fg(Color::Green)),
                         Span::styled("   Kind: ", Style::default().fg(Color::Gray)),
                         Span::styled(rep.record_kind.clone(), Style::default().fg(Color::Magenta)),
-                        Span::styled("   Route Peer: ", Style::default().fg(Color::Gray)),
-                        Span::styled(
-                            rep.route_peer.as_deref().unwrap_or("Local / Self"),
-                            Style::default().fg(Color::White),
-                        ),
+                        Span::styled("   Mode: ", Style::default().fg(Color::Gray)),
+                        Span::styled(rep.query_mode.clone(), Style::default().fg(Color::White)),
                     ]),
                     Line::from(vec![
                         Span::styled(
@@ -1411,11 +1328,11 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    " Supports topic names (e.g. 'rings-chat'), service names (e.g. 'ipfs-gateway'), registries ('online_nodes'), or raw 0x... DIDs.",
+                    " Supports topic names (e.g. 'rings-chat'), service names (e.g. 'ipfs-gateway'), registries ('online_nodes'), or raw 0x... Entry DIDs.",
                     Style::default().fg(Color::Gray),
                 )),
                 Line::from(Span::styled(
-                    " Computes the 160-bit SHA-1 Chord target DID, queries the live DHT network, and decodes local Persistent & Cache VNode records.",
+                    " Computes the 160-bit SHA-1 Entry DID (or inspects raw 0x... VNode DID directly without double-hashing).",
                     Style::default().fg(Color::DarkGray),
                 )),
             ],
@@ -1520,7 +1437,13 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     Constraint::Min(14),
                 ])
                 .header(
-                    Row::new(vec!["Storage Key", "Owner DID", "Kind", "Elements"]).style(
+                    Row::new(vec![
+                        "Storage Key",
+                        "Entry Key DID (VNode)",
+                        "Kind",
+                        "Elements",
+                    ])
+                    .style(
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
@@ -1878,6 +1801,12 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             ConnectionState::Offline(err) => format!("Node API Error: {err}"),
             _ => match app.action_logs.front() {
                 Some(last) => format!("Last Action [{}]: {}", last.command, last.message),
+                None if !app.snapshot.warnings.is_empty() => {
+                    format!(
+                        "Partial Poll Warnings: {}",
+                        app.snapshot.warnings.join(" | ")
+                    )
+                }
                 None => app.config.warning.clone().unwrap_or_else(|| {
                     "Ready. Click any button or press [?] for help.".to_string()
                 }),

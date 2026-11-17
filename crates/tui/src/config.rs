@@ -106,6 +106,17 @@ impl Default for TuiArgs {
     }
 }
 
+/// Origin of the active API Bearer credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialSource {
+    /// Pinned explicitly on the CLI or via `RINGS_API_TOKEN`; disk reload must not overwrite it.
+    CliExplicit,
+    /// Loaded from `token_path` on disk.
+    TokenFile,
+    /// No token was available at startup; disk reload may load `token_path` later.
+    Missing,
+}
+
 /// Subset of `config.yaml` relevant to a local operator TUI client.
 #[derive(Debug, Default, Clone, Deserialize)]
 struct PartialFileConfig {
@@ -150,6 +161,8 @@ pub struct ResolvedTuiConfig {
     pub token_path: PathBuf,
     /// Loaded Bearer token secret, if available.
     pub api_token: Option<String>,
+    /// Provenance of `api_token`, governing whether disk reloads are permitted.
+    pub credential_source: CredentialSource,
     /// Diagnostic note when the config or token file could not be loaded yet.
     pub warning: Option<String>,
     /// Polling interval for background status updates.
@@ -208,22 +221,22 @@ impl ResolvedTuiConfig {
             .or(file_cfg.api_token_path.as_deref());
         let token_path = resolve_token_path(&config_path, configured_token_path);
 
-        let api_token = if let Some(explicit) = args
+        let (api_token, credential_source) = if let Some(explicit) = args
             .api_token
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            Some(explicit.to_owned())
+            (Some(explicit.to_owned()), CredentialSource::CliExplicit)
         } else {
             match fs::read_to_string(&token_path) {
                 Ok(contents) => {
                     let trimmed = contents.trim().to_owned();
                     if trimmed.is_empty() {
                         warnings.push(format!("API token file {} is empty", token_path.display()));
-                        None
+                        (None, CredentialSource::Missing)
                     } else {
-                        Some(trimmed)
+                        (Some(trimmed), CredentialSource::TokenFile)
                     }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -231,14 +244,14 @@ impl ResolvedTuiConfig {
                         "API token file not found at {}",
                         token_path.display()
                     ));
-                    None
+                    (None, CredentialSource::Missing)
                 }
                 Err(err) => {
                     warnings.push(format!(
                         "Could not read API token {}: {err}",
                         token_path.display()
                     ));
-                    None
+                    (None, CredentialSource::Missing)
                 }
             }
         };
@@ -259,6 +272,7 @@ impl ResolvedTuiConfig {
             advertise_onion_exit: file_cfg.advertise_onion_exit.unwrap_or(args.demo),
             token_path,
             api_token,
+            credential_source,
             warning: if args.demo {
                 Some("Running in DEMO mode (simulated live telemetry)".to_string())
             } else {
@@ -269,8 +283,17 @@ impl ResolvedTuiConfig {
         })
     }
 
-    /// Re-read the API token file from disk if `api_token` was not explicitly fixed on the CLI.
-    pub fn reload_token_from_disk(&mut self) -> Result<bool> {
+    /// Read and validate a candidate API token from `token_path` without mutating `self` yet,
+    /// refusing when the credential was explicitly pinned via `--api-token`.
+    pub fn load_token_candidate(&self) -> Result<String> {
+        if self.credential_source == CredentialSource::CliExplicit {
+            return Err(TuiError::ApiToken {
+                path: self.token_path.clone(),
+                reason:
+                    "API token is pinned via --api-token / RINGS_API_TOKEN; disk reload is disabled"
+                        .to_string(),
+            });
+        }
         let contents = fs::read_to_string(&self.token_path).map_err(|err| TuiError::ApiToken {
             path: self.token_path.clone(),
             reason: err.to_string(),
@@ -282,10 +305,14 @@ impl ResolvedTuiConfig {
                 reason: "token file is empty".to_string(),
             });
         }
-        let changed = self.api_token.as_deref() != Some(trimmed.as_str());
-        self.api_token = Some(trimmed);
+        Ok(trimmed)
+    }
+
+    /// Commit a validated token after the new client transport has been constructed.
+    pub fn commit_reloaded_token(&mut self, token: String) {
+        self.api_token = Some(token);
+        self.credential_source = CredentialSource::TokenFile;
         self.warning = None;
-        Ok(changed)
     }
 }
 
@@ -360,7 +387,29 @@ mod tests {
             resolved.api_token.as_deref(),
             Some("0123456789abcdef0123456789abcdef")
         );
+        assert_eq!(resolved.credential_source, CredentialSource::TokenFile);
         assert!(resolved.warning.is_none());
+    }
+
+    #[test]
+    fn cli_explicit_token_refuses_disk_reload_override() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cfg_path = dir.path().join("config.yaml");
+        let token_path = dir.path().join("api-token");
+        fs::write(&token_path, "disk-token-0123456789abcdef0123456789\n").expect("write token");
+
+        let args = TuiArgs {
+            config: cfg_path.to_string_lossy().to_string(),
+            endpoint_url: None,
+            api_token_path: None,
+            api_token: Some("cli-pinned-token-0123456789abcdef0123".to_string()),
+            refresh_ms: 1000,
+            demo: false,
+            print_preview: false,
+        };
+        let resolved = ResolvedTuiConfig::from_args(&args).expect("resolve config");
+        assert_eq!(resolved.credential_source, CredentialSource::CliExplicit);
+        assert!(resolved.load_token_candidate().is_err());
     }
 
     #[test]
@@ -379,6 +428,7 @@ mod tests {
         let resolved = ResolvedTuiConfig::from_args(&args).expect("resolve fallback");
         assert!(!resolved.config_loaded);
         assert_eq!(resolved.endpoint_url, DEFAULT_ENDPOINT_URL);
+        assert_eq!(resolved.credential_source, CredentialSource::Missing);
         assert_eq!(
             resolved.refresh_interval,
             Duration::from_millis(MIN_REFRESH_MS)

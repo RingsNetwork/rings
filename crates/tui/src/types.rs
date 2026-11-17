@@ -1,18 +1,18 @@
 //! Data transfer objects, combined node snapshots, and telemetry time-series buffers.
 
 use std::collections::VecDeque;
-use std::str::FromStr;
 
-use rings_core::dht::entry::Entry;
-use rings_core::dht::Did;
 use rings_rpc::protos::rings_node::NodeInfoResponse;
 use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::PeerInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementInfo;
+use rings_rpc::protos::rings_node::PeerReliabilityInfo;
 use rings_rpc::protos::rings_node::SwarmInfo;
 use serde::Deserialize;
 use serde::Serialize;
+use sha1::Digest;
+use sha1::Sha1;
 
 /// Maximum number of telemetry samples kept in the sparkline ring buffer.
 pub const TELEMETRY_HISTORY_CAPACITY: usize = 60;
@@ -254,6 +254,21 @@ pub struct GatewayStatusDto {
     pub last_flow_reset: Option<serde_json::Value>,
 }
 
+/// Explicit probe outcome for `/gateway/status`, distinguishing "not mounted (404)" from
+/// authentication or transport errors.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum GatewayProbeState {
+    /// Initial state before the first poll completes.
+    #[default]
+    Unknown,
+    /// `/gateway/status` returned HTTP 404 (gateway is not mounted on this node).
+    NotMounted,
+    /// `/gateway/status` returned a valid snapshot.
+    Available(GatewayStatusDto),
+    /// `/gateway/status` failed with an HTTP or transport error.
+    Failed(String),
+}
+
 /// Combined state gathered from a running `rings-node` during a refresh cycle.
 #[derive(Clone, Debug, Default)]
 pub struct NodeSnapshot {
@@ -271,12 +286,16 @@ pub struct NodeSnapshot {
     pub measurements: Vec<PeerMeasurementInfo>,
     /// Structured observability snapshot (`/status?view=observability`).
     pub observability: Option<OperatorSnapshotDto>,
-    /// Optional native TUN gateway status (`/gateway/status`).
-    pub gateway: Option<GatewayStatusDto>,
+    /// Probe status of the native TUN gateway (`/gateway/status`).
+    pub gateway: GatewayProbeState,
     /// Discovered online-node directory entries.
     pub online_nodes: Vec<OnlineNodeDescriptorInfo>,
     /// Discovered onion-exit directory entries.
     pub onion_exits: Vec<OnionExitDescriptorInfo>,
+    /// Whether this snapshot was queried with `include_expired = true`.
+    pub include_expired_directory: bool,
+    /// Non-fatal subquery warnings encountered while assembling this snapshot.
+    pub warnings: Vec<String>,
     /// Unix epoch milliseconds when this snapshot was collected.
     pub fetched_at_ms: u128,
     /// Round-trip duration of the poll in milliseconds.
@@ -313,18 +332,26 @@ impl NodeSnapshot {
             return "Peer".to_string();
         };
         let mut roles = Vec::new();
-        if let Some(pos) = dht.successors.iter().position(|d| d == peer_did) {
+        if let Some(pos) = dht
+            .successors
+            .iter()
+            .position(|d| d.eq_ignore_ascii_case(peer_did))
+        {
             roles.push(format!("Succ#{}", pos + 1));
         }
-        if dht.predecessor.as_deref() == Some(peer_did) {
+        if dht
+            .predecessor
+            .as_deref()
+            .is_some_and(|p| p.eq_ignore_ascii_case(peer_did))
+        {
             roles.push("Pred".to_string());
         }
         if roles.is_empty() {
-            if let Some(range) = dht
-                .finger_table_ranges
-                .iter()
-                .find(|r| r.did.as_deref() == Some(peer_did))
-            {
+            if let Some(range) = dht.finger_table_ranges.iter().find(|r| {
+                r.did
+                    .as_deref()
+                    .is_some_and(|d| d.eq_ignore_ascii_case(peer_did))
+            }) {
                 roles.push(format!("Finger[{}..{}]", range.start, range.end));
             }
         }
@@ -335,118 +362,274 @@ impl NodeSnapshot {
         }
     }
 
-    /// Identify all nodes currently using this node's services (relay forwarding, onion circuit
-    /// relay/exit, DHT VNode storage, mailbox custody, and registered services).
-    pub fn service_consumers(
-        &self,
-        advertise_relay: bool,
-        advertise_exit: bool,
-        registered_services: &[String],
-    ) -> Vec<ServiceConsumerRow> {
-        let mut rows = Vec::new();
+    /// Build a unified, source-merged list of peer traffic and measurement rows, combining
+    /// connected peers (`listPeers`), local transport measurements (`listPeerMeasurements`),
+    /// and observability peer ratings (`peer_ratings`).
+    pub fn peer_traffic_rows(&self) -> Vec<PeerTrafficRow> {
         let local_did = self.did.as_deref().unwrap_or_default();
+        let mut rows = Vec::new();
 
-        // 1. Peers with active inbound/outbound traffic or byte credits in measurements.
-        for m in &self.measurements {
-            if m.did == local_did {
-                continue;
-            }
-            let is_connected = self.peers.iter().any(|p| p.did == m.did);
-            let rx_bytes = m
-                .credit
-                .as_ref()
-                .map(|c| c.bytes_received_from_peer)
-                .unwrap_or(0);
-            let tx_bytes = m.credit.as_ref().map(|c| c.bytes_sent_to_peer).unwrap_or(0);
+        for peer in &self.peers {
+            let meas = self
+                .measurements
+                .iter()
+                .find(|m| m.did.eq_ignore_ascii_case(&peer.did));
+            let rating = self.observability.as_ref().and_then(|o| {
+                o.peer_ratings
+                    .iter()
+                    .find(|r| r.peer.eq_ignore_ascii_case(&peer.did))
+            });
 
-            if m.counters.received == 0 && m.counters.sent == 0 && rx_bytes == 0 && tx_bytes == 0 {
-                continue;
-            }
+            let reliability = meas
+                .map(|m| match m.reliability {
+                    PeerReliabilityInfo::Healthy => "healthy",
+                    PeerReliabilityInfo::Unknown => "unknown",
+                    PeerReliabilityInfo::Degraded => "degraded",
+                })
+                .or_else(|| rating.map(|r| r.reliability.as_str()))
+                .unwrap_or("unknown")
+                .to_string();
 
-            let mut services_used = Vec::new();
-            if advertise_exit && rx_bytes > 0 {
-                services_used.push("OnionExit".to_string());
-            } else if advertise_relay && (m.counters.received > 0 || rx_bytes > 0) {
-                services_used.push("OnionRelay".to_string());
-            }
-            if m.counters.received > 0 {
-                services_used.push("DHT/MsgRelay".to_string());
-            }
-            if let Some(first_svc) = registered_services.first() {
-                services_used.push(format!("Svc:{first_svc}"));
-            }
-            if services_used.is_empty() {
-                services_used.push("Transport".to_string());
-            }
+            let credit_score = meas
+                .and_then(|m| m.credit.as_ref().map(|c| c.score))
+                .or_else(|| rating.map(|r| r.credit_score));
 
-            rows.push(ServiceConsumerRow {
-                consumer_did: m.did.clone(),
-                status: if is_connected {
-                    "Active (Connected)".to_string()
-                } else {
-                    "Retained (Recent)".to_string()
-                },
-                services_used: services_used.join(", "),
-                requests_in: m.counters.received,
-                responses_out: m.counters.sent,
-                bytes_rx: rx_bytes,
-                bytes_tx: tx_bytes,
-                credit_score: m.credit.as_ref().map(|c| c.score).unwrap_or(1.0),
+            let (sent_ok, sent_fail, recv_ok, recv_fail) = match (meas, rating) {
+                (Some(m), _) => (
+                    m.counters.sent,
+                    m.counters.failed_to_send,
+                    m.counters.received,
+                    m.counters.failed_to_receive,
+                ),
+                (None, Some(r)) => (r.sent, r.failed_to_send, r.received, r.failed_to_receive),
+                (None, None) => (0, 0, 0, 0),
+            };
+
+            let (bytes_tx, bytes_rx) = meas
+                .and_then(|m| {
+                    m.credit
+                        .as_ref()
+                        .map(|c| (c.bytes_sent_to_peer, c.bytes_received_from_peer))
+                })
+                .unwrap_or((0, 0));
+
+            rows.push(PeerTrafficRow {
+                peer_did: peer.did.clone(),
+                chord_role: self.peer_chord_role(&peer.did),
+                transport_state: peer.state.clone(),
+                reliability,
+                credit_score,
+                sent_ok,
+                sent_fail,
+                recv_ok,
+                recv_fail,
+                bytes_tx,
+                bytes_rx,
             });
         }
 
-        // 2. Storage/VNode consumers whose entries are hosted in our persistent or cache storage.
-        if let Some(swarm) = &self.swarm {
-            for (tier, st_opt) in [
-                ("VNodeStore", swarm.persistence_storage.as_ref()),
-                ("DHTCache", swarm.cache_storage.as_ref()),
-            ] {
-                if let Some(st) = st_opt {
-                    for item in &st.items {
-                        if let Some(val) = &item.value {
-                            if val.did != local_did
-                                && !rows.iter().any(|r| r.consumer_did == val.did)
-                            {
-                                rows.push(ServiceConsumerRow {
-                                    consumer_did: val.did.clone(),
-                                    status: format!("Hosted ({tier})"),
-                                    services_used: format!("{tier}:{} ({})", val.kind, item.key),
-                                    requests_in: val.data.len() as u64,
-                                    responses_out: 0,
-                                    bytes_rx: 0,
-                                    bytes_tx: 0,
-                                    credit_score: 1.0,
-                                });
-                            }
-                        }
-                    }
-                }
+        for m in &self.measurements {
+            if m.did.eq_ignore_ascii_case(local_did)
+                || rows.iter().any(|r| r.peer_did.eq_ignore_ascii_case(&m.did))
+            {
+                continue;
             }
+            let reliability = match m.reliability {
+                PeerReliabilityInfo::Healthy => "healthy",
+                PeerReliabilityInfo::Unknown => "unknown",
+                PeerReliabilityInfo::Degraded => "degraded",
+            }
+            .to_string();
+            let (bytes_tx, bytes_rx) = m
+                .credit
+                .as_ref()
+                .map(|c| (c.bytes_sent_to_peer, c.bytes_received_from_peer))
+                .unwrap_or((0, 0));
+
+            rows.push(PeerTrafficRow {
+                peer_did: m.did.clone(),
+                chord_role: "Retained".to_string(),
+                transport_state: "Offline (Measured)".to_string(),
+                reliability,
+                credit_score: m.credit.as_ref().map(|c| c.score),
+                sent_ok: m.counters.sent,
+                sent_fail: m.counters.failed_to_send,
+                recv_ok: m.counters.received,
+                recv_fail: m.counters.failed_to_receive,
+                bytes_tx,
+                bytes_rx,
+            });
         }
 
         rows
     }
+
+    /// List DHT VNode storage entries currently hosted in this node's persistent or cache storage.
+    ///
+    /// Note: `entry_did` is the 160-bit Chord ring key (`Entry.did`) of the stored virtual node,
+    /// not a remote peer identity.
+    pub fn hosted_vnode_rows(&self) -> Vec<HostedVNodeRow> {
+        let mut rows = Vec::new();
+        let Some(swarm) = &self.swarm else {
+            return rows;
+        };
+        for (tier, st_opt) in [
+            ("Persistent", swarm.persistence_storage.as_ref()),
+            ("Cache", swarm.cache_storage.as_ref()),
+        ] {
+            let Some(st) = st_opt else {
+                continue;
+            };
+            for item in &st.items {
+                let (entry_did, kind, element_count) = match &item.value {
+                    Some(v) => (v.did.clone(), v.kind.clone(), v.data.len()),
+                    None => ("-".to_string(), "Empty".to_string(), 0),
+                };
+                rows.push(HostedVNodeRow {
+                    storage_tier: tier.to_string(),
+                    storage_key: item.key.clone(),
+                    entry_did,
+                    entry_kind: kind,
+                    element_count,
+                });
+            }
+        }
+        rows
+    }
 }
 
-/// Summary row describing a remote peer or client consuming services provided by this node.
+/// Merged transport, Chord role, reliability, and byte-credit summary for one peer.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ServiceConsumerRow {
-    /// DID of the peer/client using our node's services.
-    pub consumer_did: String,
-    /// Connection or hosting status (`Active (Connected)`, `Retained`, `Hosted`).
-    pub status: String,
-    /// Services consumed by this peer (`OnionRelay`, `OnionExit`, `DHT/MsgRelay`, `VNodeStore`, etc.).
-    pub services_used: String,
-    /// Inbound messages/requests received from this peer.
-    pub requests_in: u64,
-    /// Outbound messages/responses sent to this peer.
-    pub responses_out: u64,
+pub struct PeerTrafficRow {
+    /// Remote peer DID.
+    pub peer_did: String,
+    /// Role in the local Chord ring (`Succ#1`, `Pred`, `Finger[..]`, `Direct Peer`, or `Retained`).
+    pub chord_role: String,
+    /// Transport connection state (`Connected`, `Offline (Measured)`, etc.).
+    pub transport_state: String,
+    /// Local reliability class (`healthy`, `unknown`, `degraded`).
+    pub reliability: String,
+    /// Local resource-priority credit score, if measured.
+    pub credit_score: Option<f64>,
+    /// Successful sends to this peer.
+    pub sent_ok: u64,
+    /// Failed sends to this peer.
+    pub sent_fail: u64,
+    /// Successful receives from this peer.
+    pub recv_ok: u64,
+    /// Failed receives from this peer.
+    pub recv_fail: u64,
+    /// Verified payload bytes sent to this peer.
+    pub bytes_tx: u64,
     /// Verified payload bytes received from this peer.
     pub bytes_rx: u64,
-    /// Payload bytes served/sent to this peer.
-    pub bytes_tx: u64,
-    /// Local credit score multiplier.
-    pub credit_score: f64,
+}
+
+/// Summary row for a DHT VNode entry hosted in the local node's storage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostedVNodeRow {
+    /// Storage backend tier (`Persistent` or `Cache`).
+    pub storage_tier: String,
+    /// Storage map key reported by `nodeInfo`.
+    pub storage_key: String,
+    /// 160-bit Chord ring key (`Entry.did`) of the stored entry.
+    pub entry_did: String,
+    /// Entry kind (`Data`, `RelayMessage`, `Append`, `Map`).
+    pub entry_kind: String,
+    /// Number of elements held in this entry.
+    pub element_count: usize,
+}
+
+/// Classification of a user-supplied DHT lookup query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DhtQueryTarget {
+    /// Human-readable topic or service name whose 160-bit Chord entry key is `SHA-1(topic)`.
+    TopicKey {
+        /// Original topic or service name string.
+        topic: String,
+        /// Derived 160-bit Chord ring entry key (`0x` + 40 lowercase hex chars).
+        derived_entry_did: String,
+    },
+    /// Explicit 160-bit Chord ring entry key (`0x` + 40 hex chars).
+    ///
+    /// Because `fetchTopicMessages` hashes its topic parameter on the server, raw entry DIDs are
+    /// inspected against local persistent/cache VNode storage without double-hashing over RPC.
+    RawEntryDid {
+        /// Canonical lowercase `0x` + 40 hex char entry key.
+        entry_did: String,
+    },
+}
+
+impl DhtQueryTarget {
+    /// Parse a user query string into either a [`Self::RawEntryDid`] (when it is a 20-byte hex
+    /// identifier) or a [`Self::TopicKey`] (deriving its SHA-1 Chord ring key).
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim();
+        let hex_part = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"));
+        if let Some(hex) = hex_part {
+            if hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Self::RawEntryDid {
+                    entry_did: format!("0x{}", hex.to_ascii_lowercase()),
+                };
+            }
+        }
+        let mut hasher = Sha1::new();
+        hasher.update(trimmed.as_bytes());
+        let digest = hasher.finalize();
+        let mut hex_out = String::with_capacity(42);
+        hex_out.push_str("0x");
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex_out, "{byte:02x}");
+        }
+        Self::TopicKey {
+            topic: trimmed.to_string(),
+            derived_entry_did: hex_out,
+        }
+    }
+
+    /// Return the 160-bit Chord ring entry key (`0x...`) targeted by this query.
+    pub fn target_entry_did(&self) -> &str {
+        match self {
+            Self::TopicKey {
+                derived_entry_did, ..
+            } => derived_entry_did.as_str(),
+            Self::RawEntryDid { entry_did } => entry_did.as_str(),
+        }
+    }
+
+    /// Describe the query mode in human-readable form.
+    pub const fn mode_label(&self) -> &'static str {
+        match self {
+            Self::TopicKey { .. } => "Topic/Service Name (Live DHT Fetch + Local Storage)",
+            Self::RawEntryDid { .. } => "Raw Entry DID (Local VNode Storage Inspection)",
+        }
+    }
+}
+
+/// Outcome status of a DHT key lookup.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DhtLookupStatus {
+    /// At least one element or VNode entry was found.
+    Found,
+    /// Queries succeeded, and no entry was present for the key.
+    #[default]
+    Absent,
+    /// One sub-query failed while another succeeded; results may be incomplete.
+    PartialError,
+}
+
+impl DhtLookupStatus {
+    /// Short human-readable label for this lookup status.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Found => "Found",
+            Self::Absent => "Absent (Empty)",
+            Self::PartialError => "Partial Error",
+        }
+    }
 }
 
 /// Structured result of a Chord DHT key lookup operation.
@@ -454,16 +637,20 @@ pub struct ServiceConsumerRow {
 pub struct DhtKeyLookupReport {
     /// Raw key string or DID queried by the user.
     pub query_key: String,
-    /// Resolved 160-bit Chord ring target DID (`0x...`).
+    /// Query mode description (`Topic/Service Name` vs `Raw Entry DID`).
+    pub query_mode: String,
+    /// Resolved 160-bit Chord ring target entry key (`0x...`).
     pub target_did: String,
-    /// Next-hop or responsible peer DID from the local Chord ring, if known.
-    pub route_peer: Option<String>,
-    /// Where the key was found (`Live DHT Fetch`, `Persistent Storage`, `Cache Storage`).
+    /// Lookup outcome classification.
+    pub status: DhtLookupStatus,
+    /// Authoritative sources where the entry was found (`Live DHT Topic Fetch`, `Persistent Storage`, `Cache Storage`).
     pub sources: Vec<String>,
-    /// Entry kind (`Data`, `Append`, `Map`, or `None`).
+    /// Entry kind (`Data`, `RelayMessage`, `Append`, `Map`, or `Absent`).
     pub record_kind: String,
     /// Decoded elements stored under this key.
     pub elements: Vec<String>,
+    /// Diagnostic warning if a sub-query failed or raw DID mode skipped topic RPC.
+    pub warning: Option<String>,
     /// Lookup latency in milliseconds.
     pub duration_ms: u64,
 }
@@ -471,14 +658,7 @@ pub struct DhtKeyLookupReport {
 /// Resolve any key string (either a hex DID `0x...` or an arbitrary topic/service string) into
 /// its canonical 160-bit Chord ring `Did` hex string (`0x...`).
 pub fn resolve_dht_key_did(key: &str) -> String {
-    let trimmed = key.trim();
-    if let Ok(did) = Did::from_str(trimmed) {
-        return did.to_string();
-    }
-    match Entry::gen_did(trimmed) {
-        Ok(did) => did.to_string(),
-        Err(_) => trimmed.to_string(),
-    }
+    DhtQueryTarget::parse(key).target_entry_did().to_string()
 }
 
 /// Decode a base64-encoded `StorageValue` element into a human-readable string (UTF-8 or hex).
@@ -516,6 +696,12 @@ pub struct TelemetryHistory {
     pub peer_counts: VecDeque<u64>,
     /// Poll latency samples in milliseconds.
     pub poll_latencies_ms: VecDeque<u64>,
+    /// Node DID associated with the current baseline.
+    tracked_did: Option<String>,
+    /// Process start timestamp associated with the current baseline.
+    tracked_process_started_at_ms: Option<u128>,
+    /// Monotonic `generated_at_ms` of the latest recorded observability snapshot.
+    last_generated_at_ms: Option<u128>,
     /// Previous cumulative message totals used to compute per-interval deltas.
     last_totals: Option<MessageTotalsDto>,
 }
@@ -529,23 +715,50 @@ impl Default for TelemetryHistory {
             failed_deltas: VecDeque::with_capacity(TELEMETRY_HISTORY_CAPACITY),
             peer_counts: VecDeque::with_capacity(TELEMETRY_HISTORY_CAPACITY),
             poll_latencies_ms: VecDeque::with_capacity(TELEMETRY_HISTORY_CAPACITY),
+            tracked_did: None,
+            tracked_process_started_at_ms: None,
+            last_generated_at_ms: None,
             last_totals: None,
         }
     }
 }
 
 impl TelemetryHistory {
-    /// Record a new [`NodeSnapshot`] into the rolling time series.
+    /// Reset the counter baseline when switching nodes or when a node process restarts.
+    pub fn reset_baseline(&mut self) {
+        self.last_totals = None;
+        self.last_generated_at_ms = None;
+    }
+
+    /// Record a new [`NodeSnapshot`] into the rolling time series, ignoring out-of-order samples
+    /// and resetting the counter baseline if the node identity or process start timestamp changed.
     pub fn record(&mut self, snapshot: &NodeSnapshot) {
-        let peer_count = snapshot
-            .observability
-            .as_ref()
-            .map(|o| o.health.admitted_peer_count)
-            .unwrap_or_else(|| u64::try_from(snapshot.peers.len()).unwrap_or(0));
-        push_bounded(&mut self.peer_counts, peer_count);
-        push_bounded(&mut self.poll_latencies_ms, snapshot.poll_latency_ms);
+        if snapshot.did.is_some() && self.tracked_did.is_some() && snapshot.did != self.tracked_did
+        {
+            self.reset_baseline();
+        }
+        if snapshot.did.is_some() {
+            self.tracked_did.clone_from(&snapshot.did);
+        }
 
         if let Some(obs) = &snapshot.observability {
+            if self
+                .tracked_process_started_at_ms
+                .is_some_and(|prev_start| prev_start != obs.process_started_at_ms)
+            {
+                self.reset_baseline();
+            }
+            self.tracked_process_started_at_ms = Some(obs.process_started_at_ms);
+
+            if self
+                .last_generated_at_ms
+                .is_some_and(|prev_gen| obs.generated_at_ms < prev_gen)
+            {
+                // Ignore stale out-of-order observability sample.
+                return;
+            }
+            self.last_generated_at_ms = Some(obs.generated_at_ms);
+
             let current = obs.messages;
             let (sent_d, recv_d, fwd_d, fail_d) = match self.last_totals {
                 Some(prev) => (
@@ -562,6 +775,14 @@ impl TelemetryHistory {
             push_bounded(&mut self.forwarded_deltas, fwd_d);
             push_bounded(&mut self.failed_deltas, fail_d);
         }
+
+        let peer_count = snapshot
+            .observability
+            .as_ref()
+            .map(|o| o.health.admitted_peer_count)
+            .unwrap_or_else(|| u64::try_from(snapshot.peers.len()).unwrap_or(0));
+        push_bounded(&mut self.peer_counts, peer_count);
+        push_bounded(&mut self.poll_latencies_ms, snapshot.poll_latency_ms);
     }
 
     /// Return a `Vec<u64>` slice copy suitable for `ratatui::widgets::Sparkline`.
@@ -595,6 +816,20 @@ fn push_bounded(queue: &mut VecDeque<u64>, value: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dht_query_target_distinguishes_raw_entry_did_from_topic_name() {
+        let raw = DhtQueryTarget::parse("0x32b622ddf0f94698ac584873f52d05daebc39ee3");
+        assert_eq!(raw, DhtQueryTarget::RawEntryDid {
+            entry_did: "0x32b622ddf0f94698ac584873f52d05daebc39ee3".to_string(),
+        });
+
+        let topic = DhtQueryTarget::parse("rings-chat");
+        assert_eq!(topic, DhtQueryTarget::TopicKey {
+            topic: "rings-chat".to_string(),
+            derived_entry_did: "0x32b622ddf0f94698ac584873f52d05daebc39ee3".to_string(),
+        });
+    }
 
     #[test]
     fn session_key_ratio_and_lookup_buckets_are_well_behaved() {
@@ -643,19 +878,56 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_history_computes_deltas_and_respects_capacity() {
+    fn telemetry_history_ignores_out_of_order_samples_and_resets_on_restart() {
         let mut history = TelemetryHistory::default();
-        for idx in 0..70_u64 {
-            let mut snap = NodeSnapshot::default();
-            let mut obs = OperatorSnapshotDto::default();
-            obs.messages.sent = idx * 5;
-            obs.messages.received = idx * 3;
-            obs.health.admitted_peer_count = 4;
+        for idx in 1..=5_u64 {
+            let mut snap = NodeSnapshot {
+                did: Some("0x1111".to_string()),
+                ..NodeSnapshot::default()
+            };
+            let mut obs = OperatorSnapshotDto {
+                process_started_at_ms: 100,
+                generated_at_ms: u128::from(idx * 1_000),
+                ..OperatorSnapshotDto::default()
+            };
+            obs.messages.sent = idx * 10;
             snap.observability = Some(obs);
             history.record(&snap);
         }
-        assert_eq!(history.sent_deltas.len(), TELEMETRY_HISTORY_CAPACITY);
-        assert_eq!(history.sent_deltas.back().copied(), Some(5));
-        assert_eq!(history.received_deltas.back().copied(), Some(3));
+        assert_eq!(history.sent_deltas.back().copied(), Some(10));
+
+        // Out-of-order older snapshot (generated_at_ms = 2_000 < 5_000) must be ignored.
+        let mut stale = NodeSnapshot {
+            did: Some("0x1111".to_string()),
+            ..NodeSnapshot::default()
+        };
+        stale.observability = Some(OperatorSnapshotDto {
+            process_started_at_ms: 100,
+            generated_at_ms: 2_000,
+            messages: MessageTotalsDto {
+                sent: 20,
+                ..MessageTotalsDto::default()
+            },
+            ..OperatorSnapshotDto::default()
+        });
+        history.record(&stale);
+        assert_eq!(history.sent_deltas.len(), 5);
+
+        // Next in-order snapshot (generated_at_ms = 6_000, sent = 60) records delta = 10 (not 40!).
+        let mut next = NodeSnapshot {
+            did: Some("0x1111".to_string()),
+            ..NodeSnapshot::default()
+        };
+        next.observability = Some(OperatorSnapshotDto {
+            process_started_at_ms: 100,
+            generated_at_ms: 6_000,
+            messages: MessageTotalsDto {
+                sent: 60,
+                ..MessageTotalsDto::default()
+            },
+            ..OperatorSnapshotDto::default()
+        });
+        history.record(&next);
+        assert_eq!(history.sent_deltas.back().copied(), Some(10));
     }
 }
