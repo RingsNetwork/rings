@@ -139,7 +139,7 @@ pub trait NodeClient: Send + Sync {
 /// Live HTTP + JSON-RPC client talking to a native `rings-node` internal listener.
 pub struct HttpNodeClient {
     endpoint_url: String,
-    bearer_token: Option<String>,
+    auth_header: Option<HeaderValue>,
     rpc: RpcClient,
     http: reqwest::Client,
 }
@@ -150,13 +150,31 @@ impl HttpNodeClient {
         Self::new(&config.endpoint_url, config.api_token.clone())
     }
 
-    /// Construct an [`HttpNodeClient`] targeting `endpoint_url` with an optional Bearer token.
+    /// Construct an [`HttpNodeClient`] targeting `endpoint_url` with an optional Bearer token,
+    /// validating both the endpoint URL and the HTTP `Authorization` header upfront.
     pub fn new(endpoint_url: &str, bearer_token: Option<String>) -> Result<Self> {
         let trimmed_url = endpoint_url.trim_end_matches('/').to_string();
+        let auth_header = match &bearer_token {
+            Some(token) => {
+                if token.trim().is_empty() || token.chars().any(char::is_control) {
+                    return Err(TuiError::InvalidInput(
+                        "API token cannot be empty or contain control characters".to_string(),
+                    ));
+                }
+                let hv = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|err| {
+                    TuiError::InvalidInput(format!(
+                        "API token is not a valid HTTP Authorization header value: {err}"
+                    ))
+                })?;
+                Some(hv)
+            }
+            None => None,
+        };
+
         let rpc_builder = reqwest::Client::builder().timeout(REQUEST_TIMEOUT);
         let rpc = RpcClient::with_http_client_builder(&trimmed_url, rpc_builder)?;
-        let rpc = match &bearer_token {
-            Some(token) => rpc.with_bearer_token(token.clone())?,
+        let rpc = match bearer_token {
+            Some(token) => rpc.with_bearer_token(token)?,
             None => rpc,
         };
 
@@ -168,7 +186,7 @@ impl HttpNodeClient {
 
         Ok(Self {
             endpoint_url: trimmed_url,
-            bearer_token,
+            auth_header,
             rpc,
             http,
         })
@@ -176,10 +194,8 @@ impl HttpNodeClient {
 
     fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if let Some(token) = &self.bearer_token {
-            if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
-                headers.insert(AUTHORIZATION, val);
-            }
+        if let Some(val) = &self.auth_header {
+            headers.insert(AUTHORIZATION, val.clone());
         }
         headers
     }
@@ -394,7 +410,9 @@ impl NodeClient for HttpNodeClient {
                 snapshot.online_nodes = online.nodes;
             }
             Err(err) => {
-                snapshot.warnings.push(format!("lookupOnlineNodes: {err}"));
+                let msg = err.to_string();
+                snapshot.online_nodes_error = Some(msg.clone());
+                snapshot.warnings.push(format!("lookupOnlineNodes: {msg}"));
             }
         }
 
@@ -403,7 +421,9 @@ impl NodeClient for HttpNodeClient {
                 snapshot.onion_exits = exits.exits;
             }
             Err(err) => {
-                snapshot.warnings.push(format!("lookupOnionExits: {err}"));
+                let msg = err.to_string();
+                snapshot.onion_exits_error = Some(msg.clone());
+                snapshot.warnings.push(format!("lookupOnionExits: {msg}"));
             }
         }
 
@@ -597,7 +617,7 @@ impl NodeClient for HttpNodeClient {
                 match fetch_res {
                     Ok(fetched) => {
                         if !fetched.data.is_empty() {
-                            sources.push("Live DHT Topic Network".to_string());
+                            sources.push("DHT Topic RPC (Network/Cache)".to_string());
                             record_kind = "Data/Append".to_string();
                             elements.extend(fetched.data);
                         }
@@ -1053,6 +1073,8 @@ impl NodeClient for DemoNodeClient {
                 version: "1.0.0-pre.3".to_string(),
                 signature: serde_json::Value::Null,
             }],
+            online_nodes_error: None,
+            onion_exits_error: None,
             include_expired_directory,
             warnings: Vec::new(),
             fetched_at_ms: now_ms,
@@ -1220,7 +1242,7 @@ impl NodeClient for DemoNodeClient {
                     }
                 }
                 if !elements.is_empty() {
-                    sources.push("Live DHT Topic Network".to_string());
+                    sources.push("DHT Topic RPC (Network/Cache)".to_string());
                 }
             }
             DhtQueryTarget::RawEntryDid { .. } => {}
@@ -1268,5 +1290,12 @@ mod tests {
         let err = load_seed_peers("/nonexistent/rings-seed-file-that-does-not-exist.json")
             .expect_err("missing seed file must return file error");
         assert!(err.to_string().contains("failed to read seed file"));
+    }
+
+    #[test]
+    fn http_node_client_rejects_invalid_bearer_tokens_at_construction() {
+        assert!(HttpNodeClient::new("http://127.0.0.1:50000", Some("valid-token".into())).is_ok());
+        assert!(HttpNodeClient::new("http://127.0.0.1:50000", Some("bad\ntoken".into())).is_err());
+        assert!(HttpNodeClient::new("http://127.0.0.1:50000", Some("   ".into())).is_err());
     }
 }

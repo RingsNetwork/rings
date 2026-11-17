@@ -284,7 +284,8 @@ impl ResolvedTuiConfig {
     }
 
     /// Read and validate a candidate API token from `token_path` without mutating `self` yet,
-    /// refusing when the credential was explicitly pinned via `--api-token`.
+    /// refusing when the credential was explicitly pinned via `--api-token` or when the token
+    /// contains control characters that cannot form a valid HTTP `Authorization` header.
     pub fn load_token_candidate(&self) -> Result<String> {
         if self.credential_source == CredentialSource::CliExplicit {
             return Err(TuiError::ApiToken {
@@ -303,6 +304,14 @@ impl ResolvedTuiConfig {
             return Err(TuiError::ApiToken {
                 path: self.token_path.clone(),
                 reason: "token file is empty".to_string(),
+            });
+        }
+        if trimmed.chars().any(char::is_control)
+            || reqwest::header::HeaderValue::from_str(&format!("Bearer {trimmed}")).is_err()
+        {
+            return Err(TuiError::ApiToken {
+                path: self.token_path.clone(),
+                reason: "token contains invalid HTTP header or control characters".to_string(),
             });
         }
         Ok(trimmed)
@@ -410,6 +419,20 @@ mod tests {
         let resolved = ResolvedTuiConfig::from_args(&args).expect("resolve config");
         assert_eq!(resolved.credential_source, CredentialSource::CliExplicit);
         assert!(resolved.load_token_candidate().is_err());
+
+        // Also verify that a token file with internal newline / control characters is rejected.
+        fs::write(&token_path, "line1\nline2").expect("write multiline token");
+        let file_args = TuiArgs {
+            config: cfg_path.to_string_lossy().to_string(),
+            endpoint_url: None,
+            api_token_path: Some(token_path.to_string_lossy().to_string()),
+            api_token: None,
+            refresh_ms: 1000,
+            demo: false,
+            print_preview: false,
+        };
+        let file_resolved = ResolvedTuiConfig::from_args(&file_args).expect("resolve config");
+        assert!(file_resolved.load_token_candidate().is_err());
     }
 
     #[test]

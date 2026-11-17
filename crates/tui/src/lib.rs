@@ -60,6 +60,7 @@ use crate::error::Result;
 use crate::executor::execute_dispatched_command;
 
 const INPUT_POLL_SLICE: Duration = Duration::from_millis(50);
+const CHANNEL_CAPACITY: usize = 64;
 
 /// Guard that restores the terminal out of raw mode and alternate screen on drop.
 struct TerminalGuard;
@@ -69,6 +70,28 @@ impl Drop for TerminalGuard {
         let mut stdout = io::stdout();
         let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
         let _ = disable_raw_mode();
+    }
+}
+
+/// RAII guard for the background terminal input reader thread that signals the thread to stop
+/// whenever the TUI exits (including on early `?` error returns, future cancellation, or unwind).
+struct InputReaderGuard {
+    stop_flag: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl InputReaderGuard {
+    fn shutdown(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for InputReaderGuard {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
     }
 }
 
@@ -102,9 +125,11 @@ pub async fn render_preview_frames(
     // Drain the initial queued refresh command so `in_flight_commands` stays 0 in the preview.
     let _ = app.pop_pending_command();
     app.in_flight_commands = 0;
+    app.has_refresh_in_flight = false;
 
-    for req_id in 1..=8_u64 {
-        if let Ok(snap) = client.fetch_snapshot(false).await {
+    if app.config.demo {
+        for req_id in 1..=8_u64 {
+            let snap = client.fetch_snapshot(false).await?;
             app.apply_outcome(DispatchedOutcome {
                 meta: RequestMeta {
                     client_epoch: app.client_epoch,
@@ -113,17 +138,26 @@ pub async fn render_preview_frames(
                 outcome: CommandOutcome::Snapshot(Box::new(snap)),
             });
         }
+        if let Ok(report) = client.dht_lookup_key("rings-chat").await {
+            app.last_dht_lookup = Some(report);
+        }
+        app.push_log(
+            "connectPeerViaHttp",
+            true,
+            "Connected to http://127.0.0.1:50001 -> Peer DID: 0x9f1c...2a3b".to_string(),
+            Some("Remote Peer DID: 0x9f1c2e3a4b5d6e7f8091a2b3c4d5e6f708192a3b".to_string()),
+            12,
+        );
+    } else {
+        let snap = client.fetch_snapshot(false).await?;
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: app.client_epoch,
+                request_id: 1,
+            },
+            outcome: CommandOutcome::Snapshot(Box::new(snap)),
+        });
     }
-    if let Ok(report) = client.dht_lookup_key("rings-chat").await {
-        app.last_dht_lookup = Some(report);
-    }
-    app.push_log(
-        "connectPeerViaHttp",
-        true,
-        "Connected to http://127.0.0.1:50001 -> Peer DID: 0x9f1c...2a3b".to_string(),
-        Some("Remote Peer DID: 0x9f1c2e3a4b5d6e7f8091a2b3c4d5e6f708192a3b".to_string()),
-        12,
-    );
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend)?;
@@ -150,19 +184,18 @@ pub async fn render_preview_frames(
     Ok(output)
 }
 
-/// Spawn a dedicated background thread that reads terminal events and forwards them to a Tokio
-/// channel, preventing blocking `crossterm::event::poll` calls from starving `current-thread`
-/// Tokio executors.
-fn spawn_terminal_input_reader(
-    stop_flag: Arc<AtomicBool>,
-) -> (mpsc::UnboundedReceiver<Event>, std::thread::JoinHandle<()>) {
-    let (tx, rx) = mpsc::unbounded_channel();
+/// Spawn a dedicated background thread that reads terminal events and forwards them to a bounded
+/// Tokio channel, returning the receiver and an RAII [`InputReaderGuard`].
+fn spawn_terminal_input_reader() -> (mpsc::Receiver<Event>, InputReaderGuard) {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let thread_stop = Arc::clone(&stop_flag);
+    let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
-        while !stop_flag.load(Ordering::Relaxed) {
+        while !thread_stop.load(Ordering::Relaxed) {
             match event::poll(INPUT_POLL_SLICE) {
                 Ok(true) => match event::read() {
                     Ok(ev) => {
-                        if tx.send(ev).is_err() {
+                        if tx.blocking_send(ev).is_err() {
                             break;
                         }
                     }
@@ -173,14 +206,17 @@ fn spawn_terminal_input_reader(
             }
         }
     });
-    (rx, handle)
+    (rx, InputReaderGuard {
+        stop_flag,
+        handle: Some(handle),
+    })
 }
 
-/// Drain and spawn all queued commands from `app` onto `worker_tasks`.
+/// Drain and spawn eligible queued commands from `app` onto `worker_tasks`.
 fn dispatch_queued_commands(
     app: &mut App,
     client: &Arc<dyn NodeClient>,
-    outcome_tx: &mpsc::UnboundedSender<DispatchedOutcome>,
+    outcome_tx: &mpsc::Sender<DispatchedOutcome>,
     worker_tasks: &mut tokio::task::JoinSet<()>,
 ) {
     while let Some(dispatched) = app.pop_pending_command() {
@@ -188,8 +224,19 @@ fn dispatch_queued_commands(
         let tx = outcome_tx.clone();
         worker_tasks.spawn(async move {
             let outcome = execute_dispatched_command(client_clone.as_ref(), dispatched).await;
-            let _ = tx.send(outcome);
+            let _ = tx.send(outcome).await;
         });
+    }
+}
+
+/// Reap finished background tasks, recovering `in_flight_commands` if any task panicked.
+fn reap_finished_workers(app: &mut App, worker_tasks: &mut tokio::task::JoinSet<()>) {
+    while let Some(join_res) = worker_tasks.try_join_next() {
+        if let Err(join_err) = join_res {
+            if !join_err.is_cancelled() {
+                app.on_worker_aborted_or_panicked(&join_err.to_string());
+            }
+        }
     }
 }
 
@@ -213,11 +260,10 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
         Arc::new(HttpNodeClient::from_config(&app.config)?)
     };
 
-    let (outcome_tx, mut outcome_rx) = mpsc::unbounded_channel::<DispatchedOutcome>();
+    let (outcome_tx, mut outcome_rx) = mpsc::channel::<DispatchedOutcome>(CHANNEL_CAPACITY);
     let mut worker_tasks = tokio::task::JoinSet::new();
 
-    let stop_input = Arc::new(AtomicBool::new(false));
-    let (mut input_rx, input_thread) = spawn_terminal_input_reader(Arc::clone(&stop_input));
+    let (mut input_rx, mut input_guard) = spawn_terminal_input_reader();
     let mut tick_interval = tokio::time::interval(app.config.refresh_interval);
     // Consume the immediate first tick because `App::new` already queued an initial refresh.
     tick_interval.tick().await;
@@ -262,15 +308,14 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
             app.apply_outcome(dispatched_outcome);
         }
 
-        while worker_tasks.try_join_next().is_some() {}
+        reap_finished_workers(&mut app, &mut worker_tasks);
 
         terminal.draw(|frame| ui::render(frame, &mut app))?;
 
         if app.should_quit {
-            stop_input.store(true, Ordering::Relaxed);
             worker_tasks.abort_all();
             while worker_tasks.join_next().await.is_some() {}
-            let _ = input_thread.join();
+            input_guard.shutdown();
             break;
         }
 
@@ -281,15 +326,17 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
                 }
             }
             maybe_ev = input_rx.recv() => {
-                if let Some(ev) = maybe_ev {
-                    match ev {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            app.handle_key_event(key);
-                        }
-                        Event::Mouse(mouse) => {
-                            app.handle_mouse_event(mouse);
-                        }
-                        _ => {}
+                match maybe_ev {
+                    Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        app.handle_key_event(key);
+                    }
+                    Some(Event::Mouse(mouse)) => {
+                        app.handle_mouse_event(mouse);
+                    }
+                    Some(_) => {}
+                    None => {
+                        // Terminal input stream closed or errored; exit cleanly instead of spinning.
+                        app.should_quit = true;
                     }
                 }
             }
@@ -331,6 +378,7 @@ mod tests {
     use crate::action::TabId;
     use crate::config::CredentialSource;
     use crate::error::TuiError;
+    use crate::types::DhtKeyLookupReport;
     use crate::types::DhtLookupSnapshotDto;
     use crate::types::DhtLookupStatus;
     use crate::types::GatewayProbeState;
@@ -471,7 +519,9 @@ mod tests {
                     last_flow_reset: None,
                 }),
                 online_nodes: Vec::new(),
+                online_nodes_error: None,
                 onion_exits: Vec::new(),
+                onion_exits_error: None,
                 include_expired_directory: include_expired,
                 warnings: Vec::new(),
                 fetched_at_ms: 1_700_000_060_000,
@@ -558,14 +608,14 @@ mod tests {
             }))
         }
 
-        async fn dht_lookup_key(&self, key: &str) -> Result<crate::types::DhtKeyLookupReport> {
+        async fn dht_lookup_key(&self, key: &str) -> Result<DhtKeyLookupReport> {
             let target = crate::types::DhtQueryTarget::parse(key);
-            Ok(crate::types::DhtKeyLookupReport {
+            Ok(DhtKeyLookupReport {
                 query_key: key.to_string(),
                 query_mode: target.mode_label().to_string(),
                 target_did: target.target_entry_did().to_string(),
                 status: DhtLookupStatus::Found,
-                sources: vec!["Live DHT Topic Network".to_string()],
+                sources: vec!["DHT Topic RPC (Network/Cache)".to_string()],
                 record_kind: "Data/Append".to_string(),
                 elements: vec!["value-1".to_string()],
                 warning: None,
@@ -598,7 +648,7 @@ mod tests {
         let client: Arc<dyn NodeClient> = Arc::new(FakeNodeClient::default());
         let mut app = App::new(test_config());
 
-        let (outcome_tx, mut outcome_rx) = mpsc::unbounded_channel();
+        let (outcome_tx, mut outcome_rx) = mpsc::channel(CHANNEL_CAPACITY);
         let mut worker_tasks = tokio::task::JoinSet::new();
 
         // Dispatch initial refresh onto a JoinSet on a `current_thread` Tokio runtime and await via `outcome_rx.recv()`.
@@ -636,6 +686,7 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.modal.is_none());
 
+        // Drain the initial refresh flag if needed and pop ConnectPeerViaHttp.
         let connect_cmd = app.pop_pending_command().expect("connect command");
         assert!(matches!(
             connect_cmd.command,
@@ -716,6 +767,8 @@ mod tests {
         let first_req = app.pop_pending_command().expect("initial refresh");
         assert_eq!(first_req.meta.client_epoch, 1);
         assert_eq!(first_req.meta.request_id, 1);
+        // Simulate first_req completing or allow a second refresh after it:
+        app.has_refresh_in_flight = false;
 
         // Queue a second refresh (request_id = 2) and apply it first.
         app.trigger_button(ButtonId::RefreshNow);
@@ -757,6 +810,49 @@ mod tests {
         });
         assert_eq!(app.snapshot.did.as_deref(), Some("0xnewer"));
 
+        // Out-of-order `DhtLookupKey` outcomes: apply request_id = 5 first, then stale request_id = 4.
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 5,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "dhtLookupKey",
+                summary: "newer lookup".to_string(),
+                output: Some("newer-output".to_string()),
+                measurement: None,
+                dht_lookup: Some(Box::new(DhtKeyLookupReport {
+                    query_key: "newer-key".to_string(),
+                    ..DhtKeyLookupReport::default()
+                })),
+                registered_service: None,
+                duration_ms: 2,
+            },
+        });
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 4,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "dhtLookupKey",
+                summary: "older lookup".to_string(),
+                output: Some("older-output".to_string()),
+                measurement: None,
+                dht_lookup: Some(Box::new(DhtKeyLookupReport {
+                    query_key: "older-key".to_string(),
+                    ..DhtKeyLookupReport::default()
+                })),
+                registered_service: None,
+                duration_ms: 8,
+            },
+        });
+        assert_eq!(
+            app.last_dht_lookup.as_ref().map(|r| r.query_key.as_str()),
+            Some("newer-key")
+        );
+        assert_eq!(app.last_command_output.as_deref(), Some("newer-output"));
+
         // Bump client epoch (e.g. token reload) -> old epoch outcomes must be ignored.
         app.bump_client_epoch();
         assert_eq!(app.client_epoch, 2);
@@ -771,5 +867,113 @@ mod tests {
             },
         });
         assert_eq!(app.connection_state, crate::app::ConnectionState::Online);
+    }
+
+    #[test]
+    fn coalesces_duplicate_refreshes_and_recovers_from_worker_panic() {
+        let mut app = App::new(test_config());
+        // Spam `[R]` 10 times before popping any command: all must coalesce into 1 queued RefreshSnapshot.
+        for _ in 0..10 {
+            app.trigger_button(ButtonId::RefreshNow);
+        }
+        let first = app.pop_pending_command().expect("first refresh");
+        assert!(matches!(first.command, NodeCommand::RefreshSnapshot { .. }));
+        assert!(app.has_refresh_in_flight);
+        assert_eq!(app.in_flight_commands, 1);
+
+        // Even if the user presses `[R]` again while `has_refresh_in_flight` is true,
+        // `pop_pending_command` will not dispatch a second concurrent `RefreshSnapshot`.
+        app.trigger_button(ButtonId::RefreshNow);
+        assert!(app.pop_pending_command().is_none());
+
+        // Simulate worker task panic -> `on_worker_aborted_or_panicked` recovers in_flight_commands
+        // and clears `has_refresh_in_flight` so the queued refresh can now be dispatched!
+        app.on_worker_aborted_or_panicked("simulated panic");
+        assert_eq!(app.in_flight_commands, 0);
+        assert!(!app.has_refresh_in_flight);
+        let recovered = app
+            .pop_pending_command()
+            .expect("queued refresh after recovery");
+        assert!(matches!(
+            recovered.command,
+            NodeCommand::RefreshSnapshot { .. }
+        ));
+    }
+
+    #[test]
+    fn scrolled_peers_table_mouse_click_and_modal_prefill_use_offset_and_merged_order() {
+        let mut app = App::new(test_config());
+        let _ = app.pop_pending_command();
+
+        // Build a snapshot with 1 connected peer (`0xpeer00`) and 15 retained measured peers
+        // (`0xmeas01`..`0xmeas15`), plus a duplicate measurement for `0xpeer00`.
+        let mut measurements = vec![PeerMeasurementInfo {
+            did: "0xpeer00".to_string(),
+            counters: PeerMeasurementCountersInfo::default(),
+            credit: None,
+            reliability: PeerReliabilityInfo::Healthy,
+        }];
+        for idx in 1..=15_u32 {
+            measurements.push(PeerMeasurementInfo {
+                did: format!("0xmeas{idx:02}"),
+                counters: PeerMeasurementCountersInfo::default(),
+                credit: None,
+                reliability: PeerReliabilityInfo::Healthy,
+            });
+        }
+
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: app.client_epoch,
+                request_id: 1,
+            },
+            outcome: CommandOutcome::Snapshot(Box::new(NodeSnapshot {
+                did: Some("0xlocal".to_string()),
+                peers: vec![PeerInfo {
+                    did: "0xpeer00".to_string(),
+                    state: "Connected".to_string(),
+                }],
+                measurements,
+                include_expired_directory: false,
+                ..NodeSnapshot::default()
+            })),
+        });
+
+        app.active_tab = TabId::Peers;
+        // Move selection down to row 14 (`0xmeas14`), which forces the table in a 24-row terminal
+        // to scroll (`state.offset() > 0`).
+        for _ in 0..14 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        assert_eq!(app.selected_peer_idx, 14);
+        assert_eq!(app.selected_did(), Some("0xmeas14"));
+
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw scrolled peers tab");
+
+        // Click the first visible data row in the Peers table (row y = 11, column x = 10).
+        // Because the table scrolled (`offset > 0`), clicking the first visible row MUST select
+        // `offset` (> 0), NOT row 0!
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(
+            app.selected_peer_idx > 0,
+            "expected scrolled click to include table offset, got {}",
+            app.selected_peer_idx
+        );
+        let expected_did = format!("0xmeas{:02}", app.selected_peer_idx);
+        assert_eq!(app.selected_did(), Some(expected_did.as_str()));
+
+        // Opening InspectPeer modal must prefill `expected_did`.
+        app.trigger_button(ButtonId::InspectPeer);
+        let modal = app.modal.as_ref().expect("inspect modal");
+        assert_eq!(modal.fields[0].value, expected_did);
     }
 }

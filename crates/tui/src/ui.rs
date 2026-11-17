@@ -422,8 +422,18 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let health = obs.map(|o| &o.health);
     let dht = app.snapshot.swarm.as_ref().and_then(|s| s.dht.as_ref());
 
-    let api_ok = health.map(|h| h.process_api_healthy).unwrap_or(false);
-    let overlay_ok = health.map(|h| h.overlay_ready).unwrap_or(false);
+    let (api_label, api_color) =
+        match (health.map(|h| h.process_api_healthy), &app.connection_state) {
+            (Some(true), _) => ("HEALTHY", Color::Green),
+            (Some(false), _) | (None, ConnectionState::Offline(_)) => ("UNREACHABLE", Color::Red),
+            (None, ConnectionState::Connecting) => ("PROBING...", Color::Yellow),
+            (None, ConnectionState::Online) => ("RPC OK (Obs Pending)", Color::Yellow),
+        };
+    let (overlay_label, overlay_color) = match health.map(|h| h.overlay_ready) {
+        Some(true) => ("YES", Color::Green),
+        Some(false) => ("NO", Color::Yellow),
+        None => ("UNKNOWN", Color::DarkGray),
+    };
     let admitted = health
         .map(|h| h.admitted_peer_count)
         .unwrap_or_else(|| app.snapshot.peers.len() as u64);
@@ -435,20 +445,8 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .unwrap_or_else(|| dht.is_some_and(|d| d.predecessor.is_some()));
 
     let lines = vec![
-        kv_line(
-            "Process API:",
-            if api_ok { "HEALTHY" } else { "UNREACHABLE" },
-            if api_ok { Color::Green } else { Color::Red },
-        ),
-        kv_line(
-            "Overlay Ready:",
-            if overlay_ok { "YES" } else { "NO" },
-            if overlay_ok {
-                Color::Green
-            } else {
-                Color::Yellow
-            },
-        ),
+        kv_line("Process API:", api_label, api_color),
+        kv_line("Overlay Ready:", overlay_label, overlay_color),
         kv_line(
             "Admitted Peers:",
             &format!("{admitted} (listed: {})", app.snapshot.peers.len()),
@@ -613,7 +611,18 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
                 ),
             ]
         }
-        GatewayProbeState::Unknown | GatewayProbeState::NotMounted => vec![
+        GatewayProbeState::Unknown => vec![
+            kv_line("TUN Gateway:", "PROBING...", Color::Yellow),
+            kv_line(
+                "HTTP Proxy:",
+                app.config
+                    .onion_http_proxy_addr
+                    .as_deref()
+                    .unwrap_or("disabled"),
+                Color::Cyan,
+            ),
+        ],
+        GatewayProbeState::NotMounted => vec![
             kv_line("TUN Gateway:", "NOT MOUNTED (404)", Color::DarkGray),
             kv_line(
                 "HTTP Proxy:",
@@ -1006,8 +1015,6 @@ fn render_recent_events_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
         .collect::<Vec<_>>();
 
     let event_count = events.len();
-    register_table_row_hits(&mut app.hit_map, area, event_count);
-
     let mut state = TableState::default();
     if event_count > 0 {
         state.select(Some(app.selected_event_idx));
@@ -1035,6 +1042,7 @@ fn render_recent_events_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     );
 
     frame.render_stateful_widget(table, area, &mut state);
+    register_table_row_hits(&mut app.hit_map, area, event_count, state.offset());
 }
 
 fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1095,7 +1103,6 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         .collect::<Vec<_>>();
 
     if let Some(&table_rect) = chunks.first() {
-        register_table_row_hits(&mut app.hit_map, table_rect, row_count);
         let mut state = TableState::default();
         if row_count > 0 {
             state.select(Some(app.selected_peer_idx));
@@ -1130,6 +1137,7 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         );
         frame.render_stateful_widget(table, table_rect, &mut state);
+        register_table_row_hits(&mut app.hit_map, table_rect, row_count, state.offset());
     }
 
     if let Some(&vnodes_rect) = chunks.get(1) {
@@ -1371,7 +1379,6 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                register_table_row_hits(&mut app.hit_map, bot_rect, range_count);
                 let mut state = TableState::default();
                 if range_count > 0 {
                     state.select(Some(app.selected_dht_idx));
@@ -1397,6 +1404,7 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 )
                 .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, bot_rect, &mut state);
+                register_table_row_hits(&mut app.hit_map, bot_rect, range_count, state.offset());
             }
             DhtSubtab::PersistentStorage | DhtSubtab::CacheStorage => {
                 let items = app
@@ -1425,7 +1433,6 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                register_table_row_hits(&mut app.hit_map, bot_rect, item_count);
                 let mut state = TableState::default();
                 if item_count > 0 {
                     state.select(Some(app.selected_dht_idx));
@@ -1457,6 +1464,7 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 )
                 .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, bot_rect, &mut state);
+                register_table_row_hits(&mut app.hit_map, bot_rect, item_count, state.offset());
             }
         }
     }
@@ -1530,11 +1538,16 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                register_table_row_hits(&mut app.hit_map, table_rect, node_count);
                 let mut state = TableState::default();
                 if node_count > 0 {
                     state.select(Some(app.selected_directory_idx));
                 }
+                let title = match &app.snapshot.online_nodes_error {
+                    Some(err) => {
+                        format!(" Online Nodes Directory ({node_count} cached — RPC Error: {err}) ")
+                    }
+                    None => format!(" Online Nodes Directory ({node_count}) "),
+                };
                 let table = Table::new(rows, [
                     Constraint::Min(28),
                     Constraint::Length(9),
@@ -1563,11 +1576,18 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Online Nodes Directory ({node_count}) "))
-                        .border_style(Style::default().fg(Color::Cyan)),
+                        .title(title)
+                        .border_style(Style::default().fg(
+                            if app.snapshot.online_nodes_error.is_some() {
+                                Color::Red
+                            } else {
+                                Color::Cyan
+                            },
+                        )),
                 )
                 .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, table_rect, &mut state);
+                register_table_row_hits(&mut app.hit_map, table_rect, node_count, state.offset());
             }
             DirectorySubtab::OnionExits => {
                 let exit_count = app.snapshot.onion_exits.len();
@@ -1593,11 +1613,16 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                         ])
                     })
                     .collect::<Vec<_>>();
-                register_table_row_hits(&mut app.hit_map, table_rect, exit_count);
                 let mut state = TableState::default();
                 if exit_count > 0 {
                     state.select(Some(app.selected_directory_idx));
                 }
+                let title = match &app.snapshot.onion_exits_error {
+                    Some(err) => {
+                        format!(" Onion Exits Directory ({exit_count} cached — RPC Error: {err}) ")
+                    }
+                    None => format!(" Onion Exits Directory ({exit_count}) "),
+                };
                 let table = Table::new(rows, [
                     Constraint::Min(28),
                     Constraint::Length(10),
@@ -1624,11 +1649,18 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Onion Exits Directory ({exit_count}) "))
-                        .border_style(Style::default().fg(Color::Magenta)),
+                        .title(title)
+                        .border_style(Style::default().fg(
+                            if app.snapshot.onion_exits_error.is_some() {
+                                Color::Red
+                            } else {
+                                Color::Magenta
+                            },
+                        )),
                 )
                 .row_highlight_style(Style::default().bg(Color::DarkGray));
                 frame.render_stateful_widget(table, table_rect, &mut state);
+                register_table_row_hits(&mut app.hit_map, table_rect, exit_count, state.offset());
             }
         }
     }
@@ -1727,10 +1759,16 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             );
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Command Output / Handshake & PubSub Inspector ")
+                .title(format!(
+                    " Command Output Inspector (Scroll: +{} lines — [PgUp/PgDn] or `[`/`]` or Mouse Wheel) ",
+                    app.output_scroll
+                ))
                 .border_style(Style::default().fg(Color::Green));
             frame.render_widget(
-                Paragraph::new(text).wrap(Wrap { trim: false }).block(block),
+                Paragraph::new(text)
+                    .wrap(Wrap { trim: false })
+                    .scroll((app.output_scroll, 0))
+                    .block(block),
                 out_rect,
             );
         }
@@ -1741,11 +1779,11 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
-fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let log_count = app.action_logs.len();
     let rows = app
         .action_logs
         .iter()
-        .take(20)
         .map(|entry| {
             let badge = if entry.succeeded { "OK" } else { "ERR" };
             let color = if entry.succeeded {
@@ -1762,6 +1800,11 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &App, area: Rect
             ])
         })
         .collect::<Vec<_>>();
+
+    let mut state = TableState::default();
+    if log_count > 0 {
+        state.select(Some(app.selected_log_idx));
+    }
 
     let table = Table::new(rows, [
         Constraint::Length(5),
@@ -1781,12 +1824,13 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &App, area: Rect
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Command Execution Log ({}) ",
-                app.action_logs.len()
+                " Command Execution Log ({log_count} — Click Row to Inspect Output) "
             ))
             .border_style(Style::default().fg(Color::Blue)),
-    );
-    frame.render_widget(table, area);
+    )
+    .row_highlight_style(Style::default().bg(Color::DarkGray));
+    frame.render_stateful_widget(table, area, &mut state);
+    register_table_row_hits(&mut app.hit_map, area, log_count, state.offset());
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -1796,24 +1840,24 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         String::new()
     };
 
-    let status_text =
-        match &app.connection_state {
-            ConnectionState::Offline(err) => format!("Node API Error: {err}"),
-            _ => match app.action_logs.front() {
-                Some(last) => format!("Last Action [{}]: {}", last.command, last.message),
-                None if !app.snapshot.warnings.is_empty() => {
-                    format!(
-                        "Partial Poll Warnings: {}",
-                        app.snapshot.warnings.join(" | ")
-                    )
-                }
-                None => app.config.warning.clone().unwrap_or_else(|| {
-                    "Ready. Click any button or press [?] for help.".to_string()
-                }),
-            },
-        };
+    let primary_text = match &app.connection_state {
+        ConnectionState::Offline(err) => format!("Node API Error: {err}"),
+        _ => match app.action_logs.front() {
+            Some(last) => format!("Last Action [{}]: {}", last.command, last.message),
+            None => "Ready. Click any button or press [?] for help.".to_string(),
+        },
+    };
 
-    let line = Line::from(vec![
+    let warning_text = if !app.snapshot.warnings.is_empty() {
+        Some(format!(
+            "Partial Poll Warnings: {}",
+            app.snapshot.warnings.join(" | ")
+        ))
+    } else {
+        app.config.warning.clone()
+    };
+
+    let mut lines = vec![Line::from(vec![
         Span::styled(
             busy,
             Style::default()
@@ -1822,10 +1866,17 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(status_text, Style::default().fg(Color::White)),
-    ]);
+        Span::styled(primary_text, Style::default().fg(Color::White)),
+    ])];
 
-    frame.render_widget(Paragraph::new(line), area);
+    if let Some(warn) = warning_text {
+        lines.push(Line::from(Span::styled(
+            format!(" ⚠ {warn}"),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area: Rect) {
@@ -1872,17 +1923,19 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
         } else {
             Color::DarkGray
         };
+        let max_chars = usize::from(field_rect.width.saturating_sub(4)).max(8);
+        let visible_val = tail_chars(&field.value, max_chars);
         let display_text = if field.value.is_empty() && !is_active {
             Span::styled(field.placeholder, Style::default().fg(Color::DarkGray))
         } else if is_active {
             Span::styled(
-                format!("{}█", field.value),
+                format!("{visible_val}█"),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(field.value.clone(), Style::default().fg(Color::White))
+            Span::styled(visible_val, Style::default().fg(Color::White))
         };
 
         let f_block = Block::default()
@@ -1995,14 +2048,16 @@ fn register_table_row_hits(
     hit_map: &mut crate::action::HitMap,
     table_area: Rect,
     row_count: usize,
+    row_offset: usize,
 ) {
     // Border top (1) + Header row (1) = 2 rows offset inside `table_area`.
     let first_data_y = table_area.y.saturating_add(2);
     let max_y = table_area
         .y
         .saturating_add(table_area.height.saturating_sub(1));
-    for idx in 0..row_count {
-        let y = first_data_y.saturating_add(u16::try_from(idx).unwrap_or(u16::MAX));
+    let visible_rows = row_count.saturating_sub(row_offset);
+    for visible_idx in 0..visible_rows {
+        let y = first_data_y.saturating_add(u16::try_from(visible_idx).unwrap_or(u16::MAX));
         if y >= max_y {
             break;
         }
@@ -2013,9 +2068,19 @@ fn register_table_row_hits(
                 width: table_area.width.saturating_sub(2),
                 height: 1,
             },
-            ClickTarget::TableRow(idx),
+            ClickTarget::TableRow(row_offset.saturating_add(visible_idx)),
         );
     }
+}
+
+fn tail_chars(input: &str, max_chars: usize) -> String {
+    let total = input.chars().count();
+    if total <= max_chars {
+        return input.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let tail: String = input.chars().skip(total.saturating_sub(keep)).collect();
+    format!("…{tail}")
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

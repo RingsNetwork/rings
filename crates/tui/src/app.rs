@@ -29,6 +29,12 @@ use crate::types::TelemetryHistory;
 /// Maximum number of command execution logs retained in memory.
 pub const MAX_ACTION_LOGS: usize = 100;
 
+/// Maximum number of pending commands buffered in the dispatch queue.
+pub const MAX_PENDING_COMMANDS: usize = 32;
+
+/// Maximum number of concurrent RPC tasks executing in flight at once.
+pub const MAX_CONCURRENT_COMMANDS: usize = 8;
+
 /// Connection state between the TUI and the target `rings-node` API.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -122,6 +128,8 @@ pub struct App {
     pub directory_subtab: DirectorySubtab,
     /// Selected row index in the Peers table.
     pub selected_peer_idx: usize,
+    /// Stable DID of the currently selected peer row, preserved across snapshot refreshes.
+    pub selected_peer_did: Option<String>,
     /// Selected row index in the Recent Message Events table.
     pub selected_event_idx: usize,
     /// Selected row index in the DHT / Storage table.
@@ -132,6 +140,8 @@ pub struct App {
     pub selected_workbench_idx: usize,
     /// Selected row index in the `6:Commands` execution log table.
     pub selected_log_idx: usize,
+    /// Vertical scroll offset (in lines) for the Command Output inspector panel in `6:Commands`.
+    pub output_scroll: u16,
     /// Optional keyboard focus on the persistent toolbar buttons.
     pub focused_toolbar_idx: Option<usize>,
     /// Active modal input dialog, when open.
@@ -140,6 +150,8 @@ pub struct App {
     pub show_help: bool,
     /// Number of asynchronous commands currently executing in the active client epoch.
     pub in_flight_commands: usize,
+    /// Whether a `RefreshSnapshot` request is currently in flight in the active client epoch.
+    pub has_refresh_in_flight: bool,
     /// Latest multi-line command output (e.g. SDP offer/answer, topic messages, service DIDs).
     pub last_command_output: Option<String>,
     /// Latest Chord DHT key lookup report.
@@ -158,20 +170,26 @@ pub struct App {
     next_request_id: u64,
     /// Highest `request_id` of any applied `RefreshSnapshot` outcome in the current epoch.
     latest_applied_snapshot_id: u64,
+    /// Highest `request_id` of any applied peer measurement update in the current epoch.
+    latest_measurement_req_id: u64,
+    /// Highest `request_id` of any applied `DhtLookupKey` report in the current epoch.
+    latest_dht_lookup_req_id: u64,
+    /// Highest `request_id` of any applied `last_command_output` in the current epoch.
+    latest_output_req_id: u64,
     /// Screen hit-test map populated during rendering for mouse clicks.
     pub hit_map: HitMap,
     /// Whether the user has requested to exit the TUI.
     pub should_quit: bool,
     /// Flag set when the user requests reloading the API token from disk.
     pub pending_token_reload: bool,
-    /// Queue of commands ready to be sent to the async node worker.
+    /// Bounded queue of commands ready to be sent to the async node worker.
     pending_commands: VecDeque<NodeCommand>,
 }
 
 impl App {
     /// Construct a new [`App`] from a resolved TUI configuration and queue an initial refresh.
     pub fn new(config: ResolvedTuiConfig) -> Self {
-        let mut pending_commands = VecDeque::new();
+        let mut pending_commands = VecDeque::with_capacity(MAX_PENDING_COMMANDS);
         pending_commands.push_back(NodeCommand::RefreshSnapshot {
             include_expired_directory: false,
         });
@@ -191,15 +209,18 @@ impl App {
             dht_subtab: DhtSubtab::FingerTable,
             directory_subtab: DirectorySubtab::OnlineNodes,
             selected_peer_idx: 0,
+            selected_peer_did: None,
             selected_event_idx: 0,
             selected_dht_idx: 0,
             selected_directory_idx: 0,
             selected_workbench_idx: 0,
             selected_log_idx: 0,
+            output_scroll: 0,
             focused_toolbar_idx: None,
             modal: None,
             show_help: false,
             in_flight_commands: 0,
+            has_refresh_in_flight: false,
             last_command_output: None,
             last_dht_lookup: None,
             registered_services,
@@ -209,6 +230,9 @@ impl App {
             client_epoch: 1,
             next_request_id: 1,
             latest_applied_snapshot_id: 0,
+            latest_measurement_req_id: 0,
+            latest_dht_lookup_req_id: 0,
+            latest_output_req_id: 0,
             hit_map: HitMap::default(),
             should_quit: false,
             pending_token_reload: false,
@@ -216,22 +240,90 @@ impl App {
         }
     }
 
+    /// Enqueue or coalesce a `RefreshSnapshot` command so rapid manual refreshes do not flood the queue.
+    pub fn enqueue_refresh(&mut self) {
+        let desired = self.include_expired_directory;
+        if let Some(NodeCommand::RefreshSnapshot {
+            include_expired_directory,
+        }) = self
+            .pending_commands
+            .iter_mut()
+            .find(|cmd| matches!(cmd, NodeCommand::RefreshSnapshot { .. }))
+        {
+            *include_expired_directory = desired;
+            return;
+        }
+        if self.pending_commands.len() < MAX_PENDING_COMMANDS {
+            self.pending_commands
+                .push_back(NodeCommand::RefreshSnapshot {
+                    include_expired_directory: desired,
+                });
+        }
+    }
+
+    fn enqueue_command(&mut self, command: NodeCommand) {
+        if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
+            self.enqueue_refresh();
+            return;
+        }
+        if self.pending_commands.len() >= MAX_PENDING_COMMANDS {
+            self.push_log(
+                command.title(),
+                false,
+                format!("Command queue is full ({MAX_PENDING_COMMANDS}); try again shortly"),
+                None,
+                0,
+            );
+            return;
+        }
+        self.pending_commands.push_back(command);
+    }
+
     /// Advance to a new client generation after a successful token reload / client rebuild,
     /// invalidating any in-flight outcomes from the previous client epoch.
     pub fn bump_client_epoch(&mut self) {
         self.client_epoch = self.client_epoch.saturating_add(1);
         self.in_flight_commands = 0;
+        self.has_refresh_in_flight = false;
         self.latest_applied_snapshot_id = 0;
+        self.latest_measurement_req_id = 0;
+        self.latest_dht_lookup_req_id = 0;
+        self.latest_output_req_id = 0;
         self.pending_commands.clear();
-        self.pending_commands
-            .push_back(NodeCommand::RefreshSnapshot {
-                include_expired_directory: self.include_expired_directory,
-            });
+        self.enqueue_refresh();
     }
 
-    /// Drain the next queued [`NodeCommand`] wrapped with its [`RequestMeta`] envelope.
+    /// Recover accounting when a background worker task panics or aborts unexpectedly without
+    /// delivering a [`DispatchedOutcome`].
+    pub fn on_worker_aborted_or_panicked(&mut self, reason: &str) {
+        self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
+        self.has_refresh_in_flight = false;
+        self.push_log(
+            "workerTask",
+            false,
+            format!("Background command task terminated unexpectedly: {reason}"),
+            None,
+            0,
+        );
+    }
+
+    /// Drain the next eligible [`NodeCommand`] wrapped with its [`RequestMeta`] envelope,
+    /// respecting [`MAX_CONCURRENT_COMMANDS`] and ensuring at most one `RefreshSnapshot` runs at a time.
     pub fn pop_pending_command(&mut self) -> Option<DispatchedCommand> {
-        let command = self.pending_commands.pop_front()?;
+        if self.in_flight_commands >= MAX_CONCURRENT_COMMANDS {
+            return None;
+        }
+        let pos = self.pending_commands.iter().position(|cmd| {
+            if matches!(cmd, NodeCommand::RefreshSnapshot { .. }) {
+                !self.has_refresh_in_flight
+            } else {
+                true
+            }
+        })?;
+        let command = self.pending_commands.remove(pos)?;
+        if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
+            self.has_refresh_in_flight = true;
+        }
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.in_flight_commands = self.in_flight_commands.saturating_add(1);
@@ -247,15 +339,12 @@ impl App {
     /// Queue a background snapshot refresh if auto-polling is enabled and no command is in flight.
     pub fn on_tick(&mut self) {
         if self.auto_poll && self.in_flight_commands == 0 && self.pending_commands.is_empty() {
-            self.pending_commands
-                .push_back(NodeCommand::RefreshSnapshot {
-                    include_expired_directory: self.include_expired_directory,
-                });
+            self.enqueue_refresh();
         }
     }
 
     /// Apply a [`DispatchedOutcome`] from the worker task if its [`RequestMeta`] matches the active
-    /// client epoch and is not superseded by a newer snapshot request.
+    /// client epoch and is not superseded by a newer request.
     pub fn apply_outcome(&mut self, dispatched: DispatchedOutcome) {
         if dispatched.meta.client_epoch != self.client_epoch {
             return;
@@ -263,14 +352,37 @@ impl App {
         self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
 
         match dispatched.outcome {
-            CommandOutcome::Snapshot(snapshot) => {
+            CommandOutcome::Snapshot(mut snapshot) => {
+                self.has_refresh_in_flight = false;
                 if dispatched.meta.request_id < self.latest_applied_snapshot_id {
                     return;
                 }
                 if snapshot.include_expired_directory != self.include_expired_directory {
                     return;
                 }
+                // Preserve previously fetched directory rows when a directory subquery fails transiently
+                // under the same filter setting.
+                if snapshot.online_nodes_error.is_some()
+                    && snapshot.online_nodes.is_empty()
+                    && self.snapshot.include_expired_directory == snapshot.include_expired_directory
+                    && !self.snapshot.online_nodes.is_empty()
+                {
+                    snapshot
+                        .online_nodes
+                        .clone_from(&self.snapshot.online_nodes);
+                }
+                if snapshot.onion_exits_error.is_some()
+                    && snapshot.onion_exits.is_empty()
+                    && self.snapshot.include_expired_directory == snapshot.include_expired_directory
+                    && !self.snapshot.onion_exits.is_empty()
+                {
+                    snapshot.onion_exits.clone_from(&self.snapshot.onion_exits);
+                }
+
                 self.latest_applied_snapshot_id = dispatched.meta.request_id;
+                self.latest_measurement_req_id = self
+                    .latest_measurement_req_id
+                    .max(dispatched.meta.request_id);
                 self.connection_state = ConnectionState::Online;
                 self.history.record(&snapshot);
                 self.snapshot = *snapshot;
@@ -280,6 +392,7 @@ impl App {
                 include_expired_directory,
                 error,
             } => {
+                self.has_refresh_in_flight = false;
                 if dispatched.meta.request_id < self.latest_applied_snapshot_id {
                     return;
                 }
@@ -304,29 +417,37 @@ impl App {
                     }
                 }
                 if let Some(meas) = measurement {
-                    if let Some(existing) = self
-                        .snapshot
-                        .measurements
-                        .iter_mut()
-                        .find(|m| m.did == meas.did)
-                    {
-                        *existing = *meas;
-                    } else {
-                        self.snapshot.measurements.push(*meas);
+                    if dispatched.meta.request_id >= self.latest_measurement_req_id {
+                        self.latest_measurement_req_id = dispatched.meta.request_id;
+                        if let Some(existing) = self
+                            .snapshot
+                            .measurements
+                            .iter_mut()
+                            .find(|m| m.did.eq_ignore_ascii_case(&meas.did))
+                        {
+                            *existing = *meas;
+                        } else {
+                            self.snapshot.measurements.push(*meas);
+                        }
+                        self.clamp_selections();
                     }
                 }
                 if let Some(lookup) = dht_lookup {
-                    self.last_dht_lookup = Some(*lookup);
+                    if dispatched.meta.request_id >= self.latest_dht_lookup_req_id {
+                        self.latest_dht_lookup_req_id = dispatched.meta.request_id;
+                        self.last_dht_lookup = Some(*lookup);
+                    }
                 }
                 if let Some(out) = &output {
-                    self.last_command_output = Some(out.clone());
+                    if dispatched.meta.request_id >= self.latest_output_req_id {
+                        self.latest_output_req_id = dispatched.meta.request_id;
+                        self.last_command_output = Some(out.clone());
+                        self.output_scroll = 0;
+                    }
                 }
                 self.push_log(command, true, summary, output, duration_ms);
-                // Automatically queue a fresh snapshot after mutating node state.
-                self.pending_commands
-                    .push_back(NodeCommand::RefreshSnapshot {
-                        include_expired_directory: self.include_expired_directory,
-                    });
+                // Coalesce a snapshot refresh after mutating node state.
+                self.enqueue_refresh();
             }
             CommandOutcome::CommandError {
                 command,
@@ -363,7 +484,8 @@ impl App {
         self.selected_log_idx = 0;
     }
 
-    /// Return the DID of the currently selected peer (or directory entry) to pre-fill command modals.
+    /// Return the DID of the currently selected peer (or directory entry) in the exact same row
+    /// order rendered by [`crate::types::NodeSnapshot::peer_traffic_rows`].
     pub fn selected_did(&self) -> Option<&str> {
         match self.active_tab {
             TabId::Directory => match self.directory_subtab {
@@ -378,17 +500,7 @@ impl App {
                     .get(self.selected_directory_idx)
                     .map(|e| e.did.as_str()),
             },
-            _ => self
-                .snapshot
-                .peers
-                .get(self.selected_peer_idx)
-                .map(|p| p.did.as_str())
-                .or_else(|| {
-                    self.snapshot
-                        .measurements
-                        .get(self.selected_peer_idx)
-                        .map(|m| m.did.as_str())
-                }),
+            _ => self.snapshot.peer_did_at(self.selected_peer_idx),
         }
     }
 
@@ -427,10 +539,7 @@ impl App {
         let default_topic = self.last_topic_name.clone();
         match button {
             ButtonId::RefreshNow => {
-                self.pending_commands
-                    .push_back(NodeCommand::RefreshSnapshot {
-                        include_expired_directory: self.include_expired_directory,
-                    });
+                self.enqueue_refresh();
             }
             ButtonId::ToggleAutoPoll => {
                 self.auto_poll = !self.auto_poll;
@@ -544,10 +653,7 @@ impl App {
             }
             ButtonId::ToggleExpiredDirectory => {
                 self.include_expired_directory = !self.include_expired_directory;
-                self.pending_commands
-                    .push_back(NodeCommand::RefreshSnapshot {
-                        include_expired_directory: self.include_expired_directory,
-                    });
+                self.enqueue_refresh();
                 self.push_log(
                     "directoryFilter",
                     true,
@@ -584,7 +690,7 @@ impl App {
                 _ => {}
             }
             self.modal = None;
-            self.pending_commands.push_back(cmd);
+            self.enqueue_command(cmd);
         }
     }
 
@@ -656,6 +762,12 @@ impl App {
                 self.trigger_button(ButtonId::ToggleExpiredDirectory)
             }
             KeyCode::Char('u') | KeyCode::Char('U') => self.trigger_button(ButtonId::ReloadToken),
+            KeyCode::PageDown | KeyCode::Char(']') => {
+                self.output_scroll = self.output_scroll.saturating_add(3);
+            }
+            KeyCode::PageUp | KeyCode::Char('[') => {
+                self.output_scroll = self.output_scroll.saturating_sub(3);
+            }
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 if self.focused_toolbar_idx.is_some() {
                     self.focused_toolbar_idx = None;
@@ -804,10 +916,18 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp if self.modal.is_none() => {
-                self.move_selection_up();
+                if self.active_tab == TabId::Commands {
+                    self.output_scroll = self.output_scroll.saturating_sub(2);
+                } else {
+                    self.move_selection_up();
+                }
             }
             MouseEventKind::ScrollDown if self.modal.is_none() => {
-                self.move_selection_down();
+                if self.active_tab == TabId::Commands {
+                    self.output_scroll = self.output_scroll.saturating_add(2);
+                } else {
+                    self.move_selection_down();
+                }
             }
             _ => {}
         }
@@ -820,6 +940,7 @@ impl App {
             }
             TabId::Peers => {
                 self.selected_peer_idx = row;
+                self.selected_peer_did = None;
             }
             TabId::DhtStorage => {
                 self.selected_dht_idx = row;
@@ -829,6 +950,14 @@ impl App {
             }
             TabId::Commands => {
                 self.selected_log_idx = row;
+                if let Some(entry) = self.action_logs.get(row) {
+                    let body = entry
+                        .details
+                        .clone()
+                        .unwrap_or_else(|| format!("[{}] {}", entry.command, entry.message));
+                    self.last_command_output = Some(body);
+                    self.output_scroll = 0;
+                }
             }
         }
         self.clamp_selections();
@@ -845,6 +974,7 @@ impl App {
             }
             TabId::Peers => {
                 self.selected_peer_idx = self.selected_peer_idx.saturating_sub(1);
+                self.selected_peer_did = None;
             }
             TabId::DhtStorage => {
                 self.selected_dht_idx = self.selected_dht_idx.saturating_sub(1);
@@ -870,6 +1000,7 @@ impl App {
             }
             TabId::Peers => {
                 self.selected_peer_idx = self.selected_peer_idx.saturating_add(1);
+                self.selected_peer_did = None;
             }
             TabId::DhtStorage => {
                 self.selected_dht_idx = self.selected_dht_idx.saturating_add(1);
@@ -931,11 +1062,26 @@ impl App {
     }
 
     fn clamp_selections(&mut self) {
-        let peer_len = self.snapshot.peer_traffic_rows().len();
+        let peer_rows = self.snapshot.peer_traffic_rows();
+        let peer_len = peer_rows.len();
+        if let Some(prev_did) = &self.selected_peer_did {
+            if let Some(pos) = peer_rows
+                .iter()
+                .position(|r| r.peer_did.eq_ignore_ascii_case(prev_did))
+            {
+                self.selected_peer_idx = pos;
+            }
+        }
         if peer_len == 0 {
             self.selected_peer_idx = 0;
-        } else if self.selected_peer_idx >= peer_len {
-            self.selected_peer_idx = peer_len - 1;
+            self.selected_peer_did = None;
+        } else {
+            if self.selected_peer_idx >= peer_len {
+                self.selected_peer_idx = peer_len - 1;
+            }
+            self.selected_peer_did = peer_rows
+                .get(self.selected_peer_idx)
+                .map(|r| r.peer_did.clone());
         }
 
         let event_len = self

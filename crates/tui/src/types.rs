@@ -290,8 +290,12 @@ pub struct NodeSnapshot {
     pub gateway: GatewayProbeState,
     /// Discovered online-node directory entries.
     pub online_nodes: Vec<OnlineNodeDescriptorInfo>,
+    /// Error from the most recent `lookupOnlineNodes` call, if it failed.
+    pub online_nodes_error: Option<String>,
     /// Discovered onion-exit directory entries.
     pub onion_exits: Vec<OnionExitDescriptorInfo>,
+    /// Error from the most recent `lookupOnionExits` call, if it failed.
+    pub onion_exits_error: Option<String>,
     /// Whether this snapshot was queried with `include_expired = true`.
     pub include_expired_directory: bool,
     /// Non-fatal subquery warnings encountered while assembling this snapshot.
@@ -462,6 +466,43 @@ impl NodeSnapshot {
         }
 
         rows
+    }
+
+    /// Return the peer DID at `index` in the exact same order as [`Self::peer_traffic_rows`],
+    /// ensuring UI table selection and command modal pre-filling always target the same peer.
+    pub fn peer_did_at(&self, index: usize) -> Option<&str> {
+        if let Some(peer) = self.peers.get(index) {
+            return Some(peer.did.as_str());
+        }
+        let local_did = self.did.as_deref().unwrap_or_default();
+        let mut retained_idx = index.saturating_sub(self.peers.len());
+        let mut seen_measurements: Vec<&str> = Vec::new();
+        for m in &self.measurements {
+            if m.did.eq_ignore_ascii_case(local_did)
+                || self
+                    .peers
+                    .iter()
+                    .any(|p| p.did.eq_ignore_ascii_case(&m.did))
+                || seen_measurements
+                    .iter()
+                    .any(|prev| prev.eq_ignore_ascii_case(&m.did))
+            {
+                continue;
+            }
+            seen_measurements.push(m.did.as_str());
+            if retained_idx == 0 {
+                return Some(m.did.as_str());
+            }
+            retained_idx -= 1;
+        }
+        None
+    }
+
+    /// Find the row index of `target_did` in [`Self::peer_traffic_rows`].
+    pub fn position_of_peer_did(&self, target_did: &str) -> Option<usize> {
+        self.peer_traffic_rows()
+            .iter()
+            .position(|r| r.peer_did.eq_ignore_ascii_case(target_did))
     }
 
     /// List DHT VNode storage entries currently hosted in this node's persistent or cache storage.
@@ -929,5 +970,83 @@ mod tests {
         });
         history.record(&next);
         assert_eq!(history.sent_deltas.back().copied(), Some(10));
+
+        // Node process restart (`process_started_at_ms` changes from 100 to 7_000) resets baseline:
+        let mut restarted = NodeSnapshot {
+            did: Some("0x1111".to_string()),
+            ..NodeSnapshot::default()
+        };
+        restarted.observability = Some(OperatorSnapshotDto {
+            process_started_at_ms: 7_000,
+            generated_at_ms: 7_500,
+            messages: MessageTotalsDto {
+                sent: 5,
+                ..MessageTotalsDto::default()
+            },
+            ..OperatorSnapshotDto::default()
+        });
+        history.record(&restarted);
+        assert_eq!(history.sent_deltas.back().copied(), Some(0));
+
+        let mut after_restart = NodeSnapshot {
+            did: Some("0x1111".to_string()),
+            ..NodeSnapshot::default()
+        };
+        after_restart.observability = Some(OperatorSnapshotDto {
+            process_started_at_ms: 7_000,
+            generated_at_ms: 8_500,
+            messages: MessageTotalsDto {
+                sent: 12,
+                ..MessageTotalsDto::default()
+            },
+            ..OperatorSnapshotDto::default()
+        });
+        history.record(&after_restart);
+        assert_eq!(history.sent_deltas.back().copied(), Some(7));
+    }
+
+    #[test]
+    fn peer_did_at_matches_peer_traffic_rows_order_with_deduped_measurements() {
+        use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
+
+        let snap = NodeSnapshot {
+            did: Some("0xlocal".to_string()),
+            peers: vec![PeerInfo {
+                did: "0xpeerA".to_string(),
+                state: "Connected".to_string(),
+            }],
+            measurements: vec![
+                PeerMeasurementInfo {
+                    did: "0xpeerB".to_string(),
+                    counters: PeerMeasurementCountersInfo::default(),
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                },
+                PeerMeasurementInfo {
+                    did: "0xpeerA".to_string(),
+                    counters: PeerMeasurementCountersInfo::default(),
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                },
+                PeerMeasurementInfo {
+                    did: "0xpeerC".to_string(),
+                    counters: PeerMeasurementCountersInfo::default(),
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Unknown,
+                },
+            ],
+            ..NodeSnapshot::default()
+        };
+
+        let rows = snap.peer_traffic_rows();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].peer_did, "0xpeerA");
+        assert_eq!(rows[1].peer_did, "0xpeerB");
+        assert_eq!(rows[2].peer_did, "0xpeerC");
+
+        for (idx, row) in rows.iter().enumerate() {
+            assert_eq!(snap.peer_did_at(idx), Some(row.peer_did.as_str()));
+        }
+        assert_eq!(snap.peer_did_at(3), None);
     }
 }
