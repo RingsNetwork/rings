@@ -496,29 +496,46 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|h| h.has_predecessor)
         .unwrap_or_else(|| dht.is_some_and(|d| d.predecessor.is_some()));
 
-    let lines = if area.height <= 6 {
+    let (api_short, ovly_short) = (
+        match (&app.connection_state, health.map(|h| h.process_api_healthy)) {
+            (ConnectionState::Offline(_), _) => "OFFLINE",
+            (ConnectionState::Connecting, None) => "PROBING",
+            (ConnectionState::Online, None) => "RPC-OK",
+            (_, Some(true)) => "OK",
+            (_, Some(false)) => "UNHLTHY",
+        },
+        match (&app.connection_state, health.map(|h| h.overlay_ready)) {
+            (ConnectionState::Offline(_), Some(true)) => "STALE",
+            (ConnectionState::Offline(_), _) => "OFFLINE",
+            (_, Some(true)) => "YES",
+            (_, Some(false)) => "NO",
+            (_, None) => "UNK",
+        },
+    );
+
+    let lines = if area.height <= 6 || area.width < 34 {
         vec![
             Line::from(vec![
-                Span::styled(" API: ", Style::default().fg(Color::Gray)),
+                Span::styled(" API:", Style::default().fg(Color::Gray)),
                 Span::styled(
-                    api_label,
+                    format!("{api_short} "),
                     Style::default().fg(api_color).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" | Overlay: ", Style::default().fg(Color::Gray)),
+                Span::styled("Ovly:", Style::default().fg(Color::Gray)),
                 Span::styled(
-                    overlay_label,
+                    ovly_short,
                     Style::default()
                         .fg(overlay_color)
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(" Peers: ", Style::default().fg(Color::Gray)),
+                Span::styled(" Peers:", Style::default().fg(Color::Gray)),
                 Span::styled(
-                    format!("{admitted} ({})", app.snapshot.peers.len()),
+                    format!("{admitted}({}) ", app.snapshot.peers.len()),
                     Style::default().fg(Color::Cyan),
                 ),
-                Span::styled(" | Succ/Pred: ", Style::default().fg(Color::Gray)),
+                Span::styled("S/P:", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format!(
                         "{}/{}",
@@ -533,10 +550,10 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ),
             ]),
             Line::from(vec![
-                Span::styled(" Dir: ", Style::default().fg(Color::Gray)),
+                Span::styled(" Dir:", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format!(
-                        "{} online / {} exits",
+                        "{}on/{}ex",
                         app.snapshot.online_nodes.len(),
                         app.snapshot.onion_exits.len()
                     ),
@@ -544,16 +561,24 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ),
             ]),
             Line::from(vec![
-                Span::styled(" Roles: ", Style::default().fg(Color::Gray)),
+                Span::styled(" Roles:", Style::default().fg(Color::Gray)),
                 Span::styled(
                     format!(
-                        "net={} relay={} exit={}",
+                        "n={} r={} x={}",
                         app.config
                             .network_id
                             .map(|n| n.to_string())
                             .unwrap_or_else(|| "-".to_string()),
-                        app.config.advertise_onion_relay,
-                        app.config.advertise_onion_exit
+                        if app.config.advertise_onion_relay {
+                            "Y"
+                        } else {
+                            "N"
+                        },
+                        if app.config.advertise_onion_exit {
+                            "Y"
+                        } else {
+                            "N"
+                        }
                     ),
                     Style::default().fg(Color::Gray),
                 ),
@@ -799,44 +824,44 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
 fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_h = area.height.saturating_sub(2);
     let lines = match app.snapshot.observability.as_ref().map(|o| o.messages) {
-        Some(totals) if inner_h <= 1 => vec![Line::from(vec![
-            Span::styled(" Snt:", Style::default().fg(Color::Gray)),
+        Some(totals) if inner_h <= 1 || area.width < 55 => vec![Line::from(vec![
+            Span::styled(" Failed:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{} ", totals.sent),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Rcv:", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{} ", totals.received),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Fwd:", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{} ", totals.forwarded),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Mail:", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{} ", totals.stored),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Failed:", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{}", totals.failed),
+                format!("{} ", format_compact_count(totals.failed)),
                 Style::default()
                     .fg(if totals.failed == 0 {
                         Color::Gray
                     } else {
                         Color::Red
                     })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("S:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", format_compact_count(totals.sent)),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("R:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", format_compact_count(totals.received)),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("F:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", format_compact_count(totals.forwarded)),
+                Style::default()
+                    .fg(Color::Blue)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("M:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format_compact_count(totals.stored),
+                Style::default()
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             ),
         ])],
@@ -907,42 +932,46 @@ fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let lookups = app.snapshot.observability.as_ref().map(|o| &o.dht_lookups);
 
     let lines = match lookups {
-        Some(l) if inner_h <= 1 => vec![Line::from(vec![
-            Span::styled(" Tot:", Style::default().fg(Color::Gray)),
+        Some(l) if inner_h <= 1 || area.width < 55 => vec![Line::from(vec![
+            Span::styled(" Fail:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{} ", l.total),
+                format!("{} ", format_compact_count(l.failed)),
                 Style::default()
-                    .fg(Color::White)
+                    .fg(if l.failed == 0 {
+                        Color::Gray
+                    } else {
+                        Color::Red
+                    })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("T/O:", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ", format_compact_count(l.timed_out)),
+                Style::default()
+                    .fg(if l.timed_out == 0 {
+                        Color::Gray
+                    } else {
+                        Color::LightRed
+                    })
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("OK:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{} ", l.succeeded),
+                format!("{} ", format_compact_count(l.succeeded)),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Fail:", Style::default().fg(Color::Gray)),
+            Span::styled("Tot:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{} ", l.failed),
-                Style::default().fg(if l.failed == 0 {
-                    Color::Gray
-                } else {
-                    Color::Red
-                }),
-            ),
-            Span::styled("T/O:", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{} ", l.timed_out),
-                Style::default().fg(if l.timed_out == 0 {
-                    Color::Gray
-                } else {
-                    Color::LightRed
-                }),
+                format!("{} ", format_compact_count(l.total)),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("Avg:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{:.1}ms", l.avg_latency_ms()),
+                format!("{:.0}ms", l.avg_latency_ms()),
                 Style::default().fg(Color::Cyan),
             ),
         ])],
@@ -2178,9 +2207,9 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 "No command output yet.\n\nClick any command button above (or press its hotkey) to run an RPC operation.\nOutputs such as WebRTC SDP offers/answers, PubSub topic messages, and service lookup DIDs will be displayed here.",
             );
             let inner_w = usize::from(out_rect.width.saturating_sub(2)).max(1);
-            let inner_h = out_rect.height.saturating_sub(2);
+            let inner_h = usize::from(out_rect.height.saturating_sub(2));
             let wrapped_lines = wrap_text_for_width(text, inner_w);
-            let total_lines = u16::try_from(wrapped_lines.len().max(1)).unwrap_or(u16::MAX);
+            let total_lines = wrapped_lines.len().max(1);
             app.output_max_scroll = total_lines.saturating_sub(inner_h);
             app.output_scroll = app.output_scroll.min(app.output_max_scroll);
 
@@ -2203,13 +2232,18 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 } else {
                     Color::Green
                 }));
-            let rendered_lines: Vec<Line<'_>> = wrapped_lines.into_iter().map(Line::from).collect();
-            frame.render_widget(
-                Paragraph::new(rendered_lines)
-                    .scroll((app.output_scroll, 0))
-                    .block(block),
-                out_rect,
-            );
+            let visible_end = app
+                .output_scroll
+                .saturating_add(inner_h)
+                .min(wrapped_lines.len());
+            let rendered_lines: Vec<Line<'_>> = wrapped_lines
+                .get(app.output_scroll..visible_end)
+                .unwrap_or(&[])
+                .iter()
+                .cloned()
+                .map(Line::from)
+                .collect();
+            frame.render_widget(Paragraph::new(rendered_lines).block(block), out_rect);
         }
 
         if let Some(&log_rect) = cols.get(1) {
@@ -2405,7 +2439,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
             Span::styled(
                 visible_field_slice_with_cursor(
                     &field.value,
-                    field.value.chars().count(),
+                    field.grapheme_count(),
                     max_cols,
                     false,
                 ),
@@ -2479,7 +2513,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Clear, rect);
 
     let inner_w = usize::from(rect.width.saturating_sub(2)).max(1);
-    let inner_h = rect.height.saturating_sub(2);
+    let inner_h = usize::from(rect.height.saturating_sub(2));
 
     let raw_entries: [(Option<Color>, &str); 18] = [
         (Some(Color::Cyan), "Navigation, Focus & Mouse Support"),
@@ -2556,7 +2590,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         }
     }
 
-    let total_lines = u16::try_from(wrapped_lines.len().max(1)).unwrap_or(u16::MAX);
+    let total_lines = wrapped_lines.len().max(1);
     app.help_max_scroll = total_lines.saturating_sub(inner_h);
     app.help_scroll = app.help_scroll.min(app.help_max_scroll);
 
@@ -2570,12 +2604,15 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         )))
         .border_style(Style::default().fg(Color::Cyan));
-    frame.render_widget(
-        Paragraph::new(wrapped_lines)
-            .scroll((app.help_scroll, 0))
-            .block(block),
-        rect,
-    );
+    let visible_end = app
+        .help_scroll
+        .saturating_add(inner_h)
+        .min(wrapped_lines.len());
+    let visible_lines: Vec<Line<'static>> = wrapped_lines
+        .get(app.help_scroll..visible_end)
+        .unwrap_or(&[])
+        .to_vec();
+    frame.render_widget(Paragraph::new(visible_lines).block(block), rect);
 }
 
 fn stateful_table_state(selected: usize, row_count: usize, offset: &mut usize) -> TableState {
@@ -2650,8 +2687,8 @@ fn register_log_row_hits(
 }
 
 /// Wrap `text` into visual lines of at most `max_width` terminal display columns, breaking on word
-/// boundaries when possible (preserving leading spaces) and splitting single words wider than
-/// `max_width` along Unicode grapheme cluster boundaries.
+/// boundaries when possible (preserving leading spaces and overwide whitespace runs) and splitting
+/// tokens wider than `max_width` along Unicode grapheme cluster boundaries.
 pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
     let limit = max_width.max(1);
     let mut result = Vec::new();
@@ -2695,6 +2732,7 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
 
         let mut current = String::new();
         let mut current_cols = 0_usize;
+        let mut line_emitted = false;
 
         for token in tokens {
             let token_cols = UnicodeWidthStr::width(token);
@@ -2706,13 +2744,27 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
             } else if is_ws {
                 if !current.is_empty() {
                     result.push(current);
+                    line_emitted = true;
                     current = String::new();
                     current_cols = 0;
+                } else {
+                    for g in UnicodeSegmentation::graphemes(token, true) {
+                        let g_cols = UnicodeWidthStr::width(g).max(1);
+                        if current_cols + g_cols > limit && !current.is_empty() {
+                            result.push(current);
+                            line_emitted = true;
+                            current = String::new();
+                            current_cols = 0;
+                        }
+                        current.push_str(g);
+                        current_cols += g_cols;
+                    }
                 }
             } else {
                 if !current.is_empty() {
                     let trimmed = current.trim_end().to_string();
                     result.push(if trimmed.is_empty() { current } else { trimmed });
+                    line_emitted = true;
                     current = String::new();
                     current_cols = 0;
                 }
@@ -2724,6 +2776,7 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
                         let g_cols = UnicodeWidthStr::width(g).max(1);
                         if current_cols + g_cols > limit && !current.is_empty() {
                             result.push(current);
+                            line_emitted = true;
                             current = String::new();
                             current_cols = 0;
                         }
@@ -2733,7 +2786,7 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
                 }
             }
         }
-        if !current.is_empty() {
+        if !current.is_empty() || !line_emitted {
             result.push(current);
         }
     }
@@ -2744,12 +2797,12 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
     result
 }
 
-/// Format a modal input value onto a single visual line with a cursor `█` at `cursor_char_idx`,
-/// slicing on Unicode grapheme cluster boundaries and accounting for cursor and ellipsis widths via
-/// `unicode-width` so `UnicodeWidthStr::width(&returned)` never exceeds `max_cols`.
+/// Format a modal input value onto a single visual line with a cursor `█` at `cursor_grapheme_idx`,
+/// slicing on extended Unicode grapheme cluster boundaries and accounting for cursor and ellipsis
+/// widths via `unicode-width` so `UnicodeWidthStr::width(&returned)` never exceeds `max_cols`.
 pub fn visible_field_slice_with_cursor(
     value: &str,
-    cursor_char_idx: usize,
+    cursor_grapheme_idx: usize,
     max_cols: usize,
     show_cursor: bool,
 ) -> String {
@@ -2772,17 +2825,7 @@ pub fn visible_field_slice_with_cursor(
         .map(|&g| UnicodeWidthStr::width(g).max(1))
         .collect();
 
-    // Map `cursor_char_idx` (character offset in `value`) to the corresponding grapheme index.
-    let mut char_accum = 0_usize;
-    let mut cur_g = graphemes.len();
-    for (g_idx, &g) in graphemes.iter().enumerate() {
-        if cursor_char_idx <= char_accum {
-            cur_g = g_idx;
-            break;
-        }
-        char_accum += g.chars().count();
-    }
-
+    let cur_g = cursor_grapheme_idx.min(graphemes.len());
     let cursor_cols = usize::from(show_cursor);
     let mut start = cur_g;
     let mut end = cur_g;
@@ -2839,6 +2882,19 @@ pub fn visible_field_slice_with_cursor(
     }
     let _ = UnicodeWidthChar::width('█');
     out
+}
+
+/// Format an integer counter in a compact form (`999`, `10k`, `1.2M`, `3.4B`) for narrow cards.
+pub fn format_compact_count(count: u64) -> String {
+    if count >= 1_000_000_000 {
+        format!("{:.1}B", count as f64 / 1_000_000_000.0)
+    } else if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 10_000 {
+        format!("{}k", count / 1_000)
+    } else {
+        format!("{count}")
+    }
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

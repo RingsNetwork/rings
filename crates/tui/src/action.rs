@@ -2,6 +2,7 @@
 
 use ratatui::layout::Rect;
 use rings_rpc::protos::rings_node::PeerMeasurementInfo;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::types::DhtKeyLookupReport;
 use crate::types::NodeSnapshot;
@@ -275,7 +276,7 @@ pub struct FormField {
     pub placeholder: &'static str,
     /// Current user-edited text value.
     pub value: String,
-    /// Character cursor position in `0..=self.value.chars().count()`.
+    /// Extended Unicode grapheme cluster cursor position in `0..=self.grapheme_count()`.
     pub cursor: usize,
     /// Whether this field is optional.
     pub optional: bool,
@@ -292,7 +293,7 @@ impl FormField {
         optional: bool,
     ) -> Self {
         let value = initial.into();
-        let cursor = value.chars().count();
+        let cursor = UnicodeSegmentation::graphemes(value.as_str(), true).count();
         Self {
             label,
             placeholder,
@@ -315,25 +316,39 @@ impl FormField {
         field
     }
 
-    fn byte_index_at_char(&self, char_idx: usize) -> usize {
-        self.value
-            .char_indices()
-            .nth(char_idx)
+    /// Return the number of extended Unicode grapheme clusters in `self.value`.
+    pub fn grapheme_count(&self) -> usize {
+        UnicodeSegmentation::graphemes(self.value.as_str(), true).count()
+    }
+
+    fn byte_index_at_grapheme(&self, grapheme_idx: usize) -> usize {
+        UnicodeSegmentation::grapheme_indices(self.value.as_str(), true)
+            .nth(grapheme_idx)
             .map(|(byte_idx, _)| byte_idx)
             .unwrap_or(self.value.len())
     }
 
-    /// Insert a string slice at the current cursor position in $O(n)$ time.
+    fn byte_range_of_grapheme(&self, grapheme_idx: usize) -> Option<(usize, usize)> {
+        UnicodeSegmentation::grapheme_indices(self.value.as_str(), true)
+            .nth(grapheme_idx)
+            .map(|(start, g)| (start, start + g.len()))
+    }
+
+    /// Insert a string slice at the current grapheme cursor position in $O(n)$ time.
     pub fn insert_str(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
-        let char_len = self.value.chars().count();
-        let cur = self.cursor.min(char_len);
-        let byte_idx = self.byte_index_at_char(cur);
-        let inserted_chars = text.chars().count();
+        let g_len = self.grapheme_count();
+        let cur = self.cursor.min(g_len);
+        let byte_idx = self.byte_index_at_grapheme(cur);
         self.value.insert_str(byte_idx, text);
-        self.cursor = cur + inserted_chars;
+        let prefix_bytes = byte_idx + text.len();
+        self.cursor = self
+            .value
+            .get(..prefix_bytes)
+            .map(|prefix| UnicodeSegmentation::graphemes(prefix, true).count())
+            .unwrap_or_else(|| self.grapheme_count());
     }
 }
 
@@ -514,73 +529,72 @@ impl CommandModal {
         }
     }
 
-    /// Move the character cursor left by 1 character in the currently focused field.
+    /// Move the cursor left by 1 extended Unicode grapheme cluster in the currently focused field.
     pub fn move_cursor_left(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
             field.cursor = field.cursor.saturating_sub(1);
         }
     }
 
-    /// Move the character cursor right by 1 character in the currently focused field.
+    /// Move the cursor right by 1 extended Unicode grapheme cluster in the currently focused field.
     pub fn move_cursor_right(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            let len = field.value.chars().count();
+            let len = field.grapheme_count();
             if field.cursor < len {
                 field.cursor += 1;
             }
         }
     }
 
-    /// Move the character cursor to the start of the currently focused field.
+    /// Move the cursor to the start of the currently focused field.
     pub fn move_cursor_home(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
             field.cursor = 0;
         }
     }
 
-    /// Move the character cursor to the end of the currently focused field.
+    /// Move the cursor to the end of the currently focused field.
     pub fn move_cursor_end(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            field.cursor = field.value.chars().count();
+            field.cursor = field.grapheme_count();
         }
     }
 
     /// Insert a character at the cursor position of the currently focused field.
     pub fn push_char(&mut self, ch: char) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            let char_len = field.value.chars().count();
-            let cur = field.cursor.min(char_len);
-            let byte_idx = field.byte_index_at_char(cur);
-            field.value.insert(byte_idx, ch);
-            field.cursor = cur + 1;
+            let mut buf = [0_u8; 4];
+            field.insert_str(ch.encode_utf8(&mut buf));
             self.clear_error_if_active();
         }
     }
 
-    /// Remove the character immediately before the cursor in the currently focused field (`Backspace`).
+    /// Remove the extended Unicode grapheme cluster immediately before the cursor (`Backspace`).
     pub fn pop_char(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            let char_len = field.value.chars().count();
-            let cur = field.cursor.min(char_len);
+            let g_len = field.grapheme_count();
+            let cur = field.cursor.min(g_len);
             if cur > 0 {
                 let remove_idx = cur - 1;
-                let byte_idx = field.byte_index_at_char(remove_idx);
-                field.value.remove(byte_idx);
-                field.cursor = remove_idx;
-                self.clear_error_if_active();
+                if let Some((start, end)) = field.byte_range_of_grapheme(remove_idx) {
+                    field.value.replace_range(start..end, "");
+                    field.cursor = remove_idx;
+                    self.clear_error_if_active();
+                }
             }
         }
     }
 
-    /// Remove the character under the cursor in the currently focused field (`Delete`).
+    /// Remove the extended Unicode grapheme cluster under the cursor (`Delete`).
     pub fn delete_char(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            let char_len = field.value.chars().count();
-            let cur = field.cursor.min(char_len);
-            if cur < char_len {
-                let byte_idx = field.byte_index_at_char(cur);
-                field.value.remove(byte_idx);
-                self.clear_error_if_active();
+            let g_len = field.grapheme_count();
+            let cur = field.cursor.min(g_len);
+            if cur < g_len {
+                if let Some((start, end)) = field.byte_range_of_grapheme(cur) {
+                    field.value.replace_range(start..end, "");
+                    self.clear_error_if_active();
+                }
             }
         }
     }

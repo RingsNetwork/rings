@@ -191,20 +191,20 @@ pub struct App {
     pub log_table_offset: usize,
     /// Active keyboard focus pane in `6:Commands`.
     pub commands_focus: CommandsFocus,
-    /// Vertical scroll offset (in lines) for the Command Output inspector panel in `6:Commands`.
-    pub output_scroll: u16,
+    /// Vertical scroll offset (in visual lines) for the Command Output inspector panel in `6:Commands`.
+    pub output_scroll: usize,
     /// Upper bound for `output_scroll` computed from the rendered output line count and panel height.
-    pub output_max_scroll: u16,
+    pub output_max_scroll: usize,
     /// Optional keyboard focus on the persistent toolbar buttons.
     pub focused_toolbar_idx: Option<usize>,
     /// Active modal input dialog, when open.
     pub modal: Option<CommandModal>,
     /// Whether the help overlay is open.
     pub show_help: bool,
-    /// Vertical scroll offset (in lines) for the Help overlay when terminal height is compact.
-    pub help_scroll: u16,
+    /// Vertical scroll offset (in visual lines) for the Help overlay when terminal height is compact.
+    pub help_scroll: usize,
     /// Upper bound for `help_scroll` computed during Help overlay rendering.
-    pub help_max_scroll: u16,
+    pub help_max_scroll: usize,
     /// Number of asynchronous commands currently executing in the active client epoch.
     pub in_flight_commands: usize,
     /// Whether a `RefreshSnapshot` request is currently in flight in the active client epoch.
@@ -641,13 +641,9 @@ impl App {
         let insert_pos = if is_stale_out_of_order {
             self.action_logs
                 .iter()
-                .position(|existing| existing.request_id > 0 && existing.request_id <= request_id)
-                .unwrap_or_else(|| {
-                    self.action_logs
-                        .iter()
-                        .take_while(|existing| existing.request_id > request_id)
-                        .count()
-                })
+                .rposition(|existing| existing.request_id > request_id)
+                .map(|idx| idx + 1)
+                .unwrap_or(self.action_logs.len())
         } else {
             0
         };
@@ -661,7 +657,7 @@ impl App {
         let user_pinned_to_history = !self.follow_latest_log
             || (self.commands_focus != CommandsFocus::Workbench && self.selected_log_id.is_some());
 
-        if user_pinned_to_history {
+        if user_pinned_to_history || is_stale_out_of_order {
             if clamped_pos <= self.log_table_offset && self.log_table_offset > 0 {
                 self.log_table_offset = self
                     .log_table_offset
@@ -671,22 +667,21 @@ impl App {
             if let Some(pinned_id) = self.selected_log_id {
                 if let Some(pos) = self.action_logs.iter().position(|e| e.id == pinned_id) {
                     self.selected_log_idx = pos;
+                    if self.last_command_output.is_none() {
+                        self.load_selected_log_into_output();
+                    }
                     return;
                 }
             }
-            // Pinned entry was evicted from the 100-entry ring buffer; clamp to the oldest retained entry.
+            // Pinned entry was evicted from the 100-entry ring buffer; clamp and sync output.
             self.clamp_selections();
             self.load_selected_log_into_output();
-        } else if !is_stale_out_of_order {
+        } else {
             self.selected_log_idx = 0;
             self.selected_log_id = Some(id);
             self.log_table_offset = 0;
             self.last_command_output = Some(entry_output);
             self.output_scroll = 0;
-        } else {
-            // Stale out-of-order RPC inserted below index 0: keep index 0 selected.
-            self.selected_log_idx = 0;
-            self.selected_log_id = self.action_logs.front().map(|e| e.id);
         }
     }
 

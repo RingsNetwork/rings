@@ -1389,6 +1389,61 @@ mod tests {
         let wrapped_e = ui::wrap_text_for_width(&latin_e, 38);
         assert_eq!(wrapped_e.len(), 3);
 
+        // 2b. Overwide whitespace lines and leading indentation are preserved, never swallowed (F5).
+        let ws_sample = format!("A\n{}\nB\n    indented", " ".repeat(80));
+        let wrapped_ws = ui::wrap_text_for_width(&ws_sample, 38);
+        assert_eq!(wrapped_ws, vec![
+            "A".to_string(),
+            " ".repeat(38),
+            " ".repeat(38),
+            " ".repeat(4),
+            "B".to_string(),
+            "    indented".to_string(),
+        ]);
+
+        // 2c. Grapheme-cluster cursor editing aligns visual cursor with insertion/deletion on combining marks (F4).
+        let mut app_g = App::new(test_config());
+        app_g.trigger_button(ButtonId::RegisterService);
+        app_g.handle_paste("e\u{0301}X");
+        {
+            let m = app_g.modal.as_ref().expect("modal");
+            assert_eq!(m.fields[0].grapheme_count(), 2);
+            assert_eq!(m.fields[0].cursor, 2);
+        }
+        // Home -> Right moves cursor after the full `e\u{0301}` grapheme cluster (index 1, before `X`):
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        {
+            let m = app_g.modal.as_ref().expect("modal");
+            assert_eq!(m.fields[0].cursor, 1);
+            let rendered = ui::visible_field_slice_with_cursor(
+                &m.fields[0].value,
+                m.fields[0].cursor,
+                20,
+                true,
+            );
+            assert_eq!(rendered, "e\u{0301}█X");
+        }
+        // Typing `'a'` inserts after `e\u{0301}` (producing `"e\u{0301}aX"`, NOT `"ea\u{0301}X"`):
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(
+            app_g.modal.as_ref().expect("modal").fields[0].value,
+            "e\u{0301}aX"
+        );
+        // Delete removes `'X'`, Backspace removes `'a'`, second Backspace removes the entire `"e\u{0301}"` cluster:
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(
+            app_g.modal.as_ref().expect("modal").fields[0].value,
+            "e\u{0301}a"
+        );
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(
+            app_g.modal.as_ref().expect("modal").fields[0].value,
+            "e\u{0301}"
+        );
+        app_g.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app_g.modal.as_ref().expect("modal").fields[0].value, "");
+
         // 3. `visible_field_slice_with_cursor` never exceeds `max_cols` display width across ASCII,
         // Latin-1, combining marks, CJK, and multi-line markers.
         for sample in [
@@ -1398,7 +1453,8 @@ mod tests {
             "你好世界Rings节点测试输入长文本切分",
             "line1\nline2\tindented\nline3-long-payload",
         ] {
-            for cur in [0, 3, sample.chars().count() / 2, sample.chars().count()] {
+            let g_len = unicode_segmentation::UnicodeSegmentation::graphemes(sample, true).count();
+            for cur in [0, 3, g_len / 2, g_len] {
                 for max_cols in [8, 14, 24] {
                     let s = ui::visible_field_slice_with_cursor(sample, cur, max_cols, true);
                     let width = unicode_width::UnicodeWidthStr::width(s.as_str());
@@ -1447,21 +1503,26 @@ mod tests {
                 }],
                 observability: Some(OperatorSnapshotDto {
                     messages: MessageTotalsDto {
-                        sent: 10,
-                        received: 20,
-                        forwarded: 5,
-                        stored: 3,
+                        sent: 10_000,
+                        received: 10_000,
+                        forwarded: 10_000,
+                        stored: 10_000,
                         failed: 99,
                     },
                     dht_lookups: DhtLookupSnapshotDto {
-                        total: 50,
-                        succeeded: 40,
+                        total: 10_000,
+                        succeeded: 10_000,
                         failed: 3,
                         timed_out: 77,
                         in_flight: 1,
-                        latency_sum_ms: 500,
-                        latency_count: 50,
+                        latency_sum_ms: 500_000,
+                        latency_count: 10_000,
                         latency_buckets: Vec::new(),
+                    },
+                    health: HealthSnapshotDto {
+                        process_api_healthy: true,
+                        overlay_ready: true,
+                        ..HealthSnapshotDto::default()
                     },
                     ..OperatorSnapshotDto::default()
                 }),
@@ -1469,7 +1530,8 @@ mod tests {
             })),
         });
 
-        // Verify 80x24 Overview renders Failed:99 and T/O:77 visibly, and 3:Peers renders "Unknown" for unmeasured peer.
+        // Verify 80x24 Overview renders Ovly:YES, Failed:99, S:10k, Fail:3, and T/O:77 visibly even with 10,000+ counters (F3),
+        // and 3:Peers renders "Unknown" for unmeasured peer (R7).
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("80x24 terminal");
         app.active_tab = TabId::Overview;
@@ -1477,7 +1539,10 @@ mod tests {
             .draw(|frame| ui::render(frame, &mut app))
             .expect("draw overview 80x24");
         let overview_screen = buffer_to_string(&terminal);
+        assert!(overview_screen.contains("Ovly:YES"));
         assert!(overview_screen.contains("Failed:99"));
+        assert!(overview_screen.contains("S:10k"));
+        assert!(overview_screen.contains("Fail:3"));
         assert!(overview_screen.contains("T/O:77"));
 
         app.active_tab = TabId::Peers;
@@ -1533,6 +1598,73 @@ mod tests {
         // Pinned selection shifts to index 2 (`offer-1`) and output remains `"OFFER-PAYLOAD-1"`!
         assert_eq!(app.selected_log_idx, 2);
         assert_eq!(app.last_command_output.as_deref(), Some("OFFER-PAYLOAD-1"));
+
+        // Verify F1: when `follow_latest_log = true` and logs contain `[P0 (req_id=0), RPC2 (req_id=2)]`,
+        // a late out-of-order `RPC1 (req_id=1)` is inserted AFTER `RPC2` and never desynchronizes
+        // `selected_log_idx` / `selected_log_id` from `last_command_output`.
+        app.follow_latest_log = true;
+        app.commands_focus = crate::app::CommandsFocus::Workbench;
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 20,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "createOffer",
+                summary: "rpc-20".into(),
+                output: Some("RPC-20-OUT".into()),
+                measurement: None,
+                dht_lookup: None,
+                registered_service: None,
+                duration_ms: 2,
+            },
+        });
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(app.action_logs[0].command, "autoPoll");
+        assert_eq!(app.action_logs[1].request_id, 20);
+        // Late completion of request_id = 19 (< 20):
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 19,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "createOffer",
+                summary: "rpc-19-late".into(),
+                output: Some("RPC-19-STALE-OUT".into()),
+                measurement: None,
+                dht_lookup: None,
+                registered_service: None,
+                duration_ms: 9,
+            },
+        });
+        assert_eq!(app.action_logs[0].command, "autoPoll");
+        assert_eq!(app.action_logs[1].request_id, 20);
+        assert_eq!(app.action_logs[2].request_id, 19);
+        assert_eq!(app.selected_log_idx, 0);
+        assert_eq!(app.selected_log_id, Some(app.action_logs[0].id));
+        assert_eq!(
+            app.last_command_output.as_deref(),
+            Some(app.action_logs[0].formatted_output().as_str())
+        );
+
+        // Verify F2: 70,000-line output (> u16::MAX) can scroll all the way to line 70,000.
+        let huge_output = (1..=70_000_u32)
+            .map(|i| format!("LINE-{i:05}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.last_command_output = Some(huge_output);
+        app.active_tab = TabId::Commands;
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw huge output");
+        assert!(app.output_max_scroll > usize::from(u16::MAX));
+        app.output_scroll = app.output_max_scroll;
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw huge output at bottom");
+        let bottom_screen = buffer_to_string(&terminal);
+        assert!(bottom_screen.contains("LINE-70000"));
 
         // Verify R12: when command queue is full, submitting a modal keeps the modal open and preserves input.
         for i in 0..crate::app::MAX_PENDING_COMMANDS {
