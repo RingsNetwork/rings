@@ -823,12 +823,19 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             ])
             .split(spark_rect);
 
-        let totals = app
-            .snapshot
-            .observability
-            .as_ref()
-            .map(|o| o.messages)
-            .unwrap_or_default();
+        let totals_opt = app.snapshot.observability.as_ref().map(|o| o.messages);
+        let sent_lbl = totals_opt
+            .map(|t| t.sent.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let recv_lbl = totals_opt
+            .map(|t| t.received.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let fwd_lbl = totals_opt
+            .map(|t| t.forwarded.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
+        let fail_lbl = totals_opt
+            .map(|t| t.failed.to_string())
+            .unwrap_or_else(|| "N/A".to_string());
 
         if let Some(&c0) = cols.first() {
             let data = app.history.sent_series();
@@ -836,7 +843,7 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Sent (total: {}) ", totals.sent)),
+                        .title(format!(" Sent (total: {sent_lbl}) ")),
                 )
                 .data(&data)
                 .style(Style::default().fg(Color::Green));
@@ -848,7 +855,7 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Received (total: {}) ", totals.received)),
+                        .title(format!(" Received (total: {recv_lbl}) ")),
                 )
                 .data(&data)
                 .style(Style::default().fg(Color::Cyan));
@@ -860,7 +867,7 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Forwarded (total: {}) ", totals.forwarded)),
+                        .title(format!(" Forwarded (total: {fwd_lbl}) ")),
                 )
                 .data(&data)
                 .style(Style::default().fg(Color::Blue));
@@ -872,7 +879,7 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(format!(" Failed (total: {}) ", totals.failed)),
+                        .title(format!(" Failed (total: {fail_lbl}) ")),
                 )
                 .data(&data)
                 .style(Style::default().fg(Color::Red));

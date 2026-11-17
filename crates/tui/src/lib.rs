@@ -205,10 +205,13 @@ fn spawn_terminal_input_reader() -> (mpsc::Receiver<Event>, InputReaderGuard) {
         while !thread_stop.load(Ordering::Relaxed) {
             match event::poll(INPUT_POLL_SLICE) {
                 Ok(true) => match event::read() {
-                    Ok(ev) => match tx.try_send(ev) {
-                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                        Err(mpsc::error::TrySendError::Closed(_)) => break,
-                    },
+                    Ok(ev) => {
+                        // `InputReaderGuard::shutdown` closes `rx` before `join()`, so `blocking_send`
+                        // preserves every keystroke under backpressure while immediately unblocking on exit.
+                        if tx.blocking_send(ev).is_err() {
+                            break;
+                        }
+                    }
                     Err(_) => break,
                 },
                 Ok(false) => {}
@@ -1043,6 +1046,62 @@ mod tests {
             .expect("peerB");
         assert_eq!(peer_a.sent_ok, 300);
         assert_eq!(peer_b.sent_ok, 400);
+
+        // Direction 2: Newer Snapshot (req_id = 10, sent = 900) arrives first, and then an older
+        // in-flight `InspectPeer(peerA)` (req_id = 6, sent = 500) arrives late -> must NOT overwrite 900!
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 10,
+            },
+            outcome: CommandOutcome::Snapshot(Box::new(NodeSnapshot {
+                did: Some("0xlocal".to_string()),
+                peers: vec![PeerInfo {
+                    did: "0xpeerA".to_string(),
+                    state: "Connected".to_string(),
+                }],
+                measurements: vec![PeerMeasurementInfo {
+                    did: "0xpeerA".to_string(),
+                    counters: PeerMeasurementCountersInfo {
+                        sent: 900,
+                        ..PeerMeasurementCountersInfo::default()
+                    },
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                }],
+                include_expired_directory: false,
+                ..NodeSnapshot::default()
+            })),
+        });
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 6,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "peerMeasurement",
+                summary: "late peerA measurement".to_string(),
+                output: None,
+                measurement: Some(Box::new(PeerMeasurementInfo {
+                    did: "0xpeerA".to_string(),
+                    counters: PeerMeasurementCountersInfo {
+                        sent: 500,
+                        ..PeerMeasurementCountersInfo::default()
+                    },
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                })),
+                dht_lookup: None,
+                registered_service: None,
+                duration_ms: 1,
+            },
+        });
+        let rows2 = app.snapshot.peer_traffic_rows();
+        let peer_a2 = rows2
+            .iter()
+            .find(|r| r.peer_did == "0xpeerA")
+            .expect("peerA");
+        assert_eq!(peer_a2.sent_ok, 900);
     }
 
     #[test]
@@ -1050,18 +1109,14 @@ mod tests {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop_flag);
         let (tx, mut rx) = mpsc::channel::<u32>(2);
-        // Fill the bounded channel to capacity before the producer thread starts.
+        // Fill the bounded channel to capacity so the next `blocking_send` parks the producer thread.
         tx.try_send(1).expect("fill 1");
         tx.try_send(2).expect("fill 2");
-        assert!(tx.try_send(3).is_err());
 
         let handle = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
-                match tx.try_send(99) {
-                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                if tx.blocking_send(99).is_err() {
+                    break;
                 }
             }
         });
@@ -1070,6 +1125,7 @@ mod tests {
             stop_flag,
             handle: Some(handle),
         };
+        // `shutdown` closes `rx` before `join()`, immediately waking `tx.blocking_send(99)` with `Err`.
         guard.shutdown(&mut rx);
         assert!(guard.handle.is_none());
     }
