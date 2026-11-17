@@ -1389,7 +1389,7 @@ mod tests {
         let wrapped_e = ui::wrap_text_for_width(&latin_e, 38);
         assert_eq!(wrapped_e.len(), 3);
 
-        // 2b. Overwide whitespace lines and leading indentation are preserved, never swallowed (F5).
+        // 2b. Overwide whitespace lines, mid-line long whitespace, and leading indentation are preserved (F5, G1).
         let ws_sample = format!("A\n{}\nB\n    indented", " ".repeat(80));
         let wrapped_ws = ui::wrap_text_for_width(&ws_sample, 38);
         assert_eq!(wrapped_ws, vec![
@@ -1400,8 +1400,18 @@ mod tests {
             "B".to_string(),
             "    indented".to_string(),
         ]);
+        let inline_ws = format!("A{}B", " ".repeat(80));
+        let wrapped_inline_ws = ui::wrap_text_for_width(&inline_ws, 38);
+        assert_eq!(wrapped_inline_ws, vec![
+            format!("A{}", " ".repeat(37)),
+            " ".repeat(38),
+            "     B".to_string(),
+        ]);
 
-        // 2c. Grapheme-cluster cursor editing aligns visual cursor with insertion/deletion on combining marks (F4).
+        // 2c. Grapheme-cluster cursor editing aligns visual cursor with insertion/deletion on combining marks,
+        // including combining marks immediately after LF `\n\u{0301}X` (F4, G2).
+        let nl_comb = ui::visible_field_slice_with_cursor("\n\u{0301}X", 2, 20, true);
+        assert_eq!(nl_comb, "↵\u{0301}█X");
         let mut app_g = App::new(test_config());
         app_g.trigger_button(ButtonId::RegisterService);
         app_g.handle_paste("e\u{0301}X");
@@ -1503,15 +1513,15 @@ mod tests {
                 }],
                 observability: Some(OperatorSnapshotDto {
                     messages: MessageTotalsDto {
-                        sent: 10_000,
-                        received: 10_000,
-                        forwarded: 10_000,
-                        stored: 10_000,
+                        sent: 9_999,
+                        received: 9_999,
+                        forwarded: 9_999,
+                        stored: 9_999,
                         failed: 99,
                     },
                     dht_lookups: DhtLookupSnapshotDto {
-                        total: 10_000,
-                        succeeded: 10_000,
+                        total: 9_999,
+                        succeeded: 9_999,
                         failed: 3,
                         timed_out: 77,
                         in_flight: 1,
@@ -1530,7 +1540,7 @@ mod tests {
             })),
         });
 
-        // Verify 80x24 Overview renders Ovly:YES, Failed:99, S:10k, Fail:3, and T/O:77 visibly even with 10,000+ counters (F3),
+        // Verify 80x24 Overview renders Ovly:YES, Failed:99, S:9k..M:9k, Fail:3, and T/O:77 visibly without clipping (F3, G3),
         // and 3:Peers renders "Unknown" for unmeasured peer (R7).
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).expect("80x24 terminal");
@@ -1541,9 +1551,49 @@ mod tests {
         let overview_screen = buffer_to_string(&terminal);
         assert!(overview_screen.contains("Ovly:YES"));
         assert!(overview_screen.contains("Failed:99"));
-        assert!(overview_screen.contains("S:10k"));
+        assert!(overview_screen.contains("S:9k"));
+        assert!(overview_screen.contains("M:9k"));
         assert!(overview_screen.contains("Fail:3"));
         assert!(overview_screen.contains("T/O:77"));
+
+        // Verify `format_compact_count` is `<= 3` chars across all orders of magnitude up to `u64::MAX`
+        // and that five `u64::MAX` counters + multi-minute latency still fit in 38 cols on 80x24 without clipping.
+        for val in [
+            0,
+            999,
+            1_000,
+            9_999,
+            99_999,
+            100_000,
+            999_999,
+            99_999_999,
+            100_000_000_000_000,
+            u64::MAX,
+        ] {
+            let formatted = ui::format_compact_count(val);
+            assert!(
+                formatted.len() <= 3,
+                "expected <= 3 chars for {val}, got {formatted:?}"
+            );
+        }
+        if let Some(obs) = &mut app.snapshot.observability {
+            obs.messages = MessageTotalsDto {
+                sent: u64::MAX,
+                received: u64::MAX,
+                forwarded: u64::MAX,
+                stored: u64::MAX,
+                failed: u64::MAX,
+            };
+            obs.dht_lookups.latency_sum_ms = 1_200_000;
+            obs.dht_lookups.latency_count = 1;
+        }
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw overview u64::MAX");
+        let max_screen = buffer_to_string(&terminal);
+        assert!(max_screen.contains("Failed:18E"));
+        assert!(max_screen.contains("M:18E"));
+        assert!(max_screen.contains("20m"));
 
         app.active_tab = TabId::Peers;
         terminal

@@ -825,7 +825,7 @@ fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_h = area.height.saturating_sub(2);
     let lines = match app.snapshot.observability.as_ref().map(|o| o.messages) {
         Some(totals) if inner_h <= 1 || area.width < 55 => vec![Line::from(vec![
-            Span::styled(" Failed:", Style::default().fg(Color::Gray)),
+            Span::styled("Failed:", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{} ", format_compact_count(totals.failed)),
                 Style::default()
@@ -933,7 +933,7 @@ fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let lines = match lookups {
         Some(l) if inner_h <= 1 || area.width < 55 => vec![Line::from(vec![
-            Span::styled(" Fail:", Style::default().fg(Color::Gray)),
+            Span::styled("Fail:", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{} ", format_compact_count(l.failed)),
                 Style::default()
@@ -962,16 +962,15 @@ fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Tot:", Style::default().fg(Color::Gray)),
+            Span::styled("T:", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{} ", format_compact_count(l.total)),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Avg:", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{:.0}ms", l.avg_latency_ms()),
+                format_compact_latency_ms(l.avg_latency_ms()),
                 Style::default().fg(Color::Cyan),
             ),
         ])],
@@ -2742,7 +2741,7 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
                 current.push_str(token);
                 current_cols += token_cols;
             } else if is_ws {
-                if !current.is_empty() {
+                if !current.is_empty() && token_cols <= limit {
                     result.push(current);
                     line_emitted = true;
                     current = String::new();
@@ -2798,8 +2797,10 @@ pub fn wrap_text_for_width(text: &str, max_width: usize) -> Vec<String> {
 }
 
 /// Format a modal input value onto a single visual line with a cursor `█` at `cursor_grapheme_idx`,
-/// slicing on extended Unicode grapheme cluster boundaries and accounting for cursor and ellipsis
-/// widths via `unicode-width` so `UnicodeWidthStr::width(&returned)` never exceeds `max_cols`.
+/// segmenting the original string on extended Unicode grapheme cluster boundaries FIRST (so control
+/// character replacement never merges a subsequent combining mark onto `↵` or `→`) and accounting
+/// for cursor and ellipsis widths via `unicode-width` so `UnicodeWidthStr::width(&returned)` never
+/// exceeds `max_cols`.
 pub fn visible_field_slice_with_cursor(
     value: &str,
     cursor_grapheme_idx: usize,
@@ -2807,46 +2808,48 @@ pub fn visible_field_slice_with_cursor(
     show_cursor: bool,
 ) -> String {
     let limit = max_cols.max(2);
-    // Replace newlines and tabs with single-column visible markers so multi-line payloads remain
-    // inspectable inside the single-line modal input box without breaking layout.
-    let sanitized: String = value
-        .chars()
-        .map(|c| match c {
-            '\n' => '↵',
-            '\t' => '→',
-            ch if ch.is_control() => '?',
-            ch => ch,
+    // Segment `value` into extended grapheme clusters FIRST, then map each cluster 1-to-1 into its
+    // single-line visual representation so grapheme indices match `FormField::cursor` identically.
+    let display_graphemes: Vec<String> = UnicodeSegmentation::graphemes(value, true)
+        .map(|g| {
+            if g == "\r\n" || g == "\n" || g == "\r" {
+                "↵".to_string()
+            } else if g == "\t" {
+                "→".to_string()
+            } else {
+                g.chars()
+                    .map(|ch| if ch.is_control() { '?' } else { ch })
+                    .collect()
+            }
         })
         .collect();
-
-    let graphemes: Vec<&str> = UnicodeSegmentation::graphemes(sanitized.as_str(), true).collect();
-    let g_widths: Vec<usize> = graphemes
+    let g_widths: Vec<usize> = display_graphemes
         .iter()
-        .map(|&g| UnicodeWidthStr::width(g).max(1))
+        .map(|g| UnicodeWidthStr::width(g.as_str()).max(1))
         .collect();
 
-    let cur_g = cursor_grapheme_idx.min(graphemes.len());
+    let cur_g = cursor_grapheme_idx.min(display_graphemes.len());
     let cursor_cols = usize::from(show_cursor);
     let mut start = cur_g;
     let mut end = cur_g;
     let mut used_cols = 0_usize;
 
-    while start > 0 || end < graphemes.len() {
+    while start > 0 || end < display_graphemes.len() {
         let mut progressed = false;
         if start > 0 {
             let next_start = start - 1;
             let w = g_widths.get(next_start).copied().unwrap_or(1);
-            let ell_cols = usize::from(next_start > 0) + usize::from(end < graphemes.len());
+            let ell_cols = usize::from(next_start > 0) + usize::from(end < display_graphemes.len());
             if used_cols + w + cursor_cols + ell_cols <= limit {
                 start = next_start;
                 used_cols += w;
                 progressed = true;
             }
         }
-        if end < graphemes.len() {
+        if end < display_graphemes.len() {
             let next_end = end + 1;
             let w = g_widths.get(end).copied().unwrap_or(1);
-            let ell_cols = usize::from(start > 0) + usize::from(next_end < graphemes.len());
+            let ell_cols = usize::from(start > 0) + usize::from(next_end < display_graphemes.len());
             if used_cols + w + cursor_cols + ell_cols <= limit {
                 end = next_end;
                 used_cols += w;
@@ -2862,7 +2865,7 @@ pub fn visible_field_slice_with_cursor(
     if start > 0 {
         out.push('…');
     }
-    for (idx, &g) in graphemes.iter().enumerate().take(end).skip(start) {
+    for (idx, g) in display_graphemes.iter().enumerate().take(end).skip(start) {
         if show_cursor && idx == cur_g {
             out.push('█');
         }
@@ -2871,7 +2874,7 @@ pub fn visible_field_slice_with_cursor(
     if show_cursor && cur_g == end {
         out.push('█');
     }
-    if end < graphemes.len() {
+    if end < display_graphemes.len() {
         out.push('…');
     }
     // Final safety guard in case `limit` is smaller than the cursor + ellipses themselves.
@@ -2884,16 +2887,51 @@ pub fn visible_field_slice_with_cursor(
     out
 }
 
-/// Format an integer counter in a compact form (`999`, `10k`, `1.2M`, `3.4B`) for narrow cards.
+/// Format an integer counter in a compact `<= 3`-character form (`999`, `9k`, `99k`, `.1M`, `99M`, `99B`, `99T`, `99P`, `18E`)
+/// for every `u64` in `0..=u64::MAX` so narrow 80x24 cards never clip trailing digits.
 pub fn format_compact_count(count: u64) -> String {
-    if count >= 1_000_000_000 {
-        format!("{:.1}B", count as f64 / 1_000_000_000.0)
+    if count >= 1_000_000_000_000_000_000 {
+        format!("{}E", count / 1_000_000_000_000_000_000)
+    } else if count >= 100_000_000_000_000_000 {
+        format!(".{}E", count / 100_000_000_000_000_000)
+    } else if count >= 1_000_000_000_000_000 {
+        format!("{}P", count / 1_000_000_000_000_000)
+    } else if count >= 100_000_000_000_000 {
+        format!(".{}P", count / 100_000_000_000_000)
+    } else if count >= 1_000_000_000_000 {
+        format!("{}T", count / 1_000_000_000_000)
+    } else if count >= 100_000_000_000 {
+        format!(".{}T", count / 100_000_000_000)
+    } else if count >= 1_000_000_000 {
+        format!("{}B", count / 1_000_000_000)
+    } else if count >= 100_000_000 {
+        format!(".{}B", count / 100_000_000)
     } else if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.0)
-    } else if count >= 10_000 {
+        format!("{}M", count / 1_000_000)
+    } else if count >= 100_000 {
+        format!(".{}M", count / 100_000)
+    } else if count >= 1_000 {
         format!("{}k", count / 1_000)
     } else {
         format!("{count}")
+    }
+}
+
+fn format_compact_latency_ms(ms: f64) -> String {
+    if !ms.is_finite() || ms < 0.0 {
+        "-".to_string()
+    } else if ms > 86_400_000.0 {
+        ">24h".to_string()
+    } else if ms >= 3_600_000.0 {
+        format!("{:.0}h", ms / 3_600_000.0)
+    } else if ms >= 60_000.0 {
+        format!("{:.0}m", ms / 60_000.0)
+    } else if ms >= 10_000.0 {
+        format!("{:.0}s", ms / 1_000.0)
+    } else if ms >= 1_000.0 {
+        format!("{:.1}s", ms / 1_000.0)
+    } else {
+        format!("{ms:.0}ms")
     }
 }
 
