@@ -81,7 +81,10 @@ struct InputReaderGuard {
 }
 
 impl InputReaderGuard {
-    fn shutdown(&mut self) {
+    /// Close `input_rx`, set `stop_flag`, and join the reader thread so it can never deadlock
+    /// on a full channel buffer during shutdown.
+    fn shutdown<T>(&mut self, input_rx: &mut mpsc::Receiver<T>) {
+        input_rx.close();
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -92,6 +95,15 @@ impl InputReaderGuard {
 impl Drop for InputReaderGuard {
     fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Guard that aborts an inner spawned task when the outer supervision task is cancelled.
+struct AbortTaskOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -124,8 +136,7 @@ pub async fn render_preview_frames(
 
     // Drain the initial queued refresh command so `in_flight_commands` stays 0 in the preview.
     let _ = app.pop_pending_command();
-    app.in_flight_commands = 0;
-    app.has_refresh_in_flight = false;
+    app.clear_in_flight();
 
     if app.config.demo {
         for req_id in 1..=8_u64 {
@@ -194,11 +205,10 @@ fn spawn_terminal_input_reader() -> (mpsc::Receiver<Event>, InputReaderGuard) {
         while !thread_stop.load(Ordering::Relaxed) {
             match event::poll(INPUT_POLL_SLICE) {
                 Ok(true) => match event::read() {
-                    Ok(ev) => {
-                        if tx.blocking_send(ev).is_err() {
-                            break;
-                        }
-                    }
+                    Ok(ev) => match tx.try_send(ev) {
+                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                        Err(mpsc::error::TrySendError::Closed(_)) => break,
+                    },
                     Err(_) => break,
                 },
                 Ok(false) => {}
@@ -213,29 +223,44 @@ fn spawn_terminal_input_reader() -> (mpsc::Receiver<Event>, InputReaderGuard) {
 }
 
 /// Drain and spawn eligible queued commands from `app` onto `worker_tasks`.
+///
+/// Each task returns `(RequestMeta, Option<String>)`, where `Some(err)` indicates that the inner
+/// command execution panicked or terminated abnormally without sending a [`DispatchedOutcome`].
 fn dispatch_queued_commands(
     app: &mut App,
     client: &Arc<dyn NodeClient>,
     outcome_tx: &mpsc::Sender<DispatchedOutcome>,
-    worker_tasks: &mut tokio::task::JoinSet<()>,
+    worker_tasks: &mut tokio::task::JoinSet<(RequestMeta, Option<String>)>,
 ) {
     while let Some(dispatched) = app.pop_pending_command() {
+        let meta = dispatched.meta;
         let client_clone = Arc::clone(client);
         let tx = outcome_tx.clone();
         worker_tasks.spawn(async move {
-            let outcome = execute_dispatched_command(client_clone.as_ref(), dispatched).await;
-            let _ = tx.send(outcome).await;
+            let mut inner = tokio::spawn(async move {
+                execute_dispatched_command(client_clone.as_ref(), dispatched).await
+            });
+            let _abort_guard = AbortTaskOnDrop(inner.abort_handle());
+            match (&mut inner).await {
+                Ok(outcome) => {
+                    let _ = tx.send(outcome).await;
+                    (meta, None)
+                }
+                Err(join_err) if !join_err.is_cancelled() => (meta, Some(join_err.to_string())),
+                Err(_) => (meta, None),
+            }
         });
     }
 }
 
-/// Reap finished background tasks, recovering `in_flight_commands` if any task panicked.
-fn reap_finished_workers(app: &mut App, worker_tasks: &mut tokio::task::JoinSet<()>) {
+/// Reap finished background tasks, retiring the exact [`RequestMeta`] if any task panicked.
+fn reap_finished_workers(
+    app: &mut App,
+    worker_tasks: &mut tokio::task::JoinSet<(RequestMeta, Option<String>)>,
+) {
     while let Some(join_res) = worker_tasks.try_join_next() {
-        if let Err(join_err) = join_res {
-            if !join_err.is_cancelled() {
-                app.on_worker_aborted_or_panicked(&join_err.to_string());
-            }
+        if let Ok((meta, Some(panic_reason))) = join_res {
+            app.on_worker_aborted_or_panicked(meta, &panic_reason);
         }
     }
 }
@@ -315,7 +340,7 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
         if app.should_quit {
             worker_tasks.abort_all();
             while worker_tasks.join_next().await.is_some() {}
-            input_guard.shutdown();
+            input_guard.shutdown(&mut input_rx);
             break;
         }
 
@@ -768,7 +793,7 @@ mod tests {
         assert_eq!(first_req.meta.client_epoch, 1);
         assert_eq!(first_req.meta.request_id, 1);
         // Simulate first_req completing or allow a second refresh after it:
-        app.has_refresh_in_flight = false;
+        app.clear_in_flight();
 
         // Queue a second refresh (request_id = 2) and apply it first.
         app.trigger_button(ButtonId::RefreshNow);
@@ -876,19 +901,42 @@ mod tests {
         for _ in 0..10 {
             app.trigger_button(ButtonId::RefreshNow);
         }
-        let first = app.pop_pending_command().expect("first refresh");
-        assert!(matches!(first.command, NodeCommand::RefreshSnapshot { .. }));
+        let first_refresh = app.pop_pending_command().expect("first refresh");
+        assert!(matches!(
+            first_refresh.command,
+            NodeCommand::RefreshSnapshot { .. }
+        ));
         assert!(app.has_refresh_in_flight);
         assert_eq!(app.in_flight_commands, 1);
 
-        // Even if the user presses `[R]` again while `has_refresh_in_flight` is true,
-        // `pop_pending_command` will not dispatch a second concurrent `RefreshSnapshot`.
+        // Queue a read-only LookupService and a second RefreshNow while `first_refresh` is still in flight.
+        app.trigger_button(ButtonId::LookupService);
+        for ch in "ipfs".chars() {
+            app.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.submit_modal();
         app.trigger_button(ButtonId::RefreshNow);
+
+        // `pop_pending_command` must skip the queued `RefreshSnapshot` (since `first_refresh` is in flight)
+        // and pop `LookupService`!
+        let lookup_cmd = app.pop_pending_command().expect("lookup command");
+        assert!(matches!(
+            lookup_cmd.command,
+            NodeCommand::LookupService { .. }
+        ));
+        assert_eq!(app.in_flight_commands, 2);
         assert!(app.pop_pending_command().is_none());
 
-        // Simulate worker task panic -> `on_worker_aborted_or_panicked` recovers in_flight_commands
-        // and clears `has_refresh_in_flight` so the queued refresh can now be dispatched!
-        app.on_worker_aborted_or_panicked("simulated panic");
+        // If `lookup_cmd` panics, `on_worker_aborted_or_panicked` must retire ONLY `lookup_cmd.meta`
+        // and MUST NOT clear `has_refresh_in_flight` while `first_refresh` is still running!
+        app.on_worker_aborted_or_panicked(lookup_cmd.meta, "simulated lookup panic");
+        assert_eq!(app.in_flight_commands, 1);
+        assert!(app.has_refresh_in_flight);
+        assert!(app.pop_pending_command().is_none());
+
+        // Now if `first_refresh` itself panics (or finishes), `has_refresh_in_flight` clears and
+        // the coalesced refresh is finally dispatched.
+        app.on_worker_aborted_or_panicked(first_refresh.meta, "simulated refresh panic");
         assert_eq!(app.in_flight_commands, 0);
         assert!(!app.has_refresh_in_flight);
         let recovered = app
@@ -898,6 +946,132 @@ mod tests {
             recovered.command,
             NodeCommand::RefreshSnapshot { .. }
         ));
+    }
+
+    #[test]
+    fn bidirectional_snapshot_and_peer_measurement_versioning_preserves_newer_data() {
+        let mut app = App::new(test_config());
+        let _ = app.pop_pending_command();
+        app.clear_in_flight();
+
+        // Suppose Snapshot req_id = 2 is dispatched BEFORE InspectPeer(peerA) req_id = 3,
+        // and InspectPeer(peerB) req_id = 4 is also dispatched.
+        // First, InspectPeer(peerB) req_id = 4 finishes, then InspectPeer(peerA) req_id = 3 finishes.
+        // Because per-peer versions are tracked independently, peerB (req 4) must NOT block peerA (req 3)!
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 4,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "peerMeasurement",
+                summary: "peerB measured".to_string(),
+                output: None,
+                measurement: Some(Box::new(PeerMeasurementInfo {
+                    did: "0xpeerB".to_string(),
+                    counters: PeerMeasurementCountersInfo {
+                        sent: 400,
+                        ..PeerMeasurementCountersInfo::default()
+                    },
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                })),
+                dht_lookup: None,
+                registered_service: None,
+                duration_ms: 1,
+            },
+        });
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 3,
+            },
+            outcome: CommandOutcome::CommandSuccess {
+                command: "peerMeasurement",
+                summary: "peerA measured".to_string(),
+                output: None,
+                measurement: Some(Box::new(PeerMeasurementInfo {
+                    did: "0xpeerA".to_string(),
+                    counters: PeerMeasurementCountersInfo {
+                        sent: 300,
+                        ..PeerMeasurementCountersInfo::default()
+                    },
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                })),
+                dht_lookup: None,
+                registered_service: None,
+                duration_ms: 1,
+            },
+        });
+
+        // Now older Snapshot req_id = 2 arrives with stale `sent = 10` for `0xpeerA`.
+        // Because `0xpeerA` has measurement version 3 > 2, Snapshot req_id = 2 MUST NOT clobber `sent = 300`!
+        app.apply_outcome(DispatchedOutcome {
+            meta: RequestMeta {
+                client_epoch: 1,
+                request_id: 2,
+            },
+            outcome: CommandOutcome::Snapshot(Box::new(NodeSnapshot {
+                did: Some("0xlocal".to_string()),
+                peers: vec![PeerInfo {
+                    did: "0xpeerA".to_string(),
+                    state: "Connected".to_string(),
+                }],
+                measurements: vec![PeerMeasurementInfo {
+                    did: "0xpeerA".to_string(),
+                    counters: PeerMeasurementCountersInfo {
+                        sent: 10,
+                        ..PeerMeasurementCountersInfo::default()
+                    },
+                    credit: None,
+                    reliability: PeerReliabilityInfo::Healthy,
+                }],
+                include_expired_directory: false,
+                ..NodeSnapshot::default()
+            })),
+        });
+
+        let rows = app.snapshot.peer_traffic_rows();
+        let peer_a = rows
+            .iter()
+            .find(|r| r.peer_did == "0xpeerA")
+            .expect("peerA");
+        let peer_b = rows
+            .iter()
+            .find(|r| r.peer_did == "0xpeerB")
+            .expect("peerB");
+        assert_eq!(peer_a.sent_ok, 300);
+        assert_eq!(peer_b.sent_ok, 400);
+    }
+
+    #[test]
+    fn input_guard_shutdown_never_deadlocks_when_channel_is_full() {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop_flag);
+        let (tx, mut rx) = mpsc::channel::<u32>(2);
+        // Fill the bounded channel to capacity before the producer thread starts.
+        tx.try_send(1).expect("fill 1");
+        tx.try_send(2).expect("fill 2");
+        assert!(tx.try_send(3).is_err());
+
+        let handle = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match tx.try_send(99) {
+                    Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                }
+            }
+        });
+
+        let mut guard = InputReaderGuard {
+            stop_flag,
+            handle: Some(handle),
+        };
+        guard.shutdown(&mut rx);
+        assert!(guard.handle.is_none());
     }
 
     #[test]

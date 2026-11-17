@@ -423,17 +423,21 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let dht = app.snapshot.swarm.as_ref().and_then(|s| s.dht.as_ref());
 
     let (api_label, api_color) =
-        match (health.map(|h| h.process_api_healthy), &app.connection_state) {
-            (Some(true), _) => ("HEALTHY", Color::Green),
-            (Some(false), _) | (None, ConnectionState::Offline(_)) => ("UNREACHABLE", Color::Red),
-            (None, ConnectionState::Connecting) => ("PROBING...", Color::Yellow),
-            (None, ConnectionState::Online) => ("RPC OK (Obs Pending)", Color::Yellow),
+        match (&app.connection_state, health.map(|h| h.process_api_healthy)) {
+            (ConnectionState::Offline(_), _) => ("UNREACHABLE (OFFLINE)", Color::Red),
+            (ConnectionState::Connecting, None) => ("PROBING...", Color::Yellow),
+            (ConnectionState::Online, None) => ("RPC OK (Obs Unavailable)", Color::Yellow),
+            (_, Some(true)) => ("HEALTHY", Color::Green),
+            (_, Some(false)) => ("UNHEALTHY", Color::Red),
         };
-    let (overlay_label, overlay_color) = match health.map(|h| h.overlay_ready) {
-        Some(true) => ("YES", Color::Green),
-        Some(false) => ("NO", Color::Yellow),
-        None => ("UNKNOWN", Color::DarkGray),
-    };
+    let (overlay_label, overlay_color) =
+        match (&app.connection_state, health.map(|h| h.overlay_ready)) {
+            (ConnectionState::Offline(_), Some(true)) => ("YES (STALE — OFFLINE)", Color::Yellow),
+            (ConnectionState::Offline(_), _) => ("NO (OFFLINE)", Color::Red),
+            (_, Some(true)) => ("YES", Color::Green),
+            (_, Some(false)) => ("NO", Color::Yellow),
+            (_, None) => ("UNKNOWN", Color::DarkGray),
+        };
     let admitted = health
         .map(|h| h.admitted_peer_count)
         .unwrap_or_else(|| app.snapshot.peers.len() as u64);
@@ -571,12 +575,7 @@ fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let mb = app
-        .snapshot
-        .observability
-        .as_ref()
-        .map(|o| o.mailboxes)
-        .unwrap_or_default();
+    let mb_opt = app.snapshot.observability.as_ref().map(|o| o.mailboxes);
 
     let mut lines = match &app.snapshot.gateway {
         GatewayProbeState::Available(gw) => {
@@ -639,14 +638,21 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
         ],
     };
 
-    lines.push(kv_line(
-        "Relay Mailboxes:",
-        &format!(
-            "{} inboxes | {} held | {} total",
-            mb.registered, mb.held_messages, mb.stored_total
-        ),
-        Color::LightMagenta,
-    ));
+    match mb_opt {
+        Some(mb) => lines.push(kv_line(
+            "Relay Mailboxes:",
+            &format!(
+                "{} inboxes | {} held | {} total",
+                mb.registered, mb.held_messages, mb.stored_total
+            ),
+            Color::LightMagenta,
+        )),
+        None => lines.push(kv_line(
+            "Relay Mailboxes:",
+            "N/A (observability unavailable)",
+            Color::DarkGray,
+        )),
+    }
     lines.push(kv_line(
         "External API:",
         app.config
@@ -664,62 +670,61 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
 }
 
 fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let totals = app
-        .snapshot
-        .observability
-        .as_ref()
-        .map(|o| o.messages)
-        .unwrap_or_default();
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(" Sent: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:<10}", totals.sent),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Received: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:<10}", totals.received),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Forwarded: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:<10}", totals.forwarded),
-                Style::default()
-                    .fg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" Stored (Mail): ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:<10}", totals.stored),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" Failed: ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("{:<10}", totals.failed),
-                Style::default()
-                    .fg(if totals.failed == 0 {
-                        Color::Gray
-                    } else {
-                        Color::Red
-                    })
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(Span::styled(
-            " Tip: Switch to [2:Monitor] for real-time throughput sparklines & latency histogram",
+    let lines = match app.snapshot.observability.as_ref().map(|o| o.messages) {
+        Some(totals) => vec![
+            Line::from(vec![
+                Span::styled(" Sent: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<10}", totals.sent),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Received: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<10}", totals.received),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Forwarded: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<10}", totals.forwarded),
+                    Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(" Stored (Mail): ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<10}", totals.stored),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" Failed: ", Style::default().fg(Color::Gray)),
+                Span::styled(
+                    format!("{:<10}", totals.failed),
+                    Style::default()
+                        .fg(if totals.failed == 0 {
+                            Color::Gray
+                        } else {
+                            Color::Red
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(Span::styled(
+                " Tip: Switch to [2:Monitor] for real-time throughput sparklines & latency histogram",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ],
+        None => vec![Line::from(Span::styled(
+            " Process message counters unavailable (/status?view=observability not loaded)",
             Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        ))],
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)

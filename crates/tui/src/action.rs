@@ -638,6 +638,24 @@ impl NodeCommand {
             Self::InspectPeer { .. } => "peerMeasurement",
         }
     }
+
+    /// Return `true` when this command mutates node transport, handshake, topic, or service state
+    /// and therefore must be serialized in FIFO order relative to other mutating commands.
+    pub const fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectPeerViaHttp { .. }
+                | Self::ConnectWithDid { .. }
+                | Self::ConnectWithSeed { .. }
+                | Self::Disconnect { .. }
+                | Self::CreateOffer { .. }
+                | Self::AnswerOffer { .. }
+                | Self::AcceptAnswer { .. }
+                | Self::SendBackendMessage { .. }
+                | Self::PublishTopic { .. }
+                | Self::RegisterService { .. }
+        )
+    }
 }
 
 /// Metadata tagging every asynchronous command and its outcome with the client epoch and monotonic

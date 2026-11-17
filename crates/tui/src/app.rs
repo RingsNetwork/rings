@@ -1,5 +1,6 @@
 //! Pure application state machine, keyboard/mouse event handling, and command scheduling.
 
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 use crossterm::event::KeyCode;
@@ -8,6 +9,7 @@ use crossterm::event::KeyModifiers;
 use crossterm::event::MouseButton;
 use crossterm::event::MouseEvent;
 use crossterm::event::MouseEventKind;
+use rings_rpc::protos::rings_node::PeerMeasurementInfo;
 
 use crate::action::ActionLogEntry;
 use crate::action::ButtonId;
@@ -106,6 +108,17 @@ impl DirectorySubtab {
     }
 }
 
+/// Classification of an in-flight background command for concurrency and recovery tracking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InFlightKind {
+    /// Background or manual `RefreshSnapshot` poll (at most 1 in flight at a time).
+    Refresh,
+    /// State-mutating RPC command (serialized in FIFO order so at most 1 runs at a time).
+    Mutating,
+    /// Read-only inspection RPC command (`InspectPeer`, `DhtLookupKey`, `FetchTopic`, `LookupService`).
+    ReadOnly,
+}
+
 /// Complete state of a running `rings-tui` session.
 pub struct App {
     /// Resolved node endpoint, config path, and token state.
@@ -152,6 +165,8 @@ pub struct App {
     pub in_flight_commands: usize,
     /// Whether a `RefreshSnapshot` request is currently in flight in the active client epoch.
     pub has_refresh_in_flight: bool,
+    /// Active in-flight requests keyed by `request_id` in the current `client_epoch`.
+    in_flight_requests: BTreeMap<u64, InFlightKind>,
     /// Latest multi-line command output (e.g. SDP offer/answer, topic messages, service DIDs).
     pub last_command_output: Option<String>,
     /// Latest Chord DHT key lookup report.
@@ -170,8 +185,9 @@ pub struct App {
     next_request_id: u64,
     /// Highest `request_id` of any applied `RefreshSnapshot` outcome in the current epoch.
     latest_applied_snapshot_id: u64,
-    /// Highest `request_id` of any applied peer measurement update in the current epoch.
-    latest_measurement_req_id: u64,
+    /// Per-peer `(request_id, PeerMeasurementInfo)` from `InspectPeer` in the current epoch,
+    /// preventing older snapshots or older per-peer queries from overwriting newer measurements.
+    peer_measurement_versions: BTreeMap<String, (u64, PeerMeasurementInfo)>,
     /// Highest `request_id` of any applied `DhtLookupKey` report in the current epoch.
     latest_dht_lookup_req_id: u64,
     /// Highest `request_id` of any applied `last_command_output` in the current epoch.
@@ -221,6 +237,7 @@ impl App {
             show_help: false,
             in_flight_commands: 0,
             has_refresh_in_flight: false,
+            in_flight_requests: BTreeMap::new(),
             last_command_output: None,
             last_dht_lookup: None,
             registered_services,
@@ -230,7 +247,7 @@ impl App {
             client_epoch: 1,
             next_request_id: 1,
             latest_applied_snapshot_id: 0,
-            latest_measurement_req_id: 0,
+            peer_measurement_versions: BTreeMap::new(),
             latest_dht_lookup_req_id: 0,
             latest_output_req_id: 0,
             hit_map: HitMap::default(),
@@ -238,6 +255,26 @@ impl App {
             pending_token_reload: false,
             pending_commands,
         }
+    }
+
+    fn sync_in_flight_counters(&mut self) {
+        self.in_flight_commands = self.in_flight_requests.len();
+        self.has_refresh_in_flight = self
+            .in_flight_requests
+            .values()
+            .any(|&k| k == InFlightKind::Refresh);
+    }
+
+    fn has_mutating_in_flight(&self) -> bool {
+        self.in_flight_requests
+            .values()
+            .any(|&k| k == InFlightKind::Mutating)
+    }
+
+    /// Clear all in-flight request tracking (e.g. during non-interactive preview rendering).
+    pub fn clear_in_flight(&mut self) {
+        self.in_flight_requests.clear();
+        self.sync_in_flight_counters();
     }
 
     /// Enqueue or coalesce a `RefreshSnapshot` command so rapid manual refreshes do not flood the queue.
@@ -283,50 +320,66 @@ impl App {
     /// invalidating any in-flight outcomes from the previous client epoch.
     pub fn bump_client_epoch(&mut self) {
         self.client_epoch = self.client_epoch.saturating_add(1);
-        self.in_flight_commands = 0;
-        self.has_refresh_in_flight = false;
+        self.in_flight_requests.clear();
+        self.sync_in_flight_counters();
         self.latest_applied_snapshot_id = 0;
-        self.latest_measurement_req_id = 0;
+        self.peer_measurement_versions.clear();
         self.latest_dht_lookup_req_id = 0;
         self.latest_output_req_id = 0;
         self.pending_commands.clear();
         self.enqueue_refresh();
     }
 
-    /// Recover accounting when a background worker task panics or aborts unexpectedly without
-    /// delivering a [`DispatchedOutcome`].
-    pub fn on_worker_aborted_or_panicked(&mut self, reason: &str) {
-        self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
-        self.has_refresh_in_flight = false;
+    /// Recover accounting for a specific [`RequestMeta`] when its background worker task panics or
+    /// aborts unexpectedly without delivering a [`DispatchedOutcome`].
+    pub fn on_worker_aborted_or_panicked(&mut self, meta: RequestMeta, reason: &str) {
+        if meta.client_epoch != self.client_epoch {
+            return;
+        }
+        self.in_flight_requests.remove(&meta.request_id);
+        self.sync_in_flight_counters();
         self.push_log(
             "workerTask",
             false,
-            format!("Background command task terminated unexpectedly: {reason}"),
+            format!(
+                "Background task #{} terminated unexpectedly: {reason}",
+                meta.request_id
+            ),
             None,
             0,
         );
     }
 
     /// Drain the next eligible [`NodeCommand`] wrapped with its [`RequestMeta`] envelope,
-    /// respecting [`MAX_CONCURRENT_COMMANDS`] and ensuring at most one `RefreshSnapshot` runs at a time.
+    /// respecting [`MAX_CONCURRENT_COMMANDS`], ensuring at most one `RefreshSnapshot` runs at a time,
+    /// and serializing state-mutating commands in FIFO order.
     pub fn pop_pending_command(&mut self) -> Option<DispatchedCommand> {
-        if self.in_flight_commands >= MAX_CONCURRENT_COMMANDS {
+        if self.in_flight_requests.len() >= MAX_CONCURRENT_COMMANDS {
             return None;
         }
+        let refresh_busy = self.has_refresh_in_flight;
+        let mutating_busy = self.has_mutating_in_flight();
         let pos = self.pending_commands.iter().position(|cmd| {
             if matches!(cmd, NodeCommand::RefreshSnapshot { .. }) {
-                !self.has_refresh_in_flight
+                !refresh_busy
+            } else if cmd.is_mutating() {
+                !mutating_busy
             } else {
                 true
             }
         })?;
         let command = self.pending_commands.remove(pos)?;
-        if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
-            self.has_refresh_in_flight = true;
-        }
+        let kind = if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
+            InFlightKind::Refresh
+        } else if command.is_mutating() {
+            InFlightKind::Mutating
+        } else {
+            InFlightKind::ReadOnly
+        };
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
-        self.in_flight_commands = self.in_flight_commands.saturating_add(1);
+        self.in_flight_requests.insert(request_id, kind);
+        self.sync_in_flight_counters();
         Some(DispatchedCommand {
             meta: RequestMeta {
                 client_epoch: self.client_epoch,
@@ -338,7 +391,8 @@ impl App {
 
     /// Queue a background snapshot refresh if auto-polling is enabled and no command is in flight.
     pub fn on_tick(&mut self) {
-        if self.auto_poll && self.in_flight_commands == 0 && self.pending_commands.is_empty() {
+        if self.auto_poll && self.in_flight_requests.is_empty() && self.pending_commands.is_empty()
+        {
             self.enqueue_refresh();
         }
     }
@@ -349,11 +403,11 @@ impl App {
         if dispatched.meta.client_epoch != self.client_epoch {
             return;
         }
-        self.in_flight_commands = self.in_flight_commands.saturating_sub(1);
+        self.in_flight_requests.remove(&dispatched.meta.request_id);
+        self.sync_in_flight_counters();
 
         match dispatched.outcome {
             CommandOutcome::Snapshot(mut snapshot) => {
-                self.has_refresh_in_flight = false;
                 if dispatched.meta.request_id < self.latest_applied_snapshot_id {
                     return;
                 }
@@ -379,10 +433,24 @@ impl App {
                     snapshot.onion_exits.clone_from(&self.snapshot.onion_exits);
                 }
 
-                self.latest_applied_snapshot_id = dispatched.meta.request_id;
-                self.latest_measurement_req_id = self
-                    .latest_measurement_req_id
-                    .max(dispatched.meta.request_id);
+                // Overlay any per-peer `InspectPeer` measurements whose `request_id` is newer than
+                // this snapshot so an older snapshot never overwrites a newer single-peer inspection.
+                let snap_req_id = dispatched.meta.request_id;
+                for (meas_req_id, meas_info) in self.peer_measurement_versions.values() {
+                    if *meas_req_id > snap_req_id {
+                        if let Some(existing) = snapshot
+                            .measurements
+                            .iter_mut()
+                            .find(|m| m.did.eq_ignore_ascii_case(&meas_info.did))
+                        {
+                            *existing = meas_info.clone();
+                        } else {
+                            snapshot.measurements.push(meas_info.clone());
+                        }
+                    }
+                }
+
+                self.latest_applied_snapshot_id = snap_req_id;
                 self.connection_state = ConnectionState::Online;
                 self.history.record(&snapshot);
                 self.snapshot = *snapshot;
@@ -392,7 +460,6 @@ impl App {
                 include_expired_directory,
                 error,
             } => {
-                self.has_refresh_in_flight = false;
                 if dispatched.meta.request_id < self.latest_applied_snapshot_id {
                     return;
                 }
@@ -417,19 +484,28 @@ impl App {
                     }
                 }
                 if let Some(meas) = measurement {
-                    if dispatched.meta.request_id >= self.latest_measurement_req_id {
-                        self.latest_measurement_req_id = dispatched.meta.request_id;
-                        if let Some(existing) = self
-                            .snapshot
-                            .measurements
-                            .iter_mut()
-                            .find(|m| m.did.eq_ignore_ascii_case(&meas.did))
-                        {
-                            *existing = *meas;
-                        } else {
-                            self.snapshot.measurements.push(*meas);
+                    let peer_key = meas.did.to_ascii_lowercase();
+                    let prev_peer_req_id = self
+                        .peer_measurement_versions
+                        .get(&peer_key)
+                        .map(|(id, _)| *id)
+                        .unwrap_or(0);
+                    if dispatched.meta.request_id >= prev_peer_req_id {
+                        self.peer_measurement_versions
+                            .insert(peer_key, (dispatched.meta.request_id, (*meas).clone()));
+                        if dispatched.meta.request_id >= self.latest_applied_snapshot_id {
+                            if let Some(existing) = self
+                                .snapshot
+                                .measurements
+                                .iter_mut()
+                                .find(|m| m.did.eq_ignore_ascii_case(&meas.did))
+                            {
+                                *existing = *meas;
+                            } else {
+                                self.snapshot.measurements.push(*meas);
+                            }
+                            self.clamp_selections();
                         }
-                        self.clamp_selections();
                     }
                 }
                 if let Some(lookup) = dht_lookup {
