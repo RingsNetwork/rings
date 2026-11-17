@@ -153,7 +153,7 @@ impl ButtonId {
         Self::ReloadToken,
     ];
 
-    /// Compact button label for the top quick-action toolbar (fits 80+ col terminals).
+    /// Compact button label for the top quick-action toolbar (fits 110+ col terminals).
     pub const fn toolbar_label(self) -> &'static str {
         match self {
             Self::RefreshNow => "[R]Refresh",
@@ -170,12 +170,38 @@ impl ButtonId {
             Self::FetchTopic => "[F]Fetch",
             Self::RegisterService => "[G]+Svc",
             Self::LookupService => "[V]Svc?",
-            Self::DhtLookupKey => "[/ ]DHTKey",
+            Self::DhtLookupKey => "[/]DHTKey",
             Self::InspectPeer => "[I]Meas",
             Self::ToggleExpiredDirectory => "[E]Exp",
             Self::ReloadToken => "[U]Token",
             Self::ShowHelp => "[?]Help",
             Self::Quit => "[Q]Quit",
+        }
+    }
+
+    /// Ultra-compact toolbar label (<= 6 chars) for narrow 80-column terminals.
+    pub const fn compact_toolbar_label(self) -> &'static str {
+        match self {
+            Self::RefreshNow => "R:Sync",
+            Self::ToggleAutoPoll => "P:Poll",
+            Self::ConnectUrl => "C:+URL",
+            Self::ConnectDid => "D:+DID",
+            Self::ConnectSeed => "S:Seed",
+            Self::DisconnectPeer => "X:Drop",
+            Self::CreateOffer => "O:Offr",
+            Self::AnswerOffer => "A:Answ",
+            Self::AcceptAnswer => "Y:Acpt",
+            Self::SendMessage => "M:Msg",
+            Self::PublishTopic => "T:Pub",
+            Self::FetchTopic => "F:Ftch",
+            Self::RegisterService => "G:+Svc",
+            Self::LookupService => "V:Svc?",
+            Self::DhtLookupKey => "/:Key",
+            Self::InspectPeer => "I:Meas",
+            Self::ToggleExpiredDirectory => "E:Exp",
+            Self::ReloadToken => "U:Tokn",
+            Self::ShowHelp => "?:Help",
+            Self::Quit => "Q:Quit",
         }
     }
 
@@ -249,24 +275,37 @@ pub struct FormField {
     pub placeholder: &'static str,
     /// Current user-edited text value.
     pub value: String,
+    /// Character cursor position in `0..=self.value.chars().count()`.
+    pub cursor: usize,
     /// Whether this field is optional.
     pub optional: bool,
 }
 
 impl FormField {
-    /// Construct a new form field with an initial value.
+    /// Construct a new form field with an initial value and cursor placed at the end.
     pub fn new(
         label: &'static str,
         placeholder: &'static str,
         initial: impl Into<String>,
         optional: bool,
     ) -> Self {
+        let value = initial.into();
+        let cursor = value.chars().count();
         Self {
             label,
             placeholder,
-            value: initial.into(),
+            value,
+            cursor,
             optional,
         }
+    }
+
+    fn byte_index_at_char(&self, char_idx: usize) -> usize {
+        self.value
+            .char_indices()
+            .nth(char_idx)
+            .map(|(byte_idx, _)| byte_idx)
+            .unwrap_or(self.value.len())
     }
 }
 
@@ -314,6 +353,8 @@ pub struct CommandModal {
     pub fields: Vec<FormField>,
     /// Index of the currently focused input field.
     pub active_field: usize,
+    /// Field index that triggered the current validation error, if any.
+    pub error_field: Option<usize>,
     /// Inline validation error message, if submission failed validation.
     pub error: Option<String>,
 }
@@ -419,7 +460,15 @@ impl CommandModal {
             title,
             fields,
             active_field: 0,
+            error_field: None,
             error: None,
+        }
+    }
+
+    fn clear_error_if_active(&mut self) {
+        if self.error_field.is_none() || self.error_field == Some(self.active_field) {
+            self.error = None;
+            self.error_field = None;
         }
     }
 
@@ -437,19 +486,74 @@ impl CommandModal {
         }
     }
 
-    /// Append a character to the currently focused field.
-    pub fn push_char(&mut self, ch: char) {
+    /// Move the character cursor left by 1 character in the currently focused field.
+    pub fn move_cursor_left(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            field.value.push(ch);
-            self.error = None;
+            field.cursor = field.cursor.saturating_sub(1);
         }
     }
 
-    /// Remove the last character from the currently focused field.
+    /// Move the character cursor right by 1 character in the currently focused field.
+    pub fn move_cursor_right(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.active_field) {
+            let len = field.value.chars().count();
+            if field.cursor < len {
+                field.cursor += 1;
+            }
+        }
+    }
+
+    /// Move the character cursor to the start of the currently focused field.
+    pub fn move_cursor_home(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.active_field) {
+            field.cursor = 0;
+        }
+    }
+
+    /// Move the character cursor to the end of the currently focused field.
+    pub fn move_cursor_end(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.active_field) {
+            field.cursor = field.value.chars().count();
+        }
+    }
+
+    /// Insert a character at the cursor position of the currently focused field.
+    pub fn push_char(&mut self, ch: char) {
+        if let Some(field) = self.fields.get_mut(self.active_field) {
+            let char_len = field.value.chars().count();
+            let cur = field.cursor.min(char_len);
+            let byte_idx = field.byte_index_at_char(cur);
+            field.value.insert(byte_idx, ch);
+            field.cursor = cur + 1;
+            self.clear_error_if_active();
+        }
+    }
+
+    /// Remove the character immediately before the cursor in the currently focused field (`Backspace`).
     pub fn pop_char(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
-            field.value.pop();
-            self.error = None;
+            let char_len = field.value.chars().count();
+            let cur = field.cursor.min(char_len);
+            if cur > 0 {
+                let remove_idx = cur - 1;
+                let byte_idx = field.byte_index_at_char(remove_idx);
+                field.value.remove(byte_idx);
+                field.cursor = remove_idx;
+                self.clear_error_if_active();
+            }
+        }
+    }
+
+    /// Remove the character under the cursor in the currently focused field (`Delete`).
+    pub fn delete_char(&mut self) {
+        if let Some(field) = self.fields.get_mut(self.active_field) {
+            let char_len = field.value.chars().count();
+            let cur = field.cursor.min(char_len);
+            if cur < char_len {
+                let byte_idx = field.byte_index_at_char(cur);
+                field.value.remove(byte_idx);
+                self.clear_error_if_active();
+            }
         }
     }
 
@@ -457,15 +561,18 @@ impl CommandModal {
     pub fn clear_active_field(&mut self) {
         if let Some(field) = self.fields.get_mut(self.active_field) {
             field.value.clear();
-            self.error = None;
+            field.cursor = 0;
+            self.clear_error_if_active();
         }
     }
 
     /// Validate fields and build the corresponding [`NodeCommand`].
     pub fn build_command(&mut self) -> std::result::Result<NodeCommand, String> {
-        for field in &self.fields {
+        for (idx, field) in self.fields.iter().enumerate() {
             if !field.optional && field.value.trim().is_empty() {
                 let msg = format!("Field '{}' is required", field.label);
+                self.active_field = idx;
+                self.error_field = Some(idx);
                 self.error = Some(msg.clone());
                 return Err(msg);
             }
@@ -514,6 +621,8 @@ impl CommandModal {
             ModalKind::FetchTopic => {
                 let skip = v1.parse::<i64>().map_err(|_| {
                     let msg = "Skip Offset must be a valid integer".to_string();
+                    self.active_field = 1;
+                    self.error_field = Some(1);
                     self.error = Some(msg.clone());
                     msg
                 })?;
@@ -752,6 +861,10 @@ pub enum ClickTarget {
     Button(ButtonId),
     /// Row index in the primary table of the active tab.
     TableRow(usize),
+    /// Row index in the Command Execution Log table of `6:Commands`.
+    LogRow(usize),
+    /// Scrollable Command Output panel in `6:Commands`.
+    OutputPanel,
     /// Sub-tab toggle in the Directory or DHT view.
     SubViewToggle,
     /// Input field inside an open modal dialog.
@@ -800,14 +913,29 @@ mod tests {
 
     #[test]
     fn modal_validation_and_command_building_work() {
-        let mut modal = CommandModal::open(ModalKind::ConnectUrl, None, None);
+        let mut modal = CommandModal::open(ModalKind::SendMessage, None, None);
+        modal.active_field = 2;
         assert!(modal.build_command().is_err());
+        // Validation failure on field 0 automatically moves `active_field` to 0:
+        assert_eq!(modal.active_field, 0);
+        assert_eq!(modal.error_field, Some(0));
         assert!(modal.error.is_some());
 
-        for ch in "http://127.0.0.1:50001".chars() {
-            modal.push_char(ch);
+        // Editing field 2 while field 0 is the error field preserves the error until field 0 is edited:
+        modal.active_field = 2;
+        modal.push_char('!');
+        assert!(modal.error.is_some());
+
+        let mut url_modal = CommandModal::open(ModalKind::ConnectUrl, None, None);
+        for ch in "http://127.0.0.1:5001".chars() {
+            url_modal.push_char(ch);
         }
-        let cmd = modal.build_command().expect("valid connect url command");
+        // Test mid-string cursor editing: move left 1 char and insert '0' -> `:50001`
+        url_modal.move_cursor_left();
+        url_modal.push_char('0');
+        let cmd = url_modal
+            .build_command()
+            .expect("valid connect url command");
         assert_eq!(cmd, NodeCommand::ConnectPeerViaHttp {
             url: "http://127.0.0.1:50001".to_string(),
             api_token: None,

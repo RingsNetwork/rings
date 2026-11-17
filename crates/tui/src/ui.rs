@@ -248,7 +248,12 @@ fn render_button_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         };
-        let p = Paragraph::new(btn.toolbar_label())
+        let label = if inner.width < 110 {
+            btn.compact_toolbar_label()
+        } else {
+            btn.toolbar_label()
+        };
+        let p = Paragraph::new(label)
             .style(style)
             .alignment(Alignment::Center);
         frame.render_widget(p, rect);
@@ -256,13 +261,22 @@ fn render_button_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_overview_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let constraints = if area.height < 18 {
+        [
+            Constraint::Length(6), // Compact top row on 80x24 terminals
+            Constraint::Length(3), // Compact middle row
+            Constraint::Min(4),    // Bottom tables
+        ]
+    } else {
+        [
             Constraint::Length(9), // Top row: Health, Delegation Key, Gateway & Mailboxes
             Constraint::Length(6), // Middle row: Message Totals & DHT Lookup Summary
-            Constraint::Min(5),    // Bottom row: Recent Message Activity & Latest Command Output
-        ])
+            Constraint::Min(5),    // Bottom row: Connected Peers & Hosted VNodes
+        ]
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     if let Some(&top_rect) = rows.first() {
@@ -803,13 +817,22 @@ fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
+    let constraints = if area.height < 20 {
+        [
+            Constraint::Length(4), // Compact sparklines on 80x24 terminals
+            Constraint::Length(5), // Compact histogram
+            Constraint::Min(4),    // Recent message event table
+        ]
+    } else {
+        [
             Constraint::Length(6),  // Top: 4 Sparklines (Sent, Received, Forwarded, Failed)
             Constraint::Length(10), // Middle: DHT Lookup Latency Histogram
             Constraint::Min(6),     // Bottom: Recent Message Event Stream
-        ])
+        ]
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
         .split(area);
 
     if let Some(&spark_rect) = rows.first() {
@@ -1679,29 +1702,39 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let top_len = if area.height < 18 { 9 } else { 11 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(11), // Top: 4x4 Interactive Command Button Grid + Selected Button Description
-            Constraint::Min(6), // Bottom: Split between Last Command Output & Execution History Log
+            Constraint::Length(top_len), // Top: 4x4 Interactive Command Button Grid + Selected Button Description
+            Constraint::Min(5), // Bottom: Split between Last Command Output & Execution History Log
         ])
         .split(area);
 
     if let Some(&grid_area) = chunks.first() {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" Interactive Command Workbench (Click any button, use Arrows + Enter, or press Hotkey) ")
-            .border_style(Style::default().fg(Color::Magenta));
+            .title(if app.commands_focus_logs {
+                " Interactive Command Workbench (Click button, press Left to focus, or press Hotkey) "
+            } else {
+                " Interactive Command Workbench [Focused] (Click, Arrows + Enter/Space, or Hotkey) "
+            })
+            .border_style(Style::default().fg(if app.commands_focus_logs {
+                Color::DarkGray
+            } else {
+                Color::Magenta
+            }));
         let inner = block.inner(grid_area);
         frame.render_widget(block, grid_area);
 
+        let row_h = if top_len < 11 { 1 } else { 2 };
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
-                Constraint::Length(2),
-                Constraint::Length(2),
-                Constraint::Length(2),
+                Constraint::Length(row_h),
+                Constraint::Length(row_h),
+                Constraint::Length(row_h),
+                Constraint::Length(row_h),
                 Constraint::Min(1),
             ])
             .split(inner);
@@ -1728,7 +1761,7 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     continue;
                 };
                 app.hit_map.register(btn_rect, ClickTarget::Button(btn));
-                let is_selected = app.selected_workbench_idx == btn_idx;
+                let is_selected = !app.commands_focus_logs && app.selected_workbench_idx == btn_idx;
                 let style = if is_selected {
                     Style::default()
                         .fg(Color::Black)
@@ -1766,14 +1799,28 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             .split(bot_area);
 
         if let Some(&out_rect) = cols.first() {
+            app.hit_map.register(out_rect, ClickTarget::OutputPanel);
             let text = app.last_command_output.as_deref().unwrap_or(
                 "No command output yet.\n\nClick any command button above (or press its hotkey) to run an RPC operation.\nOutputs such as WebRTC SDP offers/answers, PubSub topic messages, and service lookup DIDs will be displayed here.",
             );
+            let inner_w = usize::from(out_rect.width.saturating_sub(2)).max(1);
+            let inner_h = out_rect.height.saturating_sub(2);
+            let wrapped_lines: u16 = text
+                .lines()
+                .map(|line| {
+                    let cols = display_col_width(line).max(1);
+                    u16::try_from(cols.div_ceil(inner_w)).unwrap_or(1)
+                })
+                .fold(0_u16, u16::saturating_add)
+                .max(1);
+            app.output_max_scroll = wrapped_lines.saturating_sub(inner_h);
+            app.output_scroll = app.output_scroll.min(app.output_max_scroll);
+
             let block = Block::default()
                 .borders(Borders::ALL)
                 .title(format!(
-                    " Command Output Inspector (Scroll: +{} lines — [PgUp/PgDn] or `[`/`]` or Mouse Wheel) ",
-                    app.output_scroll
+                    " Command Output (Line +{}/{} — [PgUp/PgDn] / `[`/`]` / Wheel) ",
+                    app.output_scroll, app.output_max_scroll
                 ))
                 .border_style(Style::default().fg(Color::Green));
             frame.render_widget(
@@ -1818,12 +1865,18 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: 
         state.select(Some(app.selected_log_idx));
     }
 
+    let title = if app.commands_focus_logs {
+        format!(" Command Log [Focused] ({log_count} — Up/Down/`{{`/`}}`/Click/Wheel) ")
+    } else {
+        format!(" Command Log ({log_count} — Click, Wheel, or `{{`/`}}` to Inspect) ")
+    };
+
     let table = Table::new(rows, [
-        Constraint::Length(5),
-        Constraint::Length(5),
-        Constraint::Length(18),
-        Constraint::Length(7),
-        Constraint::Min(20),
+        Constraint::Length(4),
+        Constraint::Length(4),
+        Constraint::Length(14),
+        Constraint::Length(6),
+        Constraint::Min(12),
     ])
     .header(
         Row::new(vec!["#", "St", "Command", "Time", "Result"]).style(
@@ -1835,14 +1888,20 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: 
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(
-                " Command Execution Log ({log_count} — Click Row to Inspect Output) "
-            ))
-            .border_style(Style::default().fg(Color::Blue)),
+            .title(title)
+            .border_style(Style::default().fg(if app.commands_focus_logs {
+                Color::Cyan
+            } else {
+                Color::Blue
+            })),
     )
-    .row_highlight_style(Style::default().bg(Color::DarkGray));
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_stateful_widget(table, area, &mut state);
-    register_table_row_hits(&mut app.hit_map, area, log_count, state.offset());
+    register_log_row_hits(&mut app.hit_map, area, log_count, state.offset());
 }
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -1935,19 +1994,26 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
         } else {
             Color::DarkGray
         };
-        let max_chars = usize::from(field_rect.width.saturating_sub(4)).max(8);
-        let visible_val = tail_chars(&field.value, max_chars);
+        let max_cols = usize::from(field_rect.width.saturating_sub(4)).max(8);
         let display_text = if field.value.is_empty() && !is_active {
             Span::styled(field.placeholder, Style::default().fg(Color::DarkGray))
         } else if is_active {
             Span::styled(
-                format!("{visible_val}█"),
+                visible_field_slice_with_cursor(&field.value, field.cursor, max_cols, true),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(visible_val, Style::default().fg(Color::White))
+            Span::styled(
+                visible_field_slice_with_cursor(
+                    &field.value,
+                    field.value.chars().count(),
+                    max_cols,
+                    false,
+                ),
+                Style::default().fg(Color::White),
+            )
         };
 
         let f_block = Block::default()
@@ -1968,7 +2034,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )),
             None => Line::from(Span::styled(
-                " [Tab/Up/Down] Switch Field  [Ctrl+U] Clear  [Enter] Submit  [Esc] Cancel",
+                " [Tab/Up/Down] Field  [Left/Right/Home/End/Del] Edit  [Ctrl+U] Clear  [Enter] Submit  [Esc] Cancel",
                 Style::default().fg(Color::Gray),
             )),
         };
@@ -2012,20 +2078,21 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
 }
 
 fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
-    let rect = centered_rect(72, 22, area);
+    let rect = centered_rect(76, 23, area);
     frame.render_widget(Clear, rect);
 
     let lines = vec![
         Line::from(Span::styled(
-            "Navigation & Mouse Support",
+            "Navigation, Focus & Mouse Support",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("  • Click any Tab, Toolbar Button, Table Row, or Modal Button with the mouse."),
-        Line::from("  • Press [1]-[6] or [Tab]/[Shift+Tab] to switch between views."),
-        Line::from("  • Press [Up]/[Down] (or j/k) to scroll tables; [Space] toggles sub-views."),
-        Line::from("  • Press [B] to focus the Quick Command Button bar with keyboard arrows."),
+        Line::from("  • Mouse: Click any Tab, Button, Table Row, Log Row, or Modal Field; Wheel scrolls active panel."),
+        Line::from("  • Views: [1]-[6] or [Tab]/[Shift+Tab] switch tabs; [B] focuses the Quick Command Bar."),
+        Line::from("  • Tables & Grid: [Up]/[Down] (or j/k) move selection; [PgUp]/[PgDn] page tables or Command Output."),
+        Line::from("  • Sub-Views & Actions: [Left]/[Right] or [Space] cycle sub-views (DHT/Directory) or run focused button."),
+        Line::from("  • Commands Tab: `[` / `]` scroll Output; `{` / `}` (or click/wheel on Log) inspect Execution Log history."),
         Line::from(""),
         Line::from(Span::styled(
             "Global Button Command Hotkeys",
@@ -2044,7 +2111,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
         Line::from("  [E] Toggle Expired Dir    [U] Reload API Token      [Q] Quit"),
         Line::from(""),
         Line::from(Span::styled(
-            "Press [Esc], [Enter], or [?] (or click anywhere) to close this help window.",
+            "Press [Esc], [Enter], or [?] (or left-click anywhere) to close this help window.",
             Style::default().fg(Color::Green),
         )),
     ];
@@ -2053,7 +2120,12 @@ fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
         .borders(Borders::ALL)
         .title(" rings-tui Help & Command Reference ")
         .border_style(Style::default().fg(Color::Cyan));
-    frame.render_widget(Paragraph::new(lines).block(block), rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block),
+        rect,
+    );
 }
 
 fn register_table_row_hits(
@@ -2085,14 +2157,108 @@ fn register_table_row_hits(
     }
 }
 
-fn tail_chars(input: &str, max_chars: usize) -> String {
-    let total = input.chars().count();
-    if total <= max_chars {
-        return input.to_string();
+fn register_log_row_hits(
+    hit_map: &mut crate::action::HitMap,
+    table_area: Rect,
+    row_count: usize,
+    row_offset: usize,
+) {
+    let first_data_y = table_area.y.saturating_add(2);
+    let max_y = table_area
+        .y
+        .saturating_add(table_area.height.saturating_sub(1));
+    let visible_rows = row_count.saturating_sub(row_offset);
+    for visible_idx in 0..visible_rows {
+        let y = first_data_y.saturating_add(u16::try_from(visible_idx).unwrap_or(u16::MAX));
+        if y >= max_y {
+            break;
+        }
+        hit_map.register(
+            Rect {
+                x: table_area.x.saturating_add(1),
+                y,
+                width: table_area.width.saturating_sub(2),
+                height: 1,
+            },
+            ClickTarget::LogRow(row_offset.saturating_add(visible_idx)),
+        );
     }
-    let keep = max_chars.saturating_sub(1);
-    let tail: String = input.chars().skip(total.saturating_sub(keep)).collect();
-    format!("…{tail}")
+}
+
+fn char_display_cols(ch: char) -> usize {
+    if ch.is_ascii() {
+        1
+    } else {
+        2
+    }
+}
+
+fn display_col_width(s: &str) -> usize {
+    s.chars().map(char_display_cols).sum()
+}
+
+/// Format a single-line modal input value with a visible cursor `█` at `cursor_char_idx`,
+/// horizontally scrolling by terminal display columns (treating non-ASCII wide characters as 2 columns)
+/// so the cursor and surrounding text never overflow `max_cols`.
+pub fn visible_field_slice_with_cursor(
+    value: &str,
+    cursor_char_idx: usize,
+    max_cols: usize,
+    show_cursor: bool,
+) -> String {
+    let chars: Vec<char> = value.chars().collect();
+    let cur = cursor_char_idx.min(chars.len());
+    let budget = max_cols.saturating_sub(usize::from(show_cursor)).max(2);
+
+    // Grow a window `[start..end]` around `cur` within `budget` display columns.
+    let mut start = cur;
+    let mut end = cur;
+    let mut used_cols = 0_usize;
+
+    while start > 0 || end < chars.len() {
+        let mut progressed = false;
+        if start > 0 {
+            if let Some(&ch) = chars.get(start - 1) {
+                let w = char_display_cols(ch);
+                if used_cols + w <= budget {
+                    start -= 1;
+                    used_cols += w;
+                    progressed = true;
+                }
+            }
+        }
+        if end < chars.len() {
+            if let Some(&ch) = chars.get(end) {
+                let w = char_display_cols(ch);
+                if used_cols + w <= budget {
+                    end += 1;
+                    used_cols += w;
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    for (idx, &ch) in chars.iter().enumerate().take(end).skip(start) {
+        if show_cursor && idx == cur {
+            out.push('█');
+        }
+        out.push(ch);
+    }
+    if show_cursor && cur == end {
+        out.push('█');
+    }
+    if end < chars.len() {
+        out.push('…');
+    }
+    out
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

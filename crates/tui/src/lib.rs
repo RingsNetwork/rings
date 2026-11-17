@@ -361,6 +361,9 @@ pub async fn run_with_config(config: ResolvedTuiConfig) -> Result<()> {
                     Some(Event::Mouse(mouse)) => {
                         app.handle_mouse_event(mouse);
                     }
+                    Some(Event::Paste(text)) => {
+                        app.handle_paste(&text);
+                    }
                     Some(_) => {}
                     None => {
                         // Terminal input stream closed or errored; exit cleanly instead of spinning.
@@ -1205,5 +1208,85 @@ mod tests {
         app.trigger_button(ButtonId::InspectPeer);
         let modal = app.modal.as_ref().expect("inspect modal");
         assert_eq!(modal.fields[0].value, expected_did);
+    }
+
+    #[test]
+    fn ui_focus_navigation_log_inspection_and_compact_80x24_layout_work() {
+        let mut app = App::new(test_config());
+        let _ = app.pop_pending_command();
+        app.clear_in_flight();
+
+        // 1. Focus toolbar via `[B]`, move left to `[Q]Quit`, then press `3` to switch to Peers.
+        // Switching tabs via numeric hotkey must clear `focused_toolbar_idx` so `Enter` opens
+        // InspectPeer instead of quitting!
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert_eq!(app.focused_toolbar_idx, Some(0));
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.focused_toolbar_idx, Some(ButtonId::TOOLBAR.len() - 1));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE));
+        assert_eq!(app.active_tab, TabId::Peers);
+        assert_eq!(app.focused_toolbar_idx, None);
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.should_quit);
+        assert!(app.modal.is_some());
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // 2. Verify DHT Left (`prev`) vs Right (`next`) navigation.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+        assert_eq!(app.dht_subtab, crate::app::DhtSubtab::FingerTable);
+        app.handle_key_event(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.dht_subtab, crate::app::DhtSubtab::CacheStorage);
+        app.handle_key_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.dht_subtab, crate::app::DhtSubtab::FingerTable);
+
+        // 3. Verify Commands Workbench top-row `Up` stays in its column and `{`/`}` navigates logs.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE));
+        app.selected_workbench_idx = 2;
+        app.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.selected_workbench_idx, 2);
+
+        app.push_log(
+            "createOffer",
+            true,
+            "offer-1".into(),
+            Some("DETAIL-1".into()),
+            5,
+        );
+        app.push_log(
+            "answerOffer",
+            true,
+            "answer-2".into(),
+            Some("DETAIL-2".into()),
+            6,
+        );
+        assert_eq!(app.selected_log_idx, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE));
+        assert_eq!(app.selected_log_idx, 1);
+        assert_eq!(app.last_command_output.as_deref(), Some("DETAIL-1"));
+
+        // 4. Verify Help overlay blocks scroll wheel events from mutating underlying selection.
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(app.show_help);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.output_scroll, 0);
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        // 5. Render all 6 tabs in a compact 80x24 terminal and verify CJK cursor slicing.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("80x24 terminal");
+        for tab in TabId::ALL {
+            app.active_tab = tab;
+            terminal
+                .draw(|frame| ui::render(frame, &mut app))
+                .expect("draw 80x24 tab");
+        }
+
+        let sliced = ui::visible_field_slice_with_cursor("你好世界Rings节点测试输入", 4, 14, true);
+        assert!(sliced.contains('█'));
     }
 }

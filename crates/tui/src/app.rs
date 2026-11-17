@@ -70,6 +70,15 @@ impl DhtSubtab {
         }
     }
 
+    /// Cycle to the previous sub-view.
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::FingerTable => Self::CacheStorage,
+            Self::PersistentStorage => Self::FingerTable,
+            Self::CacheStorage => Self::PersistentStorage,
+        }
+    }
+
     /// Display title of the sub-view.
     pub const fn title(self) -> &'static str {
         match self {
@@ -153,8 +162,13 @@ pub struct App {
     pub selected_workbench_idx: usize,
     /// Selected row index in the `6:Commands` execution log table.
     pub selected_log_idx: usize,
+    /// Whether keyboard navigation in `6:Commands` currently targets the Execution Log table
+    /// (`true`) instead of the 4x4 Command Workbench button grid (`false`).
+    pub commands_focus_logs: bool,
     /// Vertical scroll offset (in lines) for the Command Output inspector panel in `6:Commands`.
     pub output_scroll: u16,
+    /// Upper bound for `output_scroll` computed from the rendered output line count and panel height.
+    pub output_max_scroll: u16,
     /// Optional keyboard focus on the persistent toolbar buttons.
     pub focused_toolbar_idx: Option<usize>,
     /// Active modal input dialog, when open.
@@ -231,7 +245,9 @@ impl App {
             selected_directory_idx: 0,
             selected_workbench_idx: 0,
             selected_log_idx: 0,
+            commands_focus_logs: false,
             output_scroll: 0,
+            output_max_scroll: 0,
             focused_toolbar_idx: None,
             modal: None,
             show_help: false,
@@ -795,12 +811,30 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Char('Q') => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('1') => self.active_tab = TabId::Overview,
-            KeyCode::Char('2') => self.active_tab = TabId::Monitor,
-            KeyCode::Char('3') => self.active_tab = TabId::Peers,
-            KeyCode::Char('4') => self.active_tab = TabId::DhtStorage,
-            KeyCode::Char('5') => self.active_tab = TabId::Directory,
-            KeyCode::Char('6') => self.active_tab = TabId::Commands,
+            KeyCode::Char('1') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::Overview;
+            }
+            KeyCode::Char('2') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::Monitor;
+            }
+            KeyCode::Char('3') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::Peers;
+            }
+            KeyCode::Char('4') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::DhtStorage;
+            }
+            KeyCode::Char('5') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::Directory;
+            }
+            KeyCode::Char('6') => {
+                self.focused_toolbar_idx = None;
+                self.active_tab = TabId::Commands;
+            }
             KeyCode::Tab => {
                 self.focused_toolbar_idx = None;
                 self.active_tab = self.active_tab.next();
@@ -838,11 +872,41 @@ impl App {
                 self.trigger_button(ButtonId::ToggleExpiredDirectory)
             }
             KeyCode::Char('u') | KeyCode::Char('U') => self.trigger_button(ButtonId::ReloadToken),
-            KeyCode::PageDown | KeyCode::Char(']') => {
-                self.output_scroll = self.output_scroll.saturating_add(3);
+            KeyCode::Char(']') => {
+                self.output_scroll = self
+                    .output_scroll
+                    .saturating_add(3)
+                    .min(self.output_max_scroll);
             }
-            KeyCode::PageUp | KeyCode::Char('[') => {
+            KeyCode::Char('[') => {
                 self.output_scroll = self.output_scroll.saturating_sub(3);
+            }
+            KeyCode::Char('}') => {
+                self.step_log_selection_down(1);
+            }
+            KeyCode::Char('{') => {
+                self.step_log_selection_up(1);
+            }
+            KeyCode::PageDown => {
+                if self.active_tab == TabId::Commands {
+                    self.output_scroll = self
+                        .output_scroll
+                        .saturating_add(5)
+                        .min(self.output_max_scroll);
+                } else {
+                    for _ in 0..5 {
+                        self.move_selection_down();
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                if self.active_tab == TabId::Commands {
+                    self.output_scroll = self.output_scroll.saturating_sub(5);
+                } else {
+                    for _ in 0..5 {
+                        self.move_selection_up();
+                    }
+                }
             }
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 if self.focused_toolbar_idx.is_some() {
@@ -863,7 +927,10 @@ impl App {
                     self.directory_subtab = self.directory_subtab.toggle();
                     self.selected_directory_idx = 0;
                 } else if self.active_tab == TabId::Commands {
-                    if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx) {
+                    if self.commands_focus_logs {
+                        self.load_selected_log_into_output();
+                    } else if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
+                    {
                         self.trigger_button(btn);
                     }
                 }
@@ -874,7 +941,10 @@ impl App {
                         self.trigger_button(btn);
                     }
                 } else if self.active_tab == TabId::Commands {
-                    if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx) {
+                    if self.commands_focus_logs {
+                        self.load_selected_log_into_output();
+                    } else if let Some(&btn) = ButtonId::WORKBENCH.get(self.selected_workbench_idx)
+                    {
                         self.trigger_button(btn);
                     }
                 } else if self.active_tab == TabId::Peers {
@@ -891,17 +961,35 @@ impl App {
             KeyCode::Right | KeyCode::Char('l') => self.move_selection_right(),
             KeyCode::Esc => {
                 self.focused_toolbar_idx = None;
+                self.commands_focus_logs = false;
             }
             _ => {}
         }
     }
 
     fn handle_modal_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('u') {
-            if let Some(modal) = &mut self.modal {
-                modal.clear_active_field();
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('u') => {
+                    if let Some(modal) = &mut self.modal {
+                        modal.clear_active_field();
+                    }
+                    return;
+                }
+                KeyCode::Char('a') => {
+                    if let Some(modal) = &mut self.modal {
+                        modal.move_cursor_home();
+                    }
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    if let Some(modal) = &mut self.modal {
+                        modal.move_cursor_end();
+                    }
+                    return;
+                }
+                _ => {}
             }
-            return;
         }
         match key.code {
             KeyCode::Esc => {
@@ -920,9 +1008,34 @@ impl App {
                     modal.prev_field();
                 }
             }
+            KeyCode::Left => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_cursor_left();
+                }
+            }
+            KeyCode::Right => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_cursor_right();
+                }
+            }
+            KeyCode::Home => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_cursor_home();
+                }
+            }
+            KeyCode::End => {
+                if let Some(modal) = &mut self.modal {
+                    modal.move_cursor_end();
+                }
+            }
             KeyCode::Backspace => {
                 if let Some(modal) = &mut self.modal {
                     modal.pop_char();
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(modal) = &mut self.modal {
+                    modal.delete_char();
                 }
             }
             KeyCode::Char(ch) => {
@@ -934,14 +1047,32 @@ impl App {
         }
     }
 
+    /// Handle bracketed or multi-character pasted text into the active modal field without
+    /// prematurely submitting on embedded newlines.
+    pub fn handle_paste(&mut self, pasted: &str) {
+        let Some(modal) = &mut self.modal else {
+            return;
+        };
+        for ch in pasted.chars() {
+            match ch {
+                '\r' | '\n' => modal.push_char(' '),
+                c if !c.is_control() => modal.push_char(c),
+                _ => {}
+            }
+        }
+    }
+
     /// Handle a terminal mouse event using the bounding boxes registered in [`HitMap`].
     pub fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if self.show_help {
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                self.show_help = false;
+            }
+            return;
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.show_help {
-                    self.show_help = false;
-                    return;
-                }
                 let Some(target) = self.hit_map.hit_test(mouse.column, mouse.row) else {
                     return;
                 };
@@ -954,19 +1085,38 @@ impl App {
                     }
                     ClickTarget::Button(btn) => {
                         if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
                             if let Some(pos) = ButtonId::WORKBENCH.iter().position(|&b| b == btn) {
                                 self.selected_workbench_idx = pos;
+                                self.commands_focus_logs = false;
                             }
                             self.trigger_button(btn);
                         }
                     }
                     ClickTarget::TableRow(row) => {
                         if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
                             self.select_row(row);
+                        }
+                    }
+                    ClickTarget::LogRow(row) => {
+                        if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
+                            self.commands_focus_logs = true;
+                            self.selected_log_idx = row;
+                            self.clamp_selections();
+                            self.load_selected_log_into_output();
+                        }
+                    }
+                    ClickTarget::OutputPanel => {
+                        if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
+                            self.commands_focus_logs = false;
                         }
                     }
                     ClickTarget::SubViewToggle => {
                         if self.modal.is_none() {
+                            self.focused_toolbar_idx = None;
                             if self.active_tab == TabId::DhtStorage {
                                 self.dht_subtab = self.dht_subtab.next();
                                 self.selected_dht_idx = 0;
@@ -992,21 +1142,65 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp if self.modal.is_none() => {
+                self.focused_toolbar_idx = None;
                 if self.active_tab == TabId::Commands {
-                    self.output_scroll = self.output_scroll.saturating_sub(2);
+                    match self.hit_map.hit_test(mouse.column, mouse.row) {
+                        Some(ClickTarget::LogRow(_)) => {
+                            self.commands_focus_logs = true;
+                            self.step_log_selection_up(1);
+                        }
+                        _ => {
+                            self.output_scroll = self.output_scroll.saturating_sub(2);
+                        }
+                    }
                 } else {
                     self.move_selection_up();
                 }
             }
             MouseEventKind::ScrollDown if self.modal.is_none() => {
+                self.focused_toolbar_idx = None;
                 if self.active_tab == TabId::Commands {
-                    self.output_scroll = self.output_scroll.saturating_add(2);
+                    match self.hit_map.hit_test(mouse.column, mouse.row) {
+                        Some(ClickTarget::LogRow(_)) => {
+                            self.commands_focus_logs = true;
+                            self.step_log_selection_down(1);
+                        }
+                        _ => {
+                            self.output_scroll = self
+                                .output_scroll
+                                .saturating_add(2)
+                                .min(self.output_max_scroll);
+                        }
+                    }
                 } else {
                     self.move_selection_down();
                 }
             }
             _ => {}
         }
+    }
+
+    fn load_selected_log_into_output(&mut self) {
+        if let Some(entry) = self.action_logs.get(self.selected_log_idx) {
+            let body = entry
+                .details
+                .clone()
+                .unwrap_or_else(|| format!("[{}] {}", entry.command, entry.message));
+            self.last_command_output = Some(body);
+            self.output_scroll = 0;
+        }
+    }
+
+    fn step_log_selection_up(&mut self, step: usize) {
+        self.selected_log_idx = self.selected_log_idx.saturating_sub(step);
+        self.clamp_selections();
+        self.load_selected_log_into_output();
+    }
+
+    fn step_log_selection_down(&mut self, step: usize) {
+        self.selected_log_idx = self.selected_log_idx.saturating_add(step);
+        self.clamp_selections();
+        self.load_selected_log_into_output();
     }
 
     fn select_row(&mut self, row: usize) {
@@ -1025,15 +1219,11 @@ impl App {
                 self.selected_directory_idx = row;
             }
             TabId::Commands => {
+                self.commands_focus_logs = true;
                 self.selected_log_idx = row;
-                if let Some(entry) = self.action_logs.get(row) {
-                    let body = entry
-                        .details
-                        .clone()
-                        .unwrap_or_else(|| format!("[{}] {}", entry.command, entry.message));
-                    self.last_command_output = Some(body);
-                    self.output_scroll = 0;
-                }
+                self.clamp_selections();
+                self.load_selected_log_into_output();
+                return;
             }
         }
         self.clamp_selections();
@@ -1059,7 +1249,12 @@ impl App {
                 self.selected_directory_idx = self.selected_directory_idx.saturating_sub(1);
             }
             TabId::Commands => {
-                self.selected_workbench_idx = self.selected_workbench_idx.saturating_sub(4);
+                if self.commands_focus_logs {
+                    self.step_log_selection_up(1);
+                    return;
+                } else if self.selected_workbench_idx >= 4 {
+                    self.selected_workbench_idx -= 4;
+                }
             }
         }
         self.clamp_selections();
@@ -1085,7 +1280,10 @@ impl App {
                 self.selected_directory_idx = self.selected_directory_idx.saturating_add(1);
             }
             TabId::Commands => {
-                if self.selected_workbench_idx + 4 < ButtonId::WORKBENCH.len() {
+                if self.commands_focus_logs {
+                    self.step_log_selection_down(1);
+                    return;
+                } else if self.selected_workbench_idx + 4 < ButtonId::WORKBENCH.len() {
                     self.selected_workbench_idx += 4;
                 }
             }
@@ -1101,7 +1299,7 @@ impl App {
         }
         match self.active_tab {
             TabId::DhtStorage => {
-                self.dht_subtab = self.dht_subtab.next();
+                self.dht_subtab = self.dht_subtab.prev();
                 self.selected_dht_idx = 0;
             }
             TabId::Directory => {
@@ -1109,7 +1307,11 @@ impl App {
                 self.selected_directory_idx = 0;
             }
             TabId::Commands => {
-                self.selected_workbench_idx = self.selected_workbench_idx.saturating_sub(1);
+                if self.commands_focus_logs {
+                    self.commands_focus_logs = false;
+                } else {
+                    self.selected_workbench_idx = self.selected_workbench_idx.saturating_sub(1);
+                }
             }
             _ => {}
         }
@@ -1130,8 +1332,12 @@ impl App {
                 self.directory_subtab = self.directory_subtab.toggle();
                 self.selected_directory_idx = 0;
             }
-            TabId::Commands if self.selected_workbench_idx + 1 < ButtonId::WORKBENCH.len() => {
-                self.selected_workbench_idx += 1;
+            TabId::Commands => {
+                if self.selected_workbench_idx + 1 < ButtonId::WORKBENCH.len() {
+                    self.selected_workbench_idx += 1;
+                } else {
+                    self.commands_focus_logs = true;
+                }
             }
             _ => {}
         }
