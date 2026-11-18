@@ -724,9 +724,17 @@ impl FileStore {
 
 /// Scan `data`, the bytes of the file `name` (pure): the whole record filed there under its own
 /// key, or an undecodable record for `name` (anything else: torn, corrupt, or another key's).
+///
+/// Records written before the compact binary `Did` / `PublicKey` cutover are transparently
+/// decoded via [`crate::dht::did::with_legacy_persisted_codec`] when the current wire codec fails.
 fn scan_bytes<V>(name: String, data: &[u8]) -> ScannedRecord<V>
 where V: DeserializeOwned {
-    match rings_codec::deserialize::<(String, V)>(data) {
+    let decoded = rings_codec::deserialize::<(String, V)>(data).or_else(|_| {
+        crate::dht::did::with_legacy_persisted_codec(|| {
+            rings_codec::deserialize::<(String, V)>(data)
+        })
+    });
+    match decoded {
         Ok((key, value)) if file_name_for(&key) == name => ScannedRecord::Filed { key, value },
         _ => ScannedRecord::Undecodable(UndecodableRecord { name }),
     }

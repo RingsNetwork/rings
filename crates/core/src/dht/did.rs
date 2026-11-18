@@ -71,6 +71,34 @@ use crate::error::Result;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct Did(H160);
 
+thread_local! {
+    static LEGACY_PERSISTED_CODEC: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
+/// Whether the current thread is encoding or decoding a legacy persisted storage record whose
+/// `Did` and `PublicKey` fields use their pre-`WIRE_VERSION = 4` text representations.
+pub(crate) fn is_legacy_persisted_codec() -> bool {
+    LEGACY_PERSISTED_CODEC.with(core::cell::Cell::get)
+}
+
+/// Run `operation` with legacy persisted `Did` (`0x`-prefixed hex string) and `PublicKey`
+/// (Base58-check string) serialization/deserialization enabled on the current thread.
+pub(crate) fn with_legacy_persisted_codec<T>(operation: impl FnOnce() -> T) -> T {
+    struct ResetGuard(bool);
+    impl Drop for ResetGuard {
+        fn drop(&mut self) {
+            LEGACY_PERSISTED_CODEC.with(|flag| flag.set(self.0));
+        }
+    }
+    let previous = LEGACY_PERSISTED_CODEC.with(|flag| {
+        let prev = flag.get();
+        flag.set(true);
+        prev
+    });
+    let _guard = ResetGuard(previous);
+    operation()
+}
+
 struct DidNewtypeVisitor;
 
 impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
@@ -94,7 +122,7 @@ impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
 impl Serialize for Did {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::Serializer {
-        if serializer.is_human_readable() {
+        if serializer.is_human_readable() || is_legacy_persisted_codec() {
             self.0.serialize(serializer)
         } else {
             serializer.serialize_newtype_struct("Did", &self.to_be_bytes())
@@ -105,7 +133,7 @@ impl Serialize for Did {
 impl<'de> Deserialize<'de> for Did {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where D: serde::Deserializer<'de> {
-        if deserializer.is_human_readable() {
+        if deserializer.is_human_readable() || is_legacy_persisted_codec() {
             H160::deserialize(deserializer).map(Self)
         } else {
             deserializer.deserialize_newtype_struct("Did", DidNewtypeVisitor)

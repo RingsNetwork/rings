@@ -19,7 +19,7 @@ struct PublicKeyVisitor<const SIZE: usize>;
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::ser::Serializer {
-        if serializer.is_human_readable() {
+        if serializer.is_human_readable() || crate::dht::did::is_legacy_persisted_codec() {
             serializer.serialize_str(
                 &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
             )
@@ -158,7 +158,7 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
 impl<'de, const SIZE: usize> Deserialize<'de> for PublicKey<SIZE> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where D: serde::de::Deserializer<'de> {
-        if deserializer.is_human_readable() {
+        if deserializer.is_human_readable() || crate::dht::did::is_legacy_persisted_codec() {
             deserializer.deserialize_str(PublicKeyVisitor)
         } else {
             deserializer.deserialize_tuple(SIZE, PublicKeyVisitor)

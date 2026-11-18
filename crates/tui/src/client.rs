@@ -1394,4 +1394,124 @@ mod tests {
         assert!(HttpNodeClient::new("http://127.0.0.1:50000", Some("bad\ntoken".into())).is_err());
         assert!(HttpNodeClient::new("http://127.0.0.1:50000", Some("   ".into())).is_err());
     }
+
+    #[tokio::test]
+    async fn read_bounded_json_enforces_content_length_chunked_exact_and_malformed_bounds() {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        async fn serve_once(raw_http_response: Vec<u8>) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind local test listener");
+            let addr = listener.local_addr().expect("listener local addr");
+            tokio::spawn(async move {
+                if let Ok((mut stream, _)) = listener.accept().await {
+                    let mut req_buf = [0u8; 1024];
+                    let _ = stream.read(&mut req_buf).await;
+                    let _ = stream.write_all(&raw_http_response).await;
+                    let _ = stream.shutdown().await;
+                }
+            });
+            format!("http://{addr}/status")
+        }
+
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test reqwest client");
+        let max_bytes = 64_usize;
+
+        // 1. Oversized Content-Length header (> max_bytes) is rejected immediately.
+        let oversized_header_url = serve_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                max_bytes + 1,
+                "a".repeat(max_bytes + 1)
+            )
+            .into_bytes(),
+        )
+        .await;
+        let resp = client
+            .get(&oversized_header_url)
+            .send()
+            .await
+            .expect("send oversized header req");
+        let err = read_bounded_json::<serde_json::Value>(resp, max_bytes)
+            .await
+            .expect_err("oversized Content-Length must fail");
+        assert!(err.to_string().contains("exceeds limit"));
+
+        // 2. Chunked body without Content-Length crossing max_bytes (65 bytes > 64) is rejected.
+        let chunk1 = "x".repeat(40);
+        let chunk2 = "y".repeat(25);
+        let chunked_over_url = serve_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{}\r\n{:X}\r\n{}\r\n0\r\n\r\n",
+                chunk1.len(),
+                chunk1,
+                chunk2.len(),
+                chunk2
+            )
+            .into_bytes(),
+        )
+        .await;
+        let resp = client
+            .get(&chunked_over_url)
+            .send()
+            .await
+            .expect("send chunked over req");
+        let err = read_bounded_json::<serde_json::Value>(resp, max_bytes)
+            .await
+            .expect_err("chunked body crossing limit must fail");
+        assert!(err.to_string().contains("exceeded limit"));
+
+        // 3. Exact-limit body (len == max_bytes == 64) succeeds and decodes.
+        let prefix = r#"{"ok":""#;
+        let suffix = r#""}"#;
+        let pad_len = max_bytes - prefix.len() - suffix.len();
+        let exact_body = format!("{prefix}{}{suffix}", "z".repeat(pad_len));
+        assert_eq!(exact_body.len(), max_bytes);
+        let exact_url = serve_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                exact_body.len(),
+                exact_body
+            )
+            .into_bytes(),
+        )
+        .await;
+        let resp = client.get(&exact_url).send().await.expect("send exact req");
+        let val = read_bounded_json::<serde_json::Value>(resp, max_bytes)
+            .await
+            .expect("exact-limit JSON must succeed");
+        assert_eq!(
+            val.get("ok").and_then(serde_json::Value::as_str),
+            Some("z".repeat(pad_len).as_str())
+        );
+
+        // 4. Malformed / truncated JSON within limit is rejected with a JSON decode error.
+        let malformed_body = r#"{"ok":"unterminated"#;
+        let malformed_url = serve_once(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                malformed_body.len(),
+                malformed_body
+            )
+            .into_bytes(),
+        )
+        .await;
+        let resp = client
+            .get(&malformed_url)
+            .send()
+            .await
+            .expect("send malformed req");
+        let err = read_bounded_json::<serde_json::Value>(resp, max_bytes)
+            .await
+            .expect_err("malformed JSON must fail");
+        assert!(err
+            .to_string()
+            .contains("failed to decode status JSON response"));
+    }
 }

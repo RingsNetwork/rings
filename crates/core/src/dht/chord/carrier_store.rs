@@ -118,7 +118,7 @@ pub struct ChargedRegister {
 /// register, each with its charge. The charges are local to this owner and never sent.
 ///
 /// Law: `as_entry` forgets the charges, so `R(x) = record.as_entry()` for the record of `x`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RemovalRecord {
     /// The carrier's resource key.
     pub did: Did,
@@ -126,6 +126,136 @@ pub struct RemovalRecord {
     pub register: Option<ChargedRegister>,
     /// The removes, in the carrier's order.
     pub removes: Vec<ChargedRemove>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "RemovalRecord")]
+struct DirectRemovalRecord {
+    did: Did,
+    register: Option<ChargedRegister>,
+    removes: Vec<ChargedRemove>,
+}
+
+struct RemovalHeader {
+    did: Did,
+    register: Option<ChargedRegister>,
+    legacy: bool,
+}
+
+struct RemovalHeaderVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RemovalHeaderVisitor {
+    type Value = RemovalHeader;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(
+            formatter,
+            "a RemovalRecord (did, register) header in compact binary or legacy 0x-hex format"
+        )
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where A: serde::de::SeqAccess<'de> {
+        let first_20: [u8; 20] = seq
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let tag_or_hex: u8 = seq
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        match tag_or_hex {
+            0 => Ok(RemovalHeader {
+                did: Did::from(ethereum_types::H160(first_20)),
+                register: None,
+                legacy: false,
+            }),
+            1 => {
+                let register: ChargedRegister = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
+                Ok(RemovalHeader {
+                    did: Did::from(ethereum_types::H160(first_20)),
+                    register: Some(register),
+                    legacy: false,
+                })
+            }
+            b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'
+                if first_20[0] == 42
+                    && first_20[1] == b'0'
+                    && (first_20[2] == b'x' || first_20[2] == b'X') =>
+            {
+                let rest_22: [u8; 22] = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(2, &self))?;
+                let mut hex_bytes = [0u8; 40];
+                hex_bytes[..17].copy_from_slice(&first_20[3..20]);
+                hex_bytes[17] = tag_or_hex;
+                hex_bytes[18..40].copy_from_slice(&rest_22);
+                let decoded: [u8; 20] =
+                    hex::FromHex::from_hex(hex_bytes).map_err(serde::de::Error::custom)?;
+                let register: Option<ChargedRegister> =
+                    crate::dht::did::with_legacy_persisted_codec(|| seq.next_element())?
+                        .ok_or_else(|| serde::de::Error::invalid_length(3, &self))?;
+                Ok(RemovalHeader {
+                    did: Did::from(ethereum_types::H160(decoded)),
+                    register,
+                    legacy: true,
+                })
+            }
+            _ => Err(serde::de::Error::custom(
+                "invalid RemovalRecord Option<ChargedRegister> tag or legacy DID prefix",
+            )),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RemovalHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        deserializer.deserialize_tuple(4, RemovalHeaderVisitor)
+    }
+}
+
+struct RemovalRecordVisitor;
+
+impl<'de> serde::de::Visitor<'de> for RemovalRecordVisitor {
+    type Value = RemovalRecord;
+
+    fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+        write!(formatter, "a RemovalRecord")
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+    where A: serde::de::SeqAccess<'de> {
+        let header: RemovalHeader = seq
+            .next_element()?
+            .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+        let removes: Vec<ChargedRemove> = if header.legacy {
+            crate::dht::did::with_legacy_persisted_codec(|| seq.next_element())?
+        } else {
+            seq.next_element()?
+        }
+        .ok_or_else(|| serde::de::Error::invalid_length(1, &self))?;
+        Ok(RemovalRecord {
+            did: header.did,
+            register: header.register,
+            removes,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for RemovalRecord {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        if deserializer.is_human_readable() || crate::dht::did::is_legacy_persisted_codec() {
+            DirectRemovalRecord::deserialize(deserializer).map(|r| Self {
+                did: r.did,
+                register: r.register,
+                removes: r.removes,
+            })
+        } else {
+            deserializer.deserialize_tuple(2, RemovalRecordVisitor)
+        }
+    }
 }
 
 /// The instant a remove or register at `version` is stable: `τ + H + σ`.

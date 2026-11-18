@@ -1017,3 +1017,124 @@ async fn test_recovery_waits_for_a_cancelled_backends_late_commit() -> Result<()
     .await?;
     Ok(())
 }
+
+/// Regression: legacy `RemovalRecord` files persisted on disk in the pre-`WIRE_VERSION = 4`
+/// 43-byte `0x`-hex `Did` format decode cleanly via both `rings_codec::deserialize` and
+/// `FileStorage` (`RecordAuthority::Retained`) without retiring/deleting the on-disk record.
+#[tokio::test]
+async fn test_legacy_persisted_removal_record_decodes_and_survives_retained_file_storage(
+) -> Result<()> {
+    use crate::dht::entry::ElementDigest;
+    use crate::dht::entry::EntryDot;
+    use crate::dht::entry::EntryTombstone;
+    use crate::dht::entry::EntryVersion;
+    use crate::dht::ChargedRegister;
+    use crate::dht::ChargedRemove;
+
+    let did = Did::from(0x0102_0304_u32);
+    let actor = Did::from(0x0a0b_0c0d_u32);
+    let op_did = Did::from(0x0e0f_1011_u32);
+    let record = RemovalRecord {
+        did,
+        register: Some(ChargedRegister {
+            version: EntryVersion {
+                logical_time_ms: 1_700_000_000_000,
+                counter: 3,
+                actor,
+                operation: op_did,
+            },
+            charge: Principal::Slot(2),
+        }),
+        removes: vec![ChargedRemove {
+            tombstone: EntryTombstone {
+                element: ElementDigest([0x5a; 32]),
+                dot: EntryDot {
+                    version: EntryVersion {
+                        logical_time_ms: 1_700_000_000_123,
+                        counter: 1,
+                        actor,
+                        operation: op_did,
+                    },
+                    index: 0,
+                },
+            },
+            charge: Principal::Local,
+        }],
+    };
+
+    let legacy_record_bytes =
+        crate::dht::did::with_legacy_persisted_codec(|| rings_codec::serialize(&record))
+            .map_err(Error::CodecSerialize)?;
+    // Legacy `Did` starts with length prefix 42 (`0x2a`) followed by `"0x0000000000000000000000000000000001020304"`.
+    assert_eq!(legacy_record_bytes.first().copied(), Some(42));
+    assert_eq!(
+        legacy_record_bytes.get(1..43),
+        Some(&b"0x0000000000000000000000000000000001020304"[..])
+    );
+
+    let decoded_direct: RemovalRecord =
+        rings_codec::deserialize(&legacy_record_bytes).map_err(Error::CodecDeserialize)?;
+    assert_eq!(decoded_direct, record);
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    {
+        use crate::storage::file::FileStorage;
+        use crate::storage::KvStorageScan;
+        use crate::storage::RecordAuthority;
+        use crate::storage::ScannedRecord;
+
+        struct TempDirGuard(std::path::PathBuf);
+        impl Drop for TempDirGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let key = did.to_string();
+        let legacy_pair_bytes = crate::dht::did::with_legacy_persisted_codec(|| {
+            rings_codec::serialize(&(&key, &record))
+        })
+        .map_err(Error::CodecSerialize)?;
+
+        let guard = TempDirGuard(
+            std::env::temp_dir().join(format!("rings-legacy-removal-{}", uuid::Uuid::new_v4())),
+        );
+        let path = guard.0.join("dht-removals");
+        let file_name = {
+            let storage = FileStorage::new_with_cap_path_and_authority(
+                1024 * 1024,
+                &path,
+                RecordAuthority::Retained,
+            )
+            .await?;
+            let name = <FileStorage as KvStorageScan<RemovalRecord>>::record_name(&storage, &key);
+            let release = storage.released();
+            drop(storage);
+            release.await;
+            name
+        };
+        std::fs::write(path.join(&file_name), &legacy_pair_bytes).map_err(Error::ServiceIOError)?;
+
+        let reopened = FileStorage::new_with_cap_path_and_authority(
+            1024 * 1024,
+            &path,
+            RecordAuthority::Retained,
+        )
+        .await?;
+        let scanned = <FileStorage as KvStorageScan<RemovalRecord>>::scan(&reopened).await?;
+        assert_eq!(scanned, vec![ScannedRecord::Filed {
+            key: key.clone(),
+            value: record.clone(),
+        }]);
+        let loaded =
+            <FileStorage as KvStorageInterface<RemovalRecord>>::get(&reopened, &key).await?;
+        assert_eq!(loaded, Some(record.clone()));
+        let all = <FileStorage as KvStorageInterface<RemovalRecord>>::get_all(&reopened).await?;
+        assert_eq!(all, vec![(key, record)]);
+        assert!(
+            path.join(&file_name).exists(),
+            "Retained FileStorage must keep the legacy RemovalRecord file instead of retiring it"
+        );
+    }
+    Ok(())
+}

@@ -226,8 +226,13 @@ pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u
 }
 
 pub(super) fn decode_proof_bundle(raw: &[u8]) -> Result<Vec<SignedDataMutation>> {
-    let bundle =
-        rings_codec::deserialize::<WireProofBundle>(raw).map_err(Error::CodecDeserialize)?;
+    let bundle = rings_codec::deserialize::<WireProofBundle>(raw)
+        .or_else(|_| {
+            crate::dht::did::with_legacy_persisted_codec(|| {
+                rings_codec::deserialize::<WireProofBundle>(raw)
+            })
+        })
+        .map_err(Error::CodecDeserialize)?;
     if bundle.batches.is_empty() || bundle.items.is_empty() {
         return Err(Error::DataEntryWriteUnauthorized);
     }
