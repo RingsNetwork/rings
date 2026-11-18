@@ -120,7 +120,7 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
             "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0",
             IceCandidateTier::Relay,
         ),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
+        None
     );
     assert_eq!(
         gather_settle_delay(
@@ -148,7 +148,7 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
             "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555",
             IceCandidateTier::Relay,
         ),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
+        None
     );
     assert_eq!(
         gather_settle_delay(
@@ -190,7 +190,7 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
             "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n",
             IceCandidateTier::Relay,
         ),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
+        None
     );
     assert_eq!(
         gather_settle_delay("v=0\r\ns=-\r\n", IceCandidateTier::Reflexive),

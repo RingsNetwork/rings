@@ -95,18 +95,25 @@ const WEBRTC_GATHER_HOST_SETTLE: Duration = Duration::from_secs(3);
 /// Classify the settle window implied by an ICE candidate line or an SDP blob against the
 /// peer connection's configured `target_tier`.
 ///
-/// Law (Settle threshold): given the highest candidate tier `c` in `text` and the configured
-/// target tier `t` (`Host < Reflexive < Relay`), `c >= t` unlocks
-/// [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`), whereas `c < t` unlocks
-/// [`WEBRTC_GATHER_HOST_SETTLE`] (`3 s`).
+/// Law (Settle threshold):
+/// - Given the highest candidate tier `c` in `text` and the configured target tier `t`
+///   (`Host < Reflexive < Relay`), reaching the target tier (`c >= t`) unlocks
+///   [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`).
+/// - When `t == IceCandidateTier::Reflexive` (STUN-only) and only `Host` candidates have arrived
+///   (`c < t`), [`WEBRTC_GATHER_HOST_SETTLE`] (`3 s`) is armed so an unreachable UDP STUN server
+///   cannot stall host-candidate gathering for 60 s.
+/// - When `t == IceCandidateTier::Relay` (TURN configured) and no `Relay` candidate has arrived
+///   yet (`c < t`), returns `None` so multi-round or TCP/TLS TURN allocation taking longer than
+///   3 s on UDP-blocked networks is never truncated before the `typ relay` candidate is gathered.
 pub(crate) fn gather_settle_delay(text: &str, target_tier: IceCandidateTier) -> Option<Duration> {
-    parse_sdp_candidate_tier(text).map(|candidate_tier| {
-        if candidate_tier >= target_tier {
-            WEBRTC_GATHER_REFLEXIVE_SETTLE
-        } else {
-            WEBRTC_GATHER_HOST_SETTLE
-        }
-    })
+    let candidate_tier = parse_sdp_candidate_tier(text)?;
+    if candidate_tier >= target_tier {
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    } else if target_tier == IceCandidateTier::Reflexive {
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    } else {
+        None
+    }
 }
 
 /// Shared progress observed across `onicecandidate` and initial `localDescription.sdp` inspection
@@ -560,7 +567,7 @@ impl WebSysWebrtcConnection {
                 "local_description is None".to_string(),
             ))
             .map(|x| x.sdp())?;
-        let has_gathered_candidates = gather_settle_delay(&local_sdp, target_tier).is_some();
+        let has_gathered_candidates = parse_sdp_candidate_tier(&local_sdp).is_some();
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete
             && !has_gathered_candidates
         {
