@@ -2429,18 +2429,25 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
             Span::styled(field.placeholder, Style::default().fg(Color::DarkGray))
         } else if is_active {
             Span::styled(
-                visible_field_slice_with_cursor(&field.value, field.cursor, max_cols, true),
+                visible_field_slice_with_cursor_masked(
+                    &field.value,
+                    field.cursor,
+                    max_cols,
+                    true,
+                    field.secret,
+                ),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
             Span::styled(
-                visible_field_slice_with_cursor(
+                visible_field_slice_with_cursor_masked(
                     &field.value,
                     field.grapheme_count(),
                     max_cols,
                     false,
+                    field.secret,
                 ),
                 Style::default().fg(Color::White),
             )
@@ -2807,12 +2814,25 @@ pub fn visible_field_slice_with_cursor(
     max_cols: usize,
     show_cursor: bool,
 ) -> String {
+    visible_field_slice_with_cursor_masked(value, cursor_grapheme_idx, max_cols, show_cursor, false)
+}
+
+/// Format a modal input value onto a single visual line with optional secret masking (`*` per grapheme).
+pub fn visible_field_slice_with_cursor_masked(
+    value: &str,
+    cursor_grapheme_idx: usize,
+    max_cols: usize,
+    show_cursor: bool,
+    mask_secret: bool,
+) -> String {
     let limit = max_cols.max(2);
     // Segment `value` into extended grapheme clusters FIRST, then map each cluster 1-to-1 into its
     // single-line visual representation so grapheme indices match `FormField::cursor` identically.
     let display_graphemes: Vec<String> = UnicodeSegmentation::graphemes(value, true)
         .map(|g| {
-            if g == "\r\n" || g == "\n" || g == "\r" {
+            if mask_secret {
+                "*".to_string()
+            } else if g == "\r\n" || g == "\n" || g == "\r" {
                 "↵".to_string()
             } else if g == "\t" {
                 "→".to_string()

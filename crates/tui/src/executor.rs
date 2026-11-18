@@ -74,15 +74,20 @@ pub async fn execute_node_command(client: &dyn NodeClient, cmd: NodeCommand) -> 
             },
         },
         NodeCommand::ConnectWithSeed { source } => match client.connect_with_seed(&source).await {
-            Ok(count) => CommandOutcome::CommandSuccess {
-                command: command_name,
-                summary: format!("Connected seed ({count} bootstrap peer(s)) from {source}"),
-                output: None,
-                measurement: None,
-                dht_lookup: None,
-                registered_service: None,
-                duration_ms: elapsed_ms(started),
-            },
+            Ok(count) => {
+                let display_source = crate::client::describe_seed_source(&source);
+                CommandOutcome::CommandSuccess {
+                    command: command_name,
+                    summary: format!(
+                        "Connected seed ({count} bootstrap peer(s)) from {display_source}"
+                    ),
+                    output: None,
+                    measurement: None,
+                    dht_lookup: None,
+                    registered_service: None,
+                    duration_ms: elapsed_ms(started),
+                }
+            }
             Err(err) => CommandOutcome::CommandError {
                 command: command_name,
                 error: err.to_string(),

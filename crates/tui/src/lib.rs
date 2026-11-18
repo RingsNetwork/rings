@@ -1739,5 +1739,34 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("Command queue is full"));
+
+        // Verify inline seed document redaction and secret field masking.
+        assert_eq!(
+            crate::client::describe_seed_source(
+                r#"{"peers":[{"did":"0x1111111111111111111111111111111111111111","url":"http://127.0.0.1:50001","api_token":"TOP_SECRET"}]}"#
+            ),
+            "<inline seed document>"
+        );
+        assert_eq!(
+            crate::client::describe_seed_source("~/.rings/seed.json"),
+            "~/.rings/seed.json"
+        );
+        assert_eq!(
+            ui::visible_field_slice_with_cursor_masked("s3cr3t", 3, 20, true, true),
+            "***█***"
+        );
+        app.modal = None;
+        while app.pop_pending_command().is_some() {}
+        app.trigger_button(ButtonId::ConnectUrl);
+        if let Some(m) = &mut app.modal {
+            assert!(m.fields[1].secret);
+            m.fields[1].value = "super-secret-bearer".to_string();
+            m.fields[1].cursor = m.fields[1].grapheme_count();
+        }
+        terminal
+            .draw(|frame| ui::render(frame, &mut app))
+            .expect("draw connect url modal");
+        let modal_screen = buffer_to_string(&terminal);
+        assert!(!modal_screen.contains("super-secret-bearer"));
     }
 }

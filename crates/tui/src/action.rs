@@ -282,6 +282,8 @@ pub struct FormField {
     pub optional: bool,
     /// Whether this field accepts multi-line message payloads (preserving `\n` and `\t` on paste).
     pub multiline: bool,
+    /// Whether this field contains a sensitive secret (such as a Bearer token) that should be masked on screen.
+    pub secret: bool,
 }
 
 impl FormField {
@@ -301,7 +303,20 @@ impl FormField {
             cursor,
             optional,
             multiline: false,
+            secret: false,
         }
+    }
+
+    /// Construct a new secret single-line form field whose displayed characters are masked with `*`.
+    pub fn new_secret(
+        label: &'static str,
+        placeholder: &'static str,
+        initial: impl Into<String>,
+        optional: bool,
+    ) -> Self {
+        let mut field = Self::new(label, placeholder, initial, optional);
+        field.secret = true;
+        field
     }
 
     /// Construct a new multi-line payload form field that preserves newlines and tabs on paste.
@@ -410,7 +425,7 @@ impl CommandModal {
         let (title, fields) = match kind {
             ModalKind::ConnectUrl => ("Connect Peer via HTTP URL", vec![
                 FormField::new("Peer HTTP URL", "http://127.0.0.1:50001", "", false),
-                FormField::new(
+                FormField::new_secret(
                     "Remote API Token (optional)",
                     "Leave empty for public external handshake",
                     "",

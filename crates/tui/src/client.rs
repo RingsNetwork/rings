@@ -76,6 +76,35 @@ use crate::types::SessionKeySnapshotDto;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Maximum response body size (4 MiB) accepted from auxiliary HTTP status endpoints
+/// (`/status?view=observability` and `/gateway/status`).
+const MAX_STATUS_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+async fn read_bounded_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<T> {
+    if let Some(content_len) = response.content_length() {
+        if content_len > max_bytes as u64 {
+            return Err(TuiError::InvalidInput(format!(
+                "status response Content-Length ({content_len} bytes) exceeds limit ({max_bytes} bytes)"
+            )));
+        }
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(TuiError::InvalidInput(format!(
+                "status response body exceeded limit of {max_bytes} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice::<T>(&body).map_err(|err| {
+        TuiError::InvalidInput(format!("failed to decode status JSON response: {err}"))
+    })
+}
+
 /// Abstract interface for interacting with a Rings node, enabling both live HTTP/JSON-RPC
 /// connections and deterministic in-memory test doubles.
 #[async_trait]
@@ -209,7 +238,7 @@ impl HttpNodeClient {
             .send()
             .await?;
         let response = response.error_for_status()?;
-        Ok(response.json::<ObservabilityStatusDto>().await?)
+        read_bounded_json(response, MAX_STATUS_RESPONSE_BYTES).await
     }
 
     async fn fetch_gateway_status(&self) -> Result<Option<GatewayStatusDto>> {
@@ -224,7 +253,9 @@ impl HttpNodeClient {
             return Ok(None);
         }
         let response = response.error_for_status()?;
-        Ok(Some(response.json::<GatewayStatusDto>().await?))
+        Ok(Some(
+            read_bounded_json(response, MAX_STATUS_RESPONSE_BYTES).await?,
+        ))
     }
 
     async fn fetch_all_peer_measurements(
@@ -313,6 +344,21 @@ pub fn parse_seed_str(raw: &str) -> Result<Vec<SeedPeer>> {
     ))
 }
 
+/// Return a credential-safe display label for a seed source string, redacting inline JSON/YAML
+/// documents so embedded `api_token` values are never logged in command history.
+pub fn describe_seed_source(source: &str) -> String {
+    let trimmed = source.trim();
+    if trimmed.starts_with('{')
+        || trimmed.starts_with("peers:")
+        || trimmed.contains('\n')
+        || trimmed.contains("api_token")
+    {
+        "<inline seed document>".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Resolve seed peers from a user-supplied source, which may either be an inline `<did>@<http-url>` /
 /// JSON/YAML literal or a filesystem path to a seed file. Filesystem read errors are surfaced directly.
 pub fn load_seed_peers(source: &str) -> Result<Vec<SeedPeer>> {
@@ -323,8 +369,13 @@ pub fn load_seed_peers(source: &str) -> Result<Vec<SeedPeer>> {
         ));
     }
 
-    // Try pure inline forms (`did@http...` or inline JSON `{...}`) before touching the filesystem.
-    if trimmed.contains('@') || trimmed.starts_with('{') || trimmed.starts_with("peers:") {
+    // Try pure inline forms (`did@http...` or inline JSON/YAML) before touching the filesystem.
+    if trimmed.contains('@')
+        || trimmed.starts_with('{')
+        || trimmed.starts_with("peers:")
+        || trimmed.contains('\n')
+        || trimmed.contains("api_token")
+    {
         return parse_seed_str(trimmed);
     }
 
@@ -907,7 +958,7 @@ impl NodeClient for DemoNodeClient {
 
         Ok(NodeSnapshot {
             did: Some(local_did.clone()),
-            wire_version: Some(1),
+            wire_version: Some(4),
             version: Some("1.0.0-pre.3".to_string()),
             swarm: Some(SwarmInfo {
                 peers: peers.clone(),
