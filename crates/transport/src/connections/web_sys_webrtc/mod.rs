@@ -1,10 +1,15 @@
+use std::cell::Cell;
 use std::cell::RefCell;
+use std::future::poll_fn;
+use std::future::Future;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,6 +29,7 @@ use web_sys::RtcIceCredentialType;
 use web_sys::RtcIceGatheringState;
 use web_sys::RtcIceServer;
 use web_sys::RtcPeerConnection;
+use web_sys::RtcPeerConnectionIceEvent;
 use web_sys::RtcPeerConnectionState;
 use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
@@ -77,6 +83,121 @@ use send_lifecycle::BrowserLifecycle;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
+/// Quiet window after a server-reflexive or TURN-relay candidate arrives before ICE gathering is
+/// treated as settled when the browser has not yet reported `iceGatheringState == "complete"`.
+const WEBRTC_GATHER_REFLEXIVE_SETTLE: Duration = Duration::from_millis(300);
+/// Quiet window after a host-only candidate arrives before ICE gathering is treated as settled
+/// while waiting on STUN/TURN or mDNS interfaces that may never complete (e.g. WebKit on iOS).
+const WEBRTC_GATHER_HOST_SETTLE: Duration = Duration::from_secs(3);
+
+/// Classify the settle window implied by an ICE candidate line or an SDP blob.
+///
+/// Returns `Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)` if any candidate has `typ srflx`, `typ prflx`,
+/// or `typ relay`, `Some(WEBRTC_GATHER_HOST_SETTLE)` if any candidate line is present (`typ host`
+/// or `a=candidate:` / `candidate:`), and `None` when no candidate appears in `text`.
+pub(crate) fn gather_settle_delay(text: &str) -> Option<Duration> {
+    let mut has_candidate = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let candidate = trimmed.strip_prefix("a=").unwrap_or(trimmed);
+        if !candidate.starts_with("candidate:") {
+            continue;
+        }
+        has_candidate = true;
+        let mut tokens = candidate.split_whitespace();
+        while let Some(token) = tokens.next() {
+            if token == "typ" {
+                if let Some(typ) = tokens.next() {
+                    if typ.eq_ignore_ascii_case("srflx")
+                        || typ.eq_ignore_ascii_case("prflx")
+                        || typ.eq_ignore_ascii_case("relay")
+                    {
+                        return Some(WEBRTC_GATHER_REFLEXIVE_SETTLE);
+                    }
+                }
+                break;
+            }
+        }
+    }
+    has_candidate.then_some(WEBRTC_GATHER_HOST_SETTLE)
+}
+
+/// Shared progress observed across `onicecandidate` and initial `localDescription.sdp` inspection
+/// during [`WebSysWebrtcConnection::webrtc_gather`].
+#[derive(Default)]
+struct GatherCandidateProgress {
+    /// Monotonic count of candidate observations; advancing it resets the settle timer.
+    epoch: Cell<u64>,
+    /// Shortest settle delay unlocked by the candidates seen so far (`300 ms` once any `srflx` or
+    /// `relay` candidate arrives, `3 s` when only `host` candidates have arrived).
+    settle_delay: Cell<Option<Duration>>,
+    /// Wakers registered by [`wait_for_candidates_settled`] while polling for new candidates.
+    wakers: RefCell<Vec<std::task::Waker>>,
+}
+
+impl GatherCandidateProgress {
+    fn observe_text(&self, text: &str) -> bool {
+        let Some(delay) = gather_settle_delay(text) else {
+            return false;
+        };
+        let merged = match self.settle_delay.get() {
+            Some(existing) => existing.min(delay),
+            None => delay,
+        };
+        self.settle_delay.set(Some(merged));
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        let wakers = std::mem::take(&mut *self.wakers.borrow_mut());
+        for waker in wakers {
+            waker.wake();
+        }
+        true
+    }
+
+    fn register_waker(&self, waker: &std::task::Waker) {
+        let mut wakers = self.wakers.borrow_mut();
+        if !wakers.iter().any(|existing| existing.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+    }
+}
+
+/// Wait until gathered ICE candidates have settled for their quiet window (`300 ms` once a
+/// reflexive/relay candidate is present, `3 s` for host-only candidates). Any new candidate arrival
+/// resets the quiet window.
+async fn wait_for_candidates_settled(
+    progress: Rc<GatherCandidateProgress>,
+) -> std::result::Result<(), rings_runtime::TimerError> {
+    loop {
+        let observed_epoch = progress.epoch.get();
+        if let Some(delay) = progress.settle_delay.get() {
+            let mut sleep_fut = pin!(rings_runtime::sleep(delay));
+            let settled = poll_fn(|cx| {
+                if progress.epoch.get() != observed_epoch {
+                    return Poll::Ready(Ok(false));
+                }
+                progress.register_waker(cx.waker());
+                match sleep_fut.as_mut().poll(cx) {
+                    Poll::Ready(Ok(())) => Poll::Ready(Ok(true)),
+                    Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+            if settled && progress.epoch.get() == observed_epoch {
+                return Ok(());
+            }
+        } else {
+            poll_fn(|cx| {
+                if progress.epoch.get() != observed_epoch {
+                    return Poll::Ready(());
+                }
+                progress.register_waker(cx.waker());
+                Poll::Pending
+            })
+            .await;
+        }
+    }
+}
 
 /// A data channel paired with its delivery tracker, which owns the monotonic
 /// counter of the total bytes ever enqueued onto it. See the native backend
@@ -186,16 +307,18 @@ impl ConnectionHandlers {
     }
 }
 
-/// Guard that detaches `onicegatheringstatechange` before freeing its [`Closure`] on any exit path
-/// of [`WebSysWebrtcConnection::webrtc_gather`].
+/// Guard that detaches `onicegatheringstatechange` and `onicecandidate` before freeing their
+/// [`Closure`]s on any exit path of [`WebSysWebrtcConnection::webrtc_gather`].
 struct GatherListenerGuard<'a> {
     conn: &'a RtcPeerConnection,
-    _closure: Closure<dyn FnMut()>,
+    _gathering_closure: Closure<dyn FnMut()>,
+    _candidate_closure: Closure<dyn FnMut(RtcPeerConnectionIceEvent)>,
 }
 
 impl Drop for GatherListenerGuard<'_> {
     fn drop(&mut self) {
         self.conn.set_onicegatheringstatechange(None);
+        self.conn.set_onicecandidate(None);
     }
 }
 
@@ -348,15 +471,22 @@ impl WebSysWebrtcConnection {
         }
     }
 
-    /// Wait for ICE gathering to complete and return the local description.
+    /// Wait for ICE gathering to complete (or gathered candidates to settle) and return the local
+    /// description.
     ///
-    /// Law (Gathering ends): the wait ends when gathering completes, when this connection is
-    /// closed locally, or at `WEBRTC_GATHER_TIMEOUT`, whichever comes first. A gathering of a
-    /// locally closed connection fails as `Local connection closed`, the error native WebRTC
-    /// reports, so core classifies it by slot ownership (#945); waiting on gathering events
-    /// alone would outlive the close, which fires none (#960).
+    /// Law (Gathering ends): the wait ends when gathering completes, when gathered candidates have
+    /// settled for their quiet window (`300 ms` once a reflexive/relay candidate is present, `3 s`
+    /// for host-only candidates), when this connection is closed locally, or at
+    /// `WEBRTC_GATHER_TIMEOUT`, whichever comes first. In WebKit (Safari and every browser on
+    /// iOS), `RTCPeerConnection` gathers its STUN `srflx` candidate in a few hundred milliseconds
+    /// yet `iceGatheringState` can remain `"gathering"` past the 60 s timeout while waiting on
+    /// mDNS host-candidate registration or secondary interfaces that never finish. A gathering of
+    /// a locally closed connection fails as `Local connection closed`, the error native WebRTC
+    /// reports, so core classifies it by slot ownership (#945); waiting on gathering events alone
+    /// would outlive the close, which fires none (#960).
     async fn webrtc_gather(&self) -> Result<String> {
         let notifier = Notifier::default();
+        let progress = Rc::new(GatherCandidateProgress::default());
 
         let notifier_clone = notifier.clone();
         let conn_clone = self.webrtc_conn.clone();
@@ -367,21 +497,52 @@ impl WebSysWebrtcConnection {
             }
         });
 
-        let c = Closure::wrap(onicegatheringstatechange as Box<dyn FnMut()>);
+        let notifier_for_null_candidate = notifier.clone();
+        let progress_clone = Rc::clone(&progress);
+        let onicecandidate = Box::new(move |event: RtcPeerConnectionIceEvent| {
+            match event.candidate() {
+                None => {
+                    // End-of-candidates event (`event.candidate === null`).
+                    notifier_for_null_candidate.wake();
+                }
+                Some(candidate) => {
+                    let cand_str = candidate.candidate();
+                    if cand_str.is_empty() {
+                        // In some browsers, an empty candidate string signals end-of-candidates.
+                        notifier_for_null_candidate.wake();
+                    } else {
+                        progress_clone.observe_text(&cand_str);
+                    }
+                }
+            }
+        });
+
+        let gathering_closure = Closure::wrap(onicegatheringstatechange as Box<dyn FnMut()>);
+        let candidate_closure =
+            Closure::wrap(onicecandidate as Box<dyn FnMut(RtcPeerConnectionIceEvent)>);
         self.webrtc_conn
-            .set_onicegatheringstatechange(Some(c.as_ref().unchecked_ref()));
+            .set_onicegatheringstatechange(Some(gathering_closure.as_ref().unchecked_ref()));
+        self.webrtc_conn
+            .set_onicecandidate(Some(candidate_closure.as_ref().unchecked_ref()));
         let _gather_listener = GatherListenerGuard {
             conn: &self.webrtc_conn,
-            _closure: c,
+            _gathering_closure: gathering_closure,
+            _candidate_closure: candidate_closure,
         };
-        // Subscribe, then read: the browser runtime is single-threaded, so no gathering event
-        // runs between this read and the wait, and a gathering already complete is not missed.
+        // Subscribe, then read: the browser runtime is single-threaded, so no gathering or
+        // candidate event runs between this read and the wait. Any candidate already materialized
+        // in `localDescription.sdp` during `setLocalDescription` arms the settle window.
+        if let Some(desc) = self.webrtc_conn.local_description() {
+            progress.observe_text(&desc.sdp());
+        }
         if self.webrtc_conn.ice_gathering_state() == RtcIceGatheringState::Complete {
             notifier.wake();
         }
 
+        let settled = pin!(wait_for_candidates_settled(Rc::clone(&progress)));
+        let gather_or_settled = select(notifier, settled);
         within(
-            select(notifier, self.local_close.clone()),
+            select(gather_or_settled, self.local_close.clone()),
             Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
         )
         .await?;
@@ -390,18 +551,24 @@ impl WebSysWebrtcConnection {
                 "Local connection closed".to_string(),
             ));
         }
-        if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete {
+
+        let local_sdp = self
+            .webrtc_conn
+            .local_description()
+            .ok_or(Error::WebrtcLocalSdpGenerationError(
+                "local_description is None".to_string(),
+            ))
+            .map(|x| x.sdp())?;
+        let has_gathered_candidates = gather_settle_delay(&local_sdp).is_some();
+        if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete
+            && !has_gathered_candidates
+        {
             return Err(Error::WebrtcLocalSdpGenerationError(format!(
                 "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
             )));
         }
 
-        self.webrtc_conn
-            .local_description()
-            .ok_or(Error::WebrtcLocalSdpGenerationError(
-                "local_description is None".to_string(),
-            ))
-            .map(|x| x.sdp())
+        Ok(local_sdp)
     }
 }
 
