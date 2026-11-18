@@ -36,6 +36,7 @@ const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const DEFAULT_TURN_PORT: u16 = 3478;
 const DEFAULT_TURNS_PORT: u16 = 5349;
 const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const TURN_TCP_PER_ADDR_CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 const TURN_TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(200);
@@ -463,7 +464,13 @@ async fn run_stream_io<S>(
                     bridge_conn.send_to(&frame, client_addr),
                 ) => match res {
                     Ok(inner) => inner,
-                    Err(_) => break,
+                    Err(_) => {
+                        tracing::debug!(
+                            %client_addr,
+                            "local TURN TCP bridge delivery timed out under backpressure; dropping datagram without resetting TCP allocation"
+                        );
+                        continue;
+                    }
                 },
             };
             if send_res.is_err() {
@@ -484,6 +491,41 @@ async fn run_stream_io<S>(
     }
 }
 
+async fn connect_turn_tcp_endpoint(endpoint: &TurnTcpEndpoint) -> std::io::Result<TcpStream> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+        .await?
+        .collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "no socket addresses resolved for TURN TCP endpoint",
+        ));
+    }
+    let addr_count = u32::try_from(addrs.len()).unwrap_or(u32::MAX).max(1);
+    let per_addr_timeout = (TURN_TCP_CONNECT_TIMEOUT / addr_count)
+        .max(Duration::from_millis(500))
+        .min(TURN_TCP_PER_ADDR_CONNECT_TIMEOUT);
+    let mut last_err: Option<std::io::Error> = None;
+    for addr in addrs {
+        match tokio::time::timeout(per_addr_timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(err)) => last_err = Some(err),
+            Err(_) => {
+                last_err = Some(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("timed out connecting to TURN TCP address {addr}"),
+                ));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "failed to connect to any resolved TURN TCP address",
+        )
+    }))
+}
+
 async fn run_client_tcp_session(
     endpoint: TurnTcpEndpoint,
     outbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -496,7 +538,7 @@ async fn run_client_tcp_session(
         _ = cancel.cancelled() => return,
         res = tokio::time::timeout(
             TURN_TCP_CONNECT_TIMEOUT,
-            TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+            connect_turn_tcp_endpoint(&endpoint),
         ) => res,
     };
     let tcp_stream = match connect_res {
