@@ -457,7 +457,7 @@ mod tests {
             Ok(NodeSnapshot {
                 did: Some("0x1111222233334444555566667777888899990000".to_string()),
                 wire_version: Some(1),
-                version: Some("1.0.0-pre.3".to_string()),
+                version: Some("1.0.0-pre.5".to_string()),
                 swarm: Some(SwarmInfo {
                     peers: vec![PeerInfo {
                         did: "0xaaaa000000000000000000000000000000000001".to_string(),
