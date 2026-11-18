@@ -103,6 +103,99 @@ a=end-of-candidates\r\n";
     ]);
 }
 
+/// Regression witness for #1290 Item 1:
+/// 1. When `webrtc_answer_offer` returns its local Answer SDP, the responder must not yet have
+///    fired outbound UDP STUN connectivity checks at the offerer's candidate port (preventing
+///    pre-answer NAT port collisions while the HTTP `answerOffer` response is still in flight).
+/// 2. Once `WEBRTC_ANSWER_CHECK_START_DELAY` elapses on a live connection, the deferred remote
+///    candidates are added and the responder sends its outbound STUN Binding Request.
+/// 3. If the responder connection is closed before `WEBRTC_ANSWER_CHECK_START_DELAY` elapses,
+///    the deferred injection task cancels cleanly and sends zero UDP packets.
+#[tokio::test]
+async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer_returns(
+) -> Result<()> {
+    struct NoopCallback;
+    impl crate::core::callback::TransportCallback for NoopCallback {}
+
+    let offerer_transport = WebrtcTransport::new("", None, None);
+    let offerer = offerer_transport
+        .new_connection("responder", Box::new(NoopCallback))
+        .await?;
+    let real_offer_sdp = offerer.webrtc_create_offer().await?;
+    let (stripped_base_offer, _) = split_sdp_remote_candidates(&real_offer_sdp);
+    let _ = offerer.close().await;
+
+    // Case A: Live responder with a probe UDP socket acting as the offerer's NAT port.
+    let probe_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("probe UDP socket must bind");
+    let probe_addr = probe_socket.local_addr().expect("probe local_addr");
+    let synthetic_offer = format!(
+        "{stripped_base_offer}a=candidate:1 1 udp 2130706431 127.0.0.1 {} typ host\r\n",
+        probe_addr.port()
+    );
+
+    let responder_transport = WebrtcTransport::new("", Some("127.0.0.1".to_string()), None);
+    let responder = responder_transport
+        .new_connection("offerer_live", Box::new(NoopCallback))
+        .await?;
+    let answer_sdp = responder
+        .webrtc_answer_offer(synthetic_offer.clone())
+        .await?;
+    assert!(
+        answer_sdp.contains("a=candidate:"),
+        "responder answer SDP must contain gathered local candidates"
+    );
+
+    let mut buf = [0u8; 256];
+    assert!(
+        matches!(
+            probe_socket.try_recv(&mut buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "responder must not send any UDP STUN packet to the offerer's port before webrtc_answer_offer returns"
+    );
+
+    // After WEBRTC_ANSWER_CHECK_START_DELAY (450 ms), the deferred candidate is added and a STUN
+    // Binding Request arrives on `probe_socket`.
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), probe_socket.recv_from(&mut buf))
+        .await
+        .expect("responder must send STUN check after WEBRTC_ANSWER_CHECK_START_DELAY")
+        .expect("probe_socket recv_from");
+    assert!(
+        n >= 20 && buf[0] == 0x00 && buf[1] == 0x01,
+        "received packet must be a STUN Binding Request (0x0001)"
+    );
+    let _ = responder.close().await;
+
+    // Case B: Responder closed immediately after webrtc_answer_offer returns must cancel the
+    // deferred candidate injection and send zero packets.
+    let cancelled_probe = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("cancelled probe UDP socket must bind");
+    let cancelled_addr = cancelled_probe.local_addr().expect("cancelled local_addr");
+    let cancelled_offer = format!(
+        "{stripped_base_offer}a=candidate:1 1 udp 2130706431 127.0.0.1 {} typ host\r\n",
+        cancelled_addr.port()
+    );
+    let responder_cancelled = responder_transport
+        .new_connection("offerer_cancelled", Box::new(NoopCallback))
+        .await?;
+    let _ = responder_cancelled
+        .webrtc_answer_offer(cancelled_offer)
+        .await?;
+    responder_cancelled.close().await?;
+    tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY + Duration::from_millis(150)).await;
+    assert!(
+        matches!(
+            cancelled_probe.try_recv(&mut buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "closed responder must cancel deferred candidate checks and send zero UDP packets"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_before_witness(
 ) -> Result<()> {

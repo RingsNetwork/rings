@@ -62,8 +62,9 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum PeerLifecycle {
+    #[default]
     Absent,
     Pending(u64),
     Admitting(u64),
@@ -442,4 +443,427 @@ fn explore(
             remaining_depth - 1,
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelSignaling {
+    Creating(OfferOwner),
+    Sent(OfferOwner),
+    Answered(OfferOwner),
+    Answering,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProductAction {
+    ReserveOffering(OfferOwner),
+    ReserveAnswering,
+    MarkSent(CallbackGeneration),
+    MarkAnswered(CallbackGeneration),
+    CrossingOffer {
+        carrier: OfferOwner,
+        local_smaller: bool,
+    },
+    BeginAdmission(CallbackGeneration),
+    CommitAdmission(CallbackGeneration),
+    Terminal(CallbackGeneration),
+    Timeout,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProductView {
+    peer: PeerLifecycle,
+    signaling: Option<ModelSignaling>,
+    superseded_by_peer: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ProductModel {
+    peer: PeerLifecycle,
+    signaling: Option<ModelSignaling>,
+    next_generation: u64,
+    previous_generation: Option<u64>,
+}
+
+impl ProductModel {
+    fn apply(mut self, action: ProductAction) -> Self {
+        match action {
+            ProductAction::ReserveOffering(owner) => {
+                if matches!(self.peer, PeerLifecycle::Absent) {
+                    if let Some(next) = self.next_generation.checked_add(1) {
+                        self.next_generation = next;
+                        self.peer = PeerLifecycle::Pending(next);
+                        self.signaling = Some(ModelSignaling::Creating(owner));
+                    }
+                }
+            }
+            ProductAction::ReserveAnswering => {
+                if matches!(self.peer, PeerLifecycle::Absent) {
+                    if let Some(next) = self.next_generation.checked_add(1) {
+                        self.next_generation = next;
+                        self.peer = PeerLifecycle::Pending(next);
+                        self.signaling = Some(ModelSignaling::Answering);
+                    }
+                }
+            }
+            ProductAction::MarkSent(cb) => {
+                if let (
+                    Some(gen),
+                    PeerLifecycle::Pending(cur),
+                    Some(ModelSignaling::Creating(owner)),
+                ) = (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        self.signaling = Some(ModelSignaling::Sent(owner));
+                    }
+                }
+            }
+            ProductAction::MarkAnswered(cb) => {
+                if let (
+                    Some(gen),
+                    PeerLifecycle::Pending(cur),
+                    Some(ModelSignaling::Creating(owner) | ModelSignaling::Sent(owner)),
+                ) = (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        self.signaling = Some(ModelSignaling::Answered(owner));
+                    }
+                }
+            }
+            ProductAction::CrossingOffer {
+                carrier,
+                local_smaller,
+            } => {
+                if let (PeerLifecycle::Pending(cur), Some(sig)) = (self.peer, self.signaling) {
+                    let yields = match sig {
+                        ModelSignaling::Creating(_) => true,
+                        ModelSignaling::Sent(OfferOwner::Overlay)
+                            if carrier == OfferOwner::External =>
+                        {
+                            true
+                        }
+                        ModelSignaling::Sent(OfferOwner::External)
+                            if carrier == OfferOwner::Overlay =>
+                        {
+                            false
+                        }
+                        ModelSignaling::Sent(_) => !local_smaller,
+                        ModelSignaling::Answered(_) | ModelSignaling::Answering => false,
+                    };
+                    if yields {
+                        if let Some(next) = self.next_generation.checked_add(1) {
+                            self.previous_generation = Some(cur);
+                            self.next_generation = next;
+                            self.peer = PeerLifecycle::Pending(next);
+                            self.signaling = Some(ModelSignaling::Answering);
+                        }
+                    }
+                }
+            }
+            ProductAction::BeginAdmission(cb) => {
+                if let (Some(gen), PeerLifecycle::Pending(cur)) = (self.callback_gen(cb), self.peer)
+                {
+                    if gen == cur {
+                        self.peer = PeerLifecycle::Admitting(cur);
+                        self.signaling = None;
+                    }
+                }
+            }
+            ProductAction::CommitAdmission(cb) => {
+                if let (Some(gen), PeerLifecycle::Admitting(cur)) =
+                    (self.callback_gen(cb), self.peer)
+                {
+                    if gen == cur {
+                        self.peer = PeerLifecycle::Active(cur);
+                    }
+                }
+            }
+            ProductAction::Terminal(cb) => {
+                if let Some(gen) = self.callback_gen(cb) {
+                    if matches!(
+                        self.peer,
+                        PeerLifecycle::Pending(cur)
+                            | PeerLifecycle::Admitting(cur)
+                            | PeerLifecycle::Active(cur)
+                            if cur == gen
+                    ) {
+                        self.previous_generation = Some(gen);
+                        self.peer = PeerLifecycle::Absent;
+                        self.signaling = None;
+                    }
+                }
+            }
+            ProductAction::Timeout => match self.peer {
+                PeerLifecycle::Pending(cur) | PeerLifecycle::Admitting(cur) => {
+                    self.previous_generation = Some(cur);
+                    self.peer = PeerLifecycle::Absent;
+                    self.signaling = None;
+                }
+                PeerLifecycle::Absent | PeerLifecycle::Active(_) => {}
+            },
+        }
+        self
+    }
+
+    fn callback_gen(self, cb: CallbackGeneration) -> Option<u64> {
+        match cb {
+            CallbackGeneration::Current => match self.peer {
+                PeerLifecycle::Absent => None,
+                PeerLifecycle::Pending(g)
+                | PeerLifecycle::Admitting(g)
+                | PeerLifecycle::Active(g) => Some(g),
+            },
+            CallbackGeneration::Previous => self.previous_generation,
+        }
+    }
+
+    fn view(self) -> ProductView {
+        let superseded_by_peer = self
+            .previous_generation
+            .is_some_and(|prev| match self.peer {
+                PeerLifecycle::Pending(cur) => {
+                    cur != prev && self.signaling == Some(ModelSignaling::Answering)
+                }
+                PeerLifecycle::Admitting(cur) | PeerLifecycle::Active(cur) => cur != prev,
+                PeerLifecycle::Absent => false,
+            });
+        ProductView {
+            peer: self.peer,
+            signaling: self.signaling,
+            superseded_by_peer,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProductImpl {
+    smaller_did: Did,
+    larger_did: Did,
+    peer: Did,
+    tx_id: uuid::Uuid,
+    lifecycles: ConnectionLifecycleRegistry,
+    previous_attempt: Option<PendingConnectionAttempt>,
+    now_ms: i64,
+}
+
+impl ProductImpl {
+    fn new() -> Self {
+        let smaller_did = Did::from(1_u32);
+        let larger_did = Did::from(2_u32);
+        Self {
+            smaller_did,
+            larger_did,
+            peer: larger_did,
+            tx_id: uuid::Uuid::new_v4(),
+            lifecycles: ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 1)),
+            previous_attempt: None,
+            now_ms: 0,
+        }
+    }
+
+    fn callback_attempt(&self, cb: CallbackGeneration) -> Option<PendingConnectionAttempt> {
+        match cb {
+            CallbackGeneration::Current => self.lifecycles.state(self.peer).map(|s| s.attempt()),
+            CallbackGeneration::Previous => self.previous_attempt,
+        }
+    }
+
+    fn apply(mut self, action: ProductAction) -> Self {
+        match action {
+            ProductAction::ReserveOffering(owner) => {
+                if self
+                    .lifecycles
+                    .reserve_for(self.peer, self.now_ms, Handshake::offering(owner))
+                    .is_ok()
+                {
+                    self.now_ms += 1;
+                }
+            }
+            ProductAction::ReserveAnswering => {
+                if self
+                    .lifecycles
+                    .reserve_for(self.peer, self.now_ms, Handshake::Answering)
+                    .is_ok()
+                {
+                    self.now_ms += 1;
+                }
+            }
+            ProductAction::MarkSent(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self
+                        .lifecycles
+                        .mark_offer_sent(attempt, "sdp".to_string(), self.tx_id);
+                }
+            }
+            ProductAction::MarkAnswered(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.mark_offer_answered(attempt, None);
+                }
+            }
+            ProductAction::CrossingOffer {
+                carrier,
+                local_smaller,
+            } => {
+                if let Some(attempt) = self.lifecycles.pending_attempt(self.peer) {
+                    if let Some(handshake) = self.lifecycles.handshake(attempt).cloned() {
+                        let (local, remote) = if local_smaller {
+                            (self.smaller_did, self.larger_did)
+                        } else {
+                            (self.larger_did, self.smaller_did)
+                        };
+                        if crossing_offer_verdict(&handshake, carrier, local, remote)
+                            == CrossingOfferVerdict::Yield
+                        {
+                            if let Ok(Some(_answering)) =
+                                self.lifecycles
+                                    .replace_pending_in(attempt, &handshake, self.now_ms)
+                            {
+                                self.previous_attempt = Some(attempt);
+                                self.now_ms += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            ProductAction::BeginAdmission(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.begin_admission(attempt);
+                }
+            }
+            ProductAction::CommitAdmission(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    if let Some(admitting) = self.lifecycles.admitting_connection(attempt) {
+                        admitting.activate();
+                    }
+                }
+            }
+            ProductAction::Terminal(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let removed_unadmitted = self.lifecycles.remove_unadmitted(attempt);
+                    let removed_active = self.lifecycles.remove_active(attempt);
+                    if removed_unadmitted || removed_active {
+                        self.previous_attempt = Some(attempt);
+                    }
+                }
+            }
+            ProductAction::Timeout => {
+                let expired = self
+                    .lifecycles
+                    .expire(self.now_ms + PENDING_CONNECTION_TIMEOUT_MS);
+                if let Some(first) = expired.into_iter().next() {
+                    self.previous_attempt = Some(first.attempt);
+                }
+            }
+        }
+        self
+    }
+
+    fn view(&self) -> ProductView {
+        let peer = match self.lifecycles.state(self.peer) {
+            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+                PeerLifecycle::Pending(attempt.generation)
+            }
+            Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
+                PeerLifecycle::Admitting(attempt.generation)
+            }
+            Some(PeerConnectionLifecycle::Active { attempt }) => {
+                PeerLifecycle::Active(attempt.generation)
+            }
+            None => PeerLifecycle::Absent,
+        };
+        let signaling = self
+            .lifecycles
+            .state(self.peer)
+            .and_then(|s| self.lifecycles.handshake(s.attempt()))
+            .map(|h| match h {
+                Handshake::Offering {
+                    owner,
+                    phase: handshake::OfferPhase::Creating,
+                } => ModelSignaling::Creating(*owner),
+                Handshake::Offering {
+                    owner,
+                    phase: handshake::OfferPhase::Sent { .. },
+                } => ModelSignaling::Sent(*owner),
+                Handshake::Offering {
+                    owner,
+                    phase: handshake::OfferPhase::Answered,
+                } => ModelSignaling::Answered(*owner),
+                Handshake::Answering => ModelSignaling::Answering,
+            });
+        let superseded_by_peer = self
+            .previous_attempt
+            .is_some_and(|prev| self.lifecycles.superseded_by_peer(prev));
+        ProductView {
+            peer,
+            signaling,
+            superseded_by_peer,
+        }
+    }
+}
+
+#[test]
+fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
+    const MAX_DEPTH: usize = 4;
+    let actions = [
+        ProductAction::ReserveOffering(OfferOwner::Overlay),
+        ProductAction::ReserveOffering(OfferOwner::External),
+        ProductAction::ReserveAnswering,
+        ProductAction::MarkSent(CallbackGeneration::Current),
+        ProductAction::MarkAnswered(CallbackGeneration::Current),
+        ProductAction::CrossingOffer {
+            carrier: OfferOwner::Overlay,
+            local_smaller: true,
+        },
+        ProductAction::CrossingOffer {
+            carrier: OfferOwner::Overlay,
+            local_smaller: false,
+        },
+        ProductAction::CrossingOffer {
+            carrier: OfferOwner::External,
+            local_smaller: true,
+        },
+        ProductAction::CrossingOffer {
+            carrier: OfferOwner::External,
+            local_smaller: false,
+        },
+        ProductAction::BeginAdmission(CallbackGeneration::Current),
+        ProductAction::BeginAdmission(CallbackGeneration::Previous),
+        ProductAction::CommitAdmission(CallbackGeneration::Current),
+        ProductAction::Terminal(CallbackGeneration::Current),
+        ProductAction::Terminal(CallbackGeneration::Previous),
+        ProductAction::Timeout,
+    ];
+
+    fn explore_product(
+        model: ProductModel,
+        implementation: ProductImpl,
+        actions: &[ProductAction],
+        remaining_depth: usize,
+    ) {
+        let model_view = model.view();
+        let impl_view = implementation.view();
+        assert_eq!(model_view, impl_view);
+        // Invariant (Signaling): signaling state exists iff the peer is in `Pending`.
+        assert_eq!(
+            model_view.signaling.is_some(),
+            matches!(model_view.peer, PeerLifecycle::Pending(_))
+        );
+        if remaining_depth == 0 {
+            return;
+        }
+        for &action in actions {
+            explore_product(
+                model.apply(action),
+                implementation.clone().apply(action),
+                actions,
+                remaining_depth - 1,
+            );
+        }
+    }
+
+    explore_product(
+        ProductModel::default(),
+        ProductImpl::new(),
+        &actions,
+        MAX_DEPTH,
+    );
 }
