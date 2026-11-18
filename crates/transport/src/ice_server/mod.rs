@@ -73,17 +73,35 @@ impl Default for IceServer {
     }
 }
 
-/// [stun|turn]://[username]:[password]@[url]
+/// [stun|stuns|turn|turns]://[username]:[password]@[url][?transport=tcp|udp]
 /// For current implementation all type is `password` as default
 /// E.g: stun://foo:bar@stun.l.google.com:19302
 ///      turn://ethereum.org:9090
 ///      turn://ryan@ethereum.org:9090/nginx/v2
+///      turn://user:pass@ethereum.org:80?transport=tcp
+///      turns://user:pass@ethereum.org:5349?transport=tcp
 impl FromStr for IceServer {
     type Err = IceServerError;
     fn from_str(s: &str) -> Result<Self, IceServerError> {
-        let parsed = Url::parse(s)?;
+        let trimmed = s.trim();
+        let normalized;
+        let to_parse = if !trimmed.contains("://") {
+            if let Some((scheme_part, rest)) = trimmed.split_once(':') {
+                if !rest.is_empty() && !rest.starts_with('/') {
+                    normalized = format!("{scheme_part}://{rest}");
+                    normalized.as_str()
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        };
+        let parsed = Url::parse(to_parse)?;
         let scheme = parsed.scheme();
-        if !(["turn", "stun"].contains(&scheme)) {
+        if !(["turn", "turns", "stun", "stuns"].contains(&scheme)) {
             return Err(IceServerError::SchemeNotSupported(scheme.into()));
         }
         if !parsed.has_host() {
@@ -98,7 +116,12 @@ impl FromStr for IceServer {
             .map(|p| format!(":{p}"))
             .unwrap_or_else(|| "".to_string());
         let path = parsed.path();
-        let url = format!("{scheme}:{host}{port}{path}");
+        let query = parsed
+            .query()
+            .filter(|q| !q.is_empty())
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        let url = format!("{scheme}:{host}{port}{path}{query}");
         Ok(Self {
             urls: vec![url],
             username: username.to_string(),

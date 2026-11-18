@@ -1858,4 +1858,175 @@ mod tests {
         v6_server.close().await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn turn_server_relays_udp_traffic_for_tcp_turn_client() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+        use turn::proto::chandata::ChannelData;
+
+        let clock = Arc::new(ManualClock::new(1_700_000_000_000));
+        let mut config = TurnServerConfig::loopback_ephemeral();
+        config.clock = clock.clone();
+
+        let server = TurnServer::start(config).await?;
+        let server_addr = server.local_addr();
+        let server_pubkey = server.server_pubkey();
+
+        let account_key = SecretKey::random();
+        let delegatee_key =
+            DelegateeKey::new_with_seckey_at(&account_key, 60_000, clock.now_ms()).unwrap();
+        let signed_tcp_url = server.tcp_ice_server_url_for(&delegatee_key)?;
+        assert!(signed_tcp_url.ends_with("?transport=tcp"));
+        let creds = delegatee_key.turn_credentials(server_pubkey)?;
+
+        let mut tcp_client = TcpStream::connect(server_addr).await?;
+        tcp_client.set_nodelay(true)?;
+
+        // 1. Send unauthenticated Allocate over TCP to get 401 challenge.
+        let unauth_alloc = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        tcp_client.write_all(&unauth_alloc).await?;
+        tcp_client.flush().await?;
+
+        async fn read_stun_over_tcp(stream: &mut tokio::net::TcpStream) -> Message {
+            use tokio::io::AsyncReadExt;
+
+            let mut hdr = [0u8; 20];
+            stream.read_exact(&mut hdr).await.unwrap();
+            let body_len = usize::from(u16::from_be_bytes([hdr[2], hdr[3]]));
+            let mut raw = vec![0u8; 20 + body_len];
+            raw[..20].copy_from_slice(&hdr);
+            stream.read_exact(&mut raw[20..]).await.unwrap();
+            let mut msg = Message {
+                raw,
+                ..Default::default()
+            };
+            msg.decode().unwrap();
+            msg
+        }
+
+        let challenge_resp = read_stun_over_tcp(&mut tcp_client).await;
+        assert_eq!(challenge_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let nonce_attr = Nonce::get_from_as(&challenge_resp, ATTR_NONCE).unwrap();
+        let realm_attr = Realm::get_from_as(&challenge_resp, ATTR_REALM).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm_attr.text, &creds.credential);
+
+        // 2. Send authenticated Allocate over TCP.
+        let auth_alloc = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        tcp_client.write_all(&auth_alloc).await?;
+        tcp_client.flush().await?;
+
+        let alloc_resp = read_stun_over_tcp(&mut tcp_client).await;
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut relayed = RelayedAddress::default();
+        relayed.get_from(&alloc_resp).unwrap();
+        let relay_addr = SocketAddr::new(relayed.ip, relayed.port);
+
+        // 3. Spin up a UDP echo peer and bind Channel 0x4000 to it over TCP.
+        let echo_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let echo_addr = echo_socket.local_addr()?;
+
+        let channel_bind = {
+            let mut msg = Message::new();
+            let setters: Vec<Box<dyn Setter>> = vec![
+                Box::new(Message {
+                    transaction_id: TransactionId::new(),
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                Box::new(ChannelNumber(0x4000)),
+                Box::new(PeerAddress {
+                    ip: echo_addr.ip(),
+                    port: echo_addr.port(),
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username)),
+                Box::new(Realm::new(ATTR_REALM, realm_attr.text)),
+                Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text)),
+                Box::new(MessageIntegrity(mi_key)),
+                Box::new(FINGERPRINT),
+            ];
+            msg.build(&setters).unwrap();
+            msg.raw
+        };
+        tcp_client.write_all(&channel_bind).await?;
+        tcp_client.flush().await?;
+        let bind_resp = read_stun_over_tcp(&mut tcp_client).await;
+        assert_eq!(bind_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 4. Send unaligned 5-byte ChannelData frame over TCP (padded to 8-byte body = 12 bytes total)
+        //    and verify UDP relay delivery and TCP ChannelData reply.
+        let mut cd = ChannelData {
+            number: ChannelNumber(0x4000),
+            data: b"hello".to_vec(),
+            raw: Vec::new(),
+        };
+        cd.encode();
+        assert_eq!(cd.raw.len(), 12);
+        tcp_client.write_all(&cd.raw).await?;
+        tcp_client.flush().await?;
+
+        let mut udp_buf = [0u8; 64];
+        let (n, from) =
+            tokio::time::timeout(Duration::from_secs(5), echo_socket.recv_from(&mut udp_buf))
+                .await
+                .expect("UDP peer should receive ChannelData payload")?;
+        assert_eq!(from, relay_addr);
+        assert_eq!(&udp_buf[..n], b"hello");
+
+        echo_socket.send_to(b"world", from).await?;
+
+        let mut tcp_cd_buf = [0u8; 12];
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tcp_client.read_exact(&mut tcp_cd_buf),
+        )
+        .await
+        .expect("TCP TURN client should receive padded ChannelData frame")?;
+        let mut inbound_cd = ChannelData {
+            raw: tcp_cd_buf.to_vec(),
+            ..Default::default()
+        };
+        inbound_cd.decode().unwrap();
+        assert_eq!(inbound_cd.number, ChannelNumber(0x4000));
+        assert_eq!(inbound_cd.data, b"world");
+
+        drop(tcp_client);
+        server.close().await?;
+        Ok(())
+    }
 }
