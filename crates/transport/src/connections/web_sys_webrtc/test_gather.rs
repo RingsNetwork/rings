@@ -15,7 +15,12 @@ use web_sys::RtcSdpType;
 use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
+use super::gather_settle_delay;
+use super::wait_for_candidates_settled;
+use super::GatherCandidateProgress;
 use super::WebSysWebrtcConnection;
+use super::WEBRTC_GATHER_HOST_SETTLE;
+use super::WEBRTC_GATHER_REFLEXIVE_SETTLE;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
 use crate::core::callback::TransportCallback;
@@ -96,4 +101,104 @@ async fn local_close_ends_a_gathering_in_progress() {
         matches!(&gathered, Err(Error::WebrtcLocalSdpGenerationError(message)) if message == "Local connection closed"),
         "{gathered:?}"
     );
+}
+
+#[wasm_bindgen_test]
+fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0"
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0"
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay("candidate:3 1 udp 2113937151 test.local 56555 typ host"),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay("v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n"),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n"
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(gather_settle_delay("v=0\r\ns=-\r\n"), None);
+}
+
+/// If a host candidate arrives first (arming the 3 s settle timer) and a reflexive candidate
+/// arrives shortly after, `GatherCandidateProgress::observe_text` must wake the in-flight wait so
+/// it switches immediately to the 300 ms reflexive settle window instead of sleeping out the 3 s
+/// host timer.
+#[wasm_bindgen_test]
+async fn test_reflexive_candidate_shortens_in_flight_host_settle_window() {
+    with_hang_guard(
+        "test_reflexive_candidate_shortens_in_flight_host_settle_window",
+        Duration::from_millis(1200),
+        async {
+            let progress = Rc::new(GatherCandidateProgress::default());
+            assert!(progress.observe_text("candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host"));
+            let progress_for_srflx = Rc::clone(&progress);
+            let inject_srflx = async move {
+                rings_runtime::sleep(Duration::from_millis(50))
+                    .await
+                    .expect("browser timer must fire");
+                assert!(progress_for_srflx.observe_text(
+                    "candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0"
+                ));
+            };
+            let (settled, ()) =
+                futures::join!(wait_for_candidates_settled(progress), inject_srflx);
+            settled.expect("settled wait must complete within the shortened reflexive window");
+        },
+    )
+    .await
+}
+
+/// Even when an unreachable STUN server keeps `iceGatheringState` in `"gathering"` past the
+/// settle window (as WebKit does on iOS), `webrtc_gather` resolves once local candidates settle
+/// rather than waiting out the full 60 s gather timeout.
+#[wasm_bindgen_test]
+async fn test_stalled_gathering_settles_once_candidates_arrive() {
+    with_hang_guard(
+        "test_stalled_gathering_settles_once_candidates_arrive",
+        Duration::from_secs(10),
+        stalled_gathering_settles_once_candidates_arrive(),
+    )
+    .await
+}
+
+async fn stalled_gathering_settles_once_candidates_arrive() {
+    let peer_connection = stalled_gathering_connection();
+    let _channel = peer_connection.create_data_channel("gather-settle");
+    let connection = WebSysWebrtcConnection::new(
+        peer_connection.clone(),
+        Rc::new(ChannelPool::from_vec(Vec::new())),
+        Notifier::default(),
+        ConnectionStateCell::new(),
+        Rc::new(InnerTransportCallback::new(
+            "peer",
+            Box::new(IgnoredCallback),
+            Notifier::default(),
+            NodeFramePool::new(),
+        )),
+    );
+
+    let sdp = connection
+        .webrtc_create_offer()
+        .await
+        .expect("offer gathering must settle before the 60 s timeout");
+    assert!(
+        sdp.contains("a=candidate:"),
+        "settled offer SDP must contain at least one gathered candidate: {sdp}"
+    );
+    let _ = connection.close().await;
 }
