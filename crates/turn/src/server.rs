@@ -7,6 +7,7 @@ use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
@@ -115,7 +116,9 @@ const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const PROTO_TCP: Protocol = Protocol(6);
 const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
 const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
-const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 256;
+const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 64;
+const MAX_TCP_PEER_QUEUED_BYTES: usize = 256 * 1024;
+const MAX_TCP_TOTAL_QUEUED_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TCP_CONNECTIONS_CAP: usize = 512;
 const TCP_ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(20);
 const TCP_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
@@ -344,14 +347,17 @@ struct AllocationState {
     channel_bindings: HashMap<ChannelNumber, (SocketAddr, Instant)>,
 }
 
+static NEXT_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
+
 struct ManagedAllocation {
+    alloc_id: u64,
     five_tuple: FiveTuple,
     username: String,
     relay_addr: SocketAddr,
     relay_conn: Arc<PolicyRelayConn>,
     state: SyncMutex<AllocationState>,
     expiry_tx: watch::Sender<Instant>,
-    tcp_authenticated_tx: Option<watch::Sender<bool>>,
+    tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
 }
 
 impl ManagedAllocation {
@@ -361,13 +367,15 @@ impl ManagedAllocation {
         relay_addr: SocketAddr,
         relay_conn: Arc<PolicyRelayConn>,
         lifetime: Duration,
-        tcp_authenticated_tx: Option<watch::Sender<bool>>,
+        tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
     ) -> Arc<Self> {
+        let alloc_id = NEXT_ALLOCATION_ID.fetch_add(1, Ordering::Relaxed);
         if let Some(ref tx) = tcp_authenticated_tx {
-            let _ = tx.send_replace(true);
+            let _ = tx.send_replace(Some(alloc_id));
         }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
         Arc::new(Self {
+            alloc_id,
             five_tuple,
             username,
             relay_addr,
@@ -395,7 +403,15 @@ impl ManagedAllocation {
 
     fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
         if let Some(ref tx) = self.tcp_authenticated_tx {
-            let _ = tx.send_replace(false);
+            let alloc_id = self.alloc_id;
+            tx.send_if_modified(|current| {
+                if *current == Some(alloc_id) {
+                    *current = None;
+                    true
+                } else {
+                    false
+                }
+            });
         }
         let _ = self.expiry_tx.send_replace(Instant::now());
         self.relay_conn.begin_close()
@@ -610,12 +626,58 @@ where R: AsyncRead + Unpin {
     }
 }
 
+struct QueuedTcpFrame {
+    bytes: Vec<u8>,
+    peer_queued_bytes: Arc<AtomicUsize>,
+    total_queued_bytes: Arc<AtomicUsize>,
+}
+
+impl QueuedTcpFrame {
+    fn try_reserve(
+        bytes: Vec<u8>,
+        peer_queued_bytes: &Arc<AtomicUsize>,
+        total_queued_bytes: &Arc<AtomicUsize>,
+        enforce_peer_cap: bool,
+    ) -> Option<Self> {
+        let len = bytes.len();
+        if enforce_peer_cap {
+            let prev_peer = peer_queued_bytes.fetch_add(len, Ordering::AcqRel);
+            if prev_peer.saturating_add(len) > MAX_TCP_PEER_QUEUED_BYTES {
+                peer_queued_bytes.fetch_sub(len, Ordering::Release);
+                return None;
+            }
+        } else {
+            peer_queued_bytes.fetch_add(len, Ordering::AcqRel);
+        }
+        let prev_total = total_queued_bytes.fetch_add(len, Ordering::AcqRel);
+        if prev_total.saturating_add(len) > MAX_TCP_TOTAL_QUEUED_BYTES {
+            total_queued_bytes.fetch_sub(len, Ordering::Release);
+            peer_queued_bytes.fetch_sub(len, Ordering::Release);
+            return None;
+        }
+        Some(Self {
+            bytes,
+            peer_queued_bytes: Arc::clone(peer_queued_bytes),
+            total_queued_bytes: Arc::clone(total_queued_bytes),
+        })
+    }
+}
+
+impl Drop for QueuedTcpFrame {
+    fn drop(&mut self) {
+        let len = self.bytes.len();
+        self.peer_queued_bytes.fetch_sub(len, Ordering::Release);
+        self.total_queued_bytes.fetch_sub(len, Ordering::Release);
+    }
+}
+
 #[derive(Clone)]
 struct TcpPeerEntry {
     conn_id: u64,
-    control_tx: mpsc::Sender<Vec<u8>>,
-    data_tx: mpsc::Sender<Vec<u8>>,
-    authenticated_tx: watch::Sender<bool>,
+    control_tx: mpsc::Sender<QueuedTcpFrame>,
+    data_tx: mpsc::Sender<QueuedTcpFrame>,
+    peer_queued_bytes: Arc<AtomicUsize>,
+    authenticated_tx: watch::Sender<Option<u64>>,
     evict_tx: watch::Sender<bool>,
 }
 
@@ -634,6 +696,7 @@ struct TcpTurnListenerConn {
     local_addr: SocketAddr,
     inbound_rx: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
     peers: Arc<SyncMutex<TcpPeerMap>>,
+    total_queued_bytes: Arc<AtomicUsize>,
     disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>>,
     shutdown_tx: watch::Sender<bool>,
     accept_handle: Mutex<Option<JoinHandle<()>>>,
@@ -647,6 +710,7 @@ impl TcpTurnListenerConn {
     ) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(TCP_INBOUND_QUEUE_CAPACITY);
         let peers: Arc<SyncMutex<TcpPeerMap>> = Arc::new(SyncMutex::new(HashMap::new()));
+        let total_queued_bytes = Arc::new(AtomicUsize::new(0));
         let handoffs: Arc<SyncMutex<TcpPeerHandoffMap>> = Arc::new(SyncMutex::new(HashMap::new()));
         let disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>> =
             Arc::new(SyncMutex::new(HashMap::new()));
@@ -695,12 +759,13 @@ impl TcpTurnListenerConn {
                 let _ = tcp_stream.set_nodelay(true);
                 let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
                 let (control_tx, mut control_rx) =
-                    mpsc::channel::<Vec<u8>>(TCP_PEER_CONTROL_QUEUE_CAPACITY);
+                    mpsc::channel::<QueuedTcpFrame>(TCP_PEER_CONTROL_QUEUE_CAPACITY);
                 let (data_tx, mut data_rx) =
-                    mpsc::channel::<Vec<u8>>(TCP_PEER_WRITE_QUEUE_CAPACITY);
+                    mpsc::channel::<QueuedTcpFrame>(TCP_PEER_WRITE_QUEUE_CAPACITY);
+                let peer_queued_bytes = Arc::new(AtomicUsize::new(0));
                 let (evict_tx, mut evict_rx) = watch::channel(false);
                 let (done_tx, done_rx) = watch::channel(false);
-                let (authenticated_tx, mut authenticated_rx) = watch::channel(false);
+                let (authenticated_tx, mut authenticated_rx) = watch::channel(None);
 
                 // Synchronously chain same-address reconnects (`A -> B -> C`) in `accept()` so
                 // each successor observes and waits on its immediate predecessor in strict order.
@@ -762,6 +827,7 @@ impl TcpTurnListenerConn {
                             conn_id,
                             control_tx,
                             data_tx,
+                            peer_queued_bytes,
                             authenticated_tx,
                             evict_tx: evict_tx.clone(),
                         });
@@ -781,7 +847,7 @@ impl TcpTurnListenerConn {
                                 {
                                     break false;
                                 }
-                                let is_auth = *authenticated_rx.borrow_and_update();
+                                let is_auth = authenticated_rx.borrow_and_update().is_some();
                                 if is_auth {
                                     was_authenticated = true;
                                     unauth_frames = 0;
@@ -854,7 +920,7 @@ impl TcpTurnListenerConn {
                                 break;
                             };
                             last_activity = Instant::now();
-                            if !*authenticated_rx.borrow() {
+                            if authenticated_rx.borrow().is_none() {
                                 unauth_frames = unauth_frames.saturating_add(1);
                             }
                             tokio::select! {
@@ -896,10 +962,11 @@ impl TcpTurnListenerConn {
                                 break;
                             };
                             let write_res = tokio::time::timeout(TCP_WRITE_TIMEOUT, async {
-                                writer.write_all(&pkt).await?;
+                                writer.write_all(&pkt.bytes).await?;
                                 writer.flush().await
                             })
                             .await;
+                            drop(pkt);
                             if !matches!(write_res, Ok(Ok(()))) {
                                 break;
                             }
@@ -969,13 +1036,14 @@ impl TcpTurnListenerConn {
             local_addr,
             inbound_rx: Mutex::new(inbound_rx),
             peers,
+            total_queued_bytes,
             disconnect_acks,
             shutdown_tx,
             accept_handle: Mutex::new(Some(accept_handle)),
         })
     }
 
-    fn peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<bool>)> {
+    fn peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
         self.peers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1011,14 +1079,31 @@ impl TcpTurnListenerConn {
                 } else {
                     entry.data_tx.clone()
                 };
-                Some((tx, entry.evict_tx.clone()))
+                Some((
+                    tx,
+                    Arc::clone(&entry.peer_queued_bytes),
+                    entry.evict_tx.clone(),
+                ))
             });
-        let Some((tx, evict_tx)) = maybe_peer else {
+        let Some((tx, peer_queued_bytes, evict_tx)) = maybe_peer else {
             return Err(webrtc_util::Error::Other(
                 "TCP TURN peer disconnected".to_string(),
             ));
         };
-        if let Err(err) = tx.try_send(framed) {
+        let Some(queued_frame) = QueuedTcpFrame::try_reserve(
+            framed,
+            &peer_queued_bytes,
+            &self.total_queued_bytes,
+            !is_control,
+        ) else {
+            if is_control {
+                let _ = evict_tx.send_replace(true);
+            }
+            return Err(webrtc_util::Error::Other(
+                "TCP TURN outbound byte budget exceeded".to_string(),
+            ));
+        };
+        if let Err(err) = tx.try_send(queued_frame) {
             if is_control {
                 let _ = evict_tx.send_replace(true);
             }
@@ -1130,7 +1215,7 @@ impl RecordingConn {
         }
     }
 
-    fn tcp_peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<bool>)> {
+    fn tcp_peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
         let inner = self.clone_inner().ok()?;
         let tcp_conn = inner.as_any().downcast_ref::<TcpTurnListenerConn>()?;
         tcp_conn.peer_context(peer_addr)
@@ -2146,6 +2231,30 @@ async fn handle_authenticated_allocate(
         return;
     }
 
+    let tcp_peer_ctx = conn
+        .as_any()
+        .downcast_ref::<RecordingConn>()
+        .and_then(|rc| rc.tcp_peer_context(src_addr));
+    let relay_turn_socket: Arc<dyn Conn + Send + Sync> = match (
+        conn.as_any().downcast_ref::<RecordingConn>(),
+        tcp_peer_ctx.as_ref().map(|(cid, _)| *cid),
+    ) {
+        (Some(rc), Some(conn_id)) => Arc::new(ScopedTcpPeerConn {
+            recording: Arc::new(RecordingConn {
+                inner: SyncMutex::new(rc.clone_inner().ok()),
+                local_addr: rc.local_addr,
+                protocol: rc.protocol,
+            }),
+            conn_id,
+        }),
+        (Some(rc), None) if rc.protocol == PROTO_TCP => {
+            // The TCP peer already disconnected before this queued Allocate request was reached.
+            return;
+        }
+        _ => Arc::clone(conn),
+    };
+    let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
+
     let Ok((relay_conn, relay_addr)) = relay_generator
         .allocate_relay_conn(use_ipv4, need_even_port)
         .await
@@ -2161,26 +2270,6 @@ async fn handle_authenticated_allocate(
         )
         .await;
         return;
-    };
-
-    let tcp_peer_ctx = conn
-        .as_any()
-        .downcast_ref::<RecordingConn>()
-        .and_then(|rc| rc.tcp_peer_context(src_addr));
-    let tcp_authenticated_tx = tcp_peer_ctx.as_ref().map(|(_, tx)| tx.clone());
-    let relay_turn_socket: Arc<dyn Conn + Send + Sync> = match (
-        conn.as_any().downcast_ref::<RecordingConn>(),
-        tcp_peer_ctx.map(|(cid, _)| cid),
-    ) {
-        (Some(rc), Some(conn_id)) => Arc::new(ScopedTcpPeerConn {
-            recording: Arc::new(RecordingConn {
-                inner: SyncMutex::new(rc.clone_inner().ok()),
-                local_addr: rc.local_addr,
-                protocol: rc.protocol,
-            }),
-            conn_id,
-        }),
-        _ => Arc::clone(conn),
     };
 
     let alloc = ManagedAllocation::new(
