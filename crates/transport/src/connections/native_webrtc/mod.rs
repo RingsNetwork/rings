@@ -624,6 +624,14 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
+        if let Some(guard) = self
+            .turn_tcp_bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            guard.quiesce_inbound();
+        }
         let _ = self
             .webrtc_data_channel
             .for_each(|tracked| tracked.delivery.close());
@@ -973,6 +981,13 @@ async fn close_reconfigurable_native_connection(
         async move {
             let connection = {
                 let _guard = reconfigure_lock.lock().await;
+                if let Some(guard) = turn_tcp_bridge
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    guard.quiesce_inbound();
+                }
                 Arc::clone(
                     &webrtc_conn
                         .read()
@@ -1033,6 +1048,13 @@ async fn close_failed_native_send(
     close_failed_native_send_with_witness(
         &runtime,
         async move {
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                guard.quiesce_inbound();
+            }
             let result = connection.close().await.map_err(Into::into);
             if let Some(guard) = turn_tcp_bridge
                 .lock()

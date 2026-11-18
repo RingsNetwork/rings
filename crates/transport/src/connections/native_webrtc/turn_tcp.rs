@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_rustls::rustls;
 use tokio_rustls::TlsConnector;
 use tokio_util::sync::CancellationToken;
@@ -31,13 +33,15 @@ const CHANNEL_NUMBER_MIN: u16 = 0x4000;
 const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const DEFAULT_TURN_PORT: u16 = 3478;
 const DEFAULT_TURNS_PORT: u16 = 5349;
-const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TURN_TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const TURN_TCP_LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(200);
 const OS_UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
-const BRIDGE_UDP_MTU: usize = 65_535;
+const BRIDGE_UDP_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
 const SESSION_QUEUE_CAPACITY: usize = 256;
 const MAX_BRIDGE_SESSIONS: usize = 8;
+const RECENT_STUN_TX_IDS_CAPACITY: usize = 32;
 
 #[cfg(test)]
 static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
@@ -46,21 +50,34 @@ static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
 /// Guard that keeps any spawned TURN-over-TCP bridge tasks alive for the lifetime of a
 /// native `RTCPeerConnection` and cancels them when the connection is reconfigured or closed.
 pub(crate) struct TurnTcpBridgeGuard {
+    inbound_cancel: CancellationToken,
     cancel: CancellationToken,
 }
 
 impl TurnTcpBridgeGuard {
-    fn new(cancel: CancellationToken) -> Self {
-        Self { cancel }
+    fn new(inbound_cancel: CancellationToken, cancel: CancellationToken) -> Self {
+        Self {
+            inbound_cancel,
+            cancel,
+        }
+    }
+
+    /// Stop inbound TCP-to-local packet injection before awaiting `RTCPeerConnection::close()`
+    /// so a full virtual UDP queue cannot block while holding the `VNet` mutex needed by
+    /// outbound `Refresh(LIFETIME=0)`.
+    pub(crate) fn quiesce_inbound(&self) {
+        self.inbound_cancel.cancel();
     }
 
     pub(crate) fn cancel(&self) {
+        self.inbound_cancel.cancel();
         self.cancel.cancel();
     }
 }
 
 impl Drop for TurnTcpBridgeGuard {
     fn drop(&mut self) {
+        self.inbound_cancel.cancel();
         self.cancel.cancel();
     }
 }
@@ -177,6 +194,22 @@ pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
     } else {
         None
     }
+}
+
+/// Extract the 12-byte STUN transaction ID if `pkt` is a STUN Request (RFC 5389 §6 class `0b00`).
+fn stun_request_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
+    let &[b0, b1, ..] = pkt else {
+        return None;
+    };
+    // Top two bits 00 (STUN) and class bits (bit 0 of b0, bit 4 of b1) both 0 (Request).
+    if (b0 & 0b1100_0001) != 0 || (b1 & 0b0001_0000) != 0 {
+        return None;
+    }
+    if pkt.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+        return None;
+    }
+    let tx_slice = pkt.get(8..STUN_HEADER_BYTES)?;
+    <[u8; 12]>::try_from(tx_slice).ok()
 }
 
 /// Read a single RFC 5766 STUN message or `ChannelData` frame from a TCP/TLS stream.
@@ -302,6 +335,7 @@ async fn run_stream_io<S>(
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
+    inbound_cancel: CancellationToken,
     cancel: CancellationToken,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -309,6 +343,8 @@ async fn run_stream_io<S>(
     let (mut reader, mut writer) = tokio::io::split(stream);
     let cancel_write = cancel.clone();
     let write_fut = async move {
+        let mut sent_request_tx_ids: VecDeque<[u8; 12]> =
+            VecDeque::with_capacity(RECENT_STUN_TX_IDS_CAPACITY);
         loop {
             let maybe_pkt = tokio::select! {
                 _ = cancel_write.cancelled() => break,
@@ -317,6 +353,16 @@ async fn run_stream_io<S>(
             let Some(pkt) = maybe_pkt else {
                 break;
             };
+            // Suppress duplicate STUN request retransmissions over reliable TCP/TLS (RFC 5389 §7.2.2).
+            if let Some(tx_id) = stun_request_transaction_id(&pkt) {
+                if sent_request_tx_ids.contains(&tx_id) {
+                    continue;
+                }
+                if sent_request_tx_ids.len() >= RECENT_STUN_TX_IDS_CAPACITY {
+                    sent_request_tx_ids.pop_front();
+                }
+                sent_request_tx_ids.push_back(tx_id);
+            }
             let write_res = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, async {
                 writer.write_all(&pkt).await?;
                 writer.flush().await
@@ -329,19 +375,24 @@ async fn run_stream_io<S>(
         let _ = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, writer.shutdown()).await;
     };
 
-    let cancel_read = cancel.clone();
     let read_fut = async move {
         loop {
             let frame_res = tokio::select! {
-                _ = cancel_read.cancelled() => break,
+                _ = inbound_cancel.cancelled() => break,
                 res = read_turn_tcp_frame(&mut reader) => res,
             };
             let Ok(frame) = frame_res else {
                 break;
             };
             let send_res = tokio::select! {
-                _ = cancel_read.cancelled() => break,
-                res = bridge_conn.send_to(&frame, client_addr) => res,
+                _ = inbound_cancel.cancelled() => break,
+                res = tokio::time::timeout(
+                    TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
+                    bridge_conn.send_to(&frame, client_addr),
+                ) => match res {
+                    Ok(inner) => inner,
+                    Err(_) => break,
+                },
             };
             if send_res.is_err() {
                 break;
@@ -361,6 +412,7 @@ async fn run_client_tcp_session(
     outbound_rx: mpsc::Receiver<Vec<u8>>,
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
+    inbound_cancel: CancellationToken,
     cancel: CancellationToken,
 ) {
     let connect_res = tokio::select! {
@@ -409,7 +461,15 @@ async fn run_client_tcp_session(
         };
         match tls_res {
             Ok(Ok(tls_stream)) => {
-                run_stream_io(tls_stream, outbound_rx, bridge_conn, client_addr, cancel).await;
+                run_stream_io(
+                    tls_stream,
+                    outbound_rx,
+                    bridge_conn,
+                    client_addr,
+                    inbound_cancel,
+                    cancel,
+                )
+                .await;
             }
             Ok(Err(error)) => {
                 tracing::warn!(
@@ -428,17 +488,32 @@ async fn run_client_tcp_session(
             }
         }
     } else {
-        run_stream_io(tcp_stream, outbound_rx, bridge_conn, client_addr, cancel).await;
+        run_stream_io(
+            tcp_stream,
+            outbound_rx,
+            bridge_conn,
+            client_addr,
+            inbound_cancel,
+            cancel,
+        )
+        .await;
     }
+}
+
+struct BridgeSession {
+    tx: mpsc::Sender<Vec<u8>>,
+    cancel: CancellationToken,
+    last_active: Instant,
 }
 
 fn spawn_turn_tcp_bridge(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     endpoint: TurnTcpEndpoint,
+    inbound_cancel: CancellationToken,
     cancel: CancellationToken,
 ) {
     tokio::spawn(async move {
-        let mut sessions: HashMap<SocketAddr, mpsc::Sender<Vec<u8>>> = HashMap::new();
+        let mut sessions: HashMap<SocketAddr, BridgeSession> = HashMap::new();
         let mut buf = vec![0u8; BRIDGE_UDP_MTU];
 
         loop {
@@ -456,10 +531,12 @@ fn spawn_turn_tcp_bridge(
                 continue;
             };
 
-            sessions.retain(|_, tx| !tx.is_closed());
+            sessions.retain(|_, session| !session.tx.is_closed());
+            let now = Instant::now();
 
-            if let Some(existing_tx) = sessions.get(&client_addr) {
-                match existing_tx.try_send(framed) {
+            if let Some(existing) = sessions.get_mut(&client_addr) {
+                existing.last_active = now;
+                match existing.tx.try_send(framed) {
                     Ok(()) => continue,
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         tracing::debug!(
@@ -476,26 +553,35 @@ fn spawn_turn_tcp_bridge(
             }
 
             if sessions.len() >= MAX_BRIDGE_SESSIONS {
-                tracing::warn!(
-                    %client_addr,
-                    max_sessions = MAX_BRIDGE_SESSIONS,
-                    "TURN TCP bridge session cap reached; ignoring new client address"
-                );
-                continue;
+                if let Some(oldest_addr) = sessions
+                    .iter()
+                    .min_by_key(|(_, s)| s.last_active)
+                    .map(|(addr, _)| *addr)
+                {
+                    if let Some(evicted) = sessions.remove(&oldest_addr) {
+                        evicted.cancel.cancel();
+                    }
+                }
             }
 
             let (tx, rx) = mpsc::channel(SESSION_QUEUE_CAPACITY);
             let _ = tx.try_send(framed);
-            sessions.insert(client_addr, tx);
+            let session_cancel = cancel.child_token();
+            let session_inbound_cancel = inbound_cancel.child_token();
+            sessions.insert(client_addr, BridgeSession {
+                tx,
+                cancel: session_cancel.clone(),
+                last_active: now,
+            });
             let session_endpoint = endpoint.clone();
             let session_conn = Arc::clone(&bridge_conn);
-            let session_cancel = cancel.child_token();
             tokio::spawn(async move {
                 run_client_tcp_session(
                     session_endpoint,
                     rx,
                     session_conn,
                     client_addr,
+                    session_inbound_cancel,
                     session_cancel,
                 )
                 .await;
@@ -543,7 +629,8 @@ pub(crate) async fn prepare_native_ice_config(
     };
 
     let cancel = CancellationToken::new();
-    let bridge_guard = TurnTcpBridgeGuard::new(cancel.clone());
+    let inbound_cancel = cancel.child_token();
+    let bridge_guard = TurnTcpBridgeGuard::new(inbound_cancel.clone(), cancel.clone());
     let mut bridged_servers = Vec::with_capacity(ice_servers.len());
 
     for server in ice_servers {
@@ -557,7 +644,12 @@ pub(crate) async fn prepare_native_ice_config(
                 let bridge_addr = bridge_conn
                     .local_addr()
                     .map_err(|e| Error::Webrtc(webrtc::error::Error::Util(e)))?;
-                spawn_turn_tcp_bridge(bridge_conn, endpoint, cancel.child_token());
+                spawn_turn_tcp_bridge(
+                    bridge_conn,
+                    endpoint,
+                    inbound_cancel.child_token(),
+                    cancel.child_token(),
+                );
                 rewritten_urls.push(format!("turn:{bridge_addr}"));
             } else if !use_vnet_relay_only {
                 rewritten_urls.push(url.clone());

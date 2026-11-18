@@ -105,8 +105,8 @@ use crate::config::TurnServerConfig;
 use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::error::Result;
 
-const INBOUND_MTU: usize = 65_535;
 const STUN_HEADER_BYTES: usize = 20;
+const INBOUND_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
 const STUN_ATTR_HEADER_BYTES: usize = 4;
 const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
 const CHANNEL_DATA_HEADER_BYTES: usize = 4;
@@ -114,11 +114,13 @@ const CHANNEL_NUMBER_MIN: u16 = 0x4000;
 const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const PROTO_TCP: Protocol = Protocol(6);
 const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
+const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
 const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 256;
-const TCP_IDLE_READ_TIMEOUT: Duration = Duration::from_secs(300);
+const TCP_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
+const TCP_IDLE_READ_TIMEOUT: Duration = MAXIMUM_ALLOCATION_LIFETIME;
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 const MAX_DELETION_TXS_PER_TUPLE: usize = 16;
@@ -508,10 +510,24 @@ fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-async fn read_turn_tcp_frame<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
-where R: AsyncRead + Unpin {
+fn is_stun_control_response(datagram: &[u8]) -> bool {
+    let &[b0, b1, ..] = datagram else {
+        return false;
+    };
+    // STUN message (top 2 bits 00) whose class is Success Response (10) or Error Response (11),
+    // i.e. class bit C1 (`b1 & 0x10`) is 1.
+    (b0 & 0b1100_0000) == 0 && (b1 & 0b0001_0000) != 0
+}
+
+async fn read_turn_tcp_frame<R>(
+    reader: &mut R,
+    prefix_timeout: Duration,
+) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
     let mut prefix = [0u8; 4];
-    tokio::time::timeout(TCP_IDLE_READ_TIMEOUT, reader.read_exact(&mut prefix))
+    tokio::time::timeout(prefix_timeout, reader.read_exact(&mut prefix))
         .await
         .map_err(|_| {
             std::io::Error::new(
@@ -592,7 +608,16 @@ where R: AsyncRead + Unpin {
     }
 }
 
-type TcpPeerMap = HashMap<SocketAddr, (u64, mpsc::Sender<Vec<u8>>)>;
+#[derive(Clone)]
+struct TcpPeerEntry {
+    conn_id: u64,
+    control_tx: mpsc::Sender<Vec<u8>>,
+    data_tx: mpsc::Sender<Vec<u8>>,
+    evict_tx: watch::Sender<bool>,
+    done_rx: watch::Receiver<bool>,
+}
+
+type TcpPeerMap = HashMap<SocketAddr, TcpPeerEntry>;
 
 struct TcpTurnListenerConn {
     local_addr: SocketAddr,
@@ -644,12 +669,18 @@ impl TcpTurnListenerConn {
                 };
                 let _ = tcp_stream.set_nodelay(true);
                 let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
-                let (write_tx, mut write_rx) =
+                let (control_tx, mut control_rx) =
+                    mpsc::channel::<Vec<u8>>(TCP_PEER_CONTROL_QUEUE_CAPACITY);
+                let (data_tx, mut data_rx) =
                     mpsc::channel::<Vec<u8>>(TCP_PEER_WRITE_QUEUE_CAPACITY);
-                peers_for_accept
+                let (evict_tx, mut evict_rx) = watch::channel(false);
+                let (done_tx, done_rx) = watch::channel(false);
+
+                let previous_peer = peers_for_accept
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .insert(peer_addr, (conn_id, write_tx));
+                    .get(&peer_addr)
+                    .cloned();
 
                 let (mut reader, mut writer) = tokio::io::split(tcp_stream);
                 let inbound_tx_peer = inbound_tx.clone();
@@ -659,13 +690,51 @@ impl TcpTurnListenerConn {
 
                 peer_tasks.spawn(async move {
                     let _permit = permit;
+                    // If a prior TCP connection from the exact same `(ip, port)` is still winding
+                    // down, evict it and wait for its disconnect sentinel to be enqueued before
+                    // registering or reading from this replacement connection.
+                    if let Some(prev) = previous_peer {
+                        let _ = prev.evict_tx.send_replace(true);
+                        let mut prev_done = prev.done_rx;
+                        tokio::select! {
+                            _ = prev_done.wait_for(|&done| done) => {},
+                            _ = peer_shutdown_read.changed() => {
+                                if *peer_shutdown_read.borrow() {
+                                    let _ = done_tx.send_replace(true);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    peers_cleanup
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(peer_addr, TcpPeerEntry {
+                            conn_id,
+                            control_tx,
+                            data_tx,
+                            evict_tx,
+                            done_rx,
+                        });
+
+                    let mut evict_read = evict_rx.clone();
                     let read_loop = async {
+                        let mut first_frame_received = false;
                         loop {
-                            if *peer_shutdown_read.borrow_and_update() {
+                            if *peer_shutdown_read.borrow_and_update()
+                                || *evict_read.borrow_and_update()
+                            {
                                 break;
                             }
+                            let prefix_timeout = if first_frame_received {
+                                TCP_IDLE_READ_TIMEOUT
+                            } else {
+                                TCP_INITIAL_FRAME_TIMEOUT
+                            };
                             let frame_res = tokio::select! {
-                                res = read_turn_tcp_frame(&mut reader) => res,
+                                res = read_turn_tcp_frame(&mut reader, prefix_timeout) => res,
+                                _ = evict_read.changed() => break,
                                 res = peer_shutdown_read.changed() => {
                                     if res.is_err() || *peer_shutdown_read.borrow() {
                                         break;
@@ -676,12 +745,14 @@ impl TcpTurnListenerConn {
                             let Ok(frame) = frame_res else {
                                 break;
                             };
+                            first_frame_received = true;
                             tokio::select! {
                                 res = inbound_tx_peer.send((frame, peer_addr)) => {
                                     if res.is_err() {
                                         break;
                                     }
                                 }
+                                _ = evict_read.changed() => break,
                                 res = peer_shutdown_read.changed() => {
                                     if res.is_err() || *peer_shutdown_read.borrow() {
                                         break;
@@ -693,11 +764,16 @@ impl TcpTurnListenerConn {
 
                     let write_loop = async {
                         loop {
-                            if *peer_shutdown_write.borrow_and_update() {
+                            if *peer_shutdown_write.borrow_and_update()
+                                || *evict_rx.borrow_and_update()
+                            {
                                 break;
                             }
                             let maybe_pkt = tokio::select! {
-                                pkt = write_rx.recv() => pkt,
+                                biased;
+                                pkt = control_rx.recv() => pkt,
+                                pkt = data_rx.recv() => pkt,
+                                _ = evict_rx.changed() => break,
                                 res = peer_shutdown_write.changed() => {
                                     if res.is_err() || *peer_shutdown_write.borrow() {
                                         break;
@@ -730,7 +806,7 @@ impl TcpTurnListenerConn {
                             peers_cleanup.lock().unwrap_or_else(PoisonError::into_inner);
                         if guard
                             .get(&peer_addr)
-                            .is_some_and(|(active_id, _)| *active_id == conn_id)
+                            .is_some_and(|entry| entry.conn_id == conn_id)
                         {
                             guard.remove(&peer_addr);
                             true
@@ -740,10 +816,15 @@ impl TcpTurnListenerConn {
                     };
 
                     if removed_current && !*peer_shutdown_read.borrow() {
-                        // Send a 0-byte sentinel frame in FIFO order to instruct `TurnServer::read_loop`
-                        // to retire any allocation or cached state owned by this disconnected TCP 5-tuple.
-                        let _ = inbound_tx_peer.try_send((Vec::new(), peer_addr));
+                        // Reliably deliver a 0-byte sentinel frame in FIFO order to instruct
+                        // `TurnServer::read_loop` to retire any allocation or cached state owned by
+                        // this disconnected TCP 5-tuple before signalling `done_tx`.
+                        tokio::select! {
+                            _ = inbound_tx_peer.send((Vec::new(), peer_addr)) => {},
+                            _ = peer_shutdown_read.changed() => {},
+                        }
                     }
+                    let _ = done_tx.send_replace(true);
                 });
             }
 
@@ -795,12 +876,19 @@ impl Conn for TcpTurnListenerConn {
                 "invalid outbound TURN TCP frame".to_string(),
             ));
         };
+        let is_control = is_stun_control_response(buf);
         let maybe_tx = self
             .peers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&target)
-            .map(|(_, tx)| tx.clone());
+            .map(|entry| {
+                if is_control {
+                    entry.control_tx.clone()
+                } else {
+                    entry.data_tx.clone()
+                }
+            });
         let Some(tx) = maybe_tx else {
             return Err(webrtc_util::Error::Other(
                 "TCP TURN peer disconnected".to_string(),
