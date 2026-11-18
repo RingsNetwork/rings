@@ -46,6 +46,7 @@ struct BridgeModelState {
     srflx_stalled: bool,
     relayed_data_leaked_during_quiesce: bool,
     control_response_dropped_in_quiesce: bool,
+    outbound_close_notify_dropped_in_quiesce: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -57,6 +58,9 @@ enum BridgeAction {
     AllocateTurnRelay,
     /// Remote peer sends `ChannelData` over the TCP TURN stream.
     InboundRelayedChannelData,
+    /// Local DTLS sends `close_notify` encapsulated as `ChannelData` / `Send Indication` during
+    /// `RTCPeerConnection::close()`.
+    OutboundCloseNotifyChannelData,
     /// `WebrtcConnection::close()` calls `quiesce_inbound()` and `Client::close()` sends
     /// `Refresh(0)`.
     BeginQuiesceAndSendRefreshZero,
@@ -80,6 +84,9 @@ enum BridgeMutant {
     /// Bug 4: `quiesce_inbound` continues delivering inbound `ChannelData`, starving the TURN
     /// client's internal mutex during teardown under heavy inbound traffic.
     QuiesceForwardsRelayedData,
+    /// Bug 5 (Codex P2): `quiesce_inbound` drops outbound `ChannelData` / `Send Indication`
+    /// packets, suppressing the DTLS `close_notify` alert sent during `RTCPeerConnection::close()`.
+    QuiesceDropsOutboundCloseNotify,
 }
 
 struct BridgeModel {
@@ -92,16 +99,21 @@ impl BridgeModel {
         phase: TurnBridgePhase,
         class: OutboundTurnClass,
     ) -> OutboundTurnDecision {
-        match (self.mutant, class) {
+        match (self.mutant, phase, class) {
             (
                 Some(BridgeMutant::ForwardBindingRequestOverTcp),
+                TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
                 OutboundTurnClass::StunBindingRequest(tx),
-            ) if phase != TurnBridgePhase::Cancelled => {
-                OutboundTurnDecision::ForwardControlRequest(tx)
-            }
+            ) => OutboundTurnDecision::ForwardControlRequest(tx),
             (
                 Some(BridgeMutant::DropBindingRequestSilently),
+                _,
                 OutboundTurnClass::StunBindingRequest(_),
+            ) => OutboundTurnDecision::Drop,
+            (
+                Some(BridgeMutant::QuiesceDropsOutboundCloseNotify),
+                TurnBridgePhase::Quiescing,
+                OutboundTurnClass::RelayedDataOrIndication,
             ) => OutboundTurnDecision::Drop,
             _ => turn_bridge_outbound_decision(phase, class),
         }
@@ -150,6 +162,7 @@ impl Model for BridgeModel {
         }
         if state.phase == TurnBridgePhase::Quiescing {
             actions.push(BridgeAction::InboundRelayedChannelData);
+            actions.push(BridgeAction::OutboundCloseNotifyChannelData);
             if state.refresh_zero_in_flight && !state.teardown_completed {
                 actions.push(BridgeAction::InboundRefreshZeroResponse);
             }
@@ -190,6 +203,15 @@ impl Model for BridgeModel {
                     && inp == InboundTurnDecision::DeliverRelayedData
                 {
                     next.relayed_data_leaked_during_quiesce = true;
+                }
+            }
+            BridgeAction::OutboundCloseNotifyChannelData => {
+                let out =
+                    self.outbound_decision(next.phase, OutboundTurnClass::RelayedDataOrIndication);
+                if next.phase == TurnBridgePhase::Quiescing
+                    && out != OutboundTurnDecision::ForwardData
+                {
+                    next.outbound_close_notify_dropped_in_quiesce = true;
                 }
             }
             BridgeAction::BeginQuiesceAndSendRefreshZero => {
@@ -235,6 +257,10 @@ impl Model for BridgeModel {
                 "quiescing bridge delivers STUN control responses for teardown",
                 |_, state| !state.control_response_dropped_in_quiesce,
             ),
+            Property::<Self>::always(
+                "quiescing bridge forwards outbound DTLS close_notify relayed frame",
+                |_, state| !state.outbound_close_notify_dropped_in_quiesce,
+            ),
         ]
     }
 }
@@ -264,6 +290,10 @@ fn test_each_turn_tcp_bridge_mutant_is_refuted() {
         (
             BridgeMutant::QuiesceForwardsRelayedData,
             "quiescing bridge drops inbound relayed data",
+        ),
+        (
+            BridgeMutant::QuiesceDropsOutboundCloseNotify,
+            "quiescing bridge forwards outbound DTLS close_notify relayed frame",
         ),
     ];
 

@@ -177,27 +177,46 @@ pub(crate) fn parse_turn_tcp_url(raw_url: &str) -> Option<TurnTcpEndpoint> {
     })
 }
 
-/// Encode an outbound STUN message or TURN `ChannelData` datagram for transmission over a
-/// stream-oriented TCP/TLS TURN connection (RFC 5766 §7.3 & §11.5).
-pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
+/// Allocation-free check whether `datagram` is a well-formed RFC 5389 STUN message or RFC 5766
+/// `ChannelData` datagram that can be framed over a TCP/TLS TURN stream.
+pub(crate) fn is_valid_turn_tcp_datagram(datagram: &[u8]) -> bool {
     let &[b0, b1, b2, b3, ..] = datagram else {
-        return None;
+        return false;
     };
     let first_u16 = u16::from_be_bytes([b0, b1]);
     let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
 
     if (b0 & 0b1100_0000) == 0 {
-        if (length_u16 & 0b11) != 0 {
-            return None;
+        if (length_u16 & 0b11) != 0 || datagram.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+            return false;
         }
-        let cookie = datagram.get(4..8)?;
-        if cookie != STUN_MAGIC_COOKIE {
-            return None;
-        }
-        let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
-        let slice = datagram.get(..total)?;
-        Some(slice.to_vec())
+        STUN_HEADER_BYTES
+            .checked_add(length_u16)
+            .is_some_and(|total| datagram.len() >= total)
     } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
+        CHANNEL_DATA_HEADER_BYTES
+            .checked_add(length_u16)
+            .is_some_and(|total| datagram.len() >= total)
+    } else {
+        false
+    }
+}
+
+/// Encode an outbound STUN message or TURN `ChannelData` datagram for transmission over a
+/// stream-oriented TCP/TLS TURN connection (RFC 5766 §7.3 & §11.5).
+pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
+    if !is_valid_turn_tcp_datagram(datagram) {
+        return None;
+    }
+    let &[b0, _b1, b2, b3, ..] = datagram else {
+        return None;
+    };
+    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
+
+    if (b0 & 0b1100_0000) == 0 {
+        let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
+        Some(datagram.get(..total)?.to_vec())
+    } else {
         let unpadded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(length_u16)?;
         let slice = datagram.get(..unpadded_total)?;
         let padded_data_len = (length_u16 + 3) & !3;
@@ -206,8 +225,6 @@ pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
         out.extend_from_slice(slice);
         out.resize(padded_total, 0u8);
         Some(out)
-    } else {
-        None
     }
 }
 
@@ -344,22 +361,27 @@ pub(crate) enum InboundTurnDecision {
     DeliverRelayedData,
 }
 
-/// Classify an outbound UDP datagram into its [`OutboundTurnClass`].
+/// Classify an outbound UDP datagram into its [`OutboundTurnClass`] without heap allocation.
 pub(crate) fn classify_outbound_turn_datagram(datagram: &[u8]) -> OutboundTurnClass {
+    if !is_valid_turn_tcp_datagram(datagram) {
+        return OutboundTurnClass::Malformed;
+    }
     if let Some(tx_id) = stun_request_transaction_id(datagram) {
         if datagram.first() == Some(&0x00) && datagram.get(1) == Some(&0x01) {
             OutboundTurnClass::StunBindingRequest(tx_id)
         } else {
             OutboundTurnClass::TurnControlRequest(tx_id)
         }
-    } else if encode_turn_tcp_frame(datagram).is_some() {
-        OutboundTurnClass::RelayedDataOrIndication
     } else {
-        OutboundTurnClass::Malformed
+        OutboundTurnClass::RelayedDataOrIndication
     }
 }
 
 /// Pure transition `TurnBridgePhase × OutboundTurnClass -> OutboundTurnDecision`.
+///
+/// Outbound `RelayedDataOrIndication` remains forwarded in `Quiescing` so DTLS `close_notify`
+/// alerts sent during `RTCPeerConnection::close()` reach the remote peer over TURN `ChannelData`
+/// or `Send Indication` before the bridge is cancelled.
 pub(crate) const fn turn_bridge_outbound_decision(
     phase: TurnBridgePhase,
     class: OutboundTurnClass,
@@ -376,12 +398,10 @@ pub(crate) const fn turn_bridge_outbound_decision(
             TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
             OutboundTurnClass::TurnControlRequest(tx_id),
         ) => OutboundTurnDecision::ForwardControlRequest(tx_id),
-        (TurnBridgePhase::Active, OutboundTurnClass::RelayedDataOrIndication) => {
-            OutboundTurnDecision::ForwardData
-        }
-        (TurnBridgePhase::Quiescing, OutboundTurnClass::RelayedDataOrIndication) => {
-            OutboundTurnDecision::Drop
-        }
+        (
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            OutboundTurnClass::RelayedDataOrIndication,
+        ) => OutboundTurnDecision::ForwardData,
     }
 }
 

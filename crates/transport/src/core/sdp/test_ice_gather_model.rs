@@ -40,6 +40,8 @@ struct GatherModelState {
     /// An in-flight timer snapshot `(window, armed_epoch)` captured before a subsequent candidate
     /// arrival, used to verify that any post-arm candidate arrival invalidates the older timer.
     in_flight_timer: Option<(IceSettleWindow, u64)>,
+    /// Whether at least one candidate arrived after `in_flight_timer` was snapshotted.
+    candidate_arrived_since_snapshot: bool,
     steps_taken: u8,
     settled_by_timer: bool,
     settled_by_browser: bool,
@@ -151,6 +153,7 @@ impl Model for GatherModel {
         vec![GatherModelState {
             gather: IceGatherState::new(self.target_tier),
             in_flight_timer: None,
+            candidate_arrived_since_snapshot: false,
             steps_taken: 0,
             settled_by_timer: false,
             settled_by_browser: false,
@@ -186,6 +189,9 @@ impl Model for GatherModel {
             GatherAction::ObserveCandidate(tier) => {
                 let (gather, _) = self.step_observe(next.gather, tier);
                 next.gather = gather;
+                if next.in_flight_timer.is_some() {
+                    next.candidate_arrived_since_snapshot = true;
+                }
                 next.steps_taken = next.steps_taken.saturating_add(1);
             }
             GatherAction::ObserveNonCandidateText => {
@@ -197,6 +203,7 @@ impl Model for GatherModel {
             GatherAction::SnapshotInFlightTimer => {
                 if let Some(window) = next.gather.armed_window {
                     next.in_flight_timer = Some((window, next.gather.epoch));
+                    next.candidate_arrived_since_snapshot = false;
                 }
             }
             GatherAction::FireCurrentTimer => {
@@ -207,14 +214,17 @@ impl Model for GatherModel {
             GatherAction::FireSnapshotTimer => {
                 if let Some((_window, snapshot_epoch)) = next.in_flight_timer {
                     // In `wait_for_candidates_settled`, a timer poll checks
-                    // `progress.state.get().epoch == observed_epoch`. If an intervening candidate
-                    // arrived after `SnapshotInFlightTimer` (`steps_taken` advanced on a candidate)
-                    // yet `epoch` failed to advance, the stale timer would falsely settle!
+                    // `progress.state.get().epoch == observed_epoch`. If a candidate arrived after
+                    // `SnapshotInFlightTimer` (`candidate_arrived_since_snapshot == true`) yet
+                    // `epoch` failed to advance, the stale timer falsely settles!
                     if next.gather.epoch == snapshot_epoch {
-                        next.stale_timer_settled = true;
+                        if next.candidate_arrived_since_snapshot {
+                            next.stale_timer_settled = true;
+                        }
                         next.settled_by_timer = true;
                     }
                     next.in_flight_timer = None;
+                    next.candidate_arrived_since_snapshot = false;
                 }
             }
             GatherAction::BrowserComplete => {
@@ -252,21 +262,7 @@ impl Model for GatherModel {
             ),
             Property::<Self>::always(
                 "in-flight snapshot timer is invalidated by any subsequent candidate",
-                |model, state| {
-                    if let Some((_win, snap_epoch)) = state.in_flight_timer {
-                        for tier in [
-                            IceCandidateTier::Host,
-                            IceCandidateTier::Reflexive,
-                            IceCandidateTier::Relay,
-                        ] {
-                            let (after, _) = model.step_observe(state.gather, tier);
-                            if after.epoch == snap_epoch {
-                                return false;
-                            }
-                        }
-                    }
-                    !state.stale_timer_settled || state.in_flight_timer.is_none()
-                },
+                |_, state| !state.stale_timer_settled,
             ),
         ]
     }
