@@ -259,7 +259,7 @@ pub struct WebrtcConnection {
     cancel_token: CancellationToken,
     retirement_fence: NativeRetirementFence,
     sdp_extra_host_candidates: std::sync::RwLock<Vec<String>>,
-    turn_tcp_bridge: std::sync::Mutex<Option<TurnTcpBridgeGuard>>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -483,7 +483,7 @@ impl WebrtcConnection {
             cancel_token,
             retirement_fence,
             sdp_extra_host_candidates: std::sync::RwLock::new(sdp_extra_host_candidates),
-            turn_tcp_bridge: std::sync::Mutex::new(turn_tcp_bridge),
+            turn_tcp_bridge: Arc::new(std::sync::Mutex::new(turn_tcp_bridge)),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             physical_close_completed: PhysicalCloseCompletion::new(),
             callback,
@@ -624,14 +624,6 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
-        if let Some(guard) = self
-            .turn_tcp_bridge
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            guard.cancel();
-        }
         let _ = self
             .webrtc_data_channel
             .for_each(|tracked| tracked.delivery.close());
@@ -793,7 +785,7 @@ async fn create_peer_connection_with_config(
     external_address: Option<&str>,
     udp_port_range: Option<WebrtcUdpPortRange>,
 ) -> Result<(RTCPeerConnection, Vec<String>, Option<TurnTcpBridgeGuard>)> {
-    let prepared = prepare_native_ice_config(ice_servers, external_address).await?;
+    let prepared = prepare_native_ice_config(ice_servers).await?;
     let is_relay_only = prepared.vnet.is_some();
     let configuration = RTCConfiguration {
         ice_servers: prepared.ice_servers,
@@ -868,6 +860,7 @@ impl FrameSink for WebrtcConnection {
                 self.webrtc_data_channel.clone(),
                 self.webrtc_data_channel_state_notifier.clone(),
                 self.callback.clone(),
+                Arc::clone(&self.turn_tcp_bridge),
                 physical_close_completed,
             ),
         )
@@ -961,6 +954,7 @@ impl ConnectionInterface for WebrtcConnection {
         close_reconfigurable_native_connection(
             Arc::clone(&self.reconfigure_lock),
             Arc::clone(&self.webrtc_conn),
+            Arc::clone(&self.turn_tcp_bridge),
             self.physical_close_completed.clone(),
         )
         .await
@@ -970,6 +964,7 @@ impl ConnectionInterface for WebrtcConnection {
 async fn close_reconfigurable_native_connection(
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     let runtime = native_send_runtime()?;
@@ -984,7 +979,15 @@ async fn close_reconfigurable_native_connection(
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 )
             };
-            connection.close().await.map_err(Into::into)
+            let result = connection.close().await.map_err(Into::into);
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                guard.cancel();
+            }
+            result
         },
         physical_close_completed,
     )
@@ -1020,6 +1023,7 @@ async fn close_failed_native_send(
     channel_pool: Arc<ChannelPool<TrackedChannel>>,
     data_channel_notifier: Notifier,
     callback: Arc<InnerTransportCallback>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     let _ = channel_pool.for_each(|tracked| tracked.delivery.close());
@@ -1028,7 +1032,17 @@ async fn close_failed_native_send(
     let runtime = native_send_runtime()?;
     close_failed_native_send_with_witness(
         &runtime,
-        async move { connection.close().await.map_err(Into::into) },
+        async move {
+            let result = connection.close().await.map_err(Into::into);
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                guard.cancel();
+            }
+            result
+        },
         physical_close_completed,
     )
     .await

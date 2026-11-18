@@ -25,14 +25,19 @@ use crate::error::Result;
 use crate::ice_server::IceServer;
 
 const STUN_HEADER_BYTES: usize = 20;
+const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
 const CHANNEL_DATA_HEADER_BYTES: usize = 4;
 const CHANNEL_NUMBER_MIN: u16 = 0x4000;
-const CHANNEL_NUMBER_MAX: u16 = 0xFFFE;
+const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const DEFAULT_TURN_PORT: u16 = 3478;
 const DEFAULT_TURNS_PORT: u16 = 5349;
-const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const TURN_TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+const OS_UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
 const BRIDGE_UDP_MTU: usize = 65_535;
 const SESSION_QUEUE_CAPACITY: usize = 256;
+const MAX_BRIDGE_SESSIONS: usize = 8;
 
 #[cfg(test)]
 static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
@@ -150,6 +155,13 @@ pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
     let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
 
     if (b0 & 0b1100_0000) == 0 {
+        if (length_u16 & 0b11) != 0 {
+            return None;
+        }
+        let cookie = datagram.get(4..8)?;
+        if cookie != STUN_MAGIC_COOKIE {
+            return None;
+        }
         let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
         let slice = datagram.get(..total)?;
         Some(slice.to_vec())
@@ -176,25 +188,76 @@ where R: AsyncRead + Unpin {
     let first_u16 = u16::from_be_bytes([b0, b1]);
     let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
 
-    let body_bytes = if (b0 & 0b1100_0000) == 0 {
-        16usize.saturating_add(length_u16)
+    if (b0 & 0b1100_0000) == 0 {
+        if (length_u16 & 0b11) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unaligned STUN message length over TCP: {length_u16}"),
+            ));
+        }
+        let mut hdr_rest = [0u8; 16];
+        tokio::time::timeout(
+            TURN_TCP_FRAME_BODY_TIMEOUT,
+            reader.read_exact(&mut hdr_rest),
+        )
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out reading STUN header over TCP",
+            )
+        })??;
+        if hdr_rest.get(..4) != Some(&STUN_MAGIC_COOKIE) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid STUN magic cookie on TCP stream",
+            ));
+        }
+        let mut frame = vec![0u8; STUN_HEADER_BYTES.saturating_add(length_u16)];
+        if let Some(head) = frame.get_mut(..4) {
+            head.copy_from_slice(&prefix);
+        }
+        if let Some(rest) = frame.get_mut(4..STUN_HEADER_BYTES) {
+            rest.copy_from_slice(&hdr_rest);
+        }
+        if let Some(body) = frame.get_mut(STUN_HEADER_BYTES..) {
+            if !body.is_empty() {
+                tokio::time::timeout(TURN_TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timed out reading STUN body over TCP",
+                        )
+                    })??;
+            }
+        }
+        Ok(frame)
     } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
-        (length_u16 + 3) & !3
+        let padded_body_bytes = (length_u16 + 3) & !3;
+        let mut frame = vec![0u8; CHANNEL_DATA_HEADER_BYTES.saturating_add(padded_body_bytes)];
+        if let Some(head) = frame.get_mut(..4) {
+            head.copy_from_slice(&prefix);
+        }
+        if let Some(body) = frame.get_mut(4..) {
+            if !body.is_empty() {
+                tokio::time::timeout(TURN_TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timed out reading ChannelData body over TCP",
+                        )
+                    })??;
+            }
+        }
+        Ok(frame)
     } else {
-        return Err(std::io::Error::new(
+        Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("invalid TURN TCP frame header: 0x{first_u16:04x}"),
-        ));
-    };
-
-    let mut frame = vec![0u8; 4usize.saturating_add(body_bytes)];
-    if let Some(head) = frame.get_mut(..4) {
-        head.copy_from_slice(&prefix);
+        ))
     }
-    if let Some(tail) = frame.get_mut(4..) {
-        reader.read_exact(tail).await?;
-    }
-    Ok(frame)
 }
 
 async fn can_use_os_udp() -> bool {
@@ -209,7 +272,15 @@ async fn can_use_os_udp() -> bool {
     let Ok(addr) = sock.local_addr() else {
         return false;
     };
-    sock.send_to(&[0u8], addr).await.is_ok()
+    let probe = *b"ping";
+    if sock.send_to(&probe, addr).await.is_err() {
+        return false;
+    }
+    let mut recv_buf = [0u8; 8];
+    matches!(
+        tokio::time::timeout(OS_UDP_PROBE_TIMEOUT, sock.recv_from(&mut recv_buf)).await,
+        Ok(Ok((4, _))) if recv_buf.get(..4) == Some(&probe)
+    )
 }
 
 fn build_tls_connector() -> std::io::Result<TlsConnector> {
@@ -246,14 +317,16 @@ async fn run_stream_io<S>(
             let Some(pkt) = maybe_pkt else {
                 break;
             };
-            if writer.write_all(&pkt).await.is_err() {
-                break;
-            }
-            if writer.flush().await.is_err() {
+            let write_res = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, async {
+                writer.write_all(&pkt).await?;
+                writer.flush().await
+            })
+            .await;
+            if !matches!(write_res, Ok(Ok(()))) {
                 break;
             }
         }
-        let _ = writer.shutdown().await;
+        let _ = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, writer.shutdown()).await;
     };
 
     let cancel_read = cancel.clone();
@@ -266,13 +339,18 @@ async fn run_stream_io<S>(
             let Ok(frame) = frame_res else {
                 break;
             };
-            if bridge_conn.send_to(&frame, client_addr).await.is_err() {
+            let send_res = tokio::select! {
+                _ = cancel_read.cancelled() => break,
+                res = bridge_conn.send_to(&frame, client_addr) => res,
+            };
+            if send_res.is_err() {
                 break;
             }
         }
     };
 
     tokio::select! {
+        _ = cancel.cancelled() => {},
         _ = write_fut => {},
         _ = read_fut => {},
     }
@@ -285,11 +363,13 @@ async fn run_client_tcp_session(
     client_addr: SocketAddr,
     cancel: CancellationToken,
 ) {
-    let connect_res = tokio::time::timeout(
-        TURN_TCP_CONNECT_TIMEOUT,
-        TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
-    )
-    .await;
+    let connect_res = tokio::select! {
+        _ = cancel.cancelled() => return,
+        res = tokio::time::timeout(
+            TURN_TCP_CONNECT_TIMEOUT,
+            TcpStream::connect((endpoint.host.as_str(), endpoint.port)),
+        ) => res,
+    };
     let tcp_stream = match connect_res {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
@@ -320,11 +400,13 @@ async fn run_client_tcp_session(
             tracing::warn!(host = %endpoint.host, "Invalid ServerName for TURNS TLS connection");
             return;
         };
-        let tls_res = tokio::time::timeout(
-            TURN_TCP_CONNECT_TIMEOUT,
-            connector.connect(server_name, tcp_stream),
-        )
-        .await;
+        let tls_res = tokio::select! {
+            _ = cancel.cancelled() => return,
+            res = tokio::time::timeout(
+                TURN_TCP_CONNECT_TIMEOUT,
+                connector.connect(server_name, tcp_stream),
+            ) => res,
+        };
         match tls_res {
             Ok(Ok(tls_stream)) => {
                 run_stream_io(tls_stream, outbound_rx, bridge_conn, client_addr, cancel).await;
@@ -370,34 +452,54 @@ fn spawn_turn_tcp_bridge(
             let Some(datagram) = buf.get(..n) else {
                 continue;
             };
-            let Some(framed) = encode_turn_tcp_frame(datagram) else {
+            let Some(mut framed) = encode_turn_tcp_frame(datagram) else {
                 continue;
             };
 
-            let mut delivered = false;
+            sessions.retain(|_, tx| !tx.is_closed());
+
             if let Some(existing_tx) = sessions.get(&client_addr) {
-                if existing_tx.try_send(framed.clone()).is_ok() {
-                    delivered = true;
+                match existing_tx.try_send(framed) {
+                    Ok(()) => continue,
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        tracing::debug!(
+                            %client_addr,
+                            "TURN TCP bridge outbound queue full; dropping packet without resetting TCP session"
+                        );
+                        continue;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(returned)) => {
+                        sessions.remove(&client_addr);
+                        framed = returned;
+                    }
                 }
             }
-            if !delivered {
-                let (tx, rx) = mpsc::channel(SESSION_QUEUE_CAPACITY);
-                let _ = tx.try_send(framed);
-                sessions.insert(client_addr, tx);
-                let session_endpoint = endpoint.clone();
-                let session_conn = Arc::clone(&bridge_conn);
-                let session_cancel = cancel.child_token();
-                tokio::spawn(async move {
-                    run_client_tcp_session(
-                        session_endpoint,
-                        rx,
-                        session_conn,
-                        client_addr,
-                        session_cancel,
-                    )
-                    .await;
-                });
+
+            if sessions.len() >= MAX_BRIDGE_SESSIONS {
+                tracing::warn!(
+                    %client_addr,
+                    max_sessions = MAX_BRIDGE_SESSIONS,
+                    "TURN TCP bridge session cap reached; ignoring new client address"
+                );
+                continue;
             }
+
+            let (tx, rx) = mpsc::channel(SESSION_QUEUE_CAPACITY);
+            let _ = tx.try_send(framed);
+            sessions.insert(client_addr, tx);
+            let session_endpoint = endpoint.clone();
+            let session_conn = Arc::clone(&bridge_conn);
+            let session_cancel = cancel.child_token();
+            tokio::spawn(async move {
+                run_client_tcp_session(
+                    session_endpoint,
+                    rx,
+                    session_conn,
+                    client_addr,
+                    session_cancel,
+                )
+                .await;
+            });
         }
 
         let _ = bridge_conn.close().await;
@@ -408,13 +510,10 @@ fn spawn_turn_tcp_bridge(
 /// bridges for `create_peer_connection_with_config`.
 pub(crate) async fn prepare_native_ice_config(
     ice_servers: &[IceServer],
-    external_address: Option<&str>,
 ) -> Result<PreparedNativeIceConfig> {
-    let mut total_urls = 0usize;
     let mut tcp_turn_urls = 0usize;
     for server in ice_servers {
         for url in &server.urls {
-            total_urls += 1;
             if parse_turn_tcp_url(url).is_some() {
                 tcp_turn_urls += 1;
             }
@@ -436,9 +535,7 @@ pub(crate) async fn prepare_native_ice_config(
         });
     }
 
-    let all_urls_are_tcp_turn = total_urls > 0 && tcp_turn_urls == total_urls;
-    let use_vnet_relay_only = !os_udp_ok || (all_urls_are_tcp_turn && external_address.is_none());
-
+    let use_vnet_relay_only = !os_udp_ok;
     let net = if use_vnet_relay_only {
         Arc::new(Net::new(Some(NetConfig::default())))
     } else {
@@ -446,6 +543,7 @@ pub(crate) async fn prepare_native_ice_config(
     };
 
     let cancel = CancellationToken::new();
+    let bridge_guard = TurnTcpBridgeGuard::new(cancel.clone());
     let mut bridged_servers = Vec::with_capacity(ice_servers.len());
 
     for server in ice_servers {
@@ -481,7 +579,7 @@ pub(crate) async fn prepare_native_ice_config(
             RTCIceTransportPolicy::All
         },
         vnet: use_vnet_relay_only.then_some(net),
-        bridge_guard: Some(TurnTcpBridgeGuard::new(cancel)),
+        bridge_guard: Some(bridge_guard),
         disable_mdns: use_vnet_relay_only || !os_udp_ok,
     })
 }

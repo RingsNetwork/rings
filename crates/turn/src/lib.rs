@@ -2025,8 +2025,24 @@ mod tests {
         assert_eq!(inbound_cd.number, ChannelNumber(0x4000));
         assert_eq!(inbound_cd.data, b"world");
 
+        assert_eq!(server.allocations_info(None).await?.len(), 1);
         drop(tcp_client);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if server.allocations_info(None).await.unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("TCP disconnect should retire the associated TURN allocation");
+
         server.close().await?;
+        let mut restart_cfg = TurnServerConfig::loopback_ephemeral();
+        restart_cfg.listen_addr = server_addr;
+        let restarted = TurnServer::start(restart_cfg).await?;
+        restarted.close().await?;
         Ok(())
     }
 }

@@ -129,6 +129,7 @@ async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_befo
                 channel_pool,
                 data_channel_notifier,
                 inner_cb,
+                Arc::new(std::sync::Mutex::new(None)),
                 physical_close_completed,
             )
             .await;

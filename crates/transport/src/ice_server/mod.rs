@@ -73,7 +73,7 @@ impl Default for IceServer {
     }
 }
 
-/// [stun|stuns|turn|turns]://[username]:[password]@[url][?transport=tcp|udp]
+/// [stun|turn|turns]://[username]:[password]@[url][?transport=tcp|udp]
 /// For current implementation all type is `password` as default
 /// E.g: stun://foo:bar@stun.l.google.com:19302
 ///      turn://ethereum.org:9090
@@ -101,7 +101,7 @@ impl FromStr for IceServer {
         };
         let parsed = Url::parse(to_parse)?;
         let scheme = parsed.scheme();
-        if !(["turn", "turns", "stun", "stuns"].contains(&scheme)) {
+        if !(["turn", "turns", "stun"].contains(&scheme)) {
             return Err(IceServerError::SchemeNotSupported(scheme.into()));
         }
         if !parsed.has_host() {
@@ -116,11 +116,7 @@ impl FromStr for IceServer {
             .map(|p| format!(":{p}"))
             .unwrap_or_else(|| "".to_string());
         let path = parsed.path();
-        let query = parsed
-            .query()
-            .filter(|q| !q.is_empty())
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default();
+        let query = normalize_ice_query(parsed.query());
         let url = format!("{scheme}:{host}{port}{path}{query}");
         Ok(Self {
             urls: vec![url],
@@ -128,6 +124,41 @@ impl FromStr for IceServer {
             credential: password.to_string(),
             credential_type: IceCredentialType::default(),
         })
+    }
+}
+
+fn normalize_ice_query(raw_query: Option<&str>) -> String {
+    let Some(raw_query) = raw_query else {
+        return String::new();
+    };
+    let mut params = Vec::new();
+    for pair in raw_query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = pair.split_once('=') {
+            if key.eq_ignore_ascii_case("pubkey") {
+                continue;
+            }
+            if key.eq_ignore_ascii_case("transport") {
+                if value.eq_ignore_ascii_case("tcp") {
+                    params.push("transport=tcp".to_string());
+                } else if value.eq_ignore_ascii_case("udp") {
+                    params.push("transport=udp".to_string());
+                } else {
+                    params.push(format!("transport={value}"));
+                }
+            } else {
+                params.push(pair.to_string());
+            }
+        } else {
+            params.push(pair.to_string());
+        }
+    }
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", params.join("&"))
     }
 }
 
