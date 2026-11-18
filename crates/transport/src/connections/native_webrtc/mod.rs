@@ -83,9 +83,11 @@ mod turn_tcp;
 
 use host_candidates::append_sdp_extra_host_candidates;
 use host_candidates::external_address_candidates;
+use host_candidates::is_excluded_virtual_interface;
 use host_candidates::nat_1to1_host_candidates;
 use host_candidates::sdp_candidate_count;
 use host_candidates::sdp_extra_host_candidates;
+use host_candidates::split_remote_offer_candidates;
 #[cfg(test)]
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
@@ -102,6 +104,11 @@ use turn_tcp::TurnTcpBridgeGuard;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
+/// Delay before the responder starts outbound ICE connectivity checks in [`WebrtcConnection::webrtc_answer_offer`]
+/// after local candidate gathering finishes, giving the out-of-band HTTP `answerOffer` response
+/// (~300–350 ms RTT) time to reach the browser and apply `setRemoteDescription(answer)` before the
+/// seed's UDP STUN Binding Requests hit the client router's NAT port (#1290).
+const WEBRTC_ANSWER_CHECK_START_DELAY: std::time::Duration = std::time::Duration::from_millis(450);
 
 #[cfg(test)]
 const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
@@ -815,6 +822,7 @@ async fn create_peer_connection_with_config(
     let sdp_extra_host_candidates = if is_relay_only {
         Vec::new()
     } else {
+        setting.set_interface_filter(Box::new(|name: &str| !is_excluded_virtual_interface(name)));
         let external_addresses = external_address_candidates(external_address);
         let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
         let extra = sdp_extra_host_candidates(&external_addresses);
@@ -914,8 +922,9 @@ impl ConnectionInterface for WebrtcConnection {
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer)?;
-        let offer = RTCSessionDescription::offer(offer)?;
-        let gathering_complete_promise = {
+        let (stripped_offer_sdp, deferred_candidates) = split_remote_offer_candidates(&offer);
+        let offer = RTCSessionDescription::offer(stripped_offer_sdp)?;
+        let (webrtc_conn, gathering_complete_promise) = {
             let _guard = self.reconfigure_lock.lock().await;
             self.refresh_ice_servers_locked().await?;
             self.negotiation_started.store(true, Ordering::Release);
@@ -925,12 +934,36 @@ impl ConnectionInterface for WebrtcConnection {
             let answer = webrtc_conn.create_answer(None).await?;
             let gathering_complete_promise = webrtc_conn.gathering_complete_promise().await;
             webrtc_conn.set_local_description(answer.clone()).await?;
-            gathering_complete_promise
+            (webrtc_conn, gathering_complete_promise)
         };
         let local_sdp = self.webrtc_gather(gathering_complete_promise).await?;
 
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
+
+        if !deferred_candidates.is_empty() {
+            let cancel_token = self.cancel_token.clone();
+            let _ = rings_runtime::spawn_detached(async move {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => return,
+                    _ = tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY) => {}
+                }
+                for candidate in deferred_candidates {
+                    if cancel_token.is_cancelled() {
+                        break;
+                    }
+                    let _ = webrtc_conn
+                        .add_ice_candidate(
+                            webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                                candidate,
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                }
+            });
+        }
+
         Ok(local_sdp)
     }
 

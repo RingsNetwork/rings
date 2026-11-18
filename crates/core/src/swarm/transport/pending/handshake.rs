@@ -106,7 +106,8 @@ pub(crate) enum CrossingOfferVerdict {
 ///                                           ──▶ Refuse               if o = External
 /// Offering(o, Sent(_)),    c = o, l > p     ──▶ Yield     the smaller DID's offer prevails
 /// Offering(_, Answered)                     ──▶ Refuse    an answer is being applied
-/// Answering                                 ──▶ Refuse    the slot answers the peer's own offer
+/// Answering,               c = External     ──▶ Yield     a newer out-of-band re-offer supersedes
+/// Answering,               c = Overlay      ──▶ Refuse    the slot answers the peer's own offer
 /// ```
 ///
 /// Law (Tie-break): of two crossing unanswered offers exactly one side yields. An offer carried
@@ -114,7 +115,11 @@ pub(crate) enum CrossingOfferVerdict {
 /// a counter-offer to it could be answered only through this node's `acceptAnswer`, which a
 /// node's public HTTP API does not serve. Of two offers carried alike the larger DID yields,
 /// and the other sends its own offer back unless an external owner carries it; so whenever
-/// either overlay offer is delivered the edge is established.
+/// either overlay offer is delivered the edge is established. When an external out-of-band offer
+/// (`Swarm::answer_offer` / HTTP `answerOffer`, authenticated by the peer's signature) meets an
+/// unadmitted `Handshake::Answering` slot for the same peer, the newer external re-offer
+/// supersedes (`Yield`) the stale unestablished `Answering` generation instead of locking out
+/// HTTP retries for the 30 s ICE checking timeout (#1290).
 pub(crate) fn crossing_offer_verdict(
     handshake: &Handshake,
     carrier: OfferOwner,
@@ -145,6 +150,7 @@ pub(crate) fn crossing_offer_verdict(
             sdp: sdp.clone(),
             tx_id: *tx_id,
         },
+        Handshake::Answering if carrier == OfferOwner::External => CrossingOfferVerdict::Yield,
         Handshake::Offering {
             owner: OfferOwner::External,
             phase: OfferPhase::Sent { .. },

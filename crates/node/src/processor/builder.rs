@@ -428,6 +428,7 @@ impl ProcessorBuilder {
             registration_tasks,
             observability,
             remote_rpc_proxy: self.remote_rpc_proxy,
+            http_endpoint_dids: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         })
     }
 

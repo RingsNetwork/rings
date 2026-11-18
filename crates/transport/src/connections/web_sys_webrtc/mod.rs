@@ -92,14 +92,21 @@ const WEBRTC_GATHER_HOST_SETTLE: Duration = Duration::from_secs(3);
 
 /// Classify the settle window implied by an ICE candidate line or an SDP blob.
 ///
-/// When `has_turn_server` is `false` (STUN-only or no ICE servers), any reflexive (`typ srflx`,
-/// `typ prflx`) or `typ relay` candidate unlocks [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`),
-/// while host-only candidates unlock [`WEBRTC_GATHER_HOST_SETTLE`] (`3 s`).
-///
-/// When `has_turn_server` is `true`, only a `typ relay` candidate unlocks the fast `300 ms`
-/// window; `srflx`, `prflx`, and `host` candidates use the `3 s` window so multi-round TURN
-/// authentication and allocation are not truncated by an early STUN `srflx` response.
-pub(crate) fn gather_settle_delay(text: &str, has_turn_server: bool) -> Option<Duration> {
+/// - When `has_stun_or_turn_server` is `false` (no `stun:`, `turn:`, or `turns:` server is
+///   configured), no reflexive or relay candidate can ever arrive, so any candidate line
+///   (`typ host` included) unlocks [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`).
+/// - When `has_stun_or_turn_server` is `true` and `has_turn_server` is `false` (STUN-only), any
+///   reflexive (`typ srflx`, `typ prflx`) or `typ relay` candidate unlocks
+///   [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`), while host-only candidates unlock
+///   [`WEBRTC_GATHER_HOST_SETTLE`] (`3 s`).
+/// - When `has_turn_server` is `true`, only a `typ relay` candidate unlocks the fast `300 ms`
+///   window; `srflx`, `prflx`, and `host` candidates use the `3 s` window so multi-round TURN
+///   authentication and allocation are not truncated by an early STUN `srflx` response.
+pub(crate) fn gather_settle_delay(
+    text: &str,
+    has_stun_or_turn_server: bool,
+    has_turn_server: bool,
+) -> Option<Duration> {
     let mut has_candidate = false;
     for line in text.lines() {
         let trimmed = line.trim();
@@ -108,6 +115,9 @@ pub(crate) fn gather_settle_delay(text: &str, has_turn_server: bool) -> Option<D
             continue;
         }
         has_candidate = true;
+        if !has_stun_or_turn_server {
+            return Some(WEBRTC_GATHER_REFLEXIVE_SETTLE);
+        }
         let mut tokens = candidate.split_whitespace();
         while let Some(token) = tokens.next() {
             if token == "typ" {
@@ -130,6 +140,20 @@ pub(crate) fn gather_settle_delay(text: &str, has_turn_server: bool) -> Option<D
     has_candidate.then_some(WEBRTC_GATHER_HOST_SETTLE)
 }
 
+/// Return whether any configured [`IceServer`] URL uses the `stun:`, `turn:`, or `turns:` scheme.
+pub(crate) fn ice_servers_have_stun_or_turn(ice_servers: &[IceServer]) -> bool {
+    ice_servers.iter().any(|server| {
+        server.urls.iter().any(|url| {
+            let trimmed = url.trim();
+            trimmed.split_once(':').is_some_and(|(scheme, _)| {
+                scheme.eq_ignore_ascii_case("stun")
+                    || scheme.eq_ignore_ascii_case("turn")
+                    || scheme.eq_ignore_ascii_case("turns")
+            })
+        })
+    })
+}
+
 /// Return whether any configured [`IceServer`] URL uses the `turn:` or `turns:` scheme.
 pub(crate) fn ice_servers_have_turn(ice_servers: &[IceServer]) -> bool {
     ice_servers.iter().any(|server| {
@@ -146,6 +170,9 @@ pub(crate) fn ice_servers_have_turn(ice_servers: &[IceServer]) -> bool {
 /// during [`WebSysWebrtcConnection::webrtc_gather`].
 #[derive(Default)]
 struct GatherCandidateProgress {
+    /// Whether this peer connection was configured with at least one `stun:`, `turn:`, or `turns:`
+    /// server.
+    has_stun_or_turn_server: bool,
     /// Whether this peer connection was configured with at least one `turn:` / `turns:` server.
     has_turn_server: bool,
     /// Monotonic count of candidate observations; advancing it resets the settle timer.
@@ -157,15 +184,18 @@ struct GatherCandidateProgress {
 }
 
 impl GatherCandidateProgress {
-    fn new(has_turn_server: bool) -> Self {
+    fn new(has_stun_or_turn_server: bool, has_turn_server: bool) -> Self {
         Self {
+            has_stun_or_turn_server,
             has_turn_server,
             ..Self::default()
         }
     }
 
     fn observe_text(&self, text: &str) -> bool {
-        let Some(delay) = gather_settle_delay(text, self.has_turn_server) else {
+        let Some(delay) =
+            gather_settle_delay(text, self.has_stun_or_turn_server, self.has_turn_server)
+        else {
             return false;
         };
         let merged = match self.settle_delay.get() {
@@ -427,6 +457,9 @@ pub struct WebSysWebrtcConnection {
     webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
+    /// Whether any configured ICE server uses `stun:`, `turn:`, or `turns:`. When `false`,
+    /// host candidates settle after 300 ms instead of 3 s.
+    has_stun_or_turn_server: Cell<bool>,
     /// Whether any configured ICE server uses `turn:` or `turns:`. When `true`, only a `typ relay`
     /// candidate unlocks the 300 ms fast settle window so multi-round TURN allocation is not
     /// truncated by an early STUN `srflx` response.
@@ -478,17 +511,20 @@ impl WebSysWebrtcConnection {
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             connection_state,
+            true,
             false,
             callback,
             Rc::new(RefCell::new(ConnectionHandlers::default())),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_handlers(
         webrtc_conn: RtcPeerConnection,
         webrtc_data_channel: Rc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
+        has_stun_or_turn_server: bool,
         has_turn_server: bool,
         callback: Rc<InnerTransportCallback>,
         handlers: Rc<RefCell<ConnectionHandlers>>,
@@ -498,6 +534,7 @@ impl WebSysWebrtcConnection {
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             connection_state,
+            has_stun_or_turn_server: Cell::new(has_stun_or_turn_server),
             has_turn_server: Cell::new(has_turn_server),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             callback,
@@ -510,20 +547,25 @@ impl WebSysWebrtcConnection {
     /// description.
     ///
     /// Law (Gathering ends): the wait ends when gathering completes, when gathered candidates have
-    /// settled for their quiet window (`300 ms` once a reflexive/relay candidate is present when
-    /// no TURN server is configured, or once a `relay` candidate is present when TURN is
-    /// configured; `3 s` otherwise), when this connection is closed locally, or at
-    /// `WEBRTC_GATHER_TIMEOUT`, whichever comes first. In WebKit (Safari and every browser on
-    /// iOS), `RTCPeerConnection` gathers its STUN `srflx` candidate in a few hundred milliseconds
-    /// yet `iceGatheringState` can remain `"gathering"` past the 60 s timeout while waiting on
-    /// mDNS host-candidate registration or secondary interfaces that never finish. A gathering of
-    /// a locally closed connection fails as `Local connection closed`, the error native WebRTC
-    /// reports, so core classifies it by slot ownership (#945); waiting on gathering events alone
-    /// would outlive the close, which fires none (#960).
+    /// settled for their quiet window (`300 ms` once any candidate is present when no STUN/TURN
+    /// server is configured, once a reflexive/relay candidate is present when only STUN is
+    /// configured, or once a `relay` candidate is present when TURN is configured; `3 s`
+    /// otherwise), when this connection is closed locally, or at `WEBRTC_GATHER_TIMEOUT`,
+    /// whichever comes first. In WebKit (Safari and every browser on iOS), `RTCPeerConnection`
+    /// gathers its STUN `srflx` candidate in a few hundred milliseconds yet `iceGatheringState`
+    /// can remain `"gathering"` past the 60 s timeout while waiting on mDNS host-candidate
+    /// registration or secondary interfaces that never finish. A gathering of a locally closed
+    /// connection fails as `Local connection closed`, the error native WebRTC reports, so core
+    /// classifies it by slot ownership (#945); waiting on gathering events alone would outlive the
+    /// close, which fires none (#960).
     async fn webrtc_gather(&self) -> Result<String> {
         let notifier = Notifier::default();
+        let has_stun_or_turn_server = self.has_stun_or_turn_server.get();
         let has_turn_server = self.has_turn_server.get();
-        let progress = Rc::new(GatherCandidateProgress::new(has_turn_server));
+        let progress = Rc::new(GatherCandidateProgress::new(
+            has_stun_or_turn_server,
+            has_turn_server,
+        ));
 
         let notifier_clone = notifier.clone();
         let conn_clone = self.webrtc_conn.clone();
@@ -596,7 +638,8 @@ impl WebSysWebrtcConnection {
                 "local_description is None".to_string(),
             ))
             .map(|x| x.sdp())?;
-        let has_gathered_candidates = gather_settle_delay(&local_sdp, has_turn_server).is_some();
+        let has_gathered_candidates =
+            gather_settle_delay(&local_sdp, has_stun_or_turn_server, has_turn_server).is_some();
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete
             && !has_gathered_candidates
         {
@@ -629,6 +672,7 @@ impl WebSysWebrtcTransport {
     /// browser peer connections in place via `RTCPeerConnection.setConfiguration`.
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let parsed = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
+        let has_stun_or_turn = ice_servers_have_stun_or_turn(&parsed);
         let has_turn = ice_servers_have_turn(&parsed);
         *self.ice_servers.borrow_mut() = parsed.clone();
 
@@ -648,6 +692,7 @@ impl WebSysWebrtcTransport {
                         "Skipped setConfiguration on active browser peer connection"
                     );
                 } else {
+                    conn.has_stun_or_turn_server.set(has_stun_or_turn);
                     conn.has_turn_server.set(has_turn);
                 }
             }
@@ -957,12 +1002,13 @@ impl TransportInterface for WebSysWebrtcTransport {
         // Setup webrtc connection env
         //
         let config = RtcConfiguration::new();
-        let (has_turn_server, ice_servers) = {
+        let (has_stun_or_turn_server, has_turn_server, ice_servers) = {
             let configured_ice = self.ice_servers.borrow();
+            let has_stun_or_turn = ice_servers_have_stun_or_turn(&configured_ice);
             let has_turn = ice_servers_have_turn(&configured_ice);
             let js_servers: js_sys::Array =
                 js_sys::Array::from_iter(configured_ice.iter().cloned().map(RtcIceServer::from));
-            (has_turn, js_servers)
+            (has_stun_or_turn, has_turn, js_servers)
         };
         config.set_ice_servers(&ice_servers.into());
 
@@ -1014,6 +1060,7 @@ impl TransportInterface for WebSysWebrtcTransport {
             channel_pool,
             webrtc_data_channel_state_notifier,
             connection_state,
+            has_stun_or_turn_server,
             has_turn_server,
             Rc::clone(&inner_cb),
             handlers,

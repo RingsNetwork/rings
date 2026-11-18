@@ -128,8 +128,9 @@ fn test_exactly_one_of_two_sent_offers_yields() {
     }
 }
 
-/// An answered offer and an answering attempt refuse a delayed or duplicate offer in both
-/// DID orders, whatever carries it, and never counter-offer.
+/// An answered offer refuses a delayed or duplicate offer in both DID orders, whatever carries
+/// it; an unadmitted `Answering` attempt refuses a duplicate overlay offer but yields to a newer
+/// out-of-band (`OfferOwner::External`) re-offer from the peer (#1290).
 #[test]
 fn test_answered_and_answering_attempts_refuse() {
     let (smaller, larger) = ordered();
@@ -137,15 +138,23 @@ fn test_answered_and_answering_attempts_refuse() {
         owner: OfferOwner::Overlay,
         phase: OfferPhase::Answered,
     };
-    for handshake in [answered, Handshake::Answering] {
-        for carrier in CARRIERS {
-            for (local, peer) in [(smaller, larger), (larger, smaller)] {
-                assert_eq!(
-                    crossing_offer_verdict(&handshake, carrier, local, peer),
-                    CrossingOfferVerdict::Refuse
-                );
-            }
+    for carrier in CARRIERS {
+        for (local, peer) in [(smaller, larger), (larger, smaller)] {
+            assert_eq!(
+                crossing_offer_verdict(&answered, carrier, local, peer),
+                CrossingOfferVerdict::Refuse
+            );
         }
+    }
+    for (local, peer) in [(smaller, larger), (larger, smaller)] {
+        assert_eq!(
+            crossing_offer_verdict(&Handshake::Answering, OfferOwner::Overlay, local, peer),
+            CrossingOfferVerdict::Refuse
+        );
+        assert_eq!(
+            crossing_offer_verdict(&Handshake::Answering, OfferOwner::External, local, peer),
+            CrossingOfferVerdict::Yield
+        );
     }
 }
 
