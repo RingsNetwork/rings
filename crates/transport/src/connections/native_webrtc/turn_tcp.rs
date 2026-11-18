@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex as SyncMutex;
+use std::sync::PoisonError;
 use std::time::Duration;
 
 use tokio::io::AsyncRead;
@@ -39,6 +41,7 @@ const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(200);
 const OS_UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
 const BRIDGE_UDP_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
+const MAX_LOCAL_UDP_PAYLOAD_LEN: usize = 65_507;
 const SESSION_QUEUE_CAPACITY: usize = 256;
 const MAX_BRIDGE_SESSIONS: usize = 8;
 const RECENT_STUN_TX_IDS_CAPACITY: usize = 32;
@@ -212,6 +215,20 @@ fn stun_request_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     <[u8; 12]>::try_from(tx_slice).ok()
 }
 
+/// Extract the 12-byte STUN transaction ID if `pkt` is a STUN Success or Error Response
+/// (RFC 5389 §6 class `0b10` or `0b11`, where bit 0 of byte 0 `C1 == 1`).
+fn stun_response_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
+    let &b0 = pkt.first()?;
+    if (b0 & 0b1100_0001) != 0b0000_0001 {
+        return None;
+    }
+    if pkt.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+        return None;
+    }
+    let tx_slice = pkt.get(8..STUN_HEADER_BYTES)?;
+    <[u8; 12]>::try_from(tx_slice).ok()
+}
+
 /// Read a single RFC 5766 STUN message or `ChannelData` frame from a TCP/TLS stream.
 pub(crate) async fn read_turn_tcp_frame<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
 where R: AsyncRead + Unpin {
@@ -330,6 +347,8 @@ fn build_tls_connector() -> std::io::Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+type StunTxCache = Arc<SyncMutex<VecDeque<([u8; 12], Option<Vec<u8>>)>>>;
+
 async fn run_stream_io<S>(
     stream: S,
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -341,10 +360,13 @@ async fn run_stream_io<S>(
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, mut writer) = tokio::io::split(stream);
+    let stun_tx_cache: StunTxCache = Arc::new(SyncMutex::new(VecDeque::with_capacity(
+        RECENT_STUN_TX_IDS_CAPACITY,
+    )));
+    let cache_for_write = Arc::clone(&stun_tx_cache);
+    let bridge_for_write = Arc::clone(&bridge_conn);
     let cancel_write = cancel.clone();
     let write_fut = async move {
-        let mut sent_request_tx_ids: VecDeque<[u8; 12]> =
-            VecDeque::with_capacity(RECENT_STUN_TX_IDS_CAPACITY);
         loop {
             let maybe_pkt = tokio::select! {
                 _ = cancel_write.cancelled() => break,
@@ -354,14 +376,35 @@ async fn run_stream_io<S>(
                 break;
             };
             // Suppress duplicate STUN request retransmissions over reliable TCP/TLS (RFC 5389 §7.2.2).
+            // If the server already responded to this transaction ID and the response was lost on the
+            // local UDP hop, replay the cached response directly without re-sending over TCP.
             if let Some(tx_id) = stun_request_transaction_id(&pkt) {
-                if sent_request_tx_ids.contains(&tx_id) {
+                let duplicate_action = {
+                    let mut guard = cache_for_write
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if let Some((_, cached_resp)) = guard.iter().find(|(id, _)| *id == tx_id) {
+                        Some(cached_resp.clone())
+                    } else {
+                        if guard.len() >= RECENT_STUN_TX_IDS_CAPACITY {
+                            guard.pop_front();
+                        }
+                        guard.push_back((tx_id, None));
+                        None
+                    }
+                };
+                if let Some(maybe_cached_resp) = duplicate_action {
+                    if let Some(resp) = maybe_cached_resp {
+                        if resp.len() <= MAX_LOCAL_UDP_PAYLOAD_LEN {
+                            let _ = tokio::time::timeout(
+                                TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
+                                bridge_for_write.send_to(&resp, client_addr),
+                            )
+                            .await;
+                        }
+                    }
                     continue;
                 }
-                if sent_request_tx_ids.len() >= RECENT_STUN_TX_IDS_CAPACITY {
-                    sent_request_tx_ids.pop_front();
-                }
-                sent_request_tx_ids.push_back(tx_id);
             }
             let write_res = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, async {
                 writer.write_all(&pkt).await?;
@@ -375,17 +418,46 @@ async fn run_stream_io<S>(
         let _ = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, writer.shutdown()).await;
     };
 
+    let cache_for_read = Arc::clone(&stun_tx_cache);
+    let cancel_read = cancel.clone();
     let read_fut = async move {
+        let mut quiesced = false;
         loop {
             let frame_res = tokio::select! {
-                _ = inbound_cancel.cancelled() => break,
+                _ = inbound_cancel.cancelled() => {
+                    quiesced = true;
+                    break;
+                }
                 res = read_turn_tcp_frame(&mut reader) => res,
             };
             let Ok(frame) = frame_res else {
                 break;
             };
+            if frame.len() > MAX_LOCAL_UDP_PAYLOAD_LEN {
+                tracing::debug!(
+                    len = frame.len(),
+                    "dropping inbound TURN TCP frame exceeding local UDP datagram limit"
+                );
+                continue;
+            }
+            if let Some(tx_id) = stun_response_transaction_id(&frame) {
+                let mut guard = cache_for_read
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let Some((_, slot)) = guard.iter_mut().find(|(id, _)| *id == tx_id) {
+                    *slot = Some(frame.clone());
+                } else {
+                    if guard.len() >= RECENT_STUN_TX_IDS_CAPACITY {
+                        guard.pop_front();
+                    }
+                    guard.push_back((tx_id, Some(frame.clone())));
+                }
+            }
             let send_res = tokio::select! {
-                _ = inbound_cancel.cancelled() => break,
+                _ = inbound_cancel.cancelled() => {
+                    quiesced = true;
+                    break;
+                }
                 res = tokio::time::timeout(
                     TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
                     bridge_conn.send_to(&frame, client_addr),
@@ -397,6 +469,11 @@ async fn run_stream_io<S>(
             if send_res.is_err() {
                 break;
             }
+        }
+        if quiesced {
+            // Keep `read_fut` pending after inbound quiescence so `tokio::select!` does not drop
+            // `write_fut` while `RTCPeerConnection::close()` is transmitting `Refresh(LIFETIME=0)`.
+            cancel_read.cancelled().await;
         }
     };
 

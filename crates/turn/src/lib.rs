@@ -2038,6 +2038,24 @@ mod tests {
         .await
         .expect("TCP disconnect should retire the associated TURN allocation");
 
+        // 5. Verify unauthenticated TCP connections cannot send unlimited dummy frames to hold a
+        //    connection slot without authenticating an allocation.
+        let mut unauth_spammer = tokio::net::TcpStream::connect(server_addr).await?;
+        for _ in 0..8 {
+            unauth_spammer.write_all(&[0x40, 0x00, 0x00, 0x00]).await?;
+            unauth_spammer.flush().await?;
+        }
+        let mut eof_buf = [0u8; 4];
+        let eof_res =
+            tokio::time::timeout(Duration::from_secs(2), unauth_spammer.read(&mut eof_buf))
+                .await
+                .expect("unauthenticated TCP spammer must be disconnected promptly");
+        assert!(
+            matches!(eof_res, Ok(0))
+                || matches!(eof_res, Err(ref e) if e.kind() == std::io::ErrorKind::ConnectionReset),
+            "server must close unauthenticated TCP connection after exceeding unauth frame cap: {eof_res:?}"
+        );
+
         server.close().await?;
         let mut restart_cfg = TurnServerConfig::loopback_ephemeral();
         restart_cfg.listen_addr = server_addr;

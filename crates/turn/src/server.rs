@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -117,6 +118,7 @@ const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
 const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
 const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 256;
 const TCP_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_UNAUTHENTICATED_TCP_FRAMES: usize = 8;
 const TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
@@ -348,6 +350,7 @@ struct ManagedAllocation {
     relay_conn: Arc<PolicyRelayConn>,
     state: SyncMutex<AllocationState>,
     expiry_tx: watch::Sender<Instant>,
+    tcp_authenticated: Option<Arc<AtomicBool>>,
 }
 
 impl ManagedAllocation {
@@ -357,7 +360,11 @@ impl ManagedAllocation {
         relay_addr: SocketAddr,
         relay_conn: Arc<PolicyRelayConn>,
         lifetime: Duration,
+        tcp_authenticated: Option<Arc<AtomicBool>>,
     ) -> Arc<Self> {
+        if let Some(ref flag) = tcp_authenticated {
+            flag.store(true, Ordering::Release);
+        }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
         Arc::new(Self {
             five_tuple,
@@ -369,6 +376,7 @@ impl ManagedAllocation {
                 channel_bindings: HashMap::new(),
             }),
             expiry_tx,
+            tcp_authenticated,
         })
     }
 
@@ -385,6 +393,9 @@ impl ManagedAllocation {
     }
 
     fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
+        if let Some(ref flag) = self.tcp_authenticated {
+            flag.store(false, Ordering::Release);
+        }
         let _ = self.expiry_tx.send_replace(Instant::now());
         self.relay_conn.begin_close()
     }
@@ -511,12 +522,16 @@ fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn is_stun_control_response(datagram: &[u8]) -> bool {
-    let &[b0, b1, ..] = datagram else {
+    let Some(&b0) = datagram.first() else {
         return false;
     };
-    // STUN message (top 2 bits 00) whose class is Success Response (10) or Error Response (11),
-    // i.e. class bit C1 (`b1 & 0x10`) is 1.
-    (b0 & 0b1100_0000) == 0 && (b1 & 0b0001_0000) != 0
+    if datagram.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+        return false;
+    }
+    // RFC 5389 Figure 3: STUN messages have top 2 bits 00, and STUN class bit C1 (bit 0 of byte 0)
+    // is 1 for both Success Response (class 0b10) and Error Response (class 0b11), and 0 for
+    // Request (0b00) and Indication (0b01, such as Data Indication 0x0017).
+    (b0 & 0b1100_0001) == 0b0000_0001
 }
 
 async fn read_turn_tcp_frame<R>(
@@ -613,16 +628,25 @@ struct TcpPeerEntry {
     conn_id: u64,
     control_tx: mpsc::Sender<Vec<u8>>,
     data_tx: mpsc::Sender<Vec<u8>>,
+    authenticated: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct TcpPeerHandoff {
+    conn_id: u64,
     evict_tx: watch::Sender<bool>,
     done_rx: watch::Receiver<bool>,
 }
 
 type TcpPeerMap = HashMap<SocketAddr, TcpPeerEntry>;
+type TcpPeerHandoffMap = HashMap<SocketAddr, TcpPeerHandoff>;
+type TcpDisconnectAckMap = HashMap<SocketAddr, VecDeque<tokio::sync::oneshot::Sender<()>>>;
 
 struct TcpTurnListenerConn {
     local_addr: SocketAddr,
     inbound_rx: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
     peers: Arc<SyncMutex<TcpPeerMap>>,
+    disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>>,
     shutdown_tx: watch::Sender<bool>,
     accept_handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -635,10 +659,15 @@ impl TcpTurnListenerConn {
     ) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(TCP_INBOUND_QUEUE_CAPACITY);
         let peers: Arc<SyncMutex<TcpPeerMap>> = Arc::new(SyncMutex::new(HashMap::new()));
+        let handoffs: Arc<SyncMutex<TcpPeerHandoffMap>> = Arc::new(SyncMutex::new(HashMap::new()));
+        let disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>> =
+            Arc::new(SyncMutex::new(HashMap::new()));
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let next_conn_id = Arc::new(AtomicU64::new(1));
 
         let peers_for_accept = Arc::clone(&peers);
+        let handoffs_for_accept = Arc::clone(&handoffs);
+        let disconnect_acks_for_accept = Arc::clone(&disconnect_acks);
         let accept_handle = tokio::spawn(async move {
             let mut peer_tasks = JoinSet::new();
             loop {
@@ -675,25 +704,33 @@ impl TcpTurnListenerConn {
                     mpsc::channel::<Vec<u8>>(TCP_PEER_WRITE_QUEUE_CAPACITY);
                 let (evict_tx, mut evict_rx) = watch::channel(false);
                 let (done_tx, done_rx) = watch::channel(false);
+                let authenticated = Arc::new(AtomicBool::new(false));
 
-                let previous_peer = peers_for_accept
+                // Synchronously chain same-address reconnects (`A -> B -> C`) in `accept()` so
+                // each successor observes and waits on its immediate predecessor in strict order.
+                let previous_handoff = handoffs_for_accept
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .get(&peer_addr)
-                    .cloned();
+                    .insert(peer_addr, TcpPeerHandoff {
+                        conn_id,
+                        evict_tx: evict_tx.clone(),
+                        done_rx: done_rx.clone(),
+                    });
 
                 let (mut reader, mut writer) = tokio::io::split(tcp_stream);
                 let inbound_tx_peer = inbound_tx.clone();
                 let peers_cleanup = Arc::clone(&peers_for_accept);
+                let handoffs_cleanup = Arc::clone(&handoffs_for_accept);
+                let disconnect_acks_peer = Arc::clone(&disconnect_acks_for_accept);
                 let mut peer_shutdown_read = shutdown_rx.clone();
                 let mut peer_shutdown_write = shutdown_rx.clone();
 
                 peer_tasks.spawn(async move {
                     let _permit = permit;
                     // If a prior TCP connection from the exact same `(ip, port)` is still winding
-                    // down, evict it and wait for its disconnect sentinel to be enqueued before
-                    // registering or reading from this replacement connection.
-                    if let Some(prev) = previous_peer {
+                    // down, evict it and wait for `TurnServer::read_loop` to finish processing its
+                    // disconnect sentinel before registering or reading from this connection.
+                    if let Some(prev) = previous_handoff {
                         let _ = prev.evict_tx.send_replace(true);
                         let mut prev_done = prev.done_rx;
                         tokio::select! {
@@ -707,6 +744,21 @@ impl TcpTurnListenerConn {
                         }
                     }
 
+                    // If a newer connection (`C`) arrived while we (`B`) were waiting for `A`,
+                    // exit immediately without touching `peers` or reading from the socket.
+                    if *evict_rx.borrow() || *peer_shutdown_read.borrow() {
+                        {
+                            let mut guard = handoffs_cleanup
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            if guard.get(&peer_addr).is_some_and(|h| h.conn_id == conn_id) {
+                                guard.remove(&peer_addr);
+                            }
+                        }
+                        let _ = done_tx.send_replace(true);
+                        return;
+                    }
+
                     peers_cleanup
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -714,23 +766,42 @@ impl TcpTurnListenerConn {
                             conn_id,
                             control_tx,
                             data_tx,
-                            evict_tx,
-                            done_rx,
+                            authenticated: Arc::clone(&authenticated),
                         });
 
                     let mut evict_read = evict_rx.clone();
+                    let authenticated_read = Arc::clone(&authenticated);
                     let read_loop = async {
-                        let mut first_frame_received = false;
+                        let mut unauth_deadline = Instant::now() + TCP_INITIAL_FRAME_TIMEOUT;
+                        let mut unauth_frames = 0usize;
+                        let mut was_authenticated = false;
                         loop {
                             if *peer_shutdown_read.borrow_and_update()
                                 || *evict_read.borrow_and_update()
                             {
                                 break;
                             }
-                            let prefix_timeout = if first_frame_received {
+                            let is_auth = authenticated_read.load(Ordering::Acquire);
+                            if is_auth {
+                                was_authenticated = true;
+                                unauth_frames = 0;
+                            } else if was_authenticated {
+                                was_authenticated = false;
+                                unauth_deadline = Instant::now() + TCP_INITIAL_FRAME_TIMEOUT;
+                                unauth_frames = 0;
+                            }
+                            let prefix_timeout = if is_auth {
                                 TCP_IDLE_READ_TIMEOUT
                             } else {
-                                TCP_INITIAL_FRAME_TIMEOUT
+                                if unauth_frames >= MAX_UNAUTHENTICATED_TCP_FRAMES {
+                                    break;
+                                }
+                                let remaining =
+                                    unauth_deadline.saturating_duration_since(Instant::now());
+                                if remaining.is_zero() {
+                                    break;
+                                }
+                                remaining
                             };
                             let frame_res = tokio::select! {
                                 res = read_turn_tcp_frame(&mut reader, prefix_timeout) => res,
@@ -745,7 +816,9 @@ impl TcpTurnListenerConn {
                             let Ok(frame) = frame_res else {
                                 break;
                             };
-                            first_frame_received = true;
+                            if !authenticated_read.load(Ordering::Acquire) {
+                                unauth_frames = unauth_frames.saturating_add(1);
+                            }
                             tokio::select! {
                                 res = inbound_tx_peer.send((frame, peer_addr)) => {
                                     if res.is_err() {
@@ -816,12 +889,34 @@ impl TcpTurnListenerConn {
                     };
 
                     if removed_current && !*peer_shutdown_read.borrow() {
-                        // Reliably deliver a 0-byte sentinel frame in FIFO order to instruct
-                        // `TurnServer::read_loop` to retire any allocation or cached state owned by
-                        // this disconnected TCP 5-tuple before signalling `done_tx`.
-                        tokio::select! {
-                            _ = inbound_tx_peer.send((Vec::new(), peer_addr)) => {},
-                            _ = peer_shutdown_read.changed() => {},
+                        // Enqueue a 0-byte disconnect sentinel in FIFO order and wait for
+                        // `TurnServer::read_loop` to retire any allocation/cached state for this
+                        // 5-tuple before releasing `done_tx` to any waiting successor connection.
+                        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                        disconnect_acks_peer
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .entry(peer_addr)
+                            .or_default()
+                            .push_back(ack_tx);
+                        let sent = tokio::select! {
+                            res = inbound_tx_peer.send((Vec::new(), peer_addr)) => res.is_ok(),
+                            _ = peer_shutdown_read.changed() => false,
+                        };
+                        if sent && !*peer_shutdown_read.borrow() {
+                            tokio::select! {
+                                _ = ack_rx => {},
+                                _ = peer_shutdown_read.changed() => {},
+                            }
+                        }
+                    }
+
+                    {
+                        let mut guard = handoffs_cleanup
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if guard.get(&peer_addr).is_some_and(|h| h.conn_id == conn_id) {
+                            guard.remove(&peer_addr);
                         }
                     }
                     let _ = done_tx.send_replace(true);
@@ -836,9 +931,35 @@ impl TcpTurnListenerConn {
             local_addr,
             inbound_rx: Mutex::new(inbound_rx),
             peers,
+            disconnect_acks,
             shutdown_tx,
             accept_handle: Mutex::new(Some(accept_handle)),
         })
+    }
+
+    fn peer_authenticated_flag(&self, peer_addr: SocketAddr) -> Option<Arc<AtomicBool>> {
+        self.peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer_addr)
+            .map(|entry| Arc::clone(&entry.authenticated))
+    }
+
+    fn notify_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
+        let maybe_tx = {
+            let mut guard = self
+                .disconnect_acks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let tx = guard.get_mut(&peer_addr).and_then(VecDeque::pop_front);
+            if guard.get(&peer_addr).is_some_and(VecDeque::is_empty) {
+                guard.remove(&peer_addr);
+            }
+            tx
+        };
+        if let Some(tx) = maybe_tx {
+            let _ = tx.send(());
+        }
     }
 }
 
@@ -917,6 +1038,10 @@ impl Conn for TcpTurnListenerConn {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
+        self.disconnect_acks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
@@ -945,6 +1070,20 @@ impl RecordingConn {
             inner: SyncMutex::new(Some(inner)),
             local_addr,
             protocol: PROTO_TCP,
+        }
+    }
+
+    fn tcp_peer_authenticated_flag(&self, peer_addr: SocketAddr) -> Option<Arc<AtomicBool>> {
+        let inner = self.clone_inner().ok()?;
+        let tcp_conn = inner.as_any().downcast_ref::<TcpTurnListenerConn>()?;
+        tcp_conn.peer_authenticated_flag(peer_addr)
+    }
+
+    fn notify_tcp_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
+        if let Ok(inner) = self.clone_inner() {
+            if let Some(tcp_conn) = inner.as_any().downcast_ref::<TcpTurnListenerConn>() {
+                tcp_conn.notify_peer_disconnect_processed(peer_addr);
+            }
         }
     }
 
@@ -1909,12 +2048,18 @@ async fn handle_authenticated_allocate(
         return;
     };
 
+    let tcp_authenticated = conn
+        .as_any()
+        .downcast_ref::<RecordingConn>()
+        .and_then(|rc| rc.tcp_peer_authenticated_flag(src_addr));
+
     let alloc = ManagedAllocation::new(
         five_tuple,
         username_attr.text,
         relay_addr,
         relay_conn,
         lifetime_duration,
+        tcp_authenticated,
     );
     {
         let mut guard = allocations.lock().await;
@@ -2675,6 +2820,7 @@ impl TurnServer {
                     .lock()
                     .await
                     .retain(|_, (tuple, _)| *tuple != five_tuple);
+                recording_conn.notify_tcp_peer_disconnect_processed(addr);
                 continue;
             }
 
