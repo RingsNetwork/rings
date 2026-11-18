@@ -129,11 +129,7 @@ impl HeldMessage {
 
     /// The held message an inbox element encodes.
     pub(crate) fn from_element(element: &[u8]) -> Result<Self> {
-        rings_codec::deserialize(element)
-            .or_else(|_| {
-                crate::dht::did::with_legacy_persisted_codec(|| rings_codec::deserialize(element))
-            })
-            .map_err(Error::CodecDeserialize)
+        rings_codec::deserialize(element).map_err(Error::CodecDeserialize)
     }
 
     /// Hold `payload` under `holder`'s authority at the instant `held_at_ms`.
