@@ -6,6 +6,9 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::net::Ipv6Addr;
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::PoisonError;
@@ -62,10 +65,18 @@ use stun::textattrs::Realm;
 use stun::textattrs::Username;
 use stun::uattrs::UnknownAttributes;
 use stun::xoraddr::XorMappedAddress;
+use tokio::io::AsyncRead;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpListener;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use turn::allocation::five_tuple::FiveTuple;
@@ -83,6 +94,7 @@ use turn::proto::reqfamily::RequestedAddressFamily;
 use turn::proto::reqfamily::REQUESTED_FAMILY_IPV4;
 use turn::proto::reqtrans::RequestedTransport;
 use turn::proto::rsrvtoken::ReservationToken;
+use turn::proto::Protocol;
 use turn::proto::PROTO_UDP;
 use webrtc_util::vnet::net::Net;
 use webrtc_util::Conn;
@@ -94,10 +106,27 @@ use crate::config::TurnServerConfig;
 use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::error::Result;
 
-const INBOUND_MTU: usize = 65_535;
 const STUN_HEADER_BYTES: usize = 20;
+const INBOUND_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
 const STUN_ATTR_HEADER_BYTES: usize = 4;
+const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
+const CHANNEL_DATA_HEADER_BYTES: usize = 4;
+const CHANNEL_NUMBER_MIN: u16 = 0x4000;
+const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
+const PROTO_TCP: Protocol = Protocol(6);
+const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
+const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
+const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 64;
+const MAX_TCP_PEER_QUEUED_BYTES: usize = 256 * 1024;
+const MAX_TCP_TOTAL_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TCP_CONNECTIONS_CAP: usize = 512;
+const TCP_ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(20);
+const TCP_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_UNAUTHENTICATED_TCP_FRAMES: usize = 8;
+const TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
+const TCP_IDLE_READ_TIMEOUT: Duration = MAXIMUM_ALLOCATION_LIFETIME;
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 const MAX_DELETION_TXS_PER_TUPLE: usize = 16;
@@ -318,13 +347,17 @@ struct AllocationState {
     channel_bindings: HashMap<ChannelNumber, (SocketAddr, Instant)>,
 }
 
+static NEXT_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
+
 struct ManagedAllocation {
+    alloc_id: u64,
     five_tuple: FiveTuple,
     username: String,
     relay_addr: SocketAddr,
     relay_conn: Arc<PolicyRelayConn>,
     state: SyncMutex<AllocationState>,
     expiry_tx: watch::Sender<Instant>,
+    tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
 }
 
 impl ManagedAllocation {
@@ -334,9 +367,15 @@ impl ManagedAllocation {
         relay_addr: SocketAddr,
         relay_conn: Arc<PolicyRelayConn>,
         lifetime: Duration,
+        tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
     ) -> Arc<Self> {
+        let alloc_id = NEXT_ALLOCATION_ID.fetch_add(1, Ordering::Relaxed);
+        if let Some(ref tx) = tcp_authenticated_tx {
+            let _ = tx.send_replace(Some(alloc_id));
+        }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
         Arc::new(Self {
+            alloc_id,
             five_tuple,
             username,
             relay_addr,
@@ -346,6 +385,7 @@ impl ManagedAllocation {
                 channel_bindings: HashMap::new(),
             }),
             expiry_tx,
+            tcp_authenticated_tx,
         })
     }
 
@@ -362,6 +402,17 @@ impl ManagedAllocation {
     }
 
     fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
+        if let Some(ref tx) = self.tcp_authenticated_tx {
+            let alloc_id = self.alloc_id;
+            tx.send_if_modified(|current| {
+                if *current == Some(alloc_id) {
+                    *current = None;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
         let _ = self.expiry_tx.send_replace(Instant::now());
         self.relay_conn.begin_close()
     }
@@ -455,9 +506,696 @@ impl ManagedAllocation {
     }
 }
 
+fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
+    let &[b0, b1, b2, b3, ..] = datagram else {
+        return None;
+    };
+    let first_u16 = u16::from_be_bytes([b0, b1]);
+    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
+
+    if (b0 & 0b1100_0000) == 0 {
+        if (length_u16 & 0b11) != 0 {
+            return None;
+        }
+        let cookie = datagram.get(4..8)?;
+        if cookie != STUN_MAGIC_COOKIE {
+            return None;
+        }
+        let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
+        let slice = datagram.get(..total)?;
+        Some(slice.to_vec())
+    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
+        let unpadded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(length_u16)?;
+        let slice = datagram.get(..unpadded_total)?;
+        let padded_data_len = (length_u16 + 3) & !3;
+        let padded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(padded_data_len)?;
+        let mut out = Vec::with_capacity(padded_total);
+        out.extend_from_slice(slice);
+        out.resize(padded_total, 0u8);
+        Some(out)
+    } else {
+        None
+    }
+}
+
+fn is_stun_control_response(datagram: &[u8]) -> bool {
+    let Some(&b0) = datagram.first() else {
+        return false;
+    };
+    if datagram.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+        return false;
+    }
+    // RFC 5389 Figure 3: STUN messages have top 2 bits 00, and STUN class bit C1 (bit 0 of byte 0)
+    // is 1 for both Success Response (class 0b10) and Error Response (class 0b11), and 0 for
+    // Request (0b00) and Indication (0b01, such as Data Indication 0x0017).
+    (b0 & 0b1100_0001) == 0b0000_0001
+}
+
+async fn read_turn_tcp_frame_body<R>(reader: &mut R, prefix: [u8; 4]) -> std::io::Result<Vec<u8>>
+where R: AsyncRead + Unpin {
+    let [b0, b1, b2, b3] = prefix;
+    let first_u16 = u16::from_be_bytes([b0, b1]);
+    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
+
+    if (b0 & 0b1100_0000) == 0 {
+        if (length_u16 & 0b11) != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unaligned STUN message length over TCP: {length_u16}"),
+            ));
+        }
+        let mut hdr_rest = [0u8; 16];
+        tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(&mut hdr_rest))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "timed out reading STUN header over TCP",
+                )
+            })??;
+        if hdr_rest.get(..4) != Some(&STUN_MAGIC_COOKIE) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid STUN magic cookie on TCP stream",
+            ));
+        }
+        let mut frame = vec![0u8; STUN_HEADER_BYTES.saturating_add(length_u16)];
+        if let Some(head) = frame.get_mut(..4) {
+            head.copy_from_slice(&prefix);
+        }
+        if let Some(rest) = frame.get_mut(4..STUN_HEADER_BYTES) {
+            rest.copy_from_slice(&hdr_rest);
+        }
+        if let Some(body) = frame.get_mut(STUN_HEADER_BYTES..) {
+            if !body.is_empty() {
+                tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timed out reading STUN body over TCP",
+                        )
+                    })??;
+            }
+        }
+        Ok(frame)
+    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
+        let padded_body_bytes = (length_u16 + 3) & !3;
+        let mut frame = vec![0u8; CHANNEL_DATA_HEADER_BYTES.saturating_add(padded_body_bytes)];
+        if let Some(head) = frame.get_mut(..4) {
+            head.copy_from_slice(&prefix);
+        }
+        if let Some(body) = frame.get_mut(4..) {
+            if !body.is_empty() {
+                tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "timed out reading ChannelData body over TCP",
+                        )
+                    })??;
+            }
+        }
+        Ok(frame)
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid TURN TCP frame header: 0x{first_u16:04x}"),
+        ))
+    }
+}
+
+struct QueuedTcpFrame {
+    bytes: Vec<u8>,
+    peer_queued_bytes: Arc<AtomicUsize>,
+    total_queued_bytes: Arc<AtomicUsize>,
+}
+
+impl QueuedTcpFrame {
+    fn try_reserve(
+        bytes: Vec<u8>,
+        peer_queued_bytes: &Arc<AtomicUsize>,
+        total_queued_bytes: &Arc<AtomicUsize>,
+        enforce_peer_cap: bool,
+    ) -> Option<Self> {
+        let len = bytes.len();
+        if enforce_peer_cap {
+            let prev_peer = peer_queued_bytes.fetch_add(len, Ordering::AcqRel);
+            if prev_peer.saturating_add(len) > MAX_TCP_PEER_QUEUED_BYTES {
+                peer_queued_bytes.fetch_sub(len, Ordering::Release);
+                return None;
+            }
+        } else {
+            peer_queued_bytes.fetch_add(len, Ordering::AcqRel);
+        }
+        let prev_total = total_queued_bytes.fetch_add(len, Ordering::AcqRel);
+        if prev_total.saturating_add(len) > MAX_TCP_TOTAL_QUEUED_BYTES {
+            total_queued_bytes.fetch_sub(len, Ordering::Release);
+            peer_queued_bytes.fetch_sub(len, Ordering::Release);
+            return None;
+        }
+        Some(Self {
+            bytes,
+            peer_queued_bytes: Arc::clone(peer_queued_bytes),
+            total_queued_bytes: Arc::clone(total_queued_bytes),
+        })
+    }
+}
+
+impl Drop for QueuedTcpFrame {
+    fn drop(&mut self) {
+        let len = self.bytes.len();
+        self.peer_queued_bytes.fetch_sub(len, Ordering::Release);
+        self.total_queued_bytes.fetch_sub(len, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct TcpPeerEntry {
+    conn_id: u64,
+    control_tx: mpsc::Sender<QueuedTcpFrame>,
+    data_tx: mpsc::Sender<QueuedTcpFrame>,
+    peer_queued_bytes: Arc<AtomicUsize>,
+    authenticated_tx: watch::Sender<Option<u64>>,
+    evict_tx: watch::Sender<bool>,
+}
+
+#[derive(Clone)]
+struct TcpPeerHandoff {
+    conn_id: u64,
+    evict_tx: watch::Sender<bool>,
+    done_rx: watch::Receiver<bool>,
+}
+
+type TcpPeerMap = HashMap<SocketAddr, TcpPeerEntry>;
+type TcpPeerHandoffMap = HashMap<SocketAddr, TcpPeerHandoff>;
+type TcpDisconnectAckMap = HashMap<SocketAddr, VecDeque<tokio::sync::oneshot::Sender<()>>>;
+
+struct TcpTurnListenerConn {
+    local_addr: SocketAddr,
+    inbound_rx: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
+    peers: Arc<SyncMutex<TcpPeerMap>>,
+    total_queued_bytes: Arc<AtomicUsize>,
+    disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>>,
+    shutdown_tx: watch::Sender<bool>,
+    accept_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl TcpTurnListenerConn {
+    fn spawn(
+        listener: TcpListener,
+        local_addr: SocketAddr,
+        connection_semaphore: Arc<Semaphore>,
+    ) -> Arc<Self> {
+        let (inbound_tx, inbound_rx) = mpsc::channel(TCP_INBOUND_QUEUE_CAPACITY);
+        let peers: Arc<SyncMutex<TcpPeerMap>> = Arc::new(SyncMutex::new(HashMap::new()));
+        let total_queued_bytes = Arc::new(AtomicUsize::new(0));
+        let handoffs: Arc<SyncMutex<TcpPeerHandoffMap>> = Arc::new(SyncMutex::new(HashMap::new()));
+        let disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>> =
+            Arc::new(SyncMutex::new(HashMap::new()));
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let next_conn_id = Arc::new(AtomicU64::new(1));
+
+        let peers_for_accept = Arc::clone(&peers);
+        let handoffs_for_accept = Arc::clone(&handoffs);
+        let disconnect_acks_for_accept = Arc::clone(&disconnect_acks);
+        let accept_handle = tokio::spawn(async move {
+            let mut peer_tasks = JoinSet::new();
+            loop {
+                if *shutdown_rx.borrow_and_update() {
+                    break;
+                }
+                let accepted = tokio::select! {
+                    res = listener.accept() => res,
+                    Some(_) = peer_tasks.join_next(), if !peer_tasks.is_empty() => continue,
+                    res = shutdown_rx.changed() => {
+                        if res.is_err() || *shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                };
+                let (tcp_stream, peer_addr) = match accepted {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::debug!("ignoring transient TCP TURN accept error: {err}");
+                        tokio::select! {
+                            () = tokio::time::sleep(TCP_ACCEPT_ERROR_BACKOFF) => {},
+                            res = shutdown_rx.changed() => {
+                                if res.is_err() || *shutdown_rx.borrow() {
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let Ok(permit) = Arc::clone(&connection_semaphore).try_acquire_owned() else {
+                    tracing::debug!(%peer_addr, "rejecting TCP TURN connection: connection cap reached");
+                    drop(tcp_stream);
+                    continue;
+                };
+                let _ = tcp_stream.set_nodelay(true);
+                let conn_id = next_conn_id.fetch_add(1, Ordering::Relaxed);
+                let (control_tx, mut control_rx) =
+                    mpsc::channel::<QueuedTcpFrame>(TCP_PEER_CONTROL_QUEUE_CAPACITY);
+                let (data_tx, mut data_rx) =
+                    mpsc::channel::<QueuedTcpFrame>(TCP_PEER_WRITE_QUEUE_CAPACITY);
+                let peer_queued_bytes = Arc::new(AtomicUsize::new(0));
+                let (evict_tx, mut evict_rx) = watch::channel(false);
+                let (done_tx, done_rx) = watch::channel(false);
+                let (authenticated_tx, mut authenticated_rx) = watch::channel(None);
+
+                // Synchronously chain same-address reconnects (`A -> B -> C`) in `accept()` so
+                // each successor observes and waits on its immediate predecessor in strict order.
+                let previous_handoff = handoffs_for_accept
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(peer_addr, TcpPeerHandoff {
+                        conn_id,
+                        evict_tx: evict_tx.clone(),
+                        done_rx: done_rx.clone(),
+                    });
+
+                let (mut reader, mut writer) = tokio::io::split(tcp_stream);
+                let inbound_tx_peer = inbound_tx.clone();
+                let peers_cleanup = Arc::clone(&peers_for_accept);
+                let handoffs_cleanup = Arc::clone(&handoffs_for_accept);
+                let disconnect_acks_peer = Arc::clone(&disconnect_acks_for_accept);
+                let mut peer_shutdown_read = shutdown_rx.clone();
+                let mut peer_shutdown_write = shutdown_rx.clone();
+
+                peer_tasks.spawn(async move {
+                    let _permit = permit;
+                    // If a prior TCP connection from the exact same `(ip, port)` is still winding
+                    // down, evict it and wait for `TurnServer::read_loop` to finish processing its
+                    // disconnect sentinel before registering or reading from this connection.
+                    if let Some(prev) = previous_handoff {
+                        let _ = prev.evict_tx.send_replace(true);
+                        let mut prev_done = prev.done_rx;
+                        tokio::select! {
+                            _ = prev_done.wait_for(|&done| done) => {},
+                            _ = peer_shutdown_read.changed() => {
+                                if *peer_shutdown_read.borrow() {
+                                    let _ = done_tx.send_replace(true);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+
+                    // If a newer connection (`C`) arrived while we (`B`) were waiting for `A`,
+                    // exit immediately without touching `peers` or reading from the socket.
+                    if *evict_rx.borrow() || *peer_shutdown_read.borrow() {
+                        {
+                            let mut guard = handoffs_cleanup
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            if guard.get(&peer_addr).is_some_and(|h| h.conn_id == conn_id) {
+                                guard.remove(&peer_addr);
+                            }
+                        }
+                        let _ = done_tx.send_replace(true);
+                        return;
+                    }
+
+                    peers_cleanup
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(peer_addr, TcpPeerEntry {
+                            conn_id,
+                            control_tx,
+                            data_tx,
+                            peer_queued_bytes,
+                            authenticated_tx,
+                            evict_tx: evict_tx.clone(),
+                        });
+
+                    let mut evict_read = evict_rx.clone();
+                    let read_loop = async {
+                        let mut unauth_deadline = Instant::now() + TCP_INITIAL_FRAME_TIMEOUT;
+                        let mut last_activity = Instant::now();
+                        let mut unauth_frames = 0usize;
+                        let mut was_authenticated = false;
+                        loop {
+                            let mut prefix = [0u8; 4];
+                            let mut prefix_filled = 0usize;
+                            let prefix_ok = loop {
+                                if *peer_shutdown_read.borrow_and_update()
+                                    || *evict_read.borrow_and_update()
+                                {
+                                    break false;
+                                }
+                                let is_auth = authenticated_rx.borrow_and_update().is_some();
+                                if is_auth {
+                                    was_authenticated = true;
+                                    unauth_frames = 0;
+                                } else if was_authenticated {
+                                    was_authenticated = false;
+                                    unauth_deadline = Instant::now() + TCP_INITIAL_FRAME_TIMEOUT;
+                                    unauth_frames = 0;
+                                } else if unauth_frames >= MAX_UNAUTHENTICATED_TCP_FRAMES {
+                                    break false;
+                                }
+                                let deadline = if is_auth {
+                                    if prefix_filled > 0 {
+                                        (last_activity + TCP_FRAME_BODY_TIMEOUT)
+                                            .min(last_activity + TCP_IDLE_READ_TIMEOUT)
+                                    } else {
+                                        last_activity + TCP_IDLE_READ_TIMEOUT
+                                    }
+                                } else if prefix_filled > 0 {
+                                    (last_activity + TCP_FRAME_BODY_TIMEOUT).min(unauth_deadline)
+                                } else {
+                                    unauth_deadline
+                                };
+                                let Some(rem_slice) = prefix.get_mut(prefix_filled..) else {
+                                    break true;
+                                };
+                                if rem_slice.is_empty() {
+                                    break true;
+                                }
+                                tokio::select! {
+                                    res = reader.read(rem_slice) => {
+                                        match res {
+                                            Ok(0) | Err(_) => break false,
+                                            Ok(n) => {
+                                                last_activity = Instant::now();
+                                                prefix_filled = prefix_filled.saturating_add(n);
+                                                if prefix_filled >= 4 {
+                                                    break true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    () = tokio::time::sleep_until(deadline) => break false,
+                                    res = authenticated_rx.changed() => {
+                                        if res.is_err() {
+                                            break false;
+                                        }
+                                    }
+                                    _ = evict_read.changed() => break false,
+                                    res = peer_shutdown_read.changed() => {
+                                        if res.is_err() || *peer_shutdown_read.borrow() {
+                                            break false;
+                                        }
+                                    }
+                                }
+                            };
+                            if !prefix_ok {
+                                break;
+                            }
+                            let frame_res = tokio::select! {
+                                res = read_turn_tcp_frame_body(&mut reader, prefix) => res,
+                                _ = evict_read.changed() => break,
+                                res = peer_shutdown_read.changed() => {
+                                    if res.is_err() || *peer_shutdown_read.borrow() {
+                                        break;
+                                    }
+                                    break;
+                                }
+                            };
+                            let Ok(frame) = frame_res else {
+                                break;
+                            };
+                            last_activity = Instant::now();
+                            if authenticated_rx.borrow().is_none() {
+                                unauth_frames = unauth_frames.saturating_add(1);
+                            }
+                            tokio::select! {
+                                res = inbound_tx_peer.send((frame, peer_addr)) => {
+                                    if res.is_err() {
+                                        break;
+                                    }
+                                }
+                                _ = evict_read.changed() => break,
+                                res = peer_shutdown_read.changed() => {
+                                    if res.is_err() || *peer_shutdown_read.borrow() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    let write_loop = async {
+                        loop {
+                            if *peer_shutdown_write.borrow_and_update()
+                                || *evict_rx.borrow_and_update()
+                            {
+                                break;
+                            }
+                            let maybe_pkt = tokio::select! {
+                                biased;
+                                pkt = control_rx.recv() => pkt,
+                                pkt = data_rx.recv() => pkt,
+                                _ = evict_rx.changed() => break,
+                                res = peer_shutdown_write.changed() => {
+                                    if res.is_err() || *peer_shutdown_write.borrow() {
+                                        break;
+                                    }
+                                    continue;
+                                }
+                            };
+                            let Some(pkt) = maybe_pkt else {
+                                break;
+                            };
+                            let write_res = tokio::time::timeout(TCP_WRITE_TIMEOUT, async {
+                                writer.write_all(&pkt.bytes).await?;
+                                writer.flush().await
+                            })
+                            .await;
+                            drop(pkt);
+                            if !matches!(write_res, Ok(Ok(()))) {
+                                break;
+                            }
+                        }
+                        let _ = tokio::time::timeout(TCP_WRITE_TIMEOUT, writer.shutdown()).await;
+                    };
+
+                    tokio::select! {
+                        _ = read_loop => {},
+                        _ = write_loop => {},
+                    }
+
+                    let removed_current = {
+                        let mut guard =
+                            peers_cleanup.lock().unwrap_or_else(PoisonError::into_inner);
+                        if guard
+                            .get(&peer_addr)
+                            .is_some_and(|entry| entry.conn_id == conn_id)
+                        {
+                            guard.remove(&peer_addr);
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                    if removed_current && !*peer_shutdown_read.borrow() {
+                        // Enqueue a 0-byte disconnect sentinel in FIFO order and wait for
+                        // `TurnServer::read_loop` to retire any allocation/cached state for this
+                        // 5-tuple before releasing `done_tx` to any waiting successor connection.
+                        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+                        disconnect_acks_peer
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .entry(peer_addr)
+                            .or_default()
+                            .push_back(ack_tx);
+                        let sent = tokio::select! {
+                            res = inbound_tx_peer.send((Vec::new(), peer_addr)) => res.is_ok(),
+                            _ = peer_shutdown_read.changed() => false,
+                        };
+                        if sent && !*peer_shutdown_read.borrow() {
+                            tokio::select! {
+                                _ = ack_rx => {},
+                                _ = peer_shutdown_read.changed() => {},
+                            }
+                        }
+                    }
+
+                    {
+                        let mut guard = handoffs_cleanup
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if guard.get(&peer_addr).is_some_and(|h| h.conn_id == conn_id) {
+                            guard.remove(&peer_addr);
+                        }
+                    }
+                    let _ = done_tx.send_replace(true);
+                });
+            }
+
+            drop(listener);
+            while peer_tasks.join_next().await.is_some() {}
+        });
+
+        Arc::new(Self {
+            local_addr,
+            inbound_rx: Mutex::new(inbound_rx),
+            peers,
+            total_queued_bytes,
+            disconnect_acks,
+            shutdown_tx,
+            accept_handle: Mutex::new(Some(accept_handle)),
+        })
+    }
+
+    fn peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
+        self.peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer_addr)
+            .map(|entry| (entry.conn_id, entry.authenticated_tx.clone()))
+    }
+
+    fn send_to_peer_conn(
+        &self,
+        buf: &[u8],
+        target: SocketAddr,
+        expected_conn_id: Option<u64>,
+    ) -> webrtc_util::Result<usize> {
+        let Some(framed) = encode_turn_tcp_frame(buf) else {
+            return Err(webrtc_util::Error::Other(
+                "invalid outbound TURN TCP frame".to_string(),
+            ));
+        };
+        let is_control = is_stun_control_response(buf);
+        let maybe_peer = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&target)
+            .and_then(|entry| {
+                if let Some(cid) = expected_conn_id {
+                    if entry.conn_id != cid {
+                        return None;
+                    }
+                }
+                let tx = if is_control {
+                    entry.control_tx.clone()
+                } else {
+                    entry.data_tx.clone()
+                };
+                Some((
+                    tx,
+                    Arc::clone(&entry.peer_queued_bytes),
+                    entry.evict_tx.clone(),
+                ))
+            });
+        let Some((tx, peer_queued_bytes, evict_tx)) = maybe_peer else {
+            return Err(webrtc_util::Error::Other(
+                "TCP TURN peer disconnected".to_string(),
+            ));
+        };
+        let Some(queued_frame) = QueuedTcpFrame::try_reserve(
+            framed,
+            &peer_queued_bytes,
+            &self.total_queued_bytes,
+            !is_control,
+        ) else {
+            if is_control {
+                let _ = evict_tx.send_replace(true);
+            }
+            return Err(webrtc_util::Error::Other(
+                "TCP TURN outbound byte budget exceeded".to_string(),
+            ));
+        };
+        if let Err(err) = tx.try_send(queued_frame) {
+            if is_control {
+                let _ = evict_tx.send_replace(true);
+            }
+            return Err(webrtc_util::Error::Other(err.to_string()));
+        }
+        Ok(buf.len())
+    }
+
+    fn notify_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
+        let maybe_tx = {
+            let mut guard = self
+                .disconnect_acks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let tx = guard.get_mut(&peer_addr).and_then(VecDeque::pop_front);
+            if guard.get(&peer_addr).is_some_and(VecDeque::is_empty) {
+                guard.remove(&peer_addr);
+            }
+            tx
+        };
+        if let Some(tx) = maybe_tx {
+            let _ = tx.send(());
+        }
+    }
+}
+
+#[async_trait]
+impl Conn for TcpTurnListenerConn {
+    async fn connect(&self, _addr: SocketAddr) -> webrtc_util::Result<()> {
+        Err(webrtc_util::Error::Other("not applicable".to_string()))
+    }
+
+    async fn recv(&self, _buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        Err(webrtc_util::Error::Other("not applicable".to_string()))
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        let mut rx = self.inbound_rx.lock().await;
+        let Some((frame, peer_addr)) = rx.recv().await else {
+            return Err(webrtc_util::Error::Other(
+                "TCP TURN listener closed".to_string(),
+            ));
+        };
+        let n = buf.len().min(frame.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), frame.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        Ok((n, peer_addr))
+    }
+
+    async fn send(&self, _buf: &[u8]) -> webrtc_util::Result<usize> {
+        Err(webrtc_util::Error::Other("not applicable".to_string()))
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        self.send_to_peer_conn(buf, target, None)
+    }
+
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        Ok(self.local_addr)
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        None
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        let _ = self.shutdown_tx.send_replace(true);
+        let handle = self.accept_handle.lock().await.take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        self.peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.disconnect_acks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        Ok(())
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
 struct RecordingConn {
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
     local_addr: SocketAddr,
+    protocol: Protocol,
 }
 
 impl RecordingConn {
@@ -465,6 +1203,42 @@ impl RecordingConn {
         Self {
             inner: SyncMutex::new(Some(inner)),
             local_addr,
+            protocol: PROTO_UDP,
+        }
+    }
+
+    fn new_tcp(inner: Arc<dyn Conn + Send + Sync>, local_addr: SocketAddr) -> Self {
+        Self {
+            inner: SyncMutex::new(Some(inner)),
+            local_addr,
+            protocol: PROTO_TCP,
+        }
+    }
+
+    fn tcp_peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
+        let inner = self.clone_inner().ok()?;
+        let tcp_conn = inner.as_any().downcast_ref::<TcpTurnListenerConn>()?;
+        tcp_conn.peer_context(peer_addr)
+    }
+
+    fn send_to_tcp_peer_conn(
+        &self,
+        buf: &[u8],
+        target: SocketAddr,
+        expected_conn_id: u64,
+    ) -> webrtc_util::Result<usize> {
+        let inner = self.clone_inner()?;
+        let Some(tcp_conn) = inner.as_any().downcast_ref::<TcpTurnListenerConn>() else {
+            return Err(webrtc_util::Error::Other("not a TCP listener".to_string()));
+        };
+        tcp_conn.send_to_peer_conn(buf, target, Some(expected_conn_id))
+    }
+
+    fn notify_tcp_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
+        if let Ok(inner) = self.clone_inner() {
+            if let Some(tcp_conn) = inner.as_any().downcast_ref::<TcpTurnListenerConn>() {
+                tcp_conn.notify_peer_disconnect_processed(peer_addr);
+            }
         }
     }
 
@@ -532,6 +1306,51 @@ impl Conn for RecordingConn {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(|c| c.remote_addr())
+    }
+
+    async fn close(&self) -> webrtc_util::Result<()> {
+        Ok(())
+    }
+
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self
+    }
+}
+
+struct ScopedTcpPeerConn {
+    recording: Arc<RecordingConn>,
+    conn_id: u64,
+}
+
+#[async_trait]
+impl Conn for ScopedTcpPeerConn {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
+        self.recording.connect(addr).await
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        self.recording.recv(buf).await
+    }
+
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        self.recording.recv_from(buf).await
+    }
+
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+        self.recording.send(buf).await
+    }
+
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        self.recording
+            .send_to_tcp_peer_conn(buf, target, self.conn_id)
+    }
+
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        self.recording.local_addr()
+    }
+
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.recording.remote_addr()
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {
@@ -1412,6 +2231,30 @@ async fn handle_authenticated_allocate(
         return;
     }
 
+    let tcp_peer_ctx = conn
+        .as_any()
+        .downcast_ref::<RecordingConn>()
+        .and_then(|rc| rc.tcp_peer_context(src_addr));
+    let relay_turn_socket: Arc<dyn Conn + Send + Sync> = match (
+        conn.as_any().downcast_ref::<RecordingConn>(),
+        tcp_peer_ctx.as_ref().map(|(cid, _)| *cid),
+    ) {
+        (Some(rc), Some(conn_id)) => Arc::new(ScopedTcpPeerConn {
+            recording: Arc::new(RecordingConn {
+                inner: SyncMutex::new(rc.clone_inner().ok()),
+                local_addr: rc.local_addr,
+                protocol: rc.protocol,
+            }),
+            conn_id,
+        }),
+        (Some(rc), None) if rc.protocol == PROTO_TCP => {
+            // The TCP peer already disconnected before this queued Allocate request was reached.
+            return;
+        }
+        _ => Arc::clone(conn),
+    };
+    let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
+
     let Ok((relay_conn, relay_addr)) = relay_generator
         .allocate_relay_conn(use_ipv4, need_even_port)
         .await
@@ -1435,6 +2278,7 @@ async fn handle_authenticated_allocate(
         relay_addr,
         relay_conn,
         lifetime_duration,
+        tcp_authenticated_tx,
     );
     {
         let mut guard = allocations.lock().await;
@@ -1444,7 +2288,7 @@ async fn handle_authenticated_allocate(
     tokio::spawn(relay_packet_handler(
         Arc::clone(&alloc),
         Arc::clone(allocations),
-        Arc::clone(conn),
+        relay_turn_socket,
         src_addr,
     ));
 
@@ -1821,14 +2665,51 @@ fn collect_concrete_listener_candidates(
 async fn bind_listener_sockets(
     listen_addr: SocketAddr,
     extra_local_ips: &[IpAddr],
+    connection_semaphore: Arc<Semaphore>,
 ) -> Result<(SocketAddr, Vec<Arc<RecordingConn>>)> {
     if !listen_addr.ip().is_unspecified() {
-        let socket = UdpSocket::bind(listen_addr).await?;
-        let local_addr = socket.local_addr()?;
-        let conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
-        return Ok((local_addr, vec![Arc::new(RecordingConn::new(
-            conn, local_addr,
-        ))]));
+        if listen_addr.port() != 0 {
+            let socket = UdpSocket::bind(listen_addr).await?;
+            let local_addr = socket.local_addr()?;
+            let tcp_listener = TcpListener::bind(local_addr).await?;
+            let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
+            let tcp_conn: Arc<dyn Conn + Send + Sync> =
+                TcpTurnListenerConn::spawn(tcp_listener, local_addr, connection_semaphore);
+            return Ok((local_addr, vec![
+                Arc::new(RecordingConn::new(udp_conn, local_addr)),
+                Arc::new(RecordingConn::new_tcp(tcp_conn, local_addr)),
+            ]));
+        }
+
+        let mut last_err: Option<std::io::Error> = None;
+        for _ in 0..DEFAULT_PORT_RANGE_MAX_RETRIES {
+            let socket = UdpSocket::bind(listen_addr).await?;
+            let local_addr = socket.local_addr()?;
+            match TcpListener::bind(local_addr).await {
+                Ok(tcp_listener) => {
+                    let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
+                    let tcp_conn: Arc<dyn Conn + Send + Sync> =
+                        TcpTurnListenerConn::spawn(tcp_listener, local_addr, connection_semaphore);
+                    return Ok((local_addr, vec![
+                        Arc::new(RecordingConn::new(udp_conn, local_addr)),
+                        Arc::new(RecordingConn::new_tcp(tcp_conn, local_addr)),
+                    ]));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(err);
+                    continue;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+        return Err(last_err
+            .unwrap_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "failed to bind matching UDP and TCP TURN listener port",
+                )
+            })
+            .into());
     }
 
     let candidates = collect_concrete_listener_candidates(listen_addr.is_ipv4(), extra_local_ips);
@@ -1841,8 +2722,15 @@ async fn bind_listener_sockets(
             match UdpSocket::bind(cand).await {
                 Ok(sock) => {
                     let concrete_addr = sock.local_addr()?;
-                    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
-                    listeners.push(Arc::new(RecordingConn::new(conn, concrete_addr)));
+                    let tcp_listener = TcpListener::bind(concrete_addr).await?;
+                    let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
+                    let tcp_conn: Arc<dyn Conn + Send + Sync> = TcpTurnListenerConn::spawn(
+                        tcp_listener,
+                        concrete_addr,
+                        Arc::clone(&connection_semaphore),
+                    );
+                    listeners.push(Arc::new(RecordingConn::new(udp_conn, concrete_addr)));
+                    listeners.push(Arc::new(RecordingConn::new_tcp(tcp_conn, concrete_addr)));
                 }
                 Err(err)
                     if err.kind() == std::io::ErrorKind::AddrInUse
@@ -1884,8 +2772,25 @@ async fn bind_listener_sockets(
             match UdpSocket::bind(cand).await {
                 Ok(sock) => {
                     let concrete_addr = sock.local_addr()?;
-                    let conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
-                    listeners.push(Arc::new(RecordingConn::new(conn, concrete_addr)));
+                    match TcpListener::bind(concrete_addr).await {
+                        Ok(tcp_listener) => {
+                            let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(sock);
+                            let tcp_conn: Arc<dyn Conn + Send + Sync> = TcpTurnListenerConn::spawn(
+                                tcp_listener,
+                                concrete_addr,
+                                Arc::clone(&connection_semaphore),
+                            );
+                            listeners.push(Arc::new(RecordingConn::new(udp_conn, concrete_addr)));
+                            listeners
+                                .push(Arc::new(RecordingConn::new_tcp(tcp_conn, concrete_addr)));
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
+                            last_err = Some(err);
+                            conflict = true;
+                            break;
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => {
                     last_err = Some(err);
@@ -1950,7 +2855,14 @@ impl TurnServer {
         if let Some(adv) = config.advertised_ip {
             extra_ips.push(adv);
         }
-        let (local_addr, listeners) = bind_listener_sockets(config.listen_addr, &extra_ips).await?;
+        let max_tcp_connections = config
+            .max_allocations
+            .max(1)
+            .saturating_add(config.max_nonces.max(1))
+            .min(MAX_TCP_CONNECTIONS_CAP);
+        let connection_semaphore = Arc::new(Semaphore::new(max_tcp_connections));
+        let (local_addr, listeners) =
+            bind_listener_sockets(config.listen_addr, &extra_ips, connection_semaphore).await?;
         let advertised_ip = match config.advertised_ip {
             Some(ip) if !ip.is_unspecified() => ip,
             _ if !local_addr.ip().is_unspecified() => local_addr.ip(),
@@ -2114,8 +3026,23 @@ impl TurnServer {
             let five_tuple = FiveTuple {
                 src_addr: addr,
                 dst_addr: local_dst_addr,
-                protocol: PROTO_UDP,
+                protocol: recording_conn.protocol,
             };
+
+            if payload.is_empty() && recording_conn.protocol == PROTO_TCP {
+                let removed_alloc = allocations.lock().await.remove(&five_tuple);
+                if let Some(alloc) = removed_alloc {
+                    close_allocations(vec![alloc]).await;
+                }
+                allocate_responses.remove(&five_tuple);
+                completed_deletions.remove(&five_tuple);
+                nonces
+                    .lock()
+                    .await
+                    .retain(|_, (tuple, _)| *tuple != five_tuple);
+                recording_conn.notify_tcp_peer_disconnect_processed(addr);
+                continue;
+            }
 
             if ChannelData::is_channel_data(&payload) {
                 let mut channel_data = ChannelData {
@@ -2431,9 +3358,23 @@ impl TurnServer {
         Ok(format_turn_server_url(&base_url, self.server_pubkey())?)
     }
 
+    /// Return the unsigned `turn://<advertised_addr>?transport=tcp&pubkey=<base58(server_pubkey)>`
+    /// URL for connecting to this server over TCP.
+    pub fn tcp_ice_server_base_url(&self) -> Result<String> {
+        let base_url = format!("turn://{}?transport=tcp", self.advertised_addr);
+        Ok(format_turn_server_url(&base_url, self.server_pubkey())?)
+    }
+
     /// Build a complete signed `turn://<username>:<credential>@<advertised_addr>` URL for `delegatee_key`.
     pub fn ice_server_url_for(&self, delegatee_key: &DelegateeKey) -> Result<String> {
         let base_url = self.ice_server_base_url()?;
+        Ok(delegatee_key.sign_ice_servers(&base_url)?)
+    }
+
+    /// Build a complete signed `turn://<username>:<credential>@<advertised_addr>?transport=tcp`
+    /// URL for `delegatee_key`.
+    pub fn tcp_ice_server_url_for(&self, delegatee_key: &DelegateeKey) -> Result<String> {
+        let base_url = self.tcp_ice_server_base_url()?;
         Ok(delegatee_key.sign_ice_servers(&base_url)?)
     }
 

@@ -79,6 +79,7 @@ mod send_runtime;
 mod test_close_actor;
 #[cfg(test)]
 mod test_send_lifecycle;
+mod turn_tcp;
 
 use host_candidates::append_sdp_extra_host_candidates;
 use host_candidates::external_address_candidates;
@@ -96,6 +97,8 @@ use send_runtime::run_irrevocable_send;
 use send_runtime::run_irrevocable_send_with_timeout;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
+use turn_tcp::prepare_native_ice_config;
+use turn_tcp::TurnTcpBridgeGuard;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -255,7 +258,8 @@ pub struct WebrtcConnection {
     connection_state: ConnectionStateCell,
     cancel_token: CancellationToken,
     retirement_fence: NativeRetirementFence,
-    sdp_extra_host_candidates: Vec<String>,
+    sdp_extra_host_candidates: std::sync::RwLock<Vec<String>>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -459,6 +463,7 @@ impl WebrtcConnection {
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
+        turn_tcp_bridge: Option<TurnTcpBridgeGuard>,
         callback: Arc<InnerTransportCallback>,
     ) -> Self {
         let cancel_token = CancellationToken::new();
@@ -477,7 +482,8 @@ impl WebrtcConnection {
             connection_state,
             cancel_token,
             retirement_fence,
-            sdp_extra_host_candidates,
+            sdp_extra_host_candidates: std::sync::RwLock::new(sdp_extra_host_candidates),
+            turn_tcp_bridge: Arc::new(std::sync::Mutex::new(turn_tcp_bridge)),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             physical_close_completed: PhysicalCloseCompletion::new(),
             callback,
@@ -526,12 +532,13 @@ impl WebrtcConnection {
             && self.connection_state.snapshot().webrtc() == WebrtcConnectionState::New;
 
         if is_unnegotiated {
-            let (new_webrtc_conn, _) = create_peer_connection_with_config(
-                &desired,
-                self.external_address.as_deref(),
-                self.udp_port_range,
-            )
-            .await?;
+            let (new_webrtc_conn, new_extra_host_candidates, new_turn_tcp_bridge) =
+                create_peer_connection_with_config(
+                    &desired,
+                    self.external_address.as_deref(),
+                    self.udp_port_range,
+                )
+                .await?;
             wire_received_data_channels(&new_webrtc_conn, Arc::clone(&self.callback));
             wire_peer_connection_state(
                 &new_webrtc_conn,
@@ -548,6 +555,7 @@ impl WebrtcConnection {
             if self.cancel_token.is_cancelled()
                 || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
             {
+                drop(new_turn_tcp_bridge);
                 new_webrtc_conn.on_peer_connection_state_change(Box::new(|_| Box::pin(async {})));
                 new_webrtc_conn.on_data_channel(Box::new(|_| Box::pin(async {})));
                 for tracked in new_channels {
@@ -568,6 +576,18 @@ impl WebrtcConnection {
                 .configured_ice_servers
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
+            *self
+                .sdp_extra_host_candidates
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_extra_host_candidates;
+            let old_bridge = std::mem::replace(
+                &mut *self
+                    .turn_tcp_bridge
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                new_turn_tcp_bridge,
+            );
+            drop(old_bridge);
 
             current_conn.on_peer_connection_state_change(Box::new(|_| Box::pin(async {})));
             current_conn.on_data_channel(Box::new(|_| Box::pin(async {})));
@@ -604,6 +624,14 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
+        if let Some(guard) = self
+            .turn_tcp_bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            guard.quiesce_inbound();
+        }
         let _ = self
             .webrtc_data_channel
             .for_each(|tracked| tracked.delivery.close());
@@ -641,7 +669,12 @@ impl WebrtcConnection {
                 "Failed to get local description".to_string(),
             ))?
             .sdp;
-        let sdp = append_sdp_extra_host_candidates(sdp, &self.sdp_extra_host_candidates);
+        let extra_host_candidates = self
+            .sdp_extra_host_candidates
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let sdp = append_sdp_extra_host_candidates(sdp, &extra_host_candidates);
 
         let candidate_count = sdp_candidate_count(&sdp);
         if candidate_count == 0 {
@@ -729,61 +762,83 @@ fn set_udp_network_range(
 
 async fn create_peer_connection(
     transport: &WebrtcTransport,
-) -> Result<(RTCPeerConnection, Vec<String>, Vec<IceServer>)> {
+) -> Result<(
+    RTCPeerConnection,
+    Vec<String>,
+    Vec<IceServer>,
+    Option<TurnTcpBridgeGuard>,
+)> {
     let ice_servers = transport
         .ice_servers
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let (connection, sdp_extra_host_candidates) = create_peer_connection_with_config(
-        &ice_servers,
-        transport.external_address.as_deref(),
-        transport.udp_port_range,
-    )
-    .await?;
-    Ok((connection, sdp_extra_host_candidates, ice_servers))
+    let (connection, sdp_extra_host_candidates, turn_tcp_bridge) =
+        create_peer_connection_with_config(
+            &ice_servers,
+            transport.external_address.as_deref(),
+            transport.udp_port_range,
+        )
+        .await?;
+    Ok((
+        connection,
+        sdp_extra_host_candidates,
+        ice_servers,
+        turn_tcp_bridge,
+    ))
 }
 
 async fn create_peer_connection_with_config(
     ice_servers: &[IceServer],
     external_address: Option<&str>,
     udp_port_range: Option<WebrtcUdpPortRange>,
-) -> Result<(RTCPeerConnection, Vec<String>)> {
-    let ice_servers = ice_servers
-        .iter()
-        .cloned()
-        .map(RTCIceServer::from)
-        .collect();
+) -> Result<(RTCPeerConnection, Vec<String>, Option<TurnTcpBridgeGuard>)> {
+    let prepared = prepare_native_ice_config(ice_servers).await?;
+    let is_relay_only = prepared.vnet.is_some();
     let configuration = RTCConfiguration {
-        ice_servers,
+        ice_servers: prepared.ice_servers,
+        ice_transport_policy: prepared.ice_transport_policy,
         ..Default::default()
     };
 
     let mut setting = webrtc::api::setting_engine::SettingEngine::default();
     set_udp_network_range(&mut setting, udp_port_range)?;
-    let external_addresses = external_address_candidates(external_address);
-    let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
-    let sdp_extra_host_candidates = sdp_extra_host_candidates(&external_addresses);
-    setting.set_ice_multicast_dns_mode(MulticastDnsMode::QueryOnly);
-    if !nat_host_candidates.is_empty() {
-        tracing::debug!(
-            external_addresses = ?nat_host_candidates,
-            "setting external WebRTC host candidates"
-        );
-        setting.set_nat_1to1_ips(nat_host_candidates, RTCIceCandidateType::Host);
+    if let Some(vnet) = prepared.vnet {
+        setting.set_vnet(Some(vnet));
     }
-    if !sdp_extra_host_candidates.is_empty() {
-        tracing::debug!(
-            extra_host_candidates = ?sdp_extra_host_candidates,
-            "will append SDP-only WebRTC host candidates"
-        );
-    }
+    setting.set_ice_multicast_dns_mode(if prepared.disable_mdns {
+        MulticastDnsMode::Disabled
+    } else {
+        MulticastDnsMode::QueryOnly
+    });
+
+    let sdp_extra_host_candidates = if is_relay_only {
+        Vec::new()
+    } else {
+        let external_addresses = external_address_candidates(external_address);
+        let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
+        let extra = sdp_extra_host_candidates(&external_addresses);
+        if !nat_host_candidates.is_empty() {
+            tracing::debug!(
+                external_addresses = ?nat_host_candidates,
+                "setting external WebRTC host candidates"
+            );
+            setting.set_nat_1to1_ips(nat_host_candidates, RTCIceCandidateType::Host);
+        }
+        if !extra.is_empty() {
+            tracing::debug!(
+                extra_host_candidates = ?extra,
+                "will append SDP-only WebRTC host candidates"
+            );
+        }
+        extra
+    };
 
     let api = webrtc::api::APIBuilder::new()
         .with_setting_engine(setting)
         .build();
     let connection = api.new_peer_connection(configuration).await?;
-    Ok((connection, sdp_extra_host_candidates))
+    Ok((connection, sdp_extra_host_candidates, prepared.bridge_guard))
 }
 
 #[async_trait]
@@ -813,6 +868,7 @@ impl FrameSink for WebrtcConnection {
                 self.webrtc_data_channel.clone(),
                 self.webrtc_data_channel_state_notifier.clone(),
                 self.callback.clone(),
+                Arc::clone(&self.turn_tcp_bridge),
                 physical_close_completed,
             ),
         )
@@ -906,6 +962,7 @@ impl ConnectionInterface for WebrtcConnection {
         close_reconfigurable_native_connection(
             Arc::clone(&self.reconfigure_lock),
             Arc::clone(&self.webrtc_conn),
+            Arc::clone(&self.turn_tcp_bridge),
             self.physical_close_completed.clone(),
         )
         .await
@@ -915,6 +972,7 @@ impl ConnectionInterface for WebrtcConnection {
 async fn close_reconfigurable_native_connection(
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     let runtime = native_send_runtime()?;
@@ -923,13 +981,28 @@ async fn close_reconfigurable_native_connection(
         async move {
             let connection = {
                 let _guard = reconfigure_lock.lock().await;
+                if let Some(guard) = turn_tcp_bridge
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                {
+                    guard.quiesce_inbound();
+                }
                 Arc::clone(
                     &webrtc_conn
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 )
             };
-            connection.close().await.map_err(Into::into)
+            let result = connection.close().await.map_err(Into::into);
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                guard.cancel();
+            }
+            result
         },
         physical_close_completed,
     )
@@ -965,6 +1038,7 @@ async fn close_failed_native_send(
     channel_pool: Arc<ChannelPool<TrackedChannel>>,
     data_channel_notifier: Notifier,
     callback: Arc<InnerTransportCallback>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     physical_close_completed: PhysicalCloseCompletion,
 ) -> Result<()> {
     let _ = channel_pool.for_each(|tracked| tracked.delivery.close());
@@ -973,7 +1047,24 @@ async fn close_failed_native_send(
     let runtime = native_send_runtime()?;
     close_failed_native_send_with_witness(
         &runtime,
-        async move { connection.close().await.map_err(Into::into) },
+        async move {
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                guard.quiesce_inbound();
+            }
+            let result = connection.close().await.map_err(Into::into);
+            if let Some(guard) = turn_tcp_bridge
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                guard.cancel();
+            }
+            result
+        },
         physical_close_completed,
     )
     .await
@@ -1166,7 +1257,7 @@ impl TransportInterface for WebrtcTransport {
     ) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.ensure_peer_slot_available(cid)?;
 
-        let (webrtc_conn, sdp_extra_host_candidates, configured_ice_servers) =
+        let (webrtc_conn, sdp_extra_host_candidates, configured_ice_servers, turn_tcp_bridge) =
             create_peer_connection(self).await?;
 
         //
@@ -1209,6 +1300,7 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier,
             connection_state,
             sdp_extra_host_candidates,
+            turn_tcp_bridge,
             Arc::clone(&inner_cb),
         );
 

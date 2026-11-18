@@ -4781,6 +4781,7 @@ dependencies = [
  "stateright",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "url",
@@ -4788,6 +4789,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "web-sys",
+ "webpki-roots",
  "webrtc",
 ]
 
