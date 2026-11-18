@@ -5,12 +5,16 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
 
 ## 1.0 Frozen Contracts
 
-- **Wire framing (`WIRE_VERSION = 3`).** Every frame and handshake payload opens with the fixed
+- **Wire framing (`WIRE_VERSION = 4`).** Every frame and handshake payload opens with the fixed
   header `"RINGS\0" ‖ wire_version` (`u16` big-endian). Nodes accept only their own `WIRE_VERSION`
-  (`3` across the `1.0.x` line) and refuse any other version before body decode with
+  (`4` across the `1.0.x` line) and refuse any other version before body decode with
   `Error::IncompatibleWireVersion` (JSON-RPC error `210`). There is no multi-version negotiation:
   any future wire-version bump is a coordinated cutover, and `1.0.x` patch/minor releases preserve
-  `WIRE_VERSION = 3`.
+  `WIRE_VERSION = 4`. Binary `postcard` serialization of `Did` (`[u8; 20]`) and `PublicKey<SIZE>`
+  (`[u8; SIZE]`) is likewise cut over without legacy disk-format shims: under the
+  `RecordAuthority` decode law, non-authoritative local stores (`Disposable`, `DurableCache`, and
+  `Retained`, including `dht-removals` and `relay-inbox`) intentionally retire undecodable records
+  from pre-`WIRE_VERSION = 4` schemas on read.
 - **Delegation verification and key binding.**
   - `DelegateeKey` deserialization and `FromStr` verify that `delegatee_secret_key` derives
     `delegation.delegatee_did()` and that the delegator signature over `delegation` is valid.
@@ -36,9 +40,13 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
 
 ## Operator Upgrade Checklist (0.39 / 0.40 → 1.0)
 
-1. **Upgrade all overlay peers to `WIRE_VERSION = 3`.** Verify a remote seed's wire version via
-   `nodeDid` (`"wire_version": 3`) before connecting; pre-`1.0` nodes on earlier wire versions are
-   refused with JSON-RPC error `210`.
+1. **Upgrade all overlay peers to `WIRE_VERSION = 4`.** Verify a remote seed's wire version via
+   `nodeDid` (`"wire_version": 4`) before connecting; pre-`1.0` nodes on earlier wire versions are
+   refused with JSON-RPC error `210`. Because `WIRE_VERSION = 4` switches binary `Did` and
+   `PublicKey` encodings from text to fixed-width bytes without legacy decoders, pre-`WIRE_VERSION = 4`
+   records in `Disposable`, `DurableCache`, and `Retained` stores (`data`, `dht-removals`,
+   `relay-inbox`, `onion-entry-guards`, `measure`, `provisional-evidence`) are retired automatically
+   on read under `RecordAuthority::retires_undecodable()`.
 2. **Verify `config.yaml` fields.**
    - Remove deprecated keys (`ecdsa_key`, `session_manager`, `onion_http_proxy_service`,
      `max_circuits`, `max_streams_per_circuit`); `config.yaml` rejects unknown fields.
@@ -60,7 +68,7 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
    - Update Rust callers binding the return type of `rings_rpc::jsonrpc::Client::connect_with_did`
      to `ConnectWithDidResponse`.
 5. **Published Cargo crates.**
-   All 13 workspace crates (`rings-derive`, `rings-codec`, `rings-measure`, `rings-runtime`,
+   All 15 workspace crates (`rings-derive`, `rings-codec`, `rings-measure`, `rings-runtime`,
    `rings-aez`, `rings-network-policy`, `rings-dns-relay`, `rings-gateway`, `rings-webview`,
-   `rings-transport`, `rings-core`, `rings-rpc`, `rings-node`) publish in topological dependency
-   order at matching workspace versions.
+   `rings-transport`, `rings-core`, `rings-turn`, `rings-rpc`, `rings-node`, `rings-tui`) publish
+   in topological dependency order at matching workspace versions.

@@ -6,7 +6,7 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 ## Milestones
 
 - **1.0: a stable network.** Delivers deterministic wire-versioned framing
-  (`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 3`), range-proved and non-transitive Chord
+  (`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 4`), range-proved and non-transitive Chord
   stabilization, CRDT removal stability, durable group-committed local stores and chain-replicated
   relay custody, fair slot-isolated admission and load bounds, and client-sealed Sphinx onion
   Kleisli pipelines (#834, #843, #880). Stabilizes the `1.0.x` public runtime contracts across the

@@ -72,6 +72,7 @@
 
 use async_trait::async_trait;
 
+use super::coalesce_by_key;
 use super::StorageSyncDestination;
 use super::StorageSyncTarget;
 use crate::dht::chord::PeerRing;
@@ -208,8 +209,16 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let now_ms = self.epoch_ms();
+        let entries = coalesce_by_key(
+            self.live_storage_entries(now_ms)
+                .await?
+                .into_iter()
+                .map(|(_, entry)| entry),
+            |entry| (entry.kind, entry.did),
+            Entry::join,
+        )?;
         let mut actions = Vec::new();
-        for (_, entry) in self.live_storage_entries(now_ms).await? {
+        for entry in entries {
             let action = self.republish_entry(now_ms, entry, redundancy).await?;
             push_action(&mut actions, action);
         }

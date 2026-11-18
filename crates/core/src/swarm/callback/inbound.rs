@@ -287,6 +287,7 @@ impl InboundMailbox {
             lease:
                 InboundFrameLease {
                     bytes,
+                    uncompressed_bytes,
                     transport_credit,
                     carrier,
                     #[cfg(test)]
@@ -306,7 +307,7 @@ impl InboundMailbox {
             authentication,
         }
         .introducer(processor.logical.transport.dht.edges());
-        let charge = arrival_charge(&prepared.message, bytes.len(), (carrier, introducer));
+        let charge = arrival_charge(&prepared.message, uncompressed_bytes, (carrier, introducer));
         let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
         let PreparedInboundFrame {
             payload,
@@ -316,7 +317,7 @@ impl InboundMailbox {
         } = prepared;
         // Core now owns both retained decoded representations. Release the raw
         // bytes and their transport lease together at this handoff boundary.
-        let wire_bytes = bytes.len();
+        let wire_bytes = uncompressed_bytes;
         drop((bytes, transport_credit));
         // Test builds: the actor's capacity permit now covers the frame.
         #[cfg(test)]
@@ -775,11 +776,20 @@ fn arrival_charge(
     let frame = memory_reservation(wire_bytes);
     match message {
         crate::message::Message::Chunk(chunk) => match chunk.chunk {
-            [0, total] => InboundCharge::Message {
-                bytes: memory_reservation(total.saturating_mul(chunk.data.len())).max(frame),
-                lane: InboundLane::of_carrier(carrier),
-                introducer,
-            },
+            [0, total] => {
+                let claimed = total.saturating_mul(chunk.data.len());
+                let upper_bound =
+                    if crate::message::may_start_compressed_payload(chunk.data.as_ref()) {
+                        claimed.max(crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES)
+                    } else {
+                        claimed
+                    };
+                InboundCharge::Message {
+                    bytes: memory_reservation(upper_bound).max(frame),
+                    lane: InboundLane::of_carrier(carrier),
+                    introducer,
+                }
+            }
             _ => InboundCharge::Covered,
         },
         _ => InboundCharge::Bytes(frame),

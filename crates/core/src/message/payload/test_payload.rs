@@ -419,16 +419,43 @@ fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Re
         0, 1, 63, 64, 127, 128, 255, 256, 16_383, 16_384, 65_535, 65_536,
     ] {
         for message in Message::test_variants()? {
-            let message_kind = message.kind().as_str();
+            let kind = message.kind();
+            let message_kind = kind.as_str();
             let mut payload = new_payload(message, next_hop);
             payload.verification.sig = vec![9; signature_len];
             payload.transaction.verification.sig = vec![7; signature_len / 2];
 
+            let wire_size = payload.wire_size()?;
+            let wire = payload.to_wire()?;
+            let (decoded, uncompressed_len) =
+                MessagePayload::from_wire_with_uncompressed_len(&wire)?;
+            assert_eq!(decoded, payload, "message kind {message_kind}");
             assert_eq!(
-                payload.wire_size()?,
-                payload.to_wire()?.len(),
+                uncompressed_len, wire_size,
                 "message kind {message_kind}, signature length {signature_len}"
             );
+            let eligible_for_compression = matches!(
+                kind.class(),
+                MessageCategory::DhtControl | MessageCategory::Storage
+            ) && (wire_size - super::frame::FRAME_HEADER_LEN)
+                <= MAX_COMPRESSED_PAYLOAD_BYTES;
+            if eligible_for_compression {
+                assert_eq!(wire[8], 2, "message kind {message_kind} should compress");
+                assert!(
+                    wire.len() < wire_size,
+                    "message kind {message_kind}, signature length {signature_len}"
+                );
+            } else {
+                assert_eq!(
+                    wire[8], 0,
+                    "message kind {message_kind} must stay uncompressed"
+                );
+                assert_eq!(
+                    wire.len(),
+                    wire_size,
+                    "message kind {message_kind}, signature length {signature_len}"
+                );
+            }
         }
     }
     Ok(())
@@ -565,8 +592,9 @@ fn test_the_frame_header_names_the_wire_version_before_any_decoding() -> Result<
     let wire = payload.to_wire()?;
     assert_eq!(&wire[..6], b"RINGS\0");
     assert_eq!(u16::from_be_bytes([wire[6], wire[7]]), WIRE_VERSION);
-    assert_eq!(wire.len(), payload.wire_size()?);
-    assert_eq!(MessagePayload::from_wire(&wire)?, payload);
+    let (decoded, uncompressed_len) = MessagePayload::from_wire_with_uncompressed_len(&wire)?;
+    assert_eq!(uncompressed_len, payload.wire_size()?);
+    assert_eq!(decoded, payload);
 
     let theirs = WIRE_VERSION + 1;
     let mut other = wire.to_vec();
@@ -605,7 +633,7 @@ fn test_the_frame_header_names_the_wire_version_before_any_decoding() -> Result<
     }
 
     let mut unknown_kind = wire.to_vec();
-    unknown_kind[8] = 2;
+    unknown_kind[8] = 3;
     for bytes in [legacy_body.as_slice(), &wire[..7], unknown_kind.as_slice()] {
         assert!(matches!(
             MessagePayload::from_wire(bytes),
@@ -748,5 +776,292 @@ fn test_transaction_verify_rejects_origin_swap_with_shared_delegatee_session() -
         !tx.verify(TEST_NETWORK_ID),
         "swapping delegator on a signed transaction must invalidate hash_transaction"
     );
+    Ok(())
+}
+
+/// Law (category boundary, #1280): `MessageCategory::E2e` and `MessageCategory::Application`
+/// frames never emit `FrameKind::CompressedPayload` on the wire and are rejected if forged as
+/// `FrameKind::CompressedPayload`.
+#[test]
+fn test_compressed_payload_is_restricted_to_dht_control_and_storage() -> Result<()> {
+    let next_hop: Did = SecretKey::random().address().into();
+    for message in Message::test_variants()? {
+        let class = message.kind().class();
+        let mut payload = new_payload(message, next_hop);
+        // Ensure redundant bytes so LZ4 always shrinks the serialized WirePayload body.
+        payload.verification.sig = vec![0x42; 512];
+        let uncompressed_body = rings_codec::serialize(&WirePayload::inline(&payload))
+            .map_err(Error::CodecSerialize)?;
+        let compressed_body =
+            lz4_flex::block::compress_with_dict(&uncompressed_body, super::WIRE_COMPRESSION_DICT);
+        assert!(compressed_body.len() < uncompressed_body.len());
+
+        let forged = super::frame::frame_bytes(
+            super::frame::FrameKind::CompressedPayload,
+            &compressed_body,
+        )?;
+        match class {
+            MessageCategory::DhtControl | MessageCategory::Storage => {
+                assert_eq!(payload.to_wire()?.as_ref(), forged.as_ref());
+                assert_eq!(MessagePayload::from_wire(&forged)?, payload);
+            }
+            MessageCategory::E2e | MessageCategory::Application => {
+                let emitted = payload.to_wire()?;
+                assert_eq!(emitted[8], 0);
+                assert!(matches!(
+                    MessagePayload::from_wire(&forged),
+                    Err(Error::InvalidMessage(reason))
+                        if reason.contains("forbids compression")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Law (non-shrinking fallback and bomb rejection, #1280):
+/// - If compressing a `DhtControl` or `Storage` body does not strictly shrink it, `to_wire`
+///   falls back to `FrameKind::Payload`, and a `FrameKind::CompressedPayload` whose body does
+///   not strictly shrink is rejected by `from_wire`.
+/// - Decompression bombs expanding past `MAX_COMPRESSED_PAYLOAD_BYTES`, empty bodies, and
+///   corrupted LZ4 blocks are rejected with `Error::InvalidMessage`.
+#[test]
+fn test_compressed_payload_rejects_bombs_corrupted_blocks_and_non_shrinking_frames() -> Result<()> {
+    use rand::RngCore;
+    use rand::SeedableRng;
+
+    let mut rng = rand_hc::Hc128Rng::seed_from_u64(1280);
+    fn random_did(rng: &mut impl rand::RngCore) -> Did {
+        let mut bytes = [0u8; 20];
+        rng.fill_bytes(&mut bytes);
+        Did::from(ethereum_types::H160::from(bytes))
+    }
+    fn random_sig(rng: &mut impl rand::RngCore) -> Vec<u8> {
+        let mut bytes = vec![0u8; 65];
+        rng.fill_bytes(&mut bytes);
+        bytes
+    }
+
+    let mut payload = new_payload(
+        Message::Leave(crate::message::Leave {
+            successor_list: vec![random_did(&mut rng)],
+        }),
+        random_did(&mut rng),
+    );
+    let mut tx_uuid_bytes = [0u8; 16];
+    rng.fill_bytes(&mut tx_uuid_bytes);
+    payload.transaction.tx_id = uuid::Uuid::from_bytes(tx_uuid_bytes);
+    payload.transaction.sequence = rng.next_u64();
+    payload.transaction.destination = random_did(&mut rng);
+    payload.relay.destination = random_did(&mut rng);
+    payload.relay.next_hop = random_did(&mut rng);
+    payload.transaction.verification.ttl_ms = rng.next_u64();
+    payload.transaction.verification.ts_ms =
+        (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
+    payload.transaction.verification.sig = random_sig(&mut rng);
+    payload.verification.ttl_ms = rng.next_u64();
+    payload.verification.ts_ms = (u128::from(rng.next_u64()) << 64) | u128::from(rng.next_u64());
+    payload.verification.sig = random_sig(&mut rng);
+    let origin_session =
+        DelegateeKey::new_with_seckey(&SecretKey::from_bytes([0x33; 32]).unwrap())?;
+    let hop_session = DelegateeKey::new_with_seckey(&SecretKey::from_bytes([0x77; 32]).unwrap())?;
+    let sessions = PerSlot {
+        origin: DelegationRef::Digest(origin_session.delegation().digest()?),
+        hop: DelegationRef::Digest(hop_session.delegation().digest()?),
+    };
+    let wire_view = WirePayload::view(&payload, sessions);
+    let raw_body = rings_codec::serialize(&wire_view).map_err(Error::CodecSerialize)?;
+    let compressed_body =
+        lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
+    assert!(
+        compressed_body.len() >= raw_body.len(),
+        "high-entropy referenced frame must not shrink under LZ4"
+    );
+
+    let emitted = wire_view.to_wire()?;
+    assert_eq!(
+        emitted[8], 0,
+        "non-shrinking DhtControl frame must fall back to FrameKind::Payload"
+    );
+
+    let forged_non_shrinking =
+        super::frame::frame_bytes(super::frame::FrameKind::CompressedPayload, &compressed_body)?;
+    assert!(matches!(
+        LinkFrame::from_wire(&forged_non_shrinking),
+        Err(Error::InvalidMessage(reason)) if reason.contains("did not shrink")
+    ));
+
+    // Empty CompressedPayload body is rejected.
+    let empty_compressed =
+        super::frame::frame_bytes(super::frame::FrameKind::CompressedPayload, &[])?;
+    assert!(matches!(
+        LinkFrame::from_wire(&empty_compressed),
+        Err(Error::InvalidMessage(reason)) if reason.contains("out of bounds")
+    ));
+
+    // Oversized CompressedPayload body (>= MAX_COMPRESSED_PAYLOAD_BYTES) is rejected up front.
+    let oversized_compressed = super::frame::frame_bytes(
+        super::frame::FrameKind::CompressedPayload,
+        &vec![0u8; MAX_COMPRESSED_PAYLOAD_BYTES],
+    )?;
+    assert!(matches!(
+        LinkFrame::from_wire(&oversized_compressed),
+        Err(Error::InvalidMessage(reason)) if reason.contains("out of bounds")
+    ));
+
+    // Decompression bomb (small compressed block that expands past MAX_COMPRESSED_PAYLOAD_BYTES)
+    // is rejected before allocating beyond the frame ceiling, including the exact +1 byte boundary.
+    for excess in [1usize, MAX_COMPRESSED_PAYLOAD_BYTES * 7] {
+        let bomb_uncompressed = vec![0u8; MAX_COMPRESSED_PAYLOAD_BYTES + excess];
+        let bomb_compressed =
+            lz4_flex::block::compress_with_dict(&bomb_uncompressed, super::WIRE_COMPRESSION_DICT);
+        assert!(bomb_compressed.len() < 4096);
+        let bomb_frame = super::frame::frame_bytes(
+            super::frame::FrameKind::CompressedPayload,
+            &bomb_compressed,
+        )?;
+        assert!(matches!(
+            LinkFrame::from_wire(&bomb_frame),
+            Err(Error::InvalidMessage(reason)) if reason.contains("failed LZ4 decompression")
+        ));
+    }
+
+    // Corrupted LZ4 block is rejected.
+    let corrupted_frame =
+        super::frame::frame_bytes(super::frame::FrameKind::CompressedPayload, &[
+            0xff, 0x00, 0x00, 0xff, 0xff,
+        ])?;
+    assert!(matches!(
+        LinkFrame::from_wire(&corrupted_frame),
+        Err(Error::InvalidMessage(reason)) if reason.contains("failed LZ4 decompression")
+    ));
+
+    Ok(())
+}
+
+/// Law (Sign-then-Compress, #1280): hop-by-hop delegation slot re-encoding (`Inline` <-> `Referenced`)
+/// on compressed `DhtControl` and `Storage` frames preserves canonical `Transaction` and
+/// `MessagePayload` signatures.
+#[test]
+fn test_compressed_payload_preserves_canonical_signatures_across_slot_encodings() -> Result<()> {
+    let origin_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let hop_session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let destination: Did = SecretKey::random().address().into();
+    let tx = Transaction::new(
+        destination,
+        uuid::Uuid::new_v4(),
+        42,
+        None,
+        Message::ConnectNodeSend(crate::message::ConnectNodeSend {
+            sdp: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".repeat(8),
+            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            relay_custody: crate::dht::RelayCustody::Holds,
+        }),
+        MessageSigner::new(&origin_session, TEST_NETWORK_ID),
+    )?;
+    let relay = MessageRelay::new(NextHop::toward(destination), destination, HopBudget::MAX);
+    let payload =
+        MessagePayload::new(tx, MessageSigner::new(&hop_session, TEST_NETWORK_ID), relay)?;
+
+    for origin_enc in [SlotEncoding::Inline, SlotEncoding::Referenced] {
+        for hop_enc in [SlotEncoding::Inline, SlotEncoding::Referenced] {
+            let encoding = PerSlot {
+                origin: origin_enc,
+                hop: hop_enc,
+            };
+            let wire = WirePayload::encoded(&payload, encoding)?.to_wire()?;
+            assert_eq!(
+                wire[8], 2,
+                "ConnectNodeSend with repeated SDP lines must compress"
+            );
+            assert!(wire.len() < payload.wire_size()?);
+            let (LinkFrame::Payload(decoded), uncompressed_len) =
+                LinkFrame::from_wire_with_uncompressed_len(&wire)?
+            else {
+                panic!("expected payload frame");
+            };
+            assert_eq!(
+                uncompressed_len,
+                WirePayload::encoded(&payload, encoding)?.wire_size()?
+            );
+            let resolved = decoded.resolve(|slot| match slot {
+                DelegationRef::Inline(d) => Ok::<_, Error>(d.into_owned()),
+                DelegationRef::Digest(digest) => {
+                    if digest == origin_session.delegation().digest()? {
+                        Ok(origin_session.delegation())
+                    } else {
+                        Ok(hop_session.delegation())
+                    }
+                }
+            })?;
+            assert_eq!(resolved, payload);
+            assert!(resolved.verify_transaction_and_payload(TEST_NETWORK_ID));
+        }
+    }
+    Ok(())
+}
+
+/// Witness for #1282:
+/// - `PublicKey<33>` and `PublicKey<48>` encode to exact 33 and 48 raw bytes in `rings_codec`
+///   (`postcard`) while preserving Base58-check strings in `serde_json`.
+/// - `WIRE_COMPRESSION_DICT` shrinks a single-message WebRTC SDP `ConnectNodeSend` frame even
+///   further than dictionary-free LZ4.
+#[test]
+fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames() -> Result<()> {
+    use crate::ecc::PublicKey;
+
+    let pk33 = SecretKey::random().pubkey();
+    let pk33_wire = rings_codec::serialize(&pk33).map_err(Error::CodecSerialize)?;
+    assert_eq!(pk33_wire.len(), 33);
+    assert_eq!(
+        rings_codec::deserialize::<PublicKey<33>>(&pk33_wire).map_err(Error::CodecDeserialize)?,
+        pk33
+    );
+    let pk33_json = serde_json::to_string(&pk33).map_err(Error::Serialize)?;
+    assert!(pk33_json.len() > 40);
+    assert_eq!(
+        serde_json::from_str::<PublicKey<33>>(&pk33_json).map_err(Error::Deserialize)?,
+        pk33
+    );
+
+    let pk48 = PublicKey([0x5a; 48]);
+    let pk48_wire = rings_codec::serialize(&pk48).map_err(Error::CodecSerialize)?;
+    assert_eq!(pk48_wire.len(), 48);
+    assert_eq!(
+        rings_codec::deserialize::<PublicKey<48>>(&pk48_wire).map_err(Error::CodecDeserialize)?,
+        pk48
+    );
+
+    let sdp = concat!(
+        "v=0\r\no=- 8473928174 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n",
+        "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
+        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
+        "a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n",
+        "a=ice-options:trickle\r\n",
+        "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\n",
+        "a=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
+        "a=candidate:1 1 udp 2130706431 192.0.2.10 54321 typ host generation 0\r\n",
+    );
+    let next_hop: Did = SecretKey::random().address().into();
+    let payload = new_payload(
+        Message::ConnectNodeSend(crate::message::ConnectNodeSend {
+            sdp: sdp.to_owned(),
+            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            relay_custody: crate::dht::RelayCustody::Holds,
+        }),
+        next_hop,
+    );
+    let raw_body =
+        rings_codec::serialize(&WirePayload::inline(&payload)).map_err(Error::CodecSerialize)?;
+    let without_dict = lz4_flex::block::compress(&raw_body);
+    let with_dict = lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
+    assert!(
+        with_dict.len() < without_dict.len(),
+        "static protocol dictionary must compress a single SDP frame more than dictionary-free LZ4 ({} >= {})",
+        with_dict.len(),
+        without_dict.len()
+    );
+    let wire = payload.to_wire()?;
+    assert_eq!(MessagePayload::from_wire(&wire)?, payload);
     Ok(())
 }

@@ -291,6 +291,22 @@ impl PlacedEntry {
         self.custody_incarnation
     }
 
+    /// Semilattice join of two [`PlacedEntry`] values targeting the same placement key `key` and
+    /// carrier identity `(entry.kind, entry.did)`.
+    ///
+    /// Law: over a fixed placement fibre `(key, entry.kind, entry.did)`, [`PlacedEntry`] is the
+    /// product join-semilattice `(Entry, Entry::join) × (Option<u64>, max)`.
+    pub(crate) fn join(&self, other: Self) -> Result<Self> {
+        if self.key != other.key {
+            return Err(Error::EntryDidNotEqual);
+        }
+        Ok(Self {
+            key: self.key,
+            entry: self.entry.join(other.entry)?,
+            custody_incarnation: self.custody_incarnation.max(other.custody_incarnation),
+        })
+    }
+
     /// Enforce that `key` belongs to `entry.did`'s affine replica set.
     pub fn validate_placement(&self, redundancy: u16) -> Result<()> {
         validate_affine_placement(

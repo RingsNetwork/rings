@@ -189,3 +189,51 @@ async fn test_read_repair_rejects_non_affine_observed_miss() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn test_republish_and_coalesce_deduplicate_multiple_local_placements_of_same_entry(
+) -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let successor = Did::from(100u32);
+    node.successors().update(successor)?;
+    let entry = data_entry(Did::from(10u32));
+    let placements = entry.did.rotate_affine(3)?;
+    let [first_key, second_key, third_key] = placements.as_slice() else {
+        panic!("expected three affine placements");
+    };
+    let (first_key, second_key, third_key) = (*first_key, *second_key, *third_key);
+    // Store two affine placements of the same logical entry locally.
+    node.storage.put(&first_key.to_string(), &entry).await?;
+    node.storage.put(&second_key.to_string(), &entry).await?;
+
+    let action = node.republish_local_entries(3).await?;
+    let deliveries = action.coalesced_storage_sync_deliveries()?;
+    for delivery in deliveries {
+        let (_, _, batch) = delivery.into_message_parts();
+        let unique_keys: std::collections::BTreeSet<Did> =
+            batch.iter().map(|placed| placed.key).collect();
+        assert_eq!(
+            unique_keys.len(),
+            batch.len(),
+            "coalesced repair batch must not repeat the same placement key"
+        );
+    }
+
+    // Also verify coalescing across combined actions targeting the same physical owner.
+    let combined = PeerRingAction::MultiActions(vec![
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PhysicalOwner(successor),
+            vec![PlacedEntry::new(third_key, entry.clone())],
+        ),
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PhysicalOwner(successor),
+            vec![PlacedEntry::new(third_key, entry)],
+        ),
+    ]);
+    let coalesced = combined.coalesced_storage_sync_deliveries()?;
+    assert_eq!(coalesced.len(), 1);
+    let (_, _, batch) = coalesced.into_iter().next().unwrap().into_message_parts();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch.first().map(|placed| placed.key), Some(third_key));
+    Ok(())
+}

@@ -14,6 +14,10 @@ ignore = [
     # workspace lock only through webrtc 0.17.1 -> webrtc-util 0.17.1 -> nix 0.26.4 -> pin-utils
     # 0.1.0. Removed once the transport moves off webrtc 0.17; tracked in #1071.
     { id = "RUSTSEC-2026-0441", reason = "unmaintained; only webrtc 0.17 webrtc-util/nix still pulls it; #1071" },
+    # chrono 0.4 is marked unmaintained upstream (RUSTSEC-2026-0543). rings-core no longer depends
+    # on chrono; it remains in the workspace lock via imap-codec/imap-types in rings-mailbox-example
+    # and HTTP-date parsing in rings-webview.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained; imap-codec/imap-types in rings-mailbox-example and rings-webview still pull chrono 0.4" },
 ]
 
 [licenses]

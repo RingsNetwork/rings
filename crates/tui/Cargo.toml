@@ -1,0 +1,45 @@
+[package]
+name = "rings-tui"
+default-run = "rings-tui"
+description = "Interactive Terminal User Interface (TUI) for monitoring, inspecting, and controlling a Rings network node."
+readme = "README.md"
+keywords = ["Chord", "DHT", "Web3", "P2P", "TUI"]
+categories = ["command-line-interface", "network-programming"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "rings_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rings-tui"
+path = "bin/rings-tui.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+base64 = "0.13.0"
+clap = { version = "4.0.14", features = ["derive", "env"] }
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }
+rings-rpc = { workspace = true, features = ["std"] }
+serde = { version = "1.0.136", features = ["derive"] }
+serde-saphyr = "1.3.0"
+serde_json = "1.0.70"
+sha1 = "0.10.6"
+thiserror = "1"
+tokio = { version = "1.50.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+unicode-segmentation = "1.13.3"
+unicode-width = "0.2.2"
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

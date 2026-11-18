@@ -193,6 +193,36 @@ pub(super) enum StorageSyncTarget {
     Remote(StorageSyncDestination),
 }
 
+/// Quotient `items` by `key_of`, folding each fibre with the fallible semilattice `join` while
+/// preserving the first-observation order of every distinct key.
+///
+/// Law (Order-Preserving Fibre Quotient):
+/// - Uniqueness: all returned elements have pairwise distinct `key_of` projections.
+/// - Order: keys appear in strictly increasing index of their first occurrence in `items`.
+/// - Completeness: each returned element for key $k$ equals the left-to-right fold under `join`
+///   of every input element in fibre $k^{-1}(k)$.
+pub(super) fn coalesce_by_key<T, K>(
+    items: impl IntoIterator<Item = T>,
+    mut key_of: impl FnMut(&T) -> K,
+    mut join: impl FnMut(&T, T) -> Result<T>,
+) -> Result<Vec<T>>
+where
+    K: Ord,
+{
+    let mut by_key = BTreeMap::<K, (usize, T)>::new();
+    for (order, item) in items.into_iter().enumerate() {
+        let key = key_of(&item);
+        if let Some((_, existing)) = by_key.get_mut(&key) {
+            *existing = join(existing, item)?;
+        } else {
+            by_key.insert(key, (order, item));
+        }
+    }
+    let mut ordered: Vec<(usize, T)> = by_key.into_values().collect();
+    ordered.sort_by_key(|(order, _)| *order);
+    Ok(ordered.into_iter().map(|(_, item)| item).collect())
+}
+
 impl PeerRingAction {
     pub(crate) fn sync_entries_for_handoff(
         destination: StorageSyncDestination,
@@ -247,7 +277,12 @@ impl PeerRingAction {
 
         let mut deliveries = Vec::new();
         for ((purpose, destination), data) in by_route {
-            for batch in sync::sync_entries_batches(data, sync::SYNC_BATCH_MAX_BYTES)? {
+            let coalesced = coalesce_by_key(
+                data,
+                |placed| (placed.key, placed.entry.kind, placed.entry.did),
+                PlacedEntry::join,
+            )?;
+            for batch in sync::sync_entries_batches(coalesced, sync::SYNC_BATCH_MAX_BYTES)? {
                 deliveries.push(StorageSyncDelivery::from_parts(purpose, destination, batch));
             }
         }
