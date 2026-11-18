@@ -215,6 +215,34 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
         IceServer::target_candidate_tier(&with_turn),
         IceCandidateTier::Relay
     );
+
+    // When TURN is configured (`IceCandidateTier::Relay`), lower-tier candidates must not arm the
+    // settle timer before a `typ relay` candidate arrives, but once a `typ relay` candidate has
+    // armed the timer, subsequent lower-tier candidates must advance `epoch` to reset the quiet
+    // window.
+    let relay_progress = GatherCandidateProgress::new(IceCandidateTier::Relay);
+    assert!(
+        !relay_progress.observe_text("candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host"),
+        "host candidate must not arm settle timer while relay tier is outstanding"
+    );
+    assert!(
+        !relay_progress.observe_text(
+            "candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0"
+        ),
+        "srflx candidate must not arm settle timer while relay tier is outstanding"
+    );
+    assert!(
+        relay_progress.observe_text(
+            "candidate:3 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0"
+        ),
+        "relay candidate must arm the 300 ms settle timer"
+    );
+    assert!(
+        relay_progress.observe_text(
+            "candidate:4 1 udp 1677729535 14.155.204.30 51629 typ srflx raddr 0.0.0.0 rport 0"
+        ),
+        "subsequent srflx candidate after relay must reset the armed quiet window"
+    );
 }
 
 /// If a host candidate arrives first (arming the 3 s settle timer) and a reflexive candidate

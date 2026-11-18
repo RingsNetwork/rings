@@ -139,14 +139,19 @@ impl GatherCandidateProgress {
     }
 
     fn observe_text(&self, text: &str) -> bool {
-        let Some(delay) = gather_settle_delay(text, self.target_tier) else {
+        if parse_sdp_candidate_tier(text).is_none() {
             return false;
-        };
-        let merged = match self.settle_delay.get() {
-            Some(existing) => existing.min(delay),
-            None => delay,
-        };
-        self.settle_delay.set(Some(merged));
+        }
+        if let Some(delay) = gather_settle_delay(text, self.target_tier) {
+            let merged = match self.settle_delay.get() {
+                Some(existing) => existing.min(delay),
+                None => delay,
+            };
+            self.settle_delay.set(Some(merged));
+        }
+        if self.settle_delay.get().is_none() {
+            return false;
+        }
         self.epoch.set(self.epoch.get().wrapping_add(1));
         let wakers = std::mem::take(&mut *self.wakers.borrow_mut());
         for waker in wakers {
