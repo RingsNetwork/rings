@@ -30,6 +30,17 @@ use crate::ice_server::IceServer;
 
 const STUN_HEADER_BYTES: usize = 20;
 const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
+/// STUN Binding Error Response header (`0x0111`) with an 8-byte `ERROR-CODE` attribute
+/// (`400 Bad Request`, class `4`, number `0`). Returned locally to `webrtc-ice`'s
+/// `gather_candidates_srflx` when it probes the local UDP TURN-over-TCP bridge address so the
+/// reflexive gatherer finishes immediately without creating a bogus TCP-backed `srflx` candidate
+/// or waiting out its 5-second STUN gather timeout.
+const STUN_BINDING_BAD_REQUEST_BODY: [u8; 8] = [
+    0x00, 0x09, // ATTR_ERROR_CODE (0x0009)
+    0x00, 0x04, // attribute length = 4 bytes (no reason phrase)
+    0x00, 0x00, // reserved
+    0x04, 0x00, // class = 4, number = 0 (400 Bad Request)
+];
 const CHANNEL_DATA_HEADER_BYTES: usize = 4;
 const CHANNEL_NUMBER_MIN: u16 = 0x4000;
 const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
@@ -216,9 +227,41 @@ fn stun_request_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     <[u8; 12]>::try_from(tx_slice).ok()
 }
 
+/// If `pkt` is a STUN `Binding Request` (RFC 5389 method `0x001`, class `0b00`, header bytes
+/// `[0x00, 0x01, ..]`), build a 28-byte STUN `Binding Error Response` (`400 Bad Request`) with the
+/// matching transaction ID.
+///
+/// When OS UDP is available, `webrtc-ice`'s `gather_candidates_srflx` sends bare STUN Binding
+/// Requests from a local UDP socket to every configured ICE server URL, including the local UDP
+/// bridge endpoint (`turn:127.0.0.1:<bridge_port>`). Forwarding those requests over the TCP TURN
+/// stream causes the TURN server to return `XOR-MAPPED-ADDRESS` for the TCP connection's source
+/// port, which `webrtc-ice` would falsely advertise as a UDP `srflx` candidate backed by a
+/// different UDP socket; silently dropping them would stall `gather_candidates_srflx` for
+/// `STUN_GATHER_TIMEOUT` (5 s). Replying locally with a `Binding Error Response` terminates the
+/// reflexive probe immediately without opening a TCP session or producing a bogus `srflx`
+/// candidate.
+pub(crate) fn stun_binding_bad_request_response(pkt: &[u8]) -> Option<[u8; 28]> {
+    let &[b0, b1, ..] = pkt else {
+        return None;
+    };
+    if b0 != 0x00 || b1 != 0x01 || pkt.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
+        return None;
+    }
+    let tx_id = pkt.get(8..STUN_HEADER_BYTES)?;
+    let mut resp = [0u8; 28];
+    resp[0] = 0x01;
+    resp[1] = 0x11; // Binding Error Response (0x0111)
+    resp[2] = 0x00;
+    resp[3] = 0x08; // Message Length = 8 bytes
+    resp[4..8].copy_from_slice(&STUN_MAGIC_COOKIE);
+    resp[8..STUN_HEADER_BYTES].copy_from_slice(tx_id);
+    resp[STUN_HEADER_BYTES..].copy_from_slice(&STUN_BINDING_BAD_REQUEST_BODY);
+    Some(resp)
+}
+
 /// Extract the 12-byte STUN transaction ID if `pkt` is a STUN Success or Error Response
 /// (RFC 5389 §6 class `0b10` or `0b11`, where bit 0 of byte 0 `C1 == 1`).
-fn stun_response_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
+pub(crate) fn stun_response_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     let &b0 = pkt.first()?;
     if (b0 & 0b1100_0001) != 0b0000_0001 {
         return None;
@@ -422,13 +465,9 @@ async fn run_stream_io<S>(
     let cache_for_read = Arc::clone(&stun_tx_cache);
     let cancel_read = cancel.clone();
     let read_fut = async move {
-        let mut quiesced = false;
         loop {
             let frame_res = tokio::select! {
-                _ = inbound_cancel.cancelled() => {
-                    quiesced = true;
-                    break;
-                }
+                _ = cancel_read.cancelled() => break,
                 res = read_turn_tcp_frame(&mut reader) => res,
             };
             let Ok(frame) = frame_res else {
@@ -441,7 +480,8 @@ async fn run_stream_io<S>(
                 );
                 continue;
             }
-            if let Some(tx_id) = stun_response_transaction_id(&frame) {
+            let is_stun_control_response = if let Some(tx_id) = stun_response_transaction_id(&frame)
+            {
                 let mut guard = cache_for_read
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
@@ -453,12 +493,20 @@ async fn run_stream_io<S>(
                     }
                     guard.push_back((tx_id, Some(frame.clone())));
                 }
+                true
+            } else {
+                false
+            };
+            // Once inbound data is quiesced during connection teardown, drop relayed application
+            // data (`ChannelData` and STUN `Data` indications) so the virtual UDP receive queue
+            // cannot fill up, while continuing to forward STUN control responses (`CreatePermission`,
+            // `ChannelBind`, `Refresh`, `Allocate`) so an in-flight `webrtc::turn::client::Client`
+            // transaction can complete and release its internal mutex for `Client::close()`.
+            if inbound_cancel.is_cancelled() && !is_stun_control_response {
+                continue;
             }
             let send_res = tokio::select! {
-                _ = inbound_cancel.cancelled() => {
-                    quiesced = true;
-                    break;
-                }
+                _ = cancel_read.cancelled() => break,
                 res = tokio::time::timeout(
                     TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
                     bridge_conn.send_to(&frame, client_addr),
@@ -476,11 +524,6 @@ async fn run_stream_io<S>(
             if send_res.is_err() {
                 break;
             }
-        }
-        if quiesced {
-            // Keep `read_fut` pending after inbound quiescence so `tokio::select!` does not drop
-            // `write_fut` while `RTCPeerConnection::close()` is transmitting `Refresh(LIFETIME=0)`.
-            cancel_read.cancelled().await;
         }
     };
 
@@ -646,6 +689,18 @@ fn spawn_turn_tcp_bridge(
             let Some(datagram) = buf.get(..n) else {
                 continue;
             };
+            if let Some(err_resp) = stun_binding_bad_request_response(datagram) {
+                tracing::trace!(
+                    %client_addr,
+                    "rejecting bare STUN Binding Request sent to local TURN-over-TCP UDP bridge"
+                );
+                let _ = tokio::time::timeout(
+                    TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
+                    bridge_conn.send_to(&err_resp, client_addr),
+                )
+                .await;
+                continue;
+            }
             let Some(mut framed) = encode_turn_tcp_frame(datagram) else {
                 continue;
             };

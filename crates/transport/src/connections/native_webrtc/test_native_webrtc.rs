@@ -697,6 +697,48 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
 
     let _ = sender.close().await;
     let _ = receiver.close().await;
+
+    // 4. Verify normal OS UDP mode (`use_vnet_relay_only == false`) with a TCP TURN server:
+    //    `gather_candidates_srflx` sends a bare STUN Binding Request to the local UDP bridge,
+    //    which must be rejected locally with a STUN Binding Error Response rather than forwarded
+    //    over TCP (avoiding both a 5 s STUN timeout and a bogus TCP-backed `srflx` candidate).
+    accepted_tcp_conns.store(0, Ordering::SeqCst);
+    let normal_udp_offerer_ice = format!(
+        "turn://testuser:testpass@127.0.0.1:{}?transport=tcp",
+        tcp_turn_addr.port()
+    );
+    let normal_udp_offerer = WebrtcTransport::new(&normal_udp_offerer_ice, None, None);
+    let (normal_msg_tx, _normal_msg_rx) = mpsc::channel(4);
+    let normal_sender = normal_udp_offerer
+        .new_connection(
+            "normal_answerer",
+            Box::new(MsgCaptureCallback {
+                received_tx: tokio::sync::Mutex::new(Some(normal_msg_tx)),
+            }),
+        )
+        .await?;
+    let gather_started = std::time::Instant::now();
+    let normal_offer_sdp = normal_sender.webrtc_create_offer().await?;
+    assert!(
+        gather_started.elapsed() < Duration::from_secs(4),
+        "normal UDP offerer with TCP TURN bridge must not stall on a 5 s STUN srflx timeout: {:?}",
+        gather_started.elapsed()
+    );
+    assert!(
+        normal_offer_sdp.contains("typ relay"),
+        "normal UDP offerer with TCP TURN must gather a relay candidate: {normal_offer_sdp}"
+    );
+    assert!(
+        !normal_offer_sdp.contains("typ srflx"),
+        "TCP TURN bridge must not produce a bogus UDP srflx candidate when no STUN server is configured: {normal_offer_sdp}"
+    );
+    assert_eq!(
+        accepted_tcp_conns.load(Ordering::SeqCst),
+        1,
+        "only the TURN Allocate session (not the bare STUN srflx probe) should open a TCP connection"
+    );
+    let _ = normal_sender.close().await;
+
     server_cancel.cancel();
     let _ = turn_server.close().await;
     Ok(())

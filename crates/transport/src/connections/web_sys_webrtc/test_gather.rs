@@ -16,6 +16,7 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 use super::gather_settle_delay;
+use super::ice_servers_have_turn;
 use super::wait_for_candidates_settled;
 use super::GatherCandidateProgress;
 use super::WebSysWebrtcConnection;
@@ -28,6 +29,7 @@ use crate::core::pool::ChannelPool;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::error::Error;
+use crate::ice_server::parse_ice_servers_or_warn;
 use crate::notifier::Notifier;
 
 /// Budget of the test: far below the gathering's own timeout, so a gathering the close does
@@ -107,37 +109,83 @@ async fn local_close_ends_a_gathering_in_progress() {
 fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
     assert_eq!(
         gather_settle_delay(
-            "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0"
+            "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0",
+            false,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
-            "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0"
+            "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0",
+            true,
         ),
-        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
-    );
-    assert_eq!(
-        gather_settle_delay(
-            "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555"
-        ),
-        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
-    );
-    assert_eq!(
-        gather_settle_delay("candidate:3 1 udp 2113937151 test.local 56555 typ host"),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
-    );
-    assert_eq!(
-        gather_settle_delay("v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n"),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
-            "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n"
+            "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0",
+            false,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
-    assert_eq!(gather_settle_delay("v=0\r\ns=-\r\n"), None);
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0",
+            true,
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555",
+            false,
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555",
+            true,
+        ),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "candidate:3 1 udp 2113937151 test.local 56555 typ host",
+            false,
+        ),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n",
+            false,
+        ),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n",
+            false,
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
+        gather_settle_delay(
+            "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n",
+            true,
+        ),
+        Some(WEBRTC_GATHER_HOST_SETTLE)
+    );
+    assert_eq!(gather_settle_delay("v=0\r\ns=-\r\n", false), None);
+
+    let stun_only = parse_ice_servers_or_warn("stun://stun.l.google.com:19302", "test");
+    assert!(!ice_servers_have_turn(&stun_only));
+    let with_turn = parse_ice_servers_or_warn(
+        "stun://stun.l.google.com:19302;turn://u:p@turn.example.com:3478",
+        "test",
+    );
+    assert!(ice_servers_have_turn(&with_turn));
 }
 
 /// If a host candidate arrives first (arming the 3 s settle timer) and a reflexive candidate
