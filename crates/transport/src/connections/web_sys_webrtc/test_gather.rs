@@ -118,6 +118,12 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
+        gather_settle_delay(
+            "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555"
+        ),
+        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
+    );
+    assert_eq!(
         gather_settle_delay("candidate:3 1 udp 2113937151 test.local 56555 typ host"),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );

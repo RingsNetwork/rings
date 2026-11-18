@@ -92,9 +92,9 @@ const WEBRTC_GATHER_HOST_SETTLE: Duration = Duration::from_secs(3);
 
 /// Classify the settle window implied by an ICE candidate line or an SDP blob.
 ///
-/// Returns `Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)` if any candidate has `typ srflx` or `typ relay`,
-/// `Some(WEBRTC_GATHER_HOST_SETTLE)` if any candidate line is present (`typ host` or
-/// `a=candidate:` / `candidate:`), and `None` when no candidate appears in `text`.
+/// Returns `Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)` if any candidate has `typ srflx`, `typ prflx`,
+/// or `typ relay`, `Some(WEBRTC_GATHER_HOST_SETTLE)` if any candidate line is present (`typ host`
+/// or `a=candidate:` / `candidate:`), and `None` when no candidate appears in `text`.
 pub(crate) fn gather_settle_delay(text: &str) -> Option<Duration> {
     let mut has_candidate = false;
     for line in text.lines() {
@@ -107,8 +107,13 @@ pub(crate) fn gather_settle_delay(text: &str) -> Option<Duration> {
         let mut tokens = candidate.split_whitespace();
         while let Some(token) = tokens.next() {
             if token == "typ" {
-                if matches!(tokens.next(), Some("srflx" | "relay")) {
-                    return Some(WEBRTC_GATHER_REFLEXIVE_SETTLE);
+                if let Some(typ) = tokens.next() {
+                    if typ.eq_ignore_ascii_case("srflx")
+                        || typ.eq_ignore_ascii_case("prflx")
+                        || typ.eq_ignore_ascii_case("relay")
+                    {
+                        return Some(WEBRTC_GATHER_REFLEXIVE_SETTLE);
+                    }
                 }
                 break;
             }
@@ -554,8 +559,7 @@ impl WebSysWebrtcConnection {
                 "local_description is None".to_string(),
             ))
             .map(|x| x.sdp())?;
-        let has_gathered_candidates =
-            progress.settle_delay.get().is_some() || gather_settle_delay(&local_sdp).is_some();
+        let has_gathered_candidates = gather_settle_delay(&local_sdp).is_some();
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete
             && !has_gathered_candidates
         {
