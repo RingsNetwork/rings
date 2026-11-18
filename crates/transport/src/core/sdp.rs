@@ -215,7 +215,7 @@ pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
 /// Law (Settle threshold): given a peer connection's target tier `t` (the join of its configured
 /// ICE servers, or `Host` when none are configured) and the highest gathered candidate tier `c`,
 /// gathering has reached its target tier iff `c >= t`.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum IceCandidateTier {
     /// Local interface candidate (`typ host`), or an ICE configuration with no STUN/TURN servers.
     #[default]
@@ -226,6 +226,113 @@ pub enum IceCandidateTier {
     /// Relayed TURN candidate (`typ relay`), or an ICE configuration with at least one
     /// `turn:`/`turns:` server.
     Relay,
+}
+
+/// Settle timer window selected by the pure ICE gathering transition algebra.
+///
+/// Ordered by duration (`Fast < Fallback`), so joining two unlocked windows via `min` always
+/// selects the shorter window (`Fast` dominates `Fallback`).
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum IceSettleWindow {
+    /// Fast quiet window (`300 ms`) once a candidate reaches the configured target tier.
+    Fast,
+    /// Fallback quiet window (`3 s`) when only `Host` candidates have arrived for a `Reflexive`
+    /// (STUN-only) target.
+    Fallback,
+}
+
+/// Pure state of one ICE gathering session (`State` in `State × Event -> State × Effect`).
+///
+/// Invariants:
+/// - `No premature relay timer`: when `target_tier == IceCandidateTier::Relay`,
+///   `armed_window.is_some() ⟹ highest_observed == Some(IceCandidateTier::Relay)`.
+/// - `Fast window on target tier`:
+///   `highest_observed.is_some_and(|c| c >= target_tier) ⟹ armed_window == Some(IceSettleWindow::Fast)`.
+/// - `Quiet-window reset`: whenever `armed_window.is_some()`, observing any candidate line
+///   (`Host`, `Reflexive`, or `Relay`) strictly increments `epoch`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct IceGatherState {
+    /// Target candidate tier derived from configured ICE servers (`Host < Reflexive < Relay`).
+    pub target_tier: IceCandidateTier,
+    /// Highest candidate tier observed so far, if any.
+    pub highest_observed: Option<IceCandidateTier>,
+    /// Currently armed settle window, if any.
+    pub armed_window: Option<IceSettleWindow>,
+    /// Monotonic quiet-window epoch; incremented whenever a candidate arrives while a window is
+    /// (or becomes) armed.
+    pub epoch: u64,
+}
+
+impl IceGatherState {
+    /// Create a fresh gathering state for `target_tier`.
+    pub const fn new(target_tier: IceCandidateTier) -> Self {
+        Self {
+            target_tier,
+            highest_observed: None,
+            armed_window: None,
+            epoch: 0,
+        }
+    }
+
+    /// Classify the settle window unlocked by a single `candidate_tier` for `target_tier`.
+    pub const fn window_for_tier(
+        candidate_tier: IceCandidateTier,
+        target_tier: IceCandidateTier,
+    ) -> Option<IceSettleWindow> {
+        if (candidate_tier as u8) >= (target_tier as u8) {
+            Some(IceSettleWindow::Fast)
+        } else if matches!(target_tier, IceCandidateTier::Reflexive) {
+            Some(IceSettleWindow::Fallback)
+        } else {
+            None
+        }
+    }
+
+    /// Pure transition `State × IceCandidateTier -> (State, bool)`: observe a candidate of
+    /// `candidate_tier` and return `(next_state, timer_armed_or_reset)`.
+    pub fn observe_tier(self, candidate_tier: IceCandidateTier) -> (Self, bool) {
+        let highest_observed = Some(
+            self.highest_observed
+                .map_or(candidate_tier, |prev| prev.max(candidate_tier)),
+        );
+        let unlocked = Self::window_for_tier(candidate_tier, self.target_tier);
+        let armed_window = match (self.armed_window, unlocked) {
+            (Some(existing), Some(new)) => Some(existing.min(new)),
+            (Some(existing), None) => Some(existing),
+            (None, unlocked) => unlocked,
+        };
+        if armed_window.is_some() {
+            (
+                Self {
+                    target_tier: self.target_tier,
+                    highest_observed,
+                    armed_window,
+                    epoch: self.epoch.wrapping_add(1),
+                },
+                true,
+            )
+        } else {
+            (
+                Self {
+                    target_tier: self.target_tier,
+                    highest_observed,
+                    armed_window: None,
+                    epoch: self.epoch,
+                },
+                false,
+            )
+        }
+    }
+
+    /// Observe raw candidate/SDP `text`: if it contains at least one candidate line, apply
+    /// [`Self::observe_tier`] with the highest tier in `text`; otherwise preserve state and return
+    /// `(self, false)`.
+    pub fn observe_text(self, text: &str) -> (Self, bool) {
+        match parse_sdp_candidate_tier(text) {
+            Some(tier) => self.observe_tier(tier),
+            None => (self, false),
+        }
+    }
 }
 
 /// Classify a single ICE candidate line (`candidate:...` or `a=candidate:...`) into its
@@ -282,6 +389,9 @@ pub fn split_sdp_remote_candidates(sdp: &str) -> (String, Vec<String>) {
     }
     (stripped, candidates)
 }
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_ice_gather_model;
 
 #[cfg(test)]
 mod tests {

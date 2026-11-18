@@ -273,6 +273,133 @@ pub(crate) fn stun_response_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     <[u8; 12]>::try_from(tx_slice).ok()
 }
 
+/// Lifecycle phase of a local TURN-over-TCP bridge.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) enum TurnBridgePhase {
+    /// Normal operation: forwards TURN control and relayed data in both directions.
+    #[default]
+    Active,
+    /// Teardown quiescence (`quiesce_inbound` before `RTCPeerConnection::close()`): drops
+    /// inbound relayed data (`ChannelData` and STUN `Indication`s) so the upstream TURN client
+    /// mutex is not contended, while still forwarding TURN control requests and STUN responses
+    /// (`Refresh(0)` teardown).
+    Quiescing,
+    /// Terminated (`cancel()` after `RTCPeerConnection::close()`).
+    Cancelled,
+}
+
+impl TurnBridgePhase {
+    /// Project the current phase from the cancellation tokens `(inbound_cancel, cancel)`.
+    pub(crate) fn from_tokens(
+        inbound_cancel: &CancellationToken,
+        cancel: &CancellationToken,
+    ) -> Self {
+        if cancel.is_cancelled() {
+            Self::Cancelled
+        } else if inbound_cancel.is_cancelled() {
+            Self::Quiescing
+        } else {
+            Self::Active
+        }
+    }
+}
+
+/// Classification of an outbound UDP datagram arriving at the local TURN-over-TCP bridge.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum OutboundTurnClass {
+    /// Bare STUN `Binding Request` (`0x0001`) from `webrtc-ice`'s `gather_candidates_srflx`.
+    StunBindingRequest([u8; 12]),
+    /// TURN/STUN Request other than `0x0001` (`Allocate`, `Refresh`, `CreatePermission`,
+    /// `ChannelBind`).
+    TurnControlRequest([u8; 12]),
+    /// TURN `ChannelData` (`0x4000..=0x7FFF`) or STUN `Send Indication` (`0x0016`).
+    RelayedDataOrIndication,
+    /// Malformed datagram that is not a valid RFC 5389 / RFC 5766 frame.
+    Malformed,
+}
+
+/// Pure outbound decision taken by the TURN-over-TCP bridge (`Phase × OutboundTurnClass -> Decision`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum OutboundTurnDecision {
+    /// Drop the datagram without opening or writing to the TCP stream.
+    Drop,
+    /// Reply locally on the UDP socket with a 28-byte STUN `400 Bad Request` Error Response;
+    /// never open or write to the TCP TURN stream.
+    RejectBindingRequestLocally([u8; 12]),
+    /// Forward the TURN control request (`tx_id`) over the TCP TURN stream.
+    ForwardControlRequest([u8; 12]),
+    /// Forward relayed data / indication over the TCP TURN stream.
+    ForwardData,
+}
+
+/// Pure inbound decision taken by the TURN-over-TCP bridge (`Phase × is_stun_response -> Decision`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum InboundTurnDecision {
+    /// Drop the inbound TCP frame without delivering to the local UDP socket.
+    Drop,
+    /// Deliver the STUN control response (`Allocate`, `Refresh`, `CreatePermission`, `ChannelBind`)
+    /// to the local UDP socket.
+    DeliverControlResponse,
+    /// Deliver relayed peer data (`ChannelData` or STUN `Data Indication`) to the local UDP socket.
+    DeliverRelayedData,
+}
+
+/// Classify an outbound UDP datagram into its [`OutboundTurnClass`].
+pub(crate) fn classify_outbound_turn_datagram(datagram: &[u8]) -> OutboundTurnClass {
+    if let Some(tx_id) = stun_request_transaction_id(datagram) {
+        if datagram.first() == Some(&0x00) && datagram.get(1) == Some(&0x01) {
+            OutboundTurnClass::StunBindingRequest(tx_id)
+        } else {
+            OutboundTurnClass::TurnControlRequest(tx_id)
+        }
+    } else if encode_turn_tcp_frame(datagram).is_some() {
+        OutboundTurnClass::RelayedDataOrIndication
+    } else {
+        OutboundTurnClass::Malformed
+    }
+}
+
+/// Pure transition `TurnBridgePhase × OutboundTurnClass -> OutboundTurnDecision`.
+pub(crate) const fn turn_bridge_outbound_decision(
+    phase: TurnBridgePhase,
+    class: OutboundTurnClass,
+) -> OutboundTurnDecision {
+    match (phase, class) {
+        (TurnBridgePhase::Cancelled, _) | (_, OutboundTurnClass::Malformed) => {
+            OutboundTurnDecision::Drop
+        }
+        (
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            OutboundTurnClass::StunBindingRequest(tx_id),
+        ) => OutboundTurnDecision::RejectBindingRequestLocally(tx_id),
+        (
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            OutboundTurnClass::TurnControlRequest(tx_id),
+        ) => OutboundTurnDecision::ForwardControlRequest(tx_id),
+        (TurnBridgePhase::Active, OutboundTurnClass::RelayedDataOrIndication) => {
+            OutboundTurnDecision::ForwardData
+        }
+        (TurnBridgePhase::Quiescing, OutboundTurnClass::RelayedDataOrIndication) => {
+            OutboundTurnDecision::Drop
+        }
+    }
+}
+
+/// Pure transition `TurnBridgePhase × is_stun_control_response -> InboundTurnDecision`.
+pub(crate) const fn turn_bridge_inbound_decision(
+    phase: TurnBridgePhase,
+    is_stun_control_response: bool,
+) -> InboundTurnDecision {
+    match (phase, is_stun_control_response) {
+        (TurnBridgePhase::Cancelled, _) => InboundTurnDecision::Drop,
+        (TurnBridgePhase::Active | TurnBridgePhase::Quiescing, true) => {
+            InboundTurnDecision::DeliverControlResponse
+        }
+        (TurnBridgePhase::Active, false) => InboundTurnDecision::DeliverRelayedData,
+        (TurnBridgePhase::Quiescing, false) => InboundTurnDecision::Drop,
+    }
+}
+
 /// Read a single RFC 5766 STUN message or `ChannelData` frame from a TCP/TLS stream.
 pub(crate) async fn read_turn_tcp_frame<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
 where R: AsyncRead + Unpin {
@@ -502,7 +629,10 @@ async fn run_stream_io<S>(
             // cannot fill up, while continuing to forward STUN control responses (`CreatePermission`,
             // `ChannelBind`, `Refresh`, `Allocate`) so an in-flight `webrtc::turn::client::Client`
             // transaction can complete and release its internal mutex for `Client::close()`.
-            if inbound_cancel.is_cancelled() && !is_stun_control_response {
+            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &cancel_read);
+            if turn_bridge_inbound_decision(phase, is_stun_control_response)
+                == InboundTurnDecision::Drop
+            {
                 continue;
             }
             let send_res = tokio::select! {
@@ -689,17 +819,25 @@ fn spawn_turn_tcp_bridge(
             let Some(datagram) = buf.get(..n) else {
                 continue;
             };
-            if let Some(err_resp) = stun_binding_bad_request_response(datagram) {
-                tracing::trace!(
-                    %client_addr,
-                    "rejecting bare STUN Binding Request sent to local TURN-over-TCP UDP bridge"
-                );
-                let _ = tokio::time::timeout(
-                    TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
-                    bridge_conn.send_to(&err_resp, client_addr),
-                )
-                .await;
-                continue;
+            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &cancel);
+            match turn_bridge_outbound_decision(phase, classify_outbound_turn_datagram(datagram)) {
+                OutboundTurnDecision::Drop => continue,
+                OutboundTurnDecision::RejectBindingRequestLocally(_) => {
+                    if let Some(err_resp) = stun_binding_bad_request_response(datagram) {
+                        tracing::trace!(
+                            %client_addr,
+                            "rejecting bare STUN Binding Request sent to local TURN-over-TCP UDP bridge"
+                        );
+                        let _ = tokio::time::timeout(
+                            TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
+                            bridge_conn.send_to(&err_resp, client_addr),
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+                OutboundTurnDecision::ForwardControlRequest(_)
+                | OutboundTurnDecision::ForwardData => {}
             }
             let Some(mut framed) = encode_turn_tcp_frame(datagram) else {
                 continue;

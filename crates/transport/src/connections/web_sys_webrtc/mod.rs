@@ -54,6 +54,8 @@ use crate::core::pool::LanePool;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
 use crate::core::sdp::parse_sdp_candidate_tier;
 use crate::core::sdp::IceCandidateTier;
+use crate::core::sdp::IceGatherState;
+use crate::core::sdp::IceSettleWindow;
 use crate::core::send::operation::send_sync;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
@@ -92,40 +94,28 @@ const WEBRTC_GATHER_REFLEXIVE_SETTLE: Duration = Duration::from_millis(300);
 /// while waiting on STUN/TURN or mDNS interfaces that may never complete (e.g. WebKit on iOS).
 const WEBRTC_GATHER_HOST_SETTLE: Duration = Duration::from_secs(3);
 
-/// Classify the settle window implied by an ICE candidate line or an SDP blob against the
-/// peer connection's configured `target_tier`.
-///
-/// Law (Settle threshold):
-/// - Given the highest candidate tier `c` in `text` and the configured target tier `t`
-///   (`Host < Reflexive < Relay`), reaching the target tier (`c >= t`) unlocks
-///   [`WEBRTC_GATHER_REFLEXIVE_SETTLE`] (`300 ms`).
-/// - When `t == IceCandidateTier::Reflexive` (STUN-only) and only `Host` candidates have arrived
-///   (`c < t`), [`WEBRTC_GATHER_HOST_SETTLE`] (`3 s`) is armed so an unreachable UDP STUN server
-///   cannot stall host-candidate gathering for 60 s.
-/// - When `t == IceCandidateTier::Relay` (TURN configured) and no `Relay` candidate has arrived
-///   yet (`c < t`), returns `None` so multi-round or TCP/TLS TURN allocation taking longer than
-///   3 s on UDP-blocked networks is never truncated before the `typ relay` candidate is gathered.
-pub(crate) fn gather_settle_delay(text: &str, target_tier: IceCandidateTier) -> Option<Duration> {
-    let candidate_tier = parse_sdp_candidate_tier(text)?;
-    if candidate_tier >= target_tier {
-        Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
-    } else if target_tier == IceCandidateTier::Reflexive {
-        Some(WEBRTC_GATHER_HOST_SETTLE)
-    } else {
-        None
+const fn settle_window_duration(window: IceSettleWindow) -> Duration {
+    match window {
+        IceSettleWindow::Fast => WEBRTC_GATHER_REFLEXIVE_SETTLE,
+        IceSettleWindow::Fallback => WEBRTC_GATHER_HOST_SETTLE,
     }
 }
 
+/// Classify the settle window implied by an ICE candidate line or an SDP blob against the
+/// peer connection's configured `target_tier`, delegating to [`IceGatherState::window_for_tier`].
+#[cfg(test)]
+pub(crate) fn gather_settle_delay(text: &str, target_tier: IceCandidateTier) -> Option<Duration> {
+    let candidate_tier = parse_sdp_candidate_tier(text)?;
+    IceGatherState::window_for_tier(candidate_tier, target_tier).map(settle_window_duration)
+}
+
 /// Shared progress observed across `onicecandidate` and initial `localDescription.sdp` inspection
-/// during [`WebSysWebrtcConnection::webrtc_gather`].
+/// during [`WebSysWebrtcConnection::webrtc_gather`], backed by the pure [`IceGatherState`]
+/// transition algebra.
 #[derive(Default)]
 struct GatherCandidateProgress {
-    /// Highest candidate tier the peer connection's configured ICE servers can produce.
-    target_tier: IceCandidateTier,
-    /// Monotonic count of candidate observations; advancing it resets the settle timer.
-    epoch: Cell<u64>,
-    /// Shortest settle delay unlocked by the candidates seen so far.
-    settle_delay: Cell<Option<Duration>>,
+    /// Pure transition algebra state (`IceGatherState`).
+    state: Cell<IceGatherState>,
     /// Wakers registered by [`wait_for_candidates_settled`] while polling for new candidates.
     wakers: RefCell<Vec<std::task::Waker>>,
 }
@@ -133,31 +123,21 @@ struct GatherCandidateProgress {
 impl GatherCandidateProgress {
     fn new(target_tier: IceCandidateTier) -> Self {
         Self {
-            target_tier,
-            ..Self::default()
+            state: Cell::new(IceGatherState::new(target_tier)),
+            wakers: RefCell::new(Vec::new()),
         }
     }
 
     fn observe_text(&self, text: &str) -> bool {
-        if parse_sdp_candidate_tier(text).is_none() {
-            return false;
+        let (next, armed_or_reset) = self.state.get().observe_text(text);
+        self.state.set(next);
+        if armed_or_reset {
+            let wakers = std::mem::take(&mut *self.wakers.borrow_mut());
+            for waker in wakers {
+                waker.wake();
+            }
         }
-        if let Some(delay) = gather_settle_delay(text, self.target_tier) {
-            let merged = match self.settle_delay.get() {
-                Some(existing) => existing.min(delay),
-                None => delay,
-            };
-            self.settle_delay.set(Some(merged));
-        }
-        if self.settle_delay.get().is_none() {
-            return false;
-        }
-        self.epoch.set(self.epoch.get().wrapping_add(1));
-        let wakers = std::mem::take(&mut *self.wakers.borrow_mut());
-        for waker in wakers {
-            waker.wake();
-        }
-        true
+        armed_or_reset
     }
 
     fn register_waker(&self, waker: &std::task::Waker) {
@@ -175,11 +155,13 @@ async fn wait_for_candidates_settled(
     progress: Rc<GatherCandidateProgress>,
 ) -> std::result::Result<(), rings_runtime::TimerError> {
     loop {
-        let observed_epoch = progress.epoch.get();
-        if let Some(delay) = progress.settle_delay.get() {
+        let snapshot = progress.state.get();
+        let observed_epoch = snapshot.epoch;
+        if let Some(window) = snapshot.armed_window {
+            let delay = settle_window_duration(window);
             let mut sleep_fut = pin!(rings_runtime::sleep(delay));
             let settled = poll_fn(|cx| {
-                if progress.epoch.get() != observed_epoch {
+                if progress.state.get().epoch != observed_epoch {
                     return Poll::Ready(Ok(false));
                 }
                 progress.register_waker(cx.waker());
@@ -190,12 +172,12 @@ async fn wait_for_candidates_settled(
                 }
             })
             .await?;
-            if settled && progress.epoch.get() == observed_epoch {
+            if settled && progress.state.get().epoch == observed_epoch {
                 return Ok(());
             }
         } else {
             poll_fn(|cx| {
-                if progress.epoch.get() != observed_epoch {
+                if progress.state.get().epoch != observed_epoch {
                     return Poll::Ready(());
                 }
                 progress.register_waker(cx.waker());
