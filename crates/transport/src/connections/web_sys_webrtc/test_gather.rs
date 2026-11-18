@@ -16,8 +16,6 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 
 use super::gather_settle_delay;
-use super::ice_servers_have_stun_or_turn;
-use super::ice_servers_have_turn;
 use super::wait_for_candidates_settled;
 use super::GatherCandidateProgress;
 use super::WebSysWebrtcConnection;
@@ -27,10 +25,12 @@ use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelPool;
+use crate::core::sdp::IceCandidateTier;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::error::Error;
 use crate::ice_server::parse_ice_servers_or_warn;
+use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 
 /// Budget of the test: far below the gathering's own timeout, so a gathering the close does
@@ -111,115 +111,110 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
     assert_eq!(
         gather_settle_delay(
             "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:1 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0",
-            true,
-            true,
+            IceCandidateTier::Relay,
         ),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:2 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0",
-            true,
-            true,
+            IceCandidateTier::Relay,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:4 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 56555",
-            true,
-            true,
+            IceCandidateTier::Relay,
         ),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "candidate:3 1 udp 2113937151 test.local 56555 typ host",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
-    // When no STUN or TURN server is configured (`has_stun_or_turn_server == false`), host
-    // candidates settle immediately on the 300 ms window instead of waiting 3 s.
     assert_eq!(
         gather_settle_delay(
             "candidate:3 1 udp 2113937151 test.local 56555 typ host",
-            false,
-            false,
+            IceCandidateTier::Host,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n",
-            false,
-            false,
+            IceCandidateTier::Host,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n",
-            true,
-            false,
+            IceCandidateTier::Reflexive,
         ),
         Some(WEBRTC_GATHER_REFLEXIVE_SETTLE)
     );
     assert_eq!(
         gather_settle_delay(
             "v=0\r\na=candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host\r\na=candidate:2 1 udp 1677729535 14.155.204.30 51628 typ srflx raddr 0.0.0.0 rport 0\r\n",
-            true,
-            true,
+            IceCandidateTier::Relay,
         ),
         Some(WEBRTC_GATHER_HOST_SETTLE)
     );
-    assert_eq!(gather_settle_delay("v=0\r\ns=-\r\n", true, false), None);
+    assert_eq!(
+        gather_settle_delay("v=0\r\ns=-\r\n", IceCandidateTier::Reflexive),
+        None
+    );
 
     let no_servers = parse_ice_servers_or_warn("", "test");
-    assert!(!ice_servers_have_stun_or_turn(&no_servers));
-    assert!(!ice_servers_have_turn(&no_servers));
+    assert_eq!(
+        IceServer::target_candidate_tier(&no_servers),
+        IceCandidateTier::Host
+    );
     let stun_only = parse_ice_servers_or_warn("stun://stun.l.google.com:19302", "test");
-    assert!(ice_servers_have_stun_or_turn(&stun_only));
-    assert!(!ice_servers_have_turn(&stun_only));
+    assert_eq!(
+        IceServer::target_candidate_tier(&stun_only),
+        IceCandidateTier::Reflexive
+    );
     let with_turn = parse_ice_servers_or_warn(
         "stun://stun.l.google.com:19302;turn://u:p@turn.example.com:3478",
         "test",
     );
-    assert!(ice_servers_have_stun_or_turn(&with_turn));
-    assert!(ice_servers_have_turn(&with_turn));
+    assert_eq!(
+        IceServer::target_candidate_tier(&with_turn),
+        IceCandidateTier::Relay
+    );
 }
 
 /// If a host candidate arrives first (arming the 3 s settle timer) and a reflexive candidate
@@ -232,7 +227,7 @@ async fn test_reflexive_candidate_shortens_in_flight_host_settle_window() {
         "test_reflexive_candidate_shortens_in_flight_host_settle_window",
         Duration::from_millis(1200),
         async {
-            let progress = Rc::new(GatherCandidateProgress::new(true, false));
+            let progress = Rc::new(GatherCandidateProgress::new(IceCandidateTier::Reflexive));
             assert!(progress.observe_text("candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host"));
             let progress_for_srflx = Rc::clone(&progress);
             let inject_srflx = async move {

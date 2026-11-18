@@ -91,45 +91,29 @@ fn duplicate_host_candidate_line(line: &str, extra_addresses: &[String]) -> Vec<
         .collect()
 }
 
-/// Whether a local network interface named `name` is a virtual or container bridge interface
-/// (`docker*`, `br-*`, `veth*`, `virbr*`, `cni*`, `flannel*`, `cali*`, `tunl*`, `wg*`) whose UDP
-/// sockets cannot receive direct inbound Internet traffic and therefore must not be rewritten into
+/// Whether `name` is a host-side unrouted container or hypervisor bridge interface (`docker*`,
+/// `veth*`, `virbr*`, `cni*`, `flannel*`, `cali*`, or a Docker libnetwork bridge `br-<12 hex>`)
+/// whose sockets are isolated to a local bridge subnet and therefore must not be rewritten into
 /// public `typ host` candidates by `SettingEngine::set_nat_1to1_ips` (#1290).
-pub(super) fn is_excluded_virtual_interface(name: &str) -> bool {
+///
+/// Container-internal interfaces (`eth0`), system bridges (`br0`, `br-lan`), and routed VPN/tunnel
+/// interfaces (`wg0`, `tunl0`) are not matched.
+pub(super) fn is_unrouted_container_bridge_interface(name: &str) -> bool {
     let trimmed = name.trim();
-    const EXCLUDED_PREFIXES: [&str; 9] = [
-        "docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "tunl", "wg",
-    ];
-    EXCLUDED_PREFIXES.iter().any(|prefix| {
+    const CONTAINER_BRIDGE_PREFIXES: [&str; 6] =
+        ["docker", "veth", "virbr", "cni", "flannel", "cali"];
+    if CONTAINER_BRIDGE_PREFIXES.iter().any(|prefix| {
         trimmed
             .get(..prefix.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-    })
-}
-
-/// Strip all `a=candidate:` lines from `sdp` while keeping the rest of the session description
-/// (including `a=ice-ufrag:`, `a=ice-pwd:`, `a=fingerprint:`, and media sections) intact, and
-/// return the stripped SDP together with the extracted candidate attribute values (`candidate:...`
-/// without the leading `a=`).
-///
-/// Passing the candidate-free offer to `RTCPeerConnection::set_remote_description` starts local
-/// answer gathering immediately without letting `webrtc-rs` fire outbound UDP STUN connectivity
-/// checks at the remote peer's `srflx` NAT port before the HTTP `answerOffer` response has
-/// returned to the browser (#1290).
-pub(super) fn split_remote_offer_candidates(sdp: &str) -> (String, Vec<String>) {
-    let mut stripped = String::with_capacity(sdp.len());
-    let mut candidates = Vec::new();
-    for segment in sdp.split_inclusive('\n') {
-        let trimmed = segment.trim_end_matches(['\r', '\n']).trim();
-        if let Some(cand) = trimmed.strip_prefix("a=candidate:") {
-            candidates.push(format!("candidate:{cand}"));
-        } else if trimmed == "a=end-of-candidates" {
-            continue;
-        } else {
-            stripped.push_str(segment);
-        }
+    }) {
+        return true;
     }
-    (stripped, candidates)
+    trimmed
+        .get(..3)
+        .is_some_and(|head| head.eq_ignore_ascii_case("br-"))
+        && trimmed.len() == 15
+        && trimmed[3..].bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// `sdp` with every host candidate line followed by its copies for `extra_addresses`, each

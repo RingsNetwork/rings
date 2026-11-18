@@ -1,11 +1,9 @@
 //! Processor of rings-node rpc server.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex as SyncMutex;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -171,11 +169,6 @@ pub struct Processor {
     observability: Arc<Observability>,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
-    /// Last known remote `Did` observed for an HTTP endpoint (`RemoteRpcEndpoint::as_str() -> Did`),
-    /// bounded to 64 entries so repeated `connect_peer_via_http(url)` calls with `HandshakePeer::Any`
-    /// while a handshake to that endpoint's DID is already unadmitted fail fast locally before
-    /// issuing redundant `nodeDid` network requests (#1290).
-    http_endpoint_dids: Arc<SyncMutex<BTreeMap<String, Did>>>,
 }
 
 impl Drop for Processor {

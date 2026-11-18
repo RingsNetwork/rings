@@ -2,7 +2,6 @@
 //! public HTTP API.
 
 use std::str::FromStr;
-use std::sync::PoisonError;
 
 use rings_core::dht::Did;
 use rings_core::error::Error as CoreError;
@@ -38,11 +37,6 @@ pub(crate) enum HandshakePeer {
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait RemoteHandshake {
-    /// Key used to cache the peer's resolved DID across handshake calls.
-    fn endpoint_cache_key(&self) -> &str {
-        ""
-    }
-
     /// The peer's public identity and wire version.
     async fn node_did(&self) -> Result<NodeDidResponse>;
 
@@ -56,10 +50,6 @@ pub(crate) trait RemoteHandshake {
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait::async_trait)]
 impl RemoteHandshake for rings_rpc::jsonrpc::Client {
-    fn endpoint_cache_key(&self) -> &str {
-        self.endpoint_url()
-    }
-
     async fn node_did(&self) -> Result<NodeDidResponse> {
         rings_rpc::jsonrpc::Client::node_did(self, &NodeDidRequest {})
             .await
@@ -200,29 +190,7 @@ impl From<HandshakeFailure> for Error {
     }
 }
 
-const MAX_CACHED_HTTP_ENDPOINT_DIDS: usize = 64;
-
 impl Processor {
-    fn cached_endpoint_did(&self, endpoint_url: &str) -> Option<Did> {
-        self.http_endpoint_dids
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(endpoint_url)
-            .copied()
-    }
-
-    fn record_endpoint_did(&self, endpoint_url: &str, did: Did) {
-        let mut guard = self
-            .http_endpoint_dids
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !guard.contains_key(endpoint_url) && guard.len() >= MAX_CACHED_HTTP_ENDPOINT_DIDS {
-            if let Some(first_key) = guard.keys().next().cloned() {
-                guard.remove(&first_key);
-            }
-        }
-        guard.insert(endpoint_url.to_string(), did);
-    }
     /// Connect peer with web3 did.
     /// There are 3 peers: PeerA, PeerB, PeerC.
     /// 1. PeerA has a connection with PeerB.
@@ -261,11 +229,6 @@ impl Processor {
         peer: HandshakePeer,
     ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
         self.refuse_if_unadmitted(peer)?;
-        if peer == HandshakePeer::Any {
-            if let Some(cached_did) = self.cached_endpoint_did(endpoint.as_str()) {
-                self.refuse_if_unadmitted(HandshakePeer::Pinned(cached_did))?;
-            }
-        }
         let client = remote_rpc_client(endpoint, api_token, self.remote_rpc_proxy.as_ref()).await?;
         let attempt = self.connect_peer_over(&client, peer).await;
         if let Err(HandshakeFailure::Failed(Error::HandshakePeerMismatch { expected, actual })) =
@@ -289,18 +252,11 @@ impl Processor {
         remote: &impl RemoteHandshake,
         peer: HandshakePeer,
     ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
-        let cache_key = remote.endpoint_cache_key();
         self.refuse_if_unadmitted(peer)?;
-        if peer == HandshakePeer::Any {
-            if let Some(cached_did) = self.cached_endpoint_did(cache_key) {
-                self.refuse_if_unadmitted(HandshakePeer::Pinned(cached_did))?;
-            }
-        }
         let node = remote.node_did().await?;
         admit_endpoint_wire_version(node.wire_version)?;
         let answered = node.did;
         let actual = Did::from_str(answered.as_str()).map_err(|_| Error::InvalidDid(answered))?;
-        self.record_endpoint_did(cache_key, actual);
         if let HandshakePeer::Pinned(expected) = peer {
             if actual != expected {
                 return Err(HandshakeFailure::Failed(Error::HandshakePeerMismatch {
@@ -309,7 +265,6 @@ impl Processor {
                 }));
             }
         }
-        self.refuse_if_unadmitted(HandshakePeer::Pinned(actual))?;
         self.exchange_offer(remote, actual).await
     }
 

@@ -209,6 +209,80 @@ pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
     parse(sdp).data_channel_max_message_size()
 }
 
+/// The connectivity tier of an ICE candidate or of the ICE server set configured on a peer
+/// connection, ordered as a join-semilattice (`Host < Reflexive < Relay`).
+///
+/// Law (Settle threshold): given a peer connection's target tier `t` (the join of its configured
+/// ICE servers, or `Host` when none are configured) and the highest gathered candidate tier `c`,
+/// gathering has reached its target tier iff `c >= t`.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub enum IceCandidateTier {
+    /// Local interface candidate (`typ host`), or an ICE configuration with no STUN/TURN servers.
+    #[default]
+    Host,
+    /// Server-reflexive (`typ srflx`) or peer-reflexive (`typ prflx`) candidate, or an ICE
+    /// configuration with at least one `stun:` server and no `turn:`/`turns:` servers.
+    Reflexive,
+    /// Relayed TURN candidate (`typ relay`), or an ICE configuration with at least one
+    /// `turn:`/`turns:` server.
+    Relay,
+}
+
+/// Classify a single ICE candidate line (`candidate:...` or `a=candidate:...`) into its
+/// [`IceCandidateTier`], or `None` if `line` is not a candidate line.
+pub fn parse_candidate_line_tier(line: &str) -> Option<IceCandidateTier> {
+    let trimmed = line.trim();
+    let candidate = trimmed.strip_prefix("a=").unwrap_or(trimmed);
+    if !candidate.starts_with("candidate:") {
+        return None;
+    }
+    let mut tokens = candidate.split_whitespace();
+    while let Some(token) = tokens.next() {
+        if token == "typ" {
+            return Some(match tokens.next() {
+                Some(kind) if kind.eq_ignore_ascii_case("relay") => IceCandidateTier::Relay,
+                Some(kind)
+                    if kind.eq_ignore_ascii_case("srflx") || kind.eq_ignore_ascii_case("prflx") =>
+                {
+                    IceCandidateTier::Reflexive
+                }
+                _ => IceCandidateTier::Host,
+            });
+        }
+    }
+    Some(IceCandidateTier::Host)
+}
+
+/// Fold all ICE candidate lines in `text` (either a raw `onicecandidate` string or a full SDP
+/// document) into the highest [`IceCandidateTier`] observed, or `None` if `text` contains no
+/// candidate lines.
+pub fn parse_sdp_candidate_tier(text: &str) -> Option<IceCandidateTier> {
+    text.lines().filter_map(parse_candidate_line_tier).max()
+}
+
+/// Partition an incoming SDP document into a candidate-free SDP description and the extracted
+/// `candidate:...` attribute strings (without the leading `a=`), dropping `a=end-of-candidates`.
+///
+/// Passing the candidate-free offer to `RTCPeerConnection::set_remote_description` starts local
+/// answer gathering immediately without letting `webrtc-rs` fire outbound UDP STUN connectivity
+/// checks at the remote peer's `srflx` NAT port before the HTTP `answerOffer` response has
+/// returned to the browser (#1290).
+pub fn split_sdp_remote_candidates(sdp: &str) -> (String, Vec<String>) {
+    let mut stripped = String::with_capacity(sdp.len());
+    let mut candidates = Vec::new();
+    for segment in sdp.split_inclusive('\n') {
+        let trimmed = segment.trim_end_matches(['\r', '\n']).trim();
+        if let Some(cand) = trimmed.strip_prefix("a=candidate:") {
+            candidates.push(format!("candidate:{cand}"));
+        } else if trimmed == "a=end-of-candidates" {
+            continue;
+        } else {
+            stripped.push_str(segment);
+        }
+    }
+    (stripped, candidates)
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -595,5 +669,80 @@ mod tests {
         let sdp = "m=Application 9 udp/dtls/sctp webrtc-datachannel\r\n\
                    a=Max-Message-Size:262144\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), Some(262144));
+    }
+
+    #[test]
+    fn test_ice_candidate_tier_semilattice_and_sdp_partition_laws() {
+        use super::parse_candidate_line_tier;
+        use super::parse_sdp_candidate_tier;
+        use super::split_sdp_remote_candidates;
+        use super::IceCandidateTier;
+
+        const TIERS: [IceCandidateTier; 3] = [
+            IceCandidateTier::Host,
+            IceCandidateTier::Reflexive,
+            IceCandidateTier::Relay,
+        ];
+        // Semilattice laws: idempotence, commutativity, associativity, and bottom element `Host`.
+        for a in TIERS {
+            assert_eq!(a.max(a), a);
+            assert_eq!(a.max(IceCandidateTier::Host), a);
+            for b in TIERS {
+                assert_eq!(a.max(b), b.max(a));
+                for c in TIERS {
+                    assert_eq!(a.max(b).max(c), a.max(b.max(c)));
+                }
+            }
+        }
+
+        let host = "a=candidate:1 1 udp 2130706431 10.0.0.2 51345 typ host";
+        let srflx =
+            "a=candidate:2 1 udp 1677729535 14.155.204.30 51345 typ srflx raddr 0.0.0.0 rport 0";
+        let prflx =
+            "candidate:3 1 udp 1853824767 198.51.100.7 61000 typ prflx raddr 10.0.0.2 rport 51345";
+        let relay =
+            "a=candidate:4 1 udp 16777215 203.0.113.5 54000 typ relay raddr 0.0.0.0 rport 0";
+
+        assert_eq!(
+            parse_candidate_line_tier(host),
+            Some(IceCandidateTier::Host)
+        );
+        assert_eq!(
+            parse_candidate_line_tier(srflx),
+            Some(IceCandidateTier::Reflexive)
+        );
+        assert_eq!(
+            parse_candidate_line_tier(prflx),
+            Some(IceCandidateTier::Reflexive)
+        );
+        assert_eq!(
+            parse_candidate_line_tier(relay),
+            Some(IceCandidateTier::Relay)
+        );
+
+        let full_sdp = format!(
+            "v=0\r\n\
+             o=- 1 2 IN IP4 127.0.0.1\r\n\
+             m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+             a=max-message-size:65536\r\n\
+             {host}\r\n\
+             {srflx}\r\n\
+             a=end-of-candidates\r\n"
+        );
+        assert_eq!(
+            parse_sdp_candidate_tier(&full_sdp),
+            Some(IceCandidateTier::Reflexive)
+        );
+        let (stripped, extracted) = split_sdp_remote_candidates(&full_sdp);
+        assert_eq!(parse_sdp_candidate_tier(&stripped), None);
+        assert_eq!(parse_sdp_max_message_size(&stripped), Some(65536));
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(
+            extracted
+                .iter()
+                .filter_map(|c| parse_candidate_line_tier(c))
+                .max(),
+            Some(IceCandidateTier::Reflexive)
+        );
     }
 }

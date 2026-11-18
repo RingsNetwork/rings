@@ -136,11 +136,6 @@ impl Client {
         Ok(self)
     }
 
-    /// Returns the endpoint URL this client sends requests to.
-    pub fn endpoint_url(&self) -> &str {
-        &self.endpoint_url
-    }
-
     /// Sends a typed JSON-RPC request and decodes the typed response body.
     pub async fn call_method<T>(&self, method: Method, req: &impl Serialize) -> Result<T>
     where T: DeserializeOwned {

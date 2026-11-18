@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
+use crate::core::sdp::IceCandidateTier;
 use crate::error::IceServerError;
 
 /// WebRTC IceCredentialType enums.
@@ -38,6 +39,27 @@ impl IceServer {
     /// Convert String to `Vec<IceServer>`. Will split the string by `;` and parse each part.
     pub fn vec_from_str(s: &str) -> Result<Vec<Self>, IceServerError> {
         s.split(';').map(IceServer::from_str).collect()
+    }
+
+    /// The highest [`IceCandidateTier`] that a peer connection configured with `servers` can
+    /// gather (`Host` when empty, `Reflexive` when only `stun:` URLs are present, `Relay` when any
+    /// `turn:` or `turns:` URL is present).
+    pub fn target_candidate_tier(servers: &[Self]) -> IceCandidateTier {
+        servers
+            .iter()
+            .flat_map(|server| server.urls.iter())
+            .filter_map(|url| {
+                let (scheme, _) = url.trim().split_once(':')?;
+                if scheme.eq_ignore_ascii_case("turn") || scheme.eq_ignore_ascii_case("turns") {
+                    Some(IceCandidateTier::Relay)
+                } else if scheme.eq_ignore_ascii_case("stun") {
+                    Some(IceCandidateTier::Reflexive)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(IceCandidateTier::Host)
     }
 }
 

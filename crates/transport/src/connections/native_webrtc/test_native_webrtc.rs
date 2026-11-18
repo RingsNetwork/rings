@@ -69,19 +69,21 @@ a=candidate:1 1 udp 2130706431 127.0.0.1 49160 typ host\r\n"
 
 #[test]
 fn test_excluded_virtual_interfaces_and_split_remote_offer_candidates() {
-    assert!(is_excluded_virtual_interface("docker0"));
-    assert!(is_excluded_virtual_interface("br-9a1b2c3d"));
-    assert!(is_excluded_virtual_interface("veth42a1b0"));
-    assert!(is_excluded_virtual_interface("virbr0"));
-    assert!(is_excluded_virtual_interface("cni0"));
-    assert!(is_excluded_virtual_interface("flannel.1"));
-    assert!(is_excluded_virtual_interface("cali1234"));
-    assert!(is_excluded_virtual_interface("tunl0"));
-    assert!(is_excluded_virtual_interface("wg0"));
-    assert!(!is_excluded_virtual_interface("eth0"));
-    assert!(!is_excluded_virtual_interface("ens5"));
-    assert!(!is_excluded_virtual_interface("en0"));
-    assert!(!is_excluded_virtual_interface("wlan0"));
+    assert!(is_unrouted_container_bridge_interface("docker0"));
+    assert!(is_unrouted_container_bridge_interface("br-9a1b2c3d4e5f"));
+    assert!(is_unrouted_container_bridge_interface("veth42a1b0"));
+    assert!(is_unrouted_container_bridge_interface("virbr0"));
+    assert!(is_unrouted_container_bridge_interface("cni0"));
+    assert!(is_unrouted_container_bridge_interface("flannel.1"));
+    assert!(is_unrouted_container_bridge_interface("cali1234"));
+    assert!(!is_unrouted_container_bridge_interface("br0"));
+    assert!(!is_unrouted_container_bridge_interface("br-lan"));
+    assert!(!is_unrouted_container_bridge_interface("tunl0"));
+    assert!(!is_unrouted_container_bridge_interface("wg0"));
+    assert!(!is_unrouted_container_bridge_interface("eth0"));
+    assert!(!is_unrouted_container_bridge_interface("ens5"));
+    assert!(!is_unrouted_container_bridge_interface("en0"));
+    assert!(!is_unrouted_container_bridge_interface("wlan0"));
 
     let offer_sdp = "v=0\r\n\
 o=- 1 2 IN IP4 127.0.0.1\r\n\
@@ -90,7 +92,7 @@ a=ice-pwd:password1234567890123456\r\n\
 a=candidate:1 1 udp 2130706431 10.0.0.2 51345 typ host\r\n\
 a=candidate:2 1 udp 1677729535 14.155.204.30 51345 typ srflx raddr 0.0.0.0 rport 0\r\n\
 a=end-of-candidates\r\n";
-    let (stripped, candidates) = split_remote_offer_candidates(offer_sdp);
+    let (stripped, candidates) = split_sdp_remote_candidates(offer_sdp);
     assert!(!stripped.contains("a=candidate:"));
     assert!(!stripped.contains("a=end-of-candidates"));
     assert!(stripped.contains("a=ice-ufrag:ufrag1"));

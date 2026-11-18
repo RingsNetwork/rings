@@ -43,6 +43,7 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::ChannelPool;
 use crate::core::pool::LanePool;
 use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::sdp::split_sdp_remote_candidates;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
@@ -83,11 +84,10 @@ mod turn_tcp;
 
 use host_candidates::append_sdp_extra_host_candidates;
 use host_candidates::external_address_candidates;
-use host_candidates::is_excluded_virtual_interface;
+use host_candidates::is_unrouted_container_bridge_interface;
 use host_candidates::nat_1to1_host_candidates;
 use host_candidates::sdp_candidate_count;
 use host_candidates::sdp_extra_host_candidates;
-use host_candidates::split_remote_offer_candidates;
 #[cfg(test)]
 use send_lifecycle::OwnedSend;
 use send_lifecycle::SendLifecycle;
@@ -822,7 +822,6 @@ async fn create_peer_connection_with_config(
     let sdp_extra_host_candidates = if is_relay_only {
         Vec::new()
     } else {
-        setting.set_interface_filter(Box::new(|name: &str| !is_excluded_virtual_interface(name)));
         let external_addresses = external_address_candidates(external_address);
         let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
         let extra = sdp_extra_host_candidates(&external_addresses);
@@ -831,6 +830,9 @@ async fn create_peer_connection_with_config(
                 external_addresses = ?nat_host_candidates,
                 "setting external WebRTC host candidates"
             );
+            setting.set_interface_filter(Box::new(|name: &str| {
+                !is_unrouted_container_bridge_interface(name)
+            }));
             setting.set_nat_1to1_ips(nat_host_candidates, RTCIceCandidateType::Host);
         }
         if !extra.is_empty() {
@@ -922,7 +924,7 @@ impl ConnectionInterface for WebrtcConnection {
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer)?;
-        let (stripped_offer_sdp, deferred_candidates) = split_remote_offer_candidates(&offer);
+        let (stripped_offer_sdp, deferred_candidates) = split_sdp_remote_candidates(&offer);
         let offer = RTCSessionDescription::offer(stripped_offer_sdp)?;
         let (webrtc_conn, gathering_complete_promise) = {
             let _guard = self.reconfigure_lock.lock().await;
@@ -940,29 +942,11 @@ impl ConnectionInterface for WebrtcConnection {
 
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
-
-        if !deferred_candidates.is_empty() {
-            let cancel_token = self.cancel_token.clone();
-            let _ = rings_runtime::spawn_detached(async move {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => return,
-                    _ = tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY) => {}
-                }
-                for candidate in deferred_candidates {
-                    if cancel_token.is_cancelled() {
-                        break;
-                    }
-                    let _ = webrtc_conn
-                        .add_ice_candidate(
-                            webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
-                                candidate,
-                                ..Default::default()
-                            },
-                        )
-                        .await;
-                }
-            });
-        }
+        schedule_deferred_remote_candidates(
+            webrtc_conn,
+            deferred_candidates,
+            self.cancel_token.clone(),
+        );
 
         Ok(local_sdp)
     }
@@ -1000,6 +984,33 @@ impl ConnectionInterface for WebrtcConnection {
         )
         .await
     }
+}
+
+fn schedule_deferred_remote_candidates(
+    webrtc_conn: Arc<RTCPeerConnection>,
+    deferred_candidates: Vec<String>,
+    cancel_token: CancellationToken,
+) {
+    if deferred_candidates.is_empty() {
+        return;
+    }
+    let _ = rings_runtime::spawn_detached(async move {
+        tokio::select! {
+            _ = cancel_token.cancelled() => return,
+            _ = tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY) => {}
+        }
+        for candidate in deferred_candidates {
+            if cancel_token.is_cancelled() {
+                break;
+            }
+            let _ = webrtc_conn
+                .add_ice_candidate(webrtc::ice_transport::ice_candidate::RTCIceCandidateInit {
+                    candidate,
+                    ..Default::default()
+                })
+                .await;
+        }
+    });
 }
 
 async fn close_reconfigurable_native_connection(
