@@ -7,20 +7,20 @@ use rings_core::message::OriginQuotaLaneConfig;
 use super::common::*;
 use super::*;
 use crate::descriptor::registry_lease;
-use crate::processor::config::parse_webrtc_udp_port_range;
+use crate::processor::config::parse_udp_port_range;
 use crate::registration::registry_refresh_bound;
 use crate::tests::test_processor_builder;
 
 #[test]
-fn test_webrtc_udp_port_range_absent_by_default() {
-    let range = parse_webrtc_udp_port_range(None, None);
+fn test_udp_port_range_absent_by_default() {
+    let range = parse_udp_port_range(None, None);
 
     assert!(matches!(range, core::result::Result::Ok(None)));
 }
 
 #[test]
-fn test_webrtc_udp_port_range_accepts_valid_bounds() {
-    let range = parse_webrtc_udp_port_range(Some(49160), Some(49200));
+fn test_udp_port_range_accepts_valid_bounds() {
+    let range = parse_udp_port_range(Some(49160), Some(49200));
 
     assert!(matches!(
         range,
@@ -29,12 +29,12 @@ fn test_webrtc_udp_port_range_accepts_valid_bounds() {
 }
 
 #[test]
-fn test_webrtc_udp_port_range_rejects_partial_bounds() {
-    let range = parse_webrtc_udp_port_range(Some(49160), None);
+fn test_udp_port_range_rejects_partial_bounds() {
+    let range = parse_udp_port_range(Some(49160), None);
 
     assert!(matches!(
         range,
-        Err(Error::IncompleteWebrtcUdpPortRange {
+        Err(Error::IncompleteUdpPortRange {
             min: Some(49160),
             max: None
         })
@@ -42,28 +42,25 @@ fn test_webrtc_udp_port_range_rejects_partial_bounds() {
 }
 
 #[test]
-fn test_webrtc_udp_port_range_rejects_zero_bound() {
-    let range = parse_webrtc_udp_port_range(Some(0), Some(49200));
+fn test_udp_port_range_rejects_zero_bound() {
+    let range = parse_udp_port_range(Some(0), Some(49200));
 
     assert!(matches!(
         range,
-        Err(Error::InvalidWebrtcUdpPortRange(
-            rings_transport::webrtc_config::WebrtcUdpPortRangeError::ZeroBound {
-                min: 0,
-                max: 49200
-            }
+        Err(Error::InvalidUdpPortRange(
+            rings_transport::network_config::UdpPortRangeError::ZeroBound { min: 0, max: 49200 }
         ))
     ));
 }
 
 #[test]
-fn test_webrtc_udp_port_range_rejects_inverted_bounds() {
-    let range = parse_webrtc_udp_port_range(Some(49200), Some(49160));
+fn test_udp_port_range_rejects_inverted_bounds() {
+    let range = parse_udp_port_range(Some(49200), Some(49160));
 
     assert!(matches!(
         range,
-        Err(Error::InvalidWebrtcUdpPortRange(
-            rings_transport::webrtc_config::WebrtcUdpPortRangeError::Inverted {
+        Err(Error::InvalidUdpPortRange(
+            rings_transport::network_config::UdpPortRangeError::Inverted {
                 min: 49200,
                 max: 49160
             }
@@ -244,8 +241,8 @@ fn test_serialized_processor_config_defaults_dht_virtual_nodes() {
 network_id: 0
 ice_servers: stun://stun.l.google.com:19302
 external_address: null
-webrtc_udp_port_min: null
-webrtc_udp_port_max: null
+udp_port_min: null
+udp_port_max: null
 delegatee_key: "{}"
 stabilize_interval: 15
 online_node_heartbeat_interval_secs: 30
@@ -397,5 +394,215 @@ fn test_serialized_remote_rpc_proxy_url_round_trips_and_validates() -> Result<()
         ProcessorConfig::try_from(invalid),
         Err(Error::InvalidConfig(_))
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_custom_network_parameters_trait_supports_heterogeneous_media_and_enforces_kinematic_laws(
+) -> Result<()> {
+    #[derive(Clone, Debug)]
+    struct HeterogeneousMediumParams {
+        kind: &'static str,
+        kinematics: TransportKinematics,
+        endpoint_hint: Option<String>,
+        session_template: Option<String>,
+        params: std::collections::BTreeMap<String, String>,
+    }
+
+    impl NetworkParameters for HeterogeneousMediumParams {
+        fn kind(&self) -> &'static str {
+            self.kind
+        }
+
+        fn kinematics(&self) -> TransportKinematics {
+            self.kinematics
+        }
+
+        fn endpoint_hint(&self) -> Option<&str> {
+            self.endpoint_hint.as_deref()
+        }
+
+        fn session_credential_template(&self) -> Option<&str> {
+            self.session_template.as_deref()
+        }
+
+        fn parameter_map(&self) -> std::collections::BTreeMap<String, String> {
+            self.params.clone()
+        }
+
+        fn build_transport(
+            &self,
+            initial_session_credential: Option<&str>,
+        ) -> std::result::Result<
+            rings_transport::core::transport::SharedTransport,
+            TransportParameterError,
+        > {
+            NetworkParameters::validate_parameters(self)?;
+            NetworkParameters::build_transport(
+                &TransportNetworkConfig::new(
+                    initial_session_credential.unwrap_or(""),
+                    self.endpoint_hint.clone(),
+                    None,
+                ),
+                initial_session_credential,
+            )
+        }
+    }
+
+    let media = [
+        // 1. Packet Radio (HF/VHF AX.25 / LoRa half-duplex ad-hoc)
+        HeterogeneousMediumParams {
+            kind: "packet-radio",
+            kinematics: TransportKinematics::packet_radio(),
+            endpoint_hint: Some("ax25://N0CALL-1@144.390MHz".to_string()),
+            session_template: None,
+            params: std::collections::BTreeMap::from([
+                ("modulation".to_string(), "LoRa-SF9-BW125".to_string()),
+                ("carrier_hz".to_string(), "433920000".to_string()),
+            ]),
+        },
+        // 2. Bluetooth Ad-Hoc (BLE L2CAP CoC proximity mesh)
+        HeterogeneousMediumParams {
+            kind: "bluetooth-adhoc",
+            kinematics: TransportKinematics::bluetooth_adhoc(),
+            endpoint_hint: Some("ble://psm:0x0080".to_string()),
+            session_template: None,
+            params: std::collections::BTreeMap::from([(
+                "l2cap_psm".to_string(),
+                "128".to_string(),
+            )]),
+        },
+        // 3. Ultrasonic Ad-Hoc (half-duplex acoustic air medium, no external endpoint advertisement)
+        HeterogeneousMediumParams {
+            kind: "ultrasonic-adhoc",
+            kinematics: TransportKinematics::ultrasonic_adhoc(),
+            endpoint_hint: None,
+            session_template: None,
+            params: std::collections::BTreeMap::from([
+                ("carrier_khz".to_string(), "18.5".to_string()),
+                ("modulation".to_string(), "OFDM-acoustic".to_string()),
+            ]),
+        },
+        // 4. Traditional TCP/IP (direct routed full-duplex socket transport)
+        HeterogeneousMediumParams {
+            kind: "tcp-ip",
+            kinematics: TransportKinematics::low_latency_routed(),
+            endpoint_hint: Some("tcp://198.51.100.7:9443".to_string()),
+            session_template: None,
+            params: std::collections::BTreeMap::from([(
+                "listen_addr".to_string(),
+                "0.0.0.0:9443".to_string(),
+            )]),
+        },
+        // 5. HTTPS / WebSocket (routed full-duplex offer/answer over TLS)
+        HeterogeneousMediumParams {
+            kind: "https-ws",
+            kinematics: TransportKinematics {
+                handshake: HandshakeSemantic::OfferAnswer,
+                ..TransportKinematics::low_latency_routed()
+            },
+            endpoint_hint: Some("wss://node.rings.network/ws".to_string()),
+            session_template: None,
+            params: std::collections::BTreeMap::from([(
+                "alpn".to_string(),
+                "h2,http/1.1".to_string(),
+            )]),
+        },
+    ];
+
+    for medium in media {
+        let expected_kind = medium.kind;
+        let expected_kinematics = medium.kinematics;
+        let expected_endpoint = medium.endpoint_hint.clone();
+        let expected_params = medium.params.clone();
+
+        let config = onion_test_config().with_network_parameters(medium);
+        let processor = test_processor_builder(&config).build()?;
+
+        assert_eq!(processor.network_parameters().kind(), expected_kind);
+        assert_eq!(
+            processor.network_parameters().kinematics(),
+            expected_kinematics
+        );
+        assert_eq!(
+            processor.network_parameters().endpoint_hint(),
+            expected_endpoint.as_deref()
+        );
+        assert_eq!(
+            processor.network_parameters().parameter_map(),
+            expected_params
+        );
+        assert_eq!(
+            processor
+                .network_parameters()
+                .derive_session_credential(&processor.delegatee_key())?,
+            None,
+            "proximity/routed media without relay template must not require ICE/TURN credentials"
+        );
+
+        // Session key renewal succeeds cleanly even when the medium has no external relay servers.
+        let t1 = get_epoch_ms() + 1_000;
+        let delegator = SecretKey::random();
+        let initial_key = DelegateeKey::new_with_seckey_at(
+            &delegator,
+            u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
+            t1,
+        )
+        .unwrap();
+        let renewed_key = DelegateeKey::new_with_seckey_at(
+            &delegator,
+            u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
+            t1 + SIGNING_HORIZON_LEAD_MS,
+        )
+        .unwrap();
+        let mut cfg_for_renew = ProcessorConfig::new(0, String::new(), initial_key, 3)
+            .with_network_parameters(HeterogeneousMediumParams {
+                kind: expected_kind,
+                kinematics: expected_kinematics,
+                endpoint_hint: expected_endpoint,
+                session_template: None,
+                params: expected_params,
+            });
+        cfg_for_renew.advertise_presence = false;
+        let proc_for_renew = test_processor_builder(&cfg_for_renew).build_at(t1)?;
+        assert!(proc_for_renew
+            .renew_delegatee_key(renewed_key, t1 + SIGNING_HORIZON_LEAD_MS)
+            .is_ok());
+    }
+
+    // Standard assisted-traversal config preserves UDP port range and endpoint hint in parameter_map.
+    let range = UdpPortRange::new(50000, 50100)?;
+    let traversal = TransportNetworkConfig::new(
+        "stun://stun.l.google.com:19302",
+        Some("https://node.rings.network:50000".to_string()),
+        Some(range),
+    );
+    let config = onion_test_config().with_network_parameters(traversal);
+    assert_eq!(config.udp_port_range(), Some(range));
+    let processor = test_processor_builder(&config).build()?;
+    assert_eq!(processor.network_parameters().kind(), "assisted-traversal");
+    assert_eq!(
+        processor.session_transport_credentials().as_deref(),
+        Some("stun://stun.l.google.com:19302")
+    );
+
+    // Invalid kinematics (e.g. half-duplex ultrasonic medium claiming 2 simultaneous lanes)
+    // is rejected at `ProcessorBuilder::build`.
+    let invalid_ultrasonic = HeterogeneousMediumParams {
+        kind: "ultrasonic-adhoc",
+        kinematics: TransportKinematics {
+            ordered_lanes: 2,
+            ..TransportKinematics::ultrasonic_adhoc()
+        },
+        endpoint_hint: None,
+        session_template: None,
+        params: std::collections::BTreeMap::new(),
+    };
+    let bad_config = onion_test_config().with_network_parameters(invalid_ultrasonic);
+    assert!(matches!(
+        test_processor_builder(&bad_config).build(),
+        Err(Error::InvalidConfig(msg)) if msg.contains("half-duplex")
+    ));
+
     Ok(())
 }

@@ -22,7 +22,7 @@ use crate::swarm::SwarmBuilder;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_until_result;
 use crate::tests::default::Node;
-use crate::tests::default::TEST_ICE_SERVERS;
+use crate::tests::default::TEST_TRAVERSAL_SERVERS;
 use crate::tests::fixed_secret_keys;
 use crate::tests::manually_establish_connection;
 use crate::tests::TEST_NETWORK_ID;
@@ -34,7 +34,7 @@ fn ring_node(key: SecretKey) -> Result<Node> {
     Ok(Node::build(
         SwarmBuilder::new(
             TEST_NETWORK_ID,
-            crate::tests::test_transport(TEST_ICE_SERVERS),
+            crate::tests::test_transport(TEST_TRAVERSAL_SERVERS),
             Box::new(crate::storage::MemStorage::new()),
             session,
         )
@@ -348,13 +348,12 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
         .protocol_egress()
         .originate(
             Message::ConnectNodeSend(ConnectNodeSend {
-                sdp: offer
-                    .transaction
-                    .data::<Message>()
-                    .and_then(|message| match message {
-                        Message::ConnectNodeSend(offer) => Ok(offer.sdp),
+                handshake: offer.transaction.data::<Message>().and_then(
+                    |message| match message {
+                        Message::ConnectNodeSend(offer) => Ok(offer.handshake),
                         _ => Err(Error::InvalidMessage("not an offer".to_string())),
-                    })?,
+                    },
+                )?,
                 dht_protocol_mode: first.swarm.dht_protocol_mode(),
                 relay_custody: first.swarm.transport.dht.relay_custody(),
             }),
@@ -486,7 +485,7 @@ async fn test_late_answer_is_not_applied_to_a_newer_generation() -> Result<()> {
         Some(Handshake::Offering {
             owner: OfferOwner::Overlay,
             phase: OfferPhase::Sent {
-                sdp: second_offer.sdp,
+                handshake: second_offer.handshake,
                 tx_id: second_tx,
             },
         }),
@@ -537,7 +536,7 @@ async fn test_step_failure_classification() -> Result<()> {
     let [node1, node2] = ring_nodes::<2>()?;
     let closed = || {
         Error::Transport(
-            rings_transport::error::Error::WebrtcLocalSdpGenerationError(
+            rings_transport::error::Error::LocalHandshakeGenerationError(
                 "Local connection closed".to_string(),
             ),
         )
@@ -619,7 +618,7 @@ async fn test_yielded_offer_is_superseded_before_the_answer_is_created() -> Resu
         .classify_step_failure(
             creating,
             Error::Transport(
-                rings_transport::error::Error::WebrtcLocalSdpGenerationError(
+                rings_transport::error::Error::LocalHandshakeGenerationError(
                     "Local connection closed".to_string(),
                 ),
             ),
@@ -676,7 +675,7 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     use rings_transport::error::Error as TransportError;
 
     let [node1, node2] = ring_nodes::<2>()?;
-    let sdp_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
+    let handshake_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
         let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
         let annotated = format!(
             "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
@@ -699,7 +698,7 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     else {
         return Err(Error::InvalidMessage("not an offer".to_string()));
     };
-    small_offer.sdp = sdp_with_limit(&small_offer.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+    small_offer.handshake = handshake_with_limit(&small_offer.handshake, MIN_MAX_MESSAGE_SIZE - 1)?;
     let refused = node2
         .swarm
         .transport
@@ -753,8 +752,8 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
         return Err(Error::InvalidMessage("expected an answer".to_string()));
     };
     let answering2 = created_answer.attempt;
-    created_answer.report.sdp =
-        sdp_with_limit(&created_answer.report.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+    created_answer.report.handshake =
+        handshake_with_limit(&created_answer.report.handshake, MIN_MAX_MESSAGE_SIZE - 1)?;
     let refused_answer = node1
         .swarm
         .transport
@@ -791,7 +790,7 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     else {
         return Err(Error::InvalidMessage("not an offer".to_string()));
     };
-    floor_offer.sdp = sdp_with_limit(&floor_offer.sdp, MIN_MAX_MESSAGE_SIZE)?;
+    floor_offer.handshake = handshake_with_limit(&floor_offer.handshake, MIN_MAX_MESSAGE_SIZE)?;
     let OfferReply::Answer(mut floor_answer) = node2
         .swarm
         .transport
@@ -804,7 +803,8 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     else {
         return Err(Error::InvalidMessage("expected an answer".to_string()));
     };
-    floor_answer.report.sdp = sdp_with_limit(&floor_answer.report.sdp, MIN_MAX_MESSAGE_SIZE)?;
+    floor_answer.report.handshake =
+        handshake_with_limit(&floor_answer.report.handshake, MIN_MAX_MESSAGE_SIZE)?;
     node1
         .swarm
         .transport
@@ -902,7 +902,7 @@ async fn test_connect_originate_failure_abandons_pending_slot_and_records_single
 
 /// Formal Safety Invariant (Issue #1291 §3 — Pre-Reconciliation Offer Rejection Purity):
 /// `\square RejectedOfferIsPureNoOp`: when `answer_remote_connection` rejects an inbound offer via
-/// `validate_remote_offer` (`SdpAboveMax`, invalid JSON SDP, or `RemoteMaxMessageSizeTooSmall`),
+/// `validate_remote_offer` (`HandshakeAboveMax`, invalid JSON SDP, or `RemoteMaxMessageSizeTooSmall`),
 /// the local lifecycle slot `L'[peer] == L[peer]` and transport pool `P'[peer] == P[peer]` remain
 /// bit-for-bit unchanged (no displacement of an existing pending or active connection, and no
 /// orphan physical connection created).
@@ -912,7 +912,7 @@ async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejecti
     use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
 
     let [node1, node2] = ring_nodes::<2>()?;
-    let sdp_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
+    let handshake_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
         let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
         let annotated = format!(
             "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
@@ -940,17 +940,18 @@ async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejecti
     let invalid_offers = [
         {
             let mut oversized = valid_offer.clone();
-            oversized.sdp = "x".repeat(crate::consts::MAX_SDP_BYTES + 1);
+            oversized.handshake = "x".repeat(crate::consts::MAX_HANDSHAKE_BYTES + 1);
             oversized
         },
         {
             let mut malformed = valid_offer.clone();
-            malformed.sdp = "{not-valid-json".to_string();
+            malformed.handshake = "{not-valid-json".to_string();
             malformed
         },
         {
             let mut undersized = valid_offer.clone();
-            undersized.sdp = sdp_with_limit(&valid_offer.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+            undersized.handshake =
+                handshake_with_limit(&valid_offer.handshake, MIN_MAX_MESSAGE_SIZE - 1)?;
             undersized
         },
     ];

@@ -10,7 +10,7 @@ use bytes::Bytes;
 
 use crate::callback::link_credit::CreditPermit;
 use crate::core::pool::ChannelLane;
-use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::TransportConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
 
@@ -91,16 +91,16 @@ impl InboundCreditLease {
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait TransportCallback {
-    /// Notify the data channel is open.
-    async fn on_data_channel_open(&self, _cid: &str) -> Result<(), CallbackError> {
+    /// Notify that the connection's payload channels are open.
+    async fn on_channel_open(&self, _cid: &str) -> Result<(), CallbackError> {
         Ok(())
     }
 
-    /// Notify the data channel is closed. This is a reliable, prompt signal that
-    /// the peer has gone (e.g. it closed the connection): unlike the ICE
-    /// `Disconnected` state it does not fire on transient blips, so the swarm
-    /// can use it to tear the connection down without waiting for `Failed`.
-    async fn on_data_channel_close(&self, _cid: &str) -> Result<(), CallbackError> {
+    /// Notify that the connection's payload channels have closed. This is a reliable, prompt
+    /// signal that the peer has gone: unlike a transient `Disconnected` link state it does not
+    /// fire on brief network blips, so the swarm can use it to tear the connection down without
+    /// waiting for `Failed`.
+    async fn on_channel_close(&self, _cid: &str) -> Result<(), CallbackError> {
         Ok(())
     }
 
@@ -123,11 +123,11 @@ pub trait TransportCallback {
         Ok(())
     }
 
-    /// This method is invoked when the state of connection has changed.
-    async fn on_peer_connection_state_change(
+    /// This method is invoked when the connection lifecycle state has changed.
+    async fn on_connection_state_change(
         &self,
         _cid: &str,
-        _state: WebrtcConnectionState,
+        _state: TransportConnectionState,
     ) -> Result<(), CallbackError> {
         Ok(())
     }

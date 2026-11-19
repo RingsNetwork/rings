@@ -107,7 +107,7 @@ const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
 /// Per-peer share prevents one connection from occupying the node-wide actor.
 const INBOUND_PEER_CAPACITY: usize = 32;
 const _: () =
-    assert!((rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE as usize) < INBOUND_PEER_CAPACITY);
+    assert!((rings_transport::core::pool::CHANNEL_POOL_SIZE as usize) < INBOUND_PEER_CAPACITY);
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
@@ -130,7 +130,7 @@ type InboundReply = oneshot::Sender<Result<()>>;
 /// Law (lane-local pacing). An arrived frame is submitted with [`Self::Await`], and the
 /// transport's drainer of its lane hands the next frame over only once this one completed, so
 /// every transport lane of a peer has at most one event in the actor. A peer has
-/// `DATA_CHANNEL_POOL_SIZE` lanes, fewer than the events of its per-peer share
+/// `CHANNEL_POOL_SIZE` lanes, fewer than the events of its per-peer share
 /// (`INBOUND_PEER_CAPACITY`), so arrived frames never contend for those events, which the share
 /// reserves for no lane; its bytes hold at most one data-channel message per lane, the peer's
 /// own. A lane slow to process holds its own frames, and their transport credit, in its FIFO,

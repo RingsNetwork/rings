@@ -27,9 +27,9 @@ use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
+use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportMessage;
-use crate::core::transport::WebrtcConnectionState;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 use crate::error::Error;
 use crate::notifier::Notifier;
 
@@ -66,9 +66,9 @@ impl TransportCallback for CloseCallback {
     async fn on_peer_connection_state_change(
         &self,
         _cid: &str,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        if state == WebrtcConnectionState::Closed {
+        if state == TransportConnectionState::Closed {
             self.peer_closed.fetch_add(1, Ordering::AcqRel);
         }
         Ok(())
@@ -84,7 +84,7 @@ fn guarded_test_permit(
         let mut state = retirement_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.webrtc = WebrtcConnectionState::Closed;
+        state.webrtc = TransportConnectionState::Closed;
         state.data_channel_open_override = Some(false);
     });
     guard.bind(
@@ -136,7 +136,7 @@ impl ConnectedReceiver {
         Self {
             remote: Arc::new(DummyConnection::new(callback, Arc::default())),
             connection_state: Arc::new(Mutex::new(DummyConnectionState {
-                webrtc: WebrtcConnectionState::Connected,
+                webrtc: TransportConnectionState::Connected,
                 data_channel_open_override: None,
             })),
             data,
@@ -195,7 +195,7 @@ fn test_sequence_index_survives_arbitrary_removal() {
 #[test]
 fn test_close_waits_for_claimed_dummy_dispatch_commit() {
     let connection_state = Arc::new(Mutex::new(DummyConnectionState {
-        webrtc: WebrtcConnectionState::Connected,
+        webrtc: TransportConnectionState::Connected,
         data_channel_open_override: None,
     }));
     let permit = SendPermit::always();
@@ -332,7 +332,7 @@ async fn test_receiver_credit_refusal_does_not_fail_irrevocable_dummy_send() {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .webrtc,
-        WebrtcConnectionState::Connected
+        TransportConnectionState::Connected
     );
     controlled::enable(false);
     drop(held);
@@ -354,7 +354,7 @@ async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
     let remote = Arc::new(DummyConnection::new(callback, Arc::default()));
     CONNS.insert(remote.rand_id.clone(), Arc::clone(&remote));
     let connection_state = Arc::new(Mutex::new(DummyConnectionState {
-        webrtc: WebrtcConnectionState::Connected,
+        webrtc: TransportConnectionState::Connected,
         data_channel_open_override: None,
     }));
     let permit = SendPermit::always();
@@ -362,7 +362,7 @@ async fn test_oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
 
     let _delivery = complete_irrevocable_send(
         &connection_state,
-        Bytes::from(vec![0; MAX_DATA_CHANNEL_MESSAGE_SIZE + 1]),
+        Bytes::from(vec![0; MAX_CHANNEL_MESSAGE_SIZE + 1]),
         ChannelLane::default(),
         DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, permit),
@@ -397,7 +397,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
         NodeFramePool::new(),
     );
     let connection = Arc::new(DummyConnection::new(callback, Arc::default()));
-    connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
+    connection.force_connection_state_without_callback(TransportConnectionState::Connected);
     let sender = {
         let connection = Arc::clone(&connection);
         tokio::spawn(async move {
@@ -422,7 +422,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
         tokio::spawn(async move { connection.close().await })
     };
     wait_until("dummy retirement state gate", || {
-        connection.webrtc_connection_state() == WebrtcConnectionState::Closed
+        connection.connection_state() == TransportConnectionState::Closed
     })
     .await;
     assert!(!closer.is_finished());
@@ -461,8 +461,8 @@ async fn test_cancelling_pending_close_completes_physical_retirement() {
         NodeFramePool::new(),
     );
     let remote = Arc::new(DummyConnection::new(remote_callback, Arc::default()));
-    local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
-    remote.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
+    local.force_connection_state_without_callback(TransportConnectionState::Connected);
+    remote.force_connection_state_without_callback(TransportConnectionState::Connected);
     local.set_remote_rand_id(remote.rand_id.clone());
     remote.set_remote_rand_id(local.rand_id.clone());
     CONNS.insert(local.rand_id.clone(), Arc::clone(&local));
@@ -473,14 +473,14 @@ async fn test_cancelling_pending_close_completes_physical_retirement() {
         tokio::spawn(async move { local.close().await })
     };
     wait_until("synchronous retirement fence", || {
-        local.webrtc_connection_state() == WebrtcConnectionState::Closed
+        local.connection_state() == TransportConnectionState::Closed
     })
     .await;
     closer.abort();
     let _cancelled = closer.await;
 
     wait_until("cancelled close callbacks and remote retirement", || {
-        remote.webrtc_connection_state() == WebrtcConnectionState::Closed
+        remote.connection_state() == TransportConnectionState::Closed
             && local_peer_closed.load(Ordering::Acquire) == 1
             && local_data_closed.load(Ordering::Acquire) == 1
     })
@@ -508,7 +508,7 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
             NodeFramePool::new(),
         );
         let connection = Arc::new(DummyConnection::new(callback, Arc::default()));
-        connection.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
+        connection.force_connection_state_without_callback(TransportConnectionState::Connected);
         CONNS.insert(connection.rand_id.clone(), Arc::clone(&connection));
         let fence = connection.retirement_fence();
         let permit = SendPermit::always();
@@ -525,8 +525,8 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
     assert!(result.is_ok());
     assert_eq!(
-        connection.webrtc_connection_state(),
-        WebrtcConnectionState::Closed
+        connection.connection_state(),
+        TransportConnectionState::Closed
     );
     assert!(CONNS.get(&connection.rand_id).is_none());
     assert!(!connection.dispatch(Event::DataChannelOpen(None)));
@@ -541,7 +541,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
         NodeFramePool::new(),
     );
     let local = Arc::new(DummyConnection::new(local_callback, Arc::default()));
-    local.force_webrtc_connection_state_without_callback(WebrtcConnectionState::Connected);
+    local.force_connection_state_without_callback(TransportConnectionState::Connected);
     let remote_callback = InnerTransportCallback::new(
         "remote-peer",
         Box::new(NoopCallback),
@@ -571,10 +571,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
     assert!(matches!(result, Err(Error::DummyRemoteConnectionClosed)));
     assert!(acceptance.is_irrevocable());
     assert!(!acceptance.is_accepted());
-    assert_eq!(
-        local.webrtc_connection_state(),
-        WebrtcConnectionState::Closed
-    );
+    assert_eq!(local.connection_state(), TransportConnectionState::Closed);
     assert!(CONNS.get(&local.rand_id).is_none());
     assert!(remote.remote_conn().is_none());
     assert!(!local.dispatch(Event::DataChannelOpen(None)));
@@ -586,7 +583,7 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
                 SendPermit::always(),
             )
             .await,
-        Err(Error::DataChannelOpen(_))
+        Err(Error::ChannelOpen(_))
     ));
     CONNS.remove(&remote.rand_id);
 }

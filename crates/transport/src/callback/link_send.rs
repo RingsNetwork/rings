@@ -56,7 +56,7 @@ impl InnerTransportCallback {
     where
         S: FrameSink + ?Sized,
     {
-        sink.webrtc_wait_for_data_channel_open().await?;
+        sink.wait_for_channel_open().await?;
         let _credit = self.credit_for_custom_send(lane, &mut permit).await?;
         sink.send_frame(TransportMessage::Custom(payload), lane, permit)
             .await

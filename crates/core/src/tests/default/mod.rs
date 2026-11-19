@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use futures::channel::mpsc;
 use futures::lock::Mutex;
 use futures::StreamExt;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
@@ -78,7 +78,7 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 ///
 /// Every peer of these tests runs in this process, so host candidates connect them; an
 /// external STUN server would only add a network dependency whose latency no test controls.
-pub(crate) const TEST_ICE_SERVERS: &str = "";
+pub(crate) const TEST_TRAVERSAL_SERVERS: &str = "";
 
 /// Hang guard of every awaited test state: a failure bound that names the missing state,
 /// never the condition a passing run waits for (that is always an observed state change).
@@ -228,7 +228,7 @@ fn prepare_node_with_optional_measure(
     key: SecretKey,
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
-    prepare_node_with_ice_servers_and_measure(key, TEST_ICE_SERVERS, measure)
+    prepare_node_with_ice_servers_and_measure(key, TEST_TRAVERSAL_SERVERS, measure)
 }
 
 /// The origin quota of a fixture node: buckets that never empty.
@@ -273,7 +273,7 @@ fn fixture_builder(key: &SecretKey, ice_servers: &str) -> Result<SwarmBuilder> {
 /// A fixture node with no relay store: it declares that it holds no relay mail.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub fn prepare_node_without_relay_storage(key: SecretKey) -> Result<Node> {
-    Ok(Node::build(fixture_builder(&key, TEST_ICE_SERVERS)?))
+    Ok(Node::build(fixture_builder(&key, TEST_TRAVERSAL_SERVERS)?))
 }
 
 /// A fixture node with a relay store and explicit relay replication parameters.
@@ -282,7 +282,7 @@ pub fn prepare_node_with_relay_replication(
     key: SecretKey,
     relay_replication: crate::dht::RelayReplication,
 ) -> Result<Node> {
-    let builder = fixture_builder(&key, TEST_ICE_SERVERS)?
+    let builder = fixture_builder(&key, TEST_TRAVERSAL_SERVERS)?
         .relay_replication(relay_replication)
         .relay_storage(crate::tests::volatile_relay_storage());
     Ok(Node::build(builder))
@@ -322,17 +322,17 @@ pub async fn wait_until_result(
 }
 
 /// Whether `node` holds an active, routable connection to `peer` in `state`.
-pub fn has_connection_in_state(node: &Node, peer: Did, state: WebrtcConnectionState) -> bool {
+pub fn has_connection_in_state(node: &Node, peer: Did, state: TransportConnectionState) -> bool {
     node.swarm
         .transport
         .get_connection(peer)
-        .is_some_and(|conn| conn.webrtc_connection_state() == state)
+        .is_some_and(|conn| conn.connection_state() == state)
 }
 
 pub async fn wait_for_connection_state(
     node: &Node,
     peer: Did,
-    state: WebrtcConnectionState,
+    state: TransportConnectionState,
 ) -> crate::error::Result<()> {
     wait_until_result("connection reaches expected state", || {
         Ok(has_connection_in_state(node, peer, state))
@@ -366,7 +366,7 @@ pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error
 #[cfg(feature = "dummy")]
 pub(crate) async fn admit_nodes(node1: Node, node2: Node) -> crate::error::Result<(Node, Node)> {
     crate::tests::manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     Ok((node1, node2))
 }

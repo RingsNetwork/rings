@@ -31,7 +31,7 @@
 use std::borrow::Cow;
 
 use bytes::Bytes;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -58,7 +58,7 @@ use crate::message::MessageKind;
 /// Decompression allocates at most this ceiling before reading untrusted LZ4 tokens
 /// (`lz4_flex::block::decompress`), defending against decompression bombs without relying on an
 /// attacker-controlled size prefix.
-pub(crate) const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE;
+pub(crate) const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_CHANNEL_MESSAGE_SIZE;
 
 /// Upper bound on the uncompressed wire length (`FRAME_HEADER_LEN + body`) of a
 /// [`FrameKind::CompressedPayload`] frame.

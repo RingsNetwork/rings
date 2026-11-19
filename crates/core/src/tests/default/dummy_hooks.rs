@@ -15,18 +15,18 @@ impl Drop for ControlledDeliveryGuard {
     }
 }
 
-pub(super) struct PendingDataChannelOpenGuard;
+pub(super) struct PendingChannelOpenGuard;
 
-impl PendingDataChannelOpenGuard {
+impl PendingChannelOpenGuard {
     pub(super) fn new() -> Self {
-        dummy_controlled::set_wait_for_data_channel_open_pending(true);
+        dummy_controlled::set_wait_for_channel_open_pending(true);
         Self
     }
 }
 
-impl Drop for PendingDataChannelOpenGuard {
+impl Drop for PendingChannelOpenGuard {
     fn drop(&mut self) {
-        dummy_controlled::set_wait_for_data_channel_open_pending(false);
+        dummy_controlled::set_wait_for_channel_open_pending(false);
     }
 }
 

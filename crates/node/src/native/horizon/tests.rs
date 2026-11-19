@@ -28,8 +28,8 @@ use crate::processor::ProcessorConfig;
 use crate::processor::SIGNING_HORIZON_LEAD_MS;
 use crate::test_support::TestTask;
 use crate::tests::test_processor_builder;
-use crate::tests::TEST_ICE_SERVERS;
 use crate::tests::TEST_NETWORK_ID;
+use crate::tests::TEST_TRAVERSAL_SERVERS;
 
 /// The epoch reading at the paused runtime's start.
 const EPOCH_MS: u128 = 1_800_000_000_000;
@@ -54,7 +54,7 @@ fn processor_at(delegator: &SecretKey, ttl_ms: u64, ts_ms: u128) -> Arc<Processo
     };
     let config = ProcessorConfig::new(
         TEST_NETWORK_ID,
-        TEST_ICE_SERVERS.to_string(),
+        TEST_TRAVERSAL_SERVERS.to_string(),
         delegatee_key,
         3,
     );

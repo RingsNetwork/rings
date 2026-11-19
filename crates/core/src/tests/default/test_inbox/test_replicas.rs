@@ -3,7 +3,7 @@
 //! survives the loss of its holder, read by the recipient from a surviving member, a pass offers
 //! one digest set per chain neighbour, and a young node takes no custody.
 
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::next_held_message;
 use super::HELD_MESSAGE;
@@ -141,9 +141,9 @@ async fn test_mail_survives_the_loss_of_its_holder() -> Result<()> {
         survivor
             .swarm
             .transport
-            .force_peer_connection_state_without_callback(
+            .force_connection_state_without_callback(
                 node1.did(),
-                WebrtcConnectionState::Closed,
+                TransportConnectionState::Closed,
             )?;
         survivor
             .swarm
@@ -306,7 +306,7 @@ async fn test_a_chain_neighbours_loss_runs_the_chain_exchange_at_once() -> Resul
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(node3.did(), WebrtcConnectionState::Closed)?;
+        .force_connection_state_without_callback(node3.did(), TransportConnectionState::Closed)?;
     node1
         .swarm
         .stabilizer()

@@ -199,6 +199,12 @@ impl Swarm {
         self.dht.clone()
     }
 
+    /// Return the injected trait-based [`SharedTransport`](rings_transport::core::transport::SharedTransport)
+    /// backing this swarm.
+    pub fn transport(&self) -> &rings_transport::core::transport::SharedTransport {
+        self.transport.transport()
+    }
+
     /// How many edges this node has admitted now: peers admitted and not retired
     /// ([`edges`]).
     pub fn admitted_edges(&self) -> usize {
@@ -392,7 +398,7 @@ impl Swarm {
             .iter()
             .map(|(did, c)| ConnectionInspect {
                 did: did.to_string(),
-                state: format!("{:?}", c.webrtc_connection_state()),
+                state: format!("{:?}", c.connection_state()),
             })
             .collect()
     }

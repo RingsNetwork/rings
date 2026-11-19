@@ -16,8 +16,8 @@ use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::DynConnection;
 use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
-use crate::core::transport::WebrtcConnectionState;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::core::transport::TransportConnectionState;
+use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
 use crate::error::Error;
@@ -81,8 +81,7 @@ impl<C: ?Sized> ConnectionRef<C> {
 }
 
 impl<C> ConnectionRef<C>
-where
-    C: ConnectionInterface<Sdp = String, Error = Error> + MaybeSendSync + 'static,
+where C: ConnectionInterface<Handshake = String, Error = Error> + MaybeSendSync + 'static
 {
     /// Erase the concrete connection type parameter into [`ConnectionRef<DynConnection>`],
     /// preserving the underlying weak allocation pointer for slot-identity checks.
@@ -97,8 +96,7 @@ where
 
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 impl<C> ConnectionRef<C>
-where
-    C: ConnectionInterface<Error = Error> + ?Sized,
+where C: ConnectionInterface<Error = Error> + ?Sized
 {
     /// Capture a witness that survives pool removal and observes completed native close.
     pub fn physical_close_witness(&self) -> Result<crate::connections::NativePhysicalCloseWitness> {
@@ -108,8 +106,7 @@ where
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl<C> ConnectionRef<C>
-where
-    C: ConnectionInterface<Error = Error> + ?Sized,
+where C: ConnectionInterface<Error = Error> + ?Sized
 {
     /// Stable physical generation identifier used by deterministic dummy simulations.
     pub fn dummy_generation_id(&self) -> Result<String> {
@@ -117,18 +114,18 @@ where
     }
 
     /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
-    pub fn force_dummy_webrtc_connection_state_without_callback(
+    pub fn force_dummy_connection_state_without_callback(
         &self,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> Result<()> {
         self.upgrade()?
-            .force_dummy_webrtc_connection_state_without_callback(state)
+            .force_dummy_connection_state_without_callback(state)
     }
 
     /// Test hook: override dummy data-channel readiness without dispatching callbacks.
-    pub fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+    pub fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
         self.upgrade()?
-            .force_dummy_data_channel_open_without_callback(open)
+            .force_dummy_channel_open_without_callback(open)
     }
 }
 
@@ -136,10 +133,10 @@ where
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl<C, S> ConnectionInterface for ConnectionRef<C>
 where
-    C: ConnectionInterface<Error = Error, Sdp = S> + MaybeSendSync + ?Sized,
+    C: ConnectionInterface<Error = Error, Handshake = S> + MaybeSendSync + ?Sized,
     for<'async_trait> S: Serialize + DeserializeOwned + Send + Sync + 'async_trait,
 {
-    type Sdp = C::Sdp;
+    type Handshake = C::Handshake;
     type Error = C::Error;
 
     async fn send_message_with_permit(
@@ -175,7 +172,7 @@ where
         self.upgrade()
             .map(|connection| connection.connection_state_snapshot())
             .unwrap_or(ConnectionStateSnapshot::new(
-                WebrtcConnectionState::Closed,
+                TransportConnectionState::Closed,
                 false,
             ))
     }
@@ -190,23 +187,23 @@ where
     fn max_message_size(&self) -> usize {
         self.upgrade()
             .map(|c| c.max_message_size())
-            .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
+            .unwrap_or(MAX_CHANNEL_MESSAGE_SIZE)
     }
 
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        self.upgrade()?.webrtc_create_offer().await
+    async fn create_offer(&self) -> Result<Self::Handshake> {
+        self.upgrade()?.create_offer().await
     }
 
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
-        self.upgrade()?.webrtc_answer_offer(offer).await
+    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
+        self.upgrade()?.answer_offer(offer).await
     }
 
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
-        self.upgrade()?.webrtc_accept_answer(answer).await
+    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
+        self.upgrade()?.accept_answer(answer).await
     }
 
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        self.upgrade()?.webrtc_wait_for_data_channel_open().await
+    async fn wait_for_channel_open(&self) -> Result<()> {
+        self.upgrade()?.wait_for_channel_open().await
     }
 
     async fn close(&self) -> Result<()> {
@@ -224,18 +221,18 @@ where
     }
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_webrtc_connection_state_without_callback(
+    fn force_dummy_connection_state_without_callback(
         &self,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> Result<()> {
         self.upgrade()?
-            .force_dummy_webrtc_connection_state_without_callback(state)
+            .force_dummy_connection_state_without_callback(state)
     }
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+    fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
         self.upgrade()?
-            .force_dummy_data_channel_open_without_callback(open)
+            .force_dummy_channel_open_without_callback(open)
     }
 }
 
@@ -252,7 +249,7 @@ mod tests {
     #[cfg_attr(target_family = "wasm", async_trait(?Send))]
     #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl ConnectionInterface for Mock {
-        type Sdp = String;
+        type Handshake = String;
         type Error = Error;
 
         fn max_message_size(&self) -> usize {
@@ -276,16 +273,16 @@ mod tests {
         fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
             unreachable!()
         }
-        async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
+        async fn create_offer(&self) -> Result<Self::Handshake> {
             unreachable!()
         }
-        async fn webrtc_answer_offer(&self, _: Self::Sdp) -> Result<Self::Sdp> {
+        async fn answer_offer(&self, _: Self::Handshake) -> Result<Self::Handshake> {
             unreachable!()
         }
-        async fn webrtc_accept_answer(&self, _: Self::Sdp) -> Result<()> {
+        async fn accept_answer(&self, _: Self::Handshake) -> Result<()> {
             unreachable!()
         }
-        async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+        async fn wait_for_channel_open(&self) -> Result<()> {
             unreachable!()
         }
         async fn close(&self) -> Result<()> {
@@ -304,7 +301,7 @@ mod tests {
         drop(conn);
         assert_eq!(
             reference.max_message_size(),
-            MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            MAX_CHANNEL_MESSAGE_SIZE,
             "released ref reports the interop default"
         );
     }

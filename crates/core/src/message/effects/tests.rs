@@ -354,7 +354,7 @@ async fn test_successor_query_effect_registers_before_send_and_cancels_send_fail
     wait_for_connection_state(
         &first,
         second.did(),
-        rings_transport::core::transport::WebrtcConnectionState::Connected,
+        rings_transport::core::transport::TransportConnectionState::Connected,
     )
     .await?;
     first.dht().admit_connected(second.did(), None)?;

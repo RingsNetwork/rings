@@ -294,7 +294,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
     use crate::dht::Stabilizer;
     use crate::swarm::callback::SwarmTransportCallback;
     use crate::swarm::inbox::SwarmInboxDelivery;
-    use crate::swarm::transport::tests::open_dummy_data_channel_before_ice_connected;
+    use crate::swarm::transport::tests::open_dummy_channel_before_transport_connected;
 
     /// Production admission of `peer` over a routable dummy transport.
     async fn admit_routable(
@@ -305,7 +305,7 @@ async fn test_model_agrees_with_the_production_shell_on_the_unavailable_path() -
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;
-        open_dummy_data_channel_before_ice_connected(transport, peer).await?;
+        open_dummy_channel_before_transport_connected(transport, peer).await?;
         transport.dht.admit_connected(peer, None)?;
         assert!(transport.activate_connection_for_test(attempt)?);
         Ok(attempt)

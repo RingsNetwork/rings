@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::chunk::Chunk;
-use crate::consts::MAX_SDP_BYTES;
+use crate::consts::MAX_HANDSHAKE_BYTES;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacedEntryOperation;
@@ -78,27 +78,29 @@ impl DhtProtocolMode {
     }
 }
 
-/// Decode a connect-signaling SDP string, refusing one above [`MAX_SDP_BYTES`] (#1130).
-fn deserialize_connect_sdp<'de, D: serde::Deserializer<'de>>(
+/// Decode a connect-signaling handshake string, refusing one above [`MAX_HANDSHAKE_BYTES`] (#1130).
+fn deserialize_connect_handshake<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<String, D::Error> {
-    let sdp = String::deserialize(deserializer)?;
-    if sdp.len() > MAX_SDP_BYTES {
-        return Err(serde::de::Error::custom(Error::SdpAboveMax(sdp.len())));
+    let handshake = String::deserialize(deserializer)?;
+    if handshake.len() > MAX_HANDSHAKE_BYTES {
+        return Err(serde::de::Error::custom(Error::HandshakeAboveMax(
+            handshake.len(),
+        )));
     }
-    Ok(sdp)
+    Ok(handshake)
 }
 
 /// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
 ///
 /// Wire law: the codec writes a struct as its fields in order with no framing, so
-/// `{sdp, dht_protocol_mode, relay_custody}` encodes byte-for-byte as `{sdp, network_id,
+/// `{handshake, dht_protocol_mode, relay_custody}` encodes byte-for-byte as `{handshake, network_id,
 /// storage_redundancy, dht_virtual_nodes, relay_custody}` (see the tests).
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeSend {
-    /// sdp offer of webrtc
-    #[serde(deserialize_with = "deserialize_connect_sdp")]
-    pub sdp: String,
+    /// Serialized transport handshake offer.
+    #[serde(deserialize_with = "deserialize_connect_handshake")]
+    pub handshake: String,
     /// The DHT protocol the offering node runs; the receiver answers only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
     /// Whether the offering node holds relay mail; relay custody moves past one that does not.
@@ -110,9 +112,9 @@ pub struct ConnectNodeSend {
 /// Same wire law as [`ConnectNodeSend`].
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
-    /// sdp answer of webrtc
-    #[serde(deserialize_with = "deserialize_connect_sdp")]
-    pub sdp: String,
+    /// Serialized transport handshake answer.
+    #[serde(deserialize_with = "deserialize_connect_handshake")]
+    pub handshake: String,
     /// The DHT protocol the answering node runs; the initiator admits only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
     /// Whether the answering node holds relay mail; relay custody moves past one that does not.

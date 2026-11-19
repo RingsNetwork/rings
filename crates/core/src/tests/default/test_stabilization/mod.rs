@@ -8,7 +8,7 @@ use rings_measure::ProvisionalEvidenceStore;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::connections::dummy_controlled;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 #[cfg(not(target_family = "wasm"))]
 use tokio::time::timeout;
 #[cfg(not(target_family = "wasm"))]
@@ -193,20 +193,20 @@ impl BehaviourJudgement for CountingMeasure {
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-struct PendingDataChannelWaitGuard;
+struct PendingChannelWaitGuard;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl PendingDataChannelWaitGuard {
+impl PendingChannelWaitGuard {
     fn new() -> Self {
-        dummy_controlled::set_wait_for_data_channel_open_pending(true);
+        dummy_controlled::set_wait_for_channel_open_pending(true);
         Self
     }
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl Drop for PendingDataChannelWaitGuard {
+impl Drop for PendingChannelWaitGuard {
     fn drop(&mut self) {
-        dummy_controlled::set_wait_for_data_channel_open_pending(false);
+        dummy_controlled::set_wait_for_channel_open_pending(false);
     }
 }
 
@@ -253,14 +253,14 @@ fn prepare_repair_node_with_storage(
     let session = DelegateeKey::new_with_seckey(&key)?;
     let mut builder = SwarmBuilder::new(
         0,
-        crate::tests::test_transport(super::TEST_ICE_SERVERS),
+        crate::tests::test_transport(super::TEST_TRAVERSAL_SERVERS),
         storage,
         session,
     )
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-        .dht_storage_redundancy(2)
-        .dht_virtual_nodes(0);
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
+    .dht_storage_redundancy(2)
+    .dht_virtual_nodes(0);
     if let Some(measure) = measure {
         builder = builder.measure(measure);
     }
@@ -333,7 +333,7 @@ async fn test_stabilization_once() -> Result<()> {
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> Result<()> {
+async fn test_get_and_check_connection_times_out_wedged_channel_wait() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;
@@ -342,7 +342,7 @@ async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> R
 
     wait_for_successor(&node1, node2.did()).await?;
 
-    let _guard = PendingDataChannelWaitGuard::new();
+    let _guard = PendingChannelWaitGuard::new();
     let conn = timeout(
         Duration::from_secs(1),
         node1
@@ -371,14 +371,14 @@ async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
     node1
         .swarm
         .transport
-        .force_peer_data_channel_open_without_callback(node2.did(), Some(true))?;
+        .force_peer_channel_open_without_callback(node2.did(), Some(true))?;
 
     let conn = timeout(
         Duration::from_secs(1),
@@ -580,9 +580,9 @@ async fn test_clean_unavailable_connections_observes_disconnected_peer_without_c
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
 
     assert_eq!(
@@ -649,9 +649,9 @@ async fn test_clean_unavailable_connections_fails_over_to_live_successor_tail() 
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             disconnected_head,
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
 
     node1
@@ -681,8 +681,8 @@ async fn test_clean_unavailable_connections_fails_over_to_live_successor_tail() 
             .swarm
             .transport
             .get_connection(live_tail)
-            .map(|conn| conn.webrtc_connection_state()),
-        Some(WebrtcConnectionState::Connected)
+            .map(|conn| conn.connection_state()),
+        Some(TransportConnectionState::Connected)
     );
 
     Ok(())
@@ -714,9 +714,9 @@ async fn test_clean_unavailable_connections_prunes_disconnected_non_head_slots()
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             disconnected_tail,
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
 
     node1
@@ -739,8 +739,8 @@ async fn test_clean_unavailable_connections_prunes_disconnected_non_head_slots()
             .swarm
             .transport
             .admitted_connection(disconnected_tail)?
-            .map(|conn| conn.webrtc_connection_state()),
-        Some(WebrtcConnectionState::Disconnected),
+            .map(|conn| conn.connection_state()),
+        Some(TransportConnectionState::Disconnected),
         "topology prune must not close a transiently disconnected transport"
     );
     assert!(node1
@@ -772,21 +772,21 @@ async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_f
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node3.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
     node1
         .swarm
         .transport
-        .force_peer_data_channel_open_without_callback(node3.did(), Some(true))?;
+        .force_peer_channel_open_without_callback(node3.did(), Some(true))?;
 
     node1
         .swarm
@@ -804,8 +804,8 @@ async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_f
             .swarm
             .transport
             .admitted_connection(node2.did())?
-            .map(|conn| conn.webrtc_connection_state()),
-        Some(WebrtcConnectionState::Disconnected),
+            .map(|conn| conn.connection_state()),
+        Some(TransportConnectionState::Disconnected),
         "head successor must wait for grace when every fallback is also bad"
     );
     assert_eq!(
@@ -813,8 +813,8 @@ async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_f
             .swarm
             .transport
             .admitted_connection(node3.did())?
-            .map(|conn| conn.webrtc_connection_state()),
-        Some(WebrtcConnectionState::Disconnected),
+            .map(|conn| conn.connection_state()),
+        Some(TransportConnectionState::Disconnected),
         "bad finger is pruned from topology before transport grace closes it"
     );
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
@@ -837,9 +837,9 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
 
     node1
@@ -854,8 +854,8 @@ async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Resu
             .swarm
             .transport
             .admitted_connection(node2.did())?
-            .map(|conn| conn.webrtc_connection_state()),
-        Some(WebrtcConnectionState::Disconnected)
+            .map(|conn| conn.connection_state()),
+        Some(TransportConnectionState::Disconnected)
     );
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
     assert!(!node1.dht().successors().contains(&node2.did())?);

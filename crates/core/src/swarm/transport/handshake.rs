@@ -34,7 +34,7 @@ use super::pending::PendingConnectionAttempt;
 use super::pending::PendingTransportConnection;
 use super::pending::RawConnectionOwner;
 use super::SwarmTransport;
-use crate::consts::MAX_SDP_BYTES;
+use crate::consts::MAX_HANDSHAKE_BYTES;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
@@ -203,7 +203,7 @@ impl SwarmTransport {
         let marked = self.with_connection_lifecycle(|| {
             Ok(self
                 .peer_lifecycles()?
-                .mark_offer_sent(attempt, offer.sdp.clone(), tx_id))
+                .mark_offer_sent(attempt, offer.handshake.clone(), tx_id))
         })?;
         if marked {
             Ok(())
@@ -277,9 +277,9 @@ impl SwarmTransport {
         &self,
         pending: &PendingTransportConnection,
     ) -> Result<ConnectNodeSend> {
-        let offer = pending.connection().connection.webrtc_create_offer();
+        let offer = pending.connection().connection.create_offer();
         Ok(ConnectNodeSend {
-            sdp: self.negotiate_sdp(pending, "offer", offer).await?,
+            handshake: self.negotiate_handshake(pending, "offer", offer).await?,
             dht_protocol_mode: self.dht_protocol_mode(),
             relay_custody: self.dht.relay_custody(),
         })
@@ -291,9 +291,9 @@ impl SwarmTransport {
         pending: &PendingTransportConnection,
         offer: String,
     ) -> Result<ConnectNodeReport> {
-        let answer = pending.connection().connection.webrtc_answer_offer(offer);
+        let answer = pending.connection().connection.answer_offer(offer);
         Ok(ConnectNodeReport {
-            sdp: self.negotiate_sdp(pending, "answer", answer).await?,
+            handshake: self.negotiate_handshake(pending, "answer", answer).await?,
             dht_protocol_mode: self.dht_protocol_mode(),
             relay_custody: self.dht.relay_custody(),
         })
@@ -303,7 +303,7 @@ impl SwarmTransport {
     /// ICE gathering, and serialize its description. A failure reports why
     /// ([`Self::classify_step_failure`]): a generation that lost its slot meanwhile says how,
     /// and a current one is abandoned.
-    async fn negotiate_sdp<T, E>(
+    async fn negotiate_handshake<T, E>(
         &self,
         pending: &PendingTransportConnection,
         side: &'static str,
@@ -319,7 +319,7 @@ impl SwarmTransport {
             local = %self.dht.did,
             peer = %attempt.peer,
             generation = attempt.generation,
-            state = ?pending.connection().webrtc_connection_state(),
+            state = ?pending.connection().connection_state(),
             side,
             "connection description create start"
         );
@@ -342,12 +342,12 @@ impl SwarmTransport {
             }
         };
         match serde_json::to_string(&description) {
-            Ok(serialized) if serialized.len() > MAX_SDP_BYTES => {
+            Ok(serialized) if serialized.len() > MAX_HANDSHAKE_BYTES => {
                 let operation = format!("serializing connection {side}");
                 Err(self
                     .classify_step_failure(
                         attempt,
-                        Error::SdpAboveMax(serialized.len()),
+                        Error::HandshakeAboveMax(serialized.len()),
                         &operation,
                     )
                     .await?)
@@ -401,10 +401,10 @@ impl SwarmTransport {
             };
             match crossing_offer_verdict(&handshake, carrier, self.dht.did, peer) {
                 CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
-                CrossingOfferVerdict::CounterOffer { sdp, tx_id } => {
+                CrossingOfferVerdict::CounterOffer { handshake, tx_id } => {
                     return Ok(IncomingOfferSlot::CounterOffer(CounterOffer {
                         offer: ConnectNodeSend {
-                            sdp,
+                            handshake,
                             dht_protocol_mode: self.dht_protocol_mode(),
                             relay_custody: self.dht.relay_custody(),
                         },
@@ -473,10 +473,11 @@ impl SwarmTransport {
                 "connection offer DHT protocol mismatch".to_string(),
             ));
         }
-        if offer_msg.sdp.len() > MAX_SDP_BYTES {
-            return Err(Error::SdpAboveMax(offer_msg.sdp.len()));
+        if offer_msg.handshake.len() > MAX_HANDSHAKE_BYTES {
+            return Err(Error::HandshakeAboveMax(offer_msg.handshake.len()));
         }
-        let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        let offer: String =
+            serde_json::from_str(&offer_msg.handshake).map_err(Error::Deserialize)?;
         self.transport
             .validate_remote_offer(&offer)
             .map_err(Error::Transport)?;
@@ -554,11 +555,12 @@ impl SwarmTransport {
                 "connection answer DHT protocol mismatch".to_string(),
             ));
         }
-        if answer_msg.sdp.len() > MAX_SDP_BYTES {
-            return Err(Error::SdpAboveMax(answer_msg.sdp.len()));
+        if answer_msg.handshake.len() > MAX_HANDSHAKE_BYTES {
+            return Err(Error::HandshakeAboveMax(answer_msg.handshake.len()));
         }
 
-        let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
+        let answer: String =
+            serde_json::from_str(&answer_msg.handshake).map_err(Error::Deserialize)?;
 
         let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
             (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))
@@ -588,11 +590,11 @@ impl SwarmTransport {
             local = %self.dht.did,
             peer = %peer,
             generation = attempt.generation,
-            answer_sdp_bytes = answer.len(),
-            state = ?conn.webrtc_connection_state(),
+            answer_handshake_bytes = answer.len(),
+            state = ?conn.connection_state(),
             "connection answer accept start"
         );
-        if let Err(error) = conn.connection.webrtc_accept_answer(answer).await {
+        if let Err(error) = conn.connection.accept_answer(answer).await {
             self.abandon_pending_connection(attempt, "accepting connection answer")
                 .await;
             tracing::warn!(
@@ -617,7 +619,7 @@ impl SwarmTransport {
             local = %self.dht.did,
             peer = %peer,
             generation = attempt.generation,
-            state = ?conn.webrtc_connection_state(),
+            state = ?conn.connection_state(),
             "connection answer accept complete"
         );
 

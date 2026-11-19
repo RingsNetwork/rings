@@ -220,11 +220,11 @@ async fn apply_run_overrides(
     if let Some(external_ip) = args.external_ip.take() {
         c.external_ip = Some(external_ip);
     }
-    if args.webrtc_udp_port_min.is_some() {
-        c.webrtc_udp_port_min = args.webrtc_udp_port_min;
+    if args.udp_port_min.is_some() {
+        c.udp_port_min = args.udp_port_min;
     }
-    if args.webrtc_udp_port_max.is_some() {
-        c.webrtc_udp_port_max = args.webrtc_udp_port_max;
+    if args.udp_port_max.is_some() {
+        c.udp_port_max = args.udp_port_max;
     }
     if let Some(stabilize_interval) = args.stabilize_interval.take() {
         c.stabilize_interval = stabilize_interval;

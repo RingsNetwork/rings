@@ -8,10 +8,10 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::pool::ChannelLane;
-use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
+use rings_transport::core::pool::CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::ConnectionInterface;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::pending::ActiveConnectionSet;
 use super::pending::ConnectionLifecycleBoundary;
@@ -34,18 +34,18 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::utils::sleep;
 
 /// Maximum wait for the data channel to open after the peer connection is usable.
-const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
+const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 /// Poll cadence while waiting for the combined WebRTC/data-channel readiness snapshot.
 const TRANSPORT_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Maximum wait for a close operation before lifecycle cleanup continues.
-pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.close;
+pub(super) const CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.close;
 
 /// Await a transport close future without letting a slow backend block lifecycle cleanup forever.
 pub(super) async fn await_bounded_connection_close(
     close: impl Future<Output = Result<()>>,
 ) -> Result<bool> {
     let close = close.fuse();
-    let timeout = sleep(DATA_CHANNEL_CLOSE_TIMEOUT).fuse();
+    let timeout = sleep(CHANNEL_CLOSE_TIMEOUT).fuse();
     pin_mut!(close, timeout);
     select! {
         result = close => result.map(|()| true),
@@ -173,7 +173,7 @@ impl PeerRemovalOutcome {
 }
 
 /// The credit a peer holds unused on each channel lane of one connection, indexed by lane.
-pub(crate) type LaneCredit = [u64; DATA_CHANNEL_POOL_SIZE as usize];
+pub(crate) type LaneCredit = [u64; CHANNEL_POOL_SIZE as usize];
 
 impl SwarmTransport {
     /// The credit the peer of `attempt` holds unused on each channel lane of its connection, as
@@ -788,7 +788,7 @@ impl SwarmTransport {
         if !await_bounded_connection_close(close).await? {
             tracing::warn!(
                 peer = %connection.peer,
-                timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
+                timeout_ms = CHANNEL_CLOSE_TIMEOUT.as_millis(),
                 "timed out cleaning up retired transport connection"
             );
         }
@@ -796,21 +796,21 @@ impl SwarmTransport {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn force_peer_connection_state_without_callback(
+    pub(crate) fn force_connection_state_without_callback(
         &self,
         peer: Did,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> Result<()> {
         let Some(conn) = self.get_raw_connection(peer) else {
             return Err(Error::SwarmMissTransport(peer));
         };
         conn.connection
-            .force_dummy_webrtc_connection_state_without_callback(state)
+            .force_dummy_connection_state_without_callback(state)
             .map_err(Error::Transport)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn force_peer_data_channel_open_without_callback(
+    pub(crate) fn force_peer_channel_open_without_callback(
         &self,
         peer: Did,
         open: Option<bool>,
@@ -819,7 +819,7 @@ impl SwarmTransport {
             return Err(Error::SwarmMissTransport(peer));
         };
         conn.connection
-            .force_dummy_data_channel_open_without_callback(open)
+            .force_dummy_channel_open_without_callback(open)
             .map_err(Error::Transport)
     }
 
@@ -834,7 +834,7 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Option<AdmittedConnection> {
-        self.get_and_check_send_connection_with_timeout(peer, DATA_CHANNEL_OPEN_TIMEOUT)
+        self.get_and_check_send_connection_with_timeout(peer, CHANNEL_OPEN_TIMEOUT)
             .await
     }
 
@@ -852,12 +852,12 @@ impl SwarmTransport {
         }
 
         tracing::debug!(
-            target: "rings_core::transport::data_channel",
+            target: "rings_core::transport::channel",
             local = %self.dht.did,
             peer = %peer,
             state = ?initial_readiness.state(),
             readiness = initial_readiness.as_str(),
-            data_channel_open = initial_readiness.data_channel_open(),
+            channel_open = initial_readiness.channel_open(),
             timeout_ms = wait_timeout.as_millis(),
             "waiting for active connection data channel"
         );
@@ -869,7 +869,7 @@ impl SwarmTransport {
 
             select! {
                 result = wait_for_ready => result.err().map(|e| format!("transport_wait_failed: {e:?}")),
-                _ = timeout => Some("data_channel_open_wait_timeout".to_string()),
+                _ = timeout => Some("channel_open_wait_timeout".to_string()),
             }
         };
 
@@ -881,7 +881,7 @@ impl SwarmTransport {
             // impatient sender cannot tear down a link WebRTC may still heal.
             let final_readiness = conn.readiness();
             tracing::warn!(
-                target: "rings_core::transport::data_channel",
+                target: "rings_core::transport::channel",
                 local = %self.dht.did,
                 peer = %peer,
                 generation = attempt.generation(),
@@ -889,7 +889,7 @@ impl SwarmTransport {
                 initial_readiness = initial_readiness.as_str(),
                 final_state = ?final_readiness.state(),
                 final_readiness = final_readiness.as_str(),
-                final_data_channel_open = final_readiness.data_channel_open(),
+                final_channel_open = final_readiness.channel_open(),
                 timeout_ms = wait_timeout.as_millis(),
                 reason = %reason,
                 "send connection data channel not open, send deferred to stabilization"
@@ -898,7 +898,7 @@ impl SwarmTransport {
         };
 
         tracing::debug!(
-            target: "rings_core::transport::data_channel",
+            target: "rings_core::transport::channel",
             local = %self.dht.did,
             peer = %peer,
             readiness = conn.readiness().as_str(),
@@ -913,7 +913,7 @@ impl SwarmTransport {
 async fn wait_for_transport_readiness(connection: &SwarmConnection) -> Result<()> {
     connection
         .connection
-        .webrtc_wait_for_data_channel_open()
+        .wait_for_channel_open()
         .await
         .map_err(Error::Transport)?;
     loop {

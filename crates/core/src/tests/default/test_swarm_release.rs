@@ -18,13 +18,13 @@ use std::net::SocketAddr;
 use std::net::UdpSocket;
 use std::sync::Arc;
 
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::fixture_builder;
 use super::prepare_node;
 use super::wait_for_connection_state;
 use super::Node;
-use super::TEST_ICE_SERVERS;
+use super::TEST_TRAVERSAL_SERVERS;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -59,7 +59,7 @@ async fn open_replay_store(root: &std::path::Path) -> Result<FileStorage> {
 /// A fixture node whose replay store is the file store at `root`.
 async fn prepare_node_on_replay_store(root: &std::path::Path) -> Result<Node> {
     let store = open_replay_store(root).await?;
-    let builder = fixture_builder(&SecretKey::random(), TEST_ICE_SERVERS)?;
+    let builder = fixture_builder(&SecretKey::random(), TEST_TRAVERSAL_SERVERS)?;
     Ok(Node::build(builder.replay_storage(Box::new(store))))
 }
 
@@ -85,12 +85,12 @@ fn connect_by_hand(node: Running<'_>, peer: Running<'_>) -> Result<MessagePayloa
     node.runtime.block_on(wait_for_connection_state(
         node.node,
         peer.node.did(),
-        WebrtcConnectionState::Connected,
+        TransportConnectionState::Connected,
     ))?;
     peer.runtime.block_on(wait_for_connection_state(
         peer.node,
         node.node.did(),
-        WebrtcConnectionState::Connected,
+        TransportConnectionState::Connected,
     ))?;
     Ok(offer)
 }
@@ -105,8 +105,8 @@ fn bound_host_candidates(offer: &MessagePayload) -> Result<Vec<SocketAddr>> {
         ));
     };
     // The handshake carries the SDP as a JSON string, as the answerer decodes it.
-    let sdp: String = serde_json::from_str(&send.sdp).map_err(Error::Deserialize)?;
-    Ok(sdp
+    let handshake: String = serde_json::from_str(&send.handshake).map_err(Error::Deserialize)?;
+    Ok(handshake
         .lines()
         .filter_map(host_candidate)
         .filter(|address| {

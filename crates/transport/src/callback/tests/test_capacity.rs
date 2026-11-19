@@ -7,7 +7,7 @@ use bytes::Bytes;
 use super::*;
 use crate::core::credit::LANE_CREDIT_WINDOW;
 use crate::core::pool::ChannelLane;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 
 /// Law 3 (pool, rebalance) and Prop. 3(5): a data lane is lent within its edge's fair claim
@@ -195,7 +195,7 @@ fn test_an_idle_lane_is_shrunk_and_returns_its_share() {
 fn test_each_lane_admits_exactly_its_own_credit_window() {
     let callback = callback("peer");
     let custom = wire(&TransportMessage::Custom(Bytes::from_static(b"data")));
-    let held = (0..DATA_CHANNEL_POOL_SIZE)
+    let held = (0..CHANNEL_POOL_SIZE)
         .flat_map(|index| {
             let lane = ChannelLane::new(index);
             let window = admit_window(&callback, &custom, lane);
@@ -213,7 +213,7 @@ fn test_each_lane_admits_exactly_its_own_credit_window() {
     assert_eq!(held.len(), INBOUND_PEER_FRAME_CAPACITY);
     assert_eq!(
         callback.link_credit().occupancy(),
-        [LANE_CREDIT_WINDOW; DATA_CHANNEL_POOL_SIZE as usize]
+        [LANE_CREDIT_WINDOW; CHANNEL_POOL_SIZE as usize]
     );
     drop(held);
     assert_eq!(callback.link_credit().occupancy(), [0, 0, 0, 0]);
@@ -244,7 +244,7 @@ fn test_credit_frames_are_applied_and_never_admitted() {
 #[test]
 fn test_inbound_data_channels_are_admitted_by_lane_label_once() {
     let admitted = AtomicU8::new(0);
-    for index in 0..DATA_CHANNEL_POOL_SIZE {
+    for index in 0..CHANNEL_POOL_SIZE {
         let label = data_channel_label(ChannelLane::new(index));
         assert_eq!(
             admit_inbound_data_channel(&admitted, &label),
@@ -252,7 +252,7 @@ fn test_inbound_data_channels_are_admitted_by_lane_label_once() {
         );
         assert_eq!(admit_inbound_data_channel(&admitted, &label), None);
     }
-    let beyond = data_channel_label(ChannelLane::new(DATA_CHANNEL_POOL_SIZE));
+    let beyond = data_channel_label(ChannelLane::new(CHANNEL_POOL_SIZE));
     assert_eq!(admit_inbound_data_channel(&admitted, &beyond), None);
     assert_eq!(
         admit_inbound_data_channel(&AtomicU8::new(0), "invalid-frame-accounting"),
@@ -275,7 +275,7 @@ fn test_a_terminal_state_fails_a_sender_waiting_for_credit() {
 
     futures::executor::block_on(
         callback
-            .on_peer_connection_state_change(crate::core::transport::WebrtcConnectionState::Closed),
+            .on_connection_state_change(crate::core::transport::TransportConnectionState::Closed),
     );
 
     assert!(matches!(

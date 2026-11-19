@@ -227,17 +227,19 @@ pub(crate) struct RunCommand {
 
     #[arg(
         long,
-        help = "Minimum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-max.",
+        alias = "webrtc-udp-port-min",
+        help = "Minimum local UDP port used for transport candidate gathering. Must be paired with --udp-port-max.",
         env
     )]
-    pub webrtc_udp_port_min: Option<u16>,
+    pub udp_port_min: Option<u16>,
 
     #[arg(
         long,
-        help = "Maximum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-min.",
+        alias = "webrtc-udp-port-max",
+        help = "Maximum local UDP port used for transport candidate gathering. Must be paired with --udp-port-min.",
         env
     )]
-    pub webrtc_udp_port_max: Option<u16>,
+    pub udp_port_max: Option<u16>,
 
     #[arg(
         long,

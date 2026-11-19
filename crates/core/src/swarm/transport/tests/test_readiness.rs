@@ -11,7 +11,7 @@ async fn admitted_dummy_transport() -> Result<(Arc<SwarmTransport>, Did)> {
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
     Ok((transport, peer))
 }
@@ -25,17 +25,17 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
     transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+        .force_connection_state_without_callback(peer, TransportConnectionState::Disconnected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
 
     assert!(transport.begin_connection_admission_for_test(attempt)?);
     assert!(matches!(
         transport.commit_connection_admission(attempt),
         Err(Error::TransportNotReady {
-            state: WebrtcConnectionState::Disconnected,
-            data_channel_open: true,
+            state: TransportConnectionState::Disconnected,
+            channel_open: true,
         })
     ));
     assert!(!transport.has_active_connection(peer));
@@ -47,20 +47,19 @@ async fn test_disconnected_open_transport_cannot_commit_admission() -> Result<()
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn test_data_channel_open_before_peer_state_converges_preserves_pending_admission(
-) -> Result<()> {
+async fn test_channel_open_before_peer_state_converges_preserves_pending_admission() -> Result<()> {
     let transport = default_transport()?;
     let peer = SecretKey::random().address().into();
     let callback = SwarmTransportCallback::new(Arc::clone(&transport));
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
 
     let callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(attempt);
     callback
-        .on_data_channel_open(&peer.to_string())
+        .on_channel_open(&peer.to_string())
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -69,10 +68,9 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
     assert!(!transport.dht.successors().contains(&peer)?);
     assert!(transport.get_raw_connection(peer).is_some());
 
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
+    transport.force_connection_state_without_callback(peer, TransportConnectionState::Connected)?;
     callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Connected)
+        .on_connection_state_change(&peer.to_string(), TransportConnectionState::Connected)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -87,8 +85,8 @@ async fn test_data_channel_open_before_peer_state_converges_preserves_pending_ad
 async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Result<()> {
     let (transport, peer) = admitted_dummy_transport().await?;
     transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+        .force_connection_state_without_callback(peer, TransportConnectionState::Disconnected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
 
     assert!(transport.has_active_connection(peer));
     assert!(transport.get_connection(peer).is_none());
@@ -101,9 +99,8 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
         .ok_or(Error::SwarmMissTransport(peer))?;
     assert!(!raw.readiness().can_make_progress());
 
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(false))?;
+    transport.force_connection_state_without_callback(peer, TransportConnectionState::Connected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(false))?;
     assert!(transport.get_connection(peer).is_none());
     assert!(!PayloadSender::is_connected(
         &transport.application_egress(),
@@ -120,8 +117,8 @@ async fn test_non_ready_transport_is_admitted_but_not_routable_or_live() -> Resu
 async fn test_tracked_send_rejects_disconnected_open_transport() -> Result<()> {
     let (transport, peer) = admitted_dummy_transport().await?;
     transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+        .force_connection_state_without_callback(peer, TransportConnectionState::Disconnected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
 
     let payload = MessagePayload::new_send(
         Message::custom(b"must-not-send")?,
@@ -132,8 +129,8 @@ async fn test_tracked_send_rejects_disconnected_open_transport() -> Result<()> {
     assert!(matches!(
         transport.send_payload_tracked(payload).await,
         Err(Error::TransportNotReady {
-            state: WebrtcConnectionState::Disconnected,
-            data_channel_open: true,
+            state: TransportConnectionState::Disconnected,
+            channel_open: true,
         })
     ));
 

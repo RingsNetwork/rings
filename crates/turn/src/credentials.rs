@@ -827,7 +827,9 @@ mod tests {
         let turn_with_pk =
             format_turn_server_url("turn://198.51.100.10:3478?transport=udp", server_pubkey)
                 .unwrap();
-        let raw = format!("stun://stun.l.google.com:19302;{turn_with_pk};turn://bob:secret@198.51.100.11:3478");
+        let raw = format!(
+            "stun://stun.l.google.com:19302;{turn_with_pk};turn://bob:secret@198.51.100.11:3478"
+        );
         let signed = delegatee_key.sign_ice_servers(&raw).unwrap();
         let entries: Vec<&str> = signed.split(';').collect();
         assert_eq!(entries.len(), 3);

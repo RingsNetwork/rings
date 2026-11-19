@@ -38,8 +38,6 @@ use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
-use rings_turn::TurnCredentialSigner;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -109,11 +107,12 @@ mod config;
 pub(crate) mod handshake;
 mod horizon;
 mod messaging;
+pub mod network;
 mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
-pub(crate) use config::parse_webrtc_udp_port_range;
+pub(crate) use config::parse_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 pub(crate) use handshake::HandshakeFailure;
@@ -123,6 +122,18 @@ pub use horizon::DelegationHorizon;
 pub(crate) use horizon::SessionKeyRing;
 pub use horizon::SigningState;
 pub use horizon::SIGNING_HORIZON_LEAD_MS;
+pub use network::AddressingScope;
+pub use network::DuplexMode;
+pub use network::HandshakeSemantic;
+pub use network::NetworkParameters;
+pub use network::NodeNetworkParameters;
+pub use network::TransportKinematics;
+pub use network::TransportKinematicsError;
+pub use network::TransportNetworkConfig;
+pub use network::TransportParameterError;
+pub use network::TransportTimingBudget;
+pub use network::UdpPortRange;
+pub use network::UdpPortRangeError;
 pub(crate) use registration_daemon::sleep_unless_stopped;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.
@@ -135,15 +146,6 @@ const fn is_final_lookup_poll(attempt: u32) -> bool {
     attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
 }
 
-/// Callback updating the concrete transport's signed ICE server configuration on session key
-/// rotation (#1291).
-#[cfg(not(target_family = "wasm"))]
-pub(crate) type IceServersUpdater = Arc<dyn Fn(&str) + Send + Sync>;
-/// Callback updating the concrete transport's signed ICE server configuration on session key
-/// rotation (#1291).
-#[cfg(target_family = "wasm")]
-pub(crate) type IceServersUpdater = Arc<dyn Fn(&str)>;
-
 /// Processor for rings-node rpc server.
 ///
 /// Cloning shares the same node handle; publishes from any clone are serialized
@@ -154,12 +156,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Live delegatee key and retained unexpired previous keys, shared across clones (#1153).
     session_keys: Arc<SessionKeyRing>,
-    /// Raw (pre-signing) ICE servers string retained for re-signing on session key renewal (#1291).
-    raw_ice_servers: Arc<str>,
-    /// Last signed ICE servers string installed into the concrete transport (#1291).
-    signed_ice_servers: Arc<std::sync::RwLock<String>>,
-    /// Updater that atomically installs freshly signed ICE servers into the concrete transport.
-    ice_servers_updater: IceServersUpdater,
+    /// Abstract network parameters customizing this node's transport (#1291).
+    network_parameters: Arc<dyn NodeNetworkParameters>,
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
@@ -230,7 +228,7 @@ impl Processor {
     }
 
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
-    /// [`SessionKeyRing::renew_with`], updating the swarm transport and signed TURN ICE
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport and session-bound transport
     /// credentials in lockstep on success (#1153, #1291).
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
@@ -243,25 +241,27 @@ impl Processor {
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
         let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            let signed_ice = next
-                .sign_ice_servers(&self.raw_ice_servers)
-                .map_err(Error::CoreError)?;
+            let credential = self.network_parameters.derive_session_credential(next)?;
             persist(next)?;
             self.swarm
                 .set_delegatee_key(next.clone())
                 .map_err(Error::CoreError)?;
-            (self.ice_servers_updater)(&signed_ice);
+            if let Some(ref cred) = credential {
+                self.swarm.transport().update_session_credentials(cred);
+            }
             Ok(())
         })?;
         Ok(horizon)
     }
 
-    /// Return the currently installed signed ICE server configuration string.
-    pub fn signed_ice_servers(&self) -> String {
-        self.signed_ice_servers
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    /// Return the currently installed session-bound transport credential string, if any.
+    pub fn session_transport_credentials(&self) -> Option<String> {
+        self.swarm.transport().session_credentials()
+    }
+
+    /// Return the [`NodeNetworkParameters`] customizing this processor's transport.
+    pub fn network_parameters(&self) -> &Arc<dyn NodeNetworkParameters> {
+        &self.network_parameters
     }
 
     /// Replace this node's active session key in process at `now_ms`, retaining the previous key

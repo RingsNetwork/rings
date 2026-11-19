@@ -5,9 +5,9 @@ use super::ConnectionStateCell;
 use super::ConnectionStateSnapshot;
 use super::IrrevocableSendGuard;
 use super::SendPermit;
+use super::TransportConnectionState;
 use super::TransportMessage;
-use super::WebrtcConnectionState;
-use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use super::MAX_CHANNEL_MESSAGE_SIZE;
 use super::MIN_MAX_MESSAGE_SIZE;
 
 mod test_send_permit;

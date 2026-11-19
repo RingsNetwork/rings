@@ -16,9 +16,9 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
         Box::new(MemStorage::new()),
         local,
     )
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
 
@@ -100,9 +100,9 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
         Box::new(MemStorage::new()),
         local,
     )
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
     let relay = pending_peer(&transport).await?;
@@ -158,8 +158,8 @@ async fn spoofed_transaction_destination_with_local_relay_destination_is_rejecte
         Box::new(MemStorage::new()),
         local,
     )
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .build();
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
     let relay = pending_peer(&transport).await?;
@@ -237,11 +237,11 @@ async fn redirected_frames_enforce_replay_and_origin_quota_at_terminating_node()
         Box::new(MemStorage::new()),
         local,
     )
-        .dht_virtual_nodes(0)
-        .dht_storage_redundancy(1)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .dht_virtual_nodes(0)
+    .dht_storage_redundancy(1)
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.admit(&transport).await?;
@@ -396,14 +396,14 @@ async fn offline_inbox_hold_enforces_final_admission_at_intercepting_holder() ->
         Box::new(MemStorage::new()),
         local,
     )
-        .relay_storage(Box::new(MemStorage::new()))
-        .relay_replication(crate::dht::RelayReplication {
-            replicas: 1,
-            age_gate_ms: 0,
-        })
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .relay_storage(Box::new(MemStorage::new()))
+    .relay_replication(crate::dht::RelayReplication {
+        replicas: 1,
+        age_gate_ms: 0,
+    })
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -497,14 +497,14 @@ async fn test_queued_forward_becomes_offline_hold_enforces_final_admission() -> 
         Box::new(MemStorage::new()),
         local,
     )
-        .relay_storage(Box::new(MemStorage::new()))
-        .relay_replication(crate::dht::RelayReplication {
-            replicas: 1,
-            age_gate_ms: 0,
-        })
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .relay_storage(Box::new(MemStorage::new()))
+    .relay_replication(crate::dht::RelayReplication {
+        replicas: 1,
+        age_gate_ms: 0,
+    })
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -606,11 +606,11 @@ async fn intermediate_redirecting_hop_does_not_charge_local_admission() -> Resul
         Box::new(MemStorage::new()),
         local,
     )
-        .dht_virtual_nodes(0)
-        .dht_storage_redundancy(1)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .dht_virtual_nodes(0)
+    .dht_storage_redundancy(1)
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -764,9 +764,9 @@ async fn compressed_storage_frames_charge_decompressed_bytes_and_reject_invalid_
         Box::new(MemStorage::new()),
         local,
     )
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;

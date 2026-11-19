@@ -100,7 +100,7 @@ async fn local_close_ends_a_gathering_in_progress() {
 
     closed.expect("local close succeeds");
     assert!(
-        matches!(&gathered, Err(Error::WebrtcLocalSdpGenerationError(message)) if message == "Local connection closed"),
+        matches!(&gathered, Err(Error::LocalHandshakeGenerationError(message)) if message == "Local connection closed"),
         "{gathered:?}"
     );
 }
@@ -304,7 +304,7 @@ async fn stalled_gathering_settles_once_candidates_arrive() {
     connection.target_tier.set(IceCandidateTier::Host);
 
     let sdp = connection
-        .webrtc_create_offer()
+        .create_offer()
         .await
         .expect("offer gathering must settle before the 60 s timeout");
     assert!(

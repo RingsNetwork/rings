@@ -4,8 +4,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::SharedTransport;
+use rings_transport::core::transport::TransportConnectionState;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -28,7 +28,6 @@ use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
-use rings_transport::connections::WebSysWebrtcTransport as Transport;
 use crate::swarm::Swarm;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::swarms_quiescent;
@@ -451,44 +450,44 @@ async fn get_fake_permission() {
     JsFuture::from(promise).await.unwrap();
 }
 
-async fn prepare_transport() -> Transport {
-    let trans = Transport::new(super::TEST_ICE_SERVERS, None, None);
+async fn prepare_transport() -> SharedTransport {
+    let trans = crate::tests::test_transport(super::TEST_TRAVERSAL_SERVERS);
     trans
-        .new_connection("test", Box::new(DefaultCallback))
+        .new_dyn_connection("test", Box::new(DefaultCallback))
         .await
         .unwrap();
     trans
 }
 
-/// Real browser ICE between two raw transports.
+/// Real browser transport handshake between two raw transports.
 ///
 /// This test exercises the real transport by design, so it runs under a per-test hang guard:
 /// a stalled handshake fails here by name instead of timing out the whole binary.
 #[wasm_bindgen_test]
-async fn test_ice_connection_establish() {
+async fn test_transport_connection_establish() {
     with_hang_guard(
-        "test_ice_connection_establish",
+        "test_transport_connection_establish",
         BROWSER_HANDSHAKE_HANG_GUARD,
         async {
             get_fake_permission().await;
             let trans1 = prepare_transport().await;
-            let conn1 = trans1.connection("test").unwrap();
+            let conn1 = trans1.dyn_connection("test").unwrap();
             let trans2 = prepare_transport().await;
-            let conn2 = trans2.connection("test").unwrap();
+            let conn2 = trans2.dyn_connection("test").unwrap();
 
-            assert_eq!(conn1.webrtc_connection_state(), WebrtcConnectionState::New);
-            assert_eq!(conn2.webrtc_connection_state(), WebrtcConnectionState::New);
+            assert_eq!(conn1.connection_state(), TransportConnectionState::New);
+            assert_eq!(conn2.connection_state(), TransportConnectionState::New);
 
-            let offer = conn1.webrtc_create_offer().await.unwrap();
-            let answer = conn2.webrtc_answer_offer(offer).await.unwrap();
-            conn1.webrtc_accept_answer(answer).await.unwrap();
+            let offer = conn1.create_offer().await.unwrap();
+            let answer = conn2.answer_offer(offer).await.unwrap();
+            conn1.accept_answer(answer).await.unwrap();
 
             #[cfg(feature = "browser_chrome_test")]
             {
-                conn2.webrtc_wait_for_data_channel_open().await.unwrap();
+                conn2.wait_for_channel_open().await.unwrap();
                 assert_eq!(
-                    conn2.webrtc_connection_state(),
-                    WebrtcConnectionState::Connected
+                    conn2.connection_state(),
+                    TransportConnectionState::Connected
                 );
             }
         },
@@ -497,7 +496,7 @@ async fn test_ice_connection_establish() {
 }
 
 /// Real browser handshake between two swarms, under a per-test hang guard (see
-/// [`test_ice_connection_establish`]).
+/// [`test_transport_connection_establish`]).
 #[wasm_bindgen_test]
 async fn test_message_handler_manual_handshake_only() {
     with_hang_guard(

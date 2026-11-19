@@ -24,7 +24,7 @@ pub(super) use handshake::OfferPhase;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
-use registry::PeerConnectionLifecycle;
+use registry::PeerSlotLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
 pub(super) use registry::RetirementOutcome;
@@ -324,12 +324,12 @@ impl SwarmTransport {
 
     pub(super) fn raw_connection_owner(&self, peer: Did) -> Result<RawConnectionOwner> {
         Ok(match self.peer_lifecycles()?.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                 RawConnectionOwner::Pending(attempt)
             }
-            Some(
-                PeerConnectionLifecycle::Admitting { .. } | PeerConnectionLifecycle::Active { .. },
-            ) => RawConnectionOwner::Owned,
+            Some(PeerSlotLifecycle::Admitting { .. } | PeerSlotLifecycle::Active { .. }) => {
+                RawConnectionOwner::Owned
+            }
             None => RawConnectionOwner::Orphan,
         })
     }
@@ -476,7 +476,7 @@ impl SwarmTransport {
         self.with_connection_lifecycle(|| {
             Ok(match self.peer_lifecycles()?.state(peer) {
                 None => AnswerSlot::Vacant,
-                Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+                Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                     match self.get_raw_connection(peer) {
                         Some(connection) => AnswerSlot::Pending(attempt, connection),
                         None => AnswerSlot::Owned(attempt),
@@ -516,7 +516,7 @@ impl SwarmTransport {
     /// Start admission only after the coherent transport product state can make progress.
     ///
     /// Data-channel and peer-connection callbacks are independent inputs. Browsers may therefore
-    /// report `data_channel_open = true` while the peer-connection state still reads `New`. That
+    /// report `channel_open = true` while the peer-connection state still reads `New`. That
     /// observation is transient, not a failed handshake: leave the attempt in `Pending` so the
     /// later peer-connection callback can retry the same transition.
     ///
@@ -551,7 +551,7 @@ impl SwarmTransport {
                     generation = attempt.generation,
                     readiness = readiness.as_str(),
                     state = ?readiness.state(),
-                    data_channel_open = readiness.data_channel_open(),
+                    channel_open = readiness.channel_open(),
                     "connection admission deferred until transport state converges"
                 );
                 Ok(false)

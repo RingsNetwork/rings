@@ -453,7 +453,7 @@ mod credential_transport_tests {
 
     fn encoded_answer_fixture() -> String {
         encoded_handshake_payload(Message::ConnectNodeReport(ConnectNodeReport {
-            sdp: "{\"type\":\"answer\"}".to_owned(),
+            handshake: "{\"type\":\"answer\"}".to_owned(),
             dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
             relay_custody: RelayCustody::Holds,
         }))
@@ -461,7 +461,7 @@ mod credential_transport_tests {
 
     fn encoded_counter_offer_fixture() -> String {
         encoded_handshake_payload(Message::ConnectNodeSend(ConnectNodeSend {
-            sdp: "{\"type\":\"offer\"}".to_owned(),
+            handshake: "{\"type\":\"offer\"}".to_owned(),
             dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
             relay_custody: RelayCustody::Holds,
         }))

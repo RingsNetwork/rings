@@ -86,7 +86,7 @@ pub(super) enum Refusal {
     /// Shared capacity admission timed out: `OutboundTransferAdmissionTimeout`
     /// (`CapacityRelease`, global scope).
     AdmissionTimeout,
-    /// The backend queue did not accept in time: `DataChannelSendQueueTimeout`
+    /// The backend queue did not accept in time: `ChannelSendQueueTimeout`
     /// (`ChannelDrain`).
     QueueTimeout,
 }
@@ -125,9 +125,9 @@ pub(super) enum Trigger {
 /// send can return (see `error::send_class`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Ambiguity {
-    /// `DataChannelSendCompletionTimeout`.
+    /// `ChannelSendCompletionTimeout`.
     CompletionTimeout,
-    /// `DataChannelDeliveryTimeout`.
+    /// `ChannelDeliveryTimeout`.
     DeliveryTimeout,
     /// `DetachedPayloadCleanupTimeout`.
     CleanupTimeout,
@@ -163,8 +163,8 @@ impl Refusal {
             }
             Self::Cancelled => return Ok(SendCompletionOutcome::Cancelled),
             Self::NotReady => Error::TransportNotReady {
-                state: rings_transport::core::transport::WebrtcConnectionState::Disconnected,
-                data_channel_open: true,
+                state: rings_transport::core::transport::TransportConnectionState::Disconnected,
+                channel_open: true,
             },
             Self::PeerFull => Error::OutboundTransferCapacityExceeded {
                 peer: hop,
@@ -174,7 +174,7 @@ impl Refusal {
                 peer: hop,
                 timeout_ms: 1,
             },
-            Self::QueueTimeout => Error::DataChannelSendQueueTimeout {
+            Self::QueueTimeout => Error::ChannelSendQueueTimeout {
                 peer: hop,
                 timeout_ms: 1,
                 bytes: 1,
@@ -188,13 +188,13 @@ impl Ambiguity {
     /// The production error of a send to `hop` that the backend may have accepted.
     pub(super) fn error(self, hop: Did) -> Error {
         match self {
-            Self::CompletionTimeout => Error::DataChannelSendCompletionTimeout {
+            Self::CompletionTimeout => Error::ChannelSendCompletionTimeout {
                 peer: hop,
                 timeout_ms: 1,
                 bytes: 1,
                 context: "model",
             },
-            Self::DeliveryTimeout => Error::DataChannelDeliveryTimeout {
+            Self::DeliveryTimeout => Error::ChannelDeliveryTimeout {
                 peer: hop,
                 timeout_ms: 1,
                 context: "model",

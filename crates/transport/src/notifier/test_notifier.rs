@@ -147,7 +147,7 @@ fn test_wake_invokes_inline_reentrant_waker_outside_lock() {
 #[tokio::test]
 async fn test_wait_for_data_channel_open_reports_unavailable_on_terminal_wake() {
     use crate::core::transport::ConnectionStateCell;
-    use crate::core::transport::WebrtcConnectionState;
+    use crate::core::transport::TransportConnectionState;
 
     let state = ConnectionStateCell::new();
     let notifier = Notifier::default();
@@ -158,7 +158,7 @@ async fn test_wait_for_data_channel_open_reports_unavailable_on_terminal_wake() 
     });
 
     tokio::task::yield_now().await;
-    state.observe_webrtc(WebrtcConnectionState::Failed);
+    state.observe_webrtc(TransportConnectionState::Failed);
     notifier.wake();
 
     let err = wait
@@ -166,7 +166,7 @@ async fn test_wait_for_data_channel_open_reports_unavailable_on_terminal_wake() 
         .expect("wait task completes")
         .expect_err("terminal connection must fail wait_for_data_channel_open");
     assert!(
-        matches!(err, Error::DataChannelOpen(ref msg) if msg == "Connection unavailable"),
+        matches!(err, Error::ChannelOpen(ref msg) if msg == "Connection unavailable"),
         "expected Connection unavailable, got {err:?}"
     );
 }

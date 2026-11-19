@@ -7,7 +7,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 
 use super::create_connection;
 use super::get_peers;
-use super::is_routable_webrtc_state;
+use super::is_routable_transport_state;
 use super::new_provider;
 use super::promise_settled_now;
 use super::provider_did;
@@ -18,13 +18,13 @@ use crate::prelude::rings_core::utils::js_value;
 use crate::processor::ProcessorConfig;
 use crate::provider::browser;
 use crate::provider::Provider;
-use crate::tests::TEST_ICE_SERVERS;
+use crate::tests::TEST_TRAVERSAL_SERVERS;
 
 /// Admission and retirement of a provider-level connection, observed through `listPeers`.
 ///
 /// ```text
 /// Admitted(a, b) ≡ peer_admitted(b) observed by a's backend
-/// Listed(a, b)   ≡ listPeers(a) = [b in a routable WebRTC state]   (is_routable_webrtc_state)
+/// Listed(a, b)   ≡ listPeers(a) = [b in a routable WebRTC state]   (is_routable_transport_state)
 ///
 /// create_connection(a, b)    ⊢ ◇Admitted(a, b) ∧ ◇Admitted(b, a)
 /// Admitted(a, b)             ⟹ Listed(a, b)
@@ -55,7 +55,7 @@ async fn test_two_provider_connect_and_list() {
             let peer2 = peers.first().unwrap();
 
             assert!(
-                is_routable_webrtc_state(&peer2.state),
+                is_routable_transport_state(&peer2.state),
                 "peer2 state got {:?}",
                 peer2.state
             );
@@ -258,7 +258,8 @@ async fn test_get_address() {
 /// A fresh browser `ProcessorConfig` for storage-lock tests.
 fn storage_lock_config() -> ProcessorConfig {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
-    ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 200).dht_virtual_nodes(0)
+    ProcessorConfig::new(0, TEST_TRAVERSAL_SERVERS.to_string(), delegatee_key, 200)
+        .dht_virtual_nodes(0)
 }
 
 /// Law (#1055): one browser `storage_name` has at most one open node in the origin; a second

@@ -43,43 +43,15 @@ use crate::utils::get_epoch_ms;
 /// Overlay every test fixture signs for and verifies against.
 pub(crate) const TEST_NETWORK_ID: u32 = 0;
 
-/// Build the concrete transport fixture used by `rings-core`'s own unit and integration tests.
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+/// Build the transport fixture used by `rings-core`'s own unit and integration tests via
+/// [`rings_transport::network_config::NetworkParameters`].
 pub(crate) fn test_transport(
-    ice_servers: &str,
+    traversal_servers: &str,
 ) -> rings_transport::core::transport::SharedTransport {
-    std::sync::Arc::new(rings_transport::connections::DummyTransport::new(
-        ice_servers,
-        None,
-        None,
-    ))
-}
-
-/// Build the concrete transport fixture used by `rings-core`'s own unit and integration tests.
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
-pub(crate) fn test_transport(
-    ice_servers: &str,
-) -> rings_transport::core::transport::SharedTransport {
-    std::sync::Arc::new(rings_transport::connections::WebrtcTransport::new(
-        ice_servers,
-        None,
-        None,
-    ))
-}
-
-/// Build the concrete transport fixture used by `rings-core`'s own browser integration tests.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(crate) fn test_transport(
-    ice_servers: &str,
-) -> rings_transport::core::transport::SharedTransport {
-    std::sync::Arc::new(rings_transport::connections::WebSysWebrtcTransport::new(
-        ice_servers,
-        None,
-        None,
-    ))
+    use rings_transport::network_config::NetworkParameters;
+    rings_transport::network_config::TransportNetworkConfig::new(traversal_servers, None, None)
+        .build_transport(Some(traversal_servers))
+        .expect("default test transport parameters must validate")
 }
 
 /// A delegatee key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation

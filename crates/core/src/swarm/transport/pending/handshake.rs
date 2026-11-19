@@ -38,7 +38,7 @@ pub(crate) enum OfferPhase {
     /// The offer left under transaction `tx_id` and is unanswered.
     Sent {
         /// The offer's SDP as sent, for a counter-offer.
-        sdp: String,
+        handshake: String,
         /// The transaction the offer left under; its answer echoes it.
         tx_id: uuid::Uuid,
     },
@@ -87,7 +87,7 @@ pub(crate) enum CrossingOfferVerdict {
     /// This node keeps its unanswered overlay offer, sent under `tx_id`, and sends it back.
     CounterOffer {
         /// The offer's SDP.
-        sdp: String,
+        handshake: String,
         /// The transaction the offer left under.
         tx_id: uuid::Uuid,
     },
@@ -140,9 +140,9 @@ pub(crate) fn crossing_offer_verdict(
         } if local > peer => CrossingOfferVerdict::Yield,
         Handshake::Offering {
             owner: OfferOwner::Overlay,
-            phase: OfferPhase::Sent { sdp, tx_id },
+            phase: OfferPhase::Sent { handshake, tx_id },
         } => CrossingOfferVerdict::CounterOffer {
-            sdp: sdp.clone(),
+            handshake: handshake.clone(),
             tx_id: *tx_id,
         },
         Handshake::Offering {

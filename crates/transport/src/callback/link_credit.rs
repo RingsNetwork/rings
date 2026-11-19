@@ -54,7 +54,7 @@ use crate::core::credit::ReceiveWindow;
 use crate::core::credit::SendCredit;
 use crate::core::pool::ChannelLane;
 #[cfg(test)]
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 #[cfg(rings_transport_backend)]
 use crate::core::transport::SendAcceptance;
 #[cfg(rings_transport_backend)]
@@ -606,9 +606,9 @@ impl LinkCredit {
 
     /// Frames of each lane admitted and not yet released.
     #[cfg(test)]
-    pub(crate) fn occupancy(&self) -> [u64; DATA_CHANNEL_POOL_SIZE as usize] {
+    pub(crate) fn occupancy(&self) -> [u64; CHANNEL_POOL_SIZE as usize] {
         let mut receive = self.lock().receive;
-        let mut occupancy = [0; DATA_CHANNEL_POOL_SIZE as usize];
+        let mut occupancy = [0; CHANNEL_POOL_SIZE as usize];
         for ((_, window), slot) in receive.iter_mut().zip(occupancy.iter_mut()) {
             *slot = window.occupancy();
         }

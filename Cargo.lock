@@ -4674,6 +4674,7 @@ dependencies = [
  "rings-runtime",
  "rings-test-support",
  "rings-transport",
+ "rings-turn",
  "serde",
  "serde-reflection",
  "serde-saphyr",
@@ -4821,8 +4822,11 @@ name = "rings-turn"
 version = "1.0.0-pre.6"
 dependencies = [
  "async-trait",
+ "base58-monero",
  "clap",
+ "hex",
  "rand 0.8.6",
+ "rings-codec",
  "rings-core",
  "serde",
  "stun",
@@ -4832,6 +4836,7 @@ dependencies = [
  "tracing-subscriber",
  "turn",
  "webrtc-util",
+ "zeroize",
 ]
 
 [[package]]

@@ -40,9 +40,9 @@ pub enum Error {
     #[error("IceServer error: {0}")]
     IceServer(#[from] IceServerError),
 
-    /// Failed when waiting for data channel open: {0}
-    #[error("Failed when waiting for data channel open: {0}")]
-    DataChannelOpen(String),
+    /// Failed when waiting for channel open: {0}
+    #[error("Failed when waiting for channel open: {0}")]
+    ChannelOpen(String),
 
     /// The runtime could not run a timer (browser only).
     #[error("Timer error: {0}")]
@@ -52,9 +52,9 @@ pub enum Error {
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),
 
-    /// A data-channel message used an unsupported representation: {0}
-    #[error("Unsupported data-channel message: {0}")]
-    DataChannelMessage(String),
+    /// A channel message used an unsupported representation: {0}
+    #[error("Unsupported channel message: {0}")]
+    ChannelMessage(String),
 
     /// The higher-level authorization was revoked before backend send admission.
     #[error("Send permit was revoked before transport send admission")]
@@ -122,7 +122,7 @@ pub enum Error {
 
     /// WebRTC local SDP generation error: {0}
     #[error("WebRTC local SDP generation error: {0}")]
-    WebrtcLocalSdpGenerationError(String),
+    LocalHandshakeGenerationError(String),
 
     /// The remote SDP advertised `a=max-message-size:{advertised}`, below the protocol floor
     /// `{minimum}` needed to carry every DHT control message unchunked.
@@ -138,7 +138,7 @@ pub enum Error {
 
     /// WebRTC UDP port range was rejected by the ICE stack: {0}
     #[error("WebRTC UDP port range was rejected by the ICE stack: {0}")]
-    WebrtcUdpPortRange(String),
+    UdpPortRange(String),
 
     /// Connection {0} already exists
     #[error("Connection {0} already exists")]
@@ -234,13 +234,13 @@ impl Error {
             | Self::DummyRemoteConnectionClosed => TransportSendFailureClass::Fatal,
             Self::Codec(_)
             | Self::IceServer(_)
-            | Self::DataChannelOpen(_)
+            | Self::ChannelOpen(_)
             | Self::Timer(_)
-            | Self::DataChannelMessage(_)
+            | Self::ChannelMessage(_)
             | Self::SendByteCountOverflow
-            | Self::WebrtcLocalSdpGenerationError(_)
+            | Self::LocalHandshakeGenerationError(_)
             | Self::RemoteMaxMessageSizeTooSmall { .. }
-            | Self::WebrtcUdpPortRange(_)
+            | Self::UdpPortRange(_)
             | Self::ConnectionAlreadyExists(_)
             | Self::ConnectionNotFound(_)
             | Self::ConnectionReleased(_)
@@ -296,15 +296,15 @@ mod tests {
 
         let fatal = [
             Error::IceServer(IceServerError::UrlMissHost),
-            Error::DataChannelOpen("open".to_string()),
-            Error::DataChannelMessage("msg".to_string()),
+            Error::ChannelOpen("open".to_string()),
+            Error::ChannelMessage("msg".to_string()),
             Error::SendByteCountOverflow,
-            Error::WebrtcLocalSdpGenerationError("sdp".to_string()),
+            Error::LocalHandshakeGenerationError("sdp".to_string()),
             Error::RemoteMaxMessageSizeTooSmall {
                 advertised: 100,
                 minimum: 6123,
             },
-            Error::WebrtcUdpPortRange("range".to_string()),
+            Error::UdpPortRange("range".to_string()),
             Error::ConnectionAlreadyExists("peer".to_string()),
             Error::ConnectionNotFound("peer".to_string()),
             Error::ConnectionReleased("peer".to_string()),

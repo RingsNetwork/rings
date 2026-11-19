@@ -14,7 +14,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
         (None, false, FingerCandidateAdmission::Missing),
         (None, true, FingerCandidateAdmission::Missing),
         (
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt,
                 started_at_ms: 0,
             }),
@@ -22,7 +22,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt,
                 started_at_ms: 0,
             }),
@@ -30,7 +30,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Admitting {
+            Some(PeerSlotLifecycle::Admitting {
                 attempt,
                 started_at_ms: 0,
             }),
@@ -38,7 +38,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Admitting {
+            Some(PeerSlotLifecycle::Admitting {
                 attempt,
                 started_at_ms: 0,
             }),
@@ -46,12 +46,12 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
             FingerCandidateAdmission::Queue(attempt),
         ),
         (
-            Some(PeerConnectionLifecycle::Active { attempt }),
+            Some(PeerSlotLifecycle::Active { attempt }),
             false,
             FingerCandidateAdmission::Unroutable,
         ),
         (
-            Some(PeerConnectionLifecycle::Active { attempt }),
+            Some(PeerSlotLifecycle::Active { attempt }),
             true,
             FingerCandidateAdmission::Apply,
         ),
@@ -336,13 +336,13 @@ impl LifecycleImplementation {
 
     fn view(&self) -> LifecycleView {
         let peer = match self.lifecycles.state(self.peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                 PeerLifecycle::Pending(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Admitting { attempt, .. }) => {
                 PeerLifecycle::Admitting(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Active { attempt }) => {
+            Some(PeerSlotLifecycle::Active { attempt }) => {
                 PeerLifecycle::Active(attempt.generation)
             }
             None => PeerLifecycle::Absent,
@@ -759,13 +759,13 @@ impl ProductImpl {
 
     fn view(&self) -> ProductView {
         let peer = match self.lifecycles.state(self.peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                 PeerLifecycle::Pending(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Admitting { attempt, .. }) => {
                 PeerLifecycle::Admitting(attempt.generation)
             }
-            Some(PeerConnectionLifecycle::Active { attempt }) => {
+            Some(PeerSlotLifecycle::Active { attempt }) => {
                 PeerLifecycle::Active(attempt.generation)
             }
             None => PeerLifecycle::Absent,

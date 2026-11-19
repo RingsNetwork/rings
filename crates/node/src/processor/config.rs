@@ -16,14 +16,8 @@ pub struct ProcessorConfig {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub(in crate::processor) network_id: u32,
-    /// ICE servers for webrtc
-    pub(in crate::processor) ice_servers: String,
-    /// External address for webrtc
-    pub(in crate::processor) external_address: Option<String>,
-    /// Inclusive lower native WebRTC UDP port bound.
-    pub(in crate::processor) webrtc_udp_port_min: Option<u16>,
-    /// Inclusive upper native WebRTC UDP port bound.
-    pub(in crate::processor) webrtc_udp_port_max: Option<u16>,
+    /// Abstract network parameters customizing the transport layer (#1291).
+    pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
     /// [DelegateeKey].
     pub(in crate::processor) delegatee_key: DelegateeKey,
     /// Stabilization interval.
@@ -54,19 +48,20 @@ pub struct ProcessorConfig {
 
 #[wasm_export]
 impl ProcessorConfig {
-    /// Creates a new `ProcessorConfig` instance without an external address.
+    /// Creates a new `ProcessorConfig` instance without an external endpoint hint.
     pub fn new(
         network_id: u32,
-        ice_servers: String,
+        traversal_servers: String,
         delegatee_key: DelegateeKey,
         stabilize_interval: u64,
     ) -> Self {
         Self {
             network_id,
-            ice_servers,
-            external_address: None,
-            webrtc_udp_port_min: None,
-            webrtc_udp_port_max: None,
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                traversal_servers,
+                None,
+                None,
+            )),
             delegatee_key,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
@@ -128,9 +123,25 @@ impl ProcessorConfig {
         self.online_node_type = node_type;
         self
     }
-    /// Returns the validated native WebRTC UDP port range, when configured.
-    pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
-        parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
+
+    /// Return the configured [`NodeNetworkParameters`].
+    pub fn network_parameters(&self) -> &Arc<dyn NodeNetworkParameters> {
+        &self.network_parameters
+    }
+
+    /// Inject custom [`NodeNetworkParameters`] to customize the transport layer (#1291).
+    pub fn with_network_parameters<P>(mut self, params: P) -> Self
+    where P: NodeNetworkParameters + 'static {
+        self.network_parameters = Arc::new(params);
+        self
+    }
+
+    /// Returns the validated local UDP port range from the parameter dictionary, when configured.
+    pub fn udp_port_range(&self) -> Option<UdpPortRange> {
+        let params = self.network_parameters.parameter_map();
+        let min = params.get("udp_port_min")?.parse::<u16>().ok()?;
+        let max = params.get("udp_port_max")?.parse::<u16>().ok()?;
+        UdpPortRange::new(min, max).ok()
     }
 
     /// The longer heartbeat of the two registries this node publishes, online nodes and onion
@@ -199,10 +210,12 @@ pub struct ProcessorConfigSerialized {
     pub(crate) ice_servers: String,
     /// An optional string representing the external address for WebRTC
     pub(crate) external_address: Option<String>,
-    /// Inclusive lower native WebRTC UDP port bound.
-    pub(crate) webrtc_udp_port_min: Option<u16>,
-    /// Inclusive upper native WebRTC UDP port bound.
-    pub(crate) webrtc_udp_port_max: Option<u16>,
+    /// Inclusive lower local UDP port bound.
+    #[serde(default, alias = "webrtc_udp_port_min")]
+    pub(crate) udp_port_min: Option<u16>,
+    /// Inclusive upper local UDP port bound.
+    #[serde(default, alias = "webrtc_udp_port_max")]
+    pub(crate) udp_port_max: Option<u16>,
     /// A string representing the dumped `DelegateeKey`.
     pub(crate) delegatee_key: String,
     /// An unsigned integer representing the stabilization interval in seconds.
@@ -251,16 +264,14 @@ pub struct ProcessorConfigSerialized {
     pub(crate) remote_rpc_proxy_url: Option<String>,
 }
 
-pub(crate) fn parse_webrtc_udp_port_range(
+pub(crate) fn parse_udp_port_range(
     min: Option<u16>,
     max: Option<u16>,
-) -> Result<Option<WebrtcUdpPortRange>> {
+) -> Result<Option<UdpPortRange>> {
     match (min, max) {
         (None, None) => Ok(None),
-        (Some(min), Some(max)) => WebrtcUdpPortRange::new(min, max)
-            .map(Some)
-            .map_err(Error::from),
-        (min, max) => Err(Error::IncompleteWebrtcUdpPortRange { min, max }),
+        (Some(min), Some(max)) => UdpPortRange::new(min, max).map(Some).map_err(Error::from),
+        (min, max) => Err(Error::IncompleteUdpPortRange { min, max }),
     }
 }
 
@@ -312,12 +323,15 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
+        let params = ins.network_parameters.parameter_map();
+        let udp_port_range = ins.udp_port_range();
+        let traversal_servers = params.get("traversal_servers").cloned().unwrap_or_default();
         Ok(Self {
             network_id: ins.network_id,
-            ice_servers: ins.ice_servers.clone(),
-            external_address: ins.external_address.clone(),
-            webrtc_udp_port_min: ins.webrtc_udp_port_min,
-            webrtc_udp_port_max: ins.webrtc_udp_port_max,
+            ice_servers: traversal_servers,
+            external_address: ins.network_parameters.endpoint_hint().map(str::to_owned),
+            udp_port_min: udp_port_range.map(UdpPortRange::min),
+            udp_port_max: udp_port_range.map(UdpPortRange::max),
             delegatee_key: ins.delegatee_key.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
@@ -352,8 +366,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
 impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
-        let webrtc_udp_port_range =
-            parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
+        let udp_port_range = parse_udp_port_range(ins.udp_port_min, ins.udp_port_max)?;
         let remote_rpc_proxy = ins
             .remote_rpc_proxy_url
             .as_deref()
@@ -367,10 +380,11 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
         Ok(Self {
             network_id: ins.network_id,
-            ice_servers: ins.ice_servers.clone(),
-            external_address: ins.external_address.clone(),
-            webrtc_udp_port_min: webrtc_udp_port_range.map(WebrtcUdpPortRange::min),
-            webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                ins.ice_servers,
+                ins.external_address,
+                udp_port_range,
+            )),
             delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,

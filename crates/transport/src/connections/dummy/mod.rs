@@ -27,17 +27,17 @@ use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
+use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
-use crate::core::transport::WebrtcConnectionState;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
+use crate::network_config::UdpPortRange;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::sync_utils::lock_recover;
-use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod delay;
 mod event;
@@ -176,7 +176,7 @@ pub mod controlled;
 /// Implements the [ConnectionInterface] trait with no real network.
 #[derive(Clone, Copy)]
 struct DummyConnectionState {
-    webrtc: WebrtcConnectionState,
+    webrtc: TransportConnectionState,
     data_channel_open_override: Option<bool>,
 }
 
@@ -192,7 +192,7 @@ impl DummyConnectionState {
     const fn snapshot(self) -> ConnectionStateSnapshot {
         let data_channel_open = match self.data_channel_open_override {
             Some(open) => open,
-            None => matches!(self.webrtc, WebrtcConnectionState::Connected),
+            None => matches!(self.webrtc, TransportConnectionState::Connected),
         };
         ConnectionStateSnapshot::new(self.webrtc, data_channel_open)
     }
@@ -217,6 +217,7 @@ pub struct DummyConnection {
 /// [DummyTransport] manages all the [DummyConnection] and
 /// provides methods to create, get and close connections.
 pub struct DummyTransport {
+    session_credentials: std::sync::RwLock<String>,
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -262,7 +263,7 @@ impl DummyConnection {
             remote_max_message_size: AtomicUsize::new(0),
             event_listener,
             connection_state: Arc::new(Mutex::new(DummyConnectionState {
-                webrtc: WebrtcConnectionState::New,
+                webrtc: TransportConnectionState::New,
                 data_channel_open_override: None,
             })),
             accepting_events: Arc::new(AtomicBool::new(true)),
@@ -308,27 +309,27 @@ impl DummyConnection {
 
     async fn handle_event(&self, event: Event) {
         match event {
-            Event::PeerConnectionStateChange(state, callback_cid) => {
+            Event::ConnectionStateChange(state, callback_cid) => {
                 if let Some(cid) = callback_cid {
                     self.callback
-                        .on_peer_connection_state_change_with_cid(&cid, state)
+                        .on_connection_state_change_with_cid(&cid, state)
                         .await;
                 } else {
-                    self.callback.on_peer_connection_state_change(state).await;
+                    self.callback.on_connection_state_change(state).await;
                 }
             }
-            Event::DataChannelOpen(callback_cid) => {
+            Event::ChannelOpen(callback_cid) => {
                 if let Some(cid) = callback_cid {
-                    self.callback.on_data_channel_open_with_cid(&cid).await;
+                    self.callback.on_channel_open_with_cid(&cid).await;
                 } else {
-                    self.callback.on_data_channel_open().await;
+                    self.callback.on_channel_open().await;
                 }
             }
-            Event::DataChannelClose(callback_cid) => {
+            Event::ChannelClose(callback_cid) => {
                 if let Some(cid) = callback_cid {
-                    self.callback.on_data_channel_close_with_cid(&cid).await;
+                    self.callback.on_channel_close_with_cid(&cid).await;
                 } else {
-                    self.callback.on_data_channel_close().await;
+                    self.callback.on_channel_close().await;
                 }
             }
             Event::Message(frame, lane) => {
@@ -393,7 +394,7 @@ impl DummyConnection {
         }
     }
 
-    async fn set_webrtc_connection_state(&self, state: WebrtcConnectionState) {
+    async fn set_connection_state(&self, state: TransportConnectionState) {
         {
             let mut connection_state = self.connection_state();
 
@@ -404,24 +405,21 @@ impl DummyConnection {
             connection_state.webrtc = state;
         }
 
-        self.dispatch(Event::PeerConnectionStateChange(state, None));
+        self.dispatch(Event::ConnectionStateChange(state, None));
 
-        if state == WebrtcConnectionState::Connected {
-            self.dispatch(Event::DataChannelOpen(None));
+        if state == TransportConnectionState::Connected {
+            self.dispatch(Event::ChannelOpen(None));
         }
 
         if matches!(
             state,
-            WebrtcConnectionState::Closed | WebrtcConnectionState::Disconnected
+            TransportConnectionState::Closed | TransportConnectionState::Disconnected
         ) {
-            self.dispatch(Event::DataChannelClose(None));
+            self.dispatch(Event::ChannelClose(None));
         }
     }
 
-    pub(crate) fn force_webrtc_connection_state_without_callback(
-        &self,
-        state: WebrtcConnectionState,
-    ) {
+    pub(crate) fn force_connection_state_without_callback(&self, state: TransportConnectionState) {
         self.connection_state().webrtc = state;
     }
 
@@ -435,11 +433,12 @@ impl DummyTransport {
     pub fn new(
         ice_servers: &str,
         _external_address: Option<String>,
-        _udp_port_range: Option<WebrtcUdpPortRange>,
+        _udp_port_range: Option<UdpPortRange>,
     ) -> Self {
         let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
 
         Self {
+            session_credentials: std::sync::RwLock::new(ice_servers.to_string()),
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
             dispatched: Arc::default(),
@@ -449,6 +448,10 @@ impl DummyTransport {
     /// Validate and replace the ICE server list used for subsequent peer connections.
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
+        *self
+            .session_credentials
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ice_servers.to_string();
     }
 
     /// Test hook: the payload frames this transport's connections have dispatched, over every
@@ -536,7 +539,7 @@ where
     F: FnOnce(),
 {
     let state = lock_recover(connection_state);
-    if !state.snapshot().data_channel_open() {
+    if !state.snapshot().channel_open() {
         drop(state);
         return Err(Error::DummyConnectionRetiredBeforeDispatch);
     }
@@ -647,7 +650,7 @@ impl FrameSink for DummyConnection {
 
 #[async_trait]
 impl ConnectionInterface for DummyConnection {
-    type Sdp = String;
+    type Handshake = String;
     type Error = Error;
 
     delegate_to_callback!();
@@ -665,49 +668,49 @@ impl ConnectionInterface for DummyConnection {
         }
     }
 
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        self.set_webrtc_connection_state(WebrtcConnectionState::New)
+    async fn create_offer(&self) -> Result<Self::Handshake> {
+        self.set_connection_state(TransportConnectionState::New)
             .await;
         Ok(self.rand_id.clone())
     }
 
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
+    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
         let negotiated_max_message_size = effective_max_message_size(&offer)?;
         // Set remote rand id before setting state so that the remote connection can be found in callback.
         self.set_remote_rand_id(offer);
-        self.set_webrtc_connection_state(WebrtcConnectionState::Connecting)
+        self.set_connection_state(TransportConnectionState::Connecting)
             .await;
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::Release);
         Ok(self.rand_id.clone())
     }
 
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
+    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
         // Set remote rand id before setting state so that the remote connection can be found in callback.
         self.set_remote_rand_id(answer);
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::Release);
-        self.set_webrtc_connection_state(WebrtcConnectionState::Connected)
+        self.set_connection_state(TransportConnectionState::Connected)
             .await;
 
         if let Some(remote_conn) = self.remote_conn() {
             remote_conn
-                .set_webrtc_connection_state(WebrtcConnectionState::Connected)
+                .set_connection_state(TransportConnectionState::Connected)
                 .await;
         }
 
         Ok(())
     }
 
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+    async fn wait_for_channel_open(&self) -> Result<()> {
         if WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.get()) {
             std::future::pending::<()>().await;
         }
-        if self.data_channel_is_open() {
+        if self.channel_is_open() {
             Ok(())
         } else {
-            Err(Error::DataChannelOpen(
+            Err(Error::ChannelOpen(
                 "State is not connected in dummy connection".to_string(),
             ))
         }
@@ -726,15 +729,15 @@ impl ConnectionInterface for DummyConnection {
         Ok(self.generation_id().to_string())
     }
 
-    fn force_dummy_webrtc_connection_state_without_callback(
+    fn force_dummy_connection_state_without_callback(
         &self,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> Result<()> {
-        self.force_webrtc_connection_state_without_callback(state);
+        self.force_connection_state_without_callback(state);
         Ok(())
     }
 
-    fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+    fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
         self.force_data_channel_open_without_callback(open);
         Ok(())
     }
@@ -796,6 +799,19 @@ impl TransportInterface for DummyTransport {
 
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
+    }
+
+    fn update_session_credentials(&self, credentials: &str) {
+        self.set_ice_servers(credentials);
+    }
+
+    fn session_credentials(&self) -> Option<String> {
+        Some(
+            self.session_credentials
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
     }
 
     fn dispatched_payload_frames(&self) -> usize {

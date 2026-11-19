@@ -20,8 +20,8 @@ pub mod error;
 #[doc(hidden)]
 pub mod hot_path;
 pub mod ice_server;
+pub mod network_config;
 pub mod notifier;
 pub mod pool;
-pub mod webrtc_config;
 
 mod sync_utils;

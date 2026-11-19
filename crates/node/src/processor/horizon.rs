@@ -494,8 +494,10 @@ mod tests {
         let assert_lockstep = |expected_key: &DelegateeKey| {
             let k_ring = processor.delegatee_key();
             let k_swarm = processor.swarm.delegatee_key();
-            let k_ice = processor.signed_ice_servers();
-            let expected_ice = expected_key.sign_ice_servers(&raw_ice).unwrap();
+            let k_transport = processor
+                .session_transport_credentials()
+                .expect("transport must report active session credentials");
+            let expected_credentials = expected_key.sign_ice_servers(&raw_ice).unwrap();
 
             assert_eq!(
                 k_ring.delegatee_public_key(),
@@ -508,8 +510,8 @@ mod tests {
                 "k_swarm diverged from k_ring"
             );
             assert_eq!(
-                k_ice, expected_ice,
-                "k_ice diverged from k_ring signed ICE servers"
+                k_transport, expected_credentials,
+                "k_transport diverged from k_ring session credentials"
             );
         };
 

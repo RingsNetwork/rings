@@ -182,13 +182,12 @@ pub enum Error {
     /// The requested logging level is not supported.
     #[error("Invalid logging level: {0}")]
     InvalidLoggingLevel(String) = 809,
-    /// The configured WebRTC UDP port range is invalid.
-    #[error("Invalid WebRTC UDP port range: {0}")]
-    InvalidWebrtcUdpPortRange(#[from] rings_transport::webrtc_config::WebrtcUdpPortRangeError) =
-        810,
-    /// Only one side of the WebRTC UDP port range was configured.
-    #[error("Both webrtc_udp_port_min and webrtc_udp_port_max must be set together: min={min:?}, max={max:?}")]
-    IncompleteWebrtcUdpPortRange {
+    /// The configured local UDP port range is invalid.
+    #[error("Invalid local UDP port range: {0}")]
+    InvalidUdpPortRange(#[from] rings_transport::network_config::UdpPortRangeError) = 810,
+    /// Only one side of the local UDP port range was configured.
+    #[error("Both udp_port_min and udp_port_max must be set together: min={min:?}, max={max:?}")]
+    IncompleteUdpPortRange {
         /// Configured lower UDP port bound.
         min: Option<u16>,
         /// Configured upper UDP port bound.

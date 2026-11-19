@@ -4,7 +4,7 @@ use std::str::FromStr;
 use bytes::Bytes;
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 #[cfg(feature = "dummy")]
 use tokio::time::timeout;
 #[cfg(feature = "dummy")]
@@ -339,7 +339,7 @@ async fn test_handle_connect_node() -> Result<()> {
     let node3 = prepare_node(key3).await;
     let _controlled = ControlledDeliveryGuard::new();
     dummy_controlled::set_seed(CONNECT_NODE_DUMMY_SEED);
-    let connected = WebrtcConnectionState::Connected;
+    let connected = TransportConnectionState::Connected;
 
     manually_establish_connection(&node3.swarm, &node2.swarm).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -401,7 +401,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1
@@ -429,7 +429,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1
@@ -481,7 +481,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     wait_for_finger(&node1, node2.did()).await?;
@@ -546,7 +546,7 @@ async fn connected_storage_pair() -> Result<(Node, Node)> {
 
     // node1's successor is node2
     // node2's successor is node1
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1

@@ -169,11 +169,9 @@ fn inspect_delivery(
     outbound_submission_ms: &BTreeMap<uuid::Uuid, u64>,
 ) -> Result<ScheduledDelivery, SimulationRuntimeError> {
     let (class, bytes, transaction_id, lane) = match queued.kind() {
-        QueuedDeliveryKind::PeerConnectionStateChange(_)
-        | QueuedDeliveryKind::DataChannelOpen
-        | QueuedDeliveryKind::DataChannelClose => {
-            (ScheduledDeliveryClass::Lifecycle, 0, None, None)
-        }
+        QueuedDeliveryKind::ConnectionStateChange(_)
+        | QueuedDeliveryKind::ChannelOpen
+        | QueuedDeliveryKind::ChannelClose => (ScheduledDeliveryClass::Lifecycle, 0, None, None),
         QueuedDeliveryKind::Message(bytes, lane) => {
             let (class, transaction_id) = inspect_message(queued.sequence(), bytes)?;
             (class, bytes.len(), transaction_id, Some(*lane))

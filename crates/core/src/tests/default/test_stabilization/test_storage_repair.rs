@@ -44,7 +44,7 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )
@@ -503,16 +503,16 @@ async fn test_repair_storage_defers_disconnected_open_transport_without_sending(
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
     node1
         .swarm
         .transport
-        .force_peer_data_channel_open_without_callback(node2.did(), Some(true))?;
+        .force_peer_channel_open_without_callback(node2.did(), Some(true))?;
 
-    let _pending_wait = PendingDataChannelWaitGuard::new();
+    let _pending_wait = PendingChannelWaitGuard::new();
     let outcome = timeout(
         Duration::from_millis(200),
         node1.swarm.stabilizer().repair_storage(),

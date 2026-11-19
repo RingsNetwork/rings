@@ -227,7 +227,7 @@ impl SwarmTransport {
             }
             let state = connection
                 .as_ref()
-                .map(|connection| connection.webrtc_connection_state());
+                .map(|connection| connection.connection_state());
             tracing::warn!(
                 target: "rings_core::swarm::transport::handshake",
                 local = %self.dht.did,

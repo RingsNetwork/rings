@@ -1,7 +1,6 @@
 use rings_core::dht::RemovalStorage;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
-use rings_turn::TurnCredentialSigner;
 
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
@@ -18,9 +17,7 @@ use crate::prelude::rings_core::dht::RelayReplication;
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
     pub(in crate::processor) network_id: u32,
-    pub(in crate::processor) ice_servers: String,
-    pub(in crate::processor) external_address: Option<String>,
-    pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
+    pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
     pub(in crate::processor) delegatee_key: DelegateeKey,
     pub(in crate::processor) onion_process_epoch: Option<OnionProcessEpoch>,
     pub(in crate::processor) clock: SharedClock,
@@ -69,9 +66,7 @@ impl ProcessorBuilder {
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
         Ok(Self {
             network_id: config.network_id,
-            ice_servers: config.ice_servers.clone(),
-            external_address: config.external_address.clone(),
-            webrtc_udp_port_range: config.webrtc_udp_port_range()?,
+            network_parameters: Arc::clone(&config.network_parameters),
             delegatee_key: config.delegatee_key.clone(),
             onion_process_epoch: None,
             clock: config.clock.clone(),
@@ -275,6 +270,13 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Inject custom [`NodeNetworkParameters`] to customize the processor's transport (#1291).
+    pub fn network_parameters<P>(mut self, params: P) -> Self
+    where P: NodeNetworkParameters + 'static {
+        self.network_parameters = Arc::new(params);
+        self
+    }
+
     /// Route native remote JSON-RPC requests (`nodeDid`, `answerOffer`, `acceptAnswer`) through
     /// `proxy` instead of connecting directly.
     pub fn remote_rpc_proxy(mut self, proxy: crate::remote_endpoint::RemoteRpcProxy) -> Self {
@@ -302,7 +304,7 @@ impl ProcessorBuilder {
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
-        let endpoint_hint = self.external_address.clone();
+        let endpoint_hint = self.network_parameters.endpoint_hint().map(str::to_owned);
         let initial_epoch = self
             .onion_process_epoch
             .unwrap_or_else(|| OnionProcessEpoch::from_rng(&mut self.rng.lock_rng()));
@@ -352,47 +354,9 @@ impl ProcessorBuilder {
         let observability = Arc::new(crate::observability::Observability::new_with_clock(
             self.clock.clone(),
         ));
-        let raw_ice_servers: Arc<str> = Arc::from(self.ice_servers.as_str());
-        let initial_signed_ice_servers = self
-            .delegatee_key
-            .sign_ice_servers(&self.ice_servers)
-            .unwrap_or_else(|_| self.ice_servers.clone());
-
-        #[cfg(all(feature = "node", not(feature = "dummy")))]
-        let concrete_transport = Arc::new(
-            rings_transport::connections::WebrtcTransport::new(
-                &initial_signed_ice_servers,
-                self.external_address,
-                self.webrtc_udp_port_range,
-            ),
-        );
-        #[cfg(feature = "dummy")]
-        let concrete_transport = Arc::new(
-            rings_transport::connections::DummyTransport::new(
-                &initial_signed_ice_servers,
-                self.external_address,
-                self.webrtc_udp_port_range,
-            ),
-        );
-        #[cfg(all(feature = "browser", target_family = "wasm"))]
-        let concrete_transport = Arc::new(
-            rings_transport::connections::WebSysWebrtcTransport::new(
-                &initial_signed_ice_servers,
-                self.external_address,
-                self.webrtc_udp_port_range,
-            ),
-        );
-
-        let shared_transport: rings_transport::core::transport::SharedTransport =
-            concrete_transport.clone();
-        let signed_ice_servers = Arc::new(std::sync::RwLock::new(initial_signed_ice_servers));
-        let signed_ice_servers_for_updater = Arc::clone(&signed_ice_servers);
-        let ice_servers_updater: IceServersUpdater = Arc::new(move |signed: &str| {
-            concrete_transport.set_ice_servers(signed);
-            *signed_ice_servers_for_updater
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = signed.to_string();
-        });
+        let shared_transport = self
+            .network_parameters
+            .build_transport(&self.delegatee_key)?;
 
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
@@ -447,9 +411,7 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
-            raw_ice_servers,
-            signed_ice_servers,
-            ice_servers_updater,
+            network_parameters: self.network_parameters,
             onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new_for_did(
                 onion_entry_guard_storage,

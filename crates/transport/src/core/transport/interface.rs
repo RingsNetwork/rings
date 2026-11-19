@@ -10,7 +10,7 @@ use serde::Serialize;
 use super::ConnectionStateSnapshot;
 use super::LaneCreditView;
 use super::SendPermit;
-use super::WebrtcConnectionState;
+use super::TransportConnectionState;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::LaneSignal;
@@ -56,25 +56,23 @@ pub fn custom_frame_wire(payload: Bytes) -> rings_codec::Result<Vec<u8>> {
     rings_codec::serialize(&TransportMessage::Custom(payload))
 }
 
-/// Interop ceiling for a single data-channel message, in bytes - RFC 8841's default
-/// `max-message-size` (65536), the value a spec-compliant peer accepts when it advertises nothing
-/// else. We treat it as a hard send ceiling: a sender never exceeds it regardless of what the
+/// Interop ceiling for a single transport channel message, in bytes (65536).
+/// We treat it as a hard send ceiling: a sender never exceeds it regardless of what the
 /// remote advertises, and a per-channel
 /// [`max_message_size`](ConnectionInterface::max_message_size) may resolve to *less* (a constrained
-/// peer) but never more. NOTE: this is the protocol default, not an independently verified property
-/// of every backend's SCTP stack - a peer advertising a *larger* limit is still clamped to this.
-pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
+/// peer) but never more.
+pub const MAX_CHANNEL_MESSAGE_SIZE: usize = 65536;
 
 /// Smallest negotiated `max_message_size` a connection admits (#1130).
 ///
-/// A peer advertising a positive `a=max-message-size` below this floor would force the widest
+/// A peer advertising a positive `max-message-size` below this floor would force the widest
 /// honest DHT control frame (`ConnectNodeSend` or `ConnectNodeReport`) to be fragmented by the
-/// chunk layer, or rejected by SCTP if sent whole (`RFC 8841`). Connections whose remote SDP
+/// chunk layer, or rejected if sent whole. Connections whose remote handshake description
 /// advertises `0 < max-message-size < MIN_MAX_MESSAGE_SIZE` are refused before applying the
 /// remote description.
 ///
 /// Derivation: the widest control message is `ConnectNodeSend` / `ConnectNodeReport` carrying a
-/// `MAX_SDP_BYTES` (`4096`-byte) session description (`4111` message bytes), wrapped in the
+/// `MAX_HANDSHAKE_BYTES` (`4096`-byte) session description (`4111` message bytes), wrapped in the
 /// widest `MessagePayload` envelope (`2219` bytes for a `< 16 KiB` message, whose 2-byte
 /// `transaction.data` length prefix is one byte shorter than `MAX_PAYLOAD_ENVELOPE_OVERHEAD =
 /// 2009`) and the outer transport frame reserve (`TRANSPORT_CUSTOM_OVERHEAD = 4`),
@@ -90,39 +88,37 @@ pub const MIN_MAX_MESSAGE_SIZE: usize = 6123;
 ))]
 pub(crate) const fn stored_max_message_size(stored: usize) -> usize {
     if stored == 0 {
-        MAX_DATA_CHANNEL_MESSAGE_SIZE
+        MAX_CHANNEL_MESSAGE_SIZE
     } else {
         stored
     }
 }
 
-/// The effective per-message send limit for a peer whose SDP is `remote_sdp`. The negotiated value
-/// is parsed from the SDP by [`crate::core::sdp`]; this function is the *policy* layered on top.
-/// Per RFC 8841 an absent attribute defaults to 65536 and a value of `0` means "no limit" (we still
-/// bound it by our own send cap); any explicit value at or above [`MIN_MAX_MESSAGE_SIZE`] is
-/// honoured and capped at [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for interop, while any positive value
-/// below [`MIN_MAX_MESSAGE_SIZE`] is refused with [`Error::RemoteMaxMessageSizeTooSmall`] so DHT
-/// control is never chunked (#1130).
-pub fn effective_max_message_size(remote_sdp: &str) -> crate::error::Result<usize> {
-    match parse_sdp_max_message_size(remote_sdp) {
-        None | Some(0) => Ok(MAX_DATA_CHANNEL_MESSAGE_SIZE),
+/// The effective per-message send limit for a peer whose handshake description is `remote_handshake`.
+/// An absent attribute defaults to 65536 and a value of `0` means "no limit" (still bounded by our
+/// own send cap); any explicit value at or above [`MIN_MAX_MESSAGE_SIZE`] is honoured and capped at
+/// [`MAX_CHANNEL_MESSAGE_SIZE`] for interop, while any positive value below [`MIN_MAX_MESSAGE_SIZE`]
+/// is refused with [`Error::RemoteMaxMessageSizeTooSmall`] so DHT control is never chunked (#1130).
+pub fn effective_max_message_size(remote_handshake: &str) -> crate::error::Result<usize> {
+    match parse_sdp_max_message_size(remote_handshake) {
+        None | Some(0) => Ok(MAX_CHANNEL_MESSAGE_SIZE),
         Some(n) if (n as usize) < MIN_MAX_MESSAGE_SIZE => {
             Err(Error::RemoteMaxMessageSizeTooSmall {
                 advertised: n as usize,
                 minimum: MIN_MAX_MESSAGE_SIZE,
             })
         }
-        Some(n) => Ok((n as usize).min(MAX_DATA_CHANNEL_MESSAGE_SIZE)),
+        Some(n) => Ok((n as usize).min(MAX_CHANNEL_MESSAGE_SIZE)),
     }
 }
 
-/// The [ConnectionInterface] trait defines how to
-/// make webrtc ice handshake with a remote peer and then send data channel message to it.
+/// The [ConnectionInterface] trait defines the abstract two-party offer/answer handshake and
+/// credit-bounded framed message transport for a peer connection.
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait ConnectionInterface {
-    /// Sdp is used to expose local and remote session descriptions when handshaking.
-    type Sdp: Serialize + DeserializeOwned;
+    /// Handshake token used to exchange local and remote session descriptions when handshaking.
+    type Handshake: Serialize + DeserializeOwned;
     /// The error type that is returned by connection.
     type Error: std::error::Error + From<Error>;
 
@@ -156,7 +152,7 @@ pub trait ConnectionInterface {
     /// acceptance, the implementation must retire and close that connection
     /// generation before returning.
     ///
-    /// The message travels on the data channel `lane` is pinned to, so the messages of one lane
+    /// The message travels on the channel `lane` is pinned to, so the messages of one lane
     /// reach the remote handler in send order (see [`crate::core::pool`]).
     ///
     /// The send is charged one credit of `lane` (see
@@ -186,46 +182,46 @@ pub trait ConnectionInterface {
     /// connection weakly and reserves nothing.
     fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView;
 
-    /// Return one coherent WebRTC/data-channel product-state observation.
+    /// Return one coherent connection-phase and channel-readiness product-state observation.
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot;
 
-    /// Get current webrtc connection state: the WebRTC component of
+    /// Get current transport connection state: the phase component of
     /// [`connection_state_snapshot`](Self::connection_state_snapshot).
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection_state_snapshot().webrtc()
+    fn connection_state(&self) -> TransportConnectionState {
+        self.connection_state_snapshot().state()
     }
 
-    /// Return whether every data channel used by this connection is currently open: the
-    /// data-channel component of [`connection_state_snapshot`](Self::connection_state_snapshot).
+    /// Return whether every payload channel used by this connection is currently open: the
+    /// channel-readiness component of [`connection_state_snapshot`](Self::connection_state_snapshot).
     ///
-    /// This is one component of routability, not the complete predicate. ICE
-    /// may still report `Connecting` when SCTP has opened, while
+    /// This is one component of routability, not the complete predicate. The link phase
+    /// may still report `Connecting` when channels have opened, while
     /// `Disconnected + Open` must not be treated as ready. Callers must classify
-    /// the WebRTC/data-channel product state according to their protocol model.
-    fn data_channel_is_open(&self) -> bool {
-        self.connection_state_snapshot().data_channel_open()
+    /// the product state according to their protocol model.
+    fn channel_is_open(&self) -> bool {
+        self.connection_state_snapshot().channel_open()
     }
 
     /// The maximum size, in bytes, of one message this connection can send - the channel's
-    /// negotiated SCTP / data-channel `max_message_size`, capped at
-    /// [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for cross-peer interop. A caller must keep every sent
-    /// message at or below this; larger payloads have to be chunked. Reported per-channel so a
-    /// constrained channel (which can negotiate a smaller limit) is respected.
+    /// negotiated `max_message_size`, capped at [`MAX_CHANNEL_MESSAGE_SIZE`] for cross-peer
+    /// interop. A caller must keep every sent message at or below this; larger payloads have to be
+    /// chunked. Reported per-channel so a constrained channel (which can negotiate a smaller limit)
+    /// is respected.
     fn max_message_size(&self) -> usize;
 
-    /// Create a webrtc offer to start handshake.
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp, Self::Error>;
+    /// Create a local handshake offer to initiate a connection.
+    async fn create_offer(&self) -> Result<Self::Handshake, Self::Error>;
 
-    /// Accept a webrtc offer from remote peer and give back an answer.
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp, Self::Error>;
+    /// Accept a remote handshake offer and produce a local answer.
+    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake, Self::Error>;
 
-    /// Accept a webrtc answer from remote peer.
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<(), Self::Error>;
+    /// Accept a remote handshake answer from the peer.
+    async fn accept_answer(&self, answer: Self::Handshake) -> Result<(), Self::Error>;
 
-    /// Wait for the data channel to be opened after handshake.
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<(), Self::Error>;
+    /// Wait for the payload channel to become open after handshake completion.
+    async fn wait_for_channel_open(&self) -> Result<(), Self::Error>;
 
-    /// Close the webrtc connection.
+    /// Close the connection.
     async fn close(&self) -> Result<(), Self::Error>;
 
     /// Capture a witness that survives pool removal and observes completed native physical close.
@@ -233,7 +229,7 @@ pub trait ConnectionInterface {
     fn physical_close_witness(
         &self,
     ) -> Result<crate::connections::NativePhysicalCloseWitness, Self::Error> {
-        Err(Error::DataChannelOpen(
+        Err(Error::ChannelOpen(
             "physical_close_witness is only supported by WebrtcConnection".to_string(),
         )
         .into())
@@ -242,7 +238,7 @@ pub trait ConnectionInterface {
     /// Stable physical generation identifier used by deterministic dummy simulations.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     fn dummy_generation_id(&self) -> Result<String, Self::Error> {
-        Err(Error::DataChannelOpen(
+        Err(Error::ChannelOpen(
             "dummy_generation_id is only supported by DummyConnection".to_string(),
         )
         .into())
@@ -250,25 +246,25 @@ pub trait ConnectionInterface {
 
     /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_webrtc_connection_state_without_callback(
+    fn force_dummy_connection_state_without_callback(
         &self,
-        _state: WebrtcConnectionState,
+        _state: TransportConnectionState,
     ) -> Result<(), Self::Error> {
-        Err(Error::DataChannelOpen(
-            "force_dummy_webrtc_connection_state_without_callback is only supported by DummyConnection"
+        Err(Error::ChannelOpen(
+            "force_dummy_connection_state_without_callback is only supported by DummyConnection"
                 .to_string(),
         )
         .into())
     }
 
-    /// Test hook: override dummy data-channel readiness without dispatching callbacks.
+    /// Test hook: override dummy channel readiness without dispatching callbacks.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_data_channel_open_without_callback(
+    fn force_dummy_channel_open_without_callback(
         &self,
         _open: Option<bool>,
     ) -> Result<(), Self::Error> {
-        Err(Error::DataChannelOpen(
-            "force_dummy_data_channel_open_without_callback is only supported by DummyConnection"
+        Err(Error::ChannelOpen(
+            "force_dummy_channel_open_without_callback is only supported by DummyConnection"
                 .to_string(),
         )
         .into())
@@ -278,7 +274,7 @@ pub trait ConnectionInterface {
 /// Type-erased [`ConnectionInterface`] trait object (`Send + Sync` on native, unconstrained in
 /// the browser).
 pub type DynConnection =
-    rings_runtime::maybe_send_sync!(dyn ConnectionInterface<Sdp = String, Error = Error>);
+    rings_runtime::maybe_send_sync!(dyn ConnectionInterface<Handshake = String, Error = Error>);
 
 /// This trait specifies how to management [ConnectionInterface] objects.
 /// Each platform must implement this trait for its own connection implementation.
@@ -335,6 +331,14 @@ pub trait TransportInterface {
     /// Get all the connection ids in the transport.
     fn connection_ids(&self) -> Vec<String>;
 
+    /// Update the transport's active session-bound traversal/relay credentials.
+    fn update_session_credentials(&self, _credentials: &str) {}
+
+    /// Return the transport's currently configured session-bound traversal/relay credentials, if any.
+    fn session_credentials(&self) -> Option<String> {
+        None
+    }
+
     /// Return the total custom payload frames dispatched by this transport (dummy backend).
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     fn dispatched_payload_frames(&self) -> usize {
@@ -343,7 +347,7 @@ pub trait TransportInterface {
 }
 
 /// Object-safe, backend-agnostic transport interface consumed by higher protocol layers
-/// (`rings-core`) without depending on concrete WebRTC or dummy connection types.
+/// (`rings-core`) without depending on concrete transport connection types.
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait DynTransportInterface {
@@ -368,8 +372,16 @@ pub trait DynTransportInterface {
     fn connection_ids(&self) -> Vec<String>;
 
     /// Validate a remote handshake offer description before opening or yielding a peer slot.
-    fn validate_remote_offer(&self, remote_sdp: &str) -> Result<(), Error> {
-        effective_max_message_size(remote_sdp).map(|_| ())
+    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<(), Error> {
+        effective_max_message_size(remote_handshake).map(|_| ())
+    }
+
+    /// Update the transport's active session-bound traversal/relay credentials.
+    fn update_session_credentials(&self, _credentials: &str) {}
+
+    /// Return the transport's currently configured session-bound traversal/relay credentials, if any.
+    fn session_credentials(&self) -> Option<String> {
+        None
     }
 
     /// Return the total custom payload frames dispatched by this transport (dummy backend).
@@ -384,7 +396,7 @@ pub trait DynTransportInterface {
 impl<T, C> DynTransportInterface for T
 where
     T: TransportInterface<Connection = C, Error = Error> + MaybeSendSync,
-    C: ConnectionInterface<Sdp = String, Error = Error> + MaybeSendSync + 'static,
+    C: ConnectionInterface<Handshake = String, Error = Error> + MaybeSendSync + 'static,
 {
     async fn new_dyn_connection(
         &self,
@@ -409,6 +421,14 @@ where
 
     fn connection_ids(&self) -> Vec<String> {
         TransportInterface::connection_ids(self)
+    }
+
+    fn update_session_credentials(&self, credentials: &str) {
+        TransportInterface::update_session_credentials(self, credentials);
+    }
+
+    fn session_credentials(&self) -> Option<String> {
+        TransportInterface::session_credentials(self)
     }
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]

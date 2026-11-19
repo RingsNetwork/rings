@@ -1,5 +1,5 @@
 //! Tests of the connection handlers: relayed connects, crossing topologies and successor hints.
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use tokio::time::timeout;
 use tracing_test::traced_test;
 
@@ -41,7 +41,7 @@ fn prepare_ring_node(key: SecretKey) -> Result<Node> {
     Ok(Node::build(
         crate::swarm::SwarmBuilder::new(
             crate::tests::TEST_NETWORK_ID,
-            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
             Box::new(crate::storage::MemStorage::new()),
             session,
         )
@@ -96,7 +96,7 @@ async fn received_hops(
 /// serialized against the rest of the suite, as its own invocation (`qaci.yml`).
 #[cfg(not(feature = "dummy"))]
 #[tokio::test]
-async fn test_relayed_connect_over_real_webrtc() -> Result<()> {
+async fn test_relayed_connect_over_real_transport() -> Result<()> {
     let [key1, key2, key3, key4] = crate::tests::fixed_secret_keys::<4>()?;
     let [node1, node2, node3, node4] = [key1, key2, key3, key4]
         .map(|key| prepare_ring_node(key).expect("ring node configuration is valid"));
@@ -119,8 +119,8 @@ async fn test_relayed_connect_over_real_webrtc() -> Result<()> {
     }
 
     node1.swarm.connect(node3.did()).await?;
-    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_connection_state(&node3, node1.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node3.did(), TransportConnectionState::Connected).await?;
+    wait_for_connection_state(&node3, node1.did(), TransportConnectionState::Connected).await?;
     // The witness is read from the inboxes before any quiescence wait, which drains them.
 
     let is_send = |message: &Message| matches!(message, Message::ConnectNodeSend(_));
@@ -195,7 +195,7 @@ async fn test_a_refused_offer_is_logged_once_at_debug_and_answered() -> Result<(
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2]).await;
     let offer = ConnectNodeSend {
-        sdp: serde_json::to_string("never read: the slot refuses first")
+        handshake: serde_json::to_string("never read: the slot refuses first")
             .map_err(|_| Error::SerializeToString)?,
         dht_protocol_mode: node2.swarm.dht_protocol_mode(),
         relay_custody: node2.swarm.transport.dht.relay_custody(),
@@ -291,7 +291,7 @@ async fn test_sync_successor_report_requires_token_before_connecting_successor()
         )
         .await?;
 
-    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node3.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node3.did()).await?;
     wait_for_msgs([&node1, &node2, &node3]).await;
     assert_no_more_msg([&node1, &node2, &node3]).await;
@@ -411,7 +411,7 @@ async fn test_connect_successor_report_requires_single_use_token_before_connecti
             node1.did(),
         )
         .await?;
-    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node3.did(), TransportConnectionState::Connected).await?;
     wait_for_msgs([&node1, &node2, &node3]).await;
     assert!(!node1.dht().claim_connect_lookup(request_id)?);
     assert_no_more_msg([&node1, &node2, &node3]).await;
@@ -928,7 +928,7 @@ async fn test_finger_when_disconnect() -> Result<()> {
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    // The data channels open and `on_data_channel_open -> join_dht` runs
+    // The data channels open and `on_channel_open -> join_dht` runs
     // asynchronously, so poll until both sides have joined each other rather
     // than asserting after a fixed wait.
     wait_until("node1 and node2 to join each other's DHT", || {

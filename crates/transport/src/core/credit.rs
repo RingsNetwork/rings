@@ -1,7 +1,7 @@
 //! Per-lane credit flow control: the receiver bounds how many frames of each lane it holds, and
 //! the sender never exceeds that bound, so receive-side admission never refuses an honest frame.
 //!
-//! A connection carries [`DATA_CHANNEL_POOL_SIZE`] lanes, each pinned to one ordered data
+//! A connection carries [`CHANNEL_POOL_SIZE`] lanes, each pinned to one ordered data
 //! channel (see [`crate::core::pool`]). For every lane, independently, the two ends keep:
 //!
 //! ```text
@@ -64,7 +64,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::core::pool::ChannelLane;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 
 /// Frames of one lane a receiver holds at most; a connection's bound, one window per lane, is
 /// [`INBOUND_PEER_FRAME_CAPACITY`](crate::callback::INBOUND_PEER_FRAME_CAPACITY).
@@ -195,9 +195,9 @@ pub(crate) enum LaneSignal {
 }
 
 /// The index a lane's credit is kept under: the channel the lane is pinned to, one of the
-/// [`DATA_CHANNEL_POOL_SIZE`] channels by construction.
+/// [`CHANNEL_POOL_SIZE`] channels by construction.
 ///
-/// Lanes congruent modulo [`DATA_CHANNEL_POOL_SIZE`] share one channel and so one credit,
+/// Lanes congruent modulo [`CHANNEL_POOL_SIZE`] share one channel and so one credit,
 /// exactly as they share its ordering (`channel(lane) ≜ pool[lane mod |pool|]`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CreditIndex {
@@ -212,7 +212,7 @@ pub enum CreditIndex {
 }
 
 const _: () = assert!(
-    DATA_CHANNEL_POOL_SIZE == 4,
+    CHANNEL_POOL_SIZE == 4,
     "CreditIndex and PerLane name one variant and one value per data channel"
 );
 
@@ -229,7 +229,7 @@ impl CreditIndex {
 
 /// The credit index of `lane`.
 pub const fn credit_index(lane: ChannelLane) -> CreditIndex {
-    match lane.index() % DATA_CHANNEL_POOL_SIZE {
+    match lane.index() % CHANNEL_POOL_SIZE {
         0 => CreditIndex::C0,
         1 => CreditIndex::C1,
         2 => CreditIndex::C2,

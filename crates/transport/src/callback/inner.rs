@@ -56,8 +56,8 @@ use crate::core::pool::ChannelLane;
 use crate::core::transport::BorrowedTransportMessage;
 #[cfg(rings_transport_backend)]
 use crate::core::transport::SendPermit;
-use crate::core::transport::WebrtcConnectionState;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::core::transport::TransportConnectionState;
+use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 #[cfg(rings_transport_backend)]
 use crate::error::Error;
 #[cfg(rings_transport_backend)]
@@ -83,7 +83,7 @@ struct LaneQueue {
 #[derive(Default)]
 struct PeerStateQueue {
     /// State transitions in arrival order.
-    states: VecDeque<WebrtcConnectionState>,
+    states: VecDeque<TransportConnectionState>,
     /// Whether a drainer task currently owns the queue.
     draining: bool,
 }
@@ -193,7 +193,7 @@ macro_rules! define_shared_inbound_frame_paths {
 
         /// Synchronously record terminal credit/data-channel wakeup effects for `state`, then
         /// enqueue `state` for strictly serialized, arrival-ordered callback dispatch.
-        pub fn dispatch_peer_connection_state(self: &$shared<Self>, state: WebrtcConnectionState) {
+        pub fn dispatch_peer_connection_state(self: &$shared<Self>, state: TransportConnectionState) {
             if state.is_terminal() {
                 self.close_link_credit();
                 self.data_channel_state_notifier.wake();
@@ -291,26 +291,26 @@ impl InnerTransportCallback {
     }
 
     /// Notify the data channel is open.
-    pub async fn on_data_channel_open(&self) {
-        self.on_data_channel_open_with_cid(&self.cid).await;
+    pub async fn on_channel_open(&self) {
+        self.on_channel_open_with_cid(&self.cid).await;
     }
 
-    pub(crate) async fn on_data_channel_open_with_cid(&self, cid: &str) {
+    pub(crate) async fn on_channel_open_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
-        if let Err(e) = self.callback.on_data_channel_open(cid).await {
-            tracing::error!("Callback on_data_channel_open failed: {e:?}");
+        if let Err(e) = self.callback.on_channel_open(cid).await {
+            tracing::error!("Callback on_channel_open failed: {e:?}");
         }
     }
 
     /// Notify the data channel is close.
-    pub async fn on_data_channel_close(&self) {
-        self.on_data_channel_close_with_cid(&self.cid).await;
+    pub async fn on_channel_close(&self) {
+        self.on_channel_close_with_cid(&self.cid).await;
     }
 
-    pub(crate) async fn on_data_channel_close_with_cid(&self, cid: &str) {
+    pub(crate) async fn on_channel_close_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
-        if let Err(e) = self.callback.on_data_channel_close(cid).await {
-            tracing::error!("Callback on_data_channel_close failed: {e:?}");
+        if let Err(e) = self.callback.on_channel_close(cid).await {
+            tracing::error!("Callback on_channel_close failed: {e:?}");
         }
     }
 
@@ -325,7 +325,7 @@ impl InnerTransportCallback {
         if inbound_frame_exceeds_protocol_ceiling(raw.len()) {
             return InboundFrameAdmission::Oversized {
                 bytes: raw.len(),
-                max_bytes: MAX_DATA_CHANNEL_MESSAGE_SIZE,
+                max_bytes: MAX_CHANNEL_MESSAGE_SIZE,
             };
         }
         let (borrowed, remaining) =
@@ -409,7 +409,7 @@ impl InnerTransportCallback {
     }
 
     #[cfg(rings_transport_runtime)]
-    fn enqueue_peer_state(&self, state: WebrtcConnectionState) -> bool {
+    fn enqueue_peer_state(&self, state: TransportConnectionState) -> bool {
         let mut queue = lock_recover(&self.peer_states);
         queue.states.push_back(state);
         !mem::replace(&mut queue.draining, true)
@@ -422,7 +422,7 @@ impl InnerTransportCallback {
             finished: false,
         };
         while let Some(state) = drainer.next() {
-            self.on_peer_connection_state_change(state).await;
+            self.on_connection_state_change(state).await;
         }
     }
 
@@ -446,22 +446,21 @@ impl InnerTransportCallback {
     }
 
     /// This method is invoked when the state of connection has changed.
-    pub async fn on_peer_connection_state_change(&self, s: WebrtcConnectionState) {
-        self.on_peer_connection_state_change_with_cid(&self.cid, s)
-            .await;
+    pub async fn on_connection_state_change(&self, s: TransportConnectionState) {
+        self.on_connection_state_change_with_cid(&self.cid, s).await;
     }
 
-    pub(crate) async fn on_peer_connection_state_change_with_cid(
+    pub(crate) async fn on_connection_state_change_with_cid(
         &self,
         cid: &str,
-        s: WebrtcConnectionState,
+        s: TransportConnectionState,
     ) {
         if s.is_terminal() {
             self.close_link_credit();
             self.data_channel_state_notifier.wake();
         }
-        if let Err(e) = self.callback.on_peer_connection_state_change(cid, s).await {
-            tracing::error!("Callback on_peer_connection_state_change failed: {e:?}");
+        if let Err(e) = self.callback.on_connection_state_change(cid, s).await {
+            tracing::error!("Callback on_connection_state_change failed: {e:?}");
         }
     }
 }
@@ -475,7 +474,7 @@ struct PeerStateDrainer<'a> {
 
 #[cfg(rings_transport_runtime)]
 impl PeerStateDrainer<'_> {
-    fn next(&mut self) -> Option<WebrtcConnectionState> {
+    fn next(&mut self) -> Option<TransportConnectionState> {
         let mut queue = lock_recover(&self.callback.peer_states);
         let next = queue.states.pop_front();
         if next.is_none() {

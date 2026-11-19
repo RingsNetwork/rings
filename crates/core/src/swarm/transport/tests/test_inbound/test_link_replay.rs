@@ -56,8 +56,8 @@ impl Harness {
             Box::new(MemStorage::new()),
             local,
         )
-            .replay_storage(Box::new(Arc::clone(&replay)))
-            .build();
+        .replay_storage(Box::new(Arc::clone(&replay)))
+        .build();
         swarm.set_replay_delegation(LINK_PREFIX.to_vec(), ReplayWindow::Link);
         let transport = Arc::clone(&swarm.transport);
         Ok(Self {

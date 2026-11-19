@@ -17,7 +17,7 @@ use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::LaneCreditView;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::core::transport::SharedTransport;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 
 use self::storage_sync::StorageSyncAckMap;
@@ -150,7 +150,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::StorageSyncOutcome;
-pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(crate) use self::timeouts::CHANNEL_SEND_ACCEPT_BUDGET;
 pub(crate) use self::timeouts::DELIVERY_BOUND;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
@@ -349,6 +349,11 @@ impl SwarmTransport {
     /// Return the epoch [`SharedClock`] capability bound to this transport.
     pub fn clock(&self) -> &SharedClock {
         &self.clock
+    }
+
+    /// Return the injected trait-based [`SharedTransport`] backing this swarm transport.
+    pub fn transport(&self) -> &SharedTransport {
+        &self.transport
     }
 
     /// Read the current Unix epoch timestamp in milliseconds from this transport's [`SharedClock`].
@@ -780,8 +785,8 @@ impl SwarmConnection {
         self.connection.close().await.map_err(Into::into)
     }
 
-    pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection.webrtc_connection_state()
+    pub fn connection_state(&self) -> TransportConnectionState {
+        self.connection.connection_state()
     }
 
     #[cfg(all(

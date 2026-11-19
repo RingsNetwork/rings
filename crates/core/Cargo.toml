@@ -1,6 +1,6 @@
 [package]
 name = "rings-core"
-description = "Chord DHT implementation with ICE"
+description = "Chord DHT and overlay routing core"
 readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
@@ -146,7 +146,6 @@ rings-transport = { workspace = true, features = ["web-sys-webrtc"] }
 web-sys = { version = "0.3.56", features = [
     "MediaDevices",
     "MediaStreamConstraints",
-    "RtcIceServer",
 ] }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]

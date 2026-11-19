@@ -300,12 +300,20 @@ pub struct Config {
     /// Optional externally reachable IP address hint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
-    /// Optional lower bound for WebRTC UDP port allocation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webrtc_udp_port_min: Option<u16>,
-    /// Optional upper bound for WebRTC UDP port allocation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webrtc_udp_port_max: Option<u16>,
+    /// Optional lower bound for local UDP port allocation.
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_min",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub udp_port_min: Option<u16>,
+    /// Optional upper bound for local UDP port allocation.
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_max",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub udp_port_max: Option<u16>,
     /// Persistent DHT data storage configuration.
     pub data_storage: StorageConfig,
     /// Peer measurement storage configuration.
@@ -336,17 +344,15 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             .and_then(|delegator_key| delegator_key.sign_ice_servers(&config.ice_servers).ok())
             .unwrap_or(config.ice_servers);
 
-        let udp_range = crate::processor::parse_webrtc_udp_port_range(
-            config.webrtc_udp_port_min,
-            config.webrtc_udp_port_max,
-        )?;
+        let udp_range =
+            crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
 
         Ok(Self {
             network_id: config.network_id,
             ice_servers,
             external_address: config.external_ip,
-            webrtc_udp_port_min: udp_range.map(|range| range.min()),
-            webrtc_udp_port_max: udp_range.map(|range| range.max()),
+            udp_port_min: udp_range.map(|range| range.min()),
+            udp_port_max: udp_range.map(|range| range.max()),
             delegatee_key,
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval_secs: config.online_node_heartbeat_interval_secs,
@@ -416,8 +422,8 @@ impl Config {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
             external_ip: None,
-            webrtc_udp_port_min: None,
-            webrtc_udp_port_max: None,
+            udp_port_min: None,
+            udp_port_max: None,
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }

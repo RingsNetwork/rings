@@ -43,7 +43,7 @@
 //!   `SendAcceptance::try_cancel` succeeded or while `!is_irrevocable()`; once the claim
 //!   succeeded it returns only through `await_irrevocable_send` / `complete_irrevocable_send`
 //!   / `expire_irrevocable_send`, whose errors are backend errors and
-//!   `DataChannelSendCompletionTimeout`.
+//!   `ChannelSendCompletionTimeout`.
 //! - **(T) Transport contract.** `rings_transport::error::Error::SendPermitRevoked` is returned
 //!   by every backend (dummy, native, browser queue) only when the permit's claim failed, i.e.
 //!   "revoked before transport send admission".
@@ -60,7 +60,7 @@
 //!   `resolve_initial` (as above).
 //! - `Transport(SendPermitRevoked)`: produced by a backend's failed claim (T), surfaced through
 //!   (C).
-//! - `DataChannelSendQueueTimeout`: produced by the timeout arm of `send_data_with_timeout`,
+//! - `ChannelSendQueueTimeout`: produced by the timeout arm of `send_data_with_timeout`,
 //!   only after `try_cancel` succeeded (C).
 //! - `OutboundTransferCapacityExceeded`, `OutboundTransferMemoryCapacityExceeded`,
 //!   `OutboundTransferAdmissionTimeout`: produced by `reserve_outbound_capacity`, before
@@ -194,11 +194,11 @@ impl Error {
             | Self::OutboundTransferAdmissionTimeout { .. } => {
                 SendClass::Deferrable(DeferralTrigger::CapacityRelease)
             }
-            Self::DataChannelSendQueueTimeout { .. }
+            Self::ChannelSendQueueTimeout { .. }
             | Self::OutboundFirstFrameAdmissionTimeout { .. } => {
                 SendClass::Deferrable(DeferralTrigger::ChannelDrain)
             }
-            Self::DataChannelSendCompletionTimeout { .. } | Self::DataChannelDeliveryTimeout { .. }
+            Self::ChannelSendCompletionTimeout { .. } | Self::ChannelDeliveryTimeout { .. }
             | Self::DetachedPayloadCleanupTimeout { .. } | Self::TrackedPayloadCleanupTimeout { .. }
             | Self::CancelledDetachedAdmissionPublishedSuccess
             | Self::DetachedSendAbandonedAfterClaim { .. } => SendClass::Ambiguous,
@@ -266,7 +266,7 @@ impl Error {
             | Self::MessageDecryptionFailed(_) | Self::AeadWrappedKeyBlockCount { .. }
             | Self::InvalidMessage(_) | Self::NestedChunkMessage | Self::InvalidChunkMessage
             | Self::MessageTooLarge(_) | Self::MessageSizeOverflow
-            | Self::PeerMaxMessageSizeTooSmall(_) | Self::SdpAboveMax(_)
+            | Self::PeerMaxMessageSizeTooSmall(_) | Self::HandshakeAboveMax(_)
             // connection lifecycle
             | Self::AlreadyConnected
             | Self::ConnectionAttemptCancelled { .. }
@@ -345,7 +345,7 @@ mod tests {
                 DeferralTrigger::CapacityRelease,
             ),
             (
-                Error::DataChannelSendQueueTimeout {
+                Error::ChannelSendQueueTimeout {
                     peer,
                     timeout_ms: 1,
                     bytes: 1,
@@ -361,7 +361,7 @@ mod tests {
             assert_eq!(deferral.to_string(), described);
         }
         let surfaced = [
-            Error::DataChannelSendCompletionTimeout {
+            Error::ChannelSendCompletionTimeout {
                 peer,
                 timeout_ms: 1,
                 bytes: 1,
@@ -438,11 +438,11 @@ mod tests {
                 TransportSendFailureClass::Ambiguous,
             ),
             (
-                TransportError::DataChannelMessage("bad".to_string()),
+                TransportError::ChannelMessage("bad".to_string()),
                 TransportSendFailureClass::Fatal,
             ),
             (
-                TransportError::DataChannelOpen("closed".to_string()),
+                TransportError::ChannelOpen("closed".to_string()),
                 TransportSendFailureClass::Fatal,
             ),
             (

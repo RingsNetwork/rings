@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use rings_transport::core::pool::ChannelLane;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
 use super::capacity::InboundRefusal;
 use super::*;
@@ -64,7 +64,7 @@ fn test_a_lane_waits_only_for_reassembly_of_its_category() {
 
 #[test]
 fn test_maximum_transport_frame_fits_every_lane_reservation() {
-    let reserved = memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE);
+    let reserved = memory_reservation(MAX_CHANNEL_MESSAGE_SIZE);
     assert!(reserved <= INBOUND_RESERVED_BYTES_PER_LANE);
 
     let capacity = Arc::new(InboundCapacity::new());

@@ -69,9 +69,9 @@ impl Harness {
             Box::new(MemStorage::new()),
             local,
         )
-            .replay_storage(crate::tests::volatile_replay_storage())
-            .origin_quota(quota)
-            .build();
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .origin_quota(quota)
+        .build();
         swarm.set_admission_delegation(DELEGATED_PREFIX.to_vec(), MessageLimit::Delegated);
         let transport = Arc::clone(&swarm.transport);
         Ok(Self { swarm, transport })

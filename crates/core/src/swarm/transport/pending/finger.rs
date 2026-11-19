@@ -31,7 +31,7 @@
 //!     Applied / Queued / Missing / Unroutable / Rejected(reason)
 //! ```
 
-use super::PeerConnectionLifecycle;
+use super::PeerSlotLifecycle;
 use super::PendingConnectionAttempt;
 use super::SwarmTransport;
 use crate::dht::finger::FingerApplyOutcome;
@@ -114,18 +114,16 @@ pub(super) enum FingerCandidateAdmission {
 /// Post: every lifecycle state maps to exactly one effect plan, and this pure
 /// classifier performs no DHT mutation, connection creation, or proof transfer.
 pub(super) fn finger_candidate_admission(
-    lifecycle: Option<PeerConnectionLifecycle>,
+    lifecycle: Option<PeerSlotLifecycle>,
     is_routable: bool,
 ) -> FingerCandidateAdmission {
     match lifecycle {
         Some(
-            PeerConnectionLifecycle::Pending { attempt, .. }
-            | PeerConnectionLifecycle::Admitting { attempt, .. },
+            PeerSlotLifecycle::Pending { attempt, .. }
+            | PeerSlotLifecycle::Admitting { attempt, .. },
         ) => FingerCandidateAdmission::Queue(attempt),
-        Some(PeerConnectionLifecycle::Active { .. }) if is_routable => {
-            FingerCandidateAdmission::Apply
-        }
-        Some(PeerConnectionLifecycle::Active { .. }) => FingerCandidateAdmission::Unroutable,
+        Some(PeerSlotLifecycle::Active { .. }) if is_routable => FingerCandidateAdmission::Apply,
+        Some(PeerSlotLifecycle::Active { .. }) => FingerCandidateAdmission::Unroutable,
         None => FingerCandidateAdmission::Missing,
     }
 }

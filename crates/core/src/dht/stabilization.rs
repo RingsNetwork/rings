@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::Did;
@@ -77,9 +77,9 @@ enum TopologyPeerRemovalReason {
     /// The payload layer marked this attempt as permanently unable to send.
     SendTerminal,
     /// The WebRTC connection itself reached a terminal state.
-    TerminalTransport(WebrtcConnectionState),
+    TerminalTransport(TransportConnectionState),
     /// WebRTC is connected, but its data channel is not usable for payloads.
-    DataChannelNotOpen(WebrtcConnectionState),
+    ChannelNotOpen(TransportConnectionState),
     /// The peer remained disconnected longer than the configured grace period.
     DisconnectedGraceElapsed {
         /// Milliseconds elapsed since the attempt was first observed disconnected.
@@ -134,7 +134,7 @@ impl TopologyPeerRemovalReason {
             Self::MissingTransportObject => "missing_transport_object",
             Self::SendTerminal => "send_terminal",
             Self::TerminalTransport(_) => "terminal_transport",
-            Self::DataChannelNotOpen(_) => "data_channel_not_open",
+            Self::ChannelNotOpen(_) => "channel_not_open",
             Self::DisconnectedGraceElapsed { .. } => "disconnected_grace_elapsed",
             Self::DisconnectedSuccessorFailover { .. } => "disconnected_successor_failover",
             Self::DisconnectedTopologyPrune { .. } => "disconnected_topology_prune",
@@ -143,9 +143,9 @@ impl TopologyPeerRemovalReason {
     }
 
     /// WebRTC state to include in logs when the reason came from readiness.
-    const fn transport_state(self) -> Option<WebrtcConnectionState> {
+    const fn transport_state(self) -> Option<TransportConnectionState> {
         match self {
-            Self::TerminalTransport(state) | Self::DataChannelNotOpen(state) => Some(state),
+            Self::TerminalTransport(state) | Self::ChannelNotOpen(state) => Some(state),
             _ => None,
         }
     }
@@ -378,11 +378,11 @@ impl Stabilizer {
     /// its configured deadline.
     fn log_step_timeout(&self, step: &'static str, timeout: Duration, elapsed_ms: i64) {
         let topology = TopoInfo::try_from(self.dht.as_ref()).ok();
-        let mut connections: Vec<(Did, WebrtcConnectionState)> = self
+        let mut connections: Vec<(Did, TransportConnectionState)> = self
             .transport
             .admitted_connections()
             .into_iter()
-            .map(|(attempt, conn)| (attempt.peer(), conn.webrtc_connection_state()))
+            .map(|(attempt, conn)| (attempt.peer(), conn.connection_state()))
             .collect();
         connections.sort_by_key(|(did, _)| *did);
 
@@ -495,10 +495,8 @@ impl Stabilizer {
             return Ok(removal(TopologyPeerRemovalReason::TerminalTransport(state)));
         }
 
-        if matches!(state, WebrtcConnectionState::Connected) && !readiness.data_channel_open() {
-            return Ok(removal(TopologyPeerRemovalReason::DataChannelNotOpen(
-                state,
-            )));
+        if matches!(state, TransportConnectionState::Connected) && !readiness.channel_open() {
+            return Ok(removal(TopologyPeerRemovalReason::ChannelNotOpen(state)));
         }
 
         if let Some(expiry) = self
@@ -513,7 +511,7 @@ impl Stabilizer {
             ));
         }
 
-        if matches!(state, WebrtcConnectionState::Disconnected) {
+        if matches!(state, TransportConnectionState::Disconnected) {
             if let Some(reason) = self
                 .disconnected_peer_removal_reason(did, admitted, now_ms)
                 .await?
@@ -768,7 +766,7 @@ impl Stabilizer {
                     let next_hop_state = self
                         .transport
                         .get_connection(closest_predecessor)
-                        .map(|conn| conn.webrtc_connection_state());
+                        .map(|conn| conn.connection_state());
                     tracing::debug!(
                         target: "rings_core::dht::stabilization",
                         local = %self.dht.did,
@@ -832,7 +830,7 @@ impl Stabilizer {
                 let next_hop_state = self
                     .transport
                     .get_connection(next)
-                    .map(|conn| conn.webrtc_connection_state());
+                    .map(|conn| conn.connection_state());
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
