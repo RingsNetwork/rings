@@ -41,7 +41,7 @@ fn prepare_ring_node(key: SecretKey) -> Result<Node> {
     Ok(Node::build(
         crate::swarm::SwarmBuilder::new(
             crate::tests::TEST_NETWORK_ID,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
             Box::new(crate::storage::MemStorage::new()),
             session,
         )

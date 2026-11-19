@@ -72,6 +72,9 @@ thiserror = "1.0.47"
 tracing = "0.1.37"
 url = { version = "2.4.0", features = ["serde"] }
 
+[target.'cfg(target_family = "wasm")'.dependencies]
+rings-runtime = { workspace = true, features = ["browser"] }
+
 [dev-dependencies]
 futures = "0.3.28"
 rings-test-support = { workspace = true }

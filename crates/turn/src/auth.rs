@@ -7,9 +7,6 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 
 use rings_core::delegation::DelegationDigest;
-use rings_core::delegation::TurnAuthIdentity;
-use rings_core::delegation::TurnCredentials;
-use rings_core::delegation::VerifiedTurnAuth;
 use rings_core::dht::Did;
 use rings_core::ecc::keccak256;
 use rings_core::ecc::PublicKey;
@@ -19,6 +16,9 @@ use rings_core::utils::SystemClock;
 use turn::auth::generate_auth_key;
 use turn::auth::AuthHandler;
 
+use crate::credentials::TurnAuthIdentity;
+use crate::credentials::TurnCredentials;
+use crate::credentials::VerifiedTurnAuth;
 use crate::error::Result;
 use crate::error::TurnError;
 

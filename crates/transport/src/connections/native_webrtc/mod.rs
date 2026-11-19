@@ -984,6 +984,10 @@ impl ConnectionInterface for WebrtcConnection {
         )
         .await
     }
+
+    fn physical_close_witness(&self) -> Result<NativePhysicalCloseWitness> {
+        Ok(Self::physical_close_witness(self))
+    }
 }
 
 fn schedule_deferred_remote_candidates(
@@ -1374,6 +1378,13 @@ impl TransportInterface for WebrtcTransport {
     async fn close_connection_if_current(
         &self,
         connection: &ConnectionRef<Self::Connection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
+    }
+
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<crate::core::transport::DynConnection>,
     ) -> Result<bool> {
         self.pool.safely_remove_if_current(connection).await
     }

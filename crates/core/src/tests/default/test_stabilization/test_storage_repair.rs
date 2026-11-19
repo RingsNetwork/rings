@@ -44,7 +44,7 @@ async fn test_stabilize_republishes_local_entries_to_missing_affine_owners() -> 
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )

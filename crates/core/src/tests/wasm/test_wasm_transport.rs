@@ -28,7 +28,7 @@ use crate::message::Message;
 use crate::message::MessageCategory;
 use crate::message::NotifyPredecessorSend;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::swarm::transport::Transport;
+use rings_transport::connections::WebSysWebrtcTransport as Transport;
 use crate::swarm::Swarm;
 use crate::tests::activity::probe_on_activity;
 use crate::tests::activity::swarms_quiescent;

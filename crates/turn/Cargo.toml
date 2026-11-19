@@ -20,13 +20,23 @@ default = ["cli"]
 cli = ["dep:clap", "dep:tracing-subscriber"]
 
 [dependencies]
+base58-monero = { version = "0.3", default-features = false, features = ["check"] }
+hex = "0.4.3"
+rings-codec = { workspace = true }
+rings-core = { workspace = true }
+serde = { version = "1.0.136", features = ["derive"] }
+thiserror = "1"
+zeroize = { workspace = true }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+rings-core = { workspace = true, features = ["wasm"] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
 async-trait = { workspace = true }
 clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
 rand = "0.8.5"
 rings-core = { workspace = true, features = ["default"] }
-serde = { version = "1.0.136", features = ["derive"] }
 stun = "0.17.1"
-thiserror = "1"
 tokio = { version = "1.32.0", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.15", features = ["ansi", "env-filter"], optional = true }

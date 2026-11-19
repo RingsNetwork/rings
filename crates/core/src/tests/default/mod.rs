@@ -259,7 +259,7 @@ fn fixture_builder(key: &SecretKey, ice_servers: &str) -> Result<SwarmBuilder> {
     let delegatee_key = DelegateeKey::new_with_seckey(key)?;
     Ok(SwarmBuilder::new(
         crate::tests::TEST_NETWORK_ID,
-        ice_servers,
+        crate::tests::test_transport(ice_servers),
         storage,
         delegatee_key,
     )

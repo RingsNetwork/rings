@@ -19,7 +19,7 @@ fn head_only_node(key: SecretKey) -> Result<Node> {
     let node = Node::build(
         SwarmBuilder::new(
             crate::tests::TEST_NETWORK_ID,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )

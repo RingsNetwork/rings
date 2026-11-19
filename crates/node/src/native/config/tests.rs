@@ -527,7 +527,7 @@ fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signatu
     let mut config = Config::new(&delegatee_path);
     config.delegator_key = Some(delegator_path.to_string_lossy().into_owned());
     let turn_server_pubkey = SecretKey::random().pubkey();
-    let turn_url = crate::prelude::rings_core::delegation::format_turn_server_url(
+    let turn_url = rings_turn::format_turn_server_url(
         "turn://turn.rings.rs:3478",
         turn_server_pubkey,
     )

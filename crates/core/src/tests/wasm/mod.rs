@@ -37,7 +37,12 @@ async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -
             .unwrap(),
     );
 
-    let builder = SwarmBuilder::new(0, TEST_ICE_SERVERS, storage, delegatee_key)
+    let builder = SwarmBuilder::new(
+        0,
+        crate::tests::test_transport(TEST_ICE_SERVERS),
+        storage,
+        delegatee_key,
+    )
         .replay_storage(crate::tests::volatile_replay_storage())
         .observer(Arc::new(ActivityObserver));
     let builder = match mode {

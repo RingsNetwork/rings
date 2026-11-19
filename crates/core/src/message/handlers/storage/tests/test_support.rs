@@ -257,7 +257,7 @@ pub(super) fn prepare_node_with_storage_redundancy(
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
             Box::new(MemStorage::new()),
             delegatee_key,
         )
@@ -277,7 +277,7 @@ pub(super) fn prepare_node_with_virtual_nodes(
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
             Box::new(MemStorage::new()),
             delegatee_key,
         )

@@ -34,7 +34,7 @@ fn ring_node(key: SecretKey) -> Result<Node> {
     Ok(Node::build(
         SwarmBuilder::new(
             TEST_NETWORK_ID,
-            TEST_ICE_SERVERS,
+            crate::tests::test_transport(TEST_ICE_SERVERS),
             Box::new(crate::storage::MemStorage::new()),
             session,
         )
@@ -897,5 +897,91 @@ async fn test_connect_originate_failure_abandons_pending_slot_and_records_single
         unlinked(&node_a, target)?,
         "mark_offer_sent failure in send_connection_offer must abandon the pending slot"
     );
+    Ok(())
+}
+
+/// Formal Safety Invariant (Issue #1291 §3 — Pre-Reconciliation Offer Rejection Purity):
+/// `\square RejectedOfferIsPureNoOp`: when `answer_remote_connection` rejects an inbound offer via
+/// `validate_remote_offer` (`SdpAboveMax`, invalid JSON SDP, or `RemoteMaxMessageSizeTooSmall`),
+/// the local lifecycle slot `L'[peer] == L[peer]` and transport pool `P'[peer] == P[peer]` remain
+/// bit-for-bit unchanged (no displacement of an existing pending or active connection, and no
+/// orphan physical connection created).
+#[tokio::test]
+async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejection_classes(
+) -> Result<()> {
+    use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
+
+    let [node1, node2] = ring_nodes::<2>()?;
+    let sdp_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
+        let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
+        let annotated = format!(
+            "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
+        );
+        serde_json::to_string(&annotated).map_err(Error::Serialize)
+    };
+    let (creating, _local_offer) = node2
+        .swarm
+        .transport
+        .prepare_connection_offer_with_attempt(
+            node1.did(),
+            SwarmTransportCallback::new(node2.swarm.transport.clone()),
+        )
+        .await?;
+    let (_attempt1, offer_payload) = node1.swarm.offer_connection(node2.did()).await?;
+    let Message::ConnectNodeSend(valid_offer) = offer_payload.transaction.data::<Message>()? else {
+        return Err(Error::InvalidMessage("not an offer".to_string()));
+    };
+    let original_conn = node2
+        .swarm
+        .transport
+        .transport
+        .dyn_connection(&node1.did().to_string())?;
+
+    let invalid_offers = [
+        {
+            let mut oversized = valid_offer.clone();
+            oversized.sdp = "x".repeat(crate::consts::MAX_SDP_BYTES + 1);
+            oversized
+        },
+        {
+            let mut malformed = valid_offer.clone();
+            malformed.sdp = "{not-valid-json".to_string();
+            malformed
+        },
+        {
+            let mut undersized = valid_offer.clone();
+            undersized.sdp = sdp_with_limit(&valid_offer.sdp, MIN_MAX_MESSAGE_SIZE - 1)?;
+            undersized
+        },
+    ];
+
+    for bad_offer in &invalid_offers {
+        let res = node2
+            .swarm
+            .transport
+            .answer_remote_connection(
+                node1.did(),
+                SwarmTransportCallback::new(node2.swarm.transport.clone()),
+                bad_offer,
+            )
+            .await;
+        assert!(res.is_err(), "expected pre-reconciliation rejection");
+        assert!(
+            node2
+                .swarm
+                .transport
+                .is_current_connection_attempt(creating)?,
+            "rejected offer must not displace existing pending lifecycle slot"
+        );
+        let current_conn = node2
+            .swarm
+            .transport
+            .transport
+            .dyn_connection(&node1.did().to_string())?;
+        assert!(
+            original_conn.same_allocation(&current_conn),
+            "rejected offer must not mutate or replace the transport pool entry"
+        );
+    }
     Ok(())
 }

@@ -63,7 +63,12 @@ impl Harness {
     /// A fresh local swarm owned by `key`, under `quota`.
     fn new(key: &SecretKey, quota: OriginQuotaConfig) -> Result<Self> {
         let local = DelegateeKey::new_with_seckey(key)?;
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+        let swarm = SwarmBuilder::new(
+            TEST_NETWORK_ID,
+            crate::tests::test_transport(""),
+            Box::new(MemStorage::new()),
+            local,
+        )
             .replay_storage(crate::tests::volatile_replay_storage())
             .origin_quota(quota)
             .build();

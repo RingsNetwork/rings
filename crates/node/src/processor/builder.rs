@@ -1,6 +1,7 @@
 use rings_core::dht::RemovalStorage;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
+use rings_turn::TurnCredentialSigner;
 
 use super::config::validate_dht_virtual_nodes;
 use super::config::validate_onion_role_config;
@@ -351,9 +352,51 @@ impl ProcessorBuilder {
         let observability = Arc::new(crate::observability::Observability::new_with_clock(
             self.clock.clone(),
         ));
+        let raw_ice_servers: Arc<str> = Arc::from(self.ice_servers.as_str());
+        let initial_signed_ice_servers = self
+            .delegatee_key
+            .sign_ice_servers(&self.ice_servers)
+            .unwrap_or_else(|_| self.ice_servers.clone());
+
+        #[cfg(all(feature = "node", not(feature = "dummy")))]
+        let concrete_transport = Arc::new(
+            rings_transport::connections::WebrtcTransport::new(
+                &initial_signed_ice_servers,
+                self.external_address,
+                self.webrtc_udp_port_range,
+            ),
+        );
+        #[cfg(feature = "dummy")]
+        let concrete_transport = Arc::new(
+            rings_transport::connections::DummyTransport::new(
+                &initial_signed_ice_servers,
+                self.external_address,
+                self.webrtc_udp_port_range,
+            ),
+        );
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
+        let concrete_transport = Arc::new(
+            rings_transport::connections::WebSysWebrtcTransport::new(
+                &initial_signed_ice_servers,
+                self.external_address,
+                self.webrtc_udp_port_range,
+            ),
+        );
+
+        let shared_transport: rings_transport::core::transport::SharedTransport =
+            concrete_transport.clone();
+        let signed_ice_servers = Arc::new(std::sync::RwLock::new(initial_signed_ice_servers));
+        let signed_ice_servers_for_updater = Arc::clone(&signed_ice_servers);
+        let ice_servers_updater: IceServersUpdater = Arc::new(move |signed: &str| {
+            concrete_transport.set_ice_servers(signed);
+            *signed_ice_servers_for_updater
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = signed.to_string();
+        });
+
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
-            &self.ice_servers,
+            shared_transport,
             storage,
             self.delegatee_key,
         );
@@ -393,13 +436,6 @@ impl ProcessorBuilder {
         };
         swarm_builder = swarm_builder.observer(observer);
 
-        if let Some(external_address) = self.external_address {
-            swarm_builder = swarm_builder.external_address(external_address);
-        }
-        if let Some(range) = self.webrtc_udp_port_range {
-            swarm_builder = swarm_builder.webrtc_udp_port_range(range);
-        }
-
         let measure = self.measure;
         if let Some(measure) = &measure {
             let implementation: MeasureImpl = measure.clone();
@@ -411,6 +447,9 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
+            raw_ice_servers,
+            signed_ice_servers,
+            ice_servers_updater,
             onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new_for_did(
                 onion_entry_guard_storage,

@@ -88,7 +88,7 @@
 
 use std::fmt;
 
-use rings_transport::error::Error as TransportError;
+use rings_transport::error::TransportSendFailureClass;
 
 use super::Error;
 #[cfg(test)]
@@ -300,57 +300,20 @@ impl Error {
     }
 }
 
-/// The acceptance class of a backend error, total over its (feature-gated) variants.
+/// The acceptance class of a backend error, total over its [`TransportSendFailureClass`] image.
 ///
-/// The backend's gates follow this crate's features: `std` enables `native-webrtc`, `dummy`
-/// enables `dummy`, and `wasm` enables `web-sys-webrtc`, so each arm is compiled exactly when
-/// its variant exists.
-///
-/// Only `SendPermitRevoked` (lemma (T)) and `LinkCreditClosed` are proved pre-acceptance: a
-/// credit reservation precedes every byte handed to the backend, and fails with
-/// `LinkCreditClosed` only once its connection generation ended, so nothing was sent. Backend I/O and the failures
-/// of an irrevocable write are `Ambiguous`; configuration, pairing and pre-dispatch failures
-/// are `Fatal`.
+/// Only [`TransportSendFailureClass::PreAcceptance`] (`SendPermitRevoked` under lemma (T), and
+/// `LinkCreditClosed`) is proved pre-acceptance: a credit reservation precedes every byte handed
+/// to the backend, and fails with `LinkCreditClosed` only once its connection generation ended,
+/// so nothing was sent. Backend I/O and the failures of an irrevocable write are `Ambiguous`;
+/// configuration, pairing and pre-dispatch failures are `Fatal`.
 const fn transport_send_class(error: &rings_transport::error::Error) -> SendClass {
-    match error {
-        TransportError::SendPermitRevoked | TransportError::LinkCreditClosed(_) => {
+    match error.send_failure_class() {
+        TransportSendFailureClass::PreAcceptance => {
             SendClass::Deferrable(DeferralTrigger::LinkChange)
         }
-        TransportError::MessageNotDelivered(_) => SendClass::Ambiguous,
-        #[cfg(feature = "std")]
-        TransportError::Webrtc(_)
-        | TransportError::NativeSendCompletionTimeout { .. }
-        | TransportError::NativeSendTask(_)
-        | TransportError::NativeSendPanic(_) => SendClass::Ambiguous,
-        #[cfg(feature = "std")]
-        TransportError::NativeSendRuntimeUnavailable
-        | TransportError::NativeConnectionCloseTask(_)
-        | TransportError::NativeConnectionRetirementTimeout { .. } => SendClass::Fatal,
-        #[cfg(all(feature = "wasm", target_family = "wasm"))]
-        TransportError::WebSysWebrtc(_) => SendClass::Ambiguous,
-        #[cfg(feature = "dummy")]
-        TransportError::DummyIrrevocableSendTaskStopped => SendClass::Ambiguous,
-        #[cfg(feature = "dummy")]
-        TransportError::DummyConnectionRetiredBeforeDispatch
-        | TransportError::DummyRemoteConnectionUnavailable
-        | TransportError::DummyRemoteConnectionClosed => SendClass::Fatal,
-        TransportError::Codec(_)
-        | TransportError::IceServer(_)
-        | TransportError::DataChannelOpen(_)
-        | TransportError::Timer(_)
-        | TransportError::DataChannelMessage(_)
-        | TransportError::SendByteCountOverflow
-        | TransportError::WebrtcLocalSdpGenerationError(_)
-        | TransportError::RemoteMaxMessageSizeTooSmall { .. }
-        | TransportError::WebrtcUdpPortRange(_)
-        | TransportError::ConnectionAlreadyExists(_)
-        | TransportError::ConnectionNotFound(_)
-        | TransportError::ConnectionReleased(_)
-        | TransportError::RwLockWrite(_)
-        | TransportError::RwLockRead(_)
-        | TransportError::ForeignCredit(_)
-        | TransportError::CreditPumpUnavailable(_)
-        | TransportError::ChannelPoolEmpty => SendClass::Fatal,
+        TransportSendFailureClass::Ambiguous => SendClass::Ambiguous,
+        TransportSendFailureClass::Fatal => SendClass::Fatal,
     }
 }
 
@@ -437,6 +400,77 @@ mod tests {
         for outcome in outcomes {
             assert_eq!(outcome.send_class(), SendClass::Fatal, "{outcome}");
             assert!(!outcome.records_peer_send_failure(), "{outcome}");
+        }
+    }
+
+    /// Formal Homomorphism Law (Issue #1291 §2):
+    /// `Error::Transport(e).send_class() == phi(e.send_failure_class())` commutes across all
+    /// `TransportSendFailureClass` Equivalence Classes (`PreAcceptance`, `Ambiguous`, `Fatal`),
+    /// ensuring `rings-core` never inspects concrete WebRTC backend errors while preserving
+    /// pre-acceptance soundness (`Deferrable(LinkChange)` iff `PreAcceptance`).
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), test)]
+    fn test_transport_send_class_homomorphism_commutes_over_all_failure_classes() {
+        use rings_transport::error::Error as TransportError;
+        use rings_transport::error::TransportSendFailureClass;
+
+        let phi = |class: TransportSendFailureClass| -> SendClass {
+            match class {
+                TransportSendFailureClass::PreAcceptance => {
+                    SendClass::Deferrable(DeferralTrigger::LinkChange)
+                }
+                TransportSendFailureClass::Ambiguous => SendClass::Ambiguous,
+                TransportSendFailureClass::Fatal => SendClass::Fatal,
+            }
+        };
+
+        let domain = [
+            (
+                TransportError::SendPermitRevoked,
+                TransportSendFailureClass::PreAcceptance,
+            ),
+            (
+                TransportError::LinkCreditClosed("peer".to_string()),
+                TransportSendFailureClass::PreAcceptance,
+            ),
+            (
+                TransportError::MessageNotDelivered("undelivered".to_string()),
+                TransportSendFailureClass::Ambiguous,
+            ),
+            (
+                TransportError::DataChannelMessage("bad".to_string()),
+                TransportSendFailureClass::Fatal,
+            ),
+            (
+                TransportError::DataChannelOpen("closed".to_string()),
+                TransportSendFailureClass::Fatal,
+            ),
+            (
+                TransportError::ConnectionReleased("peer".to_string()),
+                TransportSendFailureClass::Fatal,
+            ),
+            (
+                TransportError::ConnectionNotFound("missing".to_string()),
+                TransportSendFailureClass::Fatal,
+            ),
+            (
+                TransportError::ChannelPoolEmpty,
+                TransportSendFailureClass::Fatal,
+            ),
+        ];
+
+        for (transport_err, expected_failure_class) in domain {
+            assert_eq!(
+                transport_err.send_failure_class(),
+                expected_failure_class,
+                "transport failure class mismatch for {transport_err:?}"
+            );
+            let core_err = Error::Transport(transport_err);
+            assert_eq!(
+                core_err.send_class(),
+                phi(expected_failure_class),
+                "homomorphism violation for {core_err:?}"
+            );
         }
     }
 }

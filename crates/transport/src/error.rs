@@ -184,3 +184,152 @@ fn dump_js_value(v: &wasm_bindgen::JsValue) -> String {
     };
     s.into()
 }
+
+/// The acceptance class of a transport send error, partitioning every backend error by whether
+/// the frame could have crossed the irrevocable backend send boundary.
+///
+/// Laws:
+/// - **Pre-acceptance soundness (Lemma (T))**: [`Self::PreAcceptance`] is returned iff the error
+///   is [`Error::SendPermitRevoked`] or [`Error::LinkCreditClosed`], which are proven to occur
+///   before [`crate::core::transport::SendPermit::try_mark_irrevocable`] is claimed.
+/// - **Totality**: [`Error::send_failure_class`] is a total `const fn` over every compiled
+///   variant of [`Error`] with no wildcard arm.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum TransportSendFailureClass {
+    /// The send failed strictly before backend acceptance; no byte of the frame was sent, so the
+    /// caller may safely defer and retry on a link change.
+    PreAcceptance,
+    /// The send failed after or during an irrevocable backend write; the frame may or may not
+    /// have been transmitted.
+    Ambiguous,
+    /// Configuration, pairing, or pre-dispatch invariant failure that cannot be retried.
+    Fatal,
+}
+
+impl Error {
+    /// Classify this transport error into its [`TransportSendFailureClass`], total over all
+    /// compiled backend variants.
+    pub const fn send_failure_class(&self) -> TransportSendFailureClass {
+        match self {
+            Self::SendPermitRevoked | Self::LinkCreditClosed(_) => {
+                TransportSendFailureClass::PreAcceptance
+            }
+            Self::MessageNotDelivered(_) => TransportSendFailureClass::Ambiguous,
+            #[cfg(feature = "native-webrtc")]
+            Self::Webrtc(_)
+            | Self::NativeSendCompletionTimeout { .. }
+            | Self::NativeSendTask(_)
+            | Self::NativeSendPanic(_) => TransportSendFailureClass::Ambiguous,
+            #[cfg(feature = "native-webrtc")]
+            Self::NativeSendRuntimeUnavailable
+            | Self::NativeConnectionCloseTask(_)
+            | Self::NativeConnectionRetirementTimeout { .. } => TransportSendFailureClass::Fatal,
+            #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+            Self::WebSysWebrtc(_) => TransportSendFailureClass::Ambiguous,
+            #[cfg(feature = "dummy")]
+            Self::DummyIrrevocableSendTaskStopped => TransportSendFailureClass::Ambiguous,
+            #[cfg(feature = "dummy")]
+            Self::DummyConnectionRetiredBeforeDispatch
+            | Self::DummyRemoteConnectionUnavailable
+            | Self::DummyRemoteConnectionClosed => TransportSendFailureClass::Fatal,
+            Self::Codec(_)
+            | Self::IceServer(_)
+            | Self::DataChannelOpen(_)
+            | Self::Timer(_)
+            | Self::DataChannelMessage(_)
+            | Self::SendByteCountOverflow
+            | Self::WebrtcLocalSdpGenerationError(_)
+            | Self::RemoteMaxMessageSizeTooSmall { .. }
+            | Self::WebrtcUdpPortRange(_)
+            | Self::ConnectionAlreadyExists(_)
+            | Self::ConnectionNotFound(_)
+            | Self::ConnectionReleased(_)
+            | Self::RwLockWrite(_)
+            | Self::RwLockRead(_)
+            | Self::ForeignCredit(_)
+            | Self::CreditPumpUnavailable(_)
+            | Self::ChannelPoolEmpty => TransportSendFailureClass::Fatal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Error;
+    use super::IceServerError;
+    use super::TransportSendFailureClass;
+
+    /// Law (Pre-acceptance soundness, Lemma (T)): across the closed set of common and
+    /// feature-enabled transport errors, only `SendPermitRevoked` and `LinkCreditClosed` classify
+    /// as `PreAcceptance`; post-irrevocable delivery failures classify as `Ambiguous`, and
+    /// configuration/invariant failures classify as `Fatal`.
+    #[test]
+    fn test_send_failure_class_is_total_and_preserves_pre_acceptance_soundness() {
+        let pre_acceptance = [
+            Error::SendPermitRevoked,
+            Error::LinkCreditClosed("peer".to_string()),
+        ];
+        for err in &pre_acceptance {
+            assert_eq!(
+                err.send_failure_class(),
+                TransportSendFailureClass::PreAcceptance,
+                "expected PreAcceptance for {err:?}"
+            );
+        }
+
+        let ambiguous = [
+            Error::MessageNotDelivered("closed".to_string()),
+            #[cfg(feature = "native-webrtc")]
+            Error::NativeSendCompletionTimeout { timeout_ms: 100 },
+            #[cfg(feature = "native-webrtc")]
+            Error::NativeSendPanic("boom".to_string()),
+            #[cfg(feature = "dummy")]
+            Error::DummyIrrevocableSendTaskStopped,
+        ];
+        for err in &ambiguous {
+            assert_eq!(
+                err.send_failure_class(),
+                TransportSendFailureClass::Ambiguous,
+                "expected Ambiguous for {err:?}"
+            );
+        }
+
+        let fatal = [
+            Error::IceServer(IceServerError::UrlMissHost),
+            Error::DataChannelOpen("open".to_string()),
+            Error::DataChannelMessage("msg".to_string()),
+            Error::SendByteCountOverflow,
+            Error::WebrtcLocalSdpGenerationError("sdp".to_string()),
+            Error::RemoteMaxMessageSizeTooSmall {
+                advertised: 100,
+                minimum: 6123,
+            },
+            Error::WebrtcUdpPortRange("range".to_string()),
+            Error::ConnectionAlreadyExists("peer".to_string()),
+            Error::ConnectionNotFound("peer".to_string()),
+            Error::ConnectionReleased("peer".to_string()),
+            Error::RwLockWrite("w".to_string()),
+            Error::RwLockRead("r".to_string()),
+            Error::ForeignCredit("peer".to_string()),
+            Error::CreditPumpUnavailable("peer".to_string()),
+            Error::ChannelPoolEmpty,
+            #[cfg(feature = "native-webrtc")]
+            Error::NativeSendRuntimeUnavailable,
+            #[cfg(feature = "native-webrtc")]
+            Error::NativeConnectionRetirementTimeout { timeout_ms: 100 },
+            #[cfg(feature = "dummy")]
+            Error::DummyConnectionRetiredBeforeDispatch,
+            #[cfg(feature = "dummy")]
+            Error::DummyRemoteConnectionUnavailable,
+            #[cfg(feature = "dummy")]
+            Error::DummyRemoteConnectionClosed,
+        ];
+        for err in &fatal {
+            assert_eq!(
+                err.send_failure_class(),
+                TransportSendFailureClass::Fatal,
+                "expected Fatal for {err:?}"
+            );
+        }
+    }
+}

@@ -23,7 +23,6 @@
 
 use std::future::Future;
 
-use rings_transport::core::transport::effective_max_message_size;
 use rings_transport::core::transport::ConnectionInterface;
 
 use super::pending::crossing_offer_verdict;
@@ -478,7 +477,9 @@ impl SwarmTransport {
             return Err(Error::SdpAboveMax(offer_msg.sdp.len()));
         }
         let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
-        effective_max_message_size(&offer).map_err(Error::Transport)?;
+        self.transport
+            .validate_remote_offer(&offer)
+            .map_err(Error::Transport)?;
         self.dht
             .observe_relay_custody(peer, offer_msg.relay_custody)?;
         let pending = match self.reconcile_incoming_offer_peer(peer, carrier).await? {

@@ -293,7 +293,7 @@ mod tests {
         let node = Node::build(
             SwarmBuilder::new(
                 0,
-                crate::tests::default::TEST_ICE_SERVERS,
+                crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
                 storage,
                 delegatee_key,
             )

@@ -50,7 +50,12 @@ impl Harness {
     fn new(key: &crate::ecc::SecretKey) -> Result<Self> {
         let local = DelegateeKey::new_with_seckey(key)?;
         let replay = Arc::new(MemStorage::new());
-        let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
+        let swarm = SwarmBuilder::new(
+            TEST_NETWORK_ID,
+            crate::tests::test_transport(""),
+            Box::new(MemStorage::new()),
+            local,
+        )
             .replay_storage(Box::new(Arc::clone(&replay)))
             .build();
         swarm.set_replay_delegation(LINK_PREFIX.to_vec(), ReplayWindow::Link);

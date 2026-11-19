@@ -10,7 +10,6 @@ use futures::select;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::core::transport::WebrtcConnectionState;
 

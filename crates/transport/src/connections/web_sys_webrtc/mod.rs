@@ -1000,6 +1000,13 @@ impl TransportInterface for WebSysWebrtcTransport {
         self.pool.safely_remove_if_current(connection).await
     }
 
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<crate::core::transport::DynConnection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
+    }
+
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
     }

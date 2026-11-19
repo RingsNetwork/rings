@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use rings_transport::core::transport::TransportInterface;
 /// Cancellation and expiry of unadmitted generations.
 mod cancellation;
 /// Finger-table proof admission at the pending/active transport boundary.
@@ -306,14 +305,14 @@ impl SwarmTransport {
     /// returns whether it was.
     pub(super) async fn close_if_current(&self, connection: &SwarmConnection) -> Result<bool> {
         self.transport
-            .close_connection_if_current(&connection.connection)
+            .close_dyn_connection_if_current(&connection.connection)
             .await
             .map_err(Error::Transport)
     }
 
     pub(super) fn get_raw_connection(&self, peer: Did) -> Option<SwarmConnection> {
         self.transport
-            .connection(&peer.to_string())
+            .dyn_connection(&peer.to_string())
             .map(|conn| SwarmConnection {
                 peer,
                 connection: conn,
@@ -844,7 +843,7 @@ impl SwarmTransport {
         );
         let connection = match self
             .transport
-            .new_connection(&cid, Box::new(callback))
+            .new_dyn_connection(&cid, Box::new(callback))
             .await
         {
             Ok(connection) => PendingTransportConnection {

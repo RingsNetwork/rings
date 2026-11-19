@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
+use rings_runtime::MaybeSendSync;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -115,16 +118,13 @@ pub fn effective_max_message_size(remote_sdp: &str) -> crate::error::Result<usiz
 
 /// The [ConnectionInterface] trait defines how to
 /// make webrtc ice handshake with a remote peer and then send data channel message to it.
-#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
-    async_trait
-)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait ConnectionInterface {
     /// Sdp is used to expose local and remote session descriptions when handshaking.
     type Sdp: Serialize + DeserializeOwned;
     /// The error type that is returned by connection.
-    type Error: std::error::Error;
+    type Error: std::error::Error + From<Error>;
 
     /// Send the custom `payload` to the remote peer, for its `on_admitted_message` callback.
     ///
@@ -227,19 +227,67 @@ pub trait ConnectionInterface {
 
     /// Close the webrtc connection.
     async fn close(&self) -> Result<(), Self::Error>;
+
+    /// Capture a witness that survives pool removal and observes completed native physical close.
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+    fn physical_close_witness(
+        &self,
+    ) -> Result<crate::connections::NativePhysicalCloseWitness, Self::Error> {
+        Err(Error::DataChannelOpen(
+            "physical_close_witness is only supported by WebrtcConnection".to_string(),
+        )
+        .into())
+    }
+
+    /// Stable physical generation identifier used by deterministic dummy simulations.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn dummy_generation_id(&self) -> Result<String, Self::Error> {
+        Err(Error::DataChannelOpen(
+            "dummy_generation_id is only supported by DummyConnection".to_string(),
+        )
+        .into())
+    }
+
+    /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn force_dummy_webrtc_connection_state_without_callback(
+        &self,
+        _state: WebrtcConnectionState,
+    ) -> Result<(), Self::Error> {
+        Err(Error::DataChannelOpen(
+            "force_dummy_webrtc_connection_state_without_callback is only supported by DummyConnection"
+                .to_string(),
+        )
+        .into())
+    }
+
+    /// Test hook: override dummy data-channel readiness without dispatching callbacks.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn force_dummy_data_channel_open_without_callback(
+        &self,
+        _open: Option<bool>,
+    ) -> Result<(), Self::Error> {
+        Err(Error::DataChannelOpen(
+            "force_dummy_data_channel_open_without_callback is only supported by DummyConnection"
+                .to_string(),
+        )
+        .into())
+    }
 }
+
+/// Type-erased [`ConnectionInterface`] trait object (`Send + Sync` on native, unconstrained in
+/// the browser).
+pub type DynConnection =
+    rings_runtime::maybe_send_sync!(dyn ConnectionInterface<Sdp = String, Error = Error>);
 
 /// This trait specifies how to management [ConnectionInterface] objects.
 /// Each platform must implement this trait for its own connection implementation.
 /// See [connections](crate::connections) module for examples.
-#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
-    async_trait
-)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub trait TransportInterface {
     /// The connection type that is created by this trait.
-    type Connection: ConnectionInterface<Error = Self::Error>;
+    type Connection: ConnectionInterface<Error = Self::Error> + MaybeSendSync;
 
     /// The error type that is returned by transport.
     type Error: std::error::Error;
@@ -266,18 +314,117 @@ pub trait TransportInterface {
         connection: &ConnectionRef<Self::Connection>,
     ) -> Result<bool, Self::Error>;
 
+    /// Close a type-erased `connection` reference only if its physical allocation still owns its
+    /// connection-id slot.
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<DynConnection>,
+    ) -> Result<bool, Self::Error> {
+        let Ok(current) = self.connection(connection.cid()) else {
+            return Ok(false);
+        };
+        if !connection.same_allocation(&current) {
+            return Ok(false);
+        }
+        self.close_connection_if_current(&current).await
+    }
+
     /// Get a reference of the connection by its id.
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
 
     /// Get all the connection ids in the transport.
     fn connection_ids(&self) -> Vec<String>;
+
+    /// Return the total custom payload frames dispatched by this transport (dummy backend).
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn dispatched_payload_frames(&self) -> usize {
+        0
+    }
 }
 
+/// Object-safe, backend-agnostic transport interface consumed by higher protocol layers
+/// (`rings-core`) without depending on concrete WebRTC or dummy connection types.
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+pub trait DynTransportInterface {
+    /// Create a new connection and register it in the transport, returning a weak erased
+    /// reference that preserves exact physical allocation identity.
+    async fn new_dyn_connection(
+        &self,
+        cid: &str,
+        callback: BoxedTransportCallback,
+    ) -> Result<ConnectionRef<DynConnection>, Error>;
+
+    /// Close `connection` only if its physical allocation still owns its connection-id slot.
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<DynConnection>,
+    ) -> Result<bool, Error>;
+
+    /// Get a weak erased reference to the connection by its id.
+    fn dyn_connection(&self, cid: &str) -> Result<ConnectionRef<DynConnection>, Error>;
+
+    /// Get all connection ids currently in the transport.
+    fn connection_ids(&self) -> Vec<String>;
+
+    /// Validate a remote handshake offer description before opening or yielding a peer slot.
+    fn validate_remote_offer(&self, remote_sdp: &str) -> Result<(), Error> {
+        effective_max_message_size(remote_sdp).map(|_| ())
+    }
+
+    /// Return the total custom payload frames dispatched by this transport (dummy backend).
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn dispatched_payload_frames(&self) -> usize {
+        0
+    }
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+impl<T, C> DynTransportInterface for T
+where
+    T: TransportInterface<Connection = C, Error = Error> + MaybeSendSync,
+    C: ConnectionInterface<Sdp = String, Error = Error> + MaybeSendSync + 'static,
+{
+    async fn new_dyn_connection(
+        &self,
+        cid: &str,
+        callback: BoxedTransportCallback,
+    ) -> Result<ConnectionRef<DynConnection>, Error> {
+        self.new_connection(cid, callback)
+            .await
+            .map(ConnectionRef::into_dyn)
+    }
+
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<DynConnection>,
+    ) -> Result<bool, Error> {
+        TransportInterface::close_dyn_connection_if_current(self, connection).await
+    }
+
+    fn dyn_connection(&self, cid: &str) -> Result<ConnectionRef<DynConnection>, Error> {
+        self.connection(cid).map(ConnectionRef::into_dyn)
+    }
+
+    fn connection_ids(&self) -> Vec<String> {
+        TransportInterface::connection_ids(self)
+    }
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    fn dispatched_payload_frames(&self) -> usize {
+        TransportInterface::dispatched_payload_frames(self)
+    }
+}
+
+/// Shared, reference-counted object-safe transport handle injected into protocol layers.
+pub type SharedTransport = Arc<rings_runtime::maybe_send_sync!(dyn DynTransportInterface)>;
+
 /// Used to store a boxed [TransportInterface] trait object.
-#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 pub type BoxedTransport<C, E> =
     Box<dyn TransportInterface<Connection = C, Error = E> + Send + Sync>;
 
 /// Used to store a boxed [TransportInterface] trait object.
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+#[cfg(target_family = "wasm")]
 pub type BoxedTransport<C, E> = Box<dyn TransportInterface<Connection = C, Error = E>>;

@@ -10,32 +10,15 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::connection_ref::ConnectionRef;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub use rings_transport::connections::DummyConnection as ConnectionOwner;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub use rings_transport::connections::DummyTransport as Transport;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub use rings_transport::connections::WebSysWebrtcConnection as ConnectionOwner;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub use rings_transport::connections::WebSysWebrtcTransport as Transport;
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
-use rings_transport::connections::WebrtcConnection as ConnectionOwner;
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
-use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::DynConnection;
 use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::LaneCreditView;
 use rings_transport::core::transport::SendPermit;
+use rings_transport::core::transport::SharedTransport;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::ReassemblyLimits;
@@ -177,8 +160,8 @@ use super::callback::InboundCapacity;
 pub(crate) struct SwarmTransportParts {
     /// Overlay whose peers this transport admits and signs for.
     pub(crate) network_id: u32,
-    /// WebRTC ICE and address configuration.
-    pub(crate) webrtc: SwarmWebrtcConfig,
+    /// Injected trait-based transport implementation.
+    pub(crate) transport: SharedTransport,
     /// Delegation key that signs every payload.
     pub(crate) delegatee_key: DelegateeKey,
     /// Local DHT the transport keeps in step with its admitted peers.
@@ -199,8 +182,7 @@ pub(crate) struct SwarmTransportParts {
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
-    raw_ice_servers: String,
-    transport: Transport,
+    transport: SharedTransport,
     delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
@@ -288,32 +270,6 @@ impl SwarmTransportSettings {
     }
 }
 
-/// WebRTC transport configuration used when constructing [`SwarmTransport`].
-pub(crate) struct SwarmWebrtcConfig {
-    ice_servers: String,
-    external_address: Option<String>,
-    udp_port_range: Option<WebrtcUdpPortRange>,
-}
-
-impl SwarmWebrtcConfig {
-    /// Build WebRTC transport configuration.
-    ///
-    /// Invariant: a present `udp_port_range` already proves `1 <= min <= max`.
-    /// Native transports use it to constrain ICE UDP gathering; browser
-    /// transports ignore it because local ICE ports are owned by the browser.
-    pub(crate) fn new(
-        ice_servers: String,
-        external_address: Option<String>,
-        udp_port_range: Option<WebrtcUdpPortRange>,
-    ) -> Self {
-        Self {
-            ice_servers,
-            external_address,
-            udp_port_range,
-        }
-    }
-}
-
 /// Read-only handle to one physical transport connection.
 ///
 /// Clone law: clones observe the same physical connection. A
@@ -322,7 +278,7 @@ impl SwarmWebrtcConfig {
 #[derive(Clone)]
 pub struct SwarmConnection {
     peer: Did,
-    connection: ConnectionRef<ConnectionOwner>,
+    connection: ConnectionRef<DynConnection>,
     /// Test builds: the owning transport's frame counts, charged by [`Self::send_data`].
     #[cfg(test)]
     frames: Arc<FrameLedger>,
@@ -339,7 +295,7 @@ impl SwarmTransport {
     pub(crate) fn new(parts: SwarmTransportParts) -> Self {
         let SwarmTransportParts {
             network_id,
-            webrtc,
+            transport,
             delegatee_key,
             dht,
             measure,
@@ -350,18 +306,9 @@ impl SwarmTransport {
             rng,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
-        let raw_ice_servers = webrtc.ice_servers;
-        let signed_ice_servers = delegatee_key
-            .sign_ice_servers(&raw_ice_servers)
-            .unwrap_or_else(|_| raw_ice_servers.clone());
         Self {
             network_id,
-            raw_ice_servers,
-            transport: Transport::new(
-                &signed_ice_servers,
-                webrtc.external_address,
-                webrtc.udp_port_range,
-            ),
+            transport,
             delegatee_key: RwLock::new(delegatee_key),
             dht,
             storage_redundancy: settings.storage_redundancy,
@@ -581,9 +528,6 @@ impl SwarmTransport {
             crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
         if next_horizon <= current_horizon {
             return Err(Error::DelegationExpiresWithinMargin);
-        }
-        if let Ok(signed_ice_servers) = delegatee_key.sign_ice_servers(&self.raw_ice_servers) {
-            self.transport.set_ice_servers(&signed_ice_servers);
         }
         *current = delegatee_key;
         Ok(())

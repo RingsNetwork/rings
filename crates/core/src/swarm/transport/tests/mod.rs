@@ -343,7 +343,7 @@ impl TransportSpec {
         ));
         Ok(SwarmTransport::new(SwarmTransportParts {
             network_id: 0,
-            webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
+            transport: crate::tests::test_transport(""),
             delegatee_key,
             dht,
             measure: Some(self.measure),
@@ -430,9 +430,14 @@ pub(super) async fn open_dummy_data_channel_before_ice_connected(
 fn test_swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .build();
+    let swarm = SwarmBuilder::new(
+        7,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        delegatee_key,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .build();
 
     assert_eq!(
         swarm.dht_virtual_nodes(),
@@ -451,10 +456,15 @@ fn test_swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
     let requested = MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1);
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .dht_virtual_nodes(requested)
-        .build();
+    let swarm = SwarmBuilder::new(
+        7,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        delegatee_key,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .dht_virtual_nodes(requested)
+    .build();
 
     assert_eq!(
         swarm.dht_virtual_nodes(),

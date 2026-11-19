@@ -1053,7 +1053,7 @@ async fn test_set_delegatee_key_enforces_signature_and_monotone_horizon() -> Res
     let initial = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0)?;
     let swarm = crate::swarm::SwarmBuilder::new(
         crate::tests::TEST_NETWORK_ID,
-        crate::tests::default::TEST_ICE_SERVERS,
+        crate::tests::test_transport(crate::tests::default::TEST_ICE_SERVERS),
         Box::new(crate::storage::MemStorage::new()),
         initial.clone(),
     )

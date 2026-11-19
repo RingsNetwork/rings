@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
+use rings_transport::core::transport::SharedTransport;
 
 use crate::chunk::ReassemblyLimits;
 use crate::delegation::DelegateeKey;
@@ -26,7 +26,6 @@ use crate::swarm::observer::SharedSwarmObserver;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportParts;
 use crate::swarm::transport::SwarmTransportSettings;
-use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::swarm::Swarm;
 use crate::utils::SharedClock;
 use crate::utils::SharedRng;
@@ -35,9 +34,7 @@ use crate::utils::SystemClock;
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
     network_id: u32,
-    ice_servers: String,
-    external_address: Option<String>,
-    webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
+    transport: SharedTransport,
     dht_succ_max: u8,
     dht_finger_table_size: usize,
     dht_storage_redundancy: u16,
@@ -61,18 +58,16 @@ pub struct SwarmBuilder {
 }
 
 impl SwarmBuilder {
-    /// Creates new instance of [SwarmBuilder]
+    /// Creates a new instance of [`SwarmBuilder`] with an injected [`SharedTransport`].
     pub fn new(
         network_id: u32,
-        ice_servers: &str,
+        transport: SharedTransport,
         dht_storage: EntryStorage,
         delegatee_key: DelegateeKey,
     ) -> Self {
         SwarmBuilder {
             network_id,
-            ice_servers: ice_servers.to_string(),
-            external_address: None,
-            webrtc_udp_port_range: None,
+            transport,
             dht_succ_max: crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY as u8,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
@@ -130,22 +125,6 @@ impl SwarmBuilder {
     /// Sets inbound chunk reassembly limits.
     pub fn reassembly_limits(mut self, limits: ReassemblyLimits) -> Self {
         self.reassembly_limits = limits;
-        self
-    }
-
-    /// Sets up the external address for swarm transport.
-    /// This will be used to configure the transport to listen for WebRTC connections in "HOST" mode.
-    pub fn external_address(mut self, external_address: String) -> Self {
-        self.external_address = Some(external_address);
-        self
-    }
-
-    /// Sets the native WebRTC UDP port range used during ICE gathering.
-    ///
-    /// Invariant: a present range has already proven `1 <= min <= max`.
-    /// Browser transports ignore this native deployment setting.
-    pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
-        self.webrtc_udp_port_range = Some(range);
         self
     }
 
@@ -249,11 +228,7 @@ impl SwarmBuilder {
         let observer = self.observer.unwrap_or_else(|| Arc::new(NoopSwarmObserver));
         let transport = Arc::new(SwarmTransport::new(SwarmTransportParts {
             network_id: self.network_id,
-            webrtc: SwarmWebrtcConfig::new(
-                self.ice_servers,
-                self.external_address,
-                self.webrtc_udp_port_range,
-            ),
+            transport: self.transport,
             delegatee_key: self.delegatee_key,
             dht: dht.clone(),
             measure: self.measure,

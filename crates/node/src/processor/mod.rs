@@ -39,6 +39,7 @@ use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
+use rings_turn::TurnCredentialSigner;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -134,6 +135,15 @@ const fn is_final_lookup_poll(attempt: u32) -> bool {
     attempt.saturating_add(1) >= DHT_LOOKUP_CACHE_POLL_ATTEMPTS
 }
 
+/// Callback updating the concrete transport's signed ICE server configuration on session key
+/// rotation (#1291).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type IceServersUpdater = Arc<dyn Fn(&str) + Send + Sync>;
+/// Callback updating the concrete transport's signed ICE server configuration on session key
+/// rotation (#1291).
+#[cfg(target_family = "wasm")]
+pub(crate) type IceServersUpdater = Arc<dyn Fn(&str)>;
+
 /// Processor for rings-node rpc server.
 ///
 /// Cloning shares the same node handle; publishes from any clone are serialized
@@ -144,6 +154,12 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Live delegatee key and retained unexpired previous keys, shared across clones (#1153).
     session_keys: Arc<SessionKeyRing>,
+    /// Raw (pre-signing) ICE servers string retained for re-signing on session key renewal (#1291).
+    raw_ice_servers: Arc<str>,
+    /// Last signed ICE servers string installed into the concrete transport (#1291).
+    signed_ice_servers: Arc<std::sync::RwLock<String>>,
+    /// Updater that atomically installs freshly signed ICE servers into the concrete transport.
+    ice_servers_updater: IceServersUpdater,
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
@@ -214,7 +230,8 @@ impl Processor {
     }
 
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
-    /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport and signed TURN ICE
+    /// credentials in lockstep on success (#1153, #1291).
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
         now_ms: u128,
@@ -226,12 +243,25 @@ impl Processor {
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
         let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
+            let signed_ice = next
+                .sign_ice_servers(&self.raw_ice_servers)
+                .map_err(Error::CoreError)?;
             persist(next)?;
             self.swarm
                 .set_delegatee_key(next.clone())
-                .map_err(Error::CoreError)
+                .map_err(Error::CoreError)?;
+            (self.ice_servers_updater)(&signed_ice);
+            Ok(())
         })?;
         Ok(horizon)
+    }
+
+    /// Return the currently installed signed ICE server configuration string.
+    pub fn signed_ice_servers(&self) -> String {
+        self.signed_ice_servers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Replace this node's active session key in process at `now_ms`, retaining the previous key

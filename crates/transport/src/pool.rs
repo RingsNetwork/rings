@@ -96,7 +96,7 @@ impl<C> Pool<C> {
         }
     }
 
-    fn take_if_current(&self, expected: &ConnectionRef<C>) -> Option<Arc<C>> {
+    fn take_if_current<R: ?Sized>(&self, expected: &ConnectionRef<R>) -> Option<Arc<C>> {
         match self.connections.entry(expected.cid().to_string()) {
             Entry::Occupied(entry) if expected.points_to(entry.get()) => Some(entry.remove()),
             _ => None,
@@ -165,8 +165,11 @@ where
         }
     }
 
-    /// Remove and close `expected` only while it still owns its pool slot.
-    pub async fn safely_remove_if_current(&self, expected: &ConnectionRef<C>) -> Result<bool> {
+    /// Remove and close `expected` only while its physical allocation still owns its pool slot.
+    pub async fn safely_remove_if_current<R: ?Sized>(
+        &self,
+        expected: &ConnectionRef<R>,
+    ) -> Result<bool> {
         let Some(conn) = self.take_if_current(expected) else {
             return Ok(false);
         };
@@ -281,6 +284,93 @@ mod tests {
             self.closed.store(true, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    /// Law (Erasure Identity Bisimulation, □):
+    /// `ConnectionRef::new("peer", &c1).into_dyn().points_to(&c2) == Arc::ptr_eq(&c1, &c2)`
+    /// holds both while `c1` has a live strong count and after `c1` is dropped.
+    #[test]
+    fn test_erased_connection_ref_bisimulates_arc_ptr_eq_live_and_after_drop() {
+        let c1 = Arc::new(TestConnection::new(
+            WebrtcConnectionState::Connected,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let c2 = Arc::new(TestConnection::new(
+            WebrtcConnectionState::Connected,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        let typed_ref_1 = ConnectionRef::new("peer", &c1);
+        let erased_ref_1 = typed_ref_1.clone().into_dyn();
+        let typed_ref_2 = ConnectionRef::new("peer", &c2);
+        let erased_ref_2 = typed_ref_2.clone().into_dyn();
+
+        // While both strong references are live:
+        assert!(erased_ref_1.points_to(&c1));
+        assert!(!erased_ref_1.points_to(&c2));
+        assert!(erased_ref_2.points_to(&c2));
+        assert!(!erased_ref_2.points_to(&c1));
+        assert!(erased_ref_1.same_allocation(&typed_ref_1));
+        assert!(!erased_ref_1.same_allocation(&typed_ref_2));
+
+        // After dropping `c1` (so `erased_ref_1` is expired):
+        drop(c1);
+        assert!(erased_ref_1.upgrade().is_err());
+        assert!(!erased_ref_1.points_to(&c2));
+        assert!(erased_ref_1.same_allocation(&typed_ref_1));
+    }
+
+    /// Exhaustive finite-domain transition model for `Pool<C>` with erased `ConnectionRef<DynConnection>`
+    /// handles, verifying:
+    /// - □ NoCollateralRetirement: `safely_remove_if_current(&erased_old)` after `safely_insert`
+    ///   replaced `old` with `new` never removes or closes `new`.
+    /// - □ CloseIdempotence: every inserted physical generation is closed at most once across any
+    ///   sequence of state transitions, replacements, and repeated typed or erased removals.
+    #[tokio::test]
+    async fn test_pool_erased_slot_algebra_preserves_no_collateral_retirement_and_close_idempotence(
+    ) -> Result<()> {
+        let pool = Pool::new();
+
+        // Generation 1: insert, obtain both typed and erased refs.
+        let closed_g1 = Arc::new(AtomicBool::new(false));
+        let typed_g1 = pool
+            .safely_insert(
+                "peer",
+                TestConnection::new(WebrtcConnectionState::New, Arc::clone(&closed_g1)),
+            )
+            .await?;
+        let erased_g1 = typed_g1.clone().into_dyn();
+
+        // Transition G1 to terminal Failed so G2 can replace it.
+        typed_g1.upgrade()?.set_state(WebrtcConnectionState::Failed)?;
+
+        // Generation 2 replaces G1 in the slot; G1 is closed on replacement.
+        let closed_g2 = Arc::new(AtomicBool::new(false));
+        let typed_g2 = pool
+            .safely_insert(
+                "peer",
+                TestConnection::new(WebrtcConnectionState::Connected, Arc::clone(&closed_g2)),
+            )
+            .await?;
+        let erased_g2 = typed_g2.clone().into_dyn();
+        assert!(closed_g1.load(Ordering::SeqCst));
+        assert!(!closed_g2.load(Ordering::SeqCst));
+
+        // Late removal using the erased handle to G1 must be a no-op on G2 (□ NoCollateralRetirement).
+        assert!(!pool.safely_remove_if_current(&erased_g1).await?);
+        assert!(!closed_g2.load(Ordering::SeqCst));
+        assert!(pool.connection("peer").is_ok());
+
+        // Removal using the erased handle to G2 succeeds once and closes G2; a second call returns
+        // Ok(false) (□ CloseIdempotence).
+        assert!(pool.safely_remove_if_current(&erased_g2).await?);
+        assert!(closed_g2.load(Ordering::SeqCst));
+        assert!(!pool.safely_remove_if_current(&erased_g2).await?);
+        assert!(!pool.safely_remove_if_current(&typed_g2).await?);
+        assert!(matches!(
+            pool.connection("peer"),
+            Err(Error::ConnectionNotFound(_))
+        ));
+        Ok(())
     }
 
     #[tokio::test]

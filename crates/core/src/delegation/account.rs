@@ -66,7 +66,8 @@ impl Account {
         self.account_verifier().did()
     }
 
-    pub(super) fn account_verifier(&self) -> AccountVerifier {
+    /// Return the typed [`AccountVerifier`] for this account.
+    pub fn account_verifier(&self) -> AccountVerifier {
         match self {
             Self::Secp256k1(did) => AccountVerifier::Recoverable {
                 algorithm: SignatureAlgorithm::Secp256k1,

@@ -28,11 +28,8 @@ use crate::error::Result;
 /// Pre of [`send_frame`](Self::send_frame): the frame's credit, if it needs one, is already
 /// held by the caller. The backend meets the contract of
 /// [`ConnectionInterface::send_message_with_permit`] for `permit` and nothing more.
-#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
-    async_trait
-)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 pub(crate) trait FrameSink: ConnectionInterface<Error = Error> {
     /// Encode `frame` and hand it to the data channel `lane` is pinned to, under `permit`.
     async fn send_frame(

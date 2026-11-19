@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayPlan;
+use rings_turn::TurnCredentialSigner;
 use serde::Deserialize;
 use serde::Serialize;
 

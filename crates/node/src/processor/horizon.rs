@@ -455,4 +455,108 @@ mod tests {
         assert_eq!(r_short, c + (h_short - c) / 2);
         assert!(r_short > c && r_short < h_short);
     }
+
+    /// Formal 3-Component Lockstep Invariant (Issue #1291 §4):
+    /// `\square (k_ring == k_swarm == k_ice)`: across all renewal transitions (`MintErr`,
+    /// `ValidationErr` from non-advancing horizon or wrong delegator DID, `PersistErr`, and
+    /// `CommitOk`), `Processor::renew_delegatee_key_with` never leaves `SessionKeyRing`,
+    /// `SwarmTransport::delegatee_key`, and the concrete transport's signed TURN ICE credentials
+    /// in a split-brain state.
+    #[test]
+    fn test_processor_renew_delegatee_key_preserves_three_component_lockstep_invariant() {
+        use std::sync::Arc;
+
+        use rings_core::utils::ManualClock;
+        use rings_turn::format_turn_server_url;
+        use rings_turn::TurnCredentialSigner;
+
+        use crate::processor::ProcessorBuilder;
+        use crate::processor::ProcessorConfig;
+
+        let delegator = SecretKey::random();
+        let other_delegator = SecretKey::random();
+        let turn_server_pubkey = SecretKey::random().pubkey();
+        let turn_url =
+            format_turn_server_url("turn://turn.rings.rs:3478", turn_server_pubkey).unwrap();
+        let raw_ice = format!("stun://stun.l.google.com:19302;{turn_url}");
+
+        let t0: u128 = 1_800_000_000_000;
+        let ttl_ms = u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+        let k0 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
+        let clock = Arc::new(ManualClock::new(t0));
+
+        let config = ProcessorConfig::new(1, raw_ice.clone(), k0.clone(), 15).with_clock(clock);
+        let processor = ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .build_at(t0)
+            .unwrap();
+
+        let assert_lockstep = |expected_key: &DelegateeKey| {
+            let k_ring = processor.delegatee_key();
+            let k_swarm = processor.swarm.delegatee_key();
+            let k_ice = processor.signed_ice_servers();
+            let expected_ice = expected_key.sign_ice_servers(&raw_ice).unwrap();
+
+            assert_eq!(
+                k_ring.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_ring diverged from expected key"
+            );
+            assert_eq!(
+                k_swarm.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_swarm diverged from k_ring"
+            );
+            assert_eq!(
+                k_ice, expected_ice,
+                "k_ice diverged from k_ring signed ICE servers"
+            );
+        };
+
+        assert_lockstep(&k0);
+
+        let h0 = processor.signing_horizon().horizon_ms();
+        let renew_ms = h0 - SIGNING_HORIZON_LEAD_MS;
+        let k1 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms).unwrap();
+
+        // 1. MintErr: failure before validation preserves (k0, k0, k0).
+        let mint_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Err(Error::VerifyError("injected mint failure".to_string())),
+            |_| Ok(()),
+        );
+        assert!(mint_err.is_err());
+        assert_lockstep(&k0);
+
+        // 2. ValidationErr (non-advancing horizon): failure during pure law check preserves (k0, k0, k0).
+        let non_advancing = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
+        let val_err_horizon =
+            processor.renew_delegatee_key_with(renew_ms, |_| Ok(non_advancing), |_| Ok(()));
+        assert!(val_err_horizon.is_err());
+        assert_lockstep(&k0);
+
+        // 3. ValidationErr (wrong delegator DID): preserves (k0, k0, k0).
+        let wrong_did =
+            DelegateeKey::new_with_seckey_at(&other_delegator, ttl_ms, renew_ms).unwrap();
+        let val_err_did =
+            processor.renew_delegatee_key_with(renew_ms, |_| Ok(wrong_did), |_| Ok(()));
+        assert!(val_err_did.is_err());
+        assert_lockstep(&k0);
+
+        // 4. PersistErr: failure after validation and ICE signing but before commit preserves (k0, k0, k0).
+        let persist_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(k1.clone()),
+            |_| Err(Error::CreateFileError("injected disk failure".to_string())),
+        );
+        assert!(persist_err.is_err());
+        assert_lockstep(&k0);
+
+        // 5. CommitOk: atomic transition advances all three components to (k1, k1, k1).
+        let h1 = processor
+            .renew_delegatee_key_with(renew_ms, |_| Ok(k1.clone()), |_| Ok(()))
+            .expect("valid renewal must commit");
+        assert!(h1.horizon_ms() > h0);
+        assert_lockstep(&k1);
+    }
 }

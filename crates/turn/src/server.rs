@@ -15,7 +15,6 @@ use std::sync::PoisonError;
 
 use async_trait::async_trait;
 use rand::Rng;
-use rings_core::delegation::format_turn_server_url;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
 use stun::agent::TransactionId;
@@ -104,6 +103,8 @@ use crate::config::RelayAddressConfig;
 use crate::config::RelayPeerPolicy;
 use crate::config::TurnServerConfig;
 use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
+use crate::credentials::format_turn_server_url;
+use crate::credentials::TurnCredentialSigner;
 use crate::error::Result;
 
 const STUN_HEADER_BYTES: usize = 20;

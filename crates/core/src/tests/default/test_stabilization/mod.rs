@@ -251,7 +251,12 @@ fn prepare_repair_node_with_storage(
     measure: Option<MeasureImpl>,
 ) -> Result<Node> {
     let session = DelegateeKey::new_with_seckey(&key)?;
-    let mut builder = SwarmBuilder::new(0, super::TEST_ICE_SERVERS, storage, session)
+    let mut builder = SwarmBuilder::new(
+        0,
+        crate::tests::test_transport(super::TEST_ICE_SERVERS),
+        storage,
+        session,
+    )
         .replay_storage(crate::tests::volatile_replay_storage())
         .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
         .dht_storage_redundancy(2)

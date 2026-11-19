@@ -721,6 +721,23 @@ impl ConnectionInterface for DummyConnection {
         retirement.finish();
         Ok(())
     }
+
+    fn dummy_generation_id(&self) -> Result<String> {
+        Ok(self.generation_id().to_string())
+    }
+
+    fn force_dummy_webrtc_connection_state_without_callback(
+        &self,
+        state: WebrtcConnectionState,
+    ) -> Result<()> {
+        self.force_webrtc_connection_state_without_callback(state);
+        Ok(())
+    }
+
+    fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+        self.force_data_channel_open_without_callback(open);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -766,11 +783,22 @@ impl TransportInterface for DummyTransport {
         self.pool.safely_remove_if_current(connection).await
     }
 
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<crate::core::transport::DynConnection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
+    }
+
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
     }
 
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
+    }
+
+    fn dispatched_payload_frames(&self) -> usize {
+        Self::dispatched_payload_frames(self)
     }
 }

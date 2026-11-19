@@ -15,6 +15,9 @@ pub(crate) use interface::stored_max_message_size;
 pub(crate) use interface::BorrowedTransportMessage;
 pub use interface::BoxedTransport;
 pub use interface::ConnectionInterface;
+pub use interface::DynConnection;
+pub use interface::DynTransportInterface;
+pub use interface::SharedTransport;
 pub use interface::TransportInterface;
 #[cfg(any(test, rings_transport_backend))]
 pub(crate) use interface::TransportMessage;
