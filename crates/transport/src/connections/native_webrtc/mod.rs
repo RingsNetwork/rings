@@ -1039,12 +1039,12 @@ async fn close_reconfigurable_native_connection(
                 )
             };
             let result = connection.close().await.map_err(Into::into);
-            if let Some(guard) = turn_tcp_bridge
+            let maybe_guard = turn_tcp_bridge
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                guard.cancel();
+                .take();
+            if let Some(guard) = maybe_guard {
+                guard.shutdown().await;
             }
             result
         },
@@ -1100,12 +1100,12 @@ async fn close_failed_native_send(
                 guard.quiesce_inbound();
             }
             let result = connection.close().await.map_err(Into::into);
-            if let Some(guard) = turn_tcp_bridge
+            let maybe_guard = turn_tcp_bridge
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                guard.cancel();
+                .take();
+            if let Some(guard) = maybe_guard {
+                guard.shutdown().await;
             }
             result
         },

@@ -19,7 +19,6 @@ use super::gather_settle_delay;
 use super::wait_for_candidates_settled;
 use super::GatherCandidateProgress;
 use super::WebSysWebrtcConnection;
-use super::WEBRTC_GATHER_HOST_SETTLE;
 use super::WEBRTC_GATHER_REFLEXIVE_SETTLE;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
@@ -155,7 +154,7 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
             "candidate:3 1 udp 2113937151 test.local 56555 typ host",
             IceCandidateTier::Reflexive,
         ),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
+        None
     );
     assert_eq!(
         gather_settle_delay(
@@ -169,7 +168,7 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
             "v=0\r\na=candidate:3 1 udp 2113937151 10.0.0.2 56555 typ host\r\n",
             IceCandidateTier::Reflexive,
         ),
-        Some(WEBRTC_GATHER_HOST_SETTLE)
+        None
     );
     assert_eq!(
         gather_settle_delay(
@@ -245,10 +244,9 @@ fn test_gather_settle_delay_classifies_reflexive_host_and_empty_text() {
     );
 }
 
-/// If a host candidate arrives first (arming the 3 s settle timer) and a reflexive candidate
-/// arrives shortly after, `GatherCandidateProgress::observe_text` must wake the in-flight wait so
-/// it switches immediately to the 300 ms reflexive settle window instead of sleeping out the 3 s
-/// host timer.
+/// If a host candidate arrives first (leaving the settle timer unarmed while waiting for STUN) and
+/// a reflexive candidate arrives shortly after, `GatherCandidateProgress::observe_text` must wake
+/// the in-flight wait and settle on the 300 ms reflexive window.
 #[wasm_bindgen_test]
 async fn test_reflexive_candidate_shortens_in_flight_host_settle_window() {
     with_hang_guard(
@@ -256,7 +254,7 @@ async fn test_reflexive_candidate_shortens_in_flight_host_settle_window() {
         Duration::from_millis(1200),
         async {
             let progress = Rc::new(GatherCandidateProgress::new(IceCandidateTier::Reflexive));
-            assert!(progress.observe_text("candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host"));
+            assert!(!progress.observe_text("candidate:1 1 udp 2113937151 10.0.0.2 56555 typ host"));
             let progress_for_srflx = Rc::clone(&progress);
             let inject_srflx = async move {
                 rings_runtime::sleep(Duration::from_millis(50))
@@ -274,9 +272,10 @@ async fn test_reflexive_candidate_shortens_in_flight_host_settle_window() {
     .await
 }
 
-/// Even when an unreachable STUN server keeps `iceGatheringState` in `"gathering"` past the
-/// settle window (as WebKit does on iOS), `webrtc_gather` resolves once local candidates settle
-/// rather than waiting out the full 60 s gather timeout.
+/// Even when a peer connection's `iceGatheringState` remains in `"gathering"` past the settle
+/// window (as WebKit does on iOS/macOS when secondary interfaces or straggler probes do not finish),
+/// `webrtc_gather` resolves once a candidate reaching the connection's target tier settles rather
+/// than waiting out the full 60 s gather timeout.
 #[wasm_bindgen_test]
 async fn test_stalled_gathering_settles_once_candidates_arrive() {
     with_hang_guard(
@@ -302,6 +301,7 @@ async fn stalled_gathering_settles_once_candidates_arrive() {
             NodeFramePool::new(),
         )),
     );
+    connection.target_tier.set(IceCandidateTier::Host);
 
     let sdp = connection
         .webrtc_create_offer()

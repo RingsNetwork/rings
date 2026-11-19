@@ -236,9 +236,12 @@ impl Model for GatherModel {
 
     fn properties(&self) -> Vec<Property<Self>> {
         vec![
-            Property::<Self>::always("no premature TURN relay omission", |model, state| {
-                if model.target_tier == IceCandidateTier::Relay && state.settled_by_timer {
-                    state.gather.highest_observed == Some(IceCandidateTier::Relay)
+            Property::<Self>::always("no premature target-tier omission", |model, state| {
+                if state.settled_by_timer {
+                    state
+                        .gather
+                        .highest_observed
+                        .is_some_and(|highest| highest >= model.target_tier)
                 } else {
                     true
                 }
@@ -290,12 +293,17 @@ fn test_each_ice_gather_mutant_is_refuted() {
         (
             IceCandidateTier::Relay,
             GatherMutant::ReflexiveUnlocksTurnFast,
-            "no premature TURN relay omission",
+            "no premature target-tier omission",
         ),
         (
             IceCandidateTier::Relay,
             GatherMutant::HostFallbackArmsTurn,
-            "no premature TURN relay omission",
+            "no premature target-tier omission",
+        ),
+        (
+            IceCandidateTier::Reflexive,
+            GatherMutant::HostFallbackArmsTurn,
+            "no premature target-tier omission",
         ),
         (
             IceCandidateTier::Relay,

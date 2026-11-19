@@ -3,13 +3,15 @@
 //! refutation for every TURN bridge defect.
 //!
 //! ```text
-//!   BridgeState = TurnBridgePhase (Active | Quiescing | Cancelled)
+//!   BridgeState = TurnBridgePhase (Active | Quiescing | Draining | Cancelled)
 //!               × 𝔹 (srflx Binding Request probe pending)
 //!               × 𝔹 (bogus TCP-backed srflx candidate or spurious TCP session opened)
 //!               × 𝔹 (srflx probe stalled without response)
 //!               × 𝔹 (TURN Refresh(0) teardown request in flight)
 //!               × 𝔹 (TURN Refresh(0) teardown completed)
-//!               × 𝔹 (relayed peer data leaked to UDP socket during Quiescing/Cancelled)
+//!               × ℕ (queued outbound teardown frames awaiting TCP stream write)
+//!               × 𝔹 (queued outbound teardown frame lost by cancelling before drain)
+//!               × 𝔹 (relayed peer data leaked to UDP socket during Quiescing/Draining/Cancelled)
 //! ```
 //!
 //! Properties checked across all reachable interleavings:
@@ -17,11 +19,14 @@
 //! - `Always` no bogus `srflx` or 5 s stall: a bare STUN `Binding Request` (`0x0001`) sent to the
 //!   local UDP bridge is never forwarded over TCP and never dropped silently; it is immediately
 //!   rejected locally with a `400 Bad Request` response (`!bogus_tcp_srflx && !srflx_stalled`).
-//! - `Always` quiescence data isolation: once in `Quiescing` or `Cancelled`, inbound relayed peer
-//!   data (`ChannelData` / `Data Indication`) is never delivered to the local UDP socket
-//!   (`!relayed_data_leaked_during_quiesce`).
+//! - `Always` quiescence data isolation: once in `Quiescing`, `Draining`, or `Cancelled`, inbound
+//!   relayed peer data (`ChannelData` / `Data Indication`) is never delivered to the local UDP
+//!   socket (`!relayed_data_leaked_during_quiesce`).
 //! - `Always` teardown control liveness: while in `Quiescing`, inbound STUN control responses
 //!   (`Refresh(0)` response) are never dropped by the bridge (`!control_response_dropped_in_quiesce`).
+//! - `Always` outbound teardown drain: `shutdown()` transitions `Quiescing -> Draining` and flushes
+//!   all queued outbound teardown frames (`DTLS close_notify` and `TURN Refresh(0)`) to TCP before
+//!   entering `Cancelled` (`!queued_teardown_lost_on_cancel`).
 
 use stateright::Checker;
 use stateright::Model;
@@ -42,11 +47,13 @@ struct BridgeModelState {
     allocated: bool,
     refresh_zero_in_flight: bool,
     teardown_completed: bool,
+    outbound_queued_teardown_frames: u8,
     bogus_tcp_srflx: bool,
     srflx_stalled: bool,
     relayed_data_leaked_during_quiesce: bool,
     control_response_dropped_in_quiesce: bool,
     outbound_close_notify_dropped_in_quiesce: bool,
+    queued_teardown_lost_on_cancel: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -66,8 +73,13 @@ enum BridgeAction {
     BeginQuiesceAndSendRefreshZero,
     /// The TURN server's `Refresh(0)` response arrives on the TCP stream.
     InboundRefreshZeroResponse,
-    /// `WebrtcConnection::close()` finishes and calls `guard.cancel()`.
-    CancelBridge,
+    /// `write_fut` drains one queued outbound teardown frame from `outbound_rx` to the TCP stream.
+    FlushQueuedOutboundFrame,
+    /// `RTCPeerConnection::close()` returns and calls `guard.shutdown().await`, entering
+    /// `TurnBridgePhase::Draining` to flush remaining queued outbound frames.
+    BeginShutdownDrain,
+    /// `guard.shutdown().await` finishes draining and cancels the bridge.
+    FinishShutdownCancel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +99,10 @@ enum BridgeMutant {
     /// Bug 5 (Codex P2): `quiesce_inbound` drops outbound `ChannelData` / `Send Indication`
     /// packets, suppressing the DTLS `close_notify` alert sent during `RTCPeerConnection::close()`.
     QuiesceDropsOutboundCloseNotify,
+    /// Bug 6 (Codex P2): calling `guard.cancel()` immediately after `RTCPeerConnection::close()`
+    /// cancels `write_fut` before queued outbound `DTLS close_notify` or `TURN Refresh(0)` frames
+    /// are written to the TCP stream.
+    CancelWithoutDrainingOutboundQueue,
 }
 
 struct BridgeModel {
@@ -102,7 +118,7 @@ impl BridgeModel {
         match (self.mutant, phase, class) {
             (
                 Some(BridgeMutant::ForwardBindingRequestOverTcp),
-                TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+                TurnBridgePhase::Active | TurnBridgePhase::Quiescing | TurnBridgePhase::Draining,
                 OutboundTurnClass::StunBindingRequest(tx),
             ) => OutboundTurnDecision::ForwardControlRequest(tx),
             (
@@ -112,7 +128,7 @@ impl BridgeModel {
             ) => OutboundTurnDecision::Drop,
             (
                 Some(BridgeMutant::QuiesceDropsOutboundCloseNotify),
-                TurnBridgePhase::Quiescing,
+                TurnBridgePhase::Quiescing | TurnBridgePhase::Draining,
                 OutboundTurnClass::RelayedDataOrIndication,
             ) => OutboundTurnDecision::Drop,
             _ => turn_bridge_outbound_decision(phase, class),
@@ -162,11 +178,24 @@ impl Model for BridgeModel {
         }
         if state.phase == TurnBridgePhase::Quiescing {
             actions.push(BridgeAction::InboundRelayedChannelData);
-            actions.push(BridgeAction::OutboundCloseNotifyChannelData);
+            if state.outbound_queued_teardown_frames < 2 {
+                actions.push(BridgeAction::OutboundCloseNotifyChannelData);
+            }
+            if state.outbound_queued_teardown_frames > 0 {
+                actions.push(BridgeAction::FlushQueuedOutboundFrame);
+            }
             if state.refresh_zero_in_flight && !state.teardown_completed {
                 actions.push(BridgeAction::InboundRefreshZeroResponse);
             }
-            actions.push(BridgeAction::CancelBridge);
+            actions.push(BridgeAction::BeginShutdownDrain);
+        }
+        if state.phase == TurnBridgePhase::Draining {
+            actions.push(BridgeAction::InboundRelayedChannelData);
+            if state.outbound_queued_teardown_frames > 0 {
+                actions.push(BridgeAction::FlushQueuedOutboundFrame);
+            } else {
+                actions.push(BridgeAction::FinishShutdownCancel);
+            }
         }
     }
 
@@ -208,9 +237,10 @@ impl Model for BridgeModel {
             BridgeAction::OutboundCloseNotifyChannelData => {
                 let out =
                     self.outbound_decision(next.phase, OutboundTurnClass::RelayedDataOrIndication);
-                if next.phase == TurnBridgePhase::Quiescing
-                    && out != OutboundTurnDecision::ForwardData
-                {
+                if out == OutboundTurnDecision::ForwardData {
+                    next.outbound_queued_teardown_frames =
+                        next.outbound_queued_teardown_frames.saturating_add(1);
+                } else if next.phase == TurnBridgePhase::Quiescing {
                     next.outbound_close_notify_dropped_in_quiesce = true;
                 }
             }
@@ -220,6 +250,8 @@ impl Model for BridgeModel {
                     .outbound_decision(next.phase, OutboundTurnClass::TurnControlRequest(DUMMY_TX));
                 if matches!(out, OutboundTurnDecision::ForwardControlRequest(_)) {
                     next.refresh_zero_in_flight = true;
+                    next.outbound_queued_teardown_frames =
+                        next.outbound_queued_teardown_frames.saturating_add(1);
                 }
             }
             BridgeAction::InboundRefreshZeroResponse => {
@@ -233,7 +265,24 @@ impl Model for BridgeModel {
                     }
                 }
             }
-            BridgeAction::CancelBridge => {
+            BridgeAction::FlushQueuedOutboundFrame => {
+                next.outbound_queued_teardown_frames =
+                    next.outbound_queued_teardown_frames.saturating_sub(1);
+            }
+            BridgeAction::BeginShutdownDrain => {
+                if self.mutant == Some(BridgeMutant::CancelWithoutDrainingOutboundQueue) {
+                    if next.outbound_queued_teardown_frames > 0 {
+                        next.queued_teardown_lost_on_cancel = true;
+                    }
+                    next.phase = TurnBridgePhase::Cancelled;
+                } else {
+                    next.phase = TurnBridgePhase::Draining;
+                }
+            }
+            BridgeAction::FinishShutdownCancel => {
+                if next.outbound_queued_teardown_frames > 0 {
+                    next.queued_teardown_lost_on_cancel = true;
+                }
                 next.phase = TurnBridgePhase::Cancelled;
             }
         }
@@ -260,6 +309,10 @@ impl Model for BridgeModel {
             Property::<Self>::always(
                 "quiescing bridge forwards outbound DTLS close_notify relayed frame",
                 |_, state| !state.outbound_close_notify_dropped_in_quiesce,
+            ),
+            Property::<Self>::always(
+                "shutdown drains all queued outbound teardown frames before cancelling",
+                |_, state| !state.queued_teardown_lost_on_cancel,
             ),
         ]
     }
@@ -294,6 +347,10 @@ fn test_each_turn_tcp_bridge_mutant_is_refuted() {
         (
             BridgeMutant::QuiesceDropsOutboundCloseNotify,
             "quiescing bridge forwards outbound DTLS close_notify relayed frame",
+        ),
+        (
+            BridgeMutant::CancelWithoutDrainingOutboundQueue,
+            "shutdown drains all queued outbound teardown frames before cancelling",
         ),
     ];
 

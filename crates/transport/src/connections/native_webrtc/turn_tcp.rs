@@ -51,6 +51,8 @@ const TURN_TCP_PER_ADDR_CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
 const TURN_TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const TURN_TCP_LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(200);
+const TURN_TCP_UDP_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(5);
+const TURN_TCP_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 const OS_UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
 const BRIDGE_UDP_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
 const MAX_LOCAL_UDP_PAYLOAD_LEN: usize = 65_507;
@@ -63,29 +65,47 @@ static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// Guard that keeps any spawned TURN-over-TCP bridge tasks alive for the lifetime of a
-/// native `RTCPeerConnection` and cancels them when the connection is reconfigured or closed.
+/// native `RTCPeerConnection` and drains queued outbound teardown frames before cancelling.
 pub(crate) struct TurnTcpBridgeGuard {
     inbound_cancel: CancellationToken,
+    drain_cancel: CancellationToken,
     cancel: CancellationToken,
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl TurnTcpBridgeGuard {
-    fn new(inbound_cancel: CancellationToken, cancel: CancellationToken) -> Self {
+    fn new(
+        inbound_cancel: CancellationToken,
+        drain_cancel: CancellationToken,
+        cancel: CancellationToken,
+        tasks: Vec<tokio::task::JoinHandle<()>>,
+    ) -> Self {
         Self {
             inbound_cancel,
+            drain_cancel,
             cancel,
+            tasks,
         }
     }
 
-    /// Stop inbound TCP-to-local packet injection before awaiting `RTCPeerConnection::close()`
-    /// so a full virtual UDP queue cannot block while holding the `VNet` mutex needed by
-    /// outbound `Refresh(LIFETIME=0)`.
+    /// Stop inbound TCP-to-local relayed data injection before awaiting `RTCPeerConnection::close()`
+    /// while keeping STUN control responses and outbound traffic active.
     pub(crate) fn quiesce_inbound(&self) {
         self.inbound_cancel.cancel();
     }
 
-    pub(crate) fn cancel(&self) {
+    /// Drain queued outbound teardown frames (`DTLS close_notify` and `TURN Refresh(0)`) to the
+    /// TCP relay stream with a bounded barrier before hard cancellation.
+    pub(crate) async fn shutdown(mut self) {
         self.inbound_cancel.cancel();
+        self.drain_cancel.cancel();
+        let tasks = std::mem::take(&mut self.tasks);
+        let _ = tokio::time::timeout(TURN_TCP_SHUTDOWN_DRAIN_TIMEOUT, async move {
+            for task in tasks {
+                let _ = task.await;
+            }
+        })
+        .await;
         self.cancel.cancel();
     }
 }
@@ -93,6 +113,7 @@ impl TurnTcpBridgeGuard {
 impl Drop for TurnTcpBridgeGuard {
     fn drop(&mut self) {
         self.inbound_cancel.cancel();
+        self.drain_cancel.cancel();
         self.cancel.cancel();
     }
 }
@@ -244,19 +265,10 @@ fn stun_request_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     <[u8; 12]>::try_from(tx_slice).ok()
 }
 
-/// If `pkt` is a STUN `Binding Request` (RFC 5389 method `0x001`, class `0b00`, header bytes
-/// `[0x00, 0x01, ..]`), build a 28-byte STUN `Binding Error Response` (`400 Bad Request`) with the
-/// matching transaction ID.
-///
-/// When OS UDP is available, `webrtc-ice`'s `gather_candidates_srflx` sends bare STUN Binding
-/// Requests from a local UDP socket to every configured ICE server URL, including the local UDP
-/// bridge endpoint (`turn:127.0.0.1:<bridge_port>`). Forwarding those requests over the TCP TURN
-/// stream causes the TURN server to return `XOR-MAPPED-ADDRESS` for the TCP connection's source
-/// port, which `webrtc-ice` would falsely advertise as a UDP `srflx` candidate backed by a
-/// different UDP socket; silently dropping them would stall `gather_candidates_srflx` for
-/// `STUN_GATHER_TIMEOUT` (5 s). Replying locally with a `Binding Error Response` terminates the
-/// reflexive probe immediately without opening a TCP session or producing a bogus `srflx`
-/// candidate.
+/// If `pkt` is a STUN `Binding Request` (RFC 5389 method `0x001`, class `0b00`), build a 28-byte
+/// STUN `Binding Error Response` (`400 Bad Request`) with the matching transaction ID so
+/// `webrtc-ice`'s `gather_candidates_srflx` probe terminates immediately without opening a TCP
+/// TURN session or waiting out `STUN_GATHER_TIMEOUT` (5 s).
 pub(crate) fn stun_binding_bad_request_response(pkt: &[u8]) -> Option<[u8; 28]> {
     let &[b0, b1, ..] = pkt else {
         return None;
@@ -280,39 +292,41 @@ pub(crate) fn stun_binding_bad_request_response(pkt: &[u8]) -> Option<[u8; 28]> 
 /// (RFC 5389 §6 class `0b10` or `0b11`, where bit 0 of byte 0 `C1 == 1`).
 pub(crate) fn stun_response_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     let &b0 = pkt.first()?;
-    if (b0 & 0b1100_0001) != 0b0000_0001 {
+    if (b0 & 0b1100_0001) != 0b0000_0001 || pkt.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
         return None;
     }
-    if pkt.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
-        return None;
-    }
-    let tx_slice = pkt.get(8..STUN_HEADER_BYTES)?;
-    <[u8; 12]>::try_from(tx_slice).ok()
+    <[u8; 12]>::try_from(pkt.get(8..STUN_HEADER_BYTES)?).ok()
 }
 
-/// Lifecycle phase of a local TURN-over-TCP bridge.
+/// Lifecycle phase of a local TURN-over-TCP bridge (`Active -> Quiescing -> Draining -> Cancelled`).
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub(crate) enum TurnBridgePhase {
     /// Normal operation: forwards TURN control and relayed data in both directions.
     #[default]
     Active,
     /// Teardown quiescence (`quiesce_inbound` before `RTCPeerConnection::close()`): drops
-    /// inbound relayed data (`ChannelData` and STUN `Indication`s) so the upstream TURN client
-    /// mutex is not contended, while still forwarding TURN control requests and STUN responses
-    /// (`Refresh(0)` teardown).
+    /// inbound relayed data (`ChannelData` and STUN `Indication`s) while still forwarding
+    /// outbound traffic and inbound STUN control responses (`Refresh(0)` teardown).
     Quiescing,
-    /// Terminated (`cancel()` after `RTCPeerConnection::close()`).
+    /// Outbound drain barrier (`shutdown` after `RTCPeerConnection::close()`): drains any
+    /// remaining local UDP datagrams and flushes queued outbound TCP frames (`DTLS close_notify`
+    /// and `TURN Refresh(0)`) before hard cancellation.
+    Draining,
+    /// Terminated (`cancel()` or after `shutdown()` completes).
     Cancelled,
 }
 
 impl TurnBridgePhase {
-    /// Project the current phase from the cancellation tokens `(inbound_cancel, cancel)`.
+    /// Project the current phase from `(inbound_cancel, drain_cancel, cancel)`.
     pub(crate) fn from_tokens(
         inbound_cancel: &CancellationToken,
+        drain_cancel: &CancellationToken,
         cancel: &CancellationToken,
     ) -> Self {
         if cancel.is_cancelled() {
             Self::Cancelled
+        } else if drain_cancel.is_cancelled() {
+            Self::Draining
         } else if inbound_cancel.is_cancelled() {
             Self::Quiescing
         } else {
@@ -326,8 +340,7 @@ impl TurnBridgePhase {
 pub(crate) enum OutboundTurnClass {
     /// Bare STUN `Binding Request` (`0x0001`) from `webrtc-ice`'s `gather_candidates_srflx`.
     StunBindingRequest([u8; 12]),
-    /// TURN/STUN Request other than `0x0001` (`Allocate`, `Refresh`, `CreatePermission`,
-    /// `ChannelBind`).
+    /// TURN/STUN Request other than `0x0001` (`Allocate`, `Refresh`, `CreatePermission`, `ChannelBind`).
     TurnControlRequest([u8; 12]),
     /// TURN `ChannelData` (`0x4000..=0x7FFF`) or STUN `Send Indication` (`0x0016`).
     RelayedDataOrIndication,
@@ -340,8 +353,7 @@ pub(crate) enum OutboundTurnClass {
 pub(crate) enum OutboundTurnDecision {
     /// Drop the datagram without opening or writing to the TCP stream.
     Drop,
-    /// Reply locally on the UDP socket with a 28-byte STUN `400 Bad Request` Error Response;
-    /// never open or write to the TCP TURN stream.
+    /// Reply locally on the UDP socket with a 28-byte STUN `400 Bad Request` Error Response.
     RejectBindingRequestLocally([u8; 12]),
     /// Forward the TURN control request (`tx_id`) over the TCP TURN stream.
     ForwardControlRequest([u8; 12]),
@@ -354,8 +366,7 @@ pub(crate) enum OutboundTurnDecision {
 pub(crate) enum InboundTurnDecision {
     /// Drop the inbound TCP frame without delivering to the local UDP socket.
     Drop,
-    /// Deliver the STUN control response (`Allocate`, `Refresh`, `CreatePermission`, `ChannelBind`)
-    /// to the local UDP socket.
+    /// Deliver the STUN control response to the local UDP socket.
     DeliverControlResponse,
     /// Deliver relayed peer data (`ChannelData` or STUN `Data Indication`) to the local UDP socket.
     DeliverRelayedData,
@@ -378,10 +389,6 @@ pub(crate) fn classify_outbound_turn_datagram(datagram: &[u8]) -> OutboundTurnCl
 }
 
 /// Pure transition `TurnBridgePhase × OutboundTurnClass -> OutboundTurnDecision`.
-///
-/// Outbound `RelayedDataOrIndication` remains forwarded in `Quiescing` so DTLS `close_notify`
-/// alerts sent during `RTCPeerConnection::close()` reach the remote peer over TURN `ChannelData`
-/// or `Send Indication` before the bridge is cancelled.
 pub(crate) const fn turn_bridge_outbound_decision(
     phase: TurnBridgePhase,
     class: OutboundTurnClass,
@@ -391,15 +398,15 @@ pub(crate) const fn turn_bridge_outbound_decision(
             OutboundTurnDecision::Drop
         }
         (
-            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing | TurnBridgePhase::Draining,
             OutboundTurnClass::StunBindingRequest(tx_id),
         ) => OutboundTurnDecision::RejectBindingRequestLocally(tx_id),
         (
-            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing | TurnBridgePhase::Draining,
             OutboundTurnClass::TurnControlRequest(tx_id),
         ) => OutboundTurnDecision::ForwardControlRequest(tx_id),
         (
-            TurnBridgePhase::Active | TurnBridgePhase::Quiescing,
+            TurnBridgePhase::Active | TurnBridgePhase::Quiescing | TurnBridgePhase::Draining,
             OutboundTurnClass::RelayedDataOrIndication,
         ) => OutboundTurnDecision::ForwardData,
     }
@@ -411,7 +418,7 @@ pub(crate) const fn turn_bridge_inbound_decision(
     is_stun_control_response: bool,
 ) -> InboundTurnDecision {
     match (phase, is_stun_control_response) {
-        (TurnBridgePhase::Cancelled, _) => InboundTurnDecision::Drop,
+        (TurnBridgePhase::Draining | TurnBridgePhase::Cancelled, _) => InboundTurnDecision::Drop,
         (TurnBridgePhase::Active | TurnBridgePhase::Quiescing, true) => {
             InboundTurnDecision::DeliverControlResponse
         }
@@ -546,6 +553,7 @@ async fn run_stream_io<S>(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
     inbound_cancel: CancellationToken,
+    drain_cancel: CancellationToken,
     cancel: CancellationToken,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -566,9 +574,6 @@ async fn run_stream_io<S>(
             let Some(pkt) = maybe_pkt else {
                 break;
             };
-            // Suppress duplicate STUN request retransmissions over reliable TCP/TLS (RFC 5389 §7.2.2).
-            // If the server already responded to this transaction ID and the response was lost on the
-            // local UDP hop, replay the cached response directly without re-sending over TCP.
             if let Some(tx_id) = stun_request_transaction_id(&pkt) {
                 let duplicate_action = {
                     let mut guard = cache_for_write
@@ -615,16 +620,13 @@ async fn run_stream_io<S>(
         loop {
             let frame_res = tokio::select! {
                 _ = cancel_read.cancelled() => break,
+                _ = drain_cancel.cancelled() => break,
                 res = read_turn_tcp_frame(&mut reader) => res,
             };
             let Ok(frame) = frame_res else {
                 break;
             };
             if frame.len() > MAX_LOCAL_UDP_PAYLOAD_LEN {
-                tracing::debug!(
-                    len = frame.len(),
-                    "dropping inbound TURN TCP frame exceeding local UDP datagram limit"
-                );
                 continue;
             }
             let is_stun_control_response = if let Some(tx_id) = stun_response_transaction_id(&frame)
@@ -644,12 +646,7 @@ async fn run_stream_io<S>(
             } else {
                 false
             };
-            // Once inbound data is quiesced during connection teardown, drop relayed application
-            // data (`ChannelData` and STUN `Data` indications) so the virtual UDP receive queue
-            // cannot fill up, while continuing to forward STUN control responses (`CreatePermission`,
-            // `ChannelBind`, `Refresh`, `Allocate`) so an in-flight `webrtc::turn::client::Client`
-            // transaction can complete and release its internal mutex for `Client::close()`.
-            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &cancel_read);
+            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &drain_cancel, &cancel_read);
             if turn_bridge_inbound_decision(phase, is_stun_control_response)
                 == InboundTurnDecision::Drop
             {
@@ -662,13 +659,7 @@ async fn run_stream_io<S>(
                     bridge_conn.send_to(&frame, client_addr),
                 ) => match res {
                     Ok(inner) => inner,
-                    Err(_) => {
-                        tracing::debug!(
-                            %client_addr,
-                            "local TURN TCP bridge delivery timed out under backpressure; dropping datagram without resetting TCP allocation"
-                        );
-                        continue;
-                    }
+                    Err(_) => continue,
                 },
             };
             if send_res.is_err() {
@@ -679,8 +670,7 @@ async fn run_stream_io<S>(
 
     tokio::select! {
         _ = cancel.cancelled() => {},
-        _ = write_fut => {},
-        _ = read_fut => {},
+        _ = async { tokio::join!(write_fut, read_fut); } => {},
     }
 }
 
@@ -725,6 +715,7 @@ async fn run_client_tcp_session(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
     inbound_cancel: CancellationToken,
+    drain_cancel: CancellationToken,
     cancel: CancellationToken,
 ) {
     let connect_res = tokio::select! {
@@ -734,25 +725,8 @@ async fn run_client_tcp_session(
             connect_turn_tcp_endpoint(&endpoint),
         ) => res,
     };
-    let tcp_stream = match connect_res {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(error)) => {
-            tracing::warn!(
-                host = %endpoint.host,
-                port = endpoint.port,
-                %error,
-                "Failed to connect TCP stream to TURN server"
-            );
-            return;
-        }
-        Err(_) => {
-            tracing::warn!(
-                host = %endpoint.host,
-                port = endpoint.port,
-                "Timed out connecting TCP stream to TURN server"
-            );
-            return;
-        }
+    let Ok(Ok(tcp_stream)) = connect_res else {
+        return;
     };
     let _ = tcp_stream.set_nodelay(true);
 
@@ -761,7 +735,6 @@ async fn run_client_tcp_session(
             return;
         };
         let Ok(server_name) = rustls::pki_types::ServerName::try_from(endpoint.host.clone()) else {
-            tracing::warn!(host = %endpoint.host, "Invalid ServerName for TURNS TLS connection");
             return;
         };
         let tls_res = tokio::select! {
@@ -771,33 +744,17 @@ async fn run_client_tcp_session(
                 connector.connect(server_name, tcp_stream),
             ) => res,
         };
-        match tls_res {
-            Ok(Ok(tls_stream)) => {
-                run_stream_io(
-                    tls_stream,
-                    outbound_rx,
-                    bridge_conn,
-                    client_addr,
-                    inbound_cancel,
-                    cancel,
-                )
-                .await;
-            }
-            Ok(Err(error)) => {
-                tracing::warn!(
-                    host = %endpoint.host,
-                    port = endpoint.port,
-                    %error,
-                    "TLS handshake with TURNS server failed"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    host = %endpoint.host,
-                    port = endpoint.port,
-                    "Timed out during TLS handshake with TURNS server"
-                );
-            }
+        if let Ok(Ok(tls_stream)) = tls_res {
+            run_stream_io(
+                tls_stream,
+                outbound_rx,
+                bridge_conn,
+                client_addr,
+                inbound_cancel,
+                drain_cancel,
+                cancel,
+            )
+            .await;
         }
     } else {
         run_stream_io(
@@ -806,6 +763,7 @@ async fn run_client_tcp_session(
             bridge_conn,
             client_addr,
             inbound_cancel,
+            drain_cancel,
             cancel,
         )
         .await;
@@ -822,16 +780,40 @@ fn spawn_turn_tcp_bridge(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     endpoint: TurnTcpEndpoint,
     inbound_cancel: CancellationToken,
+    drain_cancel: CancellationToken,
     cancel: CancellationToken,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut sessions: HashMap<SocketAddr, BridgeSession> = HashMap::new();
+        let mut session_tasks = tokio::task::JoinSet::new();
         let mut buf = vec![0u8; BRIDGE_UDP_MTU];
+        let mut draining = false;
+        let mut drain_budget = SESSION_QUEUE_CAPACITY;
 
         loop {
-            let recv_res = tokio::select! {
-                _ = cancel.cancelled() => break,
-                res = bridge_conn.recv_from(&mut buf) => res,
+            let recv_res = if draining {
+                if drain_budget == 0 {
+                    break;
+                }
+                drain_budget -= 1;
+                let Ok(res) = tokio::time::timeout(
+                    TURN_TCP_UDP_DRAIN_POLL_TIMEOUT,
+                    bridge_conn.recv_from(&mut buf),
+                )
+                .await
+                else {
+                    break;
+                };
+                res
+            } else {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = drain_cancel.cancelled() => {
+                        draining = true;
+                        continue;
+                    }
+                    res = bridge_conn.recv_from(&mut buf) => res,
+                }
             };
             let Ok((n, client_addr)) = recv_res else {
                 break;
@@ -839,15 +821,11 @@ fn spawn_turn_tcp_bridge(
             let Some(datagram) = buf.get(..n) else {
                 continue;
             };
-            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &cancel);
+            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &drain_cancel, &cancel);
             match turn_bridge_outbound_decision(phase, classify_outbound_turn_datagram(datagram)) {
                 OutboundTurnDecision::Drop => continue,
                 OutboundTurnDecision::RejectBindingRequestLocally(_) => {
                     if let Some(err_resp) = stun_binding_bad_request_response(datagram) {
-                        tracing::trace!(
-                            %client_addr,
-                            "rejecting bare STUN Binding Request sent to local TURN-over-TCP UDP bridge"
-                        );
                         let _ = tokio::time::timeout(
                             TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
                             bridge_conn.send_to(&err_resp, client_addr),
@@ -870,13 +848,7 @@ fn spawn_turn_tcp_bridge(
                 existing.last_active = now;
                 match existing.tx.try_send(framed) {
                     Ok(()) => continue,
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::debug!(
-                            %client_addr,
-                            "TURN TCP bridge outbound queue full; dropping packet without resetting TCP session"
-                        );
-                        continue;
-                    }
+                    Err(mpsc::error::TrySendError::Full(_)) => continue,
                     Err(mpsc::error::TrySendError::Closed(returned)) => {
                         sessions.remove(&client_addr);
                         framed = returned;
@@ -900,6 +872,7 @@ fn spawn_turn_tcp_bridge(
             let _ = tx.try_send(framed);
             let session_cancel = cancel.child_token();
             let session_inbound_cancel = inbound_cancel.child_token();
+            let session_drain_cancel = drain_cancel.child_token();
             sessions.insert(client_addr, BridgeSession {
                 tx,
                 cancel: session_cancel.clone(),
@@ -907,21 +880,24 @@ fn spawn_turn_tcp_bridge(
             });
             let session_endpoint = endpoint.clone();
             let session_conn = Arc::clone(&bridge_conn);
-            tokio::spawn(async move {
+            session_tasks.spawn(async move {
                 run_client_tcp_session(
                     session_endpoint,
                     rx,
                     session_conn,
                     client_addr,
                     session_inbound_cancel,
+                    session_drain_cancel,
                     session_cancel,
                 )
                 .await;
             });
         }
 
+        drop(sessions);
+        while session_tasks.join_next().await.is_some() {}
         let _ = bridge_conn.close().await;
-    });
+    })
 }
 
 /// Prepare the `RTCIceServer` list, `RTCIceTransportPolicy`, and optional `VNet` + TCP TURN
@@ -961,8 +937,9 @@ pub(crate) async fn prepare_native_ice_config(
     };
 
     let cancel = CancellationToken::new();
-    let inbound_cancel = cancel.child_token();
-    let bridge_guard = TurnTcpBridgeGuard::new(inbound_cancel.clone(), cancel.clone());
+    let drain_cancel = cancel.child_token();
+    let inbound_cancel = drain_cancel.child_token();
+    let mut bridge_tasks = Vec::with_capacity(tcp_turn_urls);
     let mut bridged_servers = Vec::with_capacity(ice_servers.len());
 
     for server in ice_servers {
@@ -976,12 +953,13 @@ pub(crate) async fn prepare_native_ice_config(
                 let bridge_addr = bridge_conn
                     .local_addr()
                     .map_err(|e| Error::Webrtc(webrtc::error::Error::Util(e)))?;
-                spawn_turn_tcp_bridge(
+                bridge_tasks.push(spawn_turn_tcp_bridge(
                     bridge_conn,
                     endpoint,
                     inbound_cancel.child_token(),
+                    drain_cancel.child_token(),
                     cancel.child_token(),
-                );
+                ));
                 rewritten_urls.push(format!("turn:{bridge_addr}"));
             } else if !use_vnet_relay_only {
                 rewritten_urls.push(url.clone());
@@ -994,6 +972,8 @@ pub(crate) async fn prepare_native_ice_config(
             bridged_servers.push(RTCIceServer::from(adapted));
         }
     }
+
+    let bridge_guard = TurnTcpBridgeGuard::new(inbound_cancel, drain_cancel, cancel, bridge_tasks);
 
     Ok(PreparedNativeIceConfig {
         ice_servers: bridged_servers,

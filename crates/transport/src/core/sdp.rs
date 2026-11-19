@@ -244,8 +244,8 @@ pub enum IceSettleWindow {
 /// Pure state of one ICE gathering session (`State` in `State × Event -> State × Effect`).
 ///
 /// Invariants:
-/// - `No premature relay timer`: when `target_tier == IceCandidateTier::Relay`,
-///   `armed_window.is_some() ⟹ highest_observed == Some(IceCandidateTier::Relay)`.
+/// - `No premature target-tier omission`: for every `target_tier ∈ {Host, Reflexive, Relay}`,
+///   `armed_window.is_some() ⟺ highest_observed.is_some_and(|c| c >= target_tier)`.
 /// - `Fast window on target tier`:
 ///   `highest_observed.is_some_and(|c| c >= target_tier) ⟹ armed_window == Some(IceSettleWindow::Fast)`.
 /// - `Quiet-window reset`: whenever `armed_window.is_some()`, observing any candidate line
@@ -275,14 +275,17 @@ impl IceGatherState {
     }
 
     /// Classify the settle window unlocked by a single `candidate_tier` for `target_tier`.
+    ///
+    /// Law (Target-tier threshold): the early quiet-window settle timer (`300 ms`) is unlocked iff
+    /// `candidate_tier >= target_tier`. Lower-tier candidates never arm an early timer while the
+    /// configured tier (`Reflexive` for STUN or `Relay` for TURN) is still pending, so non-trickle
+    /// SDP never finalizes a host-only description while STUN or TURN gathering is still in flight.
     pub const fn window_for_tier(
         candidate_tier: IceCandidateTier,
         target_tier: IceCandidateTier,
     ) -> Option<IceSettleWindow> {
         if (candidate_tier as u8) >= (target_tier as u8) {
             Some(IceSettleWindow::Fast)
-        } else if matches!(target_tier, IceCandidateTier::Reflexive) {
-            Some(IceSettleWindow::Fallback)
         } else {
             None
         }
