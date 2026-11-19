@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
+use crate::core::sdp::IceCandidateTier;
 use crate::error::IceServerError;
 
 /// WebRTC IceCredentialType enums.
@@ -38,6 +39,27 @@ impl IceServer {
     /// Convert String to `Vec<IceServer>`. Will split the string by `;` and parse each part.
     pub fn vec_from_str(s: &str) -> Result<Vec<Self>, IceServerError> {
         s.split(';').map(IceServer::from_str).collect()
+    }
+
+    /// The highest [`IceCandidateTier`] that a peer connection configured with `servers` can
+    /// gather (`Host` when empty, `Reflexive` when only `stun:` URLs are present, `Relay` when any
+    /// `turn:` or `turns:` URL is present).
+    pub fn target_candidate_tier(servers: &[Self]) -> IceCandidateTier {
+        servers
+            .iter()
+            .flat_map(|server| server.urls.iter())
+            .filter_map(|url| {
+                let (scheme, _) = url.trim().split_once(':')?;
+                if scheme.eq_ignore_ascii_case("turn") || scheme.eq_ignore_ascii_case("turns") {
+                    Some(IceCandidateTier::Relay)
+                } else if scheme.eq_ignore_ascii_case("stun") {
+                    Some(IceCandidateTier::Reflexive)
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(IceCandidateTier::Host)
     }
 }
 
@@ -73,17 +95,35 @@ impl Default for IceServer {
     }
 }
 
-/// [stun|turn]://[username]:[password]@[url]
+/// [stun|turn|turns]://[username]:[password]@[url][?transport=tcp|udp]
 /// For current implementation all type is `password` as default
 /// E.g: stun://foo:bar@stun.l.google.com:19302
 ///      turn://ethereum.org:9090
 ///      turn://ryan@ethereum.org:9090/nginx/v2
+///      turn://user:pass@ethereum.org:80?transport=tcp
+///      turns://user:pass@ethereum.org:5349?transport=tcp
 impl FromStr for IceServer {
     type Err = IceServerError;
     fn from_str(s: &str) -> Result<Self, IceServerError> {
-        let parsed = Url::parse(s)?;
+        let trimmed = s.trim();
+        let normalized;
+        let to_parse = if !trimmed.contains("://") {
+            if let Some((scheme_part, rest)) = trimmed.split_once(':') {
+                if !rest.is_empty() && !rest.starts_with('/') {
+                    normalized = format!("{scheme_part}://{rest}");
+                    normalized.as_str()
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            }
+        } else {
+            trimmed
+        };
+        let parsed = Url::parse(to_parse)?;
         let scheme = parsed.scheme();
-        if !(["turn", "stun"].contains(&scheme)) {
+        if !(["turn", "turns", "stun"].contains(&scheme)) {
             return Err(IceServerError::SchemeNotSupported(scheme.into()));
         }
         if !parsed.has_host() {
@@ -98,13 +138,49 @@ impl FromStr for IceServer {
             .map(|p| format!(":{p}"))
             .unwrap_or_else(|| "".to_string());
         let path = parsed.path();
-        let url = format!("{scheme}:{host}{port}{path}");
+        let query = normalize_ice_query(parsed.query());
+        let url = format!("{scheme}:{host}{port}{path}{query}");
         Ok(Self {
             urls: vec![url],
             username: username.to_string(),
             credential: password.to_string(),
             credential_type: IceCredentialType::default(),
         })
+    }
+}
+
+fn normalize_ice_query(raw_query: Option<&str>) -> String {
+    let Some(raw_query) = raw_query else {
+        return String::new();
+    };
+    let mut params = Vec::new();
+    for pair in raw_query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = pair.split_once('=') {
+            if key.eq_ignore_ascii_case("pubkey") {
+                continue;
+            }
+            if key.eq_ignore_ascii_case("transport") {
+                if value.eq_ignore_ascii_case("tcp") {
+                    params.push("transport=tcp".to_string());
+                } else if value.eq_ignore_ascii_case("udp") {
+                    params.push("transport=udp".to_string());
+                } else {
+                    params.push(format!("transport={value}"));
+                }
+            } else {
+                params.push(pair.to_string());
+            }
+        } else {
+            params.push(pair.to_string());
+        }
+    }
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", params.join("&"))
     }
 }
 

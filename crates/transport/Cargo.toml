@@ -20,13 +20,15 @@ workspace = true
 # `web-sys-webrtc`) explicitly. The crate root rejects native+wasm backend combinations.
 default = ["tokio/rt", "tokio/time", "tokio-util", "rings-runtime/tokio"]
 dummy = ["webrtc", "rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
-native-webrtc = ["webrtc", "tokio-util", "tokio/macros", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
+native-webrtc = ["webrtc", "tokio-util", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync", "tokio/time", "dep:tokio-rustls", "dep:webpki-roots", "rings-runtime/tokio"]
 web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures", "rings-runtime/browser"]
 
 [dependencies]
 # Dependencies for native-webrtc feature
 tokio = { version = "1.32.0", optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"], optional = true }
 tokio-util = { version = "0.7.8", optional = true }
+webpki-roots = { version = "1.0", optional = true }
 webrtc = { workspace = true, optional = true }
 
 # Dependencies for dummy feature
@@ -46,10 +48,12 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "RtcDataChannelEvent",
     "RtcDataChannelState",
     "RtcDataChannelType",
+    "RtcIceCandidate",
     "RtcIceCredentialType",
     "RtcIceGatheringState",
     "RtcIceServer",
     "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
     "RtcPeerConnectionState",
     "RtcSdpType",
     "RtcSessionDescription",

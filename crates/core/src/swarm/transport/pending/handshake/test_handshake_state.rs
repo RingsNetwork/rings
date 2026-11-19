@@ -176,3 +176,98 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
     assert!(registry.superseded_by_peer(attempt));
     Ok(())
 }
+
+/// Formal poset & absorbing-state model check over the complete 7-state `Handshake` space:
+///
+/// 1. `rank(Creating) = 0 < rank(Sent) = 1 < rank(Answered) = rank(Answering) = 2`.
+/// 2. Every state of maximal rank (`rank == 2`: `Offering(Overlay, Answered)`,
+///    `Offering(External, Answered)`, and `Answering`) is an absorbing terminal state under
+///    `crossing_offer_verdict`: it returns `CrossingOfferVerdict::Refuse` for every carrier
+///    (`Overlay` and `External`) and every DID order (`smaller < larger` and `larger > smaller`),
+///    so an in-flight `Answering` or `Answered` generation can never be self-preempted by a
+///    duplicate or overlapping offer.
+/// 3. Whenever `crossing_offer_verdict(h, ..) == Yield`, applying `replace_pending_in` transitions
+///    the registry slot to `Handshake::Answering` (`rank == 2 > rank(h)`), ensuring any yield loop
+///    terminates in at most one replacement step.
+#[test]
+fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> Result<()> {
+    fn rank(handshake: &Handshake) -> u8 {
+        match handshake {
+            Handshake::Offering {
+                phase: OfferPhase::Creating,
+                ..
+            } => 0,
+            Handshake::Offering {
+                phase: OfferPhase::Sent { .. },
+                ..
+            } => 1,
+            Handshake::Offering {
+                phase: OfferPhase::Answered,
+                ..
+            }
+            | Handshake::Answering => 2,
+        }
+    }
+
+    let (smaller, larger) = ordered();
+    let tx_id = uuid::Uuid::new_v4();
+    let all_states = [
+        Handshake::offering(OfferOwner::Overlay),
+        Handshake::offering(OfferOwner::External),
+        sent(OfferOwner::Overlay, tx_id),
+        sent(OfferOwner::External, tx_id),
+        Handshake::Offering {
+            owner: OfferOwner::Overlay,
+            phase: OfferPhase::Answered,
+        },
+        Handshake::Offering {
+            owner: OfferOwner::External,
+            phase: OfferPhase::Answered,
+        },
+        Handshake::Answering,
+    ];
+
+    for state in &all_states {
+        let r = rank(state);
+        for carrier in CARRIERS {
+            for (local, peer) in [(smaller, larger), (larger, smaller)] {
+                let verdict = crossing_offer_verdict(state, carrier, local, peer);
+                if r == 2 {
+                    assert_eq!(
+                        verdict,
+                        CrossingOfferVerdict::Refuse,
+                        "absorbing rank-2 state {state:?} must refuse carrier {carrier:?} ({local:?} vs {peer:?})"
+                    );
+                }
+                if verdict == CrossingOfferVerdict::Yield {
+                    assert!(
+                        r < 2,
+                        "only rank < 2 states may yield, but {state:?} yielded"
+                    );
+                    let mut registry = ConnectionLifecycleRegistry::new(LifecycleBounds::new(1, 1));
+                    let initial = registry.reserve_for(peer, 0, state.clone())?;
+                    let replaced = registry
+                        .replace_pending_in(initial, state, 1)?
+                        .expect("yield on current state must succeed");
+                    let next_state = registry
+                        .handshake(replaced)
+                        .expect("replacement generation must have a signaling state");
+                    assert_eq!(next_state, &Handshake::Answering);
+                    assert!(
+                        rank(next_state) > r,
+                        "yield must strictly increase signaling rank ({r} -> {})",
+                        rank(next_state)
+                    );
+                    // Once in Answering, any subsequent offer (Overlay or External) is refused.
+                    for next_carrier in CARRIERS {
+                        assert_eq!(
+                            crossing_offer_verdict(next_state, next_carrier, local, peer),
+                            CrossingOfferVerdict::Refuse
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

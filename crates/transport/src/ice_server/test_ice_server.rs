@@ -32,6 +32,44 @@ fn test_parsing() {
     assert_eq!(ret_d.username, "ryan".to_string());
 
     assert!(ret_e.is_err());
+
+    let tcp_turn =
+        IceServer::from_str("turn://user:pass@turn.example.com:80?transport=tcp").unwrap();
+    assert_eq!(
+        tcp_turn.urls[0],
+        "turn:turn.example.com:80?transport=tcp".to_string()
+    );
+    assert_eq!(tcp_turn.username, "user".to_string());
+    assert_eq!(tcp_turn.credential, "pass".to_string());
+
+    let turns =
+        IceServer::from_str("turns://user:pass@turn.example.com:5349?transport=tcp").unwrap();
+    assert_eq!(
+        turns.urls[0],
+        "turns:turn.example.com:5349?transport=tcp".to_string()
+    );
+    assert_eq!(turns.username, "user".to_string());
+    assert_eq!(turns.credential, "pass".to_string());
+
+    // Unsupported `stuns:` scheme is rejected rather than silently downgraded to plaintext UDP.
+    assert!(IceServer::from_str("stuns://stun.l.google.com:5349").is_err());
+
+    // Case-insensitive `?TRANSPORT=UDP` / `?TRANSPORT=TCP` and residual `?pubkey=...` metadata
+    // are normalized for downstream `webrtc-ice` compatibility.
+    let upper_udp = IceServer::from_str(
+        "turn://user:pass@turn.example.com:3478?TRANSPORT=UDP&pubkey=222222222222",
+    )
+    .unwrap();
+    assert_eq!(
+        upper_udp.urls[0],
+        "turn:turn.example.com:3478?transport=udp".to_string()
+    );
+
+    let rfc7065 = IceServer::from_str("turn:turn.example.com:3478?TRANSPORT=TCP").unwrap();
+    assert_eq!(
+        rfc7065.urls[0],
+        "turn:turn.example.com:3478?transport=tcp".to_string()
+    );
 }
 
 #[test]

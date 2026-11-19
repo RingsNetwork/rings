@@ -91,6 +91,31 @@ fn duplicate_host_candidate_line(line: &str, extra_addresses: &[String]) -> Vec<
         .collect()
 }
 
+/// Whether `name` is a host-side unrouted container or hypervisor bridge interface (`docker*`,
+/// `veth*`, `virbr*`, `cni*`, `flannel*`, `cali*`, or a Docker libnetwork bridge `br-<12 hex>`)
+/// whose sockets are isolated to a local bridge subnet and therefore must not be rewritten into
+/// public `typ host` candidates by `SettingEngine::set_nat_1to1_ips` (#1290).
+///
+/// Container-internal interfaces (`eth0`), system bridges (`br0`, `br-lan`), and routed VPN/tunnel
+/// interfaces (`wg0`, `tunl0`) are not matched.
+pub(super) fn is_unrouted_container_bridge_interface(name: &str) -> bool {
+    let trimmed = name.trim();
+    const CONTAINER_BRIDGE_PREFIXES: [&str; 6] =
+        ["docker", "veth", "virbr", "cni", "flannel", "cali"];
+    if CONTAINER_BRIDGE_PREFIXES.iter().any(|prefix| {
+        trimmed
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    }) {
+        return true;
+    }
+    trimmed
+        .get(..3)
+        .is_some_and(|head| head.eq_ignore_ascii_case("br-"))
+        && trimmed.len() == 15
+        && trimmed[3..].bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// `sdp` with every host candidate line followed by its copies for `extra_addresses`, each
 /// copy ending as its line does.
 pub(super) fn append_sdp_extra_host_candidates(sdp: String, extra_addresses: &[String]) -> String {

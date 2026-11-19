@@ -67,11 +67,140 @@ a=candidate:1 1 udp 2130706431 127.0.0.1 49160 typ host\r\n"
     assert!(rewritten.ends_with("a=end-of-candidates\r\n"));
 }
 
+#[test]
+fn test_excluded_virtual_interfaces_and_split_remote_offer_candidates() {
+    assert!(is_unrouted_container_bridge_interface("docker0"));
+    assert!(is_unrouted_container_bridge_interface("br-9a1b2c3d4e5f"));
+    assert!(is_unrouted_container_bridge_interface("veth42a1b0"));
+    assert!(is_unrouted_container_bridge_interface("virbr0"));
+    assert!(is_unrouted_container_bridge_interface("cni0"));
+    assert!(is_unrouted_container_bridge_interface("flannel.1"));
+    assert!(is_unrouted_container_bridge_interface("cali1234"));
+    assert!(!is_unrouted_container_bridge_interface("br0"));
+    assert!(!is_unrouted_container_bridge_interface("br-lan"));
+    assert!(!is_unrouted_container_bridge_interface("tunl0"));
+    assert!(!is_unrouted_container_bridge_interface("wg0"));
+    assert!(!is_unrouted_container_bridge_interface("eth0"));
+    assert!(!is_unrouted_container_bridge_interface("ens5"));
+    assert!(!is_unrouted_container_bridge_interface("en0"));
+    assert!(!is_unrouted_container_bridge_interface("wlan0"));
+
+    let offer_sdp = "v=0\r\n\
+o=- 1 2 IN IP4 127.0.0.1\r\n\
+a=ice-ufrag:ufrag1\r\n\
+a=ice-pwd:password1234567890123456\r\n\
+a=candidate:1 1 udp 2130706431 10.0.0.2 51345 typ host\r\n\
+a=candidate:2 1 udp 1677729535 14.155.204.30 51345 typ srflx raddr 0.0.0.0 rport 0\r\n\
+a=end-of-candidates\r\n";
+    let (stripped, candidates) = split_sdp_remote_candidates(offer_sdp);
+    assert!(!stripped.contains("a=candidate:"));
+    assert!(!stripped.contains("a=end-of-candidates"));
+    assert!(stripped.contains("a=ice-ufrag:ufrag1"));
+    assert_eq!(candidates, vec![
+        "candidate:1 1 udp 2130706431 10.0.0.2 51345 typ host".to_string(),
+        "candidate:2 1 udp 1677729535 14.155.204.30 51345 typ srflx raddr 0.0.0.0 rport 0"
+            .to_string(),
+    ]);
+}
+
+/// Regression witness for #1290 Item 1:
+/// 1. When `webrtc_answer_offer` returns its local Answer SDP, the responder must not yet have
+///    fired outbound UDP STUN connectivity checks at the offerer's candidate port (preventing
+///    pre-answer NAT port collisions while the HTTP `answerOffer` response is still in flight).
+/// 2. Once `WEBRTC_ANSWER_CHECK_START_DELAY` elapses on a live connection, the deferred remote
+///    candidates are added and the responder sends its outbound STUN Binding Request.
+/// 3. If the responder connection is closed before `WEBRTC_ANSWER_CHECK_START_DELAY` elapses,
+///    the deferred injection task cancels cleanly and sends zero UDP packets.
+#[tokio::test]
+async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer_returns(
+) -> Result<()> {
+    struct NoopCallback;
+    impl crate::core::callback::TransportCallback for NoopCallback {}
+
+    let offerer_transport = WebrtcTransport::new("", None, None);
+    let offerer = offerer_transport
+        .new_connection("responder", Box::new(NoopCallback))
+        .await?;
+    let real_offer_sdp = offerer.webrtc_create_offer().await?;
+    let (stripped_base_offer, _) = split_sdp_remote_candidates(&real_offer_sdp);
+    let _ = offerer.close().await;
+
+    // Case A: Live responder with a probe UDP socket acting as the offerer's NAT port.
+    let probe_socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("probe UDP socket must bind");
+    let probe_addr = probe_socket.local_addr().expect("probe local_addr");
+    let synthetic_offer = format!(
+        "{stripped_base_offer}a=candidate:1 1 udp 2130706431 127.0.0.1 {} typ host\r\n",
+        probe_addr.port()
+    );
+
+    let responder_transport = WebrtcTransport::new("", Some("127.0.0.1".to_string()), None);
+    let responder = responder_transport
+        .new_connection("offerer_live", Box::new(NoopCallback))
+        .await?;
+    let answer_sdp = responder
+        .webrtc_answer_offer(synthetic_offer.clone())
+        .await?;
+    assert!(
+        answer_sdp.contains("a=candidate:"),
+        "responder answer SDP must contain gathered local candidates"
+    );
+
+    let mut buf = [0u8; 256];
+    assert!(
+        matches!(
+            probe_socket.try_recv(&mut buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "responder must not send any UDP STUN packet to the offerer's port before webrtc_answer_offer returns"
+    );
+
+    // After WEBRTC_ANSWER_CHECK_START_DELAY (450 ms), the deferred candidate is added and a STUN
+    // Binding Request arrives on `probe_socket`.
+    let (n, _) = tokio::time::timeout(Duration::from_secs(2), probe_socket.recv_from(&mut buf))
+        .await
+        .expect("responder must send STUN check after WEBRTC_ANSWER_CHECK_START_DELAY")
+        .expect("probe_socket recv_from");
+    assert!(
+        n >= 20 && buf[0] == 0x00 && buf[1] == 0x01,
+        "received packet must be a STUN Binding Request (0x0001)"
+    );
+    let _ = responder.close().await;
+
+    // Case B: Responder closed immediately after webrtc_answer_offer returns must cancel the
+    // deferred candidate injection and send zero packets.
+    let cancelled_probe = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("cancelled probe UDP socket must bind");
+    let cancelled_addr = cancelled_probe.local_addr().expect("cancelled local_addr");
+    let cancelled_offer = format!(
+        "{stripped_base_offer}a=candidate:1 1 udp 2130706431 127.0.0.1 {} typ host\r\n",
+        cancelled_addr.port()
+    );
+    let responder_cancelled = responder_transport
+        .new_connection("offerer_cancelled", Box::new(NoopCallback))
+        .await?;
+    let _ = responder_cancelled
+        .webrtc_answer_offer(cancelled_offer)
+        .await?;
+    responder_cancelled.close().await?;
+    tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY + Duration::from_millis(150)).await;
+    assert!(
+        matches!(
+            cancelled_probe.try_recv(&mut buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "closed responder must cancel deferred candidate checks and send zero UDP packets"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_before_witness(
 ) -> Result<()> {
     let transport = WebrtcTransport::new("", None, None);
-    let (webrtc_conn, _, _) = create_peer_connection(&transport).await?;
+    let (webrtc_conn, _, _, _) = create_peer_connection(&transport).await?;
     let webrtc_conn = Arc::new(webrtc_conn);
     let entered_closed_callback = Arc::new(tokio::sync::Notify::new());
     let release_closed_callback = Arc::new(tokio::sync::Notify::new());
@@ -129,6 +258,7 @@ async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_befo
                 channel_pool,
                 data_channel_notifier,
                 inner_cb,
+                Arc::new(std::sync::Mutex::new(None)),
                 physical_close_completed,
             )
             .await;
@@ -419,5 +549,326 @@ async fn test_failed_callback_closes_connection_without_deadlocking_and_preserve
     assert_eq!(callback_state.max_concurrent.load(Ordering::Acquire), 1);
 
     let _ = receiver.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_turn_tcp_url_parsing_and_rfc5766_stream_framing() {
+    use turn_tcp::encode_turn_tcp_frame;
+    use turn_tcp::parse_turn_tcp_url;
+    use turn_tcp::read_turn_tcp_frame;
+    use turn_tcp::TurnTcpEndpoint;
+
+    assert_eq!(
+        parse_turn_tcp_url("turn:turn.example.com:80?transport=tcp"),
+        Some(TurnTcpEndpoint {
+            host: "turn.example.com".to_string(),
+            port: 80,
+            use_tls: false,
+        })
+    );
+    assert_eq!(
+        parse_turn_tcp_url("turns:turn.example.com:5349?transport=tcp"),
+        Some(TurnTcpEndpoint {
+            host: "turn.example.com".to_string(),
+            port: 5349,
+            use_tls: true,
+        })
+    );
+    assert_eq!(
+        parse_turn_tcp_url("turns:turn.example.com"),
+        Some(TurnTcpEndpoint {
+            host: "turn.example.com".to_string(),
+            port: 5349,
+            use_tls: true,
+        })
+    );
+    assert_eq!(parse_turn_tcp_url("turn:turn.example.com:3478"), None);
+    assert_eq!(
+        parse_turn_tcp_url("turn:turn.example.com:3478?transport=udp"),
+        None
+    );
+    assert_eq!(parse_turn_tcp_url("stun:stun.l.google.com:19302"), None);
+
+    // ChannelData with 5-byte payload (unaligned) must be padded to 8 bytes (total 12 bytes) over TCP.
+    let unpadded_channel_data = [0x40, 0x01, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
+    let framed_cd = encode_turn_tcp_frame(&unpadded_channel_data).expect("valid ChannelData");
+    assert_eq!(framed_cd.len(), 12);
+    assert_eq!(&framed_cd[..9], &unpadded_channel_data);
+    assert_eq!(&framed_cd[9..], &[0, 0, 0]);
+
+    // 20-byte STUN Binding Request with 0-byte body.
+    let mut stun_pkt = [0u8; 20];
+    stun_pkt[1] = 0x01;
+    stun_pkt[4..8].copy_from_slice(&[0x21, 0x12, 0xA4, 0x42]);
+    let framed_stun = encode_turn_tcp_frame(&stun_pkt).expect("valid STUN header");
+    assert_eq!(framed_stun, stun_pkt);
+
+    // Coalesce both frames into one byte stream and read them back sequentially.
+    let mut stream_bytes = Vec::new();
+    stream_bytes.extend_from_slice(&framed_cd);
+    stream_bytes.extend_from_slice(&framed_stun);
+    let mut cursor = std::io::Cursor::new(stream_bytes);
+
+    let decoded_cd = read_turn_tcp_frame(&mut cursor)
+        .await
+        .expect("read ChannelData frame");
+    assert_eq!(decoded_cd, framed_cd);
+    let decoded_stun = read_turn_tcp_frame(&mut cursor)
+        .await
+        .expect("read STUN frame");
+    assert_eq!(decoded_stun, framed_stun);
+}
+
+struct StaticTurnAuthHandler;
+
+impl webrtc::turn::auth::AuthHandler for StaticTurnAuthHandler {
+    fn auth_handle(
+        &self,
+        username: &str,
+        realm: &str,
+        _src_addr: std::net::SocketAddr,
+    ) -> std::result::Result<Vec<u8>, webrtc::turn::Error> {
+        if username == "testuser" {
+            Ok(webrtc::turn::auth::generate_auth_key(
+                username, realm, "testpass",
+            ))
+        } else {
+            Err(webrtc::turn::Error::Other("unauthorized".to_string()))
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_blocked() -> Result<()> {
+    use std::net::Ipv4Addr;
+
+    use tokio::io::AsyncWriteExt;
+
+    // 1. Start an in-process TURN server on UDP and a TCP front-end listener that speaks RFC 5766
+    //    STUN / ChannelData framing over TCP.
+    let udp_turn_listener = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let udp_turn_addr = udp_turn_listener.local_addr().unwrap();
+    let turn_server =
+        webrtc::turn::server::Server::new(webrtc::turn::server::config::ServerConfig {
+            realm: "rings.rs".to_string(),
+            auth_handler: Arc::new(StaticTurnAuthHandler),
+            conn_configs: vec![webrtc::turn::server::config::ConnConfig {
+                conn: udp_turn_listener,
+                relay_addr_generator: Box::new(
+                    webrtc::turn::relay::relay_none::RelayAddressGeneratorNone {
+                        address: "127.0.0.1".to_string(),
+                        net: Arc::new(webrtc::util::vnet::net::Net::new(None)),
+                    },
+                ),
+            }],
+            channel_bind_timeout: Duration::from_secs(0),
+            alloc_close_notify: None,
+        })
+        .await
+        .unwrap();
+
+    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tcp_turn_addr = tcp_listener.local_addr().unwrap();
+    let accepted_tcp_conns = Arc::new(AtomicUsize::new(0));
+    let accepted_tcp_conns_clone = Arc::clone(&accepted_tcp_conns);
+    let server_cancel = CancellationToken::new();
+    let server_cancel_clone = server_cancel.clone();
+
+    tokio::spawn(async move {
+        loop {
+            let accept_res = tokio::select! {
+                _ = server_cancel_clone.cancelled() => break,
+                res = tcp_listener.accept() => res,
+            };
+            let Ok((tcp_stream, _)) = accept_res else {
+                break;
+            };
+            accepted_tcp_conns_clone.fetch_add(1, Ordering::SeqCst);
+            let conn_cancel = server_cancel_clone.child_token();
+            tokio::spawn(async move {
+                let Ok(udp_proxy) = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await
+                else {
+                    return;
+                };
+                let udp_proxy = Arc::new(udp_proxy);
+                let (mut reader, mut writer) = tokio::io::split(tcp_stream);
+                let udp_for_read = Arc::clone(&udp_proxy);
+                let c1 = conn_cancel.clone();
+                let tcp_to_udp = async move {
+                    loop {
+                        let frame = tokio::select! {
+                            _ = c1.cancelled() => break,
+                            res = turn_tcp::read_turn_tcp_frame(&mut reader) => match res {
+                                Ok(f) => f,
+                                Err(_) => break,
+                            },
+                        };
+                        if udp_for_read.send_to(&frame, udp_turn_addr).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                let udp_for_write = Arc::clone(&udp_proxy);
+                let c2 = conn_cancel.clone();
+                let udp_to_tcp = async move {
+                    let mut buf = vec![0u8; 65_535];
+                    loop {
+                        let (n, _) = tokio::select! {
+                            _ = c2.cancelled() => break,
+                            res = udp_for_write.recv_from(&mut buf) => match res {
+                                Ok(v) => v,
+                                Err(_) => break,
+                            },
+                        };
+                        let Some(framed) = turn_tcp::encode_turn_tcp_frame(&buf[..n]) else {
+                            continue;
+                        };
+                        if writer.write_all(&framed).await.is_err() || writer.flush().await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                };
+                tokio::select! {
+                    _ = tcp_to_udp => {},
+                    _ = udp_to_tcp => {},
+                }
+            });
+        }
+    });
+
+    struct MsgCaptureCallback {
+        received_tx: tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl crate::core::callback::TransportCallback for MsgCaptureCallback {
+        async fn on_admitted_message(
+            &self,
+            message: crate::core::callback::AdmittedInboundMessage<'_>,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            if let Some(tx) = self.received_tx.lock().await.as_ref() {
+                let _ = tx.send(message.payload().to_vec()).await;
+            }
+            Ok(())
+        }
+    }
+
+    // 2. Simulate OS-level UDP EPERM for the offerer and configure both a dead UDP STUN server
+    //    and the TCP TURN server (`?transport=tcp`).
+    let offerer_ice = format!(
+        "stun://127.0.0.1:9;turn://testuser:testpass@127.0.0.1:{}?transport=tcp",
+        tcp_turn_addr.port()
+    );
+    let offerer = WebrtcTransport::new(&offerer_ice, None, None);
+
+    turn_tcp::set_force_os_udp_blocked_for_test(true);
+    let (offer_msg_tx, mut offer_msg_rx) = mpsc::channel(4);
+    let sender_res = offerer
+        .new_connection(
+            "answerer",
+            Box::new(MsgCaptureCallback {
+                received_tx: tokio::sync::Mutex::new(Some(offer_msg_tx)),
+            }),
+        )
+        .await;
+    turn_tcp::set_force_os_udp_blocked_for_test(false);
+    let sender = sender_res?;
+
+    // 3. Answerer runs on normal OS UDP.
+    let (answer_msg_tx, mut answer_msg_rx) = mpsc::channel(4);
+    let answerer = WebrtcTransport::new("", Some("127.0.0.1".to_string()), None);
+    let receiver = answerer
+        .new_connection(
+            "offerer",
+            Box::new(MsgCaptureCallback {
+                received_tx: tokio::sync::Mutex::new(Some(answer_msg_tx)),
+            }),
+        )
+        .await?;
+
+    let offer_sdp = sender.webrtc_create_offer().await?;
+    assert!(
+        offer_sdp.contains("typ relay"),
+        "UDP-blocked offerer with ?transport=tcp must gather a relay candidate via TCP TURN: {offer_sdp}"
+    );
+    assert!(
+        !offer_sdp.contains("typ host"),
+        "UDP-blocked offerer in VNet relay-only mode must not advertise host UDP candidates: {offer_sdp}"
+    );
+    assert!(
+        accepted_tcp_conns.load(Ordering::SeqCst) >= 1,
+        "offerer must connect to the TURN server over TCP"
+    );
+
+    let answer_sdp = receiver.webrtc_answer_offer(offer_sdp).await?;
+    sender.webrtc_accept_answer(answer_sdp).await?;
+
+    sender.webrtc_wait_for_data_channel_open().await?;
+    receiver.webrtc_wait_for_data_channel_open().await?;
+
+    let payload_a2b = Bytes::from_static(b"hello from udp-blocked node over turn tcp");
+    sender.send_message(payload_a2b.clone()).await?.await?;
+    let recv_at_b = tokio::time::timeout(Duration::from_secs(5), answer_msg_rx.recv())
+        .await
+        .expect("timed out waiting for message at answerer")
+        .expect("answerer channel closed");
+    assert_eq!(recv_at_b, payload_a2b.as_ref());
+
+    let payload_b2a = Bytes::from_static(b"reply to udp-blocked node over turn tcp");
+    receiver.send_message(payload_b2a.clone()).await?.await?;
+    let recv_at_a = tokio::time::timeout(Duration::from_secs(5), offer_msg_rx.recv())
+        .await
+        .expect("timed out waiting for message at offerer")
+        .expect("offerer channel closed");
+    assert_eq!(recv_at_a, payload_b2a.as_ref());
+
+    let _ = sender.close().await;
+    let _ = receiver.close().await;
+
+    // 4. Verify normal OS UDP mode (`use_vnet_relay_only == false`) with a TCP TURN server:
+    //    `gather_candidates_srflx` sends a bare STUN Binding Request to the local UDP bridge,
+    //    which must be rejected locally with a STUN Binding Error Response rather than forwarded
+    //    over TCP (avoiding both a 5 s STUN timeout and a bogus TCP-backed `srflx` candidate).
+    accepted_tcp_conns.store(0, Ordering::SeqCst);
+    let normal_udp_offerer_ice = format!(
+        "turn://testuser:testpass@127.0.0.1:{}?transport=tcp",
+        tcp_turn_addr.port()
+    );
+    let normal_udp_offerer = WebrtcTransport::new(&normal_udp_offerer_ice, None, None);
+    let (normal_msg_tx, _normal_msg_rx) = mpsc::channel(4);
+    let normal_sender = normal_udp_offerer
+        .new_connection(
+            "normal_answerer",
+            Box::new(MsgCaptureCallback {
+                received_tx: tokio::sync::Mutex::new(Some(normal_msg_tx)),
+            }),
+        )
+        .await?;
+    let gather_started = std::time::Instant::now();
+    let normal_offer_sdp = normal_sender.webrtc_create_offer().await?;
+    assert!(
+        gather_started.elapsed() < Duration::from_secs(4),
+        "normal UDP offerer with TCP TURN bridge must not stall on a 5 s STUN srflx timeout: {:?}",
+        gather_started.elapsed()
+    );
+    assert!(
+        normal_offer_sdp.contains("typ relay"),
+        "normal UDP offerer with TCP TURN must gather a relay candidate: {normal_offer_sdp}"
+    );
+    assert!(
+        !normal_offer_sdp.contains("typ srflx"),
+        "TCP TURN bridge must not produce a bogus UDP srflx candidate when no STUN server is configured: {normal_offer_sdp}"
+    );
+    assert_eq!(
+        accepted_tcp_conns.load(Ordering::SeqCst),
+        1,
+        "only the TURN Allocate session (not the bare STUN srflx probe) should open a TCP connection"
+    );
+    let _ = normal_sender.close().await;
+
+    server_cancel.cancel();
+    let _ = turn_server.close().await;
     Ok(())
 }
