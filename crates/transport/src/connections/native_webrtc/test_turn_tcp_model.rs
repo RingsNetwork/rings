@@ -45,6 +45,8 @@ const DUMMY_TX: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 struct BridgeModelState {
     phase: TurnBridgePhase,
     allocated: bool,
+    half_dead_session_pinned: bool,
+    allocate_retransmit_suppressed: bool,
     refresh_zero_in_flight: bool,
     teardown_completed: bool,
     outbound_queued_teardown_frames: u8,
@@ -61,7 +63,9 @@ enum BridgeAction {
     /// `webrtc-ice`'s `gather_candidates_srflx` sends a bare STUN `Binding Request` (`0x0001`) to
     /// the local UDP bridge socket.
     SendSrflxBindingProbe,
-    /// `webrtc::turn::client::Client` sends `Allocate` and receives its response.
+    /// TURN server closes the TCP read stream before answering the first `Allocate` request.
+    ServerTcpReadEofBeforeAllocateResponse,
+    /// `webrtc::turn::client::Client` sends (or retransmits) `Allocate` and receives its response.
     AllocateTurnRelay,
     /// Remote peer sends `ChannelData` over the TCP TURN stream.
     InboundRelayedChannelData,
@@ -103,6 +107,10 @@ enum BridgeMutant {
     /// cancels `write_fut` before queued outbound `DTLS close_notify` or `TURN Refresh(0)` frames
     /// are written to the TCP stream.
     CancelWithoutDrainingOutboundQueue,
+    /// Bug 7 (Codex P2): when `read_fut` exits on TCP EOF before `Allocate` is answered,
+    /// `tokio::join!(write_fut, read_fut)` keeps `write_fut` and `outbound_rx` alive so the
+    /// session is not retired and its transaction cache suppresses `Allocate` retransmissions.
+    KeepWriteHalfAliveOnReadEof,
 }
 
 struct BridgeModel {
@@ -169,6 +177,9 @@ impl Model for BridgeModel {
         if state.phase == TurnBridgePhase::Active {
             actions.push(BridgeAction::SendSrflxBindingProbe);
             if !state.allocated {
+                if !state.half_dead_session_pinned {
+                    actions.push(BridgeAction::ServerTcpReadEofBeforeAllocateResponse);
+                }
                 actions.push(BridgeAction::AllocateTurnRelay);
             }
             if state.allocated {
@@ -216,14 +227,25 @@ impl Model for BridgeModel {
                     }
                 }
             }
+            BridgeAction::ServerTcpReadEofBeforeAllocateResponse => {
+                if self.mutant == Some(BridgeMutant::KeepWriteHalfAliveOnReadEof) {
+                    next.half_dead_session_pinned = true;
+                }
+            }
             BridgeAction::AllocateTurnRelay => {
-                let out = self
-                    .outbound_decision(next.phase, OutboundTurnClass::TurnControlRequest(DUMMY_TX));
-                let inp = self.inbound_decision(next.phase, true);
-                if matches!(out, OutboundTurnDecision::ForwardControlRequest(_))
-                    && inp == InboundTurnDecision::DeliverControlResponse
-                {
-                    next.allocated = true;
+                if next.half_dead_session_pinned {
+                    next.allocate_retransmit_suppressed = true;
+                } else {
+                    let out = self.outbound_decision(
+                        next.phase,
+                        OutboundTurnClass::TurnControlRequest(DUMMY_TX),
+                    );
+                    let inp = self.inbound_decision(next.phase, true);
+                    if matches!(out, OutboundTurnDecision::ForwardControlRequest(_))
+                        && inp == InboundTurnDecision::DeliverControlResponse
+                    {
+                        next.allocated = true;
+                    }
                 }
             }
             BridgeAction::InboundRelayedChannelData => {
@@ -314,6 +336,10 @@ impl Model for BridgeModel {
                 "shutdown drains all queued outbound teardown frames before cancelling",
                 |_, state| !state.queued_teardown_lost_on_cancel,
             ),
+            Property::<Self>::always(
+                "terminal TCP read EOF retires session so Allocate retransmission can reconnect",
+                |_, state| !state.allocate_retransmit_suppressed,
+            ),
         ]
     }
 }
@@ -351,6 +377,10 @@ fn test_each_turn_tcp_bridge_mutant_is_refuted() {
         (
             BridgeMutant::CancelWithoutDrainingOutboundQueue,
             "shutdown drains all queued outbound teardown frames before cancelling",
+        ),
+        (
+            BridgeMutant::KeepWriteHalfAliveOnReadEof,
+            "terminal TCP read EOF retires session so Allocate retransmission can reconnect",
         ),
     ];
 

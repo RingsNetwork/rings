@@ -30,11 +30,8 @@ use crate::ice_server::IceServer;
 
 const STUN_HEADER_BYTES: usize = 20;
 const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
-/// STUN Binding Error Response header (`0x0111`) with an 8-byte `ERROR-CODE` attribute
-/// (`400 Bad Request`, class `4`, number `0`). Returned locally to `webrtc-ice`'s
-/// `gather_candidates_srflx` when it probes the local UDP TURN-over-TCP bridge address so the
-/// reflexive gatherer finishes immediately without creating a bogus TCP-backed `srflx` candidate
-/// or waiting out its 5-second STUN gather timeout.
+/// STUN `ERROR-CODE` attribute (`400 Bad Request`) returned locally when `gather_candidates_srflx`
+/// probes the local UDP TURN-over-TCP bridge address.
 const STUN_BINDING_BAD_REQUEST_BODY: [u8; 8] = [
     0x00, 0x09, // ATTR_ERROR_CODE (0x0009)
     0x00, 0x04, // attribute length = 4 bytes (no reason phrase)
@@ -88,14 +85,12 @@ impl TurnTcpBridgeGuard {
         }
     }
 
-    /// Stop inbound TCP-to-local relayed data injection before awaiting `RTCPeerConnection::close()`
-    /// while keeping STUN control responses and outbound traffic active.
+    /// Stop inbound TCP-to-local relayed data injection before `RTCPeerConnection::close()`.
     pub(crate) fn quiesce_inbound(&self) {
         self.inbound_cancel.cancel();
     }
 
-    /// Drain queued outbound teardown frames (`DTLS close_notify` and `TURN Refresh(0)`) to the
-    /// TCP relay stream with a bounded barrier before hard cancellation.
+    /// Drain queued outbound teardown frames before hard cancellation.
     pub(crate) async fn shutdown(mut self) {
         self.inbound_cancel.cancel();
         self.drain_cancel.cancel();
@@ -562,13 +557,14 @@ async fn run_stream_io<S>(
     let stun_tx_cache: StunTxCache = Arc::new(SyncMutex::new(VecDeque::with_capacity(
         RECENT_STUN_TX_IDS_CAPACITY,
     )));
+    let io_abort = cancel.child_token();
     let cache_for_write = Arc::clone(&stun_tx_cache);
     let bridge_for_write = Arc::clone(&bridge_conn);
-    let cancel_write = cancel.clone();
+    let io_abort_write = io_abort.clone();
     let write_fut = async move {
         loop {
             let maybe_pkt = tokio::select! {
-                _ = cancel_write.cancelled() => break,
+                _ = io_abort_write.cancelled() => break,
                 pkt = outbound_rx.recv() => pkt,
             };
             let Some(pkt) = maybe_pkt else {
@@ -611,16 +607,21 @@ async fn run_stream_io<S>(
                 break;
             }
         }
+        io_abort_write.cancel();
         let _ = tokio::time::timeout(TURN_TCP_WRITE_TIMEOUT, writer.shutdown()).await;
     };
 
     let cache_for_read = Arc::clone(&stun_tx_cache);
-    let cancel_read = cancel.clone();
+    let io_abort_read = io_abort.clone();
     let read_fut = async move {
+        let mut drained = false;
         loop {
             let frame_res = tokio::select! {
-                _ = cancel_read.cancelled() => break,
-                _ = drain_cancel.cancelled() => break,
+                _ = io_abort_read.cancelled() => break,
+                _ = drain_cancel.cancelled() => {
+                    drained = true;
+                    break;
+                }
                 res = read_turn_tcp_frame(&mut reader) => res,
             };
             let Ok(frame) = frame_res else {
@@ -646,14 +647,15 @@ async fn run_stream_io<S>(
             } else {
                 false
             };
-            let phase = TurnBridgePhase::from_tokens(&inbound_cancel, &drain_cancel, &cancel_read);
+            let phase =
+                TurnBridgePhase::from_tokens(&inbound_cancel, &drain_cancel, &io_abort_read);
             if turn_bridge_inbound_decision(phase, is_stun_control_response)
                 == InboundTurnDecision::Drop
             {
                 continue;
             }
             let send_res = tokio::select! {
-                _ = cancel_read.cancelled() => break,
+                _ = io_abort_read.cancelled() => break,
                 res = tokio::time::timeout(
                     TURN_TCP_LOCAL_DELIVERY_TIMEOUT,
                     bridge_conn.send_to(&frame, client_addr),
@@ -665,6 +667,9 @@ async fn run_stream_io<S>(
             if send_res.is_err() {
                 break;
             }
+        }
+        if !drained {
+            io_abort_read.cancel();
         }
     };
 
@@ -939,7 +944,12 @@ pub(crate) async fn prepare_native_ice_config(
     let cancel = CancellationToken::new();
     let drain_cancel = cancel.child_token();
     let inbound_cancel = drain_cancel.child_token();
-    let mut bridge_tasks = Vec::with_capacity(tcp_turn_urls);
+    let mut bridge_guard = TurnTcpBridgeGuard::new(
+        inbound_cancel.clone(),
+        drain_cancel.clone(),
+        cancel.clone(),
+        Vec::with_capacity(tcp_turn_urls),
+    );
     let mut bridged_servers = Vec::with_capacity(ice_servers.len());
 
     for server in ice_servers {
@@ -953,7 +963,7 @@ pub(crate) async fn prepare_native_ice_config(
                 let bridge_addr = bridge_conn
                     .local_addr()
                     .map_err(|e| Error::Webrtc(webrtc::error::Error::Util(e)))?;
-                bridge_tasks.push(spawn_turn_tcp_bridge(
+                bridge_guard.tasks.push(spawn_turn_tcp_bridge(
                     bridge_conn,
                     endpoint,
                     inbound_cancel.child_token(),
@@ -972,8 +982,6 @@ pub(crate) async fn prepare_native_ice_config(
             bridged_servers.push(RTCIceServer::from(adapted));
         }
     }
-
-    let bridge_guard = TurnTcpBridgeGuard::new(inbound_cancel, drain_cancel, cancel, bridge_tasks);
 
     Ok(PreparedNativeIceConfig {
         ice_servers: bridged_servers,
