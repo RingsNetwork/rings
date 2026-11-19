@@ -122,16 +122,8 @@ pub use horizon::DelegationHorizon;
 pub(crate) use horizon::SessionKeyRing;
 pub use horizon::SigningState;
 pub use horizon::SIGNING_HORIZON_LEAD_MS;
-pub use network::AddressingScope;
-pub use network::DuplexMode;
-pub use network::HandshakeSemantic;
-pub use network::NetworkParameters;
 pub use network::NodeNetworkParameters;
-pub use network::TransportKinematics;
-pub use network::TransportKinematicsError;
 pub use network::TransportNetworkConfig;
-pub use network::TransportParameterError;
-pub use network::TransportTimingBudget;
 pub use network::UdpPortRange;
 pub use network::UdpPortRangeError;
 pub(crate) use registration_daemon::sleep_unless_stopped;
@@ -241,14 +233,12 @@ impl Processor {
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
         let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            let credential = self.network_parameters.derive_session_credential(next)?;
             persist(next)?;
             self.swarm
                 .set_delegatee_key(next.clone())
                 .map_err(Error::CoreError)?;
-            if let Some(ref cred) = credential {
-                self.swarm.transport().update_session_credentials(cred);
-            }
+            self.network_parameters
+                .on_session_key_rotated(self.swarm.transport(), next)?;
             Ok(())
         })?;
         Ok(horizon)

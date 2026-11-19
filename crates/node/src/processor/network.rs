@@ -2,32 +2,26 @@
 //! [`super::ProcessorBuilder`], and [`super::Processor`] (#1291).
 //!
 //! `rings-node` interacts with transport customization solely through [`NodeNetworkParameters`]
-//! and [`SharedTransport`]:
-//! - Canonical transport medium kind (`kind`)
-//! - Physical and link-layer medium kinematics (`kinematics`: duplexity, addressing scope,
-//!   handshake semantic, frame capacity, ordered lane count, and monotone timing budget)
-//! - Optional external endpoint/locator hint (`endpoint_hint`)
-//! - Canonical key-value parameter projection (`parameter_map`)
-//! - Optional session-bound credential derivation (`derive_session_credential`, returning
-//!   `Ok(None)` for proximity/ad-hoc media such as Packet Radio, Bluetooth Ad-Hoc, or
-//!   Ultrasonic Ad-Hoc that need no external relay credentials)
-//! - Trait-based transport instantiation (`build_transport`)
+//! and [`SharedTransport`]. From first principles, every interaction between a node and its
+//! network parameters reduces to three orthogonal operations:
+//! 1. **Transport instantiation** ([`NodeNetworkParameters::build_transport`]): validates the
+//!    medium's parameters and constructs a [`SharedTransport`] bound to the node's initial
+//!    [`DelegateeKey`].
+//! 2. **Advertised locator hint** ([`NodeNetworkParameters::endpoint_hint`]): returns an optional
+//!    external locator published in the node's online presence descriptor (`None` by default for
+//!    proximity ad-hoc media such as packet radio, Bluetooth ad-hoc, ultrasonic ad-hoc, or
+//!    unaddressed client nodes).
+//! 3. **Session-key rotation reaction** ([`NodeNetworkParameters::on_session_key_rotated`]):
+//!    synchronizes the live [`SharedTransport`] when the node rotates its [`DelegateeKey`] in
+//!    process (a no-op `Ok(())` by default for media whose link layer does not bind credentials
+//!    to the session key).
 
-use std::collections::BTreeMap;
 use std::fmt;
 
 use rings_core::delegation::DelegateeKey;
 use rings_runtime::MaybeSendSync;
 use rings_transport::core::transport::SharedTransport;
-pub use rings_transport::network_config::AddressingScope;
-pub use rings_transport::network_config::DuplexMode;
-pub use rings_transport::network_config::HandshakeSemantic;
-pub use rings_transport::network_config::NetworkParameters;
-pub use rings_transport::network_config::TransportKinematics;
-pub use rings_transport::network_config::TransportKinematicsError;
 pub use rings_transport::network_config::TransportNetworkConfig;
-pub use rings_transport::network_config::TransportParameterError;
-pub use rings_transport::network_config::TransportTimingBudget;
 pub use rings_transport::network_config::UdpPortRange;
 pub use rings_transport::network_config::UdpPortRangeError;
 use rings_turn::TurnCredentialSigner;
@@ -35,95 +29,63 @@ use rings_turn::TurnCredentialSigner;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Universal trait defining the network parameters that customize a node's transport layer (#1291).
+/// Trait defining the network parameters that customize and instantiate a node's transport (#1291).
 ///
-/// Defined purely by universal transport properties (`kind`, `kinematics`, `endpoint_hint`,
-/// `parameter_map`, `derive_session_credential`, and `build_transport`) so `Processor`,
-/// `ProcessorBuilder`, and `ProcessorConfig` can drive any transport medium — Packet Radio,
-/// Bluetooth Ad-Hoc, Ultrasonic Ad-Hoc, Traditional TCP/IP, HTTPS/WebSocket, or Assisted
-/// Traversal — without forcing IP/UDP or WebRTC concepts onto non-IP transports.
+/// Only [`build_transport`](Self::build_transport) is required; [`endpoint_hint`](Self::endpoint_hint)
+/// and [`on_session_key_rotated`](Self::on_session_key_rotated) carry first-principles defaults
+/// (`None` and `Ok(())`) so non-IP or unauthenticated transports (Packet Radio, Bluetooth Ad-Hoc,
+/// Ultrasonic Ad-Hoc, direct TCP/IP, HTTPS/WebSocket) never have to stub out relay or UDP concepts.
 pub trait NodeNetworkParameters: fmt::Debug + MaybeSendSync {
-    /// Canonical transport medium identifier (e.g. `"assisted-traversal"`, `"tcp-ip"`,
-    /// `"https-ws"`, `"bluetooth-adhoc"`, `"ultrasonic-adhoc"`, `"packet-radio"`).
-    fn kind(&self) -> &'static str;
-
-    /// Physical and link-layer kinematic properties of this transport medium.
-    fn kinematics(&self) -> TransportKinematics;
-
-    /// Return the external endpoint or locator hint advertised by this node, if any.
-    fn endpoint_hint(&self) -> Option<&str>;
-
-    /// Export medium-specific parameters as a canonical key-value dictionary.
-    fn parameter_map(&self) -> BTreeMap<String, String>;
-
-    /// Validate all kinematic and medium-specific invariants.
-    fn validate_parameters(&self) -> Result<()>;
-
-    /// Derive the session-bound transport credential for `delegatee_key`, if this medium
-    /// uses session-bound credentials (`Ok(None)` for proximity/ad-hoc or unauthenticated media).
-    fn derive_session_credential(&self, delegatee_key: &DelegateeKey) -> Result<Option<String>>;
-
-    /// Instantiate a [`SharedTransport`] customized by these network parameters and bound to
+    /// Validate these network parameters and instantiate a [`SharedTransport`] bound to
     /// `delegatee_key`.
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport>;
+
+    /// Return the external endpoint or locator hint advertised in the node's online presence
+    /// descriptor, if any.
+    ///
+    /// Defaults to `None` (appropriate for proximity ad-hoc media or nodes without a public locator).
+    fn endpoint_hint(&self) -> Option<&str> {
+        None
+    }
+
+    /// Synchronize the live `transport` when the node rotates its active session key to `next_key`.
+    ///
+    /// Defaults to `Ok(())` for media whose link layer does not carry session-signed credentials.
+    fn on_session_key_rotated(
+        &self,
+        _transport: &SharedTransport,
+        _next_key: &DelegateeKey,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
-/// Blanket adapter bridging any [`rings_transport::network_config::NetworkParameters`]
-/// implementation into [`NodeNetworkParameters`], wiring node-level [`DelegateeKey`] session
-/// credential derivation into transport construction and live key rotation.
-impl<T> NodeNetworkParameters for T
-where T: NetworkParameters
-{
-    /// Delegate canonical medium kind to [`NetworkParameters::kind`].
-    fn kind(&self) -> &'static str {
-        NetworkParameters::kind(self)
-    }
-
-    /// Delegate physical and link-layer kinematic properties to [`NetworkParameters::kinematics`].
-    fn kinematics(&self) -> TransportKinematics {
-        NetworkParameters::kinematics(self)
-    }
-
-    /// Delegate external endpoint locator hint to [`NetworkParameters::endpoint_hint`].
-    fn endpoint_hint(&self) -> Option<&str> {
-        NetworkParameters::endpoint_hint(self)
-    }
-
-    /// Delegate key-value parameter projection to [`NetworkParameters::parameter_map`].
-    fn parameter_map(&self) -> BTreeMap<String, String> {
-        NetworkParameters::parameter_map(self)
-    }
-
-    /// Validate all kinematic and medium-specific parameters via
-    /// [`NetworkParameters::validate_parameters`], mapping any violation to [`Error::InvalidConfig`].
-    fn validate_parameters(&self) -> Result<()> {
-        NetworkParameters::validate_parameters(self)
-            .map_err(|err| Error::InvalidConfig(err.to_string()))
-    }
-
-    /// Derive a session-bound transport credential for `delegatee_key` when
-    /// [`NetworkParameters::session_credential_template`] is present, or return `Ok(None)` for
-    /// proximity/ad-hoc or unauthenticated media that require no external relay credentials.
-    fn derive_session_credential(&self, delegatee_key: &DelegateeKey) -> Result<Option<String>> {
-        let Some(template) = self.session_credential_template() else {
-            return Ok(None);
-        };
-        delegatee_key
-            .sign_ice_servers(template)
-            .map(Some)
-            .map_err(Error::CoreError)
-    }
-
-    /// Validate all medium parameters, derive the initial session-bound credential for
-    /// `delegatee_key` (falling back to the raw template if signing is unavailable for a synthetic
-    /// test key), and instantiate the [`SharedTransport`].
+/// Implementation of [`NodeNetworkParameters`] for the built-in [`TransportNetworkConfig`].
+impl NodeNetworkParameters for TransportNetworkConfig {
+    /// Derive initial session-signed traversal credentials from `delegatee_key` (falling back to
+    /// the raw server specification if signing is unavailable for a synthetic test key) and
+    /// construct the platform's [`SharedTransport`].
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
-        NodeNetworkParameters::validate_parameters(self)?;
-        let initial_credential = match self.derive_session_credential(delegatee_key) {
-            Ok(cred) => cred,
-            Err(_) => self.session_credential_template().map(str::to_owned),
-        };
-        NetworkParameters::build_transport(self, initial_credential.as_deref())
-            .map_err(|err| Error::InvalidConfig(err.to_string()))
+        let signed = delegatee_key.sign_ice_servers(self.traversal_servers());
+        Ok(self.build_shared_transport(signed.as_deref().ok()))
+    }
+
+    /// Return the configured external endpoint hint, if any.
+    fn endpoint_hint(&self) -> Option<&str> {
+        TransportNetworkConfig::endpoint_hint(self)
+    }
+
+    /// Re-sign the configured traversal server template with `next_key` and atomically update the
+    /// live `transport`'s session credentials.
+    fn on_session_key_rotated(
+        &self,
+        transport: &SharedTransport,
+        next_key: &DelegateeKey,
+    ) -> Result<()> {
+        let signed = next_key
+            .sign_ice_servers(self.traversal_servers())
+            .map_err(Error::CoreError)?;
+        transport.update_session_credentials(&signed);
+        Ok(())
     }
 }

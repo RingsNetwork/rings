@@ -397,228 +397,119 @@ fn test_serialized_remote_rpc_proxy_url_round_trips_and_validates() -> Result<()
     Ok(())
 }
 
-/// Verifies model completeness of [`NetworkParameters`] and [`NodeNetworkParameters`] across
-/// 6 heterogeneous transport media (Packet Radio, Bluetooth Ad-Hoc, Ultrasonic Ad-Hoc,
-/// Traditional TCP/IP, HTTPS/WebSocket, and Assisted Traversal), as well as rejection of illegal
-/// kinematic profiles (e.g. multi-lane half-duplex carrier collision) at [`ProcessorBuilder::build`].
+/// Verifies that the first-principles [`NodeNetworkParameters`] contract (`build_transport`,
+/// optional `endpoint_hint`, and optional `on_session_key_rotated`) is model-complete for
+/// arbitrary transport parameters without requiring IP/UDP or relay server fields when a
+/// medium does not use them.
 #[tokio::test]
-async fn test_custom_network_parameters_trait_supports_heterogeneous_media_and_enforces_kinematic_laws(
-) -> Result<()> {
-    /// Universal parameter descriptor used to model heterogeneous transport media in tests.
+async fn test_node_network_parameters_contract_is_complete_for_custom_transports() -> Result<()> {
+    /// Custom transport parameters requiring only `build_transport` (e.g. proximity ad-hoc media
+    /// with no public locator and no session-signed relay servers).
     #[derive(Clone, Debug)]
-    struct HeterogeneousMediumParams {
-        /// Canonical transport medium identifier.
-        kind: &'static str,
-        /// Physical and link-layer kinematic profile of the medium.
-        kinematics: TransportKinematics,
-        /// Optional advertised external endpoint locator or frequency/channel descriptor.
-        endpoint_hint: Option<String>,
-        /// Optional session-credential template for relay-assisted media (`None` for ad-hoc/direct).
-        session_template: Option<String>,
-        /// Medium-specific key-value parameters (e.g. modulation, carrier frequency, L2CAP PSM).
-        params: std::collections::BTreeMap<String, String>,
+    struct MinimalAdHocParams {
+        /// Whether this parameter set is valid.
+        valid: bool,
     }
 
-    impl NetworkParameters for HeterogeneousMediumParams {
-        /// Return the medium's canonical identifier.
-        fn kind(&self) -> &'static str {
-            self.kind
-        }
-
-        /// Return the medium's kinematic profile.
-        fn kinematics(&self) -> TransportKinematics {
-            self.kinematics
-        }
-
-        /// Return the medium's endpoint locator hint, if any.
-        fn endpoint_hint(&self) -> Option<&str> {
-            self.endpoint_hint.as_deref()
-        }
-
-        /// Return the medium's session credential template, if any.
-        fn session_credential_template(&self) -> Option<&str> {
-            self.session_template.as_deref()
-        }
-
-        /// Return the medium's custom key-value parameter dictionary.
-        fn parameter_map(&self) -> std::collections::BTreeMap<String, String> {
-            self.params.clone()
-        }
-
-        /// Validate the medium's kinematic profile and instantiate a [`SharedTransport`].
+    impl NodeNetworkParameters for MinimalAdHocParams {
+        /// Validate custom parameters and construct the [`SharedTransport`].
         fn build_transport(
             &self,
-            initial_session_credential: Option<&str>,
-        ) -> std::result::Result<
-            rings_transport::core::transport::SharedTransport,
-            TransportParameterError,
-        > {
-            NetworkParameters::validate_parameters(self)?;
-            NetworkParameters::build_transport(
-                &TransportNetworkConfig::new(
-                    initial_session_credential.unwrap_or(""),
-                    self.endpoint_hint.clone(),
-                    None,
-                ),
-                initial_session_credential,
-            )
+            _delegatee_key: &DelegateeKey,
+        ) -> Result<rings_transport::core::transport::SharedTransport> {
+            if !self.valid {
+                return Err(Error::InvalidConfig(
+                    "invalid custom medium parameter".to_string(),
+                ));
+            }
+            Ok(TransportNetworkConfig::default().build_shared_transport(None))
         }
     }
 
-    let media = [
-        // 1. Packet Radio (HF/VHF AX.25 / LoRa half-duplex ad-hoc)
-        HeterogeneousMediumParams {
-            kind: "packet-radio",
-            kinematics: TransportKinematics::packet_radio(),
-            endpoint_hint: Some("ax25://N0CALL-1@144.390MHz".to_string()),
-            session_template: None,
-            params: std::collections::BTreeMap::from([
-                ("modulation".to_string(), "LoRa-SF9-BW125".to_string()),
-                ("carrier_hz".to_string(), "433920000".to_string()),
-            ]),
-        },
-        // 2. Bluetooth Ad-Hoc (BLE L2CAP CoC proximity mesh)
-        HeterogeneousMediumParams {
-            kind: "bluetooth-adhoc",
-            kinematics: TransportKinematics::bluetooth_adhoc(),
-            endpoint_hint: Some("ble://psm:0x0080".to_string()),
-            session_template: None,
-            params: std::collections::BTreeMap::from([(
-                "l2cap_psm".to_string(),
-                "128".to_string(),
-            )]),
-        },
-        // 3. Ultrasonic Ad-Hoc (half-duplex acoustic air medium, no external endpoint advertisement)
-        HeterogeneousMediumParams {
-            kind: "ultrasonic-adhoc",
-            kinematics: TransportKinematics::ultrasonic_adhoc(),
-            endpoint_hint: None,
-            session_template: None,
-            params: std::collections::BTreeMap::from([
-                ("carrier_khz".to_string(), "18.5".to_string()),
-                ("modulation".to_string(), "OFDM-acoustic".to_string()),
-            ]),
-        },
-        // 4. Traditional TCP/IP (direct routed full-duplex socket transport)
-        HeterogeneousMediumParams {
-            kind: "tcp-ip",
-            kinematics: TransportKinematics::low_latency_routed(),
-            endpoint_hint: Some("tcp://198.51.100.7:9443".to_string()),
-            session_template: None,
-            params: std::collections::BTreeMap::from([(
-                "listen_addr".to_string(),
-                "0.0.0.0:9443".to_string(),
-            )]),
-        },
-        // 5. HTTPS / WebSocket (routed full-duplex offer/answer over TLS)
-        HeterogeneousMediumParams {
-            kind: "https-ws",
-            kinematics: TransportKinematics {
-                handshake: HandshakeSemantic::OfferAnswer,
-                ..TransportKinematics::low_latency_routed()
-            },
-            endpoint_hint: Some("wss://node.rings.network/ws".to_string()),
-            session_template: None,
-            params: std::collections::BTreeMap::from([(
-                "alpn".to_string(),
-                "h2,http/1.1".to_string(),
-            )]),
-        },
-    ];
-
-    for medium in media {
-        let expected_kind = medium.kind;
-        let expected_kinematics = medium.kinematics;
-        let expected_endpoint = medium.endpoint_hint.clone();
-        let expected_params = medium.params.clone();
-
-        let config = onion_test_config().with_network_parameters(medium);
-        let processor = test_processor_builder(&config).build()?;
-
-        assert_eq!(processor.network_parameters().kind(), expected_kind);
-        assert_eq!(
-            processor.network_parameters().kinematics(),
-            expected_kinematics
-        );
-        assert_eq!(
-            processor.network_parameters().endpoint_hint(),
-            expected_endpoint.as_deref()
-        );
-        assert_eq!(
-            processor.network_parameters().parameter_map(),
-            expected_params
-        );
-        assert_eq!(
-            processor
-                .network_parameters()
-                .derive_session_credential(&processor.delegatee_key())?,
-            None,
-            "proximity/routed media without relay template must not require ICE/TURN credentials"
-        );
-
-        // Session key renewal succeeds cleanly even when the medium has no external relay servers.
-        let t1 = get_epoch_ms() + 1_000;
-        let delegator = SecretKey::random();
-        let initial_key = DelegateeKey::new_with_seckey_at(
-            &delegator,
-            u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
-            t1,
-        )
-        .unwrap();
-        let renewed_key = DelegateeKey::new_with_seckey_at(
-            &delegator,
-            u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
-            t1 + SIGNING_HORIZON_LEAD_MS,
-        )
-        .unwrap();
-        let mut cfg_for_renew = ProcessorConfig::new(0, String::new(), initial_key, 3)
-            .with_network_parameters(HeterogeneousMediumParams {
-                kind: expected_kind,
-                kinematics: expected_kinematics,
-                endpoint_hint: expected_endpoint,
-                session_template: None,
-                params: expected_params,
-            });
-        cfg_for_renew.advertise_presence = false;
-        let proc_for_renew = test_processor_builder(&cfg_for_renew).build_at(t1)?;
-        assert!(proc_for_renew
-            .renew_delegatee_key(renewed_key, t1 + SIGNING_HORIZON_LEAD_MS)
-            .is_ok());
+    /// Custom transport parameters advertising an explicit locator and tracking session-key
+    /// rotations via `on_session_key_rotated`.
+    #[derive(Clone, Debug)]
+    struct CustomRoutedParams {
+        /// External endpoint locator advertised in the online-node descriptor.
+        locator: String,
+        /// Observed session-key rotation count.
+        rotations: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    // Standard assisted-traversal config preserves UDP port range and endpoint hint in parameter_map.
-    let range = UdpPortRange::new(50000, 50100)?;
-    let traversal = TransportNetworkConfig::new(
-        "stun://stun.l.google.com:19302",
-        Some("https://node.rings.network:50000".to_string()),
-        Some(range),
-    );
-    let config = onion_test_config().with_network_parameters(traversal);
-    assert_eq!(config.udp_port_range(), Some(range));
-    let processor = test_processor_builder(&config).build()?;
-    assert_eq!(processor.network_parameters().kind(), "assisted-traversal");
-    assert_eq!(
-        processor.session_transport_credentials().as_deref(),
-        Some("stun://stun.l.google.com:19302")
-    );
+    impl NodeNetworkParameters for CustomRoutedParams {
+        /// Construct the [`SharedTransport`].
+        fn build_transport(
+            &self,
+            _delegatee_key: &DelegateeKey,
+        ) -> Result<rings_transport::core::transport::SharedTransport> {
+            Ok(
+                TransportNetworkConfig::new("", Some(self.locator.clone()), None)
+                    .build_shared_transport(None),
+            )
+        }
 
-    // Invalid kinematics (e.g. half-duplex ultrasonic medium claiming 2 simultaneous lanes)
-    // is rejected at `ProcessorBuilder::build`.
-    let invalid_ultrasonic = HeterogeneousMediumParams {
-        kind: "ultrasonic-adhoc",
-        kinematics: TransportKinematics {
-            ordered_lanes: 2,
-            ..TransportKinematics::ultrasonic_adhoc()
-        },
-        endpoint_hint: None,
-        session_template: None,
-        params: std::collections::BTreeMap::new(),
-    };
-    let bad_config = onion_test_config().with_network_parameters(invalid_ultrasonic);
+        /// Return the advertised external locator.
+        fn endpoint_hint(&self) -> Option<&str> {
+            Some(&self.locator)
+        }
+
+        /// Record that the node rotated its session key.
+        fn on_session_key_rotated(
+            &self,
+            _transport: &rings_transport::core::transport::SharedTransport,
+            _next_key: &DelegateeKey,
+        ) -> Result<()> {
+            self.rotations
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // 1. Minimal transport implementing only `build_transport` uses defaults (`endpoint_hint = None`,
+    //    `on_session_key_rotated = Ok(())`) and rotates session keys cleanly.
+    let adhoc_config =
+        onion_test_config().with_network_parameters(MinimalAdHocParams { valid: true });
+    let adhoc_processor = test_processor_builder(&adhoc_config).build()?;
+    assert_eq!(adhoc_processor.network_parameters().endpoint_hint(), None);
+
+    // Invalid custom parameters are rejected at `ProcessorBuilder::build`.
+    let invalid_config =
+        onion_test_config().with_network_parameters(MinimalAdHocParams { valid: false });
     assert!(matches!(
-        test_processor_builder(&bad_config).build(),
-        Err(Error::InvalidConfig(msg)) if msg.contains("half-duplex")
+        test_processor_builder(&invalid_config).build(),
+        Err(Error::InvalidConfig(_))
     ));
+
+    // 2. Routed transport implementing `endpoint_hint` and `on_session_key_rotated` receives
+    //    lockstep rotation callbacks when `renew_delegatee_key` succeeds.
+    let t1 = get_epoch_ms() + 1_000;
+    let delegator = SecretKey::random();
+    let initial_key = DelegateeKey::new_with_seckey_at(
+        &delegator,
+        u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
+        t1,
+    )
+    .unwrap();
+    let renewed_key = DelegateeKey::new_with_seckey_at(
+        &delegator,
+        u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX),
+        t1 + SIGNING_HORIZON_LEAD_MS,
+    )
+    .unwrap();
+    let rotations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut routed_config = ProcessorConfig::new(0, String::new(), initial_key, 3)
+        .with_network_parameters(CustomRoutedParams {
+            locator: "wss://node.rings.network/ws".to_string(),
+            rotations: Arc::clone(&rotations),
+        });
+    routed_config.advertise_presence = false;
+    let routed_processor = test_processor_builder(&routed_config).build_at(t1)?;
+    assert_eq!(
+        routed_processor.network_parameters().endpoint_hint(),
+        Some("wss://node.rings.network/ws")
+    );
+    routed_processor.renew_delegatee_key(renewed_key, t1 + SIGNING_HORIZON_LEAD_MS)?;
+    assert_eq!(rotations.load(std::sync::atomic::Ordering::SeqCst), 1);
 
     Ok(())
 }

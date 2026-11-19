@@ -44,14 +44,12 @@ use crate::utils::get_epoch_ms;
 pub(crate) const TEST_NETWORK_ID: u32 = 0;
 
 /// Build the transport fixture used by `rings-core`'s own unit and integration tests via
-/// [`rings_transport::network_config::NetworkParameters`].
+/// [`rings_transport::network_config::TransportNetworkConfig`].
 pub(crate) fn test_transport(
     traversal_servers: &str,
 ) -> rings_transport::core::transport::SharedTransport {
-    use rings_transport::network_config::NetworkParameters;
     rings_transport::network_config::TransportNetworkConfig::new(traversal_servers, None, None)
-        .build_transport(Some(traversal_servers))
-        .expect("default test transport parameters must validate")
+        .build_shared_transport(Some(traversal_servers))
 }
 
 /// A delegatee key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation

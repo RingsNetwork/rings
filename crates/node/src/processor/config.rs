@@ -18,6 +18,9 @@ pub struct ProcessorConfig {
     pub(in crate::processor) network_id: u32,
     /// Abstract network parameters customizing the transport layer (#1291).
     pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
+    /// Built-in serialized transport network configuration, when constructed from or projecting to
+    /// [`ProcessorConfigSerialized`].
+    pub(in crate::processor) serialized_transport_config: Option<TransportNetworkConfig>,
     /// [DelegateeKey].
     pub(in crate::processor) delegatee_key: DelegateeKey,
     /// Stabilization interval.
@@ -55,13 +58,11 @@ impl ProcessorConfig {
         delegatee_key: DelegateeKey,
         stabilize_interval: u64,
     ) -> Self {
+        let transport_config = TransportNetworkConfig::new(traversal_servers, None, None);
         Self {
             network_id,
-            network_parameters: Arc::new(TransportNetworkConfig::new(
-                traversal_servers,
-                None,
-                None,
-            )),
+            network_parameters: Arc::new(transport_config.clone()),
+            serialized_transport_config: Some(transport_config),
             delegatee_key,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
@@ -133,15 +134,15 @@ impl ProcessorConfig {
     pub fn with_network_parameters<P>(mut self, params: P) -> Self
     where P: NodeNetworkParameters + 'static {
         self.network_parameters = Arc::new(params);
+        self.serialized_transport_config = None;
         self
     }
 
-    /// Returns the validated local UDP port range from the parameter dictionary, when configured.
+    /// Returns the validated local UDP port range when configured on the built-in transport config.
     pub fn udp_port_range(&self) -> Option<UdpPortRange> {
-        let params = self.network_parameters.parameter_map();
-        let min = params.get("udp_port_min")?.parse::<u16>().ok()?;
-        let max = params.get("udp_port_max")?.parse::<u16>().ok()?;
-        UdpPortRange::new(min, max).ok()
+        self.serialized_transport_config
+            .as_ref()
+            .and_then(TransportNetworkConfig::udp_port_range)
     }
 
     /// The longer heartbeat of the two registries this node publishes, online nodes and onion
@@ -323,9 +324,12 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
-        let params = ins.network_parameters.parameter_map();
         let udp_port_range = ins.udp_port_range();
-        let traversal_servers = params.get("traversal_servers").cloned().unwrap_or_default();
+        let traversal_servers = ins
+            .serialized_transport_config
+            .as_ref()
+            .map(|cfg| cfg.traversal_servers().to_owned())
+            .unwrap_or_default();
         Ok(Self {
             network_id: ins.network_id,
             ice_servers: traversal_servers,
@@ -378,13 +382,12 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let onion_exit_heartbeat_interval =
             Duration::from_secs(ins.onion_exit_heartbeat_interval_secs);
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
+        let transport_config =
+            TransportNetworkConfig::new(ins.ice_servers, ins.external_address, udp_port_range);
         Ok(Self {
             network_id: ins.network_id,
-            network_parameters: Arc::new(TransportNetworkConfig::new(
-                ins.ice_servers,
-                ins.external_address,
-                udp_port_range,
-            )),
+            network_parameters: Arc::new(transport_config.clone()),
+            serialized_transport_config: Some(transport_config),
             delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,
