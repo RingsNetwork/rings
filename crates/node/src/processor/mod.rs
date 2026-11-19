@@ -456,6 +456,36 @@ impl Processor {
         crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
     }
 
+    /// List signed TURN relay service descriptors from [`crate::turn_service::TURN_SERVICES_TOPIC`]
+    /// (#1292).
+    pub async fn lookup_turn_services(
+        &self,
+        include_expired: bool,
+    ) -> Result<Vec<crate::turn_service::TurnServiceDescriptor>> {
+        let entry_key = entry::Entry::gen_did(crate::turn_service::TURN_SERVICES_TOPIC)?;
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+        Ok(
+            crate::turn_service::TurnServiceDescriptor::latest_valid_by_did(
+                crate::turn_service::TurnServiceRegistration::descriptors_from_entry(&entry),
+                self.clock().now_ms(),
+                self.swarm.network_id(),
+                include_expired,
+            ),
+        )
+    }
+
+    /// Execute one registration pass for every configured registration task on this processor.
+    #[cfg(test)]
+    pub(crate) async fn register_all_once_for_test(&self) -> Result<()> {
+        let context = self.registration_context();
+        for task in &self.registration_tasks {
+            task.register_once(&context).await?;
+        }
+        Ok(())
+    }
+
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
     /// `service` (every service when empty).
     fn select_onion_exits_from_entry(

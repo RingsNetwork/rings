@@ -24,6 +24,10 @@ use zeroize::Zeroizing;
 /// direct [`Account`] / [`Did`] signer.
 pub const TURN_AUTH_DOMAIN: &str = "rings-turn-auth-v1";
 
+/// Domain separator for unlinkable ephemeral [`TurnSessionTicket`] grants and client proofs
+/// (#1292).
+pub const TURN_SESSION_TICKET_DOMAIN: &str = "rings-turn-ticket-v1";
+
 /// Domain separator for deriving the TURN `MESSAGE-INTEGRITY` password (`credential`) from a
 /// secp256k1 Diffie-Hellman shared secret and the verified signature bytes.
 const TURN_CREDENTIAL_KDF_DOMAIN: &[u8] = b"rings-turn-credential-v1\n";
@@ -185,6 +189,121 @@ struct AccountSessionClaim {
     session_pubkey: PublicKey<33>,
 }
 
+/// Unlinkable ephemeral TURN session ticket parameters issued by a TURN server during a DHT or
+/// Onion control-plane reservation (#1292).
+///
+/// The STUN `USERNAME` attribute derived from a [`SignedTurnSessionTicket`] contains only the
+/// random `session_id`, the single-use `ephemeral_client_pubkey`, `expires_at_ms`, the server's
+/// grant signature, and the ephemeral client's signature — exposing zero correlation to the
+/// client's long-term [`Did`] or [`Delegation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSessionTicket {
+    /// 16-byte random session identifier binding the ticket to a reserved allocation or hop.
+    pub session_id: [u8; 16],
+    /// Ephemeral client/hop secp256k1 public key used for ECDH password derivation and client
+    /// signature verification.
+    pub ephemeral_client_pubkey: PublicKey<33>,
+    /// Absolute expiration timestamp in Unix epoch milliseconds.
+    pub expires_at_ms: u128,
+}
+
+impl TurnSessionTicket {
+    /// Return the ephemeral secp256k1 [`Did`] derived from `self.ephemeral_client_pubkey`.
+    pub fn ephemeral_did(&self) -> Did {
+        Did::from(self.ephemeral_client_pubkey.address())
+    }
+
+    /// Return whether this ticket has expired at `now_ms`.
+    pub const fn is_expired_at(&self, now_ms: u128) -> bool {
+        now_ms > self.expires_at_ms
+    }
+
+    /// Pack the domain-separated transcript signed by the TURN server's `server_key` when issuing
+    /// this ticket.
+    pub fn pack_server_grant(&self, server_pubkey: PublicKey<33>) -> Vec<u8> {
+        format!(
+            "{TURN_SESSION_TICKET_DOMAIN}\ngrant\n{}\n{}\n{}\n{}",
+            hex::encode(self.session_id),
+            hex::encode(self.ephemeral_client_pubkey.0),
+            self.expires_at_ms,
+            hex::encode(server_pubkey.0),
+        )
+        .into_bytes()
+    }
+
+    /// Pack the domain-separated transcript signed by the client's `ephemeral_client_key` when
+    /// presenting this ticket to `server_pubkey`.
+    pub fn pack_client_auth(&self, server_pubkey: PublicKey<33>) -> Vec<u8> {
+        format!(
+            "{TURN_SESSION_TICKET_DOMAIN}\nclient\n{}\n{}\n{}\n{}",
+            hex::encode(self.session_id),
+            hex::encode(self.ephemeral_client_pubkey.0),
+            self.expires_at_ms,
+            hex::encode(server_pubkey.0),
+        )
+        .into_bytes()
+    }
+}
+
+/// A [`TurnSessionTicket`] signed by the issuing TURN server's `server_key` (#1292).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignedTurnSessionTicket {
+    /// The ticket parameters.
+    pub ticket: TurnSessionTicket,
+    /// The TURN server's 65-byte recoverable secp256k1 signature over
+    /// [`TurnSessionTicket::pack_server_grant`].
+    pub server_signature: Vec<u8>,
+}
+
+impl SignedTurnSessionTicket {
+    /// Issue and sign a new [`SignedTurnSessionTicket`] with the TURN server's `server_key`.
+    pub fn issue(
+        session_id: [u8; 16],
+        ephemeral_client_pubkey: PublicKey<33>,
+        expires_at_ms: u128,
+        server_key: &SecretKey,
+    ) -> Result<Self> {
+        let _ = NonIdentityPoint::<Secp256k1>::try_from(ephemeral_client_pubkey)?;
+        let ticket = TurnSessionTicket {
+            session_id,
+            ephemeral_client_pubkey,
+            expires_at_ms,
+        };
+        let grant_transcript = ticket.pack_server_grant(server_key.pubkey());
+        let sig = server_key.sign_raw(&grant_transcript)?;
+        Ok(Self {
+            ticket,
+            server_signature: sig.to_vec(),
+        })
+    }
+
+    /// Verify that `self.server_signature` was produced by `server_pubkey` and that the ticket is
+    /// live at `at_ms`.
+    pub fn verify_grant_at(&self, server_pubkey: PublicKey<33>, at_ms: u128) -> Result<()> {
+        let _ = NonIdentityPoint::<Secp256k1>::try_from(self.ticket.ephemeral_client_pubkey)?;
+        if self.ticket.is_expired_at(at_ms) {
+            return Err(Error::DelegationExpired);
+        }
+        let grant_transcript = self.ticket.pack_server_grant(server_pubkey);
+        let recovered = signers::secp256k1::recover(&grant_transcript, &self.server_signature)
+            .map_err(|_| Error::VerifySignatureFailed)?;
+        if recovered != server_pubkey {
+            return Err(Error::VerifySignatureFailed);
+        }
+        Ok(())
+    }
+
+    /// Build unlinkable [`TurnCredentials`] for `server_pubkey` using the client's
+    /// `ephemeral_client_key`.
+    pub fn to_turn_credentials(
+        &self,
+        ephemeral_client_key: &SecretKey,
+        server_pubkey: PublicKey<33>,
+    ) -> Result<TurnCredentials> {
+        TurnCredentials::from_session_ticket(self, ephemeral_client_key, server_pubkey)
+    }
+}
+
 /// Verified Rings identity that authenticated a TURN request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnAuthIdentity {
@@ -192,14 +311,18 @@ pub enum TurnAuthIdentity {
     Delegation(Delegation),
     /// Authenticated via a direct signature from an [`Account`] (such as `Account::Secp256k1(did)`).
     Account(Account),
+    /// Authenticated via an unlinkable server-issued [`SignedTurnSessionTicket`] (#1292).
+    SessionTicket(SignedTurnSessionTicket),
 }
 
 impl TurnAuthIdentity {
-    /// Return the account [`Did`] represented by this TURN authentication identity.
+    /// Return the account [`Did`] (or ephemeral ticket [`Did`]) represented by this TURN
+    /// authentication identity.
     pub fn did(&self) -> Did {
         match self {
             Self::Delegation(delegation) => delegation.delegator_did(),
             Self::Account(account) => account.did(),
+            Self::SessionTicket(signed) => signed.ticket.ephemeral_did(),
         }
     }
 
@@ -207,15 +330,25 @@ impl TurnAuthIdentity {
     pub fn delegation(&self) -> Option<&Delegation> {
         match self {
             Self::Delegation(delegation) => Some(delegation),
-            Self::Account(_) => None,
+            Self::Account(_) | Self::SessionTicket(_) => None,
         }
     }
 
-    /// Borrow the authorizing or signing [`Account`].
-    pub fn account(&self) -> &Account {
+    /// Borrow the authorizing or signing [`Account`] when authenticated via a delegation or direct
+    /// account signature.
+    pub fn account(&self) -> Option<&Account> {
         match self {
-            Self::Delegation(delegation) => delegation.delegator(),
-            Self::Account(account) => account,
+            Self::Delegation(delegation) => Some(delegation.delegator()),
+            Self::Account(account) => Some(account),
+            Self::SessionTicket(_) => None,
+        }
+    }
+
+    /// Borrow the [`SignedTurnSessionTicket`] when authenticated via an unlinkable session ticket.
+    pub fn session_ticket(&self) -> Option<&SignedTurnSessionTicket> {
+        match self {
+            Self::SessionTicket(ticket) => Some(ticket),
+            Self::Delegation(_) | Self::Account(_) => None,
         }
     }
 }
@@ -273,12 +406,37 @@ impl VerifiedTurnAuth {
     }
 
     /// Borrow the verified [`Account`] that authorized or directly signed the request.
-    pub fn account(&self) -> &Account {
+    pub fn account(&self) -> Option<&Account> {
         self.identity.account()
+    }
+
+    /// Borrow the verified [`SignedTurnSessionTicket`] when authenticated via an unlinkable session
+    /// ticket.
+    pub fn session_ticket(&self) -> Option<&SignedTurnSessionTicket> {
+        self.identity.session_ticket()
     }
 }
 
 impl TurnCredentials {
+    /// Sign unlinkable TURN credentials from a server-issued [`SignedTurnSessionTicket`] and the
+    /// client's matching `ephemeral_client_key` (#1292).
+    pub fn from_session_ticket(
+        signed_ticket: &SignedTurnSessionTicket,
+        ephemeral_client_key: &SecretKey,
+        server_pubkey: PublicKey<33>,
+    ) -> Result<Self> {
+        if ephemeral_client_key.pubkey() != signed_ticket.ticket.ephemeral_client_pubkey {
+            return Err(Error::InvalidPublicKey);
+        }
+        let shared = secp256k1_shared_secret(ephemeral_client_key, server_pubkey)?;
+        let client_transcript = signed_ticket.ticket.pack_client_auth(server_pubkey);
+        let client_sig = ephemeral_client_key.sign_raw(&client_transcript)?;
+        let ticket_bytes =
+            rings_codec::serialize(signed_ticket).map_err(Error::CodecSerialize)?;
+        let ticket_b58 = base58_monero::encode(&ticket_bytes).map_err(|_| Error::Encode)?;
+        Self::from_claim_sig_and_shared(format!("tkt:{ticket_b58}"), &client_sig, &shared)
+    }
+
     /// Sign TURN credentials using a session `delegatee_key` for `server_pubkey`.
     pub fn from_delegatee_key(
         delegatee_key: &DelegateeKey,
@@ -499,6 +657,18 @@ impl TurnCredentials {
         }
         let sig_bytes = base58_monero::decode(sig_b58).map_err(|_| Error::Decode)?;
 
+        if let Some(ticket_b58) = claim_str.strip_prefix("tkt:") {
+            let claim_bytes = base58_monero::decode(ticket_b58).map_err(|_| Error::Decode)?;
+            let signed_ticket = rings_codec::deserialize::<SignedTurnSessionTicket>(&claim_bytes)
+                .map_err(|_| Error::Decode)?;
+            return Ok((
+                TurnAuthIdentity::SessionTicket(signed_ticket),
+                None,
+                sig_bytes,
+                sig_b58,
+            ));
+        }
+
         if claim_str.starts_with("0x") || claim_str.starts_with("0X") {
             let did = Did::from_str(claim_str)?;
             return Ok((
@@ -577,6 +747,17 @@ impl TurnCredentials {
                 session_pk
             }
             (TurnAuthIdentity::Account(_), None) => return Err(Error::Decode),
+            (TurnAuthIdentity::SessionTicket(signed_ticket), _) => {
+                signed_ticket.verify_grant_at(server_pubkey, at_ms)?;
+                let client_transcript = signed_ticket.ticket.pack_client_auth(server_pubkey);
+                let recovered_client =
+                    signers::secp256k1::recover(&client_transcript, &sig_bytes)
+                        .map_err(|_| Error::VerifySignatureFailed)?;
+                if recovered_client != signed_ticket.ticket.ephemeral_client_pubkey {
+                    return Err(Error::VerifySignatureFailed);
+                }
+                recovered_client
+            }
         };
         let shared = secp256k1_shared_secret(server_key, client_pubkey)?;
         let credential = derive_turn_credential(&shared, &sig_bytes)?;
@@ -698,7 +879,7 @@ mod tests {
             let verified = TurnCredentials::verify_at(&creds.username, &server_key, at_ms).unwrap();
             assert_eq!(verified.did(), did);
             assert_eq!(verified.delegation(), None);
-            assert_eq!(verified.account(), &Account::Secp256k1(did));
+            assert_eq!(verified.account(), Some(&Account::Secp256k1(did)));
             assert_eq!(verified.credential, creds.credential);
         }
 

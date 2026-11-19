@@ -11,6 +11,21 @@ pub enum TurnError {
     #[error("TURN server error: {0}")]
     Turn(#[from] turn::Error),
 
+    /// Underlying `stun` crate message encoding or decoding error.
+    #[error("STUN protocol error: {0}")]
+    Stun(#[from] stun::Error),
+
+    /// An upstream chained TURN hop returned an unexpected `XOR-RELAYED-ADDRESS`.
+    #[error(
+        "Chained TURN hop relayed address mismatch: expected {expected}, got {actual}"
+    )]
+    ChainedRelayAddressMismatch {
+        /// Expected `XOR-RELAYED-ADDRESS` (`E_exit`).
+        expected: std::net::SocketAddr,
+        /// Actual `XOR-RELAYED-ADDRESS` returned by the upstream hop.
+        actual: std::net::SocketAddr,
+    },
+
     /// Underlying `webrtc-util` connection error.
     #[error("WebRTC util connection error: {0}")]
     Util(#[from] webrtc_util::Error),
