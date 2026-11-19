@@ -573,6 +573,20 @@ impl ManagedAllocation {
         state.permissions.contains_key(&ip)
     }
 
+    fn can_install_permissions(&self, peer_ips: &[IpAddr], max_permissions: usize) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.permissions.retain(|_, &mut exp| exp > now);
+        let mut projected_len = state.permissions.len();
+        let mut seen_new = HashSet::new();
+        for &ip in peer_ips {
+            if !state.permissions.contains_key(&ip) && seen_new.insert(ip) {
+                projected_len += 1;
+            }
+        }
+        projected_len <= max_permissions
+    }
+
     fn try_install_permissions(&self, peer_ips: &[IpAddr], max_permissions: usize) -> bool {
         let now = Instant::now();
         let new_exp = now + PERMISSION_TIMEOUT;
@@ -592,6 +606,33 @@ impl ManagedAllocation {
             state.permissions.insert(ip, new_exp);
         }
         true
+    }
+
+    fn can_bind_channel(
+        &self,
+        channel: ChannelNumber,
+        peer: SocketAddr,
+        max_permissions: usize,
+    ) -> std::result::Result<(), ChannelBindError> {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.permissions.retain(|_, &mut exp| exp > now);
+        state.channel_bindings.retain(|_, (_, exp)| *exp > now);
+
+        for (&bound_ch, &(bound_peer, _)) in &state.channel_bindings {
+            if (bound_ch == channel && bound_peer != peer)
+                || (bound_peer == peer && bound_ch != channel)
+            {
+                return Err(ChannelBindError::Conflict);
+            }
+        }
+
+        if !state.permissions.contains_key(&peer.ip()) && state.permissions.len() >= max_permissions
+        {
+            return Err(ChannelBindError::QuotaExceeded);
+        }
+
+        Ok(())
     }
 
     fn try_bind_channel(
@@ -2091,6 +2132,27 @@ async fn active_allocation_count(
     count
 }
 
+async fn prune_expired_reserved_sessions_map(
+    reserved_sessions: &Mutex<HashMap<[u8; 16], ReservedTurnSession>>,
+    now_ms: u128,
+) -> usize {
+    let (expired, remaining): (Vec<ReservedTurnSession>, usize) = {
+        let mut guard = reserved_sessions.lock().await;
+        let keys: Vec<[u8; 16]> = guard
+            .iter()
+            .filter(|(_, s)| now_ms > s.expires_at_ms)
+            .map(|(k, _)| *k)
+            .collect();
+        let removed = keys.into_iter().filter_map(|k| guard.remove(&k)).collect();
+        (removed, guard.len())
+    };
+    for session in expired {
+        let handle = session.backend.begin_close();
+        session.backend.finish_close(handle).await;
+    }
+    remaining
+}
+
 async fn relay_packet_handler(
     alloc: Arc<ManagedAllocation>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
@@ -2363,7 +2425,20 @@ async fn handle_authenticated_allocate(
         lifetime_duration = clamp_allocation_lifetime(lifetime.0);
     }
 
-    if active_allocation_count(allocations).await >= max_allocations {
+    let now_ms = rings_core::utils::get_epoch_ms();
+    let reserved_count = prune_expired_reserved_sessions_map(reserved_sessions, now_ms).await;
+    let decoded_identity = TurnCredentials::decode_username_parts(&username_attr.text);
+    let is_session_ticket_claim = matches!(
+        decoded_identity,
+        Ok((TurnAuthIdentity::SessionTicket(_), ..))
+    );
+    let active_count = active_allocation_count(allocations).await;
+    let effective_occupied = if is_session_ticket_claim {
+        active_count
+    } else {
+        active_count.saturating_add(reserved_count)
+    };
+    if effective_occupied >= max_allocations {
         send_authenticated_error(
             conn,
             src_addr,
@@ -2401,11 +2476,8 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    let (relay_addr, backend, cipher) = match TurnCredentials::decode_username_parts(
-        &username_attr.text,
-    ) {
+    let (relay_addr, backend, cipher) = match decoded_identity {
         Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
-            let now_ms = rings_core::utils::get_epoch_ms();
             let claimed = {
                 let mut guard = reserved_sessions.lock().await;
                 guard.remove(&signed_ticket.ticket.session_id)
@@ -2683,6 +2755,20 @@ async fn handle_authenticated_create_permission(
         candidate_ips.push(peer_addr.ip);
     }
 
+    if !alloc.can_install_permissions(&candidate_ips, max_permissions_per_allocation) {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Permission Quota Reached",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    }
+
     if alloc.cascade_create_permission(&candidate_ips).await.is_err() {
         send_authenticated_error(
             conn,
@@ -2778,6 +2864,36 @@ async fn handle_authenticated_channel_bind(
     if !peer_policy.is_allowed_addr(target_sock) {
         send_forbidden_error(conn, src_addr, m, mi_key).await;
         return;
+    }
+
+    match alloc.can_bind_channel(channel, target_sock, max_permissions_per_allocation) {
+        Ok(()) => {}
+        Err(ChannelBindError::Conflict) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_BAD_REQUEST,
+                b"ChannelBind Conflict",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        Err(ChannelBindError::QuotaExceeded) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Permission Quota Reached",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
     }
 
     if alloc.cascade_channel_bind(channel, target_sock).await.is_err() {
@@ -3066,6 +3182,7 @@ pub struct TurnServer {
     auth_handler: Arc<DelegationAuthHandler>,
     relay_generator: Arc<PolicyRelayAddressGenerator>,
     relay_is_ipv4: bool,
+    max_allocations: usize,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
@@ -3135,6 +3252,7 @@ impl TurnServer {
             config.channel_bind_timeout
         };
 
+        let max_allocations = config.max_allocations.max(1);
         tokio::spawn(Self::read_loop(
             listeners,
             Arc::clone(&allocations),
@@ -3146,7 +3264,7 @@ impl TurnServer {
             channel_bind_timeout,
             config.peer_policy,
             config.max_nonces.max(1),
-            config.max_allocations.max(1),
+            max_allocations,
             config.max_permissions_per_allocation.max(1),
             relay_is_ipv4,
             shutdown_rx,
@@ -3160,6 +3278,7 @@ impl TurnServer {
             auth_handler,
             relay_generator,
             relay_is_ipv4,
+            max_allocations,
             allocations,
             reserved_sessions,
             nonces,
@@ -3694,8 +3813,19 @@ impl TurnServer {
         ttl: Duration,
         cipher: Option<TurnPayloadCipher>,
     ) -> Result<TurnSessionReservation> {
+        if ttl.is_zero() {
+            return Err(crate::error::TurnError::InvalidReservationTtl);
+        }
+        let clamped_ttl = ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
         let now_ms = rings_core::utils::get_epoch_ms();
-        self.prune_expired_reserved_sessions(now_ms).await;
+        let reserved_count =
+            prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
+        let active_count = active_allocation_count(&self.allocations).await;
+        if active_count.saturating_add(reserved_count) >= self.max_allocations {
+            return Err(crate::error::TurnError::AllocationCapacityReached {
+                max_allocations: self.max_allocations,
+            });
+        }
 
         let (relay_conn, relay_addr) = self
             .relay_generator
@@ -3703,20 +3833,33 @@ impl TurnServer {
             .await?;
         let mut session_id = [0u8; 16];
         rand::thread_rng().fill(&mut session_id);
-        let expires_at_ms = now_ms.saturating_add(ttl.as_millis());
+        let expires_at_ms = now_ms.saturating_add(clamped_ttl.as_millis());
         let ticket = SignedTurnSessionTicket::issue(
             session_id,
             ephemeral_client_pubkey,
             expires_at_ms,
             self.auth_handler.server_key(),
         )?;
-        {
+        let active_now = active_allocation_count(&self.allocations).await;
+        let overflow_backend = {
             let mut guard = self.reserved_sessions.lock().await;
-            guard.insert(session_id, ReservedTurnSession {
-                expires_at_ms,
-                relay_addr,
-                backend: RelayBackend::LocalExit(relay_conn),
-                cipher,
+            if active_now.saturating_add(guard.len()) >= self.max_allocations {
+                Some(RelayBackend::LocalExit(relay_conn))
+            } else {
+                guard.insert(session_id, ReservedTurnSession {
+                    expires_at_ms,
+                    relay_addr,
+                    backend: RelayBackend::LocalExit(relay_conn),
+                    cipher,
+                });
+                None
+            }
+        };
+        if let Some(backend) = overflow_backend {
+            let handle = backend.begin_close();
+            backend.finish_close(handle).await;
+            return Err(crate::error::TurnError::AllocationCapacityReached {
+                max_allocations: self.max_allocations,
             });
         }
         Ok(TurnSessionReservation {
@@ -3733,8 +3876,19 @@ impl TurnServer {
         &self,
         spec: TurnChainedHopSpec,
     ) -> Result<TurnSessionReservation> {
+        if spec.ttl.is_zero() {
+            return Err(crate::error::TurnError::InvalidReservationTtl);
+        }
+        let clamped_ttl = spec.ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
         let now_ms = rings_core::utils::get_epoch_ms();
-        self.prune_expired_reserved_sessions(now_ms).await;
+        let reserved_count =
+            prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
+        let active_count = active_allocation_count(&self.allocations).await;
+        if active_count.saturating_add(reserved_count) >= self.max_allocations {
+            return Err(crate::error::TurnError::AllocationCapacityReached {
+                max_allocations: self.max_allocations,
+            });
+        }
 
         let (upstream, upstream_relayed_addr) =
             UpstreamTurnRelayClient::allocate(spec.next_hop_addr, spec.next_hop_credentials)
@@ -3750,20 +3904,33 @@ impl TurnServer {
 
         let mut session_id = [0u8; 16];
         rand::thread_rng().fill(&mut session_id);
-        let expires_at_ms = now_ms.saturating_add(spec.ttl.as_millis());
+        let expires_at_ms = now_ms.saturating_add(clamped_ttl.as_millis());
         let ticket = SignedTurnSessionTicket::issue(
             session_id,
             spec.ephemeral_client_pubkey,
             expires_at_ms,
             self.auth_handler.server_key(),
         )?;
-        {
+        let active_now = active_allocation_count(&self.allocations).await;
+        let overflow_backend = {
             let mut guard = self.reserved_sessions.lock().await;
-            guard.insert(session_id, ReservedTurnSession {
-                expires_at_ms,
-                relay_addr: upstream.relayed_addr(),
-                backend: RelayBackend::ChainedHop(upstream),
-                cipher: spec.cipher,
+            if active_now.saturating_add(guard.len()) >= self.max_allocations {
+                Some(RelayBackend::ChainedHop(upstream))
+            } else {
+                guard.insert(session_id, ReservedTurnSession {
+                    expires_at_ms,
+                    relay_addr: upstream.relayed_addr(),
+                    backend: RelayBackend::ChainedHop(upstream),
+                    cipher: spec.cipher,
+                });
+                None
+            }
+        };
+        if let Some(backend) = overflow_backend {
+            let handle = backend.begin_close();
+            backend.finish_close(handle).await;
+            return Err(crate::error::TurnError::AllocationCapacityReached {
+                max_allocations: self.max_allocations,
             });
         }
         Ok(TurnSessionReservation {
@@ -3772,22 +3939,6 @@ impl TurnServer {
             server_addr: self.advertised_addr,
             server_pubkey: self.server_pubkey(),
         })
-    }
-
-    async fn prune_expired_reserved_sessions(&self, now_ms: u128) {
-        let expired: Vec<ReservedTurnSession> = {
-            let mut guard = self.reserved_sessions.lock().await;
-            let keys: Vec<[u8; 16]> = guard
-                .iter()
-                .filter(|(_, s)| now_ms > s.expires_at_ms)
-                .map(|(k, _)| *k)
-                .collect();
-            keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
-        };
-        for session in expired {
-            let handle = session.backend.begin_close();
-            session.backend.finish_close(handle).await;
-        }
     }
 
     /// Gracefully stop the TURN server and close all managed connections and relay allocations.

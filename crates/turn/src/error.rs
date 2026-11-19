@@ -26,6 +26,17 @@ pub enum TurnError {
         actual: std::net::SocketAddr,
     },
 
+    /// Active allocations plus unclaimed session reservations reached `max_allocations`.
+    #[error("TURN allocation capacity reached (max_allocations={max_allocations})")]
+    AllocationCapacityReached {
+        /// Configured maximum concurrent TURN allocations.
+        max_allocations: usize,
+    },
+
+    /// Session reservation TTL must be non-zero.
+    #[error("TURN session reservation TTL must be greater than zero")]
+    InvalidReservationTtl,
+
     /// Underlying `webrtc-util` connection error.
     #[error("WebRTC util connection error: {0}")]
     Util(#[from] webrtc_util::Error),
