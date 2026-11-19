@@ -397,39 +397,55 @@ fn test_serialized_remote_rpc_proxy_url_round_trips_and_validates() -> Result<()
     Ok(())
 }
 
+/// Verifies model completeness of [`NetworkParameters`] and [`NodeNetworkParameters`] across
+/// 6 heterogeneous transport media (Packet Radio, Bluetooth Ad-Hoc, Ultrasonic Ad-Hoc,
+/// Traditional TCP/IP, HTTPS/WebSocket, and Assisted Traversal), as well as rejection of illegal
+/// kinematic profiles (e.g. multi-lane half-duplex carrier collision) at [`ProcessorBuilder::build`].
 #[tokio::test]
 async fn test_custom_network_parameters_trait_supports_heterogeneous_media_and_enforces_kinematic_laws(
 ) -> Result<()> {
+    /// Universal parameter descriptor used to model heterogeneous transport media in tests.
     #[derive(Clone, Debug)]
     struct HeterogeneousMediumParams {
+        /// Canonical transport medium identifier.
         kind: &'static str,
+        /// Physical and link-layer kinematic profile of the medium.
         kinematics: TransportKinematics,
+        /// Optional advertised external endpoint locator or frequency/channel descriptor.
         endpoint_hint: Option<String>,
+        /// Optional session-credential template for relay-assisted media (`None` for ad-hoc/direct).
         session_template: Option<String>,
+        /// Medium-specific key-value parameters (e.g. modulation, carrier frequency, L2CAP PSM).
         params: std::collections::BTreeMap<String, String>,
     }
 
     impl NetworkParameters for HeterogeneousMediumParams {
+        /// Return the medium's canonical identifier.
         fn kind(&self) -> &'static str {
             self.kind
         }
 
+        /// Return the medium's kinematic profile.
         fn kinematics(&self) -> TransportKinematics {
             self.kinematics
         }
 
+        /// Return the medium's endpoint locator hint, if any.
         fn endpoint_hint(&self) -> Option<&str> {
             self.endpoint_hint.as_deref()
         }
 
+        /// Return the medium's session credential template, if any.
         fn session_credential_template(&self) -> Option<&str> {
             self.session_template.as_deref()
         }
 
+        /// Return the medium's custom key-value parameter dictionary.
         fn parameter_map(&self) -> std::collections::BTreeMap<String, String> {
             self.params.clone()
         }
 
+        /// Validate the medium's kinematic profile and instantiate a [`SharedTransport`].
         fn build_transport(
             &self,
             initial_session_credential: Option<&str>,

@@ -38,6 +38,10 @@ use crate::core::transport::SharedTransport;
 use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
 /// Physical transmission duplexity of a transport medium.
+///
+/// Distinguishes carrier media that permit concurrent bidirectional transmission from shared
+/// physical wave media (such as radio frequency or acoustic air channels) that require
+/// turn-taking arbitration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum DuplexMode {
     /// Simultaneous bidirectional transmission without physical medium collision
@@ -46,12 +50,17 @@ pub enum DuplexMode {
     /// Shared wave/carrier medium requiring turn-taking or CSMA/TDMA arbitration
     /// (e.g. HF/VHF/LoRa packet radio, ultrasonic acoustic ad-hoc).
     ///
-    /// Invariant: `HalfDuplex` media must serialize traffic over a single ordered lane
+    /// # Invariant
+    ///
+    /// `HalfDuplex` media must serialize traffic over a single ordered lane
     /// (`ordered_lanes == 1`) so concurrent lane transmissions cannot collide on the carrier.
     HalfDuplex,
 }
 
 /// Reachability and peer-discovery scope of a transport medium.
+///
+/// Classifies how peers discover and address one another on the physical or overlay network
+/// without assuming IP routing or NAT traversal servers exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AddressingScope {
     /// Physical neighborhood discovery without IP routing (e.g. Bluetooth ad-hoc, ultrasonic
@@ -65,6 +74,10 @@ pub enum AddressingScope {
 
 /// How the abstract 3-step `create_offer -> answer_offer -> accept_answer` handshake maps onto
 /// the underlying medium.
+///
+/// Every Rings transport implements the 3-step [`ConnectionInterface`](crate::core::transport::ConnectionInterface)
+/// handshake morphism, but its physical meaning depends on the medium's [`AddressingScope`] and
+/// carrier characteristics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum HandshakeSemantic {
     /// Asymmetric session-description negotiation (e.g. SDP or cryptographic session offer/answer).
@@ -78,10 +91,15 @@ pub enum HandshakeSemantic {
 
 /// Per-stage timeout budget of a transport medium.
 ///
-/// Invariant (Temporal Monotonicity):
-/// - Every timeout is strictly positive (`> Duration::ZERO`).
-/// - `close_timeout <= send_accept_timeout <= delivery_timeout`.
-/// - `channel_open_timeout <= handshake_timeout`.
+/// Captures the physical latency scale of a medium across the five lifecycle stages of a
+/// connection generation: handshake negotiation, channel opening, local outbound send acceptance,
+/// end-to-end frame delivery, and connection teardown.
+///
+/// # Invariants (Temporal Monotonicity)
+///
+/// - **Strictly positive**: Every timeout is strictly greater than `Duration::ZERO`.
+/// - **Send pipeline monotonicity**: `close_timeout <= send_accept_timeout <= delivery_timeout`.
+/// - **Establishment monotonicity**: `channel_open_timeout <= handshake_timeout`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct TransportTimingBudget {
     /// Maximum duration to complete an offer/answer handshake exchange.
@@ -98,6 +116,12 @@ pub struct TransportTimingBudget {
 
 impl TransportTimingBudget {
     /// Validate the temporal monotonicity invariant of this timing budget.
+    ///
+    /// # Errors
+    ///
+    /// - [`TransportKinematicsError::ZeroTimeout`] if any of the five stage timeouts is zero.
+    /// - [`TransportKinematicsError::NonMonotoneTimeouts`] if `close_timeout > send_accept_timeout`,
+    ///   `send_accept_timeout > delivery_timeout`, or `channel_open_timeout > handshake_timeout`.
     pub const fn validate(&self) -> Result<(), TransportKinematicsError> {
         if self.handshake_timeout.is_zero()
             || self.channel_open_timeout.is_zero()
@@ -118,6 +142,13 @@ impl TransportTimingBudget {
 }
 
 /// Complete physical and link-layer kinematic profile of a transport medium.
+///
+/// Characterizes any physical or virtual transport medium by its universal properties rather than
+/// protocol-specific primitives:
+/// - **K1 (Frame Capacity Bound)**: `1 <= max_frame_payload_bytes <= MAX_CHANNEL_MESSAGE_SIZE`.
+/// - **K2 (Lane Multiplexing & Half-Duplex Serialization)**:
+///   `1 <= ordered_lanes <= CHANNEL_POOL_SIZE` and `duplexity == HalfDuplex ==> ordered_lanes == 1`.
+/// - **K3 (Temporal Monotonicity)**: `timing.validate() == Ok(())`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct TransportKinematics {
     /// Transmission duplexity (`FullDuplex` or `HalfDuplex`).
@@ -137,6 +168,9 @@ pub struct TransportKinematics {
 impl TransportKinematics {
     /// Kinematic profile for low-latency directly routed transports (traditional TCP/IP,
     /// HTTPS/WebSocket, local loopback).
+    ///
+    /// Properties: `FullDuplex`, `DirectRouted`, `DirectDial`, 64 KiB frame payload ceiling,
+    /// 4 multiplexed ordered lanes, and low-latency timing budgets.
     pub const fn low_latency_routed() -> Self {
         Self {
             duplexity: DuplexMode::FullDuplex,
@@ -155,6 +189,9 @@ impl TransportKinematics {
     }
 
     /// Kinematic profile for NAT/firewall traversal-assisted transports.
+    ///
+    /// Properties: `FullDuplex`, `AssistedTraversal`, `OfferAnswer`, 64 KiB frame payload ceiling,
+    /// 4 multiplexed ordered lanes, and candidate-gathering/relay-traversal timing budgets.
     pub const fn assisted_traversal() -> Self {
         Self {
             duplexity: DuplexMode::FullDuplex,
@@ -173,6 +210,9 @@ impl TransportKinematics {
     }
 
     /// Kinematic profile for Bluetooth Ad-Hoc (BLE / L2CAP Connection-Oriented Channels).
+    ///
+    /// Properties: `FullDuplex`, `ProximityAdHoc`, `BroadcastBeacon`, 1024-byte L2CAP MTU payload,
+    /// 2 ordered lanes, and proximity discovery timing budgets.
     pub const fn bluetooth_adhoc() -> Self {
         Self {
             duplexity: DuplexMode::FullDuplex,
@@ -191,6 +231,10 @@ impl TransportKinematics {
     }
 
     /// Kinematic profile for narrowband Packet Radio (HF/VHF AX.25, LoRa ad-hoc mesh).
+    ///
+    /// Properties: `HalfDuplex`, `ProximityAdHoc`, `BroadcastBeacon`, 255-byte sub-kilobit radio
+    /// frame payload, single serialized lane (`ordered_lanes == 1`), and long-turnaround radio
+    /// timing budgets.
     pub const fn packet_radio() -> Self {
         Self {
             duplexity: DuplexMode::HalfDuplex,
@@ -209,6 +253,10 @@ impl TransportKinematics {
     }
 
     /// Kinematic profile for Ultrasonic Ad-Hoc (half-duplex acoustic air medium).
+    ///
+    /// Properties: `HalfDuplex`, `ProximityAdHoc`, `BroadcastBeacon`, 128-byte acoustic frame
+    /// payload, single serialized lane (`ordered_lanes == 1`), and acoustic propagation/turnaround
+    /// timing budgets.
     pub const fn ultrasonic_adhoc() -> Self {
         Self {
             duplexity: DuplexMode::HalfDuplex,
@@ -515,15 +563,23 @@ pub trait NetworkParameters: fmt::Debug + MaybeSendSync {
 }
 
 /// Network parameters for an assisted-traversal IP transport.
+///
+/// Encapsulates the session-credential template (`traversal_servers`), optional advertised external
+/// endpoint locator (`endpoint_hint`), and optional local UDP port range constraint
+/// (`udp_port_range`) behind the universal [`NetworkParameters`] trait.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TransportNetworkConfig {
+    /// Traversal/relay server specification string (used as the session credential template).
     traversal_servers: String,
+    /// Optional external endpoint locator advertised by this node during candidate gathering.
     endpoint_hint: Option<String>,
+    /// Optional validated inclusive local UDP ephemeral port range `[min, max]`.
     udp_port_range: Option<UdpPortRange>,
 }
 
 impl TransportNetworkConfig {
-    /// Construct a new [`TransportNetworkConfig`].
+    /// Construct a new [`TransportNetworkConfig`] from a traversal server specification string,
+    /// an optional advertised external endpoint locator, and an optional validated [`UdpPortRange`].
     pub fn new(
         traversal_servers: impl Into<String>,
         endpoint_hint: Option<String>,
@@ -560,22 +616,29 @@ impl TransportNetworkConfig {
 }
 
 impl NetworkParameters for TransportNetworkConfig {
+    /// Return the canonical medium identifier (`"assisted-traversal"`).
     fn kind(&self) -> &'static str {
         "assisted-traversal"
     }
 
+    /// Return the canonical [`TransportKinematics::assisted_traversal`] kinematic profile.
     fn kinematics(&self) -> TransportKinematics {
         TransportKinematics::assisted_traversal()
     }
 
+    /// Return the configured external endpoint hint, if any.
     fn endpoint_hint(&self) -> Option<&str> {
         self.endpoint_hint.as_deref()
     }
 
+    /// Return the configured traversal server specification string as the session credential
+    /// template for DID-delegated signing.
     fn session_credential_template(&self) -> Option<&str> {
         Some(&self.traversal_servers)
     }
 
+    /// Project the traversal servers, optional external endpoint hint, and optional UDP port
+    /// range bounds into a canonical key-value parameter dictionary.
     fn parameter_map(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
         map.insert(
@@ -592,6 +655,9 @@ impl NetworkParameters for TransportNetworkConfig {
         map
     }
 
+    /// Validate all kinematic invariants and instantiate the active platform's [`SharedTransport`]
+    /// using `initial_session_credential` (falling back to the raw `traversal_servers` template
+    /// when no signed credential is supplied).
     #[cfg(any(
         feature = "dummy",
         feature = "native-webrtc",

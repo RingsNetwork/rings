@@ -68,30 +68,42 @@ pub trait NodeNetworkParameters: fmt::Debug + MaybeSendSync {
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport>;
 }
 
+/// Blanket adapter bridging any [`rings_transport::network_config::NetworkParameters`]
+/// implementation into [`NodeNetworkParameters`], wiring node-level [`DelegateeKey`] session
+/// credential derivation into transport construction and live key rotation.
 impl<T> NodeNetworkParameters for T
 where T: NetworkParameters
 {
+    /// Delegate canonical medium kind to [`NetworkParameters::kind`].
     fn kind(&self) -> &'static str {
         NetworkParameters::kind(self)
     }
 
+    /// Delegate physical and link-layer kinematic properties to [`NetworkParameters::kinematics`].
     fn kinematics(&self) -> TransportKinematics {
         NetworkParameters::kinematics(self)
     }
 
+    /// Delegate external endpoint locator hint to [`NetworkParameters::endpoint_hint`].
     fn endpoint_hint(&self) -> Option<&str> {
         NetworkParameters::endpoint_hint(self)
     }
 
+    /// Delegate key-value parameter projection to [`NetworkParameters::parameter_map`].
     fn parameter_map(&self) -> BTreeMap<String, String> {
         NetworkParameters::parameter_map(self)
     }
 
+    /// Validate all kinematic and medium-specific parameters via
+    /// [`NetworkParameters::validate_parameters`], mapping any violation to [`Error::InvalidConfig`].
     fn validate_parameters(&self) -> Result<()> {
         NetworkParameters::validate_parameters(self)
             .map_err(|err| Error::InvalidConfig(err.to_string()))
     }
 
+    /// Derive a session-bound transport credential for `delegatee_key` when
+    /// [`NetworkParameters::session_credential_template`] is present, or return `Ok(None)` for
+    /// proximity/ad-hoc or unauthenticated media that require no external relay credentials.
     fn derive_session_credential(&self, delegatee_key: &DelegateeKey) -> Result<Option<String>> {
         let Some(template) = self.session_credential_template() else {
             return Ok(None);
@@ -102,6 +114,9 @@ where T: NetworkParameters
             .map_err(Error::CoreError)
     }
 
+    /// Validate all medium parameters, derive the initial session-bound credential for
+    /// `delegatee_key` (falling back to the raw template if signing is unavailable for a synthetic
+    /// test key), and instantiate the [`SharedTransport`].
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
         NodeNetworkParameters::validate_parameters(self)?;
         let initial_credential = match self.derive_session_credential(delegatee_key) {
