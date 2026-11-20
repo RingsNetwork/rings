@@ -10,19 +10,31 @@
 )]
 #![doc = include_str!("../README.md")]
 
-#[cfg(all(feature = "native-webrtc", target_family = "wasm"))]
+#[cfg(all(
+    feature = "native-webrtc",
+    target_family = "wasm",
+    not(feature = "web-sys-webrtc")
+))]
 compile_error!(
-    "`rings-transport/native-webrtc` is not supported on wasm targets; enable `web-sys-webrtc` instead."
+    "`rings-transport/native-webrtc` is not supported on wasm targets without `web-sys-webrtc`."
 );
 
-#[cfg(all(feature = "dummy", target_family = "wasm"))]
+#[cfg(all(
+    feature = "dummy",
+    target_family = "wasm",
+    not(feature = "web-sys-webrtc")
+))]
 compile_error!(
-    "`rings-transport/dummy` requires the native Tokio runtime and is not supported on wasm targets."
+    "`rings-transport/dummy` requires the native Tokio runtime and is not supported on wasm targets without `web-sys-webrtc`."
 );
 
-#[cfg(all(feature = "web-sys-webrtc", not(target_family = "wasm")))]
+#[cfg(all(
+    feature = "web-sys-webrtc",
+    not(target_family = "wasm"),
+    not(any(feature = "native-webrtc", feature = "dummy"))
+))]
 compile_error!(
-    "`rings-transport/web-sys-webrtc` is only supported on wasm targets; enable `native-webrtc` or `dummy` instead."
+    "`rings-transport/web-sys-webrtc` is only supported on wasm targets; enable `native-webrtc` or `dummy` on native targets."
 );
 
 pub mod callback;
