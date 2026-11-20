@@ -44,7 +44,6 @@ use crate::core::pool::ChannelLane;
 use crate::core::pool::ChannelPool;
 use crate::core::pool::LanePool;
 use crate::core::pool::CHANNEL_POOL_SIZE;
-use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
@@ -66,6 +65,7 @@ use crate::ice_server::IceServer;
 use crate::network_config::UdpPortRange;
 use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
+use crate::sdp::effective_max_message_size;
 use crate::sdp::split_sdp_remote_candidates;
 use crate::sync_utils::lock_recover;
 
@@ -1401,6 +1401,10 @@ impl TransportInterface for WebrtcTransport {
 
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
+    }
+
+    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<()> {
+        effective_max_message_size(remote_handshake).map(|_| ())
     }
 
     fn update_session_credentials(&self, credentials: &str) {

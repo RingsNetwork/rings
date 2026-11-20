@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::fmt;
 
 use rings_core::dht::default_storage_virtual_positions_per_owner;
@@ -31,7 +32,7 @@ use crate::remote_endpoint::RemoteRpcProxy;
 ///    synchronizes the live [`SharedTransport`] when the node rotates its [`DelegateeKey`] in
 ///    process (a no-op `Ok(())` by default for media whose link layer does not bind credentials
 ///    to the session key).
-pub trait NodeNetworkParameters: fmt::Debug + MaybeSendSync {
+pub trait NodeNetworkParameters: Any + fmt::Debug + MaybeSendSync {
     /// Validate these network parameters and instantiate a [`SharedTransport`] bound to
     /// `delegatee_key`.
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport>;
@@ -96,9 +97,6 @@ pub struct ProcessorConfig {
     pub(in crate::processor) network_id: u32,
     /// Abstract network parameters customizing the transport layer (#1291).
     pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
-    /// Built-in serialized transport network configuration, when constructed from or projecting to
-    /// [`ProcessorConfigSerialized`].
-    pub(in crate::processor) serialized_transport_config: Option<TransportNetworkConfig>,
     /// [DelegateeKey].
     pub(in crate::processor) delegatee_key: DelegateeKey,
     /// Stabilization interval.
@@ -136,11 +134,13 @@ impl ProcessorConfig {
         delegatee_key: DelegateeKey,
         stabilize_interval: u64,
     ) -> Self {
-        let transport_config = TransportNetworkConfig::new(traversal_servers, None, None);
         Self {
             network_id,
-            network_parameters: Arc::new(transport_config.clone()),
-            serialized_transport_config: Some(transport_config),
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                traversal_servers,
+                None,
+                None,
+            )),
             delegatee_key,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
@@ -212,14 +212,13 @@ impl ProcessorConfig {
     pub fn with_network_parameters<P>(mut self, params: P) -> Self
     where P: NodeNetworkParameters + 'static {
         self.network_parameters = Arc::new(params);
-        self.serialized_transport_config = None;
         self
     }
 
     /// Returns the validated local UDP port range when configured on the built-in transport config.
     pub fn udp_port_range(&self) -> Option<UdpPortRange> {
-        self.serialized_transport_config
-            .as_ref()
+        (self.network_parameters.as_ref() as &dyn Any)
+            .downcast_ref::<TransportNetworkConfig>()
             .and_then(TransportNetworkConfig::udp_port_range)
     }
 
@@ -285,9 +284,10 @@ pub struct ProcessorConfigSerialized {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub(crate) network_id: u32,
-    /// A string representing ICE servers for WebRTC
+    /// Traversal/relay server specification string (serialized under the `ice_servers` key for
+    /// config file compatibility).
     pub(crate) ice_servers: String,
-    /// An optional string representing the external address for WebRTC
+    /// Optional external endpoint locator advertised by this node.
     pub(crate) external_address: Option<String>,
     /// Inclusive lower local UDP port bound.
     #[serde(default, alias = "webrtc_udp_port_min")]
@@ -402,10 +402,10 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
-        let udp_port_range = ins.udp_port_range();
-        let traversal_servers = ins
-            .serialized_transport_config
-            .as_ref()
+        let transport_config =
+            (ins.network_parameters.as_ref() as &dyn Any).downcast_ref::<TransportNetworkConfig>();
+        let udp_port_range = transport_config.and_then(TransportNetworkConfig::udp_port_range);
+        let traversal_servers = transport_config
             .map(|cfg| cfg.traversal_servers().to_owned())
             .unwrap_or_default();
         Ok(Self {
@@ -460,12 +460,13 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let onion_exit_heartbeat_interval =
             Duration::from_secs(ins.onion_exit_heartbeat_interval_secs);
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
-        let transport_config =
-            TransportNetworkConfig::new(ins.ice_servers, ins.external_address, udp_port_range);
         Ok(Self {
             network_id: ins.network_id,
-            network_parameters: Arc::new(transport_config.clone()),
-            serialized_transport_config: Some(transport_config),
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                ins.ice_servers,
+                ins.external_address,
+                udp_port_range,
+            )),
             delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,

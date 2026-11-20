@@ -511,5 +511,24 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     routed_processor.renew_delegatee_key(renewed_key, t1 + SIGNING_HORIZON_LEAD_MS)?;
     assert_eq!(rotations.load(std::sync::atomic::Ordering::SeqCst), 1);
 
+    // 3. Injecting `TransportNetworkConfig` via `with_network_parameters` preserves
+    //    `udp_port_range()` and round-trips through `ProcessorConfigSerialized` without dual-state divergence.
+    let range = UdpPortRange::new(50000, 50100)?;
+    let injected_traversal =
+        onion_test_config().with_network_parameters(TransportNetworkConfig::new(
+            "stun://stun.l.google.com:19302",
+            Some("https://node.rings.network:50000".to_string()),
+            Some(range),
+        ));
+    assert_eq!(injected_traversal.udp_port_range(), Some(range));
+    let serialized = ProcessorConfigSerialized::try_from(injected_traversal)?;
+    assert_eq!(serialized.ice_servers, "stun://stun.l.google.com:19302");
+    assert_eq!(
+        serialized.external_address.as_deref(),
+        Some("https://node.rings.network:50000")
+    );
+    assert_eq!(serialized.udp_port_min, Some(50000));
+    assert_eq!(serialized.udp_port_max, Some(50100));
+
     Ok(())
 }

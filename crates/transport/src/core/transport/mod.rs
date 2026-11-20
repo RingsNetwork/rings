@@ -5,7 +5,6 @@ mod send;
 mod state;
 
 pub use interface::custom_frame_wire;
-pub use interface::effective_max_message_size;
 #[cfg(any(
     feature = "dummy",
     feature = "native-webrtc",

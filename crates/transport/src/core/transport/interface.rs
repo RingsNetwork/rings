@@ -18,7 +18,6 @@ use crate::core::pool::ChannelLane;
 use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
 use crate::error::Error;
-use crate::sdp::parse_sdp_max_message_size;
 
 /// Wrapper for the data that is sent over the data channel.
 ///
@@ -91,24 +90,6 @@ pub(crate) const fn stored_max_message_size(stored: usize) -> usize {
         MAX_CHANNEL_MESSAGE_SIZE
     } else {
         stored
-    }
-}
-
-/// The effective per-message send limit for a peer whose handshake description is `remote_handshake`.
-/// An absent attribute defaults to 65536 and a value of `0` means "no limit" (still bounded by our
-/// own send cap); any explicit value at or above [`MIN_MAX_MESSAGE_SIZE`] is honoured and capped at
-/// [`MAX_CHANNEL_MESSAGE_SIZE`] for interop, while any positive value below [`MIN_MAX_MESSAGE_SIZE`]
-/// is refused with [`Error::RemoteMaxMessageSizeTooSmall`] so DHT control is never chunked (#1130).
-pub fn effective_max_message_size(remote_handshake: &str) -> crate::error::Result<usize> {
-    match parse_sdp_max_message_size(remote_handshake) {
-        None | Some(0) => Ok(MAX_CHANNEL_MESSAGE_SIZE),
-        Some(n) if (n as usize) < MIN_MAX_MESSAGE_SIZE => {
-            Err(Error::RemoteMaxMessageSizeTooSmall {
-                advertised: n as usize,
-                minimum: MIN_MAX_MESSAGE_SIZE,
-            })
-        }
-        Some(n) => Ok((n as usize).min(MAX_CHANNEL_MESSAGE_SIZE)),
     }
 }
 
@@ -331,6 +312,11 @@ pub trait TransportInterface {
     /// Get all the connection ids in the transport.
     fn connection_ids(&self) -> Vec<String>;
 
+    /// Validate a remote handshake offer description before opening or yielding a peer slot.
+    fn validate_remote_offer(&self, _remote_handshake: &str) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Update the transport's active session-bound traversal/relay credentials.
     fn update_session_credentials(&self, _credentials: &str) {}
 
@@ -372,8 +358,8 @@ pub trait DynTransportInterface {
     fn connection_ids(&self) -> Vec<String>;
 
     /// Validate a remote handshake offer description before opening or yielding a peer slot.
-    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<(), Error> {
-        effective_max_message_size(remote_handshake).map(|_| ())
+    fn validate_remote_offer(&self, _remote_handshake: &str) -> Result<(), Error> {
+        Ok(())
     }
 
     /// Update the transport's active session-bound traversal/relay credentials.
@@ -421,6 +407,10 @@ where
 
     fn connection_ids(&self) -> Vec<String> {
         TransportInterface::connection_ids(self)
+    }
+
+    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<(), Error> {
+        TransportInterface::validate_remote_offer(self, remote_handshake)
     }
 
     fn update_session_credentials(&self, credentials: &str) {

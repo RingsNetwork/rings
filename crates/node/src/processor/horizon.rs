@@ -457,21 +457,74 @@ mod tests {
     }
 
     /// Formal 3-Component Lockstep Invariant (Issue #1291 §4):
-    /// `\square (k_ring == k_swarm == k_ice)`: across all renewal transitions (`MintErr`,
-    /// `ValidationErr` from non-advancing horizon or wrong delegator DID, `PersistErr`, and
-    /// `CommitOk`), `Processor::renew_delegatee_key_with` never leaves `SessionKeyRing`,
-    /// `SwarmTransport::delegatee_key`, and the concrete transport's signed TURN ICE credentials
-    /// in a split-brain state.
+    /// Exhaustive finite-domain state-machine model check for the four-component lockstep law
+    /// `\square (k_ring == k_disk == k_swarm == k_transport)` across all 6 transition classes of
+    /// the 5-stage `Processor::renew_delegatee_key_with` Kleisli pipeline:
+    /// 1. `MintErr` (Stage 1 failure before pure law validation)
+    /// 2. `ValidationErr::NonAdvancingHorizon` (Stage 2 pure law failure: `h' <= h`)
+    /// 3. `ValidationErr::WrongDelegatorDid` (Stage 2 pure law failure: `did' != did`)
+    /// 4. `TransportRotationErr` (Stage 3 failure inside `NodeNetworkParameters::on_session_key_rotated`)
+    /// 5. `PersistErr` (Stage 4 disk persistence failure after `on_session_key_rotated` succeeded,
+    ///    verifying transactional rollback of the transport's session credentials to `k_prev`)
+    /// 6. `CommitOk` (all stages succeed, advancing all four components atomically from `k_0` to `k_1`
+    ///    and then across a second rotation from `k_1` to `k_2`).
     #[test]
     fn test_processor_renew_delegatee_key_preserves_three_component_lockstep_invariant() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
         use std::sync::Arc;
+        use std::sync::Mutex;
 
         use rings_core::utils::ManualClock;
+        use rings_transport::core::transport::SharedTransport;
         use rings_turn::format_turn_server_url;
         use rings_turn::TurnCredentialSigner;
 
+        use crate::processor::NodeNetworkParameters;
         use crate::processor::ProcessorBuilder;
         use crate::processor::ProcessorConfig;
+        use crate::processor::TransportNetworkConfig;
+
+        /// Fault-injectable [`NodeNetworkParameters`] wrapper around [`TransportNetworkConfig`]
+        /// that allows the formal transition model to inject Stage-3 `on_session_key_rotated`
+        /// failures while observing the underlying transport's active session credentials.
+        #[derive(Clone, Debug)]
+        struct FaultInjectableNetworkParams {
+            /// Underlying assisted-traversal transport configuration.
+            inner: TransportNetworkConfig,
+            /// When `true`, `on_session_key_rotated` fails before mutating the transport.
+            fail_rotation: Arc<AtomicBool>,
+        }
+
+        impl NodeNetworkParameters for FaultInjectableNetworkParams {
+            /// Delegate initial transport construction to the inner [`TransportNetworkConfig`].
+            fn build_transport(
+                &self,
+                delegatee_key: &DelegateeKey,
+            ) -> crate::error::Result<SharedTransport> {
+                NodeNetworkParameters::build_transport(&self.inner, delegatee_key)
+            }
+
+            /// Delegate endpoint hint inspection to the inner [`TransportNetworkConfig`].
+            fn endpoint_hint(&self) -> Option<&str> {
+                NodeNetworkParameters::endpoint_hint(&self.inner)
+            }
+
+            /// Fail when `fail_rotation` is armed; otherwise delegate credential rotation to
+            /// the inner [`TransportNetworkConfig`].
+            fn on_session_key_rotated(
+                &self,
+                transport: &SharedTransport,
+                next_key: &DelegateeKey,
+            ) -> crate::error::Result<()> {
+                if self.fail_rotation.load(Ordering::SeqCst) {
+                    return Err(Error::InvalidConfig(
+                        "injected transport session-key rotation failure".to_string(),
+                    ));
+                }
+                NodeNetworkParameters::on_session_key_rotated(&self.inner, transport, next_key)
+            }
+        }
 
         let delegator = SecretKey::random();
         let other_delegator = SecretKey::random();
@@ -484,8 +537,15 @@ mod tests {
         let ttl_ms = u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
         let k0 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
         let clock = Arc::new(ManualClock::new(t0));
+        let fail_rotation = Arc::new(AtomicBool::new(false));
+        let persisted_disk_key = Arc::new(Mutex::new(k0.clone()));
 
-        let config = ProcessorConfig::new(1, raw_ice.clone(), k0.clone(), 15).with_clock(clock);
+        let config = ProcessorConfig::new(1, raw_ice.clone(), k0.clone(), 15)
+            .with_clock(clock)
+            .with_network_parameters(FaultInjectableNetworkParams {
+                inner: TransportNetworkConfig::new(raw_ice.clone(), None, None),
+                fail_rotation: Arc::clone(&fail_rotation),
+            });
         let processor = ProcessorBuilder::from_config(&config)
             .unwrap()
             .build_at(t0)
@@ -493,6 +553,7 @@ mod tests {
 
         let assert_lockstep = |expected_key: &DelegateeKey| {
             let k_ring = processor.delegatee_key();
+            let k_disk = persisted_disk_key.lock().unwrap().clone();
             let k_swarm = processor.swarm.delegatee_key();
             let k_transport = processor
                 .session_transport_credentials()
@@ -503,6 +564,11 @@ mod tests {
                 k_ring.delegatee_public_key(),
                 expected_key.delegatee_public_key(),
                 "k_ring diverged from expected key"
+            );
+            assert_eq!(
+                k_disk.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_disk diverged from k_ring"
             );
             assert_eq!(
                 k_swarm.delegatee_public_key(),
@@ -521,31 +587,63 @@ mod tests {
         let renew_ms = h0 - SIGNING_HORIZON_LEAD_MS;
         let k1 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms).unwrap();
 
-        // 1. MintErr: failure before validation preserves (k0, k0, k0).
+        // 1. MintErr: failure at Stage 1 preserves (k0, k0, k0, k0).
         let mint_err = processor.renew_delegatee_key_with(
             renew_ms,
             |_| Err(Error::VerifyError("injected mint failure".to_string())),
-            |_| Ok(()),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
         );
         assert!(mint_err.is_err());
         assert_lockstep(&k0);
 
-        // 2. ValidationErr (non-advancing horizon): failure during pure law check preserves (k0, k0, k0).
+        // 2. ValidationErr (non-advancing horizon): failure at Stage 2 preserves (k0, k0, k0, k0).
         let non_advancing = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
-        let val_err_horizon =
-            processor.renew_delegatee_key_with(renew_ms, |_| Ok(non_advancing), |_| Ok(()));
+        let val_err_horizon = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(non_advancing),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
         assert!(val_err_horizon.is_err());
         assert_lockstep(&k0);
 
-        // 3. ValidationErr (wrong delegator DID): preserves (k0, k0, k0).
+        // 3. ValidationErr (wrong delegator DID): failure at Stage 2 preserves (k0, k0, k0, k0).
         let wrong_did =
             DelegateeKey::new_with_seckey_at(&other_delegator, ttl_ms, renew_ms).unwrap();
-        let val_err_did =
-            processor.renew_delegatee_key_with(renew_ms, |_| Ok(wrong_did), |_| Ok(()));
+        let val_err_did = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(wrong_did),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
         assert!(val_err_did.is_err());
         assert_lockstep(&k0);
 
-        // 4. PersistErr: failure after validation and ICE signing but before commit preserves (k0, k0, k0).
+        // 4. TransportRotationErr: failure at Stage 3 (`on_session_key_rotated`) aborts before
+        //    touching disk, swarm, or key ring, preserving (k0, k0, k0, k0).
+        fail_rotation.store(true, Ordering::SeqCst);
+        let rot_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(k1.clone()),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        fail_rotation.store(false, Ordering::SeqCst);
+        assert!(rot_err.is_err());
+        assert_lockstep(&k0);
+
+        // 5. PersistErr: failure at Stage 4 after `on_session_key_rotated` already updated the
+        //    transport rolls back the transport's session credentials to `k0`, preserving
+        //    (k0, k0, k0, k0).
         let persist_err = processor.renew_delegatee_key_with(
             renew_ms,
             |_| Ok(k1.clone()),
@@ -554,11 +652,34 @@ mod tests {
         assert!(persist_err.is_err());
         assert_lockstep(&k0);
 
-        // 5. CommitOk: atomic transition advances all three components to (k1, k1, k1).
+        // 6. CommitOk: atomic transition advances all four components to (k1, k1, k1, k1).
         let h1 = processor
-            .renew_delegatee_key_with(renew_ms, |_| Ok(k1.clone()), |_| Ok(()))
+            .renew_delegatee_key_with(
+                renew_ms,
+                |_| Ok(k1.clone()),
+                |next| {
+                    *persisted_disk_key.lock().unwrap() = next.clone();
+                    Ok(())
+                },
+            )
             .expect("valid renewal must commit");
         assert!(h1.horizon_ms() > h0);
+        assert_lockstep(&k1);
+
+        // 7. Subsequent TransportRotationErr from committed state `k1` preserves (k1, k1, k1, k1).
+        let renew_ms_2 = h1.horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+        let k2 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_2).unwrap();
+        fail_rotation.store(true, Ordering::SeqCst);
+        let rot_err_2 = processor.renew_delegatee_key_with(
+            renew_ms_2,
+            |_| Ok(k2.clone()),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        fail_rotation.store(false, Ordering::SeqCst);
+        assert!(rot_err_2.is_err());
         assert_lockstep(&k1);
     }
 }

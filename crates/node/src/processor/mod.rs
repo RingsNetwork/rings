@@ -221,6 +221,17 @@ impl Processor {
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
     /// [`SessionKeyRing::renew_with`], updating the swarm transport and session-bound transport
     /// credentials in lockstep on success (#1153, #1291).
+    ///
+    /// # Invariant (Four-Component Transactional Lockstep)
+    ///
+    /// Across every renewal outcome (`MintErr`, `ValidationErr`, `TransportRotationErr`,
+    /// `PersistErr`, `SwarmErr`, and `CommitOk`), `(k_ring, k_disk, k_swarm, k_transport)` never
+    /// diverge:
+    /// 1. `on_session_key_rotated` runs before `persist(next)` and `swarm.set_delegatee_key`,
+    ///    so any transport credential derivation or rotation failure aborts before touching disk
+    ///    or swarm state.
+    /// 2. If `persist(next)` or `swarm.set_delegatee_key` fails after `on_session_key_rotated`,
+    ///    `on_session_key_rotated` is rolled back with the prior active key before returning `Err`.
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
         now_ms: u128,
@@ -231,13 +242,20 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
+        let previous_key = self.delegatee_key();
         let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            persist(next)?;
-            self.swarm
-                .set_delegatee_key(next.clone())
-                .map_err(Error::CoreError)?;
             self.network_parameters
                 .on_session_key_rotated(self.swarm.transport(), next)?;
+            if let Err(err) = persist(next).and_then(|()| {
+                self.swarm
+                    .set_delegatee_key(next.clone())
+                    .map_err(Error::CoreError)
+            }) {
+                let _ = self
+                    .network_parameters
+                    .on_session_key_rotated(self.swarm.transport(), &previous_key);
+                return Err(err);
+            }
             Ok(())
         })?;
         Ok(horizon)
