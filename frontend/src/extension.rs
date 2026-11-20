@@ -235,7 +235,8 @@ async fn handle_headless_node_message(
 ) -> Result<JsValue, String> {
     match message_type.as_str() {
         EXTENSION_NODE_STATUS => {
-            headless_node_snapshot(state, "background node active".to_string(), false, None).await
+            let context = retained_headless_message(state.borrow().message.clone(), true);
+            headless_node_snapshot(state, context, false, None).await
         }
         EXTENSION_NODE_START => start_headless_node(state, &message).await,
         EXTENSION_NODE_STOP => stop_headless_node(state).await,
@@ -459,8 +460,14 @@ async fn connect_headless_seed(
                     Vec::new(),
                 ));
             }
-            let (peers, message) =
-                settle_headless_peers(built, "seed URL connected", true, Some(generation)).await;
+            let (peers, message) = settle_headless_peers(
+                built,
+                Vec::new(),
+                "seed URL connected",
+                true,
+                Some(generation),
+            )
+            .await;
             Ok((message, peers))
         }
         Err(error) => Ok((
@@ -705,11 +712,12 @@ fn retained_headless_message(message: String, online: bool) -> String {
 
 async fn settle_headless_peers(
     node: &DemoNode,
+    initial_peers: Vec<PeerView>,
     context: &str,
     settle: bool,
     expected_generation: Option<&GenerationToken>,
 ) -> (Vec<PeerView>, String) {
-    let mut peers = Vec::new();
+    let mut peers = initial_peers;
     let mut message = context.to_string();
     let delays: &[u64] = if settle {
         peer_sync::PEER_SETTLE_DELAYS_MS
@@ -731,6 +739,10 @@ async fn settle_headless_peers(
                     if !peers.is_empty() {
                         break;
                     }
+                } else if let Some(updated) =
+                    peer_sync::refresh_waiting_peer_status(context, peers.len())
+                {
+                    message = updated;
                 }
             }
             Err(error) => {
@@ -785,8 +797,14 @@ async fn headless_node_snapshot(
         return retained_headless_snapshot_js(state);
     };
 
-    let (peers, message) =
-        settle_headless_peers(&node, &context, settle, expected_generation.as_ref()).await;
+    let (peers, message) = settle_headless_peers(
+        &node,
+        state_peers,
+        &context,
+        settle,
+        expected_generation.as_ref(),
+    )
+    .await;
     if expected_generation
         .as_ref()
         .is_some_and(|expected| !expected.is_current())
@@ -800,7 +818,7 @@ async fn headless_node_snapshot(
             return retained_live_headless_snapshot_js(&state);
         }
         state.peers = peers.clone();
-        if settle {
+        if settle || peer_sync::refresh_waiting_peer_status(&state.message, peers.len()).is_some() {
             state.message = message.clone();
         }
     }

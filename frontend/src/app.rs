@@ -429,6 +429,11 @@ fn refresh_peer_snapshot(
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(next) = node::list_peers(&node.provider).await {
             if refresh_token.is_current() {
+                if let Some(updated) =
+                    crate::peer_sync::refresh_waiting_peer_status(&status, next.len())
+                {
+                    status.set(updated);
+                }
                 peers.set(next);
             }
         }

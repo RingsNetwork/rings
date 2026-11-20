@@ -230,7 +230,7 @@ async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, S
 
 struct IdbRequestWatch {
     request: JsValue,
-    _handlers: [Closure<dyn FnMut(Event)>; 2],
+    _handlers: [Closure<dyn FnMut(Event)>; 3],
     receiver: oneshot::Receiver<Result<JsValue, String>>,
 }
 
@@ -259,6 +259,14 @@ impl IdbRequestWatch {
                 }
             })
         };
+        let on_blocked = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Err("IndexedDB request blocked".to_string()));
+                }
+            })
+        };
         let _ = Reflect::set(
             request,
             &JsValue::from_str("onsuccess"),
@@ -269,9 +277,14 @@ impl IdbRequestWatch {
             &JsValue::from_str("onerror"),
             on_error.as_ref().unchecked_ref(),
         );
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onblocked"),
+            on_blocked.as_ref().unchecked_ref(),
+        );
         Self {
             request: request.clone(),
-            _handlers: [on_success, on_error],
+            _handlers: [on_success, on_error, on_blocked],
             receiver,
         }
     }
@@ -285,6 +298,11 @@ impl Drop for IdbRequestWatch {
             &JsValue::NULL,
         );
         let _ = Reflect::set(&self.request, &JsValue::from_str("onerror"), &JsValue::NULL);
+        let _ = Reflect::set(
+            &self.request,
+            &JsValue::from_str("onblocked"),
+            &JsValue::NULL,
+        );
     }
 }
 
@@ -460,22 +478,24 @@ async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
 }
 
 async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
-    let db = IdbDatabaseGuard {
-        db: open_webcrypto_idb().await?,
+    let record = {
+        let db = IdbDatabaseGuard {
+            db: open_webcrypto_idb().await?,
+        };
+        let transaction = js_call2(
+            &db.db,
+            "transaction",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+            &JsValue::from_str("readonly"),
+        )?;
+        let store = js_call1(
+            &transaction,
+            "objectStore",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        )?;
+        let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
+        await_idb_request(&get_req).await?
     };
-    let transaction = js_call2(
-        &db.db,
-        "transaction",
-        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-        &JsValue::from_str("readonly"),
-    )?;
-    let store = js_call1(
-        &transaction,
-        "objectStore",
-        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-    )?;
-    let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
-    let record = await_idb_request(&get_req).await?;
     if record.is_undefined() || record.is_null() {
         return Ok(None);
     }

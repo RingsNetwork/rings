@@ -58,6 +58,14 @@ pub(crate) fn peer_sync_status(context: &str, count: usize) -> String {
     }
 }
 
+pub(crate) fn refresh_waiting_peer_status(current: &str, count: usize) -> Option<String> {
+    if count == 0 {
+        return None;
+    }
+    let context = current.strip_suffix("; no peers visible yet")?;
+    Some(peer_sync_status(context, count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +84,18 @@ mod tests {
         assert_eq!(
             peer_sync_status("HTTP endpoint connected", 2),
             "HTTP endpoint connected; 2 peers visible"
+        );
+        assert_eq!(
+            refresh_waiting_peer_status("seed URL connected; no peers visible yet", 0),
+            None
+        );
+        assert_eq!(
+            refresh_waiting_peer_status("seed URL connected; no peers visible yet", 1),
+            Some("seed URL connected; 1 peer visible".to_string())
+        );
+        assert_eq!(
+            refresh_waiting_peer_status("background node ready", 1),
+            None
         );
     }
 }
