@@ -86,6 +86,7 @@ use self::frame_ledger::FrameLedger;
 pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::handshake::CounterOffer;
 pub(crate) use self::handshake::CreatedAnswer;
+pub(crate) use self::handshake::InitialOfferStep;
 pub(crate) use self::handshake::InitiatorReplyOutcome;
 pub use self::handshake::OfferReply;
 #[cfg(test)]

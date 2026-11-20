@@ -1323,8 +1323,17 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
         build_custom_node(k1.clone(), 0, MAX_CHANNEL_MESSAGE_SIZE, &zero_switchboard)?;
     let valid_zero_2 =
         build_custom_node(k2.clone(), 0, MAX_CHANNEL_MESSAGE_SIZE, &zero_switchboard)?;
-    // Both sides open their pre-established 0-step link with zero overlay signaling messages!
-    valid_zero_1.swarm.connect(valid_zero_2.did()).await?;
+    // Out-of-band `offer_connection_step` returns `(attempt, None)` cleanly without fabricating an
+    // offer or double-marking `Answered`, while ` valid_zero_2.swarm.connect(...)` completes the
+    // symmetric side!
+    let (_zero_attempt, maybe_offer) = valid_zero_1
+        .swarm
+        .offer_connection_step(valid_zero_2.did())
+        .await?;
+    assert!(
+        maybe_offer.is_none(),
+        "0-step offer_connection_step must return None without fabricating a ConnectNodeSend"
+    );
     valid_zero_2.swarm.connect(valid_zero_1.did()).await?;
     wait_until_result(
         "0-step peers admit each other without overlay signaling",

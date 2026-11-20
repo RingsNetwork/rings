@@ -592,16 +592,15 @@ impl Swarm {
             .map(|(_, payload)| payload)
     }
 
-    /// Reserve a connection generation for `peer` and create its offer, returning the attempt
-    /// that names the generation so the caller can accept the answer for it or cancel it
-    /// without touching a handshake the peer started meanwhile.
-    ///
-    /// The caller owns the offer and carries it out of band, so the attempt never sends it
-    /// over the DHT as a counter-offer (#947). It prevails over a crossing overlay offer, which
-    /// is refused; of a crossing out-of-band offer, one from a larger DID is refused and one from
-    /// a smaller DID takes the slot (`Law (Tie-break)`).
-    pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
-        let (attempt, offer_msg) = self
+    /// Reserve an out-of-band connection generation for `peer` and execute step `0` of its
+    /// handshake, returning `(attempt, None)` when a 0-step transport completes locally without
+    /// emitting any signaling message, or `(attempt, Some(payload))` when an outbound step `0`
+    /// `ConnectNodeSend` payload is produced (#1291).
+    pub async fn offer_connection_step(
+        &self,
+        peer: Did,
+    ) -> Result<(ConnectionAttempt, Option<MessagePayload>)> {
+        let (attempt, initial_step) = self
             .transport
             .prepare_connection_offer_owned_by(
                 peer,
@@ -609,6 +608,72 @@ impl Swarm {
                 OfferOwner::External,
             )
             .await?;
+        let offer_msg = match initial_step {
+            transport::InitialOfferStep::Completed => {
+                return Ok((ConnectionAttempt(attempt), None))
+            }
+            transport::InitialOfferStep::Send(offer_msg) => offer_msg,
+        };
+
+        // This payload has fake next_hop.
+        // The invoker should fix it before sending.
+        let payload = self
+            .transport
+            .settle_handshake_step(
+                attempt,
+                "wrapping connection offer",
+                self.transport.application_egress().originate(
+                    Message::ConnectNodeSend(offer_msg.clone()),
+                    peer,
+                    Some(self.did()),
+                ),
+            )
+            .await?;
+        if let Err(error) =
+            self.transport
+                .mark_offer_sent(attempt, &offer_msg, payload.transaction.tx_id)
+        {
+            return Err(self
+                .transport
+                .classify_step_failure(attempt, error, "marking connection offer sent")
+                .await?);
+        }
+
+        Ok((ConnectionAttempt(attempt), Some(payload)))
+    }
+
+    /// Reserve a connection generation for `peer` and create its 2-step out-of-band offer,
+    /// returning the attempt that names the generation so the caller can accept the answer for it
+    /// or cancel it without touching a handshake the peer started meanwhile.
+    ///
+    /// The caller owns the offer and carries it out of band, so the attempt never sends it
+    /// over the DHT as a counter-offer (#947). It prevails over a crossing overlay offer, which
+    /// is refused; of a crossing out-of-band offer, one from a larger DID is refused and one from
+    /// a smaller DID takes the slot (`Law (Tie-break)`). Transports that complete in 0 or 1 steps
+    /// return [`rings_transport::error::Error::UnsupportedOperation`] here (use
+    /// [`Self::offer_connection_step`] or [`Self::connect`]).
+    pub async fn offer_connection(&self, peer: Did) -> Result<(ConnectionAttempt, MessagePayload)> {
+        let (attempt, initial_step) = self
+            .transport
+            .prepare_connection_offer_owned_by(
+                peer,
+                self.transport_callback(),
+                OfferOwner::External,
+            )
+            .await?;
+        let offer_msg = match initial_step {
+            transport::InitialOfferStep::Send(offer_msg) if !offer_msg.final_step => offer_msg,
+            transport::InitialOfferStep::Completed | transport::InitialOfferStep::Send(_) => {
+                let err = Error::Transport(rings_transport::error::Error::UnsupportedOperation(
+                    "out-of-band offer_connection requires a non-final initial offer; use offer_connection_step or Swarm::connect"
+                        .to_string(),
+                ));
+                return Err(self
+                    .transport
+                    .classify_step_failure(attempt, err, "creating out-of-band connection offer")
+                    .await?);
+            }
+        };
 
         // This payload has fake next_hop.
         // The invoker should fix it before sending.
@@ -637,12 +702,73 @@ impl Swarm {
         Ok((ConnectionAttempt(attempt), payload))
     }
 
+    /// Verify and apply an out-of-band `ConnectNodeSend` handshake step, returning
+    /// `OfferReply::Answer(None)` when a final inbound step completes the handshake without an
+    /// outbound reply, `OfferReply::Answer(Some(payload))` when a reply `ConnectNodeReport` is
+    /// produced, or `OfferReply::CounterOffer(payload)` when this node's prevailing offer wins.
+    pub async fn answer_offer_step(
+        &self,
+        offer_payload: MessagePayload,
+    ) -> Result<OfferReply<Option<MessagePayload>, MessagePayload>> {
+        if !offer_payload
+            .verify_transaction_and_payload_at(self.network_id(), self.transport.now_ms())
+        {
+            return Err(Error::VerifySignatureFailed);
+        }
+
+        let Message::ConnectNodeSend(msg) = offer_payload.transaction.data()? else {
+            return Err(Error::InvalidMessage(
+                "Should be ConnectNodeSend".to_string(),
+            ));
+        };
+        if offer_payload.transaction.destination != self.did() {
+            return Err(Error::InvalidMessage(
+                "ConnectNodeSend destination does not match this node".to_string(),
+            ));
+        }
+        self.transport
+            .admit_final_transaction(
+                &offer_payload.transaction,
+                MessageCategory::DhtControl.into(),
+                Principal::Local,
+            )
+            .await?;
+
+        let peer = offer_payload.transaction.origin();
+        match self
+            .transport
+            .answer_remote_connection(peer, self.transport_callback(), &msg)
+            .await?
+        {
+            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) => self
+                .transport
+                .settle_handshake_step(
+                    attempt,
+                    "wrapping connection answer",
+                    self.transport.application_egress().originate(
+                        Message::ConnectNodeReport(report),
+                        peer,
+                        Some(self.did()),
+                    ),
+                )
+                .await
+                .map(|payload| OfferReply::Answer(Some(payload))),
+            OfferReply::Answer(None) => Ok(OfferReply::Answer(None)),
+            OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
+                .transport
+                .application_egress()
+                .originate(Message::ConnectNodeSend(offer), peer, Some(self.did()))
+                .await
+                .map(OfferReply::CounterOffer),
+        }
+    }
+
     /// Answer the offer of remote connection. This function will verify the answer payload and
     /// will wrap the answer inside a payload with verification.
     ///
     /// The offer is carried out of band, so it prevails over this node's own sent overlay offer
     /// to the same peer, which is released (`Law (Tie-break)`), and the reply is
-    /// [`OfferReply::Answer`], a `ConnectNodeReport` for the peer's `accept_answer`: a
+    /// [`OfferReply::Answer`], a final `ConnectNodeReport` for the peer's `accept_answer`: a
     /// counter-offer would leave the peer to deliver its answer through this node's
     /// `accept_answer`, which a node's public HTTP API does not serve. Nodes of 0.34.2 and
     /// earlier reply with [`OfferReply::CounterOffer`] when their sent overlay offer prevails on
@@ -670,6 +796,14 @@ impl Swarm {
                 "ConnectNodeSend destination does not match this node".to_string(),
             ));
         }
+        if msg.step_index != 0 || msg.final_step {
+            return Err(Error::Transport(
+                rings_transport::error::Error::UnsupportedOperation(
+                    "out-of-band answer_offer requires a non-final step-0 ConnectNodeSend; use answer_offer_step"
+                        .to_string(),
+                ),
+            ));
+        }
         self.transport
             .admit_final_transaction(
                 &offer_payload.transaction,
@@ -685,7 +819,7 @@ impl Swarm {
             .answer_remote_connection(peer, self.transport_callback(), &msg)
             .await?
         {
-            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) => self
+            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) if report.final_step => self
                 .transport
                 .settle_handshake_step(
                     attempt,
@@ -698,20 +832,22 @@ impl Swarm {
                 )
                 .await
                 .map(OfferReply::Answer),
-            OfferReply::Answer(None) => self
-                .transport
-                .application_egress()
-                .originate(
-                    Message::ConnectNodeReport(crate::message::ConnectNodeReport::final_answer(
-                        bytes::Bytes::new(),
-                        self.dht_protocol_mode(),
-                        self.transport.dht.relay_custody(),
-                    )),
-                    peer,
-                    Some(self.did()),
-                )
-                .await
-                .map(OfferReply::Answer),
+            OfferReply::Answer(Some(CreatedAnswer { attempt, .. })) => {
+                let err = Error::Transport(rings_transport::error::Error::UnsupportedOperation(
+                    "out-of-band answer_offer requires a 2-step transport; use answer_offer_step or Swarm::connect"
+                        .to_string(),
+                ));
+                Err(self
+                    .transport
+                    .classify_step_failure(attempt, err, "answering out-of-band offer")
+                    .await?)
+            }
+            OfferReply::Answer(None) => Err(Error::Transport(
+                rings_transport::error::Error::UnsupportedOperation(
+                    "out-of-band answer_offer completed without a reply payload; use answer_offer_step"
+                        .to_string(),
+                ),
+            )),
             OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
                 .transport
                 .application_egress()
@@ -761,6 +897,11 @@ impl Swarm {
         if answer_payload.transaction.destination != self.did() {
             return Err(Error::InvalidMessage(
                 "ConnectNodeReport destination does not match this node".to_string(),
+            ));
+        }
+        if !msg.final_step {
+            return Err(Error::InvalidMessage(
+                "out-of-band accept_answer requires a final ConnectNodeReport".to_string(),
             ));
         }
         self.transport

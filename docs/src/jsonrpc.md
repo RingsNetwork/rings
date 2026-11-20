@@ -63,13 +63,13 @@ Errors follow JSON-RPC 2.0:
 ### Wire version
 
 Every frame a node sends, and so every offer and answer of a handshake, opens with the fixed
-header `"RINGS\0" ‖ wire_version` (`u16` big-endian; `WIRE_VERSION = 4` in 1.0). The wire version
+header `"RINGS\0" ‖ wire_version` (`u16` big-endian; `WIRE_VERSION = 5` in 1.0). The wire version
 goes up by one per release, relative to the last released wire version, when a release changes
 anything on the wire that a node of that version would reject or misread; it is independent of
 the crate version. There is no multi-version negotiation: a node accepts only its own
 `WIRE_VERSION`, so two nodes of different wire versions never connect and each refuses the
 other's offer or answer before decoding its body (error `210` over JSON-RPC). The `1.0.x` release
-line freezes `WIRE_VERSION = 4`; any future wire-version bump is an explicit coordinated network
+line freezes `WIRE_VERSION = 5`; any future wire-version bump is an explicit coordinated network
 cutover. A client learns a node's wire version before joining it from the `wire_version` of its
 public `nodeDid`, and its crate version from the `x-node-version` header of every API response.
 

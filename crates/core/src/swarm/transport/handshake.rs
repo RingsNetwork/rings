@@ -315,34 +315,37 @@ impl SwarmTransport {
         peer: Did,
         callback: SwarmTransportCallback,
     ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
-        self.prepare_connection_offer_owned_by(peer, callback, OfferOwner::Overlay)
-            .await
+        let (attempt, step) = self
+            .prepare_connection_offer_owned_by(peer, callback, OfferOwner::Overlay)
+            .await?;
+        match step {
+            InitialOfferStep::Send(offer) => Ok((attempt, offer)),
+            InitialOfferStep::Completed => {
+                let err = Error::Transport(rings_transport::error::Error::UnsupportedOperation(
+                    "0-step transport produces no initial ConnectNodeSend".to_string(),
+                ));
+                Err(self
+                    .classify_step_failure(attempt, err, "preparing initial connection offer")
+                    .await?)
+            }
+        }
     }
 
     /// Reserve a connection generation for `peer`, driven by `owner`, and produce its initial
-    /// outbound step; the attempt names the generation so the caller can accept or cancel exactly
-    /// what it reserved. The attempt stays `Creating` until its owner marks the offer sent.
+    /// step (`Completed` for a 0-step transport, or `Send(ConnectNodeSend)` for 1+-step
+    /// transports). For `Send`, the attempt stays `Creating` until its owner marks the offer sent.
     pub(in crate::swarm) async fn prepare_connection_offer_owned_by(
         &self,
         peer: Did,
         callback: SwarmTransportCallback,
         owner: OfferOwner,
-    ) -> Result<(PendingConnectionAttempt, ConnectNodeSend)> {
+    ) -> Result<(PendingConnectionAttempt, InitialOfferStep)> {
         let pending = self
             .open_pending_connection(peer, callback, Handshake::offering(owner))
             .await?;
         let attempt = pending.attempt();
-        match self.create_initial_step(&pending).await? {
-            InitialOfferStep::Send(offer) => Ok((attempt, offer)),
-            InitialOfferStep::Completed => Ok((attempt, ConnectNodeSend {
-                step_index: 0,
-                final_step: true,
-                session_id: None,
-                handshake: Bytes::new(),
-                dht_protocol_mode: self.dht_protocol_mode(),
-                relay_custody: self.dht.relay_custody(),
-            })),
-        }
+        let step = self.create_initial_step(&pending).await?;
+        Ok((attempt, step))
     }
 
     /// Reserve a generation for `peer` whose signaling starts in `handshake`, and create its

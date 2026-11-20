@@ -293,11 +293,31 @@ impl Processor {
         remote: &impl RemoteHandshake,
         peer: Did,
     ) -> std::result::Result<ConnectionAttempt, HandshakeFailure> {
-        let (attempt, offer) = self
+        let (attempt, maybe_offer) = self
             .swarm
-            .offer_connection(peer)
+            .offer_connection_step(peer)
             .await
             .map_err(|error| HandshakeFailure::from_stage(peer, Error::CreateOffer, error))?;
+        let Some(offer) = maybe_offer else {
+            // 0-step transport completed locally with no outbound signaling message.
+            return Ok(attempt);
+        };
+        if offer
+            .transaction
+            .data::<Message>()
+            .ok()
+            .is_some_and(|m| matches!(m, Message::ConnectNodeSend(ref s) if s.final_step))
+        {
+            self.abandon_handshake(attempt).await;
+            return Err(HandshakeFailure::from_stage(
+                peer,
+                Error::CreateOffer,
+                CoreError::Transport(rings_transport::error::Error::UnsupportedOperation(
+                    "HTTP answerOffer/acceptAnswer requires a 2-step offer/answer handshake"
+                        .to_string(),
+                )),
+            ));
+        }
         let exchange = async {
             let reply = remote.answer_offer(&offer).await?;
             if OfferReplyKind::from_payload(&reply)? == OfferReplyKind::CounterOffer {
