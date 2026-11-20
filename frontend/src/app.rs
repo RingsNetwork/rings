@@ -804,4 +804,20 @@ mod tests {
         assert!(!webview_gateway_ready(false, "did:ring:online", false));
         assert!(webview_gateway_ready(false, "", true));
     }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_ice_servers_migrates_legacy_default_and_preserves_custom_values() {
+        extension::save_setting(extension::SETTING_ICE_SERVERS, LEGACY_DEFAULT_ICE_SERVERS);
+        assert_eq!(load_ice_servers_setting_or_default(), DEFAULT_ICE_SERVERS);
+        assert_eq!(
+            extension::load_setting(extension::SETTING_ICE_SERVERS).as_deref(),
+            Some(DEFAULT_ICE_SERVERS)
+        );
+
+        let custom = "turn://turn.example.com:3478";
+        extension::save_setting(extension::SETTING_ICE_SERVERS, custom);
+        assert_eq!(load_ice_servers_setting_or_default(), custom);
+        extension::save_setting(extension::SETTING_ICE_SERVERS, DEFAULT_ICE_SERVERS);
+    }
 }

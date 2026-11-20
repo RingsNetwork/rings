@@ -781,6 +781,13 @@ async fn headless_node_snapshot(
 
     let (peers, message) =
         settle_headless_peers(&node, &context, settle, expected_generation.as_ref()).await;
+    if expected_generation
+        .as_ref()
+        .is_some_and(|expected| !expected.is_current())
+    {
+        let state = state.borrow();
+        return retained_live_headless_snapshot_js(&state);
+    }
     {
         let mut state = state.borrow_mut();
         if !snapshot_generation.is_current() || state.node.is_none() {

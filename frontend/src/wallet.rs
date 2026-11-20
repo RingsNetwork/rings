@@ -228,6 +228,168 @@ async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, S
     })
 }
 
+struct IdbRequestWatch {
+    request: JsValue,
+    _handlers: [Closure<dyn FnMut(Event)>; 2],
+    receiver: oneshot::Receiver<Result<JsValue, String>>,
+}
+
+impl IdbRequestWatch {
+    fn new(request: &JsValue) -> Self {
+        let (sender, receiver) = oneshot::channel::<Result<JsValue, String>>();
+        let outcome = Rc::new(RefCell::new(Some(sender)));
+        let on_success = {
+            let outcome = outcome.clone();
+            let request = request.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(js_prop(&request, "result"));
+                }
+            })
+        };
+        let on_error = {
+            let outcome = outcome.clone();
+            let request = request.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let error = js_prop(&request, "error")
+                        .map(js_error_label)
+                        .unwrap_or_else(|err| err);
+                    let _ = tx.send(Err(error));
+                }
+            })
+        };
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onsuccess"),
+            on_success.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onerror"),
+            on_error.as_ref().unchecked_ref(),
+        );
+        Self {
+            request: request.clone(),
+            _handlers: [on_success, on_error],
+            receiver,
+        }
+    }
+}
+
+impl Drop for IdbRequestWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.request,
+            &JsValue::from_str("onsuccess"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(&self.request, &JsValue::from_str("onerror"), &JsValue::NULL);
+    }
+}
+
+struct IdbUpgradeWatch {
+    open: JsValue,
+    _handler: Closure<dyn FnMut(Event)>,
+}
+
+impl Drop for IdbUpgradeWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.open,
+            &JsValue::from_str("onupgradeneeded"),
+            &JsValue::NULL,
+        );
+    }
+}
+
+struct IdbTransactionWatch {
+    transaction: JsValue,
+    _handlers: [Closure<dyn FnMut(Event)>; 3],
+    receiver: oneshot::Receiver<Result<(), String>>,
+}
+
+impl IdbTransactionWatch {
+    fn new(transaction: &JsValue) -> Self {
+        let (sender, receiver) = oneshot::channel::<Result<(), String>>();
+        let outcome = Rc::new(RefCell::new(Some(sender)));
+        let on_complete = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Ok(()));
+                }
+            })
+        };
+        let on_error = {
+            let outcome = outcome.clone();
+            let transaction = transaction.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let error = js_prop(&transaction, "error")
+                        .map(js_error_label)
+                        .unwrap_or_else(|err| err);
+                    let _ = tx.send(Err(error));
+                }
+            })
+        };
+        let on_abort = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Err("IndexedDB transaction aborted".to_string()));
+                }
+            })
+        };
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("oncomplete"),
+            on_complete.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("onerror"),
+            on_error.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("onabort"),
+            on_abort.as_ref().unchecked_ref(),
+        );
+        Self {
+            transaction: transaction.clone(),
+            _handlers: [on_complete, on_error, on_abort],
+            receiver,
+        }
+    }
+
+    async fn committed(mut self) -> Result<(), String> {
+        (&mut self.receiver)
+            .await
+            .map_err(|_| "IndexedDB transaction dropped before settling".to_string())?
+    }
+}
+
+impl Drop for IdbTransactionWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("oncomplete"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("onerror"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("onabort"),
+            &JsValue::NULL,
+        );
+    }
+}
+
 async fn open_webcrypto_idb() -> Result<JsValue, String> {
     let factory = js_global_prop("indexedDB")?;
     if factory.is_undefined() || factory.is_null() {
@@ -266,116 +428,18 @@ async fn open_webcrypto_idb() -> Result<JsValue, String> {
         &JsValue::from_str("onupgradeneeded"),
         on_upgrade.as_ref().unchecked_ref(),
     );
-    let db = await_idb_request(&open).await;
-    let _ = Reflect::set(&open, &JsValue::from_str("onupgradeneeded"), &JsValue::NULL);
-    drop(on_upgrade);
-    db
+    let _upgrade_watch = IdbUpgradeWatch {
+        open: open.clone(),
+        _handler: on_upgrade,
+    };
+    await_idb_request(&open).await
 }
 
 async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
-    let (sender, receiver) = oneshot::channel::<Result<JsValue, String>>();
-    let outcome = Rc::new(RefCell::new(Some(sender)));
-    let on_success = {
-        let outcome = outcome.clone();
-        let request = request.clone();
-        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            if let Some(tx) = outcome.borrow_mut().take() {
-                let _ = tx.send(js_prop(&request, "result"));
-            }
-        })
-    };
-    let on_error = {
-        let outcome = outcome.clone();
-        let request = request.clone();
-        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            if let Some(tx) = outcome.borrow_mut().take() {
-                let error = js_prop(&request, "error")
-                    .map(js_error_label)
-                    .unwrap_or_else(|err| err);
-                let _ = tx.send(Err(error));
-            }
-        })
-    };
-    let _ = Reflect::set(
-        request,
-        &JsValue::from_str("onsuccess"),
-        on_success.as_ref().unchecked_ref(),
-    );
-    let _ = Reflect::set(
-        request,
-        &JsValue::from_str("onerror"),
-        on_error.as_ref().unchecked_ref(),
-    );
-    let result = receiver
+    let mut watch = IdbRequestWatch::new(request);
+    (&mut watch.receiver)
         .await
-        .map_err(|_| "IndexedDB request dropped before settling".to_string())?;
-    let _ = Reflect::set(request, &JsValue::from_str("onsuccess"), &JsValue::NULL);
-    let _ = Reflect::set(request, &JsValue::from_str("onerror"), &JsValue::NULL);
-    drop(on_success);
-    drop(on_error);
-    result
-}
-
-async fn await_idb_transaction(transaction: &JsValue) -> Result<(), String> {
-    let (sender, receiver) = oneshot::channel::<Result<(), String>>();
-    let outcome = Rc::new(RefCell::new(Some(sender)));
-    let on_complete = {
-        let outcome = outcome.clone();
-        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            if let Some(tx) = outcome.borrow_mut().take() {
-                let _ = tx.send(Ok(()));
-            }
-        })
-    };
-    let on_error = {
-        let outcome = outcome.clone();
-        let transaction = transaction.clone();
-        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            if let Some(tx) = outcome.borrow_mut().take() {
-                let error = js_prop(&transaction, "error")
-                    .map(js_error_label)
-                    .unwrap_or_else(|err| err);
-                let _ = tx.send(Err(error));
-            }
-        })
-    };
-    let on_abort = {
-        let outcome = outcome.clone();
-        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
-            if let Some(tx) = outcome.borrow_mut().take() {
-                let _ = tx.send(Err("IndexedDB transaction aborted".to_string()));
-            }
-        })
-    };
-    let _ = Reflect::set(
-        transaction,
-        &JsValue::from_str("oncomplete"),
-        on_complete.as_ref().unchecked_ref(),
-    );
-    let _ = Reflect::set(
-        transaction,
-        &JsValue::from_str("onerror"),
-        on_error.as_ref().unchecked_ref(),
-    );
-    let _ = Reflect::set(
-        transaction,
-        &JsValue::from_str("onabort"),
-        on_abort.as_ref().unchecked_ref(),
-    );
-    let result = receiver
-        .await
-        .map_err(|_| "IndexedDB transaction dropped before settling".to_string())?;
-    let _ = Reflect::set(
-        transaction,
-        &JsValue::from_str("oncomplete"),
-        &JsValue::NULL,
-    );
-    let _ = Reflect::set(transaction, &JsValue::from_str("onerror"), &JsValue::NULL);
-    let _ = Reflect::set(transaction, &JsValue::from_str("onabort"), &JsValue::NULL);
-    drop(on_complete);
-    drop(on_error);
-    drop(on_abort);
-    result
+        .map_err(|_| "IndexedDB request dropped before settling".to_string())?
 }
 
 async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
@@ -427,7 +491,7 @@ async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String
             &JsValue::from_str(WEBCRYPTO_IDB_STORE),
             &JsValue::from_str("readwrite"),
         )?;
-        let complete = await_idb_transaction(&transaction);
+        let commit = IdbTransactionWatch::new(&transaction);
         let store = js_call1(
             &transaction,
             "objectStore",
@@ -443,7 +507,7 @@ async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String
             &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
         )?;
         await_idb_request(&put_req).await?;
-        complete.await
+        commit.committed().await
     }
     .await;
     let _ = js_call0(&db, "close");
