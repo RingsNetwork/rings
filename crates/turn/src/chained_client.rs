@@ -57,7 +57,6 @@ use crate::credentials::TurnCredentials;
 use crate::error::Result;
 use crate::error::TurnError;
 
-const UPSTREAM_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_INBOUND_QUEUE_CAPACITY: usize = 512;
 const UPSTREAM_MTU: usize = 65556;
 
@@ -260,13 +259,15 @@ pub(crate) struct UpstreamTurnRelayClient {
 
 impl UpstreamTurnRelayClient {
     /// Allocate an upstream TURN relay session on `server_addr` authenticated by `credentials`,
-    /// requesting `requested_lifetime` and returning the client handle and the
-    /// `XOR-RELAYED-ADDRESS` reported by `server_addr`.
+    /// requesting `requested_lifetime` and `REQUESTED-ADDRESS-FAMILY` matching
+    /// `projected_relay_is_ipv6`, returning the client handle and the `XOR-RELAYED-ADDRESS`
+    /// reported by `server_addr`.
     pub(crate) async fn allocate(
         server_addr: SocketAddr,
         credentials: TurnCredentials,
         requested_lifetime: Duration,
         channel_bind_timeout: Duration,
+        projected_relay_is_ipv6: bool,
     ) -> Result<(Arc<Self>, SocketAddr)> {
         let bind_addr = if server_addr.is_ipv4() {
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
@@ -362,7 +363,7 @@ impl UpstreamTurnRelayClient {
                 protocol: PROTO_UDP,
             }),
         ];
-        if server_addr.is_ipv6() {
+        if projected_relay_is_ipv6 {
             challenge_setters.push(Box::new(REQUESTED_FAMILY_IPV6));
         }
         challenge_setters.push(Box::new(FINGERPRINT));
@@ -401,7 +402,7 @@ impl UpstreamTurnRelayClient {
             }),
             Box::new(Lifetime(requested_lifetime)),
         ];
-        if server_addr.is_ipv6() {
+        if projected_relay_is_ipv6 {
             alloc_setters.push(Box::new(REQUESTED_FAMILY_IPV6));
         }
         alloc_setters.push(Box::new(Username::new(
@@ -481,31 +482,44 @@ impl UpstreamTurnRelayClient {
         tx_id: TransactionId,
         raw: &[u8],
     ) -> Result<Message> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, mut rx) = oneshot::channel();
         waiters
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(tx_id, tx);
-        if let Err(err) = socket.send_to(raw, server_addr).await {
-            waiters
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&tx_id);
-            return Err(err.into());
-        }
-        match tokio::time::timeout(UPSTREAM_CONTROL_TIMEOUT, rx).await {
-            Ok(Ok(msg)) => Ok(msg),
-            _ => {
+
+        // RFC 5389 §7.2.1 bounded UDP retransmission schedule using the same TransactionId and
+        // bytes so lost responses retrieve cached server replies without re-consuming tickets.
+        const RETRANSMIT_WINDOWS: [Duration; 4] = [
+            Duration::from_millis(500),
+            Duration::from_millis(1_000),
+            Duration::from_millis(2_000),
+            Duration::from_millis(1_500),
+        ];
+
+        for wait_window in RETRANSMIT_WINDOWS {
+            if let Err(err) = socket.send_to(raw, server_addr).await {
                 waiters
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .remove(&tx_id);
-                Err(TurnError::Io(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "upstream TURN hop request timed out",
-                )))
+                return Err(err.into());
+            }
+            match tokio::time::timeout(wait_window, &mut rx).await {
+                Ok(Ok(msg)) => return Ok(msg),
+                Ok(Err(_)) => break,
+                Err(_) => continue,
             }
         }
+
+        waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&tx_id);
+        Err(TurnError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "upstream TURN hop request timed out",
+        )))
     }
 
     async fn execute_authenticated_request<F>(
@@ -761,8 +775,8 @@ impl UpstreamTurnRelayClient {
     }
 
     /// Stop the data-plane inbound receiver immediately while keeping the control-plane reader
-    /// alive so [`Self::finish_close`] can complete the `Refresh(0)` deletion exchange without
-    /// waiting for [`UPSTREAM_CONTROL_TIMEOUT`].
+    /// alive so [`Self::finish_close`] can complete the `Refresh(0)` deletion exchange promptly
+    /// without waiting for the upstream control timeout.
     pub(crate) fn begin_close(&self) {
         self.payload_closed.notify_waiters();
     }
@@ -771,6 +785,21 @@ impl UpstreamTurnRelayClient {
     /// reader task.
     pub(crate) async fn finish_close(&self) {
         let _ = self.refresh(Duration::ZERO).await;
+        self.reader_shutdown.notify_waiters();
+        if let Some(handle) = self
+            .reader_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for UpstreamTurnRelayClient {
+    fn drop(&mut self) {
+        self.payload_closed.notify_waiters();
         self.reader_shutdown.notify_waiters();
         if let Some(handle) = self
             .reader_task

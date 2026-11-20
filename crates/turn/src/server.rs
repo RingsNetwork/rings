@@ -409,6 +409,7 @@ const CHAINED_CONTROL_QUEUE_CAPACITY: usize = 32;
 
 type AllocateResponseCache = Arc<Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>>;
 type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>>;
+type PendingChainedAllocations = Arc<Mutex<HashMap<FiveTuple, (String, TransactionId)>>>;
 
 struct ReservedTurnSession {
     expires_at_ms: u128,
@@ -2297,9 +2298,21 @@ async fn prune_expired_reserved_sessions_map(
         let removed = keys.into_iter().filter_map(|k| guard.remove(&k)).collect();
         (removed, guard.len())
     };
-    for session in expired {
-        let handle = session.backend.begin_close();
-        session.backend.finish_close(handle).await;
+    if !expired.is_empty() {
+        let mut closing = Vec::with_capacity(expired.len());
+        for session in expired {
+            let handle = session.backend.begin_close();
+            // Release the capacity permit immediately once the expired reservation is detached;
+            // run upstream `Refresh(0)` / socket teardown off the shared packet loop so an
+            // unreachable upstream cannot stall unrelated clients.
+            drop(session.capacity_permit);
+            closing.push((session.backend, handle));
+        }
+        tokio::spawn(async move {
+            for (backend, handle) in closing {
+                backend.finish_close(handle).await;
+            }
+        });
     }
     remaining
 }
@@ -2390,6 +2403,8 @@ async fn finalize_allocate_install(
     conn: Arc<dyn Conn + Send + Sync>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     allocate_responses: AllocateResponseCache,
+    pending_chained_allocations: Option<PendingChainedAllocations>,
+    shutdown_rx: Option<watch::Receiver<bool>>,
     relay_turn_socket: Arc<dyn Conn + Send + Sync>,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
@@ -2413,9 +2428,22 @@ async fn finalize_allocate_install(
         tcp_authenticated_tx,
         capacity_permit,
     );
-    {
+    let installed = {
         let mut guard = allocations.lock().await;
-        guard.insert(five_tuple, Arc::clone(&alloc));
+        if shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            false
+        } else {
+            guard.insert(five_tuple, Arc::clone(&alloc));
+            true
+        }
+    };
+    if let Some(pending) = pending_chained_allocations {
+        pending.lock().await.remove(&five_tuple);
+    }
+    if !installed {
+        let handle = alloc.begin_close();
+        alloc.finish_close(handle).await;
+        return;
     }
 
     tokio::spawn(relay_packet_handler(
@@ -2466,8 +2494,10 @@ async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: &Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
+    pending_chained_allocations: &PendingChainedAllocations,
     capacity_sem: &Arc<Semaphore>,
     clock: &SharedClock,
+    shutdown_rx: &watch::Receiver<bool>,
     relay_generator: &PolicyRelayAddressGenerator,
     allocate_responses: &AllocateResponseCache,
     five_tuple: FiveTuple,
@@ -2686,6 +2716,22 @@ async fn handle_authenticated_allocate(
         Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
             let claimed = {
                 let mut guard = reserved_sessions.lock().await;
+                if let Some(peeked) = guard.get(&signed_ticket.ticket.session_id) {
+                    if need_even_port && peeked.relay_addr.port() % 2 != 0 {
+                        drop(guard);
+                        send_authenticated_error(
+                            conn,
+                            src_addr,
+                            m,
+                            CODE_INSUFFICIENT_CAPACITY,
+                            b"Reserved Relay Port Is Not Even",
+                            None,
+                            mi_key,
+                        )
+                        .await;
+                        return;
+                    }
+                }
                 guard.remove(&signed_ticket.ticket.session_id)
             };
             let Some(reserved) = claimed else {
@@ -2703,8 +2749,10 @@ async fn handle_authenticated_allocate(
             };
             if now_ms > reserved.expires_at_ms {
                 let handle = reserved.backend.begin_close();
-                reserved.backend.finish_close(handle).await;
                 drop(reserved.capacity_permit);
+                tokio::spawn(async move {
+                    reserved.backend.finish_close(handle).await;
+                });
                 send_authenticated_error(
                     conn,
                     src_addr,
@@ -2718,19 +2766,35 @@ async fn handle_authenticated_allocate(
                 return;
             }
             if matches!(reserved.backend, RelayBackend::ChainedHop(_)) {
-                // Synchronize upstream hop lifetime off the shared `read_loop` so a slow or
-                // unresponsive upstream hop cannot stall unrelated allocations.
+                // Register in-flight claim BEFORE yielding so retransmitted Allocate packets
+                // coalesce cleanly and competing installs on the same five-tuple are rejected.
+                let username = username_attr.text;
+                {
+                    let mut pending = pending_chained_allocations.lock().await;
+                    pending.insert(five_tuple, (username.clone(), m.transaction_id));
+                }
                 let conn_clone = Arc::clone(conn);
                 let allocations_clone = Arc::clone(allocations);
                 let allocate_responses_clone = Arc::clone(allocate_responses);
+                let pending_clone = Arc::clone(pending_chained_allocations);
+                let mut task_shutdown = shutdown_rx.clone();
                 let req_msg = m.clone();
-                let username = username_attr.text;
                 tokio::spawn(async move {
-                    if let RelayBackend::ChainedHop(ref upstream) = reserved.backend {
-                        if upstream.refresh(lifetime_duration).await.is_err() {
-                            let handle = reserved.backend.begin_close();
-                            reserved.backend.finish_close(handle).await;
-                            drop(reserved.capacity_permit);
+                    let refresh_ok =
+                        if let RelayBackend::ChainedHop(ref upstream) = reserved.backend {
+                            tokio::select! {
+                                _ = task_shutdown.wait_for(|&done| done) => false,
+                                res = upstream.refresh(lifetime_duration) => res.is_ok(),
+                            }
+                        } else {
+                            true
+                        };
+                    if !refresh_ok || *task_shutdown.borrow() {
+                        pending_clone.lock().await.remove(&five_tuple);
+                        let handle = reserved.backend.begin_close();
+                        reserved.backend.finish_close(handle).await;
+                        drop(reserved.capacity_permit);
+                        if !*task_shutdown.borrow() {
                             send_authenticated_error(
                                 &conn_clone,
                                 src_addr,
@@ -2741,13 +2805,15 @@ async fn handle_authenticated_allocate(
                                 mi_key,
                             )
                             .await;
-                            return;
                         }
+                        return;
                     }
                     finalize_allocate_install(
                         conn_clone,
                         allocations_clone,
                         allocate_responses_clone,
+                        Some(pending_clone),
+                        Some(task_shutdown),
                         relay_turn_socket,
                         five_tuple,
                         src_addr,
@@ -2816,6 +2882,8 @@ async fn handle_authenticated_allocate(
         Arc::clone(conn),
         Arc::clone(allocations),
         Arc::clone(allocate_responses),
+        None,
+        Some(shutdown_rx.clone()),
         relay_turn_socket,
         five_tuple,
         src_addr,
@@ -3627,6 +3695,8 @@ impl TurnServer {
 
         let allocate_responses: AllocateResponseCache = Arc::new(Mutex::new(HashMap::new()));
         let completed_deletions: CompletedDeletionCache = Arc::new(Mutex::new(HashMap::new()));
+        let pending_chained_allocations: PendingChainedAllocations =
+            Arc::new(Mutex::new(HashMap::new()));
 
         loop {
             if *shutdown_rx.borrow_and_update() {
@@ -3836,12 +3906,38 @@ impl TurnServer {
                         .await;
                         continue;
                     }
+                    let pending_match = {
+                        let guard = pending_chained_allocations.lock().await;
+                        guard.get(&five_tuple).cloned()
+                    };
+                    if let Some((pending_user, pending_tx)) = pending_match {
+                        if pending_user == username_attr.text
+                            && pending_tx == decoded_msg.transaction_id
+                        {
+                            // Retransmission of an in-flight chained Allocate: coalesce until the
+                            // spawned upstream refresh finishes and sends the response.
+                            continue;
+                        }
+                        send_authenticated_error(
+                            &recording_conn_dyn,
+                            addr,
+                            &decoded_msg,
+                            CODE_ALLOC_MISMATCH,
+                            b"Allocation Mismatch",
+                            None,
+                            mi_key,
+                        )
+                        .await;
+                        continue;
+                    }
                     handle_authenticated_allocate(
                         &recording_conn_dyn,
                         &allocations,
                         &reserved_sessions,
+                        &pending_chained_allocations,
                         &capacity_sem,
                         &clock,
+                        &shutdown_rx,
                         &relay_generator,
                         &allocate_responses,
                         five_tuple,
@@ -4165,6 +4261,10 @@ impl TurnServer {
         ttl: Duration,
         cipher: Option<TurnPayloadCipher>,
     ) -> Result<TurnSessionReservation> {
+        let _ =
+            rings_core::ecc::prime_order::NonIdentityPoint::<rings_core::ecc::Secp256k1>::try_from(
+                ephemeral_client_pubkey,
+            )?;
         if ttl.is_zero() {
             return Err(crate::error::TurnError::InvalidReservationTtl);
         }
@@ -4215,6 +4315,10 @@ impl TurnServer {
         &self,
         spec: TurnChainedHopSpec,
     ) -> Result<TurnSessionReservation> {
+        let _ =
+            rings_core::ecc::prime_order::NonIdentityPoint::<rings_core::ecc::Secp256k1>::try_from(
+                spec.ephemeral_client_pubkey,
+            )?;
         if spec.ttl.is_zero() {
             return Err(crate::error::TurnError::InvalidReservationTtl);
         }
@@ -4234,6 +4338,7 @@ impl TurnServer {
             spec.next_hop_credentials,
             upstream_lifetime,
             self.channel_bind_timeout,
+            spec.projected_relay_addr.is_ipv6(),
         )
         .await?;
         if upstream_relayed_addr != spec.projected_relay_addr {
