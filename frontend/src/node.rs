@@ -101,6 +101,7 @@ impl PeerView {
     }
 
     /// Build a connected peer row from an RPC-returned DID.
+    #[cfg(test)]
     pub fn connected(did: String) -> Option<Self> {
         Self::from_fields(did, "Connected".to_string())
     }
@@ -113,11 +114,6 @@ impl PeerView {
     /// Transport state reported by `listPeers`.
     pub fn state(&self) -> &str {
         &self.state
-    }
-
-    /// True when this row can be used as a peer operation target.
-    pub fn is_addressable(&self) -> bool {
-        !self.did.trim().is_empty()
     }
 }
 

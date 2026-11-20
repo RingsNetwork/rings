@@ -42,7 +42,9 @@ use crate::workbench;
 mod actions;
 mod routes;
 
-const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
+pub(crate) const DEFAULT_ICE_SERVERS: &str = "";
+pub(crate) const LEGACY_DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+pub(crate) const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
 const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
 
 #[derive(Clone, PartialEq)]
@@ -160,13 +162,7 @@ fn use_node_state() -> NodeState {
                 "1",
             )
         }),
-        ice_servers: use_state(|| {
-            load_setting_or_default(
-                extension::SETTING_ICE_SERVERS,
-                extension::LEGACY_SETTING_ICE_SERVERS,
-                "stun://stun.l.google.com:19302",
-            )
-        }),
+        ice_servers: use_state(load_ice_servers_setting_or_default),
         stabilize_interval: use_state(load_stabilize_interval_setting_or_default),
         storage_name: use_state(|| {
             load_setting_or_default(
@@ -249,6 +245,20 @@ fn initial_wallet_kind() -> WalletKind {
 
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
+}
+
+fn load_ice_servers_setting_or_default() -> String {
+    match extension::load_setting_with_legacy(
+        extension::SETTING_ICE_SERVERS,
+        extension::LEGACY_SETTING_ICE_SERVERS,
+    ) {
+        Some(value) if value.trim() == LEGACY_DEFAULT_ICE_SERVERS => {
+            extension::save_setting(extension::SETTING_ICE_SERVERS, DEFAULT_ICE_SERVERS);
+            DEFAULT_ICE_SERVERS.to_string()
+        }
+        Some(value) => value,
+        None => DEFAULT_ICE_SERVERS.to_string(),
+    }
 }
 
 fn load_stabilize_interval_setting_or_default() -> String {

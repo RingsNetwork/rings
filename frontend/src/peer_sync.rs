@@ -16,16 +16,12 @@ pub(crate) async fn sync_peers_after_handshake(
     peers: UseStateHandle<Vec<PeerView>>,
     status: UseStateHandle<String>,
     context: &'static str,
-    required_peer: Option<PeerView>,
     still_current: impl Fn() -> bool + 'static,
 ) {
     if !still_current() {
         return;
     }
     status.set(format!("{context}; syncing peers"));
-    if let Some(required_peer) = required_peer.as_ref() {
-        peers.set(merge_required_peer((*peers).clone(), required_peer));
-    }
     for delay_ms in PEER_SETTLE_DELAYS_MS {
         if *delay_ms > 0 {
             sleep(Duration::from_millis(*delay_ms)).await;
@@ -38,11 +34,6 @@ pub(crate) async fn sync_peers_after_handshake(
                 if !still_current() {
                     return;
                 }
-                let next = if let Some(required_peer) = required_peer.as_ref() {
-                    merge_required_peer(next, required_peer)
-                } else {
-                    next
-                };
                 let count = next.len();
                 peers.set(next);
                 status.set(peer_sync_status(context, count));
@@ -56,20 +47,32 @@ pub(crate) async fn sync_peers_after_handshake(
     }
 }
 
-pub(crate) fn merge_required_peer(mut peers: Vec<PeerView>, required: &PeerView) -> Vec<PeerView> {
-    if !required.is_addressable() {
-        return peers;
-    }
-    if !peers.iter().any(|peer| peer.did() == required.did()) {
-        peers.insert(0, required.clone());
-    }
-    peers
-}
-
 pub(crate) fn peer_sync_status(context: &str, count: usize) -> String {
     match count {
         0 => format!("{context}; no peers visible yet"),
         1 => format!("{context}; 1 peer visible"),
         count => format!("{context}; {count} peers visible"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_peer_sync_status_reports_admitted_peer_count() {
+        assert_eq!(
+            peer_sync_status("seed URL connected", 0),
+            "seed URL connected; no peers visible yet"
+        );
+        assert_eq!(
+            peer_sync_status("seed URL connected", 1),
+            "seed URL connected; 1 peer visible"
+        );
+        assert_eq!(
+            peer_sync_status("HTTP endpoint connected", 2),
+            "HTTP endpoint connected; 2 peers visible"
+        );
     }
 }

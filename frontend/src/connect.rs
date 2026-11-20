@@ -88,7 +88,6 @@ enum PeerUpdate {
         node: DemoNode,
         token: GenerationToken,
         context: &'static str,
-        required_peer: Option<PeerView>,
     },
 }
 
@@ -121,13 +120,13 @@ impl NodeBackend {
             }
             Self::Local { node, token } => {
                 let seed_did = node::connect_http(&node.provider, endpoint).await?;
-                let required_peer = PeerView::connected(seed_did)
-                    .ok_or_else(|| "seed returned an empty DID".to_string())?;
+                if seed_did.trim().is_empty() {
+                    return Err("seed returned an empty DID".to_string());
+                }
                 Ok(PeerUpdate::Local {
                     node,
                     token,
                     context: "HTTP endpoint connected",
-                    required_peer: Some(required_peer),
                 })
             }
         }
@@ -163,7 +162,6 @@ impl NodeBackend {
                     node,
                     token,
                     context: "answer accepted",
-                    required_peer: None,
                 })
             }
         }
@@ -183,16 +181,10 @@ impl PeerUpdate {
                 node,
                 token,
                 context,
-                required_peer,
             } => {
-                peer_sync::sync_peers_after_handshake(
-                    node,
-                    peers,
-                    status,
-                    context,
-                    required_peer,
-                    move || token.is_current(),
-                )
+                peer_sync::sync_peers_after_handshake(node, peers, status, context, move || {
+                    token.is_current()
+                })
                 .await;
             }
         }
