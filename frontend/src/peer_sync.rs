@@ -37,6 +37,9 @@ pub(crate) async fn sync_peers_after_handshake(
                 let count = next.len();
                 peers.set(next);
                 status.set(peer_sync_status(context, count));
+                if count > 0 {
+                    break;
+                }
             }
             Err(error) => {
                 if still_current() {

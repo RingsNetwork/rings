@@ -454,7 +454,10 @@ async fn connect_headless_seed(
     match node::connect_http(&built.provider, seed_url).await {
         Ok(seed_did) => {
             if seed_did.trim().is_empty() {
-                return Err("seed returned an empty DID".to_string());
+                return Ok((
+                    "background node ready; seed returned an empty DID".to_string(),
+                    Vec::new(),
+                ));
             }
             let (peers, message) =
                 settle_headless_peers(built, "seed URL connected", true, Some(generation)).await;
@@ -725,6 +728,9 @@ async fn settle_headless_peers(
                 peers = next;
                 if settle {
                     message = peer_sync::peer_sync_status(context, peers.len());
+                    if !peers.is_empty() {
+                        break;
+                    }
                 }
             }
             Err(error) => {

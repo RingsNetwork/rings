@@ -197,12 +197,11 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
 async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, String> {
     let usages = Array::new();
     usages.push(&JsValue::from_str("sign"));
-    usages.push(&JsValue::from_str("verify"));
     let key_pair = await_js(js_call3(
         subtle,
         "generateKey",
         &ecdsa_algorithm()?.into(),
-        &JsValue::TRUE,
+        &JsValue::FALSE,
         &usages.into(),
     )?)
     .await?;
@@ -303,10 +302,21 @@ impl Drop for IdbUpgradeWatch {
     }
 }
 
+struct IdbDatabaseGuard {
+    db: JsValue,
+}
+
+impl Drop for IdbDatabaseGuard {
+    fn drop(&mut self) {
+        let _ = js_call0(&self.db, "close");
+    }
+}
+
 struct IdbTransactionWatch {
     transaction: JsValue,
     _handlers: [Closure<dyn FnMut(Event)>; 3],
     receiver: oneshot::Receiver<Result<(), String>>,
+    settled: bool,
 }
 
 impl IdbTransactionWatch {
@@ -360,13 +370,16 @@ impl IdbTransactionWatch {
             transaction: transaction.clone(),
             _handlers: [on_complete, on_error, on_abort],
             receiver,
+            settled: false,
         }
     }
 
     async fn committed(mut self) -> Result<(), String> {
-        (&mut self.receiver)
+        let result = (&mut self.receiver)
             .await
-            .map_err(|_| "IndexedDB transaction dropped before settling".to_string())?
+            .map_err(|_| "IndexedDB transaction dropped before settling".to_string())?;
+        self.settled = true;
+        result
     }
 }
 
@@ -387,6 +400,9 @@ impl Drop for IdbTransactionWatch {
             &JsValue::from_str("onabort"),
             &JsValue::NULL,
         );
+        if !self.settled {
+            let _ = js_call0(&self.transaction, "abort");
+        }
     }
 }
 
@@ -443,75 +459,69 @@ async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
 }
 
 async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
-    let db = open_webcrypto_idb().await?;
-    let result = async {
-        let transaction = js_call2(
-            &db,
-            "transaction",
-            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-            &JsValue::from_str("readonly"),
-        )?;
-        let store = js_call1(
-            &transaction,
-            "objectStore",
-            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-        )?;
-        let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
-        let record = await_idb_request(&get_req).await?;
-        if record.is_undefined() || record.is_null() {
-            return Ok(None);
-        }
-        let account = js_string_field(&record, "account")?;
-        let private_key = js_prop(&record, "privateKey")?;
-        if account.trim().is_empty() || private_key.is_undefined() || private_key.is_null() {
-            return Ok(None);
-        }
-        let candidate = WalletAccount {
-            kind: WalletKind::WebCrypto,
-            account,
-            account_type: "secp256r1".to_string(),
-            handle: private_key,
-        };
-        let _ = candidate
-            .sign_session_proof("rings-webcrypto-key-check")
-            .await?;
-        Ok(Some(candidate))
+    let db = IdbDatabaseGuard {
+        db: open_webcrypto_idb().await?,
+    };
+    let transaction = js_call2(
+        &db.db,
+        "transaction",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        &JsValue::from_str("readonly"),
+    )?;
+    let store = js_call1(
+        &transaction,
+        "objectStore",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+    )?;
+    let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
+    let record = await_idb_request(&get_req).await?;
+    if record.is_undefined() || record.is_null() {
+        return Ok(None);
     }
-    .await;
-    let _ = js_call0(&db, "close");
-    result
+    let account = js_string_field(&record, "account")?;
+    let private_key = js_prop(&record, "privateKey")?;
+    if account.trim().is_empty() || private_key.is_undefined() || private_key.is_null() {
+        return Ok(None);
+    }
+    let candidate = WalletAccount {
+        kind: WalletKind::WebCrypto,
+        account,
+        account_type: "secp256r1".to_string(),
+        handle: private_key,
+    };
+    let _ = candidate
+        .sign_session_proof("rings-webcrypto-key-check")
+        .await?;
+    Ok(Some(candidate))
 }
 
 async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String> {
-    let db = open_webcrypto_idb().await?;
-    let result = async {
-        let transaction = js_call2(
-            &db,
-            "transaction",
-            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-            &JsValue::from_str("readwrite"),
-        )?;
-        let commit = IdbTransactionWatch::new(&transaction);
-        let store = js_call1(
-            &transaction,
-            "objectStore",
-            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
-        )?;
-        let record = Object::new();
-        js_set(&record, "account", &JsValue::from_str(&account.account))?;
-        js_set(&record, "privateKey", &account.handle)?;
-        let put_req = js_call2(
-            &store,
-            "put",
-            &record.into(),
-            &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
-        )?;
-        await_idb_request(&put_req).await?;
-        commit.committed().await
-    }
-    .await;
-    let _ = js_call0(&db, "close");
-    result
+    let db = IdbDatabaseGuard {
+        db: open_webcrypto_idb().await?,
+    };
+    let transaction = js_call2(
+        &db.db,
+        "transaction",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        &JsValue::from_str("readwrite"),
+    )?;
+    let commit = IdbTransactionWatch::new(&transaction);
+    let store = js_call1(
+        &transaction,
+        "objectStore",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+    )?;
+    let record = Object::new();
+    js_set(&record, "account", &JsValue::from_str(&account.account))?;
+    js_set(&record, "privateKey", &account.handle)?;
+    let put_req = js_call2(
+        &store,
+        "put",
+        &record.into(),
+        &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
+    )?;
+    await_idb_request(&put_req).await?;
+    commit.committed().await
 }
 
 async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
@@ -826,5 +836,9 @@ mod wasm_tests {
             second_delegatee.delegator_did(),
             delegatee_key.delegator_did()
         );
+        let extractable = js_prop(&second.handle, "extractable")
+            .ok()
+            .and_then(|val| val.as_bool());
+        assert_eq!(extractable, Some(false));
     }
 }
