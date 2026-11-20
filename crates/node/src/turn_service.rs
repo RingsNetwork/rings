@@ -3,9 +3,8 @@
 //! AEZ-backed TURN onion relays (#1292).
 //!
 //! Native nodes that host or bridge a `rings-turn` server publish a signed [`TurnServiceDescriptor`]
-//! onto [`TURN_SERVICES_TOPIC`] (and optionally on their per-DID topic [`turn_service_topic`]),
-//! advertising their connectable `turn://` endpoint, `server_pubkey`, and whether they support
-//! multi-hop `ChainedHop` onion relay reservations.
+//! onto [`TURN_SERVICES_TOPIC`], advertising their connectable `turn://` endpoint, `server_pubkey`,
+//! and whether they support multi-hop `ChainedHop` onion relay reservations.
 //!
 //! Both browser WASM nodes and native nodes can:
 //! 1. Discover live [`TurnServiceDescriptor`]s from the DHT via
@@ -203,9 +202,7 @@ impl TurnServiceDescriptor {
         include_expired: bool,
     ) -> Vec<Self> {
         latest_valid_by_did(
-            descriptors
-                .into_iter()
-                .filter(Self::has_valid_endpoint),
+            descriptors.into_iter().filter(Self::has_valid_endpoint),
             now_ms,
             network_id,
             include_expired,
@@ -567,14 +564,11 @@ impl TurnReservationService {
             ));
         };
         let exit_eph_key = rings_core::ecc::SecretKey::random();
-        let exit_res = Self::handle_request(
-            exit_server,
-            TurnReservationRequest::ReserveExit {
-                ephemeral_client_pubkey: exit_eph_key.pubkey(),
-                ttl_ms,
-                cipher_layers: TurnAezLayerSpec::from_cipher(exit_cipher),
-            },
-        )
+        let exit_res = Self::handle_request(exit_server, TurnReservationRequest::ReserveExit {
+            ephemeral_client_pubkey: exit_eph_key.pubkey(),
+            ttl_ms,
+            cipher_layers: TurnAezLayerSpec::from_cipher(exit_cipher),
+        })
         .await?;
         let exit_relay_addr = exit_res.relay_addr;
         let mut next_hop_addr = exit_res.server_addr;
@@ -585,18 +579,16 @@ impl TurnReservationService {
 
         for (hop_server, hop_cipher) in reversed_hops {
             let hop_eph_key = rings_core::ecc::SecretKey::random();
-            let hop_res = Self::handle_request(
-                hop_server,
-                TurnReservationRequest::ReserveChainedHop {
+            let hop_res =
+                Self::handle_request(hop_server, TurnReservationRequest::ReserveChainedHop {
                     ephemeral_client_pubkey: hop_eph_key.pubkey(),
                     next_hop_addr,
                     next_hop_credentials: next_hop_creds,
                     projected_relay_addr: exit_relay_addr,
                     ttl_ms,
                     cipher_layers: TurnAezLayerSpec::from_cipher(hop_cipher),
-                },
-            )
-            .await?;
+                })
+                .await?;
             next_hop_addr = hop_res.server_addr;
             next_hop_creds = hop_res
                 .ticket
@@ -705,6 +697,15 @@ mod tests {
                 hop1.advertised_addr()
             )
         );
+        assert!(
+            !entry_creds.username.contains(':'),
+            "session-ticket username must be URL-userinfo safe without ':'"
+        );
+        let parsed_ice: rings_transport::ice_server::IceServer = ice_url
+            .parse()
+            .map_err(|e| Error::InvalidConfig(format!("failed to parse ICE URL: {e}")))?;
+        assert_eq!(parsed_ice.username, entry_creds.username);
+        assert_eq!(parsed_ice.credential, entry_creds.credential);
         assert_ne!(exit_relay_addr.port(), 0);
 
         hop1.close().await.unwrap();

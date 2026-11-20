@@ -16,9 +16,7 @@ pub enum TurnError {
     Stun(#[from] stun::Error),
 
     /// An upstream chained TURN hop returned an unexpected `XOR-RELAYED-ADDRESS`.
-    #[error(
-        "Chained TURN hop relayed address mismatch: expected {expected}, got {actual}"
-    )]
+    #[error("Chained TURN hop relayed address mismatch: expected {expected}, got {actual}")]
     ChainedRelayAddressMismatch {
         /// Expected `XOR-RELAYED-ADDRESS` (`E_exit`).
         expected: std::net::SocketAddr,

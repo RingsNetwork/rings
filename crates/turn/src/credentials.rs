@@ -431,10 +431,9 @@ impl TurnCredentials {
         let shared = secp256k1_shared_secret(ephemeral_client_key, server_pubkey)?;
         let client_transcript = signed_ticket.ticket.pack_client_auth(server_pubkey);
         let client_sig = ephemeral_client_key.sign_raw(&client_transcript)?;
-        let ticket_bytes =
-            rings_codec::serialize(signed_ticket).map_err(Error::CodecSerialize)?;
+        let ticket_bytes = rings_codec::serialize(signed_ticket).map_err(Error::CodecSerialize)?;
         let ticket_b58 = base58_monero::encode(&ticket_bytes).map_err(|_| Error::Encode)?;
-        Self::from_claim_sig_and_shared(format!("tkt:{ticket_b58}"), &client_sig, &shared)
+        Self::from_claim_sig_and_shared(format!("tkt-{ticket_b58}"), &client_sig, &shared)
     }
 
     /// Sign TURN credentials using a session `delegatee_key` for `server_pubkey`.
@@ -657,7 +656,7 @@ impl TurnCredentials {
         }
         let sig_bytes = base58_monero::decode(sig_b58).map_err(|_| Error::Decode)?;
 
-        if let Some(ticket_b58) = claim_str.strip_prefix("tkt:") {
+        if let Some(ticket_b58) = claim_str.strip_prefix("tkt-") {
             let claim_bytes = base58_monero::decode(ticket_b58).map_err(|_| Error::Decode)?;
             let signed_ticket = rings_codec::deserialize::<SignedTurnSessionTicket>(&claim_bytes)
                 .map_err(|_| Error::Decode)?;
@@ -750,9 +749,8 @@ impl TurnCredentials {
             (TurnAuthIdentity::SessionTicket(signed_ticket), _) => {
                 signed_ticket.verify_grant_at(server_pubkey, at_ms)?;
                 let client_transcript = signed_ticket.ticket.pack_client_auth(server_pubkey);
-                let recovered_client =
-                    signers::secp256k1::recover(&client_transcript, &sig_bytes)
-                        .map_err(|_| Error::VerifySignatureFailed)?;
+                let recovered_client = signers::secp256k1::recover(&client_transcript, &sig_bytes)
+                    .map_err(|_| Error::VerifySignatureFailed)?;
                 if recovered_client != signed_ticket.ticket.ephemeral_client_pubkey {
                     return Err(Error::VerifySignatureFailed);
                 }

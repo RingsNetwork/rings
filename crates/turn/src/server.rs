@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use rand::Rng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
+use rings_core::utils::SharedClock;
 use stun::agent::TransactionId;
 use stun::attributes::AttrType;
 use stun::attributes::ATTR_DONT_FRAGMENT;
@@ -73,6 +74,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
@@ -403,11 +405,48 @@ impl RelayBackend {
     }
 }
 
+const CHAINED_CONTROL_QUEUE_CAPACITY: usize = 32;
+
+type AllocateResponseCache = Arc<Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>>;
+type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>>;
+
 struct ReservedTurnSession {
     expires_at_ms: u128,
     relay_addr: SocketAddr,
     backend: RelayBackend,
     cipher: Option<TurnPayloadCipher>,
+    capacity_permit: OwnedSemaphorePermit,
+}
+
+enum ChainedControlOp {
+    Refresh {
+        conn: Arc<dyn Conn + Send + Sync>,
+        allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
+        nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
+        allocate_responses: AllocateResponseCache,
+        completed_deletions: CompletedDeletionCache,
+        max_allocations: usize,
+        alloc: Arc<ManagedAllocation>,
+        msg: Message,
+        mi_key: Vec<u8>,
+    },
+    CreatePermission {
+        conn: Arc<dyn Conn + Send + Sync>,
+        alloc: Arc<ManagedAllocation>,
+        msg: Message,
+        peer_policy: RelayPeerPolicy,
+        max_permissions_per_allocation: usize,
+        mi_key: Vec<u8>,
+    },
+    ChannelBind {
+        conn: Arc<dyn Conn + Send + Sync>,
+        alloc: Arc<ManagedAllocation>,
+        msg: Message,
+        peer_policy: RelayPeerPolicy,
+        channel_bind_timeout: Duration,
+        max_permissions_per_allocation: usize,
+        mi_key: Vec<u8>,
+    },
 }
 
 /// Result of reserving an exit or chained TURN relay session on a [`TurnServer`] (#1292).
@@ -453,9 +492,12 @@ struct ManagedAllocation {
     state: SyncMutex<AllocationState>,
     expiry_tx: watch::Sender<Instant>,
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+    capacity_permit: SyncMutex<Option<OwnedSemaphorePermit>>,
+    chained_control_tx: SyncMutex<Option<mpsc::Sender<ChainedControlOp>>>,
 }
 
 impl ManagedAllocation {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         five_tuple: FiveTuple,
         username: String,
@@ -464,12 +506,87 @@ impl ManagedAllocation {
         cipher: Option<TurnPayloadCipher>,
         lifetime: Duration,
         tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+        capacity_permit: OwnedSemaphorePermit,
     ) -> Arc<Self> {
         let alloc_id = NEXT_ALLOCATION_ID.fetch_add(1, Ordering::Relaxed);
         if let Some(ref tx) = tcp_authenticated_tx {
             let _ = tx.send_replace(Some(alloc_id));
         }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
+        let chained_control_tx = if matches!(backend, RelayBackend::ChainedHop(_)) {
+            let (tx, mut rx) = mpsc::channel::<ChainedControlOp>(CHAINED_CONTROL_QUEUE_CAPACITY);
+            tokio::spawn(async move {
+                while let Some(op) = rx.recv().await {
+                    match op {
+                        ChainedControlOp::Refresh {
+                            conn,
+                            allocations,
+                            nonces,
+                            allocate_responses,
+                            completed_deletions,
+                            max_allocations,
+                            alloc,
+                            msg,
+                            mi_key,
+                        } => {
+                            handle_authenticated_refresh(
+                                &conn,
+                                &allocations,
+                                &nonces,
+                                &allocate_responses,
+                                &completed_deletions,
+                                max_allocations,
+                                alloc,
+                                &msg,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                        ChainedControlOp::CreatePermission {
+                            conn,
+                            alloc,
+                            msg,
+                            peer_policy,
+                            max_permissions_per_allocation,
+                            mi_key,
+                        } => {
+                            handle_authenticated_create_permission(
+                                &conn,
+                                &alloc,
+                                &msg,
+                                peer_policy,
+                                max_permissions_per_allocation,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                        ChainedControlOp::ChannelBind {
+                            conn,
+                            alloc,
+                            msg,
+                            peer_policy,
+                            channel_bind_timeout,
+                            max_permissions_per_allocation,
+                            mi_key,
+                        } => {
+                            handle_authenticated_channel_bind(
+                                &conn,
+                                &alloc,
+                                &msg,
+                                peer_policy,
+                                channel_bind_timeout,
+                                max_permissions_per_allocation,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            });
+            Some(tx)
+        } else {
+            None
+        };
         Arc::new(Self {
             alloc_id,
             five_tuple,
@@ -483,7 +600,16 @@ impl ManagedAllocation {
             }),
             expiry_tx,
             tcp_authenticated_tx,
+            capacity_permit: SyncMutex::new(Some(capacity_permit)),
+            chained_control_tx: SyncMutex::new(chained_control_tx),
         })
+    }
+
+    fn chained_control_sender(&self) -> Option<mpsc::Sender<ChainedControlOp>> {
+        self.chained_control_tx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn info(&self) -> AllocationInfo {
@@ -510,12 +636,22 @@ impl ManagedAllocation {
                 }
             });
         }
+        let _ = self
+            .chained_control_tx
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let _ = self.expiry_tx.send_replace(Instant::now());
         self.backend.begin_close()
     }
 
     async fn finish_close(&self, taken: RelayBackendCloseHandle) {
         self.backend.finish_close(taken).await;
+        let _ = self
+            .capacity_permit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
     }
 
     async fn recv_payload_from_peer(
@@ -1938,49 +2074,55 @@ async fn evict_nonces_up_to(
 }
 
 async fn prune_completed_deletions(
-    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_tuples: usize,
 ) {
     let now = Instant::now();
-    let mut evicted_cutoffs: Vec<(FiveTuple, Instant)> = Vec::new();
-    completed_deletions.retain(|tuple, entries| {
-        while let Some(front) = entries.front() {
-            if now
-                .checked_duration_since(front.completed_at)
-                .unwrap_or_default()
-                >= NONCE_LIFETIME
-            {
-                if let Some(evicted) = entries.pop_front() {
-                    evicted_cutoffs.push((*tuple, evicted.completed_at));
+    let evicted_cutoffs = {
+        let mut guard = completed_deletions.lock().await;
+        let mut evicted_cutoffs: Vec<(FiveTuple, Instant)> = Vec::new();
+        guard.retain(|tuple, entries| {
+            while let Some(front) = entries.front() {
+                if now
+                    .checked_duration_since(front.completed_at)
+                    .unwrap_or_default()
+                    >= NONCE_LIFETIME
+                {
+                    if let Some(evicted) = entries.pop_front() {
+                        evicted_cutoffs.push((*tuple, evicted.completed_at));
+                    }
+                } else {
+                    break;
                 }
-            } else {
+            }
+            !entries.is_empty()
+        });
+        while guard.len() > max_tuples {
+            let Some(oldest_tuple) = guard
+                .iter()
+                .min_by_key(|(_, entries)| {
+                    entries.back().map_or_else(Instant::now, |e| e.completed_at)
+                })
+                .map(|(t, _)| *t)
+            else {
                 break;
+            };
+            if let Some(entries) = guard.remove(&oldest_tuple) {
+                if let Some(last) = entries.back() {
+                    evicted_cutoffs.push((oldest_tuple, last.completed_at));
+                }
             }
         }
-        !entries.is_empty()
-    });
-    while completed_deletions.len() > max_tuples {
-        let Some(oldest_tuple) = completed_deletions
-            .iter()
-            .min_by_key(|(_, entries)| entries.back().map_or_else(Instant::now, |e| e.completed_at))
-            .map(|(t, _)| *t)
-        else {
-            break;
-        };
-        if let Some(entries) = completed_deletions.remove(&oldest_tuple) {
-            if let Some(last) = entries.back() {
-                evicted_cutoffs.push((oldest_tuple, last.completed_at));
-            }
-        }
-    }
+        evicted_cutoffs
+    };
     for (tuple, cutoff) in evicted_cutoffs {
         evict_nonces_up_to(nonces, tuple, cutoff).await;
     }
 }
 
 async fn find_completed_deletion(
-    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     five_tuple: &FiveTuple,
     username: &str,
@@ -1988,7 +2130,8 @@ async fn find_completed_deletion(
     max_tuples: usize,
 ) -> Option<Vec<u8>> {
     prune_completed_deletions(completed_deletions, nonces, max_tuples).await;
-    let entries = completed_deletions.get(five_tuple)?;
+    let guard = completed_deletions.lock().await;
+    let entries = guard.get(five_tuple)?;
     entries
         .iter()
         .find(|e| e.username == username && e.transaction_id == transaction_id)
@@ -1996,7 +2139,7 @@ async fn find_completed_deletion(
 }
 
 async fn record_completed_deletion(
-    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     five_tuple: FiveTuple,
     username: String,
@@ -2005,18 +2148,26 @@ async fn record_completed_deletion(
     max_tuples: usize,
 ) {
     prune_completed_deletions(completed_deletions, nonces, max_tuples.saturating_sub(1)).await;
-    let entries = completed_deletions.entry(five_tuple).or_default();
-    while entries.len() >= MAX_DELETION_TXS_PER_TUPLE {
-        if let Some(evicted) = entries.pop_front() {
-            evict_nonces_up_to(nonces, five_tuple, evicted.completed_at).await;
+    let evicted_cutoffs = {
+        let mut guard = completed_deletions.lock().await;
+        let entries = guard.entry(five_tuple).or_default();
+        let mut evicted_cutoffs = Vec::new();
+        while entries.len() >= MAX_DELETION_TXS_PER_TUPLE {
+            if let Some(evicted) = entries.pop_front() {
+                evicted_cutoffs.push(evicted.completed_at);
+            }
         }
+        entries.push_back(CompletedDeletionEntry {
+            username,
+            transaction_id,
+            response_raw,
+            completed_at: Instant::now(),
+        });
+        evicted_cutoffs
+    };
+    for cutoff in evicted_cutoffs {
+        evict_nonces_up_to(nonces, five_tuple, cutoff).await;
     }
-    entries.push_back(CompletedDeletionEntry {
-        username,
-        transaction_id,
-        response_raw,
-        completed_at: Instant::now(),
-    });
 }
 
 fn is_zero_lifetime_refresh(msg: &Message) -> bool {
@@ -2235,13 +2386,90 @@ async fn relay_packet_handler(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn finalize_allocate_install(
+    conn: Arc<dyn Conn + Send + Sync>,
+    allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
+    allocate_responses: AllocateResponseCache,
+    relay_turn_socket: Arc<dyn Conn + Send + Sync>,
+    five_tuple: FiveTuple,
+    src_addr: SocketAddr,
+    tx_id: TransactionId,
+    username: String,
+    relay_addr: SocketAddr,
+    backend: RelayBackend,
+    cipher: Option<TurnPayloadCipher>,
+    lifetime_duration: Duration,
+    tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+    capacity_permit: OwnedSemaphorePermit,
+    mi_key: Vec<u8>,
+) {
+    let alloc = ManagedAllocation::new(
+        five_tuple,
+        username,
+        relay_addr,
+        backend,
+        cipher,
+        lifetime_duration,
+        tcp_authenticated_tx,
+        capacity_permit,
+    );
+    {
+        let mut guard = allocations.lock().await;
+        guard.insert(five_tuple, Arc::clone(&alloc));
+    }
+
+    tokio::spawn(relay_packet_handler(
+        Arc::clone(&alloc),
+        Arc::clone(&allocations),
+        relay_turn_socket,
+        src_addr,
+    ));
+
+    let built = {
+        let mut resp = Message::new();
+        let setters: Vec<Box<dyn Setter>> = vec![
+            Box::new(Message {
+                transaction_id: tx_id,
+                ..Default::default()
+            }),
+            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_SUCCESS_RESPONSE)),
+            Box::new(RelayedAddress {
+                ip: relay_addr.ip(),
+                port: relay_addr.port(),
+            }),
+            Box::new(Lifetime(lifetime_duration)),
+            Box::new(XorMappedAddress {
+                ip: src_addr.ip(),
+                port: src_addr.port(),
+            }),
+            Box::new(MessageIntegrity(mi_key)),
+            Box::new(FINGERPRINT),
+        ];
+        resp.build(&setters).is_ok().then_some(resp.raw)
+    };
+    if let Some(raw) = built {
+        let live_tuples: HashSet<FiveTuple> = {
+            let guard = allocations.lock().await;
+            guard.keys().copied().collect()
+        };
+        {
+            let mut resp_guard = allocate_responses.lock().await;
+            resp_guard.retain(|tuple, _| live_tuples.contains(tuple));
+            resp_guard.insert(five_tuple, (tx_id, raw.clone()));
+        }
+        let _ = conn.send_to(&raw, src_addr).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: &Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
+    capacity_sem: &Arc<Semaphore>,
+    clock: &SharedClock,
     relay_generator: &PolicyRelayAddressGenerator,
-    allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
-    max_allocations: usize,
+    allocate_responses: &AllocateResponseCache,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
     m: &Message,
@@ -2425,32 +2653,10 @@ async fn handle_authenticated_allocate(
         lifetime_duration = clamp_allocation_lifetime(lifetime.0);
     }
 
-    let now_ms = rings_core::utils::get_epoch_ms();
-    let reserved_count = prune_expired_reserved_sessions_map(reserved_sessions, now_ms).await;
+    let now_ms = clock.now_ms();
+    let _ = prune_expired_reserved_sessions_map(reserved_sessions, now_ms).await;
+    let _ = active_allocation_count(allocations).await;
     let decoded_identity = TurnCredentials::decode_username_parts(&username_attr.text);
-    let is_session_ticket_claim = matches!(
-        decoded_identity,
-        Ok((TurnAuthIdentity::SessionTicket(_), ..))
-    );
-    let active_count = active_allocation_count(allocations).await;
-    let effective_occupied = if is_session_ticket_claim {
-        active_count
-    } else {
-        active_count.saturating_add(reserved_count)
-    };
-    if effective_occupied >= max_allocations {
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Allocation Capacity Reached",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    }
 
     let tcp_peer_ctx = conn
         .as_any()
@@ -2476,7 +2682,7 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    let (relay_addr, backend, cipher) = match decoded_identity {
+    let (relay_addr, backend, cipher, capacity_permit) = match decoded_identity {
         Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
             let claimed = {
                 let mut guard = reserved_sessions.lock().await;
@@ -2498,6 +2704,7 @@ async fn handle_authenticated_allocate(
             if now_ms > reserved.expires_at_ms {
                 let handle = reserved.backend.begin_close();
                 reserved.backend.finish_close(handle).await;
+                drop(reserved.capacity_permit);
                 send_authenticated_error(
                     conn,
                     src_addr,
@@ -2510,13 +2717,80 @@ async fn handle_authenticated_allocate(
                 .await;
                 return;
             }
-            (reserved.relay_addr, reserved.backend, reserved.cipher)
+            if matches!(reserved.backend, RelayBackend::ChainedHop(_)) {
+                // Synchronize upstream hop lifetime off the shared `read_loop` so a slow or
+                // unresponsive upstream hop cannot stall unrelated allocations.
+                let conn_clone = Arc::clone(conn);
+                let allocations_clone = Arc::clone(allocations);
+                let allocate_responses_clone = Arc::clone(allocate_responses);
+                let req_msg = m.clone();
+                let username = username_attr.text;
+                tokio::spawn(async move {
+                    if let RelayBackend::ChainedHop(ref upstream) = reserved.backend {
+                        if upstream.refresh(lifetime_duration).await.is_err() {
+                            let handle = reserved.backend.begin_close();
+                            reserved.backend.finish_close(handle).await;
+                            drop(reserved.capacity_permit);
+                            send_authenticated_error(
+                                &conn_clone,
+                                src_addr,
+                                &req_msg,
+                                CODE_INSUFFICIENT_CAPACITY,
+                                b"Upstream Hop Allocation Expired or Unreachable",
+                                None,
+                                mi_key,
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                    finalize_allocate_install(
+                        conn_clone,
+                        allocations_clone,
+                        allocate_responses_clone,
+                        relay_turn_socket,
+                        five_tuple,
+                        src_addr,
+                        req_msg.transaction_id,
+                        username,
+                        reserved.relay_addr,
+                        reserved.backend,
+                        reserved.cipher,
+                        lifetime_duration,
+                        tcp_authenticated_tx,
+                        reserved.capacity_permit,
+                        mi_key,
+                    )
+                    .await;
+                });
+                return;
+            }
+            (
+                reserved.relay_addr,
+                reserved.backend,
+                reserved.cipher,
+                reserved.capacity_permit,
+            )
         }
         _ => {
+            let Ok(capacity_permit) = Arc::clone(capacity_sem).try_acquire_owned() else {
+                send_authenticated_error(
+                    conn,
+                    src_addr,
+                    m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Allocation Capacity Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            };
             let Ok((relay_conn, relay_addr)) = relay_generator
                 .allocate_relay_conn(use_ipv4, need_even_port)
                 .await
             else {
+                drop(capacity_permit);
                 send_authenticated_error(
                     conn,
                     src_addr,
@@ -2529,61 +2803,33 @@ async fn handle_authenticated_allocate(
                 .await;
                 return;
             };
-            (relay_addr, RelayBackend::LocalExit(relay_conn), None)
+            (
+                relay_addr,
+                RelayBackend::LocalExit(relay_conn),
+                None,
+                capacity_permit,
+            )
         }
     };
 
-    let alloc = ManagedAllocation::new(
+    finalize_allocate_install(
+        Arc::clone(conn),
+        Arc::clone(allocations),
+        Arc::clone(allocate_responses),
+        relay_turn_socket,
         five_tuple,
+        src_addr,
+        m.transaction_id,
         username_attr.text,
         relay_addr,
         backend,
         cipher,
         lifetime_duration,
         tcp_authenticated_tx,
-    );
-    {
-        let mut guard = allocations.lock().await;
-        guard.insert(five_tuple, Arc::clone(&alloc));
-    }
-
-    tokio::spawn(relay_packet_handler(
-        Arc::clone(&alloc),
-        Arc::clone(allocations),
-        relay_turn_socket,
-        src_addr,
-    ));
-
-    let built = {
-        let mut resp = Message::new();
-        let setters: Vec<Box<dyn Setter>> = vec![
-            Box::new(Message {
-                transaction_id: m.transaction_id,
-                ..Default::default()
-            }),
-            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_SUCCESS_RESPONSE)),
-            Box::new(RelayedAddress {
-                ip: relay_addr.ip(),
-                port: relay_addr.port(),
-            }),
-            Box::new(Lifetime(lifetime_duration)),
-            Box::new(XorMappedAddress {
-                ip: src_addr.ip(),
-                port: src_addr.port(),
-            }),
-            Box::new(MessageIntegrity(mi_key)),
-            Box::new(FINGERPRINT),
-        ];
-        resp.build(&setters).is_ok().then_some(resp.raw)
-    };
-    if let Some(raw) = built {
-        {
-            let guard = allocations.lock().await;
-            allocate_responses.retain(|tuple, _| guard.contains_key(tuple));
-        }
-        allocate_responses.insert(five_tuple, (m.transaction_id, raw.clone()));
-        let _ = conn.send_to(&raw, src_addr).await;
-    }
+        capacity_permit,
+        mi_key,
+    )
+    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2591,8 +2837,8 @@ async fn handle_authenticated_refresh(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
-    allocate_responses: &mut HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
-    completed_deletions: &mut HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>,
+    allocate_responses: &Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>,
+    completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     max_allocations: usize,
     alloc: Arc<ManagedAllocation>,
     m: &Message,
@@ -2623,7 +2869,7 @@ async fn handle_authenticated_refresh(
     }
 
     if lifetime_duration.is_zero() {
-        allocate_responses.remove(&alloc.five_tuple);
+        allocate_responses.lock().await.remove(&alloc.five_tuple);
         remove_allocation_if_current(allocations, &alloc).await;
     } else {
         if alloc.cascade_refresh(lifetime_duration).await.is_err() {
@@ -2640,7 +2886,7 @@ async fn handle_authenticated_refresh(
             return;
         }
         if !try_refresh_allocation(allocations, &alloc, lifetime_duration).await {
-            allocate_responses.remove(&alloc.five_tuple);
+            allocate_responses.lock().await.remove(&alloc.five_tuple);
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2769,7 +3015,11 @@ async fn handle_authenticated_create_permission(
         return;
     }
 
-    if alloc.cascade_create_permission(&candidate_ips).await.is_err() {
+    if alloc
+        .cascade_create_permission(&candidate_ips)
+        .await
+        .is_err()
+    {
         send_authenticated_error(
             conn,
             src_addr,
@@ -2896,7 +3146,11 @@ async fn handle_authenticated_channel_bind(
         }
     }
 
-    if alloc.cascade_channel_bind(channel, target_sock).await.is_err() {
+    if alloc
+        .cascade_channel_bind(channel, target_sock)
+        .await
+        .is_err()
+    {
         send_authenticated_error(
             conn,
             src_addr,
@@ -3180,9 +3434,12 @@ pub struct TurnServer {
     advertised_addr: SocketAddr,
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
+    clock: SharedClock,
+    channel_bind_timeout: Duration,
     relay_generator: Arc<PolicyRelayAddressGenerator>,
     relay_is_ipv4: bool,
     max_allocations: usize,
+    capacity_sem: Arc<Semaphore>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
@@ -3231,6 +3488,7 @@ impl TurnServer {
         };
         let advertised_addr = SocketAddr::new(advertised_ip, local_addr.port());
 
+        let clock = Arc::clone(&config.clock);
         let auth_handler = Arc::new(DelegationAuthHandler::with_server_key_and_clock(
             config.admission,
             config.server_key,
@@ -3253,10 +3511,13 @@ impl TurnServer {
         };
 
         let max_allocations = config.max_allocations.max(1);
+        let capacity_sem = Arc::new(Semaphore::new(max_allocations));
         tokio::spawn(Self::read_loop(
             listeners,
             Arc::clone(&allocations),
             Arc::clone(&reserved_sessions),
+            Arc::clone(&capacity_sem),
+            Arc::clone(&clock),
             Arc::clone(&relay_generator),
             Arc::clone(&nonces),
             Arc::clone(&auth_handler),
@@ -3276,9 +3537,12 @@ impl TurnServer {
             advertised_addr,
             realm: config.realm,
             auth_handler,
+            clock,
+            channel_bind_timeout,
             relay_generator,
             relay_is_ipv4,
             max_allocations,
+            capacity_sem,
             allocations,
             reserved_sessions,
             nonces,
@@ -3292,6 +3556,8 @@ impl TurnServer {
         listeners: Vec<Arc<RecordingConn>>,
         allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
         reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
+        capacity_sem: Arc<Semaphore>,
+        clock: SharedClock,
         relay_generator: Arc<PolicyRelayAddressGenerator>,
         nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
         auth_handler: Arc<DelegationAuthHandler>,
@@ -3359,9 +3625,8 @@ impl TurnServer {
         }
         drop(pkt_tx);
 
-        let mut allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)> = HashMap::new();
-        let mut completed_deletions: HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>> =
-            HashMap::new();
+        let allocate_responses: AllocateResponseCache = Arc::new(Mutex::new(HashMap::new()));
+        let completed_deletions: CompletedDeletionCache = Arc::new(Mutex::new(HashMap::new()));
 
         loop {
             if *shutdown_rx.borrow_and_update() {
@@ -3395,8 +3660,8 @@ impl TurnServer {
                 if let Some(alloc) = removed_alloc {
                     close_allocations(vec![alloc]).await;
                 }
-                allocate_responses.remove(&five_tuple);
-                completed_deletions.remove(&five_tuple);
+                allocate_responses.lock().await.remove(&five_tuple);
+                completed_deletions.lock().await.remove(&five_tuple);
                 nonces
                     .lock()
                     .await
@@ -3498,7 +3763,7 @@ impl TurnServer {
 
             let existing_alloc = get_active_allocation(&allocations, &five_tuple).await;
             if existing_alloc.is_none() {
-                allocate_responses.remove(&five_tuple);
+                allocate_responses.lock().await.remove(&five_tuple);
             }
 
             if decoded_msg.typ.method == METHOD_REFRESH
@@ -3507,6 +3772,8 @@ impl TurnServer {
             {
                 let expected_owner = if is_zero_lifetime_refresh(&decoded_msg) {
                     completed_deletions
+                        .lock()
+                        .await
                         .get(&five_tuple)
                         .and_then(|q| {
                             q.iter()
@@ -3543,13 +3810,18 @@ impl TurnServer {
                 METHOD_ALLOCATE => {
                     if let Some(alloc) = &existing_alloc {
                         if username_attr.text == alloc.username {
-                            if let Some((saved_tx_id, cached_resp)) =
-                                allocate_responses.get(&five_tuple)
-                            {
-                                if *saved_tx_id == decoded_msg.transaction_id {
-                                    let _ = recording_conn.send_to(cached_resp, addr).await;
-                                    continue;
-                                }
+                            let cached_match = {
+                                let guard = allocate_responses.lock().await;
+                                guard
+                                    .get(&five_tuple)
+                                    .and_then(|(saved_tx_id, cached_resp)| {
+                                        (*saved_tx_id == decoded_msg.transaction_id)
+                                            .then(|| cached_resp.clone())
+                                    })
+                            };
+                            if let Some(cached_resp) = cached_match {
+                                let _ = recording_conn.send_to(&cached_resp, addr).await;
+                                continue;
                             }
                         }
                         send_authenticated_error(
@@ -3568,9 +3840,10 @@ impl TurnServer {
                         &recording_conn_dyn,
                         &allocations,
                         &reserved_sessions,
+                        &capacity_sem,
+                        &clock,
                         &relay_generator,
-                        &mut allocate_responses,
-                        max_allocations,
+                        &allocate_responses,
                         five_tuple,
                         addr,
                         &decoded_msg,
@@ -3583,7 +3856,7 @@ impl TurnServer {
                 METHOD_REFRESH => {
                     if is_zero_lifetime_refresh(&decoded_msg) {
                         if let Some(cached_resp) = find_completed_deletion(
-                            &mut completed_deletions,
+                            &completed_deletions,
                             &nonces,
                             &five_tuple,
                             &username_attr.text,
@@ -3609,18 +3882,46 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    handle_authenticated_refresh(
-                        &recording_conn_dyn,
-                        &allocations,
-                        &nonces,
-                        &mut allocate_responses,
-                        &mut completed_deletions,
-                        max_allocations,
-                        alloc,
-                        &decoded_msg,
-                        mi_key,
-                    )
-                    .await;
+                    if let Some(tx) = alloc.chained_control_sender() {
+                        if tx
+                            .try_send(ChainedControlOp::Refresh {
+                                conn: Arc::clone(&recording_conn_dyn),
+                                allocations: Arc::clone(&allocations),
+                                nonces: Arc::clone(&nonces),
+                                allocate_responses: Arc::clone(&allocate_responses),
+                                completed_deletions: Arc::clone(&completed_deletions),
+                                max_allocations,
+                                alloc,
+                                msg: decoded_msg.clone(),
+                                mi_key: mi_key.clone(),
+                            })
+                            .is_err()
+                        {
+                            send_authenticated_error(
+                                &recording_conn_dyn,
+                                addr,
+                                &decoded_msg,
+                                CODE_INSUFFICIENT_CAPACITY,
+                                b"Chained Control Queue Full",
+                                None,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                    } else {
+                        handle_authenticated_refresh(
+                            &recording_conn_dyn,
+                            &allocations,
+                            &nonces,
+                            &allocate_responses,
+                            &completed_deletions,
+                            max_allocations,
+                            alloc,
+                            &decoded_msg,
+                            mi_key,
+                        )
+                        .await;
+                    }
                 }
                 METHOD_CREATE_PERMISSION => {
                     let Some(alloc) = existing_alloc else {
@@ -3636,15 +3937,40 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    handle_authenticated_create_permission(
-                        &recording_conn_dyn,
-                        &alloc,
-                        &decoded_msg,
-                        peer_policy,
-                        max_permissions_per_allocation,
-                        mi_key,
-                    )
-                    .await;
+                    if let Some(tx) = alloc.chained_control_sender() {
+                        if tx
+                            .try_send(ChainedControlOp::CreatePermission {
+                                conn: Arc::clone(&recording_conn_dyn),
+                                alloc,
+                                msg: decoded_msg.clone(),
+                                peer_policy,
+                                max_permissions_per_allocation,
+                                mi_key: mi_key.clone(),
+                            })
+                            .is_err()
+                        {
+                            send_authenticated_error(
+                                &recording_conn_dyn,
+                                addr,
+                                &decoded_msg,
+                                CODE_INSUFFICIENT_CAPACITY,
+                                b"Chained Control Queue Full",
+                                None,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                    } else {
+                        handle_authenticated_create_permission(
+                            &recording_conn_dyn,
+                            &alloc,
+                            &decoded_msg,
+                            peer_policy,
+                            max_permissions_per_allocation,
+                            mi_key,
+                        )
+                        .await;
+                    }
                 }
                 METHOD_CHANNEL_BIND => {
                     let Some(alloc) = existing_alloc else {
@@ -3660,16 +3986,42 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    handle_authenticated_channel_bind(
-                        &recording_conn_dyn,
-                        &alloc,
-                        &decoded_msg,
-                        peer_policy,
-                        channel_bind_timeout,
-                        max_permissions_per_allocation,
-                        mi_key,
-                    )
-                    .await;
+                    if let Some(tx) = alloc.chained_control_sender() {
+                        if tx
+                            .try_send(ChainedControlOp::ChannelBind {
+                                conn: Arc::clone(&recording_conn_dyn),
+                                alloc,
+                                msg: decoded_msg.clone(),
+                                peer_policy,
+                                channel_bind_timeout,
+                                max_permissions_per_allocation,
+                                mi_key: mi_key.clone(),
+                            })
+                            .is_err()
+                        {
+                            send_authenticated_error(
+                                &recording_conn_dyn,
+                                addr,
+                                &decoded_msg,
+                                CODE_INSUFFICIENT_CAPACITY,
+                                b"Chained Control Queue Full",
+                                None,
+                                mi_key,
+                            )
+                            .await;
+                        }
+                    } else {
+                        handle_authenticated_channel_bind(
+                            &recording_conn_dyn,
+                            &alloc,
+                            &decoded_msg,
+                            peer_policy,
+                            channel_bind_timeout,
+                            max_permissions_per_allocation,
+                            mi_key,
+                        )
+                        .await;
+                    }
                 }
                 _ => {}
             }
@@ -3817,15 +4169,14 @@ impl TurnServer {
             return Err(crate::error::TurnError::InvalidReservationTtl);
         }
         let clamped_ttl = ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
-        let now_ms = rings_core::utils::get_epoch_ms();
-        let reserved_count =
-            prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
-        let active_count = active_allocation_count(&self.allocations).await;
-        if active_count.saturating_add(reserved_count) >= self.max_allocations {
+        let now_ms = self.clock.now_ms();
+        let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
+        let _ = active_allocation_count(&self.allocations).await;
+        let Ok(capacity_permit) = Arc::clone(&self.capacity_sem).try_acquire_owned() else {
             return Err(crate::error::TurnError::AllocationCapacityReached {
                 max_allocations: self.max_allocations,
             });
-        }
+        };
 
         let (relay_conn, relay_addr) = self
             .relay_generator
@@ -3840,26 +4191,14 @@ impl TurnServer {
             expires_at_ms,
             self.auth_handler.server_key(),
         )?;
-        let active_now = active_allocation_count(&self.allocations).await;
-        let overflow_backend = {
+        {
             let mut guard = self.reserved_sessions.lock().await;
-            if active_now.saturating_add(guard.len()) >= self.max_allocations {
-                Some(RelayBackend::LocalExit(relay_conn))
-            } else {
-                guard.insert(session_id, ReservedTurnSession {
-                    expires_at_ms,
-                    relay_addr,
-                    backend: RelayBackend::LocalExit(relay_conn),
-                    cipher,
-                });
-                None
-            }
-        };
-        if let Some(backend) = overflow_backend {
-            let handle = backend.begin_close();
-            backend.finish_close(handle).await;
-            return Err(crate::error::TurnError::AllocationCapacityReached {
-                max_allocations: self.max_allocations,
+            guard.insert(session_id, ReservedTurnSession {
+                expires_at_ms,
+                relay_addr,
+                backend: RelayBackend::LocalExit(relay_conn),
+                cipher,
+                capacity_permit,
             });
         }
         Ok(TurnSessionReservation {
@@ -3880,19 +4219,23 @@ impl TurnServer {
             return Err(crate::error::TurnError::InvalidReservationTtl);
         }
         let clamped_ttl = spec.ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
-        let now_ms = rings_core::utils::get_epoch_ms();
-        let reserved_count =
-            prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
-        let active_count = active_allocation_count(&self.allocations).await;
-        if active_count.saturating_add(reserved_count) >= self.max_allocations {
+        let now_ms = self.clock.now_ms();
+        let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
+        let _ = active_allocation_count(&self.allocations).await;
+        let Ok(capacity_permit) = Arc::clone(&self.capacity_sem).try_acquire_owned() else {
             return Err(crate::error::TurnError::AllocationCapacityReached {
                 max_allocations: self.max_allocations,
             });
-        }
+        };
 
-        let (upstream, upstream_relayed_addr) =
-            UpstreamTurnRelayClient::allocate(spec.next_hop_addr, spec.next_hop_credentials)
-                .await?;
+        let upstream_lifetime = clamped_ttl.max(DEFAULT_LIFETIME);
+        let (upstream, upstream_relayed_addr) = UpstreamTurnRelayClient::allocate(
+            spec.next_hop_addr,
+            spec.next_hop_credentials,
+            upstream_lifetime,
+            self.channel_bind_timeout,
+        )
+        .await?;
         if upstream_relayed_addr != spec.projected_relay_addr {
             upstream.begin_close();
             upstream.finish_close().await;
@@ -3911,26 +4254,14 @@ impl TurnServer {
             expires_at_ms,
             self.auth_handler.server_key(),
         )?;
-        let active_now = active_allocation_count(&self.allocations).await;
-        let overflow_backend = {
+        {
             let mut guard = self.reserved_sessions.lock().await;
-            if active_now.saturating_add(guard.len()) >= self.max_allocations {
-                Some(RelayBackend::ChainedHop(upstream))
-            } else {
-                guard.insert(session_id, ReservedTurnSession {
-                    expires_at_ms,
-                    relay_addr: upstream.relayed_addr(),
-                    backend: RelayBackend::ChainedHop(upstream),
-                    cipher: spec.cipher,
-                });
-                None
-            }
-        };
-        if let Some(backend) = overflow_backend {
-            let handle = backend.begin_close();
-            backend.finish_close(handle).await;
-            return Err(crate::error::TurnError::AllocationCapacityReached {
-                max_allocations: self.max_allocations,
+            guard.insert(session_id, ReservedTurnSession {
+                expires_at_ms,
+                relay_addr: upstream.relayed_addr(),
+                backend: RelayBackend::ChainedHop(upstream),
+                cipher: spec.cipher,
+                capacity_permit,
             });
         }
         Ok(TurnSessionReservation {

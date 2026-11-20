@@ -2248,11 +2248,55 @@ mod tests {
         );
         let _ = replay_client.close().await;
 
+        let teardown_start = tokio::time::Instant::now();
         allocated_conn.close().await?;
         turn_client.close().await?;
         hop1.close().await?;
         hop2.close().await?;
         hop3.close().await?;
+        assert!(
+            teardown_start.elapsed() < Duration::from_secs(2),
+            "chained 3-hop teardown must complete promptly without hitting the 5s upstream timeout (took {:?})",
+            teardown_start.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_reservations_honor_injected_clock_and_atomic_capacity_semaphore(
+    ) -> Result<()> {
+        let t0: u128 = 2_000_000_000_000;
+        let clock = Arc::new(ManualClock::new(t0));
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
+        cfg.clock = clock.clone();
+        cfg.max_allocations = 1;
+        let server = TurnServer::start(cfg).await?;
+
+        let key1 = SecretKey::random();
+        let res1 = server
+            .reserve_exit_session(key1.pubkey(), Duration::from_secs(30), None)
+            .await?;
+        assert_eq!(res1.ticket.ticket.expires_at_ms, t0 + 30_000);
+
+        // Second reservation must fail atomically while slot 1 is occupied.
+        let key2 = SecretKey::random();
+        let err = server
+            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30), None)
+            .await
+            .expect_err("second reservation must fail when max_allocations == 1");
+        assert!(matches!(err, TurnError::AllocationCapacityReached {
+            max_allocations: 1
+        }));
+
+        // Advancing the injected ManualClock past 30s expires reservation 1 and frees its permit.
+        clock.set(t0 + 30_001);
+        let res2 = server
+            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30), None)
+            .await?;
+        assert_eq!(res2.ticket.ticket.expires_at_ms, t0 + 60_001);
+
+        server.close().await?;
         Ok(())
     }
 }

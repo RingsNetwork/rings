@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex as SyncMutex;
 use std::sync::PoisonError;
+use std::time::Instant;
 
 use stun::agent::TransactionId;
 use stun::error_code::ErrorCodeAttribute;
@@ -19,6 +20,7 @@ use stun::integrity::MessageIntegrity;
 use stun::message::Getter;
 use stun::message::Message;
 use stun::message::MessageType;
+use stun::message::Method;
 use stun::message::Setter;
 use stun::message::CLASS_ERROR_RESPONSE;
 use stun::message::CLASS_INDICATION;
@@ -59,10 +61,185 @@ const UPSTREAM_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 const UPSTREAM_INBOUND_QUEUE_CAPACITY: usize = 512;
 const UPSTREAM_MTU: usize = 65556;
 
+/// Cancellation-safe RAII guard that aborts a spawned background task if `allocate` returns early
+/// with an error or is cancelled before transferring ownership into [`UpstreamTurnRelayClient`].
+struct AbortOnDrop(Option<JoinHandle<()>>);
+
+impl AbortOnDrop {
+    fn take(&mut self) -> Option<JoinHandle<()>> {
+        self.0.take()
+    }
+}
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 struct UpstreamAuthState {
     realm: String,
     nonce: String,
     mi_key: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct UpstreamChannelEntry {
+    peer: SocketAddr,
+    expires_at: Instant,
+    confirmed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct UpstreamPeerEntry {
+    channel: ChannelNumber,
+    expires_at: Instant,
+    confirmed: bool,
+}
+
+/// Bijective, TTL-expiring `(ChannelNumber <-> SocketAddr)` table for an upstream TURN hop.
+///
+/// Invariants:
+/// - Expired entries are never returned for either inbound `ChannelData` or outbound `send_to`.
+/// - Pending `ChannelBind` entries allow inbound `ChannelData` arriving immediately behind
+///   `ChannelBind 200 OK` on the reader task to be decoded without racing the control waiter,
+///   while outbound `send_to` waits until the binding is confirmed.
+/// - Rebinding an existing `ChannelNumber` or `SocketAddr` atomically removes any displaced reverse
+///   entry so traffic is never misrouted to a stale peer.
+#[derive(Default)]
+pub(crate) struct UpstreamChannelTable {
+    channel_to_peer: HashMap<ChannelNumber, UpstreamChannelEntry>,
+    peer_to_channel: HashMap<SocketAddr, UpstreamPeerEntry>,
+}
+
+impl UpstreamChannelTable {
+    pub(crate) fn prune(&mut self, now: Instant) {
+        self.channel_to_peer.retain(|_, e| e.expires_at > now);
+        self.peer_to_channel.retain(|_, e| e.expires_at > now);
+    }
+
+    pub(crate) fn begin_bind(
+        &mut self,
+        channel: ChannelNumber,
+        peer: SocketAddr,
+        now: Instant,
+        timeout: Duration,
+    ) {
+        self.prune(now);
+        // Only install a pending inbound mapping if this channel isn't already bound to a
+        // different peer; on confirmation, `bind` atomically replaces any displaced entries.
+        self.channel_to_peer
+            .entry(channel)
+            .or_insert(UpstreamChannelEntry {
+                peer,
+                expires_at: now + timeout,
+                confirmed: false,
+            });
+    }
+
+    pub(crate) fn cancel_pending(&mut self, channel: ChannelNumber, peer: SocketAddr) {
+        if let Some(entry) = self.channel_to_peer.get(&channel) {
+            if !entry.confirmed && entry.peer == peer {
+                self.channel_to_peer.remove(&channel);
+            }
+        }
+    }
+
+    pub(crate) fn bind(
+        &mut self,
+        channel: ChannelNumber,
+        peer: SocketAddr,
+        now: Instant,
+        timeout: Duration,
+    ) {
+        self.prune(now);
+        if let Some(old) = self.channel_to_peer.remove(&channel) {
+            if self
+                .peer_to_channel
+                .get(&old.peer)
+                .is_some_and(|e| e.channel == channel)
+            {
+                self.peer_to_channel.remove(&old.peer);
+            }
+        }
+        if let Some(old) = self.peer_to_channel.remove(&peer) {
+            if self
+                .channel_to_peer
+                .get(&old.channel)
+                .is_some_and(|e| e.peer == peer)
+            {
+                self.channel_to_peer.remove(&old.channel);
+            }
+        }
+        let expires_at = now + timeout;
+        self.channel_to_peer.insert(channel, UpstreamChannelEntry {
+            peer,
+            expires_at,
+            confirmed: true,
+        });
+        self.peer_to_channel.insert(peer, UpstreamPeerEntry {
+            channel,
+            expires_at,
+            confirmed: true,
+        });
+    }
+
+    pub(crate) fn peer_for_channel(
+        &mut self,
+        channel: ChannelNumber,
+        now: Instant,
+    ) -> Option<SocketAddr> {
+        let entry = *self.channel_to_peer.get(&channel)?;
+        if entry.expires_at <= now {
+            self.channel_to_peer.remove(&channel);
+            if self
+                .peer_to_channel
+                .get(&entry.peer)
+                .is_some_and(|e| e.channel == channel)
+            {
+                self.peer_to_channel.remove(&entry.peer);
+            }
+            return None;
+        }
+        Some(entry.peer)
+    }
+
+    pub(crate) fn channel_for_peer(
+        &mut self,
+        peer: SocketAddr,
+        now: Instant,
+    ) -> Option<ChannelNumber> {
+        let entry = *self.peer_to_channel.get(&peer)?;
+        if entry.expires_at <= now {
+            self.peer_to_channel.remove(&peer);
+            if self
+                .channel_to_peer
+                .get(&entry.channel)
+                .is_some_and(|e| e.peer == peer)
+            {
+                self.channel_to_peer.remove(&entry.channel);
+            }
+            return None;
+        }
+        entry.confirmed.then_some(entry.channel)
+    }
+}
+
+/// Verify that an upstream STUN/TURN response matches `expected_method` and carries a valid
+/// RFC 5389 `MESSAGE-INTEGRITY` attribute computed with `mi_key`.
+pub(crate) fn verify_authenticated_response(
+    resp: &Message,
+    expected_method: Method,
+    mi_key: &[u8],
+) -> bool {
+    if resp.typ.method != expected_method {
+        return false;
+    }
+    MessageIntegrity(mi_key.to_vec())
+        .check(&mut resp.clone())
+        .is_ok()
 }
 
 /// Active upstream TURN allocation client connecting hop `T_i` to `T_{i+1}` (#1292).
@@ -71,46 +248,49 @@ pub(crate) struct UpstreamTurnRelayClient {
     server_addr: SocketAddr,
     relayed_addr: SocketAddr,
     credentials: TurnCredentials,
+    channel_bind_timeout: Duration,
     auth_state: SyncMutex<UpstreamAuthState>,
     control_waiters: Arc<SyncMutex<HashMap<TransactionId, oneshot::Sender<Message>>>>,
-    channel_to_peer: Arc<SyncMutex<HashMap<ChannelNumber, SocketAddr>>>,
-    peer_to_channel: Arc<SyncMutex<HashMap<SocketAddr, ChannelNumber>>>,
+    channels: Arc<SyncMutex<UpstreamChannelTable>>,
     inbound_rx: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
-    closed_notify: Arc<Notify>,
+    payload_closed: Arc<Notify>,
+    reader_shutdown: Arc<Notify>,
     reader_task: SyncMutex<Option<JoinHandle<()>>>,
 }
 
 impl UpstreamTurnRelayClient {
     /// Allocate an upstream TURN relay session on `server_addr` authenticated by `credentials`,
-    /// returning the client handle and the `XOR-RELAYED-ADDRESS` reported by `server_addr`.
+    /// requesting `requested_lifetime` and returning the client handle and the
+    /// `XOR-RELAYED-ADDRESS` reported by `server_addr`.
     pub(crate) async fn allocate(
         server_addr: SocketAddr,
         credentials: TurnCredentials,
+        requested_lifetime: Duration,
+        channel_bind_timeout: Duration,
     ) -> Result<(Arc<Self>, SocketAddr)> {
         let bind_addr = if server_addr.is_ipv4() {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)
         } else {
-            SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
         };
         let socket = Arc::new(UdpSocket::bind(bind_addr).await?);
 
         let control_waiters: Arc<SyncMutex<HashMap<TransactionId, oneshot::Sender<Message>>>> =
             Arc::new(SyncMutex::new(HashMap::new()));
-        let channel_to_peer: Arc<SyncMutex<HashMap<ChannelNumber, SocketAddr>>> =
-            Arc::new(SyncMutex::new(HashMap::new()));
-        let peer_to_channel: Arc<SyncMutex<HashMap<SocketAddr, ChannelNumber>>> =
-            Arc::new(SyncMutex::new(HashMap::new()));
+        let channels: Arc<SyncMutex<UpstreamChannelTable>> =
+            Arc::new(SyncMutex::new(UpstreamChannelTable::default()));
         let (inbound_tx, inbound_rx) = mpsc::channel(UPSTREAM_INBOUND_QUEUE_CAPACITY);
-        let closed_notify = Arc::new(Notify::new());
+        let payload_closed = Arc::new(Notify::new());
+        let reader_shutdown = Arc::new(Notify::new());
 
         let reader_socket = Arc::clone(&socket);
         let reader_waiters = Arc::clone(&control_waiters);
-        let reader_channels = Arc::clone(&channel_to_peer);
-        let reader_closed = Arc::clone(&closed_notify);
-        let reader_task = tokio::spawn(async move {
+        let reader_channels = Arc::clone(&channels);
+        let reader_stop = Arc::clone(&reader_shutdown);
+        let mut reader_guard = AbortOnDrop(Some(tokio::spawn(async move {
             let mut buf = vec![0u8; UPSTREAM_MTU];
             loop {
-                let notified = reader_closed.notified();
+                let notified = reader_stop.notified();
                 let recv = tokio::select! {
                     _ = notified => break,
                     res = reader_socket.recv_from(&mut buf) => res,
@@ -133,8 +313,7 @@ impl UpstreamTurnRelayClient {
                         let maybe_peer = reader_channels
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner)
-                            .get(&cd.number)
-                            .copied();
+                            .peer_for_channel(cd.number, Instant::now());
                         if let Some(peer) = maybe_peer {
                             let _ = inbound_tx.try_send((cd.data, peer));
                         }
@@ -168,7 +347,7 @@ impl UpstreamTurnRelayClient {
                     }
                 }
             }
-        });
+        })));
 
         // Step 1: Unauthenticated Allocate challenge.
         let challenge_tx_id = TransactionId::new();
@@ -220,6 +399,7 @@ impl UpstreamTurnRelayClient {
             Box::new(RequestedTransport {
                 protocol: PROTO_UDP,
             }),
+            Box::new(Lifetime(requested_lifetime)),
         ];
         if server_addr.is_ipv6() {
             alloc_setters.push(Box::new(REQUESTED_FAMILY_IPV6));
@@ -243,7 +423,6 @@ impl UpstreamTurnRelayClient {
         )
         .await?;
         if alloc_resp.typ.class != CLASS_SUCCESS_RESPONSE {
-            reader_task.abort();
             let mut err_attr = ErrorCodeAttribute::default();
             let reason = if err_attr.get_from(&alloc_resp).is_ok() {
                 format!(
@@ -259,6 +438,12 @@ impl UpstreamTurnRelayClient {
                 reason,
             )));
         }
+        if !verify_authenticated_response(&alloc_resp, METHOD_ALLOCATE, &mi_key) {
+            return Err(TurnError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "upstream Allocate response failed MESSAGE-INTEGRITY verification",
+            )));
+        }
         let mut relayed_attr = RelayedAddress::default();
         relayed_attr.get_from(&alloc_resp)?;
         let relayed_addr = SocketAddr::new(relayed_attr.ip, relayed_attr.port);
@@ -268,17 +453,18 @@ impl UpstreamTurnRelayClient {
             server_addr,
             relayed_addr,
             credentials,
+            channel_bind_timeout,
             auth_state: SyncMutex::new(UpstreamAuthState {
                 realm: realm_attr.text,
                 nonce: nonce_attr.text,
                 mi_key,
             }),
             control_waiters,
-            channel_to_peer,
-            peer_to_channel,
+            channels,
             inbound_rx: Mutex::new(inbound_rx),
-            closed_notify,
-            reader_task: SyncMutex::new(Some(reader_task)),
+            payload_closed,
+            reader_shutdown,
+            reader_task: SyncMutex::new(reader_guard.take()),
         });
         Ok((client, relayed_addr))
     }
@@ -322,17 +508,26 @@ impl UpstreamTurnRelayClient {
         }
     }
 
-    async fn execute_authenticated_request<F>(&self, build_attrs: F) -> Result<Message>
+    async fn execute_authenticated_request<F>(
+        &self,
+        expected_method: Method,
+        build_attrs: F,
+    ) -> Result<Message>
     where
         F: Fn(TransactionId, &str, &str, &str, &[u8]) -> Result<Vec<u8>>,
     {
+        let mut retry_nonce: Option<String> = None;
         for attempt in 0..2 {
             let (realm, nonce, mi_key) = {
                 let state = self
                     .auth_state
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                (state.realm.clone(), state.nonce.clone(), state.mi_key.clone())
+                let active_nonce = retry_nonce
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| state.nonce.clone());
+                (state.realm.clone(), active_nonce, state.mi_key.clone())
             };
             let tx_id = TransactionId::new();
             let raw = build_attrs(tx_id, &self.credentials.username, &realm, &nonce, &mi_key)?;
@@ -345,20 +540,32 @@ impl UpstreamTurnRelayClient {
             )
             .await?;
             if resp.typ.class == CLASS_SUCCESS_RESPONSE {
+                if !verify_authenticated_response(&resp, expected_method, &mi_key) {
+                    return Err(TurnError::Io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "upstream control response failed MESSAGE-INTEGRITY verification",
+                    )));
+                }
+                if let Some(accepted_nonce) = retry_nonce.take() {
+                    let mut state = self
+                        .auth_state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    state.nonce = accepted_nonce;
+                }
                 return Ok(resp);
             }
-            if attempt == 0 && resp.typ.class == CLASS_ERROR_RESPONSE {
+            if attempt == 0
+                && resp.typ.class == CLASS_ERROR_RESPONSE
+                && resp.typ.method == expected_method
+            {
                 let mut err_attr = ErrorCodeAttribute::default();
                 let mut new_nonce = Nonce::new(stun::attributes::ATTR_NONCE, String::new());
                 if err_attr.get_from(&resp).is_ok()
                     && err_attr.code == CODE_STALE_NONCE
                     && new_nonce.get_from(&resp).is_ok()
                 {
-                    let mut state = self
-                        .auth_state
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    state.nonce = new_nonce.text;
+                    retry_nonce = Some(new_nonce.text);
                     continue;
                 }
             }
@@ -369,135 +576,139 @@ impl UpstreamTurnRelayClient {
 
     /// Cascade `CreatePermission` for `peer_ips` to the upstream TURN hop.
     pub(crate) async fn create_permission(&self, peer_ips: &[IpAddr]) -> Result<()> {
-        self.execute_authenticated_request(|tx_id, username, realm, nonce, mi_key| {
-            let mut msg = Message::new();
-            let mut setters: Vec<Box<dyn Setter>> = vec![
-                Box::new(Message {
-                    transaction_id: tx_id,
-                    ..Default::default()
-                }),
-                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
-            ];
-            for &ip in peer_ips {
-                setters.push(Box::new(PeerAddress { ip, port: 0 }));
-            }
-            setters.push(Box::new(Username::new(
-                stun::attributes::ATTR_USERNAME,
-                username.to_string(),
-            )));
-            setters.push(Box::new(Realm::new(
-                stun::attributes::ATTR_REALM,
-                realm.to_string(),
-            )));
-            setters.push(Box::new(Nonce::new(
-                stun::attributes::ATTR_NONCE,
-                nonce.to_string(),
-            )));
-            setters.push(Box::new(MessageIntegrity(mi_key.to_vec())));
-            setters.push(Box::new(FINGERPRINT));
-            msg.build(&setters)?;
-            Ok(msg.raw)
-        })
+        self.execute_authenticated_request(
+            METHOD_CREATE_PERMISSION,
+            |tx_id, username, realm, nonce, mi_key| {
+                let mut msg = Message::new();
+                let mut setters: Vec<Box<dyn Setter>> = vec![
+                    Box::new(Message {
+                        transaction_id: tx_id,
+                        ..Default::default()
+                    }),
+                    Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                ];
+                for &ip in peer_ips {
+                    setters.push(Box::new(PeerAddress { ip, port: 0 }));
+                }
+                setters.push(Box::new(Username::new(
+                    stun::attributes::ATTR_USERNAME,
+                    username.to_string(),
+                )));
+                setters.push(Box::new(Realm::new(
+                    stun::attributes::ATTR_REALM,
+                    realm.to_string(),
+                )));
+                setters.push(Box::new(Nonce::new(
+                    stun::attributes::ATTR_NONCE,
+                    nonce.to_string(),
+                )));
+                setters.push(Box::new(MessageIntegrity(mi_key.to_vec())));
+                setters.push(Box::new(FINGERPRINT));
+                msg.build(&setters)?;
+                Ok(msg.raw)
+            },
+        )
         .await
         .map(|_| ())
     }
 
     /// Cascade `ChannelBind(channel, peer)` to the upstream TURN hop and record the channel mapping
-    /// locally for `ChannelData` forwarding.
+    /// locally with TTL expiration for `ChannelData` forwarding.
     pub(crate) async fn channel_bind(
         &self,
         channel: ChannelNumber,
         peer: SocketAddr,
     ) -> Result<()> {
-        self.execute_authenticated_request(|tx_id, username, realm, nonce, mi_key| {
-            let mut msg = Message::new();
-            let setters: Vec<Box<dyn Setter>> = vec![
-                Box::new(Message {
-                    transaction_id: tx_id,
-                    ..Default::default()
-                }),
-                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
-                Box::new(channel),
-                Box::new(PeerAddress {
-                    ip: peer.ip(),
-                    port: peer.port(),
-                }),
-                Box::new(Username::new(
-                    stun::attributes::ATTR_USERNAME,
-                    username.to_string(),
-                )),
-                Box::new(Realm::new(
-                    stun::attributes::ATTR_REALM,
-                    realm.to_string(),
-                )),
-                Box::new(Nonce::new(
-                    stun::attributes::ATTR_NONCE,
-                    nonce.to_string(),
-                )),
-                Box::new(MessageIntegrity(mi_key.to_vec())),
-                Box::new(FINGERPRINT),
-            ];
-            msg.build(&setters)?;
-            Ok(msg.raw)
-        })
-        .await?;
-        self.channel_to_peer
+        self.channels
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(channel, peer);
-        self.peer_to_channel
+            .begin_bind(channel, peer, Instant::now(), self.channel_bind_timeout);
+        let res = self
+            .execute_authenticated_request(
+                METHOD_CHANNEL_BIND,
+                |tx_id, username, realm, nonce, mi_key| {
+                    let mut msg = Message::new();
+                    let setters: Vec<Box<dyn Setter>> = vec![
+                        Box::new(Message {
+                            transaction_id: tx_id,
+                            ..Default::default()
+                        }),
+                        Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                        Box::new(channel),
+                        Box::new(PeerAddress {
+                            ip: peer.ip(),
+                            port: peer.port(),
+                        }),
+                        Box::new(Username::new(
+                            stun::attributes::ATTR_USERNAME,
+                            username.to_string(),
+                        )),
+                        Box::new(Realm::new(stun::attributes::ATTR_REALM, realm.to_string())),
+                        Box::new(Nonce::new(stun::attributes::ATTR_NONCE, nonce.to_string())),
+                        Box::new(MessageIntegrity(mi_key.to_vec())),
+                        Box::new(FINGERPRINT),
+                    ];
+                    msg.build(&setters)?;
+                    Ok(msg.raw)
+                },
+            )
+            .await;
+        if let Err(err) = res {
+            self.channels
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .cancel_pending(channel, peer);
+            return Err(err);
+        }
+        self.channels
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(peer, channel);
+            .bind(channel, peer, Instant::now(), self.channel_bind_timeout);
         Ok(())
     }
 
     /// Cascade `Refresh(lifetime)` to the upstream TURN hop.
     pub(crate) async fn refresh(&self, lifetime: Duration) -> Result<()> {
-        self.execute_authenticated_request(|tx_id, username, realm, nonce, mi_key| {
-            let mut msg = Message::new();
-            let setters: Vec<Box<dyn Setter>> = vec![
-                Box::new(Message {
-                    transaction_id: tx_id,
-                    ..Default::default()
-                }),
-                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
-                Box::new(Lifetime(lifetime)),
-                Box::new(Username::new(
-                    stun::attributes::ATTR_USERNAME,
-                    username.to_string(),
-                )),
-                Box::new(Realm::new(
-                    stun::attributes::ATTR_REALM,
-                    realm.to_string(),
-                )),
-                Box::new(Nonce::new(
-                    stun::attributes::ATTR_NONCE,
-                    nonce.to_string(),
-                )),
-                Box::new(MessageIntegrity(mi_key.to_vec())),
-                Box::new(FINGERPRINT),
-            ];
-            msg.build(&setters)?;
-            Ok(msg.raw)
-        })
+        self.execute_authenticated_request(
+            METHOD_REFRESH,
+            |tx_id, username, realm, nonce, mi_key| {
+                let mut msg = Message::new();
+                let setters: Vec<Box<dyn Setter>> = vec![
+                    Box::new(Message {
+                        transaction_id: tx_id,
+                        ..Default::default()
+                    }),
+                    Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+                    Box::new(Lifetime(lifetime)),
+                    Box::new(Username::new(
+                        stun::attributes::ATTR_USERNAME,
+                        username.to_string(),
+                    )),
+                    Box::new(Realm::new(stun::attributes::ATTR_REALM, realm.to_string())),
+                    Box::new(Nonce::new(stun::attributes::ATTR_NONCE, nonce.to_string())),
+                    Box::new(MessageIntegrity(mi_key.to_vec())),
+                    Box::new(FINGERPRINT),
+                ];
+                msg.build(&setters)?;
+                Ok(msg.raw)
+            },
+        )
         .await
         .map(|_| ())
     }
 
     /// Forward an outbound payload to `target` via the upstream TURN hop (using `ChannelData` when
-    /// a channel is bound for `target`, or `SendIndication` otherwise).
+    /// an unexpired channel is bound for `target`, or `SendIndication` otherwise).
     pub(crate) async fn send_to(
         &self,
         payload: &[u8],
         target: SocketAddr,
     ) -> webrtc_util::Result<usize> {
         let maybe_channel = self
-            .peer_to_channel
+            .channels
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .get(&target)
-            .copied();
+            .channel_for_peer(target, Instant::now());
         if let Some(number) = maybe_channel {
             let mut cd = ChannelData {
                 data: payload.to_vec(),
@@ -530,7 +741,7 @@ impl UpstreamTurnRelayClient {
         buf: &mut [u8],
     ) -> webrtc_util::Result<(usize, SocketAddr)> {
         let mut rx = self.inbound_rx.lock().await;
-        let notified = self.closed_notify.notified();
+        let notified = self.payload_closed.notified();
         let item = tokio::select! {
             _ = notified => None,
             v = rx.recv() => v,
@@ -549,12 +760,18 @@ impl UpstreamTurnRelayClient {
         Ok((n, src_addr))
     }
 
+    /// Stop the data-plane inbound receiver immediately while keeping the control-plane reader
+    /// alive so [`Self::finish_close`] can complete the `Refresh(0)` deletion exchange without
+    /// waiting for [`UPSTREAM_CONTROL_TIMEOUT`].
     pub(crate) fn begin_close(&self) {
-        self.closed_notify.notify_waiters();
+        self.payload_closed.notify_waiters();
     }
 
+    /// Send `Refresh(0)` to release the upstream TURN allocation, then shut down the control-plane
+    /// reader task.
     pub(crate) async fn finish_close(&self) {
         let _ = self.refresh(Duration::ZERO).await;
+        self.reader_shutdown.notify_waiters();
         if let Some(handle) = self
             .reader_task
             .lock()
@@ -563,5 +780,107 @@ impl UpstreamTurnRelayClient {
         {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_channel_table_expires_and_evicts_displaced_reverse_entries() {
+        let t0 = Instant::now();
+        let ttl = Duration::from_secs(600);
+        let peer_a: SocketAddr = "127.0.0.1:40001".parse().unwrap();
+        let peer_b: SocketAddr = "127.0.0.1:40002".parse().unwrap();
+        let ch1 = ChannelNumber(0x4000);
+        let ch2 = ChannelNumber(0x4001);
+
+        let mut table = UpstreamChannelTable::default();
+        table.bind(ch1, peer_a, t0, ttl);
+        assert_eq!(table.peer_for_channel(ch1, t0), Some(peer_a));
+        assert_eq!(table.channel_for_peer(peer_a, t0), Some(ch1));
+
+        // Rebinding `ch1` to `peer_b` must evict `peer_a`'s reverse mapping.
+        table.bind(ch1, peer_b, t0 + Duration::from_secs(1), ttl);
+        assert_eq!(
+            table.channel_for_peer(peer_a, t0 + Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            table.peer_for_channel(ch1, t0 + Duration::from_secs(1)),
+            Some(peer_b)
+        );
+        assert_eq!(
+            table.channel_for_peer(peer_b, t0 + Duration::from_secs(1)),
+            Some(ch1)
+        );
+
+        // Rebinding `peer_b` to `ch2` must evict `ch1`'s forward mapping.
+        table.bind(ch2, peer_b, t0 + Duration::from_secs(2), ttl);
+        assert_eq!(
+            table.peer_for_channel(ch1, t0 + Duration::from_secs(2)),
+            None
+        );
+        assert_eq!(
+            table.peer_for_channel(ch2, t0 + Duration::from_secs(2)),
+            Some(peer_b)
+        );
+
+        // Advancing past TTL expires both directions.
+        let after_ttl = t0 + ttl + Duration::from_secs(5);
+        assert_eq!(table.peer_for_channel(ch2, after_ttl), None);
+        assert_eq!(table.channel_for_peer(peer_b, after_ttl), None);
+    }
+
+    #[test]
+    fn verify_authenticated_response_rejects_forged_mi_and_wrong_method() {
+        let mi_key = generate_auth_key("user", "rings.network", "secret-pass");
+        let wrong_key = generate_auth_key("user", "rings.network", "wrong-pass");
+
+        let mut valid = Message::new();
+        valid
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(
+                    METHOD_CREATE_PERMISSION,
+                    CLASS_SUCCESS_RESPONSE,
+                )),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        assert!(verify_authenticated_response(
+            &valid,
+            METHOD_CREATE_PERMISSION,
+            &mi_key
+        ));
+        assert!(!verify_authenticated_response(
+            &valid,
+            METHOD_CHANNEL_BIND,
+            &mi_key
+        ));
+        assert!(!verify_authenticated_response(
+            &valid,
+            METHOD_CREATE_PERMISSION,
+            &wrong_key
+        ));
+
+        let mut unsigned = Message::new();
+        unsigned
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(
+                    METHOD_CREATE_PERMISSION,
+                    CLASS_SUCCESS_RESPONSE,
+                )),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        assert!(!verify_authenticated_response(
+            &unsigned,
+            METHOD_CREATE_PERMISSION,
+            &mi_key
+        ));
     }
 }

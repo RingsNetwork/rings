@@ -187,7 +187,10 @@ pub fn derive_entry_wrapped_hop_ciphers(
         .map(|k| (*k, TurnCipherDirection::Encipher));
     hop_ciphers.push(TurnPayloadCipher::from_layers(entry_layers)?);
     for key in link_keys {
-        hop_ciphers.push(TurnPayloadCipher::single(key, TurnCipherDirection::Decipher)?);
+        hop_ciphers.push(TurnPayloadCipher::single(
+            key,
+            TurnCipherDirection::Decipher,
+        )?);
     }
     Ok(hop_ciphers)
 }
@@ -205,7 +208,10 @@ pub fn derive_client_wrapped_hop_ciphers(
     let client_cipher = TurnPayloadCipher::from_layers(client_layers)?;
     let mut hop_ciphers = Vec::with_capacity(hop_keys.len());
     for key in hop_keys {
-        hop_ciphers.push(TurnPayloadCipher::single(key, TurnCipherDirection::Decipher)?);
+        hop_ciphers.push(TurnPayloadCipher::single(
+            key,
+            TurnCipherDirection::Decipher,
+        )?);
     }
     Ok((client_cipher, hop_ciphers))
 }

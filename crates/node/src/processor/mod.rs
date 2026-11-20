@@ -477,7 +477,7 @@ impl Processor {
     }
 
     /// Execute one registration pass for every configured registration task on this processor.
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(crate) async fn register_all_once_for_test(&self) -> Result<()> {
         let context = self.registration_context();
         for task in &self.registration_tasks {
