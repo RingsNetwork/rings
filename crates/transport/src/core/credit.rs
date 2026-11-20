@@ -361,7 +361,6 @@ impl SendCredit {
         self.returned.filter(|_| generation == self.generation)
     }
 
-    #[cfg(rings_transport_backend)]
     /// The frames sent and the credit they were sent under, for diagnostics.
     pub(crate) const fn usage(self) -> (u64, u64) {
         (self.committed, self.limit)

@@ -142,7 +142,6 @@ impl SendPermit {
         self
     }
 
-    #[cfg(rings_transport_backend)]
     /// The credit carried by [`Self::with_credit`], taken by the backend that sends under it.
     pub(crate) fn take_credit(&mut self) -> Option<LaneCreditReservation> {
         self.credit.take()
