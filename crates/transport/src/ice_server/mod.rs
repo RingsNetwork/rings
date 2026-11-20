@@ -6,8 +6,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use crate::core::sdp::IceCandidateTier;
 use crate::error::IceServerError;
+use crate::sdp::IceCandidateTier;
 
 /// WebRTC IceCredentialType enums.
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]

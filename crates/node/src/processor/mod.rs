@@ -107,14 +107,17 @@ mod config;
 pub(crate) mod handshake;
 mod horizon;
 mod messaging;
-pub mod network;
 mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
 pub(crate) use config::parse_udp_port_range;
+pub use config::NodeNetworkParameters;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+pub use config::TransportNetworkConfig;
+pub use config::UdpPortRange;
+pub use config::UdpPortRangeError;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
 pub use handshake::OfferReplyKind;
@@ -122,10 +125,6 @@ pub use horizon::DelegationHorizon;
 pub(crate) use horizon::SessionKeyRing;
 pub use horizon::SigningState;
 pub use horizon::SIGNING_HORIZON_LEAD_MS;
-pub use network::NodeNetworkParameters;
-pub use network::TransportNetworkConfig;
-pub use network::UdpPortRange;
-pub use network::UdpPortRangeError;
 pub(crate) use registration_daemon::sleep_unless_stopped;
 
 /// The pause between two reads of the fetch cache while a DHT fetch waits for its reply.

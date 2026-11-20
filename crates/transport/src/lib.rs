@@ -11,6 +11,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod callback;
+pub mod connection_pool;
 pub mod connection_ref;
 pub mod connections;
 pub mod core;
@@ -22,6 +23,6 @@ pub mod hot_path;
 pub mod ice_server;
 pub mod network_config;
 pub mod notifier;
-pub mod pool;
+pub mod sdp;
 
 mod sync_utils;

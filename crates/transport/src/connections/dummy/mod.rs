@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
+use crate::connection_pool::Pool;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
@@ -36,7 +37,6 @@ use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::network_config::UdpPortRange;
 use crate::notifier::Notifier;
-use crate::pool::Pool;
 use crate::sync_utils::lock_recover;
 
 mod delay;

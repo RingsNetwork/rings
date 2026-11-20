@@ -24,13 +24,13 @@ use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelPool;
-use crate::core::sdp::IceCandidateTier;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::error::Error;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
+use crate::sdp::IceCandidateTier;
 
 /// Budget of the test: far below the gathering's own timeout, so a gathering the close does
 /// not end fails the test by name.

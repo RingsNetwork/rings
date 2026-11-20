@@ -15,10 +15,10 @@ use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::LaneSignal;
 use crate::core::pool::ChannelLane;
-use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
 use crate::error::Error;
+use crate::sdp::parse_sdp_max_message_size;
 
 /// Wrapper for the data that is sent over the data channel.
 ///

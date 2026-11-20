@@ -1,4 +1,4 @@
-// SDP parsing (including section semantics) is tested in `crate::core::sdp`; these cover the
+// SDP parsing (including section semantics) is tested in `crate::sdp`; these cover the
 // policy `effective_*` layers on top of it (default / no-limit / floor / cap).
 use super::effective_max_message_size;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
