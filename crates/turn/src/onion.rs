@@ -195,27 +195,6 @@ pub fn derive_entry_wrapped_hop_ciphers(
     Ok(hop_ciphers)
 }
 
-/// Derive `(client_cipher, [hop_1_cipher, ..., hop_N_cipher])` for an `N`-hop TURN onion chain
-/// where the client itself pre-wraps all `N` onion layers `[K_N, ..., K_1]` so even Entry Guard
-/// `T_1` never sees plaintext payload bytes.
-pub fn derive_client_wrapped_hop_ciphers(
-    hop_keys: &[[u8; KEY_BYTES]],
-) -> std::result::Result<(TurnPayloadCipher, Vec<TurnPayloadCipher>), CoreError> {
-    let client_layers = hop_keys
-        .iter()
-        .rev()
-        .map(|k| (*k, TurnCipherDirection::Encipher));
-    let client_cipher = TurnPayloadCipher::from_layers(client_layers)?;
-    let mut hop_ciphers = Vec::with_capacity(hop_keys.len());
-    for key in hop_keys {
-        hop_ciphers.push(TurnPayloadCipher::single(
-            key,
-            TurnCipherDirection::Decipher,
-        )?);
-    }
-    Ok((client_cipher, hop_ciphers))
-}
-
 /// Abstract state of one hop in the formal `N`-hop TURN chain model (#1292).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TurnHopModelState {
@@ -482,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_wrapped_and_client_wrapped_aez_ciphers_preserve_length_and_bijection_across_n_hops() {
+    fn entry_wrapped_aez_ciphers_preserve_length_and_bijection_across_n_hops() {
         let link_keys = [
             sample_aez_key(0x11),
             sample_aez_key(0x37),
@@ -531,24 +510,5 @@ mod tests {
                 "entry hop T_1 must recover exact inbound datagram for client"
             );
         }
-
-        // Also verify client-pre-wrapped mode where even T_1 only holds a single peel key.
-        let (client_cipher, hop_only_ciphers) =
-            derive_client_wrapped_hop_ciphers(&link_keys).unwrap();
-        let payload = b"STUN/DTLS/SCTP WebRTC frame over 3-hop TURN onion".to_vec();
-        let mut buf = payload.clone();
-        client_cipher.transform_outbound(&mut buf);
-        assert_ne!(buf, payload);
-        for hop_cipher in &hop_only_ciphers {
-            assert_eq!(hop_cipher.layer_count(), 1);
-            hop_cipher.transform_outbound(&mut buf);
-        }
-        assert_eq!(buf, payload);
-
-        for hop_cipher in hop_only_ciphers.iter().rev() {
-            hop_cipher.transform_inbound(&mut buf);
-        }
-        client_cipher.transform_inbound(&mut buf);
-        assert_eq!(buf, payload);
     }
 }

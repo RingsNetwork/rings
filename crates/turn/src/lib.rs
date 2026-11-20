@@ -65,7 +65,6 @@ pub use credentials::TURN_SESSION_TICKET_DOMAIN;
 pub use error::Result;
 #[cfg(not(target_family = "wasm"))]
 pub use error::TurnError;
-pub use onion::derive_client_wrapped_hop_ciphers;
 pub use onion::derive_entry_wrapped_hop_ciphers;
 pub use onion::TurnChainAction;
 pub use onion::TurnChainModel;
