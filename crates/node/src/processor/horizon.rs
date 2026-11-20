@@ -688,59 +688,63 @@ mod tests {
         assert!(rot_err_2.is_err());
         assert_lockstep(&k1);
 
-        // 8. Concurrent renewal race: Thread A enters `renew_delegatee_key_with` while Thread B
-        //    holds the write lock and commits `k1 -> k2`. Thread A then attempts `k2 -> k3`
-        //    whose `persist` fails. Because `current` is captured inside the write-lock
-        //    transaction, Thread A rolls the transport back to `k2` (NOT stale `k1`).
-        let renew_ms_3 =
-            DelegationHorizon::of(&k2.delegation()).horizon_ms() - SIGNING_HORIZON_LEAD_MS;
-        let k3 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_3).unwrap();
-        let entered_b = Arc::new(std::sync::Barrier::new(2));
-        let release_b = Arc::new(std::sync::Barrier::new(2));
+        // 8. Concurrent renewal race (native multi-threaded): Thread A enters
+        //    `renew_delegatee_key_with` while Thread B holds the write lock and commits
+        //    `k1 -> k2`. Thread A then attempts `k2 -> k3` whose `persist` fails. Because
+        //    `current` is captured inside the write-lock transaction, Thread A rolls the
+        //    transport back to `k2` (NOT stale `k1`).
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let renew_ms_3 =
+                DelegationHorizon::of(&k2.delegation()).horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+            let k3 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_3).unwrap();
+            let entered_b = Arc::new(std::sync::Barrier::new(2));
+            let release_b = Arc::new(std::sync::Barrier::new(2));
 
-        let proc_b = processor.clone();
-        let disk_b = Arc::clone(&persisted_disk_key);
-        let k2_for_b = k2.clone();
-        let entered_b_tx = Arc::clone(&entered_b);
-        let release_b_rx = Arc::clone(&release_b);
-        let handle_b = std::thread::spawn(move || {
-            proc_b.renew_delegatee_key_with(
-                renew_ms_2,
-                |_| {
-                    // Thread B now holds the SessionKeyRing write lock.
-                    entered_b_tx.wait();
-                    release_b_rx.wait();
-                    Ok(k2_for_b)
-                },
-                |next| {
-                    *disk_b.lock().unwrap() = next.clone();
-                    Ok(())
-                },
-            )
-        });
+            let proc_b = processor.clone();
+            let disk_b = Arc::clone(&persisted_disk_key);
+            let k2_for_b = k2.clone();
+            let entered_b_tx = Arc::clone(&entered_b);
+            let release_b_rx = Arc::clone(&release_b);
+            let handle_b = std::thread::spawn(move || {
+                proc_b.renew_delegatee_key_with(
+                    renew_ms_2,
+                    |_| {
+                        // Thread B now holds the SessionKeyRing write lock.
+                        entered_b_tx.wait();
+                        release_b_rx.wait();
+                        Ok(k2_for_b)
+                    },
+                    |next| {
+                        *disk_b.lock().unwrap() = next.clone();
+                        Ok(())
+                    },
+                )
+            });
 
-        // Wait until Thread B holds the write lock, then spawn Thread A so Thread A blocks
-        // waiting for the write lock before B commits `k2`.
-        entered_b.wait();
-        let proc_a = processor.clone();
-        let handle_a = std::thread::spawn(move || {
-            proc_a.renew_delegatee_key_with(
-                renew_ms_3,
-                |_| Ok(k3),
-                |_| {
-                    Err(Error::CreateFileError(
-                        "concurrent persist fail".to_string(),
-                    ))
-                },
-            )
-        });
+            // Wait until Thread B holds the write lock, then spawn Thread A so Thread A blocks
+            // waiting for the write lock before B commits `k2`.
+            entered_b.wait();
+            let proc_a = processor.clone();
+            let handle_a = std::thread::spawn(move || {
+                proc_a.renew_delegatee_key_with(
+                    renew_ms_3,
+                    |_| Ok(k3),
+                    |_| {
+                        Err(Error::CreateFileError(
+                            "concurrent persist fail".to_string(),
+                        ))
+                    },
+                )
+            });
 
-        // Give Thread A a moment to block on the write lock, then let Thread B commit `k2`.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        release_b.wait();
+            // Give Thread A a moment to block on the write lock, then let Thread B commit `k2`.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release_b.wait();
 
-        assert!(handle_b.join().unwrap().is_ok());
-        assert!(handle_a.join().unwrap().is_err());
-        assert_lockstep(&k2);
+            assert!(handle_b.join().unwrap().is_ok());
+            assert!(handle_a.join().unwrap().is_err());
+            assert_lockstep(&k2);
+        }
     }
 }

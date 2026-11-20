@@ -246,7 +246,7 @@ impl InnerTransportCallback {
         &self.link_credit
     }
 
-    /// Wait for one credit to send a custom frame on `lane`; see [`LinkCredit::reserve`]. The
+    /// Wait for one credit to send a custom frame on `lane`; see `LinkCredit::reserve`. The
     /// wait owns the link's credit state and nothing else of the connection: boxed, it is a
     /// backend's [`ConnectionInterface::reserve_send_credit`](crate::core::transport::ConnectionInterface::reserve_send_credit).
     pub fn reserve_credit(
