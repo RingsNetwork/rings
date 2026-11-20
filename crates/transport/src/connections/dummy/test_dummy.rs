@@ -55,7 +55,7 @@ struct CloseCallback {
 
 #[async_trait]
 impl TransportCallback for CloseCallback {
-    async fn on_data_channel_close(
+    async fn on_channel_close(
         &self,
         _cid: &str,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -63,7 +63,7 @@ impl TransportCallback for CloseCallback {
         Ok(())
     }
 
-    async fn on_peer_connection_state_change(
+    async fn on_connection_state_change(
         &self,
         _cid: &str,
         state: TransportConnectionState,
@@ -149,7 +149,7 @@ fn test_snapshot_generation_witnesses_transient_queue_activity() {
     let mut state = ControlledDeliveryState::new();
     let idle = state.snapshot();
 
-    state.push_back(("peer".to_owned(), Event::DataChannelOpen(None)));
+    state.push_back(("peer".to_owned(), Event::ChannelOpen(None)));
     let queued = state.snapshot();
     assert_eq!(queued.pending(), 1);
     assert_ne!(queued.generation(), idle.generation());
@@ -164,7 +164,7 @@ fn test_snapshot_generation_witnesses_transient_queue_activity() {
 fn test_sequence_index_survives_arbitrary_removal() {
     let mut state = ControlledDeliveryState::new();
     for _ in 0..3 {
-        state.push_back(("peer".to_owned(), Event::DataChannelOpen(None)));
+        state.push_back(("peer".to_owned(), Event::ChannelOpen(None)));
     }
 
     assert!(state.remove_sequence(1).is_some());
@@ -422,7 +422,7 @@ async fn test_pending_dummy_close_fences_an_irrevocable_dispatch_synchronously()
         tokio::spawn(async move { connection.close().await })
     };
     wait_until("dummy retirement state gate", || {
-        connection.connection_state() == TransportConnectionState::Closed
+        ConnectionInterface::connection_state(&*connection) == TransportConnectionState::Closed
     })
     .await;
     assert!(!closer.is_finished());
@@ -473,20 +473,20 @@ async fn test_cancelling_pending_close_completes_physical_retirement() {
         tokio::spawn(async move { local.close().await })
     };
     wait_until("synchronous retirement fence", || {
-        local.connection_state() == TransportConnectionState::Closed
+        ConnectionInterface::connection_state(&*local) == TransportConnectionState::Closed
     })
     .await;
     closer.abort();
     let _cancelled = closer.await;
 
     wait_until("cancelled close callbacks and remote retirement", || {
-        remote.connection_state() == TransportConnectionState::Closed
+        ConnectionInterface::connection_state(&*remote) == TransportConnectionState::Closed
             && local_peer_closed.load(Ordering::Acquire) == 1
             && local_data_closed.load(Ordering::Acquire) == 1
     })
     .await;
     assert!(CONNS.get(&local.rand_id).is_none());
-    assert!(!local.dispatch(Event::DataChannelOpen(None)));
+    assert!(!local.dispatch(Event::ChannelOpen(None)));
     assert!(local.event_listener.is_finished());
 
     CONNS.remove(&remote.rand_id);
@@ -525,11 +525,11 @@ fn test_irrevocable_retirement_drop_outside_runtime_is_panic_free() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(guard)));
     assert!(result.is_ok());
     assert_eq!(
-        connection.connection_state(),
+        ConnectionInterface::connection_state(&*connection),
         TransportConnectionState::Closed
     );
     assert!(CONNS.get(&connection.rand_id).is_none());
-    assert!(!connection.dispatch(Event::DataChannelOpen(None)));
+    assert!(!connection.dispatch(Event::ChannelOpen(None)));
 }
 
 #[tokio::test]
@@ -571,10 +571,13 @@ async fn test_failed_irrevocable_dummy_dispatch_retires_connection_and_rejects_l
     assert!(matches!(result, Err(Error::DummyRemoteConnectionClosed)));
     assert!(acceptance.is_irrevocable());
     assert!(!acceptance.is_accepted());
-    assert_eq!(local.connection_state(), TransportConnectionState::Closed);
+    assert_eq!(
+        ConnectionInterface::connection_state(&*local),
+        TransportConnectionState::Closed
+    );
     assert!(CONNS.get(&local.rand_id).is_none());
     assert!(remote.remote_conn().is_none());
-    assert!(!local.dispatch(Event::DataChannelOpen(None)));
+    assert!(!local.dispatch(Event::ChannelOpen(None)));
     assert!(matches!(
         local
             .send_message_with_permit(

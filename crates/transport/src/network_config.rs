@@ -220,6 +220,9 @@ impl TransportNetworkConfig {
         }
         #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
         {
+            // Browser wasm32 is single-threaded; `SharedTransport` unifies native and browser
+            // behind `Arc<dyn DynTransportInterface>`.
+            #[allow(clippy::arc_with_non_send_sync)]
             Arc::new(crate::connections::WebSysWebrtcTransport::new(
                 credentials,
                 self.endpoint_hint.clone(),

@@ -96,7 +96,7 @@ async fn received_hops(
 /// serialized against the rest of the suite, as its own invocation (`qaci.yml`).
 #[cfg(not(feature = "dummy"))]
 #[tokio::test]
-async fn test_relayed_connect_over_real_transport() -> Result<()> {
+async fn test_relayed_connect_over_real_webrtc() -> Result<()> {
     let [key1, key2, key3, key4] = crate::tests::fixed_secret_keys::<4>()?;
     let [node1, node2, node3, node4] = [key1, key2, key3, key4]
         .map(|key| prepare_ring_node(key).expect("ring node configuration is valid"));
