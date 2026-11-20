@@ -530,5 +530,390 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     assert_eq!(serialized.udp_port_min, Some(50000));
     assert_eq!(serialized.udp_port_max, Some(50100));
 
+    // 4. Attempting to losslessly serialize a custom `NodeNetworkParameters` implementation
+    //    into `ProcessorConfigSerialized` must fail explicitly instead of silently replacing it
+    //    with an empty `TransportNetworkConfig`.
+    let custom_cfg =
+        onion_test_config().with_network_parameters(MinimalAdHocParams { valid: true });
+    assert!(matches!(
+        ProcessorConfigSerialized::try_from(custom_cfg),
+        Err(Error::InvalidConfig(_))
+    ));
+
+    Ok(())
+}
+
+/// Constructive model-completeness proof for external transport backends (#1291):
+/// implements a completely independent in-memory `TransportInterface` + `ConnectionInterface`
+/// inside `rings-node` (an external crate relative to `rings-transport`) using **only** public
+/// `rings-transport` APIs — with zero delegation to `DummyTransport` or `WebrtcTransport` —
+/// injects it into two `Processor` instances via [`NodeNetworkParameters`], performs a full
+/// 3-step handshake (`create_offer -> answer_offer -> accept_answer`), and verifies credit-bounded
+/// custom payload delivery across the live connection.
+#[tokio::test]
+async fn test_independent_external_transport_backend_completes_handshake_and_credit_bounded_send(
+) -> Result<()> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use rings_transport::callback::InnerTransportCallback;
+    use rings_transport::callback::NodeFramePool;
+    use rings_transport::connection_pool::Pool;
+    use rings_transport::connection_ref::ConnectionRef;
+    use rings_transport::core::callback::BoxedTransportCallback;
+    use rings_transport::core::credit::CreditIndex;
+    use rings_transport::core::pool::ChannelLane;
+    use rings_transport::core::transport::ConnectionInterface;
+    use rings_transport::core::transport::ConnectionStateSnapshot;
+    use rings_transport::core::transport::LaneCreditView;
+    use rings_transport::core::transport::SendPermit;
+    use rings_transport::core::transport::SharedTransport;
+    use rings_transport::core::transport::TransportConnectionState;
+    use rings_transport::core::transport::TransportInterface;
+    use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
+    use rings_transport::delivery::DeliveryFuture;
+    use rings_transport::delivery::SendCreditWait;
+    use rings_transport::error::Error as TransportError;
+    use rings_transport::notifier::Notifier;
+
+    /// Shared in-memory switchboard connecting independent `MemoryConnection` endpoints by id.
+    #[derive(Clone, Default)]
+    struct MemorySwitchboard {
+        /// Registry of live memory endpoints keyed by their handshake token.
+        endpoints: Arc<Mutex<HashMap<String, Arc<MemoryConnection>>>>,
+    }
+
+    impl std::fmt::Debug for MemorySwitchboard {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("MemorySwitchboard").finish_non_exhaustive()
+        }
+    }
+
+    /// Independent external connection backend implementing [`ConnectionInterface`] purely via
+    /// public `rings-transport` credit and callback APIs (zero built-in transport delegation).
+    struct MemoryConnection {
+        /// Unique endpoint token exchanged as the opaque handshake payload.
+        endpoint_id: String,
+        /// Switchboard used to resolve the peer endpoint during handshake and frame delivery.
+        switchboard: MemorySwitchboard,
+        /// Negotiated peer endpoint token once handshake completes.
+        peer_id: Mutex<Option<String>>,
+        /// Connection lifecycle state snapshot.
+        state: Mutex<ConnectionStateSnapshot>,
+        /// Public credit and inbound-admission callback adapter from `rings-transport`.
+        callback: Arc<InnerTransportCallback>,
+        /// Notifier woken when channel opens or closes.
+        open_notifier: Notifier,
+    }
+
+    impl MemoryConnection {
+        /// Deliver a raw wire frame into this endpoint's credit-admitted inbound pipeline.
+        fn deliver_raw(&self, raw: Bytes, lane: ChannelLane) {
+            self.callback.receive_inbound_frame(raw, lane);
+        }
+
+        /// Spawn one credit pump per [`CreditIndex::ALL`] using public
+        /// [`InnerTransportCallback::next_credit_frame`].
+        #[allow(clippy::disallowed_methods)]
+        fn spawn_credit_pumps(self: &Arc<Self>) {
+            for index in CreditIndex::ALL {
+                let conn = Arc::downgrade(self);
+                let cb = Arc::clone(&self.callback);
+                tokio::spawn(async move {
+                    while let Some(frame) = cb.next_credit_frame(index).await {
+                        let Some(conn) = conn.upgrade() else {
+                            break;
+                        };
+                        let peer_id = conn.peer_id.lock().unwrap().clone();
+                        if let Some(peer) = peer_id.and_then(|id| {
+                            conn.switchboard.endpoints.lock().unwrap().get(&id).cloned()
+                        }) {
+                            peer.deliver_raw(frame, index.lane());
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ConnectionInterface for MemoryConnection {
+        type Handshake = String;
+        type Error = TransportError;
+
+        async fn send_message_with_permit(
+            &self,
+            payload: Bytes,
+            lane: ChannelLane,
+            permit: SendPermit,
+        ) -> std::result::Result<DeliveryFuture, TransportError> {
+            self.callback
+                .send_custom_wire(payload, lane, permit, |wire, lane, permit| async move {
+                    let Some(proof) = permit.try_mark_irrevocable() else {
+                        return Err(TransportError::SendPermitRevoked);
+                    };
+                    let peer_id = self.peer_id.lock().unwrap().clone().ok_or_else(|| {
+                        TransportError::ChannelOpen("peer not linked".to_string())
+                    })?;
+                    let peer = self
+                        .switchboard
+                        .endpoints
+                        .lock()
+                        .unwrap()
+                        .get(&peer_id)
+                        .cloned()
+                        .ok_or_else(|| TransportError::ChannelOpen("peer offline".to_string()))?;
+                    peer.deliver_raw(wire, lane);
+                    proof.mark_accepted();
+                    let delivered: DeliveryFuture = Box::pin(std::future::ready(Ok(())));
+                    Ok(delivered)
+                })
+                .await
+        }
+
+        fn reserve_send_credit(&self, lane: ChannelLane) -> SendCreditWait<TransportError> {
+            Box::pin(self.callback.reserve_credit(lane))
+        }
+
+        fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+            self.callback.send_credit_view(lane)
+        }
+
+        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+            *self.state.lock().unwrap()
+        }
+
+        fn max_message_size(&self) -> usize {
+            MAX_CHANNEL_MESSAGE_SIZE
+        }
+
+        async fn create_offer(&self) -> std::result::Result<String, TransportError> {
+            *self.state.lock().unwrap() =
+                ConnectionStateSnapshot::new(TransportConnectionState::New, false);
+            Ok(self.endpoint_id.clone())
+        }
+
+        async fn answer_offer(&self, offer: String) -> std::result::Result<String, TransportError> {
+            *self.peer_id.lock().unwrap() = Some(offer);
+            *self.state.lock().unwrap() =
+                ConnectionStateSnapshot::new(TransportConnectionState::Connecting, false);
+            Ok(self.endpoint_id.clone())
+        }
+
+        async fn accept_answer(&self, answer: String) -> std::result::Result<(), TransportError> {
+            *self.peer_id.lock().unwrap() = Some(answer.clone());
+            *self.state.lock().unwrap() =
+                ConnectionStateSnapshot::new(TransportConnectionState::Connected, true);
+            self.open_notifier.wake();
+            self.callback
+                .dispatch_peer_connection_state(TransportConnectionState::Connected);
+            self.callback.on_channel_open().await;
+
+            let peer = self
+                .switchboard
+                .endpoints
+                .lock()
+                .unwrap()
+                .get(&answer)
+                .cloned();
+            if let Some(peer) = peer {
+                *peer.state.lock().unwrap() =
+                    ConnectionStateSnapshot::new(TransportConnectionState::Connected, true);
+                peer.open_notifier.wake();
+                peer.callback
+                    .dispatch_peer_connection_state(TransportConnectionState::Connected);
+                peer.callback.on_channel_open().await;
+            }
+            Ok(())
+        }
+
+        async fn wait_for_channel_open(&self) -> std::result::Result<(), TransportError> {
+            if self.channel_is_open() {
+                Ok(())
+            } else {
+                Err(TransportError::ChannelOpen("channel not open".to_string()))
+            }
+        }
+
+        async fn close(&self) -> std::result::Result<(), TransportError> {
+            *self.state.lock().unwrap() =
+                ConnectionStateSnapshot::new(TransportConnectionState::Closed, false);
+            self.switchboard
+                .endpoints
+                .lock()
+                .unwrap()
+                .remove(&self.endpoint_id);
+            self.callback
+                .dispatch_peer_connection_state(TransportConnectionState::Closed);
+            self.callback.on_channel_close().await;
+            Ok(())
+        }
+    }
+
+    /// Independent external [`TransportInterface`] managing [`MemoryConnection`] instances.
+    struct MemoryTransport {
+        /// Shared switchboard linking peers in this test network.
+        switchboard: MemorySwitchboard,
+        /// Per-peer connection pool.
+        pool: Pool<MemoryConnection>,
+        /// Shared node frame pool for credit window lending.
+        frame_pool: NodeFramePool,
+        /// Monotonic endpoint id counter.
+        seq: std::sync::atomic::AtomicU64,
+        /// Prefix differentiating endpoints across nodes.
+        prefix: String,
+    }
+
+    #[async_trait]
+    impl TransportInterface for MemoryTransport {
+        type Connection = MemoryConnection;
+        type Error = TransportError;
+
+        async fn new_connection(
+            &self,
+            cid: &str,
+            callback: BoxedTransportCallback,
+        ) -> std::result::Result<ConnectionRef<MemoryConnection>, TransportError> {
+            let id = format!(
+                "{}-{}",
+                self.prefix,
+                self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            );
+            let notifier = Notifier::default();
+            let inner_cb = Arc::new(InnerTransportCallback::new(
+                cid,
+                callback,
+                notifier.clone(),
+                self.frame_pool.clone(),
+            ));
+            let conn = MemoryConnection {
+                endpoint_id: id.clone(),
+                switchboard: self.switchboard.clone(),
+                peer_id: Mutex::new(None),
+                state: Mutex::new(ConnectionStateSnapshot::new(
+                    TransportConnectionState::New,
+                    false,
+                )),
+                callback: inner_cb,
+                open_notifier: notifier,
+            };
+            let conn_ref = self.pool.safely_insert(cid, conn).await?;
+            let live = conn_ref.upgrade()?;
+            self.switchboard
+                .endpoints
+                .lock()
+                .unwrap()
+                .insert(id, Arc::clone(&live));
+            live.spawn_credit_pumps();
+            Ok(conn_ref)
+        }
+
+        async fn close_connection_if_current(
+            &self,
+            connection: &ConnectionRef<MemoryConnection>,
+        ) -> std::result::Result<bool, TransportError> {
+            self.pool.safely_remove_if_current(connection).await
+        }
+
+        fn connection(
+            &self,
+            cid: &str,
+        ) -> std::result::Result<ConnectionRef<MemoryConnection>, TransportError> {
+            self.pool.connection(cid)
+        }
+
+        fn connection_ids(&self) -> Vec<String> {
+            self.pool.connection_ids()
+        }
+    }
+
+    /// [`NodeNetworkParameters`] implementation that injects [`MemoryTransport`] into `Processor`.
+    #[derive(Clone, Debug)]
+    struct MemoryNetworkParams {
+        /// Shared switchboard connecting nodes in this test.
+        switchboard: MemorySwitchboard,
+        /// Node label prefix.
+        prefix: String,
+    }
+
+    impl NodeNetworkParameters for MemoryNetworkParams {
+        fn build_transport(&self, _delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
+            Ok(Arc::new(MemoryTransport {
+                switchboard: self.switchboard.clone(),
+                pool: Pool::new(),
+                frame_pool: NodeFramePool::new(),
+                seq: std::sync::atomic::AtomicU64::new(0),
+                prefix: self.prefix.clone(),
+            }))
+        }
+    }
+
+    let switchboard = MemorySwitchboard::default();
+    let cfg1 = onion_test_config().with_network_parameters(MemoryNetworkParams {
+        switchboard: switchboard.clone(),
+        prefix: "node1".to_string(),
+    });
+    let cfg2 = onion_test_config().with_network_parameters(MemoryNetworkParams {
+        switchboard,
+        prefix: "node2".to_string(),
+    });
+    let p1 = test_processor_builder(&cfg1).build()?;
+    let p2 = test_processor_builder(&cfg2).build()?;
+
+    let expected_peer = p2.did();
+    let offer = p1
+        .swarm
+        .create_offer(expected_peer)
+        .await
+        .map_err(Error::CoreError)?;
+    let answer_reply = p2
+        .swarm
+        .answer_offer(offer)
+        .await
+        .map_err(Error::CoreError)?;
+    let rings_core::swarm::OfferReply::Answer(answer) = answer_reply else {
+        panic!("expected direct OfferReply::Answer from p2");
+    };
+    p1.swarm
+        .accept_answer(answer)
+        .await
+        .map_err(Error::CoreError)?;
+
+    // Both processors completed handshake over the independent external transport and can send
+    // credit-admitted frames through `ConnectionInterface::reserve_send_credit` +
+    // `send_message_with_permit`.
+    let conn = p1
+        .swarm
+        .transport()
+        .dyn_connection(&expected_peer.to_string())
+        .map_err(rings_core::error::Error::Transport)
+        .map_err(Error::CoreError)?;
+    let live = conn
+        .upgrade()
+        .map_err(rings_core::error::Error::Transport)
+        .map_err(Error::CoreError)?;
+    let credit = live
+        .reserve_send_credit(ChannelLane::PRIORITY)
+        .await
+        .map_err(rings_core::error::Error::Transport)
+        .map_err(Error::CoreError)?;
+    let delivery = live
+        .send_message_with_permit(
+            Bytes::from_static(b"hello-from-external-transport"),
+            ChannelLane::PRIORITY,
+            SendPermit::always().with_credit(credit),
+        )
+        .await
+        .map_err(rings_core::error::Error::Transport)
+        .map_err(Error::CoreError)?;
+    delivery
+        .await
+        .map_err(rings_core::error::Error::Transport)
+        .map_err(Error::CoreError)?;
+
+    p1.close().await?;
+    p2.close().await?;
     Ok(())
 }

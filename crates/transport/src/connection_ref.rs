@@ -49,7 +49,10 @@ impl<C: ?Sized> ConnectionRef<C> {
         }
     }
 
-    pub(crate) fn upgrade(&self) -> Result<Arc<C>> {
+    /// Attempt to upgrade this weak handle to a strong [`Arc`] to the live connection,
+    /// returning [`Error::ConnectionReleased`] if the physical connection has already been
+    /// retired and dropped.
+    pub fn upgrade(&self) -> Result<Arc<C>> {
         match self.conn.upgrade() {
             Some(conn) => Ok(conn),
             None => Err(Error::ConnectionReleased(self.cid.clone())),

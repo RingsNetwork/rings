@@ -402,12 +402,16 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
-        let transport_config =
-            (ins.network_parameters.as_ref() as &dyn Any).downcast_ref::<TransportNetworkConfig>();
-        let udp_port_range = transport_config.and_then(TransportNetworkConfig::udp_port_range);
-        let traversal_servers = transport_config
-            .map(|cfg| cfg.traversal_servers().to_owned())
-            .unwrap_or_default();
+        let Some(transport_config) =
+            (ins.network_parameters.as_ref() as &dyn Any).downcast_ref::<TransportNetworkConfig>()
+        else {
+            return Err(Error::InvalidConfig(
+                "cannot losslessly serialize custom NodeNetworkParameters into ProcessorConfigSerialized"
+                    .to_string(),
+            ));
+        };
+        let udp_port_range = transport_config.udp_port_range();
+        let traversal_servers = transport_config.traversal_servers().to_owned();
         Ok(Self {
             network_id: ins.network_id,
             ice_servers: traversal_servers,

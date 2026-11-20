@@ -18,7 +18,6 @@ pub use interface::DynConnection;
 pub use interface::DynTransportInterface;
 pub use interface::SharedTransport;
 pub use interface::TransportInterface;
-#[cfg(any(test, rings_transport_backend))]
 pub(crate) use interface::TransportMessage;
 pub use interface::MAX_CHANNEL_MESSAGE_SIZE;
 pub use interface::MIN_MAX_MESSAGE_SIZE;

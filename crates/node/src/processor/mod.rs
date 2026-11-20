@@ -242,22 +242,23 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
-        let previous_key = self.delegatee_key();
-        let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            self.network_parameters
-                .on_session_key_rotated(self.swarm.transport(), next)?;
-            if let Err(err) = persist(next).and_then(|()| {
-                self.swarm
-                    .set_delegatee_key(next.clone())
-                    .map_err(Error::CoreError)
-            }) {
-                let _ = self
-                    .network_parameters
-                    .on_session_key_rotated(self.swarm.transport(), &previous_key);
-                return Err(err);
-            }
-            Ok(())
-        })?;
+        let (_next, horizon) = self
+            .session_keys
+            .renew_with(now_ms, mint, |current, next| {
+                self.network_parameters
+                    .on_session_key_rotated(self.swarm.transport(), next)?;
+                if let Err(err) = persist(next).and_then(|()| {
+                    self.swarm
+                        .set_delegatee_key(next.clone())
+                        .map_err(Error::CoreError)
+                }) {
+                    let _ = self
+                        .network_parameters
+                        .on_session_key_rotated(self.swarm.transport(), current);
+                    return Err(err);
+                }
+                Ok(())
+            })?;
         Ok(horizon)
     }
 

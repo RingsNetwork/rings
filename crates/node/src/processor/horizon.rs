@@ -257,6 +257,10 @@ impl SessionKeyRing {
     /// law validation, or `persist` short-circuits, increments `rotation_failed_total`, and leaves
     /// the active key and retained list untouched.
     ///
+    /// `persist` receives `(&current, &next)` **while the write lock is held**, so callers that
+    /// synchronize auxiliary components (such as transport session credentials) always roll back to
+    /// the exact committed `current` key even under concurrent renewal races.
+    ///
     /// Laws:
     /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
     /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
@@ -270,12 +274,14 @@ impl SessionKeyRing {
     ) -> Result<(DelegateeKey, DelegationHorizon)>
     where
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
-        P: FnOnce(&DelegateeKey) -> Result<()>,
+        P: FnOnce(&DelegateeKey, &DelegateeKey) -> Result<()>,
     {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         let outcome = mint(&state.current)
             .and_then(|next| validate_delegation_renewal(&state.current, next, now_ms))
-            .and_then(|(next, next_horizon)| persist(&next).map(|()| (next, next_horizon)));
+            .and_then(|(next, next_horizon)| {
+                persist(&state.current, &next).map(|()| (next, next_horizon))
+            });
         match outcome {
             Ok((next, next_horizon)) => {
                 state
@@ -384,7 +390,7 @@ mod tests {
             Err(error) => panic!("non-advancing key mint must succeed: {error}"),
         };
         assert!(matches!(
-            ring.renew_with(renew_ms, |_| Ok(non_advancing), |_| Ok(())),
+            ring.renew_with(renew_ms, |_| Ok(non_advancing), |_, _| Ok(())),
             Err(Error::DelegationHorizonReached { horizon_ms, .. }) if horizon_ms == h0
         ));
         assert_eq!(ring.rotation_counts(), (0, 1));
@@ -397,7 +403,7 @@ mod tests {
                 Err(error) => panic!("wrong-did key mint must succeed: {error}"),
             };
         assert!(matches!(
-            ring.renew_with(renew_ms, |_| Ok(wrong_did_key), |_| Ok(())),
+            ring.renew_with(renew_ms, |_| Ok(wrong_did_key), |_, _| Ok(())),
             Err(Error::VerifyError(_))
         ));
         assert_eq!(ring.rotation_counts(), (0, 2));
@@ -408,7 +414,7 @@ mod tests {
             Err(error) => panic!("renewed key mint must succeed: {error}"),
         };
         let renewed_pubkey = renewed.delegatee_public_key();
-        let h1 = match ring.renew_with(renew_ms, |_| Ok(renewed), |_| Ok(())) {
+        let h1 = match ring.renew_with(renew_ms, |_| Ok(renewed), |_, _| Ok(())) {
             Ok((_, horizon)) => horizon.horizon_ms(),
             Err(error) => panic!("valid renewal must succeed: {error}"),
         };
@@ -681,5 +687,60 @@ mod tests {
         fail_rotation.store(false, Ordering::SeqCst);
         assert!(rot_err_2.is_err());
         assert_lockstep(&k1);
+
+        // 8. Concurrent renewal race: Thread A enters `renew_delegatee_key_with` while Thread B
+        //    holds the write lock and commits `k1 -> k2`. Thread A then attempts `k2 -> k3`
+        //    whose `persist` fails. Because `current` is captured inside the write-lock
+        //    transaction, Thread A rolls the transport back to `k2` (NOT stale `k1`).
+        let renew_ms_3 =
+            DelegationHorizon::of(&k2.delegation()).horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+        let k3 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_3).unwrap();
+        let entered_b = Arc::new(std::sync::Barrier::new(2));
+        let release_b = Arc::new(std::sync::Barrier::new(2));
+
+        let proc_b = processor.clone();
+        let disk_b = Arc::clone(&persisted_disk_key);
+        let k2_for_b = k2.clone();
+        let entered_b_tx = Arc::clone(&entered_b);
+        let release_b_rx = Arc::clone(&release_b);
+        let handle_b = std::thread::spawn(move || {
+            proc_b.renew_delegatee_key_with(
+                renew_ms_2,
+                |_| {
+                    // Thread B now holds the SessionKeyRing write lock.
+                    entered_b_tx.wait();
+                    release_b_rx.wait();
+                    Ok(k2_for_b)
+                },
+                |next| {
+                    *disk_b.lock().unwrap() = next.clone();
+                    Ok(())
+                },
+            )
+        });
+
+        // Wait until Thread B holds the write lock, then spawn Thread A so Thread A blocks
+        // waiting for the write lock before B commits `k2`.
+        entered_b.wait();
+        let proc_a = processor.clone();
+        let handle_a = std::thread::spawn(move || {
+            proc_a.renew_delegatee_key_with(
+                renew_ms_3,
+                |_| Ok(k3),
+                |_| {
+                    Err(Error::CreateFileError(
+                        "concurrent persist fail".to_string(),
+                    ))
+                },
+            )
+        });
+
+        // Give Thread A a moment to block on the write lock, then let Thread B commit `k2`.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        release_b.wait();
+
+        assert!(handle_b.join().unwrap().is_ok());
+        assert!(handle_a.join().unwrap().is_err());
+        assert_lockstep(&k2);
     }
 }

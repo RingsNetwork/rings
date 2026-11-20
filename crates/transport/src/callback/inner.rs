@@ -18,7 +18,6 @@
 
 #[cfg(rings_transport_runtime)]
 use std::collections::VecDeque;
-#[cfg(rings_transport_backend)]
 use std::future::Future;
 #[cfg(rings_transport_runtime)]
 use std::mem;
@@ -33,11 +32,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 
 use super::inbound_frame_exceeds_protocol_ceiling;
-#[cfg(rings_transport_backend)]
 use super::link_credit::CreditReservation;
-#[cfg(rings_transport_backend)]
 use super::link_credit::LaneCreditReservation;
-#[cfg(rings_transport_backend)]
 use super::link_credit::LaneCreditView;
 use super::link_credit::LinkCredit;
 use super::link_credit::NodeFramePool;
@@ -48,19 +44,16 @@ use crate::core::callback::BoxedTransportCallback;
 use crate::core::callback::InboundCreditLease;
 #[cfg(rings_transport_runtime)]
 use crate::core::credit::credit_index;
-#[cfg(rings_transport_runtime)]
 use crate::core::credit::CreditIndex;
 #[cfg(rings_transport_runtime)]
 use crate::core::credit::PerLane;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::BorrowedTransportMessage;
-#[cfg(rings_transport_backend)]
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportConnectionState;
+use crate::core::transport::TransportMessage;
 use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
-#[cfg(rings_transport_backend)]
 use crate::error::Error;
-#[cfg(rings_transport_backend)]
 use crate::error::Result;
 use crate::notifier::Notifier;
 #[cfg(rings_transport_runtime)]
@@ -253,11 +246,10 @@ impl InnerTransportCallback {
         &self.link_credit
     }
 
-    #[cfg(rings_transport_backend)]
     /// Wait for one credit to send a custom frame on `lane`; see [`LinkCredit::reserve`]. The
     /// wait owns the link's credit state and nothing else of the connection: boxed, it is a
-    /// backend's `ConnectionInterface::reserve_send_credit`.
-    pub(crate) fn reserve_credit(
+    /// backend's [`ConnectionInterface::reserve_send_credit`](crate::core::transport::ConnectionInterface::reserve_send_credit).
+    pub fn reserve_credit(
         &self,
         lane: ChannelLane,
     ) -> impl Future<Output = Result<LaneCreditReservation>> + 'static {
@@ -265,14 +257,12 @@ impl InnerTransportCallback {
         async move { link.reserve(lane).await.map(LaneCreditReservation) }
     }
 
-    #[cfg(rings_transport_backend)]
     /// A read-only view of `lane`'s send credit; see
-    /// [`ConnectionInterface::send_credit_view`](crate::core::transport::ConnectionInterface).
-    pub(crate) fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+    /// [`ConnectionInterface::send_credit_view`](crate::core::transport::ConnectionInterface::send_credit_view).
+    pub fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
         LaneCreditView::new(&self.link_credit, lane)
     }
 
-    #[cfg(rings_transport_backend)]
     /// The credit a custom frame on `lane` is sent under, bound to the send `permit` admits: the
     /// credit `permit` carries or, without one, a credit reserved now.
     pub(crate) async fn credit_for_custom_send(
@@ -288,6 +278,42 @@ impl InnerTransportCallback {
             None => self.reserve_credit(lane).await?,
         };
         Ok(credit.0.bind(permit.acceptance()))
+    }
+
+    /// Run `send_raw` under one credit of `lane` (taken from `permit` or reserved now), encoding
+    /// `payload` into its wire frame (`custom_frame_wire`) and settling the credit according to
+    /// `permit`'s acceptance outcome.
+    ///
+    /// External [`ConnectionInterface`](crate::core::transport::ConnectionInterface) backends use
+    /// this adapter to implement `send_message_with_permit` with full credit-window enforcement
+    /// without accessing crate-private internals.
+    pub async fn send_custom_wire<F, Fut>(
+        &self,
+        payload: Bytes,
+        lane: ChannelLane,
+        mut permit: SendPermit,
+        send_raw: F,
+    ) -> Result<crate::delivery::DeliveryFuture>
+    where
+        F: FnOnce(Bytes, ChannelLane, SendPermit) -> Fut,
+        Fut: Future<Output = Result<crate::delivery::DeliveryFuture>>,
+    {
+        let _credit = self.credit_for_custom_send(lane, &mut permit).await?;
+        let wire = rings_codec::serialize(&TransportMessage::Custom(payload)).map(Bytes::from)?;
+        send_raw(wire, lane, permit).await
+    }
+
+    /// Wait for the next outbound wire-encoded credit control frame on `index`, returning `None`
+    /// once the connection's credit state is closed.
+    ///
+    /// External [`ConnectionInterface`](crate::core::transport::ConnectionInterface) backends can
+    /// spawn one pump per [`CreditIndex::ALL`] forwarding each returned `Bytes` frame over the
+    /// peer link so credit windows replenish across turns.
+    pub async fn next_credit_frame(&self, index: CreditIndex) -> Option<Bytes> {
+        let signal = self.link_credit.next_signal(index).await?;
+        rings_codec::serialize(&TransportMessage::Signal(signal))
+            .ok()
+            .map(Bytes::from)
     }
 
     /// Notify the data channel is open.
