@@ -369,7 +369,7 @@ impl TurnAuthIdentity {
 /// - The TURN server recovers/extracts `client_pk` after verifying the signature in `username`,
 ///   computes the matching `ECDH(server_sk, client_pk)`, and derives the exact same `credential`
 ///   without storing any per-user password table.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnCredentials {
     /// STUN/TURN `USERNAME` attribute carrying `<claim>.<base58(signature)>`.
     pub username: String,
@@ -377,16 +377,35 @@ pub struct TurnCredentials {
     pub credential: String,
 }
 
+impl std::fmt::Debug for TurnCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TurnCredentials")
+            .field("username", &self.username)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Verified TURN authentication extracted from a STUN `USERNAME` attribute and server key.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VerifiedTurnAuth {
-    /// The verified [`TurnAuthIdentity`] (`Delegation` or direct `Account` / `Did`) carried in
-    /// the `USERNAME` attribute.
+    /// The verified [`TurnAuthIdentity`] (`Delegation`, direct `Account` / `Did`, or
+    /// `SessionTicket`) carried in the `USERNAME` attribute.
     pub identity: TurnAuthIdentity,
     /// The verified client/session secp256k1 public key used for Diffie-Hellman key agreement.
     pub client_pubkey: PublicKey<33>,
     /// The ECDH-derived TURN password (`credential`).
     pub credential: String,
+}
+
+impl std::fmt::Debug for VerifiedTurnAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedTurnAuth")
+            .field("identity", &self.identity)
+            .field("client_pubkey", &self.client_pubkey)
+            .field("credential", &"<redacted>")
+            .finish()
+    }
 }
 
 impl VerifiedTurnAuth {
@@ -1021,5 +1040,43 @@ mod tests {
             )
         );
         assert_eq!(entries[2], "turn://bob:secret@198.51.100.11:3478");
+    }
+
+    #[test]
+    fn session_ticket_credentials_carry_no_did_and_redact_password_in_debug() {
+        let server_key = SecretKey::random();
+        let server_pubkey = server_key.pubkey();
+        let client_long_term_key = SecretKey::random();
+        let client_did_str = Did::from(client_long_term_key.address()).to_string();
+        let ephemeral_key = SecretKey::random();
+        let now_ms = 1_800_000_000_000;
+
+        let signed_ticket = SignedTurnSessionTicket::issue(
+            [0x5a; 16],
+            ephemeral_key.pubkey(),
+            now_ms + 60_000,
+            &server_key,
+        )
+        .unwrap();
+        let creds = signed_ticket
+            .to_turn_credentials(&ephemeral_key, server_pubkey)
+            .unwrap();
+
+        assert!(creds.username.starts_with("tkt-"));
+        assert!(!creds.username.contains(':'));
+        assert!(!creds.username.contains(&client_did_str));
+        assert!(!creds.username.contains(&creds.credential));
+        assert!(
+            !format!("{creds:?}").contains(&creds.credential),
+            "Debug formatting of TurnCredentials must redact the password"
+        );
+
+        let verified = TurnCredentials::verify_at(&creds.username, &server_key, now_ms).unwrap();
+        assert_eq!(verified.credential, creds.credential);
+        assert_eq!(verified.session_ticket(), Some(&signed_ticket));
+        assert!(
+            !format!("{verified:?}").contains(&verified.credential),
+            "Debug formatting of VerifiedTurnAuth must redact the password"
+        );
     }
 }

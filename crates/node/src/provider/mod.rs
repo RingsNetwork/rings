@@ -385,6 +385,28 @@ impl Provider {
             .map(crate::onion::OnionPipelineHandle::new)
     }
 
+    /// Discover a live TURN service from the DHT and anonymously acquire an unlinkable
+    /// `turn://tkt-…:<pass>@host:port` [`crate::turn_service::AcquiredTurnTicket`] over a
+    /// guard-closed Sphinx `invoke` loop (#1292).
+    pub async fn acquire_turn_ticket(
+        &self,
+        ttl: std::time::Duration,
+        target_did: Option<Did>,
+    ) -> Result<crate::turn_service::AcquiredTurnTicket> {
+        let pipeline = self.onion_pipeline()?;
+        crate::turn_service::acquire_turn_ticket(&self.processor, &pipeline, ttl, target_did).await
+    }
+
+    /// Alias for [`Self::acquire_turn_ticket`] on non-browser-WASM targets.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    pub async fn request_turn_ticket(
+        &self,
+        ttl: std::time::Duration,
+        target_did: Option<Did>,
+    ) -> Result<crate::turn_service::AcquiredTurnTicket> {
+        self.acquire_turn_ticket(ttl, target_did).await
+    }
+
     /// The drop counters the [`Backend`] serving this provider's application inbox records in.
     pub(crate) fn dispatch_drops(&self) -> Arc<DispatchDrops> {
         Arc::clone(&self.dispatch_drops)
@@ -844,6 +866,29 @@ impl Provider {
                 self.processor
                     .renew_delegatee_key(next, self.processor.clock().now_ms())?;
                 return Ok(serde_json::to_value(self.signing_horizon_snapshot())?);
+            }
+            "lookupTurnServices" => {
+                let include_expired = params
+                    .get("include_expired")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                let services = self.processor.lookup_turn_services(include_expired).await?;
+                return Ok(serde_json::to_value(services)?);
+            }
+            "requestTurnTicket" => {
+                let ttl_ms = params
+                    .get("ttl_ms")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(crate::turn_service::DEFAULT_TURN_TICKET_TTL_MS);
+                let target_did = match params.get("target_did").and_then(serde_json::Value::as_str)
+                {
+                    Some(raw) if !raw.trim().is_empty() => Some(Did::from_str(raw.trim())?),
+                    _ => None,
+                };
+                let acquired = self
+                    .acquire_turn_ticket(std::time::Duration::from_millis(ttl_ms), target_did)
+                    .await?;
+                return Ok(serde_json::to_value(acquired)?);
             }
             _ => {}
         }

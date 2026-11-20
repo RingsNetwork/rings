@@ -15,13 +15,11 @@ pub enum TurnError {
     #[error("STUN protocol error: {0}")]
     Stun(#[from] stun::Error),
 
-    /// An upstream chained TURN hop returned an unexpected `XOR-RELAYED-ADDRESS`.
-    #[error("Chained TURN hop relayed address mismatch: expected {expected}, got {actual}")]
-    ChainedRelayAddressMismatch {
-        /// Expected `XOR-RELAYED-ADDRESS` (`E_exit`).
-        expected: std::net::SocketAddr,
-        /// Actual `XOR-RELAYED-ADDRESS` returned by the upstream hop.
-        actual: std::net::SocketAddr,
+    /// Unclaimed session reservations reached `max_reservations`.
+    #[error("TURN session reservation cap reached (max_reservations={max_reservations})")]
+    ReservationCapacityReached {
+        /// Configured maximum concurrent unclaimed TURN session reservations.
+        max_reservations: usize,
     },
 
     /// Active allocations plus unclaimed session reservations reached `max_allocations`.

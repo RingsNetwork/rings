@@ -22,7 +22,6 @@ cli = ["dep:clap", "dep:tracing-subscriber"]
 [dependencies]
 base58-monero = { version = "0.3", default-features = false, features = ["check"] }
 hex = "0.4.3"
-rings-aez = { workspace = true }
 rings-codec = { workspace = true }
 rings-core = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }

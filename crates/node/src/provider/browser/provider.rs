@@ -644,6 +644,44 @@ impl Provider {
         })
     }
 
+    /// List signed TURN service descriptors discovered in the DHT (`turn_services` topic, #1292).
+    pub fn lookup_turn_services(&self, include_expired: Option<bool>) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let services = p
+                .lookup_turn_services(include_expired.unwrap_or(false))
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&services).map_err(JsError::from)?)
+        })
+    }
+
+    /// Anonymously acquire a ready `turn://tkt-…:<pass>@host:port` ICE server ticket over a
+    /// guard-closed Sphinx `invoke` loop (`turn.ticket`, #1292).
+    pub fn request_turn_ticket(
+        &self,
+        ttl_ms: Option<u32>,
+        target_did: Option<String>,
+    ) -> js_sys::Promise {
+        let provider = self.clone();
+        future_to_promise(async move {
+            let parsed_target = match target_did.as_deref() {
+                Some(raw) if !raw.trim().is_empty() => Some(
+                    Did::from_str(raw.trim()).map_err(|_| JsError::new("invalid target_did"))?,
+                ),
+                _ => None,
+            };
+            let ttl = std::time::Duration::from_millis(
+                ttl_ms.map_or(crate::turn_service::DEFAULT_TURN_TICKET_TTL_MS, u64::from),
+            );
+            let acquired = provider
+                .acquire_turn_ticket(ttl, parsed_target)
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&acquired).map_err(JsError::from)?)
+        })
+    }
+
     /// Check local cache
     pub fn storage_check_cache(
         &self,

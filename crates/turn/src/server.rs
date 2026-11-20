@@ -101,7 +101,6 @@ use webrtc_util::vnet::net::Net;
 use webrtc_util::Conn;
 
 use crate::auth::DelegationAuthHandler;
-use crate::chained_client::UpstreamTurnRelayClient;
 use crate::config::RelayAddressConfig;
 use crate::config::RelayPeerPolicy;
 use crate::config::TurnServerConfig;
@@ -112,7 +111,6 @@ use crate::credentials::TurnAuthIdentity;
 use crate::credentials::TurnCredentialSigner;
 use crate::credentials::TurnCredentials;
 use crate::error::Result;
-use crate::onion::TurnPayloadCipher;
 
 const STUN_HEADER_BYTES: usize = 20;
 const INBOUND_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
@@ -357,106 +355,23 @@ struct AllocationState {
 
 static NEXT_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
 
-enum RelayBackend {
-    LocalExit(Arc<PolicyRelayConn>),
-    ChainedHop(Arc<UpstreamTurnRelayClient>),
-}
-
-enum RelayBackendCloseHandle {
-    LocalExit(Option<Arc<dyn Conn + Send + Sync>>),
-    ChainedHop(Arc<UpstreamTurnRelayClient>),
-}
-
-impl RelayBackend {
-    async fn recv_datagram(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
-        match self {
-            Self::LocalExit(conn) => conn.recv_datagram(buf).await,
-            Self::ChainedHop(upstream) => upstream.recv_datagram(buf).await,
-        }
-    }
-
-    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
-        match self {
-            Self::LocalExit(conn) => conn.send_to(buf, target).await,
-            Self::ChainedHop(upstream) => upstream.send_to(buf, target).await,
-        }
-    }
-
-    fn begin_close(&self) -> RelayBackendCloseHandle {
-        match self {
-            Self::LocalExit(conn) => RelayBackendCloseHandle::LocalExit(conn.begin_close()),
-            Self::ChainedHop(upstream) => {
-                upstream.begin_close();
-                RelayBackendCloseHandle::ChainedHop(Arc::clone(upstream))
-            }
-        }
-    }
-
-    async fn finish_close(&self, handle: RelayBackendCloseHandle) {
-        match (self, handle) {
-            (Self::LocalExit(conn), RelayBackendCloseHandle::LocalExit(taken)) => {
-                conn.finish_close(taken).await;
-            }
-            (_, RelayBackendCloseHandle::ChainedHop(upstream)) => {
-                upstream.finish_close().await;
-            }
-            _ => {}
-        }
-    }
-}
-
-const CHAINED_CONTROL_QUEUE_CAPACITY: usize = 32;
-
 type AllocateResponseCache = Arc<Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>>;
 type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>>;
-type PendingChainedAllocations = Arc<Mutex<HashMap<FiveTuple, (String, TransactionId)>>>;
 
 struct ReservedTurnSession {
     expires_at_ms: u128,
     relay_addr: SocketAddr,
-    backend: RelayBackend,
-    cipher: Option<TurnPayloadCipher>,
+    relay_conn: Arc<PolicyRelayConn>,
+    reservation_permit: OwnedSemaphorePermit,
     capacity_permit: OwnedSemaphorePermit,
 }
 
-enum ChainedControlOp {
-    Refresh {
-        conn: Arc<dyn Conn + Send + Sync>,
-        allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-        nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
-        allocate_responses: AllocateResponseCache,
-        completed_deletions: CompletedDeletionCache,
-        max_allocations: usize,
-        alloc: Arc<ManagedAllocation>,
-        msg: Message,
-        mi_key: Vec<u8>,
-    },
-    CreatePermission {
-        conn: Arc<dyn Conn + Send + Sync>,
-        alloc: Arc<ManagedAllocation>,
-        msg: Message,
-        peer_policy: RelayPeerPolicy,
-        max_permissions_per_allocation: usize,
-        mi_key: Vec<u8>,
-    },
-    ChannelBind {
-        conn: Arc<dyn Conn + Send + Sync>,
-        alloc: Arc<ManagedAllocation>,
-        msg: Message,
-        peer_policy: RelayPeerPolicy,
-        channel_bind_timeout: Duration,
-        max_permissions_per_allocation: usize,
-        mi_key: Vec<u8>,
-    },
-}
-
-/// Result of reserving an exit or chained TURN relay session on a [`TurnServer`] (#1292).
+/// Result of reserving a TURN relay session on a [`TurnServer`] (#1292).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnSessionReservation {
     /// Server-signed unlinkable session ticket used to derive [`TurnCredentials`].
     pub ticket: SignedTurnSessionTicket,
-    /// The `XOR-RELAYED-ADDRESS` that this hop will return on `Allocate` (always the final exit
-    /// relay address `E_exit` in a multi-hop chain).
+    /// The `XOR-RELAYED-ADDRESS` bound for this reserved allocation.
     pub relay_addr: SocketAddr,
     /// This TURN server's connectable advertised address.
     pub server_addr: SocketAddr,
@@ -464,47 +379,24 @@ pub struct TurnSessionReservation {
     pub server_pubkey: PublicKey<33>,
 }
 
-/// Specification for reserving a chained intermediate or entry TURN hop `T_i` that forwards
-/// traffic to upstream hop `T_{i+1}` (#1292).
-#[derive(Clone, Debug)]
-pub struct TurnChainedHopSpec {
-    /// Single-use secp256k1 public key that the caller (`T_{i-1}` or client `C`) will use to
-    /// authenticate to this hop `T_i`.
-    pub ephemeral_client_pubkey: PublicKey<33>,
-    /// Connectable TURN listener address of the next hop `T_{i+1}`.
-    pub next_hop_addr: SocketAddr,
-    /// Unlinkable [`TurnCredentials`] for authenticating `T_i` to `T_{i+1}`.
-    pub next_hop_credentials: TurnCredentials,
-    /// Expected `XOR-RELAYED-ADDRESS` (`E_exit`) projected by `T_{i+1}`.
-    pub projected_relay_addr: SocketAddr,
-    /// Optional length-preserving `rings-aez` (`τ = 0`) payload permutation applied at `T_i`.
-    pub cipher: Option<TurnPayloadCipher>,
-    /// Reservation time-to-live before the client claims the allocation.
-    pub ttl: Duration,
-}
-
 struct ManagedAllocation {
     alloc_id: u64,
     five_tuple: FiveTuple,
     username: String,
     relay_addr: SocketAddr,
-    backend: RelayBackend,
-    cipher: Option<TurnPayloadCipher>,
+    relay_conn: Arc<PolicyRelayConn>,
     state: SyncMutex<AllocationState>,
     expiry_tx: watch::Sender<Instant>,
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
     capacity_permit: SyncMutex<Option<OwnedSemaphorePermit>>,
-    chained_control_tx: SyncMutex<Option<mpsc::Sender<ChainedControlOp>>>,
 }
 
 impl ManagedAllocation {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         five_tuple: FiveTuple,
         username: String,
         relay_addr: SocketAddr,
-        backend: RelayBackend,
-        cipher: Option<TurnPayloadCipher>,
+        relay_conn: Arc<PolicyRelayConn>,
         lifetime: Duration,
         tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
         capacity_permit: OwnedSemaphorePermit,
@@ -514,87 +406,12 @@ impl ManagedAllocation {
             let _ = tx.send_replace(Some(alloc_id));
         }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
-        let chained_control_tx = if matches!(backend, RelayBackend::ChainedHop(_)) {
-            let (tx, mut rx) = mpsc::channel::<ChainedControlOp>(CHAINED_CONTROL_QUEUE_CAPACITY);
-            tokio::spawn(async move {
-                while let Some(op) = rx.recv().await {
-                    match op {
-                        ChainedControlOp::Refresh {
-                            conn,
-                            allocations,
-                            nonces,
-                            allocate_responses,
-                            completed_deletions,
-                            max_allocations,
-                            alloc,
-                            msg,
-                            mi_key,
-                        } => {
-                            handle_authenticated_refresh(
-                                &conn,
-                                &allocations,
-                                &nonces,
-                                &allocate_responses,
-                                &completed_deletions,
-                                max_allocations,
-                                alloc,
-                                &msg,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                        ChainedControlOp::CreatePermission {
-                            conn,
-                            alloc,
-                            msg,
-                            peer_policy,
-                            max_permissions_per_allocation,
-                            mi_key,
-                        } => {
-                            handle_authenticated_create_permission(
-                                &conn,
-                                &alloc,
-                                &msg,
-                                peer_policy,
-                                max_permissions_per_allocation,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                        ChainedControlOp::ChannelBind {
-                            conn,
-                            alloc,
-                            msg,
-                            peer_policy,
-                            channel_bind_timeout,
-                            max_permissions_per_allocation,
-                            mi_key,
-                        } => {
-                            handle_authenticated_channel_bind(
-                                &conn,
-                                &alloc,
-                                &msg,
-                                peer_policy,
-                                channel_bind_timeout,
-                                max_permissions_per_allocation,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                    }
-                }
-            });
-            Some(tx)
-        } else {
-            None
-        };
         Arc::new(Self {
             alloc_id,
             five_tuple,
             username,
             relay_addr,
-            backend,
-            cipher,
+            relay_conn,
             state: SyncMutex::new(AllocationState {
                 permissions: HashMap::new(),
                 channel_bindings: HashMap::new(),
@@ -602,15 +419,7 @@ impl ManagedAllocation {
             expiry_tx,
             tcp_authenticated_tx,
             capacity_permit: SyncMutex::new(Some(capacity_permit)),
-            chained_control_tx: SyncMutex::new(chained_control_tx),
         })
-    }
-
-    fn chained_control_sender(&self) -> Option<mpsc::Sender<ChainedControlOp>> {
-        self.chained_control_tx
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
     }
 
     fn info(&self) -> AllocationInfo {
@@ -625,7 +434,7 @@ impl ManagedAllocation {
         let _ = self.expiry_tx.send_replace(Instant::now() + lifetime);
     }
 
-    fn begin_close(&self) -> RelayBackendCloseHandle {
+    fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
         if let Some(ref tx) = self.tcp_authenticated_tx {
             let alloc_id = self.alloc_id;
             tx.send_if_modified(|current| {
@@ -637,17 +446,12 @@ impl ManagedAllocation {
                 }
             });
         }
-        let _ = self
-            .chained_control_tx
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
         let _ = self.expiry_tx.send_replace(Instant::now());
-        self.backend.begin_close()
+        self.relay_conn.begin_close()
     }
 
-    async fn finish_close(&self, taken: RelayBackendCloseHandle) {
-        self.backend.finish_close(taken).await;
+    async fn finish_close(&self, taken: Option<Arc<dyn Conn + Send + Sync>>) {
+        self.relay_conn.finish_close(taken).await;
         let _ = self
             .capacity_permit
             .lock()
@@ -659,13 +463,7 @@ impl ManagedAllocation {
         &self,
         buf: &mut [u8],
     ) -> webrtc_util::Result<(usize, SocketAddr)> {
-        let (n, src_addr) = self.backend.recv_datagram(buf).await?;
-        if let Some(ref cipher) = self.cipher {
-            if let Some(slice) = buf.get_mut(..n) {
-                cipher.transform_inbound(slice);
-            }
-        }
-        Ok((n, src_addr))
+        self.relay_conn.recv_datagram(buf).await
     }
 
     async fn send_payload_to_peer(
@@ -673,34 +471,7 @@ impl ManagedAllocation {
         payload: &[u8],
         target: SocketAddr,
     ) -> webrtc_util::Result<usize> {
-        if let Some(ref cipher) = self.cipher {
-            let mut permuted = payload.to_vec();
-            cipher.transform_outbound(&mut permuted);
-            self.backend.send_to(&permuted, target).await
-        } else {
-            self.backend.send_to(payload, target).await
-        }
-    }
-
-    async fn cascade_create_permission(&self, peer_ips: &[IpAddr]) -> Result<()> {
-        match &self.backend {
-            RelayBackend::LocalExit(_) => Ok(()),
-            RelayBackend::ChainedHop(upstream) => upstream.create_permission(peer_ips).await,
-        }
-    }
-
-    async fn cascade_channel_bind(&self, channel: ChannelNumber, peer: SocketAddr) -> Result<()> {
-        match &self.backend {
-            RelayBackend::LocalExit(_) => Ok(()),
-            RelayBackend::ChainedHop(upstream) => upstream.channel_bind(channel, peer).await,
-        }
-    }
-
-    async fn cascade_refresh(&self, lifetime: Duration) -> Result<()> {
-        match &self.backend {
-            RelayBackend::LocalExit(_) => Ok(()),
-            RelayBackend::ChainedHop(upstream) => upstream.refresh(lifetime).await,
-        }
+        self.relay_conn.send_to(payload, target).await
     }
 
     fn has_permission(&self, ip: IpAddr) -> bool {
@@ -708,20 +479,6 @@ impl ManagedAllocation {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.permissions.retain(|_, &mut exp| exp > now);
         state.permissions.contains_key(&ip)
-    }
-
-    fn can_install_permissions(&self, peer_ips: &[IpAddr], max_permissions: usize) -> bool {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        let mut projected_len = state.permissions.len();
-        let mut seen_new = HashSet::new();
-        for &ip in peer_ips {
-            if !state.permissions.contains_key(&ip) && seen_new.insert(ip) {
-                projected_len += 1;
-            }
-        }
-        projected_len <= max_permissions
     }
 
     fn try_install_permissions(&self, peer_ips: &[IpAddr], max_permissions: usize) -> bool {
@@ -743,33 +500,6 @@ impl ManagedAllocation {
             state.permissions.insert(ip, new_exp);
         }
         true
-    }
-
-    fn can_bind_channel(
-        &self,
-        channel: ChannelNumber,
-        peer: SocketAddr,
-        max_permissions: usize,
-    ) -> std::result::Result<(), ChannelBindError> {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        state.channel_bindings.retain(|_, (_, exp)| *exp > now);
-
-        for (&bound_ch, &(bound_peer, _)) in &state.channel_bindings {
-            if (bound_ch == channel && bound_peer != peer)
-                || (bound_peer == peer && bound_ch != channel)
-            {
-                return Err(ChannelBindError::Conflict);
-            }
-        }
-
-        if !state.permissions.contains_key(&peer.ip()) && state.permissions.len() >= max_permissions
-        {
-            return Err(ChannelBindError::QuotaExceeded);
-        }
-
-        Ok(())
     }
 
     fn try_bind_channel(
@@ -2301,16 +2031,14 @@ async fn prune_expired_reserved_sessions_map(
     if !expired.is_empty() {
         let mut closing = Vec::with_capacity(expired.len());
         for session in expired {
-            let handle = session.backend.begin_close();
-            // Release the capacity permit immediately once the expired reservation is detached;
-            // run upstream `Refresh(0)` / socket teardown off the shared packet loop so an
-            // unreachable upstream cannot stall unrelated clients.
+            let taken = session.relay_conn.begin_close();
+            drop(session.reservation_permit);
             drop(session.capacity_permit);
-            closing.push((session.backend, handle));
+            closing.push((session.relay_conn, taken));
         }
         tokio::spawn(async move {
-            for (backend, handle) in closing {
-                backend.finish_close(handle).await;
+            for (relay_conn, taken) in closing {
+                relay_conn.finish_close(taken).await;
             }
         });
     }
@@ -2403,7 +2131,6 @@ async fn finalize_allocate_install(
     conn: Arc<dyn Conn + Send + Sync>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     allocate_responses: AllocateResponseCache,
-    pending_chained_allocations: Option<PendingChainedAllocations>,
     shutdown_rx: Option<watch::Receiver<bool>>,
     relay_turn_socket: Arc<dyn Conn + Send + Sync>,
     five_tuple: FiveTuple,
@@ -2411,48 +2138,12 @@ async fn finalize_allocate_install(
     tx_id: TransactionId,
     username: String,
     relay_addr: SocketAddr,
-    backend: RelayBackend,
-    cipher: Option<TurnPayloadCipher>,
+    relay_conn: Arc<PolicyRelayConn>,
     lifetime_duration: Duration,
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
     capacity_permit: OwnedSemaphorePermit,
     mi_key: Vec<u8>,
 ) {
-    let alloc = ManagedAllocation::new(
-        five_tuple,
-        username,
-        relay_addr,
-        backend,
-        cipher,
-        lifetime_duration,
-        tcp_authenticated_tx,
-        capacity_permit,
-    );
-    let installed = {
-        let mut guard = allocations.lock().await;
-        if shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
-            false
-        } else {
-            guard.insert(five_tuple, Arc::clone(&alloc));
-            true
-        }
-    };
-    if let Some(pending) = pending_chained_allocations {
-        pending.lock().await.remove(&five_tuple);
-    }
-    if !installed {
-        let handle = alloc.begin_close();
-        alloc.finish_close(handle).await;
-        return;
-    }
-
-    tokio::spawn(relay_packet_handler(
-        Arc::clone(&alloc),
-        Arc::clone(&allocations),
-        relay_turn_socket,
-        src_addr,
-    ));
-
     let built = {
         let mut resp = Message::new();
         let setters: Vec<Box<dyn Setter>> = vec![
@@ -2475,16 +2166,45 @@ async fn finalize_allocate_install(
         ];
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    if let Some(raw) = built {
-        let live_tuples: HashSet<FiveTuple> = {
-            let guard = allocations.lock().await;
-            guard.keys().copied().collect()
-        };
-        {
-            let mut resp_guard = allocate_responses.lock().await;
-            resp_guard.retain(|tuple, _| live_tuples.contains(tuple));
-            resp_guard.insert(five_tuple, (tx_id, raw.clone()));
+
+    let alloc = ManagedAllocation::new(
+        five_tuple,
+        username,
+        relay_addr,
+        relay_conn,
+        lifetime_duration,
+        tcp_authenticated_tx,
+        capacity_permit,
+    );
+    let installed = {
+        let mut guard = allocations.lock().await;
+        if shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
+            false
+        } else {
+            let live_tuples: HashSet<FiveTuple> = guard.keys().copied().collect();
+            if let Some(ref raw) = built {
+                let mut resp_guard = allocate_responses.lock().await;
+                resp_guard.retain(|tuple, _| live_tuples.contains(tuple));
+                resp_guard.insert(five_tuple, (tx_id, raw.clone()));
+            }
+            guard.insert(five_tuple, Arc::clone(&alloc));
+            true
         }
+    };
+    if !installed {
+        let taken = alloc.begin_close();
+        alloc.finish_close(taken).await;
+        return;
+    }
+
+    tokio::spawn(relay_packet_handler(
+        Arc::clone(&alloc),
+        Arc::clone(&allocations),
+        relay_turn_socket,
+        src_addr,
+    ));
+
+    if let Some(raw) = built {
         let _ = conn.send_to(&raw, src_addr).await;
     }
 }
@@ -2494,7 +2214,6 @@ async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
     allocations: &Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: &Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
-    pending_chained_allocations: &PendingChainedAllocations,
     capacity_sem: &Arc<Semaphore>,
     clock: &SharedClock,
     shutdown_rx: &watch::Receiver<bool>,
@@ -2712,7 +2431,7 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    let (relay_addr, backend, cipher, capacity_permit) = match decoded_identity {
+    let (relay_addr, relay_conn, capacity_permit) = match decoded_identity {
         Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
             let claimed = {
                 let mut guard = reserved_sessions.lock().await;
@@ -2748,10 +2467,11 @@ async fn handle_authenticated_allocate(
                 return;
             };
             if now_ms > reserved.expires_at_ms {
-                let handle = reserved.backend.begin_close();
+                let taken = reserved.relay_conn.begin_close();
+                drop(reserved.reservation_permit);
                 drop(reserved.capacity_permit);
                 tokio::spawn(async move {
-                    reserved.backend.finish_close(handle).await;
+                    reserved.relay_conn.finish_close(taken).await;
                 });
                 send_authenticated_error(
                     conn,
@@ -2765,76 +2485,10 @@ async fn handle_authenticated_allocate(
                 .await;
                 return;
             }
-            if matches!(reserved.backend, RelayBackend::ChainedHop(_)) {
-                // Register in-flight claim BEFORE yielding so retransmitted Allocate packets
-                // coalesce cleanly and competing installs on the same five-tuple are rejected.
-                let username = username_attr.text;
-                {
-                    let mut pending = pending_chained_allocations.lock().await;
-                    pending.insert(five_tuple, (username.clone(), m.transaction_id));
-                }
-                let conn_clone = Arc::clone(conn);
-                let allocations_clone = Arc::clone(allocations);
-                let allocate_responses_clone = Arc::clone(allocate_responses);
-                let pending_clone = Arc::clone(pending_chained_allocations);
-                let mut task_shutdown = shutdown_rx.clone();
-                let req_msg = m.clone();
-                tokio::spawn(async move {
-                    let refresh_ok =
-                        if let RelayBackend::ChainedHop(ref upstream) = reserved.backend {
-                            tokio::select! {
-                                _ = task_shutdown.wait_for(|&done| done) => false,
-                                res = upstream.refresh(lifetime_duration) => res.is_ok(),
-                            }
-                        } else {
-                            true
-                        };
-                    if !refresh_ok || *task_shutdown.borrow() {
-                        pending_clone.lock().await.remove(&five_tuple);
-                        let handle = reserved.backend.begin_close();
-                        reserved.backend.finish_close(handle).await;
-                        drop(reserved.capacity_permit);
-                        if !*task_shutdown.borrow() {
-                            send_authenticated_error(
-                                &conn_clone,
-                                src_addr,
-                                &req_msg,
-                                CODE_INSUFFICIENT_CAPACITY,
-                                b"Upstream Hop Allocation Expired or Unreachable",
-                                None,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                        return;
-                    }
-                    finalize_allocate_install(
-                        conn_clone,
-                        allocations_clone,
-                        allocate_responses_clone,
-                        Some(pending_clone),
-                        Some(task_shutdown),
-                        relay_turn_socket,
-                        five_tuple,
-                        src_addr,
-                        req_msg.transaction_id,
-                        username,
-                        reserved.relay_addr,
-                        reserved.backend,
-                        reserved.cipher,
-                        lifetime_duration,
-                        tcp_authenticated_tx,
-                        reserved.capacity_permit,
-                        mi_key,
-                    )
-                    .await;
-                });
-                return;
-            }
+            drop(reserved.reservation_permit);
             (
                 reserved.relay_addr,
-                reserved.backend,
-                reserved.cipher,
+                reserved.relay_conn,
                 reserved.capacity_permit,
             )
         }
@@ -2869,12 +2523,7 @@ async fn handle_authenticated_allocate(
                 .await;
                 return;
             };
-            (
-                relay_addr,
-                RelayBackend::LocalExit(relay_conn),
-                None,
-                capacity_permit,
-            )
+            (relay_addr, relay_conn, capacity_permit)
         }
     };
 
@@ -2882,7 +2531,6 @@ async fn handle_authenticated_allocate(
         Arc::clone(conn),
         Arc::clone(allocations),
         Arc::clone(allocate_responses),
-        None,
         Some(shutdown_rx.clone()),
         relay_turn_socket,
         five_tuple,
@@ -2890,8 +2538,7 @@ async fn handle_authenticated_allocate(
         m.transaction_id,
         username_attr.text,
         relay_addr,
-        backend,
-        cipher,
+        relay_conn,
         lifetime_duration,
         tcp_authenticated_tx,
         capacity_permit,
@@ -2939,34 +2586,19 @@ async fn handle_authenticated_refresh(
     if lifetime_duration.is_zero() {
         allocate_responses.lock().await.remove(&alloc.five_tuple);
         remove_allocation_if_current(allocations, &alloc).await;
-    } else {
-        if alloc.cascade_refresh(lifetime_duration).await.is_err() {
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_INSUFFICIENT_CAPACITY,
-                b"Upstream Hop Refresh Failed",
-                None,
-                mi_key,
-            )
-            .await;
-            return;
-        }
-        if !try_refresh_allocation(allocations, &alloc, lifetime_duration).await {
-            allocate_responses.lock().await.remove(&alloc.five_tuple);
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_ALLOC_MISMATCH,
-                b"Allocation Mismatch",
-                None,
-                mi_key,
-            )
-            .await;
-            return;
-        }
+    } else if !try_refresh_allocation(allocations, &alloc, lifetime_duration).await {
+        allocate_responses.lock().await.remove(&alloc.five_tuple);
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_ALLOC_MISMATCH,
+            b"Allocation Mismatch",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
     }
 
     let built = {
@@ -3069,38 +2701,6 @@ async fn handle_authenticated_create_permission(
         candidate_ips.push(peer_addr.ip);
     }
 
-    if !alloc.can_install_permissions(&candidate_ips, max_permissions_per_allocation) {
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Permission Quota Reached",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    }
-
-    if alloc
-        .cascade_create_permission(&candidate_ips)
-        .await
-        .is_err()
-    {
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Upstream Hop Permission Failed",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    }
-
     if !alloc.try_install_permissions(&candidate_ips, max_permissions_per_allocation) {
         send_authenticated_error(
             conn,
@@ -3181,54 +2781,6 @@ async fn handle_authenticated_channel_bind(
     let target_sock = SocketAddr::new(peer_addr.ip, peer_addr.port);
     if !peer_policy.is_allowed_addr(target_sock) {
         send_forbidden_error(conn, src_addr, m, mi_key).await;
-        return;
-    }
-
-    match alloc.can_bind_channel(channel, target_sock, max_permissions_per_allocation) {
-        Ok(()) => {}
-        Err(ChannelBindError::Conflict) => {
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_BAD_REQUEST,
-                b"ChannelBind Conflict",
-                None,
-                mi_key,
-            )
-            .await;
-            return;
-        }
-        Err(ChannelBindError::QuotaExceeded) => {
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_INSUFFICIENT_CAPACITY,
-                b"Permission Quota Reached",
-                None,
-                mi_key,
-            )
-            .await;
-            return;
-        }
-    }
-
-    if alloc
-        .cascade_channel_bind(channel, target_sock)
-        .await
-        .is_err()
-    {
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Upstream Hop ChannelBind Failed",
-            None,
-            mi_key,
-        )
-        .await;
         return;
     }
 
@@ -3503,11 +3055,12 @@ pub struct TurnServer {
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     clock: SharedClock,
-    channel_bind_timeout: Duration,
     relay_generator: Arc<PolicyRelayAddressGenerator>,
     relay_is_ipv4: bool,
     max_allocations: usize,
+    max_reservations: usize,
     capacity_sem: Arc<Semaphore>,
+    reservation_sem: Arc<Semaphore>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
@@ -3579,7 +3132,9 @@ impl TurnServer {
         };
 
         let max_allocations = config.max_allocations.max(1);
+        let max_reservations = config.max_reservations;
         let capacity_sem = Arc::new(Semaphore::new(max_allocations));
+        let reservation_sem = Arc::new(Semaphore::new(max_reservations));
         tokio::spawn(Self::read_loop(
             listeners,
             Arc::clone(&allocations),
@@ -3606,11 +3161,12 @@ impl TurnServer {
             realm: config.realm,
             auth_handler,
             clock,
-            channel_bind_timeout,
             relay_generator,
             relay_is_ipv4,
             max_allocations,
+            max_reservations,
             capacity_sem,
+            reservation_sem,
             allocations,
             reserved_sessions,
             nonces,
@@ -3695,8 +3251,6 @@ impl TurnServer {
 
         let allocate_responses: AllocateResponseCache = Arc::new(Mutex::new(HashMap::new()));
         let completed_deletions: CompletedDeletionCache = Arc::new(Mutex::new(HashMap::new()));
-        let pending_chained_allocations: PendingChainedAllocations =
-            Arc::new(Mutex::new(HashMap::new()));
 
         loop {
             if *shutdown_rx.borrow_and_update() {
@@ -3906,35 +3460,10 @@ impl TurnServer {
                         .await;
                         continue;
                     }
-                    let pending_match = {
-                        let guard = pending_chained_allocations.lock().await;
-                        guard.get(&five_tuple).cloned()
-                    };
-                    if let Some((pending_user, pending_tx)) = pending_match {
-                        if pending_user == username_attr.text
-                            && pending_tx == decoded_msg.transaction_id
-                        {
-                            // Retransmission of an in-flight chained Allocate: coalesce until the
-                            // spawned upstream refresh finishes and sends the response.
-                            continue;
-                        }
-                        send_authenticated_error(
-                            &recording_conn_dyn,
-                            addr,
-                            &decoded_msg,
-                            CODE_ALLOC_MISMATCH,
-                            b"Allocation Mismatch",
-                            None,
-                            mi_key,
-                        )
-                        .await;
-                        continue;
-                    }
                     handle_authenticated_allocate(
                         &recording_conn_dyn,
                         &allocations,
                         &reserved_sessions,
-                        &pending_chained_allocations,
                         &capacity_sem,
                         &clock,
                         &shutdown_rx,
@@ -3978,46 +3507,18 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    if let Some(tx) = alloc.chained_control_sender() {
-                        if tx
-                            .try_send(ChainedControlOp::Refresh {
-                                conn: Arc::clone(&recording_conn_dyn),
-                                allocations: Arc::clone(&allocations),
-                                nonces: Arc::clone(&nonces),
-                                allocate_responses: Arc::clone(&allocate_responses),
-                                completed_deletions: Arc::clone(&completed_deletions),
-                                max_allocations,
-                                alloc,
-                                msg: decoded_msg.clone(),
-                                mi_key: mi_key.clone(),
-                            })
-                            .is_err()
-                        {
-                            send_authenticated_error(
-                                &recording_conn_dyn,
-                                addr,
-                                &decoded_msg,
-                                CODE_INSUFFICIENT_CAPACITY,
-                                b"Chained Control Queue Full",
-                                None,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                    } else {
-                        handle_authenticated_refresh(
-                            &recording_conn_dyn,
-                            &allocations,
-                            &nonces,
-                            &allocate_responses,
-                            &completed_deletions,
-                            max_allocations,
-                            alloc,
-                            &decoded_msg,
-                            mi_key,
-                        )
-                        .await;
-                    }
+                    handle_authenticated_refresh(
+                        &recording_conn_dyn,
+                        &allocations,
+                        &nonces,
+                        &allocate_responses,
+                        &completed_deletions,
+                        max_allocations,
+                        alloc,
+                        &decoded_msg,
+                        mi_key,
+                    )
+                    .await;
                 }
                 METHOD_CREATE_PERMISSION => {
                     let Some(alloc) = existing_alloc else {
@@ -4033,40 +3534,15 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    if let Some(tx) = alloc.chained_control_sender() {
-                        if tx
-                            .try_send(ChainedControlOp::CreatePermission {
-                                conn: Arc::clone(&recording_conn_dyn),
-                                alloc,
-                                msg: decoded_msg.clone(),
-                                peer_policy,
-                                max_permissions_per_allocation,
-                                mi_key: mi_key.clone(),
-                            })
-                            .is_err()
-                        {
-                            send_authenticated_error(
-                                &recording_conn_dyn,
-                                addr,
-                                &decoded_msg,
-                                CODE_INSUFFICIENT_CAPACITY,
-                                b"Chained Control Queue Full",
-                                None,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                    } else {
-                        handle_authenticated_create_permission(
-                            &recording_conn_dyn,
-                            &alloc,
-                            &decoded_msg,
-                            peer_policy,
-                            max_permissions_per_allocation,
-                            mi_key,
-                        )
-                        .await;
-                    }
+                    handle_authenticated_create_permission(
+                        &recording_conn_dyn,
+                        &alloc,
+                        &decoded_msg,
+                        peer_policy,
+                        max_permissions_per_allocation,
+                        mi_key,
+                    )
+                    .await;
                 }
                 METHOD_CHANNEL_BIND => {
                     let Some(alloc) = existing_alloc else {
@@ -4082,42 +3558,16 @@ impl TurnServer {
                         .await;
                         continue;
                     };
-                    if let Some(tx) = alloc.chained_control_sender() {
-                        if tx
-                            .try_send(ChainedControlOp::ChannelBind {
-                                conn: Arc::clone(&recording_conn_dyn),
-                                alloc,
-                                msg: decoded_msg.clone(),
-                                peer_policy,
-                                channel_bind_timeout,
-                                max_permissions_per_allocation,
-                                mi_key: mi_key.clone(),
-                            })
-                            .is_err()
-                        {
-                            send_authenticated_error(
-                                &recording_conn_dyn,
-                                addr,
-                                &decoded_msg,
-                                CODE_INSUFFICIENT_CAPACITY,
-                                b"Chained Control Queue Full",
-                                None,
-                                mi_key,
-                            )
-                            .await;
-                        }
-                    } else {
-                        handle_authenticated_channel_bind(
-                            &recording_conn_dyn,
-                            &alloc,
-                            &decoded_msg,
-                            peer_policy,
-                            channel_bind_timeout,
-                            max_permissions_per_allocation,
-                            mi_key,
-                        )
-                        .await;
-                    }
+                    handle_authenticated_channel_bind(
+                        &recording_conn_dyn,
+                        &alloc,
+                        &decoded_msg,
+                        peer_policy,
+                        channel_bind_timeout,
+                        max_permissions_per_allocation,
+                        mi_key,
+                    )
+                    .await;
                 }
                 _ => {}
             }
@@ -4250,16 +3700,19 @@ impl TurnServer {
         Ok(())
     }
 
-    /// Reserve an exit TURN session on this server (`RelayBackend::LocalExit`) with an unlinkable
-    /// [`SignedTurnSessionTicket`] and optional `rings-aez` (`τ = 0`) payload permutation (#1292).
+    /// Return the current number of unclaimed live session reservations held in memory.
+    pub async fn active_reservation_count(&self) -> usize {
+        prune_expired_reserved_sessions_map(&self.reserved_sessions, self.clock.now_ms()).await
+    }
+
+    /// Reserve a TURN session on this server with an unlinkable [`SignedTurnSessionTicket`] (#1292).
     ///
-    /// The exit relay UDP socket is bound immediately so its `XOR-RELAYED-ADDRESS` (`E_exit`) can
-    /// be projected by every preceding hop in a multi-hop TURN chain.
+    /// Enforces both the per-server reservation cap (`max_reservations`) and the total allocation
+    /// cap (`max_allocations`). Expired unclaimed reservations are pruned first to release permits.
     pub async fn reserve_exit_session(
         &self,
         ephemeral_client_pubkey: PublicKey<33>,
         ttl: Duration,
-        cipher: Option<TurnPayloadCipher>,
     ) -> Result<TurnSessionReservation> {
         let _ =
             rings_core::ecc::prime_order::NonIdentityPoint::<rings_core::ecc::Secp256k1>::try_from(
@@ -4272,7 +3725,13 @@ impl TurnServer {
         let now_ms = self.clock.now_ms();
         let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
         let _ = active_allocation_count(&self.allocations).await;
+        let Ok(reservation_permit) = Arc::clone(&self.reservation_sem).try_acquire_owned() else {
+            return Err(crate::error::TurnError::ReservationCapacityReached {
+                max_reservations: self.max_reservations,
+            });
+        };
         let Ok(capacity_permit) = Arc::clone(&self.capacity_sem).try_acquire_owned() else {
+            drop(reservation_permit);
             return Err(crate::error::TurnError::AllocationCapacityReached {
                 max_allocations: self.max_allocations,
             });
@@ -4296,82 +3755,14 @@ impl TurnServer {
             guard.insert(session_id, ReservedTurnSession {
                 expires_at_ms,
                 relay_addr,
-                backend: RelayBackend::LocalExit(relay_conn),
-                cipher,
+                relay_conn,
+                reservation_permit,
                 capacity_permit,
             });
         }
         Ok(TurnSessionReservation {
             ticket,
             relay_addr,
-            server_addr: self.advertised_addr,
-            server_pubkey: self.server_pubkey(),
-        })
-    }
-
-    /// Reserve a chained intermediate or entry TURN hop on this server (`RelayBackend::ChainedHop`)
-    /// that forwards control and data traffic to `spec.next_hop_addr` (#1292).
-    pub async fn reserve_chained_hop(
-        &self,
-        spec: TurnChainedHopSpec,
-    ) -> Result<TurnSessionReservation> {
-        let _ =
-            rings_core::ecc::prime_order::NonIdentityPoint::<rings_core::ecc::Secp256k1>::try_from(
-                spec.ephemeral_client_pubkey,
-            )?;
-        if spec.ttl.is_zero() {
-            return Err(crate::error::TurnError::InvalidReservationTtl);
-        }
-        let clamped_ttl = spec.ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
-        let now_ms = self.clock.now_ms();
-        let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
-        let _ = active_allocation_count(&self.allocations).await;
-        let Ok(capacity_permit) = Arc::clone(&self.capacity_sem).try_acquire_owned() else {
-            return Err(crate::error::TurnError::AllocationCapacityReached {
-                max_allocations: self.max_allocations,
-            });
-        };
-
-        let upstream_lifetime = clamped_ttl.max(DEFAULT_LIFETIME);
-        let (upstream, upstream_relayed_addr) = UpstreamTurnRelayClient::allocate(
-            spec.next_hop_addr,
-            spec.next_hop_credentials,
-            upstream_lifetime,
-            self.channel_bind_timeout,
-            spec.projected_relay_addr.is_ipv6(),
-        )
-        .await?;
-        if upstream_relayed_addr != spec.projected_relay_addr {
-            upstream.begin_close();
-            upstream.finish_close().await;
-            return Err(crate::error::TurnError::ChainedRelayAddressMismatch {
-                expected: spec.projected_relay_addr,
-                actual: upstream_relayed_addr,
-            });
-        }
-
-        let mut session_id = [0u8; 16];
-        rand::thread_rng().fill(&mut session_id);
-        let expires_at_ms = now_ms.saturating_add(clamped_ttl.as_millis());
-        let ticket = SignedTurnSessionTicket::issue(
-            session_id,
-            spec.ephemeral_client_pubkey,
-            expires_at_ms,
-            self.auth_handler.server_key(),
-        )?;
-        {
-            let mut guard = self.reserved_sessions.lock().await;
-            guard.insert(session_id, ReservedTurnSession {
-                expires_at_ms,
-                relay_addr: upstream.relayed_addr(),
-                backend: RelayBackend::ChainedHop(upstream),
-                cipher: spec.cipher,
-                capacity_permit,
-            });
-        }
-        Ok(TurnSessionReservation {
-            ticket,
-            relay_addr: spec.projected_relay_addr,
             server_addr: self.advertised_addr,
             server_pubkey: self.server_pubkey(),
         })
@@ -4388,8 +3779,8 @@ impl TurnServer {
             guard.drain().map(|(_, s)| s).collect()
         };
         for session in remaining_reserved {
-            let handle = session.backend.begin_close();
-            session.backend.finish_close(handle).await;
+            let taken = session.relay_conn.begin_close();
+            session.relay_conn.finish_close(taken).await;
         }
         Ok(())
     }

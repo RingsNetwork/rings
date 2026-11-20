@@ -26,6 +26,7 @@ use crate::prelude::DelegateeKey;
 use crate::processor::ProcessorConfig;
 use crate::processor::ProcessorConfigSerialized;
 use crate::seed::SeedPeer;
+use crate::turn_service::TurnServiceConfig;
 use crate::util::ensure_parent_dir;
 use crate::util::expand_home;
 
@@ -291,6 +292,10 @@ pub struct Config {
     /// The DNS relay this node runs for its zones (#1049), if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dns_relay: Option<DnsRelayConfig>,
+    /// Embedded TURN relay service (`rings-turn`), DHT `turn_services` announcement, and
+    /// `turn.ticket` onion `invoke` ticket issuer (#1292), if configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_service: Option<TurnServiceConfig>,
     /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
@@ -346,6 +351,10 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 
         let udp_range =
             crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
+        let onion_invoke_offer = match config.turn_service.as_ref() {
+            Some(turn_cfg) => turn_cfg.onion_invoke_offer(config.advertise_onion_relay)?,
+            None => None,
+        };
 
         Ok(Self {
             network_id: config.network_id,
@@ -367,7 +376,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             onion_exit_ttl_secs: config.onion_exit_ttl_secs,
             onion_exit_services: config.onion_exit_services,
             onion_exit_policy: config.onion_exit_policy,
-            onion_invoke_offer: None,
+            onion_invoke_offer,
             remote_rpc_proxy_url: config.remote_rpc_proxy_url,
         })
     }
@@ -419,6 +428,7 @@ impl Config {
             bootstrap: BootstrapConfig::default(),
             services: None,
             dns_relay: None,
+            turn_service: None,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
             external_ip: None,

@@ -122,13 +122,21 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
+use crate::turn_service::encode_turn_ticket_outcome;
+use crate::turn_service::encode_turn_ticket_request;
+use crate::turn_service::TurnServiceDescriptor;
+use crate::turn_service::TurnServiceDescriptorBody;
+use crate::turn_service::TurnTicketOutcome;
+use crate::turn_service::TurnTicketRejection;
+use crate::turn_service::TurnTicketRequest;
+use crate::turn_service::TURN_SERVICES_TOPIC;
 
 /// The pinned `(WIRE_VERSION, keccak256(goldens))`.
 ///
 /// Both parts are one literal so a diff shows the version and the hash moving together.
 const PINNED: (u16, &str) = (
     4,
-    "bb304e05f88d43d9adc9adf1df962a5883890ba94376b98ef5f0e003334b049c",
+    "bff8acffaea3cb087c317e50da540eb16c276512d9f96febb617132ecc14e851",
 );
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -427,6 +435,41 @@ fn format_goldens() -> (String, Vec<u8>) {
     tracer.trace_value(&mut samples, &mail_body).unwrap();
     tracer.trace_value(&mut samples, &mail_descriptor).unwrap();
 
+    let turn_body = TurnServiceDescriptorBody {
+        did,
+        public_key: alice.public_key.clone(),
+        network_id: GOLDEN_NETWORK_ID,
+        turn_url: "turn://turn.rings.rs:3478".to_string(),
+        server_pubkey: pk33,
+        fresh_for_ms,
+        expires_at_ms,
+    };
+    let (_, _, turn_descriptor): (_, _, TurnServiceDescriptor) =
+        sign_descriptor_at(turn_body.clone(), &alice);
+    tracer.trace_value(&mut samples, &turn_body).unwrap();
+    tracer.trace_value(&mut samples, &turn_descriptor).unwrap();
+
+    let turn_ticket_req = TurnTicketRequest {
+        ephemeral_client_pubkey: pk33,
+        ttl_ms: 60_000,
+    };
+    tracer.trace_value(&mut samples, &turn_ticket_req).unwrap();
+    let sample_signed_ticket = rings_turn::SignedTurnSessionTicket::issue(
+        [0x77; 16],
+        pk33,
+        GOLDEN_EPOCH_MS + 60_000,
+        &fixture_secret(BOB_ACCOUNT_SEED),
+    )
+    .unwrap();
+    let turn_ticket_issued = TurnTicketOutcome::Issued {
+        ticket: sample_signed_ticket,
+        relay_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 49152)),
+        server_pubkey: fixture_secret(BOB_ACCOUNT_SEED).pubkey(),
+    };
+    tracer
+        .trace_value(&mut samples, &turn_ticket_issued)
+        .unwrap();
+
     // Sealed mail ciphertext (`AeadCiphertext`): its `Deserialize` enforces
     // `encrypted_key.len() == 2`, so it is traced from a canonical sealed sample.
     let mut aead_rng = ChaCha20Rng::from_seed([0x51; 32]);
@@ -449,6 +492,8 @@ fn format_goldens() -> (String, Vec<u8>) {
     tracer.trace_type::<OnionHttpsRequest>(&samples).unwrap();
     tracer.trace_type::<OnionHttpsResponse>(&samples).unwrap();
     tracer.trace_type::<OnionHttpsOutcome>(&samples).unwrap();
+    tracer.trace_type::<TurnTicketOutcome>(&samples).unwrap();
+    tracer.trace_type::<TurnTicketRejection>(&samples).unwrap();
 
     // Nested enums without custom deserializers: `trace_type` visits every variant.
     tracer.trace_type::<OnlineNodeType>(&samples).unwrap();
@@ -505,6 +550,10 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
             ONION_INVOKES_TOPIC.as_bytes().to_vec(),
         ),
         (
+            "descriptor/topic/turn_services".to_string(),
+            TURN_SERVICES_TOPIC.as_bytes().to_vec(),
+        ),
+        (
             "descriptor/topic/service".to_string(),
             service_topic(alice.did).into_bytes(),
         ),
@@ -543,6 +592,12 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
         (
             "descriptor/domain_tag/mail".to_string(),
             <MailDescriptorBody as SignedDescriptorBody>::DOMAIN_TAG
+                .as_bytes()
+                .to_vec(),
+        ),
+        (
+            "descriptor/domain_tag/turn_service".to_string(),
+            <TurnServiceDescriptorBody as SignedDescriptorBody>::DOMAIN_TAG
                 .as_bytes()
                 .to_vec(),
         ),
@@ -690,6 +745,41 @@ fn descriptor_goldens() -> Vec<(String, Vec<u8>)> {
     out.push((
         "descriptor/MailDescriptor/element".to_string(),
         mail_element.to_vec(),
+    ));
+
+    let turn_server_key: SecretKey = fixture_secret(BOB_ACCOUNT_SEED);
+    let turn_body = TurnServiceDescriptorBody {
+        did: alice.did,
+        public_key: alice.public_key.clone(),
+        network_id: GOLDEN_NETWORK_ID,
+        turn_url: "turn://turn.rings.rs:3478".to_string(),
+        server_pubkey: turn_server_key.pubkey(),
+        fresh_for_ms,
+        expires_at_ms,
+    };
+    let (turn_signing_data, turn_element, turn_descriptor) = sign_descriptor_at(turn_body, &alice);
+    assert!(turn_descriptor.has_valid_endpoint());
+    out.push((
+        "descriptor/TurnServiceDescriptor/signing_data".to_string(),
+        turn_signing_data,
+    ));
+    out.push((
+        "descriptor/TurnServiceDescriptor/element".to_string(),
+        turn_element.to_vec(),
+    ));
+
+    let ticket_req = TurnTicketRequest {
+        ephemeral_client_pubkey: alice.delegatee_key.delegatee_public_key(),
+        ttl_ms: 60_000,
+    };
+    out.push((
+        "turn/ticket/request_frame".to_string(),
+        encode_turn_ticket_request(&ticket_req).unwrap(),
+    ));
+    let ticket_rejected = TurnTicketOutcome::Rejected(TurnTicketRejection::CapacityReached);
+    out.push((
+        "turn/ticket/rejected_frame".to_string(),
+        encode_turn_ticket_outcome(&ticket_rejected).unwrap(),
     ));
 
     out

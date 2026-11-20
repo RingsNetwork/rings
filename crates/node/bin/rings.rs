@@ -58,6 +58,8 @@ use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_node::seed::Seed;
+use rings_node::turn_service::register_turn_ticket_invoke_backend;
+use rings_node::turn_service::TurnServiceOffer;
 use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
@@ -99,16 +101,55 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     let (data_storage, measure_storage) =
         run_storage_configs(args.storage_path, args.storage_capacity, &c);
     let service_offer = c.services.as_ref().map(ServicesConfig::offer).transpose()?;
-    let processor = build_processor(
+    let started_turn = match c.turn_service.as_ref() {
+        Some(turn_cfg) => {
+            let server_cfg = turn_cfg.to_turn_server_config(pc.clock().clone())?;
+            let server = Arc::new(
+                rings_turn::TurnServer::start(server_cfg)
+                    .await
+                    .context("starting embedded TURN server")?,
+            );
+            let offer = match turn_cfg.service_offer(&server) {
+                Ok(offer) => offer,
+                Err(error) => {
+                    let _ = server.close().await;
+                    return Err(error.into());
+                }
+            };
+            Some((
+                server,
+                offer,
+                turn_cfg.issue_tickets,
+                turn_cfg.ticket_invoke_policy,
+            ))
+        }
+        None => None,
+    };
+    let turn_service_offer = started_turn.as_ref().map(|(_, offer, _, _)| offer.clone());
+    let processor = match build_processor(
         &pc,
         data_storage,
         measure_storage,
         args.reassembly_profile.limits(),
         service_offer,
+        turn_service_offer,
     )
-    .await?;
+    .await
+    {
+        Ok(processor) => processor,
+        Err(error) => {
+            if let Some((ref server, ..)) = started_turn {
+                let _ = server.close().await;
+            }
+            return Err(error);
+        }
+    };
     println!("Did: {}", processor.swarm.did());
     let provider = Arc::new(Provider::from_processor(processor.clone()));
+    if let Some((ref server, _, true, invoke_policy)) = started_turn {
+        let pipeline = provider.onion_pipeline()?;
+        register_turn_ticket_invoke_backend(&pipeline, invoke_policy, Arc::clone(server))?;
+    }
     // The relay is an opt-in extension owning its own engine: it serves TCP/UDP tunnels, the
     // ports this node serves through DNS relays, and the ingress of a DNS relay it runs.
     let relay = RelayHandle::install(&provider.extensions())?;
@@ -183,6 +224,16 @@ async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
                 .run(dns_relay_stop.stopped())
                 .await
                 .context("DNS relay stopped")
+        });
+    }
+    if let Some((turn_server, ..)) = started_turn {
+        let turn_stop = stop.token();
+        tasks.spawn(async move {
+            turn_stop.stopped().await;
+            turn_server
+                .close()
+                .await
+                .context("closing embedded TURN server")
         });
     }
     match (onion_http_proxy, onion) {
@@ -322,6 +373,7 @@ async fn build_processor(
     measure_storage: config::StorageConfig,
     reassembly_limits: ReassemblyLimits,
     service_offer: Option<ServiceOffer>,
+    turn_service_offer: Option<TurnServiceOffer>,
 ) -> anyhow::Result<Arc<Processor>> {
     let stores = NodeStores::open(&data_storage, &measure_storage).await?;
     let collector =
@@ -345,6 +397,10 @@ async fn build_processor(
         .reassembly_limits(reassembly_limits);
     let builder = match service_offer {
         Some(offer) => builder.announce_services(offer),
+        None => builder,
+    };
+    let builder = match turn_service_offer {
+        Some(offer) => builder.announce_turn_service(offer),
         None => builder,
     };
     Ok(Arc::new(builder.build()?))

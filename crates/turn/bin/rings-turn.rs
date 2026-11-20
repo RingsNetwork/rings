@@ -20,6 +20,7 @@ use rings_turn::TurnServerConfig;
 use rings_turn::DEFAULT_MAX_ALLOCATIONS;
 use rings_turn::DEFAULT_MAX_NONCES;
 use rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
+use rings_turn::DEFAULT_MAX_RESERVATIONS;
 use rings_turn::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use rings_turn::DEFAULT_TURN_REALM;
 use tracing_subscriber::EnvFilter;
@@ -87,6 +88,14 @@ struct Cli {
         default_value_t = DEFAULT_MAX_ALLOCATIONS
     )]
     max_allocations: usize,
+
+    /// Maximum number of unclaimed session-ticket reservations stored concurrently (0 disables).
+    #[arg(
+        long,
+        env = "RINGS_TURN_MAX_RESERVATIONS",
+        default_value_t = DEFAULT_MAX_RESERVATIONS
+    )]
+    max_reservations: usize,
 
     /// Maximum number of active peer IP permissions per TURN allocation.
     #[arg(
@@ -183,6 +192,7 @@ impl Cli {
             peer_policy,
             max_nonces: self.max_nonces.max(1),
             max_allocations: self.max_allocations.max(1),
+            max_reservations: self.max_reservations,
             max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,

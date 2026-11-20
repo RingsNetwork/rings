@@ -4826,7 +4826,6 @@ dependencies = [
  "clap",
  "hex",
  "rand 0.8.6",
- "rings-aez",
  "rings-codec",
  "rings-core",
  "serde",

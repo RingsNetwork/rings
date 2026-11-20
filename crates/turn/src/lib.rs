@@ -13,13 +13,10 @@
 #[cfg(not(target_family = "wasm"))]
 mod auth;
 #[cfg(not(target_family = "wasm"))]
-mod chained_client;
-#[cfg(not(target_family = "wasm"))]
 mod config;
 mod credentials;
 #[cfg(not(target_family = "wasm"))]
 mod error;
-pub mod onion;
 #[cfg(not(target_family = "wasm"))]
 mod server;
 
@@ -41,6 +38,8 @@ pub use config::DEFAULT_MAX_ALLOCATIONS;
 pub use config::DEFAULT_MAX_NONCES;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
+#[cfg(not(target_family = "wasm"))]
+pub use config::DEFAULT_MAX_RESERVATIONS;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 #[cfg(not(target_family = "wasm"))]
@@ -65,14 +64,6 @@ pub use credentials::TURN_SESSION_TICKET_DOMAIN;
 pub use error::Result;
 #[cfg(not(target_family = "wasm"))]
 pub use error::TurnError;
-pub use onion::derive_entry_wrapped_hop_ciphers;
-pub use onion::TurnChainAction;
-pub use onion::TurnChainModel;
-pub use onion::TurnCipherDirection;
-pub use onion::TurnHopModelState;
-pub use onion::TurnPayloadCipher;
-#[cfg(not(target_family = "wasm"))]
-pub use server::TurnChainedHopSpec;
 #[cfg(not(target_family = "wasm"))]
 pub use server::TurnServer;
 #[cfg(not(target_family = "wasm"))]
@@ -2099,83 +2090,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_server_relays_udp_and_channel_data_over_three_hop_aez_onion_chain_with_unlinkable_session_tickets(
-    ) -> Result<()> {
-        let mut link_key_1 = [0u8; rings_aez::KEY_BYTES];
-        let mut link_key_2 = [0u8; rings_aez::KEY_BYTES];
-        for i in 0..rings_aez::KEY_BYTES {
-            link_key_1[i] = u8::try_from(i + 11).unwrap();
-            link_key_2[i] = u8::try_from(i + 97).unwrap();
-        }
-        let hop_ciphers = derive_entry_wrapped_hop_ciphers(&[link_key_1, link_key_2]).unwrap();
-        assert_eq!(hop_ciphers.len(), 3);
+    async fn turn_server_relays_udp_with_unlinkable_session_ticket_and_rejects_replay() -> Result<()>
+    {
+        // Configure an empty allowlist (`TurnAdmissionPolicy::allowlist([])`) to prove that
+        // server-issued unlinkable `SessionTicket` credentials authenticate without exposing or
+        // requiring any client DID.
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
+        let server = TurnServer::start(cfg).await?;
 
-        // Start 3 TURN servers (T_1 Entry, T_2 Middle, T_3 Exit), each with an empty allowlist
-        // (`TurnAdmissionPolicy::allowlist([])`) to prove that server-issued unlinkable
-        // `SessionTicket` credentials authenticate without exposing or requiring any client DID!
-        let make_strict_config = || {
-            let mut cfg = TurnServerConfig::loopback_ephemeral();
-            cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
-            cfg
-        };
-        let hop1 = TurnServer::start(make_strict_config()).await?;
-        let hop2 = TurnServer::start(make_strict_config()).await?;
-        let hop3 = TurnServer::start(make_strict_config()).await?;
-
-        let eph_key_1 = SecretKey::random();
-        let eph_key_2 = SecretKey::random();
-        let eph_key_3 = SecretKey::random();
+        let eph_key = SecretKey::random();
         let ttl = Duration::from_secs(60);
-
-        // 1. Reserve Exit Session on T_3 (`RelayBackend::LocalExit`).
-        let res3 = hop3
-            .reserve_exit_session(eph_key_3.pubkey(), ttl, Some(hop_ciphers[2].clone()))
-            .await?;
-        let exit_relay_addr = res3.relay_addr;
-        let creds3 = res3
+        let reservation = server.reserve_exit_session(eph_key.pubkey(), ttl).await?;
+        let reserved_relay_addr = reservation.relay_addr;
+        let creds = reservation
             .ticket
-            .to_turn_credentials(&eph_key_3, hop3.server_pubkey())?;
+            .to_turn_credentials(&eph_key, server.server_pubkey())?;
 
-        // 2. Reserve Middle Hop on T_2 (`RelayBackend::ChainedHop -> T_3`).
-        let res2 = hop2
-            .reserve_chained_hop(TurnChainedHopSpec {
-                ephemeral_client_pubkey: eph_key_2.pubkey(),
-                next_hop_addr: hop3.local_addr(),
-                next_hop_credentials: creds3,
-                projected_relay_addr: exit_relay_addr,
-                cipher: Some(hop_ciphers[1].clone()),
-                ttl,
-            })
-            .await?;
-        assert_eq!(res2.relay_addr, exit_relay_addr);
-        let creds2 = res2
-            .ticket
-            .to_turn_credentials(&eph_key_2, hop2.server_pubkey())?;
-
-        // 3. Reserve Entry Hop on T_1 (`RelayBackend::ChainedHop -> T_2`).
-        let res1 = hop1
-            .reserve_chained_hop(TurnChainedHopSpec {
-                ephemeral_client_pubkey: eph_key_1.pubkey(),
-                next_hop_addr: hop2.local_addr(),
-                next_hop_credentials: creds2,
-                projected_relay_addr: exit_relay_addr,
-                cipher: Some(hop_ciphers[0].clone()),
-                ttl,
-            })
-            .await?;
-        assert_eq!(res1.relay_addr, exit_relay_addr);
-        let creds1 = res1
-            .ticket
-            .to_turn_credentials(&eph_key_1, hop1.server_pubkey())?;
-
-        // Connect an unmodified standard TURN client to Entry Hop T_1 using `creds1`.
+        // Connect an unmodified standard TURN client using the unlinkable ticket credentials.
         let client_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
         let turn_client = Client::new(ClientConfig {
-            stun_serv_addr: hop1.local_addr().to_string(),
-            turn_serv_addr: hop1.local_addr().to_string(),
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
             conn: client_conn,
-            username: creds1.username.clone(),
-            password: creds1.credential.clone(),
+            username: creds.username.clone(),
+            password: creds.credential.clone(),
             realm: DEFAULT_TURN_REALM.to_string(),
             software: String::new(),
             rto_in_ms: 0,
@@ -2184,37 +2123,36 @@ mod tests {
         .await?;
         turn_client.listen().await?;
 
-        // Allocate on T_1: must return T_3's `exit_relay_addr` (`XOR-RELAYED-ADDRESS` projection)!
         let allocated_conn = turn_client.allocate().await?;
         assert_eq!(
             allocated_conn.local_addr()?,
-            exit_relay_addr,
-            "Entry hop T_1 must project Exit hop T_3's XOR-RELAYED-ADDRESS"
+            reserved_relay_addr,
+            "Allocate must return the reserved XOR-RELAYED-ADDRESS"
+        );
+        assert_eq!(
+            server.active_reservation_count().await,
+            0,
+            "claiming a ticket must release its unclaimed reservation slot"
         );
 
-        // Bind a target WebRTC peer UDP socket.
         let peer_socket = UdpSocket::bind("127.0.0.1:0").await?;
         let peer_addr = peer_socket.local_addr()?;
 
-        // Send outbound datagram from client -> T_1 -> T_2 -> T_3 -> peer_socket
-        // (triggers CreatePermission cascading across T_1 -> T_2 -> T_3 and AEZ wrap/unwrap!).
-        let outbound_msg = b"onion-turn-outbound-webrtc-datagram";
+        let outbound_msg = b"single-hop-session-ticket-outbound";
         allocated_conn.send_to(outbound_msg, peer_addr).await?;
 
         let mut peer_buf = [0u8; 256];
         let (n, observed_relay_src) =
             tokio::time::timeout(Duration::from_secs(5), peer_socket.recv_from(&mut peer_buf))
                 .await
-                .expect("peer should receive datagram from T_3 exit relay")?;
-        assert_eq!(
-            observed_relay_src, exit_relay_addr,
-            "peer must only observe T_3's exit relay address, hiding client and T_1/T_2"
-        );
+                .expect("peer should receive datagram from TURN relay")?;
+        assert_eq!(observed_relay_src, reserved_relay_addr);
         assert_eq!(&peer_buf[..n], outbound_msg);
 
-        // Send inbound datagram from peer_socket -> T_3 (`exit_relay_addr`) -> T_2 -> T_1 -> client.
-        let inbound_msg = b"onion-turn-inbound-webrtc-datagram";
-        peer_socket.send_to(inbound_msg, exit_relay_addr).await?;
+        let inbound_msg = b"single-hop-session-ticket-inbound";
+        peer_socket
+            .send_to(inbound_msg, reserved_relay_addr)
+            .await?;
 
         let mut client_buf = [0u8; 256];
         let (n_in, observed_peer_src) = tokio::time::timeout(
@@ -2222,18 +2160,18 @@ mod tests {
             allocated_conn.recv_from(&mut client_buf),
         )
         .await
-        .expect("client should receive inbound datagram via T_3 -> T_2 -> T_1")?;
+        .expect("client should receive inbound datagram from TURN relay")?;
         assert_eq!(observed_peer_src, peer_addr);
         assert_eq!(&client_buf[..n_in], inbound_msg);
 
-        // Re-using the single-use `creds1` session ticket on a second client must be rejected!
+        // Re-using the single-use `creds` session ticket on a second client must be rejected.
         let replay_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
         let replay_client = Client::new(ClientConfig {
-            stun_serv_addr: hop1.local_addr().to_string(),
-            turn_serv_addr: hop1.local_addr().to_string(),
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
             conn: replay_conn,
-            username: creds1.username,
-            password: creds1.credential,
+            username: creds.username,
+            password: creds.credential,
             realm: DEFAULT_TURN_REALM.to_string(),
             software: String::new(),
             rto_in_ms: 0,
@@ -2247,54 +2185,79 @@ mod tests {
         );
         let _ = replay_client.close().await;
 
-        let teardown_start = tokio::time::Instant::now();
         allocated_conn.close().await?;
         turn_client.close().await?;
-        hop1.close().await?;
-        hop2.close().await?;
-        hop3.close().await?;
-        assert!(
-            teardown_start.elapsed() < Duration::from_secs(2),
-            "chained 3-hop teardown must complete promptly without hitting the 5s upstream timeout (took {:?})",
-            teardown_start.elapsed()
-        );
+        server.close().await?;
         Ok(())
     }
 
     #[tokio::test]
-    async fn turn_server_reservations_honor_injected_clock_and_atomic_capacity_semaphore(
-    ) -> Result<()> {
+    async fn turn_server_reservations_honor_injected_clock_and_reservation_flood_cap() -> Result<()>
+    {
         let t0: u128 = 2_000_000_000_000;
         let clock = Arc::new(ManualClock::new(t0));
         let mut cfg = TurnServerConfig::loopback_ephemeral();
-        cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
         cfg.clock = clock.clone();
-        cfg.max_allocations = 1;
+        cfg.max_allocations = 4;
+        cfg.max_reservations = 2;
         let server = TurnServer::start(cfg).await?;
 
         let key1 = SecretKey::random();
         let res1 = server
-            .reserve_exit_session(key1.pubkey(), Duration::from_secs(30), None)
+            .reserve_exit_session(key1.pubkey(), Duration::from_secs(30))
             .await?;
         assert_eq!(res1.ticket.ticket.expires_at_ms, t0 + 30_000);
 
-        // Second reservation must fail atomically while slot 1 is occupied.
         let key2 = SecretKey::random();
-        let err = server
-            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30), None)
-            .await
-            .expect_err("second reservation must fail when max_allocations == 1");
-        assert!(matches!(err, TurnError::AllocationCapacityReached {
-            max_allocations: 1
-        }));
-
-        // Advancing the injected ManualClock past 30s expires reservation 1 and frees its permit.
-        clock.set(t0 + 30_001);
-        let res2 = server
-            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30), None)
+        let _res2 = server
+            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30))
             .await?;
-        assert_eq!(res2.ticket.ticket.expires_at_ms, t0 + 60_001);
+        assert_eq!(server.active_reservation_count().await, 2);
 
+        // Unauthenticated reservation flood cannot exceed `max_reservations = 2` even though
+        // `max_allocations = 4` still has headroom.
+        for _ in 0..8 {
+            let flood_key = SecretKey::random();
+            let err = server
+                .reserve_exit_session(flood_key.pubkey(), Duration::from_secs(30))
+                .await
+                .expect_err("reservation flood must fail once max_reservations == 2 is reached");
+            assert!(matches!(err, TurnError::ReservationCapacityReached {
+                max_reservations: 2
+            }));
+        }
+        assert_eq!(server.active_reservation_count().await, 2);
+
+        // Normal authenticated client allocation still succeeds using remaining `max_allocations`.
+        let did_key = SecretKey::random();
+        let creds = did_key.turn_credentials(server.server_pubkey())?;
+        let client_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let client = Client::new(ClientConfig {
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
+            conn: client_conn,
+            username: creds.username,
+            password: creds.credential,
+            realm: DEFAULT_TURN_REALM.to_string(),
+            software: String::new(),
+            rto_in_ms: 0,
+            vnet: None,
+        })
+        .await?;
+        client.listen().await?;
+        let alloc_conn = client.allocate().await?;
+
+        // Advancing the injected ManualClock past 30s expires unclaimed reservations and frees capacity.
+        clock.set(t0 + 30_001);
+        assert_eq!(server.active_reservation_count().await, 0);
+        let key3 = SecretKey::random();
+        let res3 = server
+            .reserve_exit_session(key3.pubkey(), Duration::from_secs(30))
+            .await?;
+        assert_eq!(res3.ticket.ticket.expires_at_ms, t0 + 60_001);
+
+        alloc_conn.close().await?;
+        client.close().await?;
         server.close().await?;
         Ok(())
     }
