@@ -12,6 +12,7 @@ use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::prelude::rings_core::ecc::signers::secp256r1;
+use rings_node::prelude::rings_core::ecc::AccountVerifier;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -489,9 +490,13 @@ async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, Str
         account_type: "secp256r1".to_string(),
         handle: private_key,
     };
-    let _ = candidate
-        .sign_session_proof("rings-webcrypto-key-check")
-        .await?;
+    let verifier = AccountVerifier::from_account_parts(&candidate.account, &candidate.account_type)
+        .map_err(|error| format!("persisted WebCrypto public key invalid: {error}"))?;
+    let probe = "rings-webcrypto-key-check";
+    let sig = candidate.sign_session_proof(probe).await?;
+    if !verifier.verify(probe.as_bytes(), &sig) {
+        return Err("persisted WebCrypto private key does not match public key".to_string());
+    }
     Ok(Some(candidate))
 }
 
@@ -840,5 +845,36 @@ mod wasm_tests {
             .ok()
             .and_then(|val| val.as_bool());
         assert_eq!(extractable, Some(false));
+
+        let crypto = js_global_prop("crypto");
+        assert!(crypto.is_ok());
+        let Ok(crypto) = crypto else {
+            return;
+        };
+        let subtle = js_prop(&crypto, "subtle");
+        assert!(subtle.is_ok());
+        let Ok(subtle) = subtle else {
+            return;
+        };
+        let mismatched = generate_webcrypto_account(&subtle).await;
+        assert!(mismatched.is_ok());
+        let Ok(mismatched) = mismatched else {
+            return;
+        };
+        let corrupted = WalletAccount {
+            kind: WalletKind::WebCrypto,
+            account: mismatched.account.clone(),
+            account_type: "secp256r1".to_string(),
+            handle: second.handle.clone(),
+        };
+        assert!(persist_webcrypto_account(&corrupted).await.is_ok());
+        assert!(load_persisted_webcrypto_account().await.is_err());
+
+        let recovered = connect_webcrypto().await;
+        assert!(recovered.is_ok());
+        let Ok(recovered) = recovered else {
+            return;
+        };
+        assert_ne!(recovered.account, mismatched.account);
     }
 }
