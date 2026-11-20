@@ -1,13 +1,22 @@
 //! Browser account standards used to authorize a Rings delegatee key.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use base58::FromBase58;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use futures::channel::oneshot;
 use js_sys::Array;
 use js_sys::Object;
+use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::prelude::rings_core::ecc::signers::secp256r1;
+use rings_node::prelude::rings_core::ecc::AccountVerifier;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use web_sys::Event;
 
 use crate::browser_api::await_js;
 use crate::browser_api::is_callable;
@@ -15,6 +24,7 @@ use crate::browser_api::js_call0;
 use crate::browser_api::js_call1;
 use crate::browser_api::js_call2;
 use crate::browser_api::js_call3;
+use crate::browser_api::js_error_label;
 use crate::browser_api::js_global_prop;
 use crate::browser_api::js_prop;
 use crate::browser_api::js_set;
@@ -22,6 +32,10 @@ use crate::browser_api::js_string_field;
 use crate::hex;
 
 const EXTENSION_WALLET_BRIDGE: &str = "RingsExtensionWalletBridge";
+const WEBCRYPTO_IDB_DATABASE: &str = "rings-frontend-webcrypto";
+const WEBCRYPTO_IDB_STORE: &str = "keys";
+const WEBCRYPTO_IDB_PRIMARY_KEY: &str = "p256-default";
+const WEBCRYPTO_IDB_VERSION: u32 = 1;
 
 /// Account authorization standard selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,21 +186,30 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
         return Err("WebCrypto SubtleCrypto is not available".to_string());
     }
 
+    if let Ok(Some(stored)) = load_persisted_webcrypto_account().await {
+        return Ok(stored);
+    }
+
+    let account = generate_webcrypto_account(&subtle).await?;
+    let _ = persist_webcrypto_account(&account).await;
+    Ok(account)
+}
+
+async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, String> {
     let usages = Array::new();
     usages.push(&JsValue::from_str("sign"));
-    usages.push(&JsValue::from_str("verify"));
     let key_pair = await_js(js_call3(
-        &subtle,
+        subtle,
         "generateKey",
         &ecdsa_algorithm()?.into(),
-        &JsValue::TRUE,
+        &JsValue::FALSE,
         &usages.into(),
     )?)
     .await?;
     let public_key = js_prop(&key_pair, "publicKey")?;
     let private_key = js_prop(&key_pair, "privateKey")?;
     let jwk = await_js(js_call2(
-        &subtle,
+        subtle,
         "exportKey",
         &JsValue::from_str("jwk"),
         &public_key,
@@ -203,6 +226,327 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
         account_type: "secp256r1".to_string(),
         handle: private_key,
     })
+}
+
+struct IdbRequestWatch {
+    request: JsValue,
+    _handlers: [Closure<dyn FnMut(Event)>; 3],
+    receiver: oneshot::Receiver<Result<JsValue, String>>,
+}
+
+impl IdbRequestWatch {
+    fn new(request: &JsValue) -> Self {
+        let (sender, receiver) = oneshot::channel::<Result<JsValue, String>>();
+        let outcome = Rc::new(RefCell::new(Some(sender)));
+        let on_success = {
+            let outcome = outcome.clone();
+            let request = request.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(js_prop(&request, "result"));
+                }
+            })
+        };
+        let on_error = {
+            let outcome = outcome.clone();
+            let request = request.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let error = js_prop(&request, "error")
+                        .map(js_error_label)
+                        .unwrap_or_else(|err| err);
+                    let _ = tx.send(Err(error));
+                }
+            })
+        };
+        let on_blocked = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Err("IndexedDB request blocked".to_string()));
+                }
+            })
+        };
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onsuccess"),
+            on_success.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onerror"),
+            on_error.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            request,
+            &JsValue::from_str("onblocked"),
+            on_blocked.as_ref().unchecked_ref(),
+        );
+        Self {
+            request: request.clone(),
+            _handlers: [on_success, on_error, on_blocked],
+            receiver,
+        }
+    }
+}
+
+impl Drop for IdbRequestWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.request,
+            &JsValue::from_str("onsuccess"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(&self.request, &JsValue::from_str("onerror"), &JsValue::NULL);
+        let _ = Reflect::set(
+            &self.request,
+            &JsValue::from_str("onblocked"),
+            &JsValue::NULL,
+        );
+    }
+}
+
+struct IdbUpgradeWatch {
+    open: JsValue,
+    _handler: Closure<dyn FnMut(Event)>,
+}
+
+impl Drop for IdbUpgradeWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.open,
+            &JsValue::from_str("onupgradeneeded"),
+            &JsValue::NULL,
+        );
+    }
+}
+
+struct IdbDatabaseGuard {
+    db: JsValue,
+}
+
+impl Drop for IdbDatabaseGuard {
+    fn drop(&mut self) {
+        let _ = js_call0(&self.db, "close");
+    }
+}
+
+struct IdbTransactionWatch {
+    transaction: JsValue,
+    _handlers: [Closure<dyn FnMut(Event)>; 3],
+    receiver: oneshot::Receiver<Result<(), String>>,
+    settled: bool,
+}
+
+impl IdbTransactionWatch {
+    fn new(transaction: &JsValue) -> Self {
+        let (sender, receiver) = oneshot::channel::<Result<(), String>>();
+        let outcome = Rc::new(RefCell::new(Some(sender)));
+        let on_complete = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Ok(()));
+                }
+            })
+        };
+        let on_error = {
+            let outcome = outcome.clone();
+            let transaction = transaction.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let error = js_prop(&transaction, "error")
+                        .map(js_error_label)
+                        .unwrap_or_else(|err| err);
+                    let _ = tx.send(Err(error));
+                }
+            })
+        };
+        let on_abort = {
+            let outcome = outcome.clone();
+            Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+                if let Some(tx) = outcome.borrow_mut().take() {
+                    let _ = tx.send(Err("IndexedDB transaction aborted".to_string()));
+                }
+            })
+        };
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("oncomplete"),
+            on_complete.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("onerror"),
+            on_error.as_ref().unchecked_ref(),
+        );
+        let _ = Reflect::set(
+            transaction,
+            &JsValue::from_str("onabort"),
+            on_abort.as_ref().unchecked_ref(),
+        );
+        Self {
+            transaction: transaction.clone(),
+            _handlers: [on_complete, on_error, on_abort],
+            receiver,
+            settled: false,
+        }
+    }
+
+    async fn committed(mut self) -> Result<(), String> {
+        let result = (&mut self.receiver)
+            .await
+            .map_err(|_| "IndexedDB transaction dropped before settling".to_string())?;
+        self.settled = true;
+        result
+    }
+}
+
+impl Drop for IdbTransactionWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("oncomplete"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("onerror"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(
+            &self.transaction,
+            &JsValue::from_str("onabort"),
+            &JsValue::NULL,
+        );
+        if !self.settled {
+            let _ = js_call0(&self.transaction, "abort");
+        }
+    }
+}
+
+async fn open_webcrypto_idb() -> Result<JsValue, String> {
+    let factory = js_global_prop("indexedDB")?;
+    if factory.is_undefined() || factory.is_null() {
+        return Err("IndexedDB is unavailable".to_string());
+    }
+    let open = js_call2(
+        &factory,
+        "open",
+        &JsValue::from_str(WEBCRYPTO_IDB_DATABASE),
+        &JsValue::from_f64(f64::from(WEBCRYPTO_IDB_VERSION)),
+    )?;
+    let on_upgrade = {
+        let open = open.clone();
+        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            let Ok(db) = js_prop(&open, "result") else {
+                return;
+            };
+            let has_store = js_prop(&db, "objectStoreNames")
+                .and_then(|names| {
+                    js_call1(&names, "contains", &JsValue::from_str(WEBCRYPTO_IDB_STORE))
+                })
+                .ok()
+                .and_then(|val| val.as_bool())
+                .unwrap_or(false);
+            if !has_store {
+                let _ = js_call1(
+                    &db,
+                    "createObjectStore",
+                    &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+                );
+            }
+        })
+    };
+    let _ = Reflect::set(
+        &open,
+        &JsValue::from_str("onupgradeneeded"),
+        on_upgrade.as_ref().unchecked_ref(),
+    );
+    let _upgrade_watch = IdbUpgradeWatch {
+        open: open.clone(),
+        _handler: on_upgrade,
+    };
+    await_idb_request(&open).await
+}
+
+async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
+    let mut watch = IdbRequestWatch::new(request);
+    (&mut watch.receiver)
+        .await
+        .map_err(|_| "IndexedDB request dropped before settling".to_string())?
+}
+
+async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
+    let record = {
+        let db = IdbDatabaseGuard {
+            db: open_webcrypto_idb().await?,
+        };
+        let transaction = js_call2(
+            &db.db,
+            "transaction",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+            &JsValue::from_str("readonly"),
+        )?;
+        let store = js_call1(
+            &transaction,
+            "objectStore",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        )?;
+        let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
+        await_idb_request(&get_req).await?
+    };
+    if record.is_undefined() || record.is_null() {
+        return Ok(None);
+    }
+    let account = js_string_field(&record, "account")?;
+    let private_key = js_prop(&record, "privateKey")?;
+    if account.trim().is_empty() || private_key.is_undefined() || private_key.is_null() {
+        return Ok(None);
+    }
+    let candidate = WalletAccount {
+        kind: WalletKind::WebCrypto,
+        account,
+        account_type: "secp256r1".to_string(),
+        handle: private_key,
+    };
+    let verifier = AccountVerifier::from_account_parts(&candidate.account, &candidate.account_type)
+        .map_err(|error| format!("persisted WebCrypto public key invalid: {error}"))?;
+    let probe = "rings-webcrypto-key-check";
+    let sig = candidate.sign_session_proof(probe).await?;
+    if !verifier.verify(probe.as_bytes(), &sig) {
+        return Err("persisted WebCrypto private key does not match public key".to_string());
+    }
+    Ok(Some(candidate))
+}
+
+async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String> {
+    let db = IdbDatabaseGuard {
+        db: open_webcrypto_idb().await?,
+    };
+    let transaction = js_call2(
+        &db.db,
+        "transaction",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        &JsValue::from_str("readwrite"),
+    )?;
+    let commit = IdbTransactionWatch::new(&transaction);
+    let store = js_call1(
+        &transaction,
+        "objectStore",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+    )?;
+    let record = Object::new();
+    js_set(&record, "account", &JsValue::from_str(&account.account))?;
+    js_set(&record, "privateKey", &account.handle)?;
+    let put_req = js_call2(
+        &store,
+        "put",
+        &record.into(),
+        &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
+    )?;
+    await_idb_request(&put_req).await?;
+    commit.committed().await
 }
 
 async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
@@ -491,5 +835,66 @@ mod wasm_tests {
             .delegation()
             .verify_delegator_authorization()
             .is_ok());
+
+        let second = connect_webcrypto().await;
+        assert!(second.is_ok());
+        let Ok(second) = second else {
+            return;
+        };
+        assert_eq!(second.account, account.account);
+
+        let mut second_builder =
+            DelegationBuilder::new(second.account.clone(), second.account_type.clone());
+        let second_proof = second_builder.unsigned_proof();
+        let second_sig = second.sign_session_proof(&second_proof).await;
+        assert!(second_sig.is_ok());
+        let Ok(second_sig) = second_sig else {
+            return;
+        };
+        second_builder = second_builder.set_delegator_signature(second_sig);
+        let second_delegatee = second_builder.build();
+        assert!(second_delegatee.is_ok());
+        let Ok(second_delegatee) = second_delegatee else {
+            return;
+        };
+        assert_eq!(
+            second_delegatee.delegator_did(),
+            delegatee_key.delegator_did()
+        );
+        let extractable = js_prop(&second.handle, "extractable")
+            .ok()
+            .and_then(|val| val.as_bool());
+        assert_eq!(extractable, Some(false));
+
+        let crypto = js_global_prop("crypto");
+        assert!(crypto.is_ok());
+        let Ok(crypto) = crypto else {
+            return;
+        };
+        let subtle = js_prop(&crypto, "subtle");
+        assert!(subtle.is_ok());
+        let Ok(subtle) = subtle else {
+            return;
+        };
+        let mismatched = generate_webcrypto_account(&subtle).await;
+        assert!(mismatched.is_ok());
+        let Ok(mismatched) = mismatched else {
+            return;
+        };
+        let corrupted = WalletAccount {
+            kind: WalletKind::WebCrypto,
+            account: mismatched.account.clone(),
+            account_type: "secp256r1".to_string(),
+            handle: second.handle.clone(),
+        };
+        assert!(persist_webcrypto_account(&corrupted).await.is_ok());
+        assert!(load_persisted_webcrypto_account().await.is_err());
+
+        let recovered = connect_webcrypto().await;
+        assert!(recovered.is_ok());
+        let Ok(recovered) = recovered else {
+            return;
+        };
+        assert_ne!(recovered.account, mismatched.account);
     }
 }

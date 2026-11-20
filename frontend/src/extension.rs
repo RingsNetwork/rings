@@ -235,14 +235,8 @@ async fn handle_headless_node_message(
 ) -> Result<JsValue, String> {
     match message_type.as_str() {
         EXTENSION_NODE_STATUS => {
-            headless_node_snapshot(
-                state,
-                "background node active".to_string(),
-                None,
-                false,
-                None,
-            )
-            .await
+            let context = retained_headless_message(state.borrow().message.clone(), true);
+            headless_node_snapshot(state, context, false, None).await
         }
         EXTENSION_NODE_START => start_headless_node(state, &message).await,
         EXTENSION_NODE_STOP => stop_headless_node(state).await,
@@ -261,21 +255,14 @@ async fn start_headless_node(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
+    if state.borrow().starting {
+        return headless_node_snapshot(state, "background node starting".to_string(), false, None)
+            .await;
+    }
     if state.borrow().node.is_some() {
         return headless_node_snapshot(
             state,
             "background node already active".to_string(),
-            None,
-            false,
-            None,
-        )
-        .await;
-    }
-    if state.borrow().starting {
-        return headless_node_snapshot(
-            state,
-            "background node starting".to_string(),
-            None,
             false,
             None,
         )
@@ -297,7 +284,6 @@ async fn start_headless_node(
     headless_node_snapshot(
         state,
         "background node starting".to_string(),
-        None,
         false,
         Some(generation),
     )
@@ -367,8 +353,20 @@ async fn start_headless_node_inner(
         return Ok("background node start cancelled".to_string());
     }
 
-    install_headless_node(&state, account, &built);
-    connect_headless_seed(state, generation, built, settings.seed_url).await
+    let (message, peers) =
+        match connect_headless_seed(&state, &generation, &built, settings.seed_url).await {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = built.close().await;
+                return Err(error);
+            }
+        };
+    if !generation.is_current() {
+        let _ = built.close().await;
+        return Ok("background node start cancelled".to_string());
+    }
+    install_headless_node(&state, &generation, account, &built, peers);
+    Ok(message)
 }
 
 fn headless_node_settings(settings: &ExtensionStartSettings) -> Result<NodeSettings, String> {
@@ -422,50 +420,59 @@ fn register_headless_protocols(built: &DemoNode, my_did: &str) -> Result<(), Str
 
 fn install_headless_node(
     state: &Rc<RefCell<HeadlessNodeState>>,
+    generation: &GenerationToken,
     account: WalletAccount,
     built: &DemoNode,
+    peers: Vec<PeerView>,
 ) {
     let mut state = state.borrow_mut();
+    if !generation.is_current() {
+        return;
+    }
     state.wallet_account = Some(account);
-    state.peers = Vec::new();
+    state.peers = peers;
     state.node = Some(built.clone());
 }
 
 async fn connect_headless_seed(
-    state: Rc<RefCell<HeadlessNodeState>>,
-    generation: GenerationToken,
-    built: DemoNode,
+    state: &Rc<RefCell<HeadlessNodeState>>,
+    generation: &GenerationToken,
+    built: &DemoNode,
     seed_url: String,
-) -> Result<String, String> {
+) -> Result<(String, Vec<PeerView>), String> {
     let seed_url = seed_url.trim().to_string();
     if seed_url.is_empty() {
-        return Ok("background node ready".to_string());
+        return Ok(("background node ready".to_string(), Vec::new()));
     }
 
     set_headless_starting_for_generation(
-        &state,
-        &generation,
+        state,
+        generation,
         format!("background node ready; connecting seed {seed_url}"),
         None,
         true,
     );
     match node::connect_http(&built.provider, seed_url).await {
         Ok(seed_did) => {
-            let seed_peer = PeerView::connected(seed_did)
-                .ok_or_else(|| "seed returned an empty DID".to_string())?;
-            let snapshot = headless_node_snapshot(
-                state.clone(),
-                "seed URL connected".to_string(),
-                Some(seed_peer),
+            if seed_did.trim().is_empty() {
+                return Ok((
+                    "background node ready; seed returned an empty DID".to_string(),
+                    Vec::new(),
+                ));
+            }
+            let (peers, message) = settle_headless_peers(
+                built,
+                Vec::new(),
+                "seed URL connected",
                 true,
                 Some(generation),
             )
-            .await?;
-            Ok(js_string_field(&snapshot, "message")
-                .unwrap_or_else(|_| "seed URL connected".to_string()))
+            .await;
+            Ok((message, peers))
         }
-        Err(error) => Ok(format!(
-            "background node ready; seed connect failed: {error}"
+        Err(error) => Ok((
+            format!("background node ready; seed connect failed: {error}"),
+            Vec::new(),
         )),
     }
 }
@@ -521,12 +528,12 @@ async fn connect_headless_node_http(
     let handle = headless_demo_node(&state)?;
     let endpoint = required_message_field(message, "endpoint", "enter a seed HTTP endpoint")?;
     let seed_did = node::connect_http(&handle.node.provider, endpoint).await?;
-    let seed_peer =
-        PeerView::connected(seed_did).ok_or_else(|| "seed returned an empty DID".to_string())?;
+    if seed_did.trim().is_empty() {
+        return Err("seed returned an empty DID".to_string());
+    }
     headless_node_snapshot(
         state,
         "HTTP endpoint connected".to_string(),
-        Some(seed_peer),
         true,
         Some(handle.generation),
     )
@@ -571,7 +578,6 @@ async fn accept_headless_answer(
     headless_node_snapshot(
         state,
         "answer accepted".to_string(),
-        None,
         true,
         Some(handle.generation),
     )
@@ -704,10 +710,52 @@ fn retained_headless_message(message: String, online: bool) -> String {
     }
 }
 
+async fn settle_headless_peers(
+    node: &DemoNode,
+    initial_peers: Vec<PeerView>,
+    context: &str,
+    settle: bool,
+    expected_generation: Option<&GenerationToken>,
+) -> (Vec<PeerView>, String) {
+    let mut peers = initial_peers;
+    let mut message = context.to_string();
+    let delays: &[u64] = if settle {
+        peer_sync::PEER_SETTLE_DELAYS_MS
+    } else {
+        &[0]
+    };
+    for delay_ms in delays {
+        if *delay_ms > 0 {
+            sleep(Duration::from_millis(*delay_ms)).await;
+            if expected_generation.is_some_and(|expected| !expected.is_current()) {
+                break;
+            }
+        }
+        match node::list_peers(&node.provider).await {
+            Ok(next) => {
+                peers = next;
+                if settle {
+                    message = peer_sync::peer_sync_status(context, peers.len());
+                    if !peers.is_empty() {
+                        break;
+                    }
+                } else if let Some(updated) =
+                    peer_sync::refresh_waiting_peer_status(context, peers.len())
+                {
+                    message = updated;
+                }
+            }
+            Err(error) => {
+                message = format!("{context}; peer sync failed: {error}");
+            }
+        }
+    }
+    (peers, message)
+}
+
 async fn headless_node_snapshot(
     state: Rc<RefCell<HeadlessNodeState>>,
     context: String,
-    required_peer: Option<PeerView>,
     settle: bool,
     expected_generation: Option<GenerationToken>,
 ) -> Result<JsValue, String> {
@@ -749,32 +797,20 @@ async fn headless_node_snapshot(
         return retained_headless_snapshot_js(state);
     };
 
-    let mut peers = state_peers;
-    let mut message = context.clone();
-    let delays: &[u64] = if settle {
-        peer_sync::PEER_SETTLE_DELAYS_MS
-    } else {
-        &[0]
-    };
-    for delay_ms in delays {
-        if *delay_ms > 0 {
-            sleep(Duration::from_millis(*delay_ms)).await;
-        }
-        match node::list_peers(&node.provider).await {
-            Ok(next) => {
-                peers = if let Some(required_peer) = required_peer.as_ref() {
-                    peer_sync::merge_required_peer(next, required_peer)
-                } else {
-                    next
-                };
-                if settle {
-                    message = peer_sync::peer_sync_status(&context, peers.len());
-                }
-            }
-            Err(error) => {
-                message = format!("{context}; peer sync failed: {error}");
-            }
-        }
+    let (peers, message) = settle_headless_peers(
+        &node,
+        state_peers,
+        &context,
+        settle,
+        expected_generation.as_ref(),
+    )
+    .await;
+    if expected_generation
+        .as_ref()
+        .is_some_and(|expected| !expected.is_current())
+    {
+        let state = state.borrow();
+        return retained_live_headless_snapshot_js(&state);
     }
     {
         let mut state = state.borrow_mut();
@@ -782,13 +818,13 @@ async fn headless_node_snapshot(
             return retained_live_headless_snapshot_js(&state);
         }
         state.peers = peers.clone();
-        if settle {
+        if settle || peer_sync::refresh_waiting_peer_status(&state.message, peers.len()).is_some() {
             state.message = message.clone();
         }
     }
 
     headless_snapshot_js(
-        true,
+        !starting,
         node.provider.address(),
         &peers,
         account.as_ref(),
@@ -820,7 +856,7 @@ fn retained_live_headless_snapshot_js(state: &HeadlessNodeState) -> Result<JsVal
 }
 
 fn retained_headless_snapshot_js(state: HeadlessSnapshotState<'_>) -> Result<JsValue, String> {
-    let online = state.node.is_some();
+    let online = state.node.is_some() && !state.starting;
     let did = state
         .node
         .map(|node| node.provider.address())
@@ -888,9 +924,9 @@ fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
     ExtensionStartSettings {
         network_id: js_string_field(value, "networkId").unwrap_or_else(|_| "1".to_string()),
         ice_servers: js_string_field(value, "iceServers")
-            .unwrap_or_else(|_| "stun://stun.l.google.com:19302".to_string()),
+            .unwrap_or_else(|_| crate::app::DEFAULT_ICE_SERVERS.to_string()),
         stabilize_interval: js_string_field(value, "stabilizeInterval")
-            .unwrap_or_else(|_| "3".to_string()),
+            .unwrap_or_else(|_| crate::app::DEFAULT_STABILIZE_INTERVAL_SECONDS.to_string()),
         storage_name: js_string_field(value, "storageName")
             .unwrap_or_else(|_| "rings-frontend".to_string()),
         seed_url: js_string_field(value, "seedUrl").unwrap_or_default(),
@@ -928,4 +964,56 @@ fn runtime_response(response: Result<JsValue, String>) -> JsValue {
         }
     }
     object.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_extension_start_settings_from_js_uses_canonical_defaults() {
+        let empty = Object::new();
+        let settings = extension_start_settings_from_js(&empty.into());
+
+        assert_eq!(settings.network_id, "1");
+        assert_eq!(settings.ice_servers, crate::app::DEFAULT_ICE_SERVERS);
+        assert_eq!(
+            settings.stabilize_interval,
+            crate::app::DEFAULT_STABILIZE_INTERVAL_SECONDS
+        );
+        assert_eq!(settings.storage_name, "rings-frontend");
+        assert_eq!(settings.seed_url, "");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_retained_headless_snapshot_stays_offline_while_starting() {
+        let state = HeadlessNodeState {
+            node: None,
+            wallet_account: None,
+            peers: Vec::new(),
+            starting: true,
+            start_error: None,
+            message: "connecting WebCrypto P-256".to_string(),
+            generation: GenerationClock::default(),
+        };
+        let snapshot = retained_live_headless_snapshot_js(&state);
+        assert!(snapshot.is_ok());
+        let Ok(snapshot) = snapshot else {
+            return;
+        };
+        assert_eq!(
+            crate::browser_api::js_bool_field(&snapshot, "online"),
+            Ok(false)
+        );
+        assert_eq!(
+            crate::browser_api::js_bool_field(&snapshot, "starting"),
+            Ok(true)
+        );
+        assert_eq!(
+            crate::browser_api::js_string_field(&snapshot, "message"),
+            Ok("connecting WebCrypto P-256".to_string())
+        );
+    }
 }
