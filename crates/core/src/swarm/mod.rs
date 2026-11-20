@@ -67,6 +67,7 @@ use crate::swarm::observer::LookupKind;
 use crate::swarm::observer::LookupOutcome;
 use crate::swarm::transport::CounterOffer;
 use crate::swarm::transport::CreatedAnswer;
+use crate::swarm::transport::InitiatorReplyOutcome;
 use crate::swarm::transport::OfferOwner;
 pub use crate::swarm::transport::OfferReply;
 use crate::swarm::transport::PendingConnectionAttempt;
@@ -134,6 +135,19 @@ impl Swarm {
     /// Replace the session key this swarm signs with, when it authorizes the same account DID.
     pub fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
         self.transport.set_delegatee_key(delegatee_key)
+    }
+
+    /// Non-mutating validation phase of two-phase session-key rotation (#1291): verify that
+    /// `delegatee_key` authorizes this node's account DID, carries a valid delegator signature,
+    /// and strictly advances the signing horizon relative to the currently committed key.
+    pub fn validate_next_delegatee_key(&self, delegatee_key: &DelegateeKey) -> Result<()> {
+        self.transport.validate_next_delegatee_key(delegatee_key)
+    }
+
+    /// Infallible commit phase of two-phase session-key rotation (#1291): swap in an
+    /// already-validated `delegatee_key` after durable storage commit has succeeded.
+    pub fn commit_delegatee_key_unchecked(&self, delegatee_key: DelegateeKey) {
+        self.transport.commit_delegatee_key_unchecked(delegatee_key);
     }
 
     /// Get this swarm's network id.
@@ -570,7 +584,7 @@ impl Swarm {
 }
 
 impl Swarm {
-    /// Create an outbound WebRTC connection offer for `peer`, wrapped in a signed
+    /// Create an outbound transport connection offer for `peer`, wrapped in a signed
     /// [`MessagePayload`].
     pub async fn create_offer(&self, peer: Did) -> Result<MessagePayload> {
         self.offer_connection(peer)
@@ -671,7 +685,7 @@ impl Swarm {
             .answer_remote_connection(peer, self.transport_callback(), &msg)
             .await?
         {
-            OfferReply::Answer(CreatedAnswer { attempt, report }) => self
+            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) => self
                 .transport
                 .settle_handshake_step(
                     attempt,
@@ -681,6 +695,20 @@ impl Swarm {
                         peer,
                         Some(self.did()),
                     ),
+                )
+                .await
+                .map(OfferReply::Answer),
+            OfferReply::Answer(None) => self
+                .transport
+                .application_egress()
+                .originate(
+                    Message::ConnectNodeReport(crate::message::ConnectNodeReport::final_answer(
+                        bytes::Bytes::new(),
+                        self.dht_protocol_mode(),
+                        self.transport.dht.relay_custody(),
+                    )),
+                    peer,
+                    Some(self.did()),
                 )
                 .await
                 .map(OfferReply::Answer),
@@ -694,7 +722,7 @@ impl Swarm {
     }
 
     /// Verify a remote connection answer payload and apply it to the pending handshake, returning
-    /// `Ok(())` once the session description is accepted.
+    /// `Ok(())` once the handshake completes.
     pub async fn accept_answer(&self, answer_payload: MessagePayload) -> Result<()> {
         self.accept_answer_with(None, answer_payload).await
     }
@@ -744,8 +772,16 @@ impl Swarm {
             .await?;
 
         let peer = answer_payload.transaction.signer();
-        self.transport
+        match self
+            .transport
             .accept_remote_connection(peer, msg, expected, None)
-            .await
+            .await?
+        {
+            InitiatorReplyOutcome::Completed => Ok(()),
+            InitiatorReplyOutcome::Continue(_) => Err(Error::InvalidMessage(
+                "out-of-band accept_answer received non-final multi-step ConnectNodeReport"
+                    .to_string(),
+            )),
+        }
     }
 }

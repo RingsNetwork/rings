@@ -36,6 +36,7 @@ pub(super) struct DummyRetirementFence {
     remote_rand_id: Arc<Mutex<Option<String>>>,
     connection_state: Arc<Mutex<DummyConnectionState>>,
     accepting_events: Arc<AtomicBool>,
+    physical_close_completed: Arc<tokio::sync::watch::Sender<bool>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -61,6 +62,7 @@ impl DummyRetirementFence {
             remote_rand_id: Arc::clone(&connection.remote_rand_id),
             connection_state: Arc::clone(&connection.connection_state),
             accepting_events: Arc::clone(&connection.accepting_events),
+            physical_close_completed: Arc::clone(&connection.physical_close_completed),
             runtime: connection.retirement_runtime.clone(),
         }
     }
@@ -89,6 +91,7 @@ impl DummyRetirementFence {
         self.accepting_events.store(false, Ordering::Release);
         CONNS.remove(&self.rand_id);
         self.listener.abort();
+        self.physical_close_completed.send_replace(true);
         if !notify {
             return;
         }

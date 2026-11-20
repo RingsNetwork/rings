@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
+use rings_transport::core::transport::MAX_HANDSHAKE_STEPS;
+
 use super::handshake::Handshake;
 use super::handshake::OfferPhase;
 use super::PendingConnectionAttempt;
@@ -552,7 +555,7 @@ impl ConnectionLifecycleRegistry {
             return Ok(None);
         }
         let answering = self.next_attempt(attempt.peer)?;
-        self.insert_pending(answering, now_ms, Handshake::Answering);
+        self.insert_pending(answering, now_ms, Handshake::answering());
         Ok(Some(answering))
     }
 
@@ -704,28 +707,61 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
-    /// Apply `Offering(o, Creating) -> Offering(o, Sent(sdp, tx_id))`.
+    /// Apply `Offering(o, Creating) -> Offering(o, Sent(0, bytes, tx_id, sid))` or advance an
+    /// active multi-round exchange `Offering(o, Sent(2k, ..)) -> Offering(o, Sent(2k + 2, ..))`.
     pub(in crate::swarm::transport) fn mark_offer_sent(
         &mut self,
         attempt: PendingConnectionAttempt,
-        handshake: String,
+        step_index: u8,
+        handshake: Bytes,
         tx_id: uuid::Uuid,
+        session_id: Option<[u8; 16]>,
     ) -> bool {
+        if step_index >= MAX_HANDSHAKE_STEPS || !step_index.is_multiple_of(2) {
+            return false;
+        }
         self.advance_handshake(attempt, |current| match current {
             Handshake::Offering {
                 owner,
                 phase: OfferPhase::Creating,
-            } => Some(Handshake::Offering {
+            } if step_index == 0 => Some(Handshake::Offering {
                 owner: *owner,
-                phase: OfferPhase::Sent { handshake, tx_id },
+                phase: OfferPhase::Sent {
+                    step_index: 0,
+                    handshake,
+                    tx_id,
+                    session_id,
+                },
             }),
-            Handshake::Offering { .. } | Handshake::Answering => None,
+            Handshake::Offering {
+                owner,
+                phase:
+                    OfferPhase::Sent {
+                        step_index: prev_step,
+                        session_id: prev_sid,
+                        ..
+                    },
+            } if step_index == prev_step.saturating_add(2)
+                && session_id.is_some()
+                && prev_sid.is_none_or(|existing| Some(existing) == session_id) =>
+            {
+                Some(Handshake::Offering {
+                    owner: *owner,
+                    phase: OfferPhase::Sent {
+                        step_index,
+                        handshake,
+                        tx_id,
+                        session_id,
+                    },
+                })
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
 
-    /// Apply `Offering(o, Sent(_, t)) -> Offering(o, Answered)` for an answer echoing `t`
-    /// (`tx_id = Some(t)`); an answer carried out of band (`tx_id = None`) also accepts an
-    /// offer still `Creating`, whose owner holds it.
+    /// Apply `Offering(o, Sent(_, t)) -> Offering(o, Answered)` for a final reply echoing `t`
+    /// (`tx_id = Some(t)`); an out-of-band reply or 0/1-step initiator completion (`tx_id = None`)
+    /// also accepts an offer in `Creating` or `Sent`.
     pub(in crate::swarm::transport) fn mark_offer_answered(
         &mut self,
         attempt: PendingConnectionAttempt,
@@ -746,26 +782,79 @@ impl ConnectionLifecycleRegistry {
                 owner: *owner,
                 phase: OfferPhase::Answered,
             }),
-            Handshake::Offering { .. } | Handshake::Answering => None,
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
 
-    /// The pending generation of `peer` whose sent, unanswered offer left under `tx_id`: the
-    /// only generation an answer echoing `tx_id` may be applied to.
+    /// Record that responder generation `attempt` sent a non-final odd step and now awaits even
+    /// initiator continuation `expected_step` under `session_id`.
+    pub(in crate::swarm::transport) fn set_answering_awaiting_step(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        expected_step: u8,
+        session_id: [u8; 16],
+    ) -> bool {
+        if expected_step == 0
+            || !expected_step.is_multiple_of(2)
+            || expected_step >= MAX_HANDSHAKE_STEPS
+        {
+            return false;
+        }
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Answering {
+                awaiting_step: None,
+            } => Some(Handshake::Answering {
+                awaiting_step: Some((expected_step, session_id)),
+            }),
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Atomically claim the responder generation for `peer` awaiting even continuation step
+    /// `step_index` with `session_id`, clearing `awaiting_step` so duplicate continuations cannot
+    /// race.
+    pub(in crate::swarm::transport) fn claim_answering_continuation(
+        &mut self,
+        peer: Did,
+        step_index: u8,
+        session_id: [u8; 16],
+    ) -> Option<PendingConnectionAttempt> {
+        let attempt = self.pending_attempt(peer)?;
+        let claimed = self.advance_handshake(attempt, |current| match current {
+            Handshake::Answering {
+                awaiting_step: Some((expected_step, expected_sid)),
+            } if *expected_step == step_index && *expected_sid == session_id => {
+                Some(Handshake::Answering {
+                    awaiting_step: None,
+                })
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        });
+        claimed.then_some(attempt)
+    }
+
+    /// The pending generation of `peer` (along with the outbound `step_index` and optional
+    /// `session_id`) whose sent, unanswered step left under `tx_id`: the only generation a
+    /// `ConnectNodeReport` echoing `tx_id` may be applied to.
     pub(in crate::swarm::transport) fn offer_sent_under(
         &self,
         peer: Did,
         tx_id: uuid::Uuid,
-    ) -> Option<PendingConnectionAttempt> {
+    ) -> Option<(PendingConnectionAttempt, u8, Option<[u8; 16]>)> {
         let attempt = self.pending_attempt(peer)?;
-        matches!(
-            self.handshakes.get(&peer),
+        match self.handshakes.get(&peer) {
             Some(Handshake::Offering {
-                phase: OfferPhase::Sent { tx_id: sent, .. },
+                phase:
+                    OfferPhase::Sent {
+                        step_index,
+                        tx_id: sent,
+                        session_id,
+                        ..
+                    },
                 ..
-            }) if *sent == tx_id
-        )
-        .then_some(attempt)
+            }) if *sent == tx_id => Some((attempt, *step_index, *session_id)),
+            _ => None,
+        }
     }
 
     /// Whether another handshake took `attempt`'s slot: the slot holds another generation
@@ -784,7 +873,7 @@ impl ConnectionLifecycleRegistry {
                 current != attempt
                     && matches!(
                         self.handshakes.get(&attempt.peer),
-                        Some(Handshake::Answering)
+                        Some(Handshake::Answering { .. })
                     )
             }
             Some(

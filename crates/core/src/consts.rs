@@ -39,14 +39,14 @@ pub const LOCAL_CACHE_CAPACITY: NonZeroU32 = match NonZeroU32::new(1024) {
 };
 /// Default session time-to-live in milliseconds.
 pub const DEFAULT_DELEGATION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
-/// Ceiling on one logical message, 60 MB. The data-channel frame size is not
+/// Ceiling on one logical message, 60 MB. The transport channel frame size is not
 /// derived from it: the transport negotiates `max_message_size` per connection
 /// and the chunk layer sizes frames to that.
 pub const TRANSPORT_MAX_SIZE: usize = 60_000_000;
-/// Bytes the transport adds when it serializes the data-channel frame: every send is wrapped in
-/// the custom frame (`rings_transport::core::transport::custom_frame_wire`) before it reaches SCTP, and the
-/// framing decision accounts for this outer wrapper so a payload sized at the limit still fits
-/// once wrapped.
+/// Bytes the transport adds when it serializes a payload channel frame: every send is wrapped in
+/// the custom frame (`rings_transport::core::transport::custom_frame_wire`) before leaving the
+/// transport, and the framing decision accounts for this outer wrapper so a payload sized at the
+/// limit still fits once wrapped.
 ///
 /// Derivation: the enum tag (1 byte) and the varint length prefix of a frame of at most
 /// `MAX_CHANNEL_MESSAGE_SIZE` bytes (3 bytes), `1 + 3 = 4`; the supremum, witnessed with
@@ -55,7 +55,7 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// Bytes reserved, per chunk, for the `MessagePayload` envelope a chunk is re-wrapped in before
 /// sending, *not* counting the outer [`TRANSPORT_CUSTOM_OVERHEAD`], which is added separately.
 /// The chunk *data* size is the connection's negotiated `max_message_size` minus both reserves,
-/// so the wrapped on-wire message stays within the data-channel limit.
+/// so the wrapped on-wire message stays within the channel limit.
 ///
 /// Derivation: the encoded size, less its chunk data, of the widest frame the chunk framer
 /// (`frame_chunk`) emits. The fields it fixes are as it fixes them: no `reply_via`, the relay
@@ -82,19 +82,21 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 742;
 /// `MAX_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
 /// `test_payload_envelope_reserve_is_the_widest_envelope`.
 pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2009;
-/// Maximum bytes of the serialized session description (`ConnectNodeSend.handshake` and
+/// Maximum bytes of one binary handshake step payload (`ConnectNodeSend.handshake` and
 /// `ConnectNodeReport.handshake`), enforced at creation, deserialization, and handshake admission
-/// (#1130).
+/// (#1130, #1291).
 ///
-/// A data-channel-only WebRTC SDP is 500–2,000 bytes in practice; 4 KiB accommodates ~30 ICE
-/// candidates while bounding the widest DHT control message below [`MIN_MAX_MESSAGE_SIZE`].
+/// Bounds the widest DHT control message below [`MIN_MAX_MESSAGE_SIZE`] regardless of the concrete
+/// transport backend's handshake format.
 pub const MAX_HANDSHAKE_BYTES: usize = 4096;
 /// Encoded bytes of a `Message::ConnectNodeSend` or `Message::ConnectNodeReport`, at most
-/// (#1130): the `Message` variant tag (1), the varint length prefix of [`MAX_HANDSHAKE_BYTES`] (2),
-/// [`MAX_HANDSHAKE_BYTES`] (4096), `DhtProtocolMode` at its widest (`u32::MAX` network ID, 5; two
-/// `u16::MAX` counts, 3 each), and `RelayCustody` (1), `1 + 2 + 4096 + 5 + 3 + 3 + 1 = 4111`;
-/// witnessed with equality by `test_min_max_message_size_fits_widest_control_payloads_whole`.
-pub const CONNECT_NODE_WIRE_MAX: usize = MAX_HANDSHAKE_BYTES + 15;
+/// (#1130, #1291): the `Message` variant tag (1), `step_index` (1), `final_step` (1),
+/// `session_id: Some([u8; 16])` (`1 + 16 = 17`), the varint length prefix of
+/// [`MAX_HANDSHAKE_BYTES`] (2), [`MAX_HANDSHAKE_BYTES`] (4096), `DhtProtocolMode` at its widest
+/// (`u32::MAX` network ID, 5; two `u16::MAX` counts, 3 each), and `RelayCustody` (1),
+/// `1 + 1 + 1 + 17 + 2 + 4096 + 5 + 3 + 3 + 1 = 4130`; witnessed with equality by
+/// `test_min_max_message_size_fits_widest_control_payloads_whole`.
+pub const CONNECT_NODE_WIRE_MAX: usize = MAX_HANDSHAKE_BYTES + 34;
 /// Control-frame law (#1130): the transport's [`MIN_MAX_MESSAGE_SIZE`] floor equals the widest
 /// `ConnectNodeSend` / `ConnectNodeReport` payload (`CONNECT_NODE_WIRE_MAX` plus the 2008-byte
 /// envelope around a `< 16 KiB` message, whose 2-byte `transaction.data` length prefix is one

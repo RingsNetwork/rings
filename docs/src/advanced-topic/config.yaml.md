@@ -89,8 +89,8 @@ always be present in `config.yaml`: `network_id`, `delegatee_key`, `internal_api
 and `capacity`), and `measure_storage` (`path` and `capacity`). Every other field is **optional**
 and defaults to the value shown above (or `null` / empty when omitted by `rings init`, such as
 `delegator_key`, `remote_rpc_proxy_url`, `api_token_path`, `api_allowed_origins`,
-`onion_http_proxy_addr`, `services`, `dns_relay`, `external_ip`, and `webrtc_udp_port_min` /
-`webrtc_udp_port_max`).
+`onion_http_proxy_addr`, `services`, `dns_relay`, `external_ip`, `udp_port_min` / `udp_port_max`,
+and `network`).
 
 ## Identity and network
 
@@ -105,8 +105,8 @@ and defaults to the value shown above (or `null` / empty when omitted by `rings 
   in process before its signing horizon (#1153). Relative paths are resolved next to `config.yaml`.
   `rings init` leaves this unset so the account private key is not stored unless the operator opts
   into online renewal; see [Delegations and keys](../cli.md#delegations-and-keys).
-* `ice_servers` *(required)*: STUN or TURN servers used to establish WebRTC connections, separated by `;`.
-  STUN is ordinary discovery; TURN is optional (needed when both peers are behind Symmetric NATs or UDP-restricted firewalls) and never a gateway prerequisite. Bare `turn://...?pubkey=<base58(server_pubkey)>` URLs without `user:pass@` are automatically signed with the node's `delegator_key` (non-expiring direct DID signature + ECDH credential) or `delegatee_key` (`Delegation` signature + ECDH credential) for [`rings-turn`](../turn-server.md), while explicit `user:pass@` credentials are preserved for third-party TURN servers.
+* `ice_servers` *(required)*: STUN or TURN servers used by the built-in WebRTC transport, separated by `;`.
+  STUN is ordinary discovery; TURN is optional (needed when both peers are behind Symmetric NATs or UDP-restricted firewalls) and never a gateway prerequisite. Bare `turn://...?pubkey=<base58(server_pubkey)>` URLs without `user:pass@` are automatically signed with the node's active `delegatee_key` (`Delegation` signature + ECDH credential) for [`rings-turn`](../turn-server.md) and rotated in lockstep whenever `delegator_key` renews `delegatee_key` in process, while explicit `user:pass@` credentials are preserved for third-party TURN servers.
 
   ```yaml
   ice_servers: stun://stun.l.google.com:19302;turn://turn.example.org:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d
@@ -127,9 +127,12 @@ and defaults to the value shown above (or `null` / empty when omitted by `rings 
   application traffic. A protocol may also declare delegated replay (#1081): its traffic from
   that same neighbour is then admitted in a volatile replay window of the connection, and the
   protocol guards its own replay. Delegation is not configured here.
-* `external_ip`, `webrtc_udp_port_min`, `webrtc_udp_port_max`: optional reachability hints, an
-  externally visible address and a UDP port range for ICE. The two port bounds must be given
-  together.
+* `external_ip`, `udp_port_min`, `udp_port_max`: optional reachability hints, an
+  externally visible address and a local UDP port range `[udp_port_min, udp_port_max]`. The two
+  port bounds must be given together.
+* `network` *(optional)*: tagged `{ kind, params }` transport descriptor selecting a registered
+  `NodeNetworkParameters` backend (defaulting to `"webrtc"` built from `ice_servers`, `external_ip`,
+  and `udp_port_min` / `udp_port_max` when omitted).
 
 ## Control API
 

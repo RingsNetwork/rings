@@ -449,8 +449,9 @@ fn explore(
 enum ModelSignaling {
     Creating(OfferOwner),
     Sent(OfferOwner),
+    SentContinuation(OfferOwner),
     Answered(OfferOwner),
-    Answering,
+    Answering(bool),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -458,7 +459,10 @@ enum ProductAction {
     ReserveOffering(OfferOwner),
     ReserveAnswering,
     MarkSent(CallbackGeneration),
+    MarkContinuationSent(CallbackGeneration),
     MarkAnswered(CallbackGeneration),
+    AwaitAnsweringContinuation(CallbackGeneration),
+    ClaimAnsweringContinuation,
     CrossingOffer {
         carrier: OfferOwner,
         local_smaller: bool,
@@ -501,7 +505,7 @@ impl ProductModel {
                     if let Some(next) = self.next_generation.checked_add(1) {
                         self.next_generation = next;
                         self.peer = PeerLifecycle::Pending(next);
-                        self.signaling = Some(ModelSignaling::Answering);
+                        self.signaling = Some(ModelSignaling::Answering(false));
                     }
                 }
             }
@@ -517,16 +521,48 @@ impl ProductModel {
                     }
                 }
             }
+            ProductAction::MarkContinuationSent(cb) => {
+                if let (Some(gen), PeerLifecycle::Pending(cur), Some(ModelSignaling::Sent(owner))) =
+                    (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        self.signaling = Some(ModelSignaling::SentContinuation(owner));
+                    }
+                }
+            }
             ProductAction::MarkAnswered(cb) => {
                 if let (
                     Some(gen),
                     PeerLifecycle::Pending(cur),
-                    Some(ModelSignaling::Creating(owner) | ModelSignaling::Sent(owner)),
+                    Some(
+                        ModelSignaling::Creating(owner)
+                        | ModelSignaling::Sent(owner)
+                        | ModelSignaling::SentContinuation(owner),
+                    ),
                 ) = (self.callback_gen(cb), self.peer, self.signaling)
                 {
                     if gen == cur {
                         self.signaling = Some(ModelSignaling::Answered(owner));
                     }
+                }
+            }
+            ProductAction::AwaitAnsweringContinuation(cb) => {
+                if let (
+                    Some(gen),
+                    PeerLifecycle::Pending(cur),
+                    Some(ModelSignaling::Answering(false)),
+                ) = (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        self.signaling = Some(ModelSignaling::Answering(true));
+                    }
+                }
+            }
+            ProductAction::ClaimAnsweringContinuation => {
+                if let (PeerLifecycle::Pending(_), Some(ModelSignaling::Answering(true))) =
+                    (self.peer, self.signaling)
+                {
+                    self.signaling = Some(ModelSignaling::Answering(false));
                 }
             }
             ProductAction::CrossingOffer {
@@ -547,14 +583,16 @@ impl ProductModel {
                             false
                         }
                         ModelSignaling::Sent(_) => !local_smaller,
-                        ModelSignaling::Answered(_) | ModelSignaling::Answering => false,
+                        ModelSignaling::SentContinuation(_)
+                        | ModelSignaling::Answered(_)
+                        | ModelSignaling::Answering(_) => false,
                     };
                     if yields {
                         if let Some(next) = self.next_generation.checked_add(1) {
                             self.previous_generation = Some(cur);
                             self.next_generation = next;
                             self.peer = PeerLifecycle::Pending(next);
-                            self.signaling = Some(ModelSignaling::Answering);
+                            self.signaling = Some(ModelSignaling::Answering(false));
                         }
                     }
                 }
@@ -621,7 +659,7 @@ impl ProductModel {
             .previous_generation
             .is_some_and(|prev| match self.peer {
                 PeerLifecycle::Pending(cur) => {
-                    cur != prev && self.signaling == Some(ModelSignaling::Answering)
+                    cur != prev && matches!(self.signaling, Some(ModelSignaling::Answering(_)))
                 }
                 PeerLifecycle::Admitting(cur) | PeerLifecycle::Active(cur) => cur != prev,
                 PeerLifecycle::Absent => false,
@@ -681,7 +719,7 @@ impl ProductImpl {
             ProductAction::ReserveAnswering => {
                 if self
                     .lifecycles
-                    .reserve_for(self.peer, self.now_ms, Handshake::Answering)
+                    .reserve_for(self.peer, self.now_ms, Handshake::answering())
                     .is_ok()
                 {
                     self.now_ms += 1;
@@ -689,15 +727,42 @@ impl ProductImpl {
             }
             ProductAction::MarkSent(cb) => {
                 if let Some(attempt) = self.callback_attempt(cb) {
-                    let _ = self
-                        .lifecycles
-                        .mark_offer_sent(attempt, "sdp".to_string(), self.tx_id);
+                    let _ = self.lifecycles.mark_offer_sent(
+                        attempt,
+                        0,
+                        bytes::Bytes::from_static(b"hs0"),
+                        self.tx_id,
+                        None,
+                    );
+                }
+            }
+            ProductAction::MarkContinuationSent(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.mark_offer_sent(
+                        attempt,
+                        2,
+                        bytes::Bytes::from_static(b"hs2"),
+                        self.tx_id,
+                        Some([9u8; 16]),
+                    );
                 }
             }
             ProductAction::MarkAnswered(cb) => {
                 if let Some(attempt) = self.callback_attempt(cb) {
                     let _ = self.lifecycles.mark_offer_answered(attempt, None);
                 }
+            }
+            ProductAction::AwaitAnsweringContinuation(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self
+                        .lifecycles
+                        .set_answering_awaiting_step(attempt, 2, [9u8; 16]);
+                }
+            }
+            ProductAction::ClaimAnsweringContinuation => {
+                let _ = self
+                    .lifecycles
+                    .claim_answering_continuation(self.peer, 2, [9u8; 16]);
             }
             ProductAction::CrossingOffer {
                 carrier,
@@ -781,13 +846,19 @@ impl ProductImpl {
                 } => ModelSignaling::Creating(*owner),
                 Handshake::Offering {
                     owner,
-                    phase: handshake::OfferPhase::Sent { .. },
+                    phase: handshake::OfferPhase::Sent { step_index: 0, .. },
                 } => ModelSignaling::Sent(*owner),
+                Handshake::Offering {
+                    owner,
+                    phase: handshake::OfferPhase::Sent { .. },
+                } => ModelSignaling::SentContinuation(*owner),
                 Handshake::Offering {
                     owner,
                     phase: handshake::OfferPhase::Answered,
                 } => ModelSignaling::Answered(*owner),
-                Handshake::Answering => ModelSignaling::Answering,
+                Handshake::Answering { awaiting_step } => {
+                    ModelSignaling::Answering(awaiting_step.is_some())
+                }
             });
         let superseded_by_peer = self
             .previous_attempt
@@ -808,7 +879,10 @@ fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
         ProductAction::ReserveOffering(OfferOwner::External),
         ProductAction::ReserveAnswering,
         ProductAction::MarkSent(CallbackGeneration::Current),
+        ProductAction::MarkContinuationSent(CallbackGeneration::Current),
         ProductAction::MarkAnswered(CallbackGeneration::Current),
+        ProductAction::AwaitAnsweringContinuation(CallbackGeneration::Current),
+        ProductAction::ClaimAnsweringContinuation,
         ProductAction::CrossingOffer {
             carrier: OfferOwner::Overlay,
             local_smaller: true,

@@ -226,14 +226,20 @@ fn test_min_max_message_size_fits_widest_control_payloads_whole() -> Result<()> 
     };
 
     let mode = DhtProtocolMode::new(u32::MAX, u16::MAX, u16::MAX);
-    let max_sdp = "x".repeat(MAX_HANDSHAKE_BYTES);
+    let max_handshake = Bytes::from(vec![b'x'; MAX_HANDSHAKE_BYTES]);
     let send = Message::ConnectNodeSend(ConnectNodeSend {
-        handshake: max_sdp.clone(),
+        step_index: u8::MAX,
+        final_step: true,
+        session_id: Some([u8::MAX; 16]),
+        handshake: max_handshake.clone(),
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     });
     let report = Message::ConnectNodeReport(ConnectNodeReport {
-        handshake: max_sdp,
+        step_index: u8::MAX,
+        final_step: true,
+        session_id: Some([u8::MAX; 16]),
+        handshake: max_handshake,
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     });
@@ -310,18 +316,18 @@ fn test_min_max_message_size_fits_widest_control_payloads_whole() -> Result<()> 
         Some(Framing::Whole)
     );
 
-    // ConnectNodeSend / ConnectNodeReport with an SDP exceeding MAX_HANDSHAKE_BYTES do not decode.
+    // ConnectNodeSend / ConnectNodeReport with a handshake exceeding MAX_HANDSHAKE_BYTES do not decode.
     for oversized in [
-        Message::ConnectNodeSend(ConnectNodeSend {
-            handshake: "x".repeat(MAX_HANDSHAKE_BYTES + 1),
-            dht_protocol_mode: mode,
-            relay_custody: RelayCustody::Holds,
-        }),
-        Message::ConnectNodeReport(ConnectNodeReport {
-            handshake: "x".repeat(MAX_HANDSHAKE_BYTES + 1),
-            dht_protocol_mode: mode,
-            relay_custody: RelayCustody::Holds,
-        }),
+        Message::ConnectNodeSend(ConnectNodeSend::initial_offer(
+            Bytes::from(vec![b'x'; MAX_HANDSHAKE_BYTES + 1]),
+            mode,
+            RelayCustody::Holds,
+        )),
+        Message::ConnectNodeReport(ConnectNodeReport::final_answer(
+            Bytes::from(vec![b'x'; MAX_HANDSHAKE_BYTES + 1]),
+            mode,
+            RelayCustody::Holds,
+        )),
     ] {
         let encoded = rings_codec::serialize(&oversized).map_err(Error::CodecSerialize)?;
         assert!(rings_codec::deserialize::<Message>(&encoded).is_err());
@@ -952,11 +958,11 @@ fn test_compressed_payload_preserves_canonical_signatures_across_slot_encodings(
         uuid::Uuid::new_v4(),
         42,
         None,
-        Message::ConnectNodeSend(crate::message::ConnectNodeSend {
-            handshake: "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".repeat(8),
-            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
-            relay_custody: crate::dht::RelayCustody::Holds,
-        }),
+        Message::ConnectNodeSend(crate::message::ConnectNodeSend::initial_offer(
+            Bytes::from("rings-core:transport-handshake:v1\nquic://127.0.0.1:49160\n".repeat(8)),
+            crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            crate::dht::RelayCustody::Holds,
+        )),
         MessageSigner::new(&origin_session, TEST_NETWORK_ID),
     )?;
     let relay = MessageRelay::new(NextHop::toward(destination), destination, HopBudget::MAX);
@@ -1001,11 +1007,11 @@ fn test_compressed_payload_preserves_canonical_signatures_across_slot_encodings(
     Ok(())
 }
 
-/// Witness for #1282:
+/// Witness for #1282 & #1291:
 /// - `PublicKey<33>` and `PublicKey<48>` encode to exact 33 and 48 raw bytes in `rings_codec`
 ///   (`postcard`) while preserving Base58-check strings in `serde_json`.
-/// - `WIRE_COMPRESSION_DICT` shrinks a single-message WebRTC SDP `ConnectNodeSend` frame even
-///   further than dictionary-free LZ4.
+/// - Transport-agnostic `WIRE_COMPRESSION_DICT` shrinks a single-message `ConnectNodeSend` frame
+///   carrying Rings protocol / endpoint tokens further than dictionary-free LZ4.
 #[test]
 fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames() -> Result<()> {
     use crate::ecc::PublicKey;
@@ -1032,23 +1038,25 @@ fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames()
         pk48
     );
 
-    let sdp = concat!(
-        "v=0\r\no=- 8473928174 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n",
-        "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
-        "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
-        "a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n",
-        "a=ice-options:trickle\r\n",
-        "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\n",
-        "a=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
-        "a=candidate:1 1 udp 2130706431 192.0.2.10 54321 typ host generation 0\r\n",
+    let handshake_bytes = Bytes::from_static(
+        concat!(
+            "rings-core:transport-handshake:v1\n",
+            "quic://127.0.0.1:49160\n",
+            "wss://0.0.0.0:443\n",
+            "rings-delegation-v1\ned25519\n0x",
+            "rings-core:message-verification:transaction\n",
+            "rings-core:message-verification:payload\n",
+            "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        )
+        .as_bytes(),
     );
     let next_hop: Did = SecretKey::random().address().into();
     let payload = new_payload(
-        Message::ConnectNodeSend(crate::message::ConnectNodeSend {
-            handshake: sdp.to_owned(),
-            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
-            relay_custody: crate::dht::RelayCustody::Holds,
-        }),
+        Message::ConnectNodeSend(crate::message::ConnectNodeSend::initial_offer(
+            handshake_bytes,
+            crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            crate::dht::RelayCustody::Holds,
+        )),
         next_hop,
     );
     let raw_body =
@@ -1057,7 +1065,7 @@ fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames()
     let with_dict = lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
     assert!(
         with_dict.len() < without_dict.len(),
-        "static protocol dictionary must compress a single SDP frame more than dictionary-free LZ4 ({} >= {})",
+        "static protocol dictionary must compress a single handshake frame more than dictionary-free LZ4 ({} >= {})",
         with_dict.len(),
         without_dict.len()
     );

@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::future::poll_fn;
@@ -58,6 +59,7 @@ use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::HandshakeStep;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportInterface;
@@ -70,6 +72,7 @@ use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
+use crate::ice_server::parse_ice_servers_strict;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::network_config::UdpPortRange;
@@ -379,6 +382,10 @@ impl ChannelPool<TrackedChannel> {
     }
 }
 
+const HANDSHAKE_ROLE_FRESH: u8 = 0;
+const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
+const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+
 /// A connection that implemented by web_sys library.
 /// Used for browser environment.
 pub struct WebSysWebrtcConnection {
@@ -390,6 +397,8 @@ pub struct WebSysWebrtcConnection {
     connection_state: ConnectionStateCell,
     /// Highest candidate tier the configured ICE servers can produce (`Host < Reflexive < Relay`).
     target_tier: Cell<IceCandidateTier>,
+    /// Current 2-step WebRTC handshake role (`Fresh`, `InitiatorAwaitingAnswer`, `Established`).
+    handshake_role: Cell<u8>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -417,8 +426,7 @@ impl Drop for WebSysWebrtcConnection {
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebSysWebrtcTransport {
-    session_credentials: RefCell<String>,
-    ice_servers: RefCell<Vec<IceServer>>,
+    ice_state: RefCell<(String, Vec<IceServer>)>,
     pool: Pool<WebSysWebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -459,6 +467,7 @@ impl WebSysWebrtcConnection {
             webrtc_data_channel_state_notifier,
             connection_state,
             target_tier: Cell::new(target_tier),
+            handshake_role: Cell::new(HANDSHAKE_ROLE_FRESH),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             callback,
             local_close: Notifier::default(),
@@ -569,7 +578,8 @@ impl WebSysWebrtcConnection {
 }
 
 impl WebSysWebrtcTransport {
-    /// Create a new [WebSysWebrtcTransport] instance.
+    /// Create a new [WebSysWebrtcTransport] instance, logging and ignoring invalid ICE
+    /// configuration.
     pub fn new(
         ice_servers: &str,
         _external_address: Option<String>,
@@ -578,20 +588,47 @@ impl WebSysWebrtcTransport {
         let parsed_ice_servers = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
 
         Self {
-            session_credentials: RefCell::new(ice_servers.to_string()),
-            ice_servers: RefCell::new(parsed_ice_servers),
+            ice_state: RefCell::new((ice_servers.to_string(), parsed_ice_servers)),
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
         }
     }
 
+    /// Create a new [WebSysWebrtcTransport] instance, failing closed when `ice_servers` is
+    /// malformed.
+    pub fn new_strict(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _udp_port_range: Option<UdpPortRange>,
+    ) -> Result<Self> {
+        let parsed_ice_servers = parse_ice_servers_strict(ice_servers)?;
+        Ok(Self {
+            ice_state: RefCell::new((ice_servers.to_string(), parsed_ice_servers)),
+            pool: Pool::new(),
+            frame_pool: NodeFramePool::new(),
+        })
+    }
+
     /// Replace the ICE server list used for subsequent peer connections and update active
     /// browser peer connections in place via `RTCPeerConnection.setConfiguration`.
     pub fn set_ice_servers(&self, ice_servers: &str) {
-        *self.session_credentials.borrow_mut() = ice_servers.to_string();
         let parsed = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+    }
+
+    /// Strictly validate and replace the ICE server list, returning [`Error::IceServer`] without
+    /// mutating state if `ice_servers` is malformed.
+    pub fn try_set_ice_servers(&self, ice_servers: &str) -> Result<()> {
+        let parsed = parse_ice_servers_strict(ice_servers)?;
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+        Ok(())
+    }
+
+    /// Atomically commit a pre-validated `(raw_credentials, parsed_ice_servers)` pair and update
+    /// active browser peer connections in place via `RTCPeerConnection.setConfiguration`.
+    pub fn commit_prepared_ice_servers(&self, raw: String, parsed: Vec<IceServer>) {
         let target_tier = IceServer::target_candidate_tier(&parsed);
-        *self.ice_servers.borrow_mut() = parsed.clone();
+        *self.ice_state.borrow_mut() = (raw, parsed.clone());
 
         let config = RtcConfiguration::new();
         let js_ice_servers: js_sys::Array =
@@ -613,6 +650,11 @@ impl WebSysWebrtcTransport {
                 }
             }
         }
+    }
+
+    /// Return the currently committed raw session credential / ICE server string.
+    pub fn session_credentials(&self) -> String {
+        self.ice_state.borrow().0.clone()
     }
 }
 
@@ -641,22 +683,8 @@ impl FrameSink for WebSysWebrtcConnection {
     }
 }
 
-#[async_trait(?Send)]
-impl ConnectionInterface for WebSysWebrtcConnection {
-    type Handshake = String;
-    type Error = Error;
-
-    delegate_to_callback!();
-
-    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-        self.connection_state.snapshot()
-    }
-
-    fn max_message_size(&self) -> usize {
-        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
-    }
-
-    async fn create_offer(&self) -> Result<Self::Handshake> {
+impl WebSysWebrtcConnection {
+    async fn create_offer_sdp(&self) -> Result<String> {
         let promise = self.webrtc_conn.create_offer();
         let offer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
         let offer = RtcSessionDescription::from(offer_js_value);
@@ -671,7 +699,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         self.webrtc_gather().await
     }
 
-    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
+    async fn answer_offer_sdp(&self, offer: String) -> Result<String> {
         tracing::debug!("answer_offer, offer: {offer:?}");
         // Read the negotiated limit, but record it only after the *whole* answer path
         // (setRemoteDescription + createAnswer + setLocalDescription + gather) has succeeded, so a
@@ -701,7 +729,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         Ok(local_sdp)
     }
 
-    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
+    async fn accept_answer_sdp(&self, answer: String) -> Result<()> {
         tracing::debug!("accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
 
@@ -715,6 +743,71 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             .store(negotiated_max_message_size, Ordering::SeqCst);
 
         Ok(())
+    }
+}
+
+#[async_trait(?Send)]
+impl ConnectionInterface for WebSysWebrtcConnection {
+    type Error = Error;
+
+    delegate_to_callback!();
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.connection_state.snapshot()
+    }
+
+    fn max_message_size(&self) -> usize {
+        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
+    }
+
+    async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
+        match (self.handshake_role.get(), inbound) {
+            (HANDSHAKE_ROLE_FRESH, None) => {
+                self.handshake_role
+                    .set(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
+                let sdp = self.create_offer_sdp().await?;
+                Ok(HandshakeStep::Send(Bytes::from(sdp.into_bytes())))
+            }
+            (HANDSHAKE_ROLE_FRESH, Some(offer_bytes)) => {
+                let offer = std::str::from_utf8(&offer_bytes)
+                    .map_err(|err| {
+                        Error::RemoteHandshakeApplyError(format!(
+                            "invalid UTF-8 SDP offer payload: {err}"
+                        ))
+                    })?
+                    .to_owned();
+                let local_sdp = self.answer_offer_sdp(offer).await?;
+                self.handshake_role.set(HANDSHAKE_ROLE_ESTABLISHED);
+                Ok(HandshakeStep::SendFinal(Bytes::from(
+                    local_sdp.into_bytes(),
+                )))
+            }
+            (HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Some(answer_bytes)) => {
+                let answer = std::str::from_utf8(&answer_bytes)
+                    .map_err(|err| {
+                        Error::RemoteHandshakeApplyError(format!(
+                            "invalid UTF-8 SDP answer payload: {err}"
+                        ))
+                    })?
+                    .to_owned();
+                self.accept_answer_sdp(answer).await?;
+                self.handshake_role.set(HANDSHAKE_ROLE_ESTABLISHED);
+                Ok(HandshakeStep::Done)
+            }
+            (_, None) => Err(Error::LocalHandshakeGenerationError(
+                "unexpected initial handshake step on active browser WebRTC connection".to_string(),
+            )),
+            (HANDSHAKE_ROLE_ESTABLISHED, Some(_)) | (_, Some(_)) => {
+                Err(Error::RemoteHandshakeApplyError(
+                    "unexpected inbound handshake step on established browser WebRTC connection"
+                        .to_string(),
+                ))
+            }
+        }
     }
 
     async fn wait_for_channel_open(&self) -> Result<()> {
@@ -829,7 +922,7 @@ fn wire_peer_connection_state(
     let on_state_change = Closure::wrap(Box::new(move |_| {
         let state_change: TransportConnectionState = state_source.connection_state().into();
         tracing::debug!("peer connection state changed: {state_change:?}");
-        connection_state.observe_webrtc(state_change);
+        connection_state.observe_phase(state_change);
         inner_cb.dispatch_peer_connection_state(state_change);
     }) as Box<dyn FnMut(web_sys::Event)>);
     webrtc_conn.set_onconnectionstatechange(Some(on_state_change.as_ref().unchecked_ref()));
@@ -851,7 +944,7 @@ fn create_outbound_data_channels(
         let on_open = Closure::wrap(Box::new(move || {
             let all_ready = matches!(open_pool.all_ready(), Ok(true));
             if all_ready {
-                open_state.observe_outbound_data_channels(true);
+                open_state.observe_channels(true);
             }
             let cb = open_cb.clone();
             spawn_local(async move {
@@ -871,7 +964,7 @@ fn create_outbound_data_channels(
         let close_delivery = Arc::clone(&delivery);
         let on_close = Closure::wrap(Box::new(move || {
             close_delivery.close();
-            close_state.observe_outbound_data_channels(false);
+            close_state.observe_channels(false);
             let all_closed = matches!(
                 close_pool.all(|(candidate, _)| {
                     candidate.ready_state() == RtcDataChannelState::Closed
@@ -919,8 +1012,8 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         let config = RtcConfiguration::new();
         let (target_tier, ice_servers) = {
-            let configured_ice = self.ice_servers.borrow();
-            let target_tier = IceServer::target_candidate_tier(&configured_ice);
+            let configured_ice = &self.ice_state.borrow().1;
+            let target_tier = IceServer::target_candidate_tier(configured_ice);
             let js_servers: js_sys::Array =
                 js_sys::Array::from_iter(configured_ice.iter().cloned().map(RtcIceServer::from));
             (target_tier, js_servers)
@@ -1018,16 +1111,13 @@ impl TransportInterface for WebSysWebrtcTransport {
         self.pool.connection_ids()
     }
 
-    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<()> {
-        effective_max_message_size(remote_handshake).map(|_| ())
-    }
-
-    fn update_session_credentials(&self, credentials: &str) {
-        self.set_ice_servers(credentials);
-    }
-
-    fn session_credentials(&self) -> Option<String> {
-        Some(self.session_credentials.borrow().clone())
+    fn validate_inbound_handshake(&self, _step_index: u8, payload: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(payload).map_err(|err| {
+            Error::RemoteHandshakeApplyError(format!(
+                "invalid UTF-8 browser SDP handshake payload: {err}"
+            ))
+        })?;
+        effective_max_message_size(text).map(|_| ())
     }
 }
 
@@ -1186,8 +1276,8 @@ mod tests {
     #[wasm_bindgen_test]
     async fn test_browser_send_failure_retires_connection_and_rejects_later_send() {
         let (peer_connection, connection_state, connection) = test_backend();
-        connection_state.observe_webrtc(TransportConnectionState::Connected);
-        connection_state.observe_outbound_data_channels(true);
+        connection_state.observe_phase(TransportConnectionState::Connected);
+        connection_state.observe_channels(true);
         let permit = SendPermit::always();
         let acceptance = permit.acceptance();
         let result = connection

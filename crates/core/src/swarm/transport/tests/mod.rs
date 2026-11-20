@@ -412,7 +412,7 @@ pub(super) async fn open_dummy_channel_before_transport_connected(
 
     connection
         .connection
-        .answer_offer("remote-dummy-connection".to_string())
+        .answer_offer(bytes::Bytes::from_static(b"remote-dummy-connection"))
         .await
         .map_err(Error::Transport)?;
     // The browser callback order under test: the channel opens while the peer connection still

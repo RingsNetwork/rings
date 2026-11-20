@@ -539,6 +539,15 @@ impl SwarmTransport {
                     .ok_or(Error::SwarmMissTransport(attempt.peer))?;
                 let readiness = connection.readiness();
                 if readiness.can_make_progress() {
+                    let advertised = connection.max_message_size();
+                    if advertised < rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE {
+                        return Err(Error::Transport(
+                            rings_transport::error::Error::RemoteMaxMessageSizeTooSmall {
+                                advertised,
+                                minimum: rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE,
+                            },
+                        ));
+                    }
                     return Ok(true);
                 }
                 if readiness.is_terminal() {

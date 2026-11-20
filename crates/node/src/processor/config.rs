@@ -1,10 +1,15 @@
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::OnceLock;
+use std::sync::PoisonError;
+use std::sync::RwLock;
 
 use rings_core::dht::default_storage_virtual_positions_per_owner;
 use rings_core::dht::VirtualNodeConfig;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+use rings_core::ecc::keys::SigningSecretKey;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SystemClock;
 use rings_runtime::MaybeSendSync;
@@ -17,21 +22,135 @@ use rings_turn::TurnCredentialSigner;
 use super::*;
 use crate::remote_endpoint::RemoteRpcProxy;
 
+/// Infallible phase-2 commit closure returned by
+/// [`NodeNetworkParameters::prepare_session_key_rotation`].
+///
+/// Executed synchronously after all phase-1 validations and durable key persistence succeed, so
+/// committing the prepared session credentials in memory cannot fail or require rollback.
+pub type SessionRotationCommit = Box<dyn FnOnce()>;
+
+/// Factory closure converting a deserialized `params` JSON value from a [`NetworkConfigDescriptor`]
+/// into a validated [`NodeNetworkParameters`] instance.
+pub type NetworkParametersFactory =
+    Arc<dyn Fn(&serde_json::Value) -> Result<Arc<dyn NodeNetworkParameters>> + Send + Sync>;
+
+fn default_empty_network_params() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+/// Serde-extensible tagged network configuration descriptor (#1291).
+///
+/// Allows native `config.yaml`, [`ProcessorConfigSerialized`], FFI, and browser WASM serialized
+/// configurations to instantiate any registered [`NodeNetworkParameters`] backend (`"webrtc"`,
+/// `"dummy"`, or embedder-registered custom media such as `"quic"`, `"ble"`, or `"packet-radio"`)
+/// without modifying `rings-node`'s configuration structs.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkConfigDescriptor {
+    /// Registered transport backend kind identifier (for example `"webrtc"` or `"quic"`).
+    pub kind: String,
+    /// Backend-specific configuration object decoded by the registered factory.
+    #[serde(default = "default_empty_network_params")]
+    pub params: serde_json::Value,
+}
+
+/// Explicit TURN credential signing mode for WebRTC network parameters (#1291).
+#[derive(Clone, Debug)]
+pub enum TurnCredentialMode {
+    /// Default session-scoped mode: signs `?pubkey=` TURN URLs with the active [`DelegateeKey`]
+    /// and rotates TURN credentials in lockstep whenever `renew_delegatee_key` commits.
+    Delegatee,
+    /// Static account-scoped mode: signs `?pubkey=` TURN URLs directly with a non-expiring
+    /// [`SigningSecretKey`] (`Did` / `Account`) at startup and leaves credentials unchanged across
+    /// session-key rotations.
+    Account(Arc<SigningSecretKey>),
+}
+
+/// Validate that every `turn:` / `turns:` entry carrying a `pubkey=` query parameter encodes a
+/// valid secp256k1 server public key, rather than silently leaving a malformed `?pubkey=` template
+/// unsigned.
+fn validate_turn_pubkey_templates(spec: &str) -> Result<()> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    for entry in trimmed.split(';') {
+        let entry = entry.trim();
+        let Some((scheme, rest)) = entry.split_once("://") else {
+            continue;
+        };
+        if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
+            continue;
+        }
+        if let Some((_, query_and_frag)) = rest.split_once('?') {
+            let query = query_and_frag
+                .split_once('#')
+                .map_or(query_and_frag, |(q, _)| q);
+            let has_pubkey_param = query.split('&').any(|pair| {
+                pair.split_once('=')
+                    .is_some_and(|(k, _)| k.eq_ignore_ascii_case("pubkey"))
+            });
+            if has_pubkey_param && rings_turn::extract_turn_server_pubkey(entry).is_none() {
+                return Err(Error::InvalidConfig(format!(
+                    "invalid TURN server pubkey in '{entry}'"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Derive session-scoped ICE/TURN credentials from `spec` using `delegatee_key`, failing closed
+/// if any `?pubkey=` template is malformed or if credential signing fails.
+fn derive_session_ice_servers(spec: &str, delegatee_key: &DelegateeKey) -> Result<String> {
+    validate_turn_pubkey_templates(spec)?;
+    delegatee_key
+        .sign_ice_servers(spec)
+        .map_err(Error::CoreError)
+}
+
+/// Derive static account-scoped ICE/TURN credentials from `spec` using `account_key`, failing
+/// closed if any `?pubkey=` template is malformed or if credential signing fails.
+fn derive_account_ice_servers(spec: &str, account_key: &SigningSecretKey) -> Result<String> {
+    validate_turn_pubkey_templates(spec)?;
+    account_key.sign_ice_servers(spec).map_err(Error::CoreError)
+}
+
+fn instantiate_builtin_transport(
+    config: &TransportNetworkConfig,
+    signed_credentials: &str,
+) -> Result<SharedTransport> {
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    {
+        config
+            .try_build_dummy_transport(Some(signed_credentials))
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
+    }
+    #[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+    {
+        config
+            .try_build_shared_transport(Some(signed_credentials))
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
+    }
+}
+
 /// Trait defining the network parameters that customize and instantiate a node's transport (#1291).
 ///
 /// From first principles, every interaction between a node (`Processor`, `ProcessorBuilder`,
-/// `ProcessorConfig`) and its network parameters reduces to three orthogonal operations:
+/// `ProcessorConfig`) and its network parameters reduces to three orthogonal operations plus
+/// optional config-descriptor projection:
 /// 1. **Transport instantiation** ([`build_transport`](Self::build_transport)): validates the
-///    medium's parameters and constructs a [`SharedTransport`] bound to the node's initial
-///    [`DelegateeKey`].
+///    medium's parameters (failing closed on malformed configuration) and constructs a
+///    [`SharedTransport`] bound to the node's initial [`DelegateeKey`].
 /// 2. **Advertised locator hint** ([`endpoint_hint`](Self::endpoint_hint)): returns an optional
 ///    external locator published in the node's online presence descriptor (`None` by default for
 ///    proximity ad-hoc media such as packet radio, Bluetooth ad-hoc, ultrasonic ad-hoc, or
 ///    unaddressed client nodes).
-/// 3. **Session-key rotation reaction** ([`on_session_key_rotated`](Self::on_session_key_rotated)):
-///    synchronizes the live [`SharedTransport`] when the node rotates its [`DelegateeKey`] in
-///    process (a no-op `Ok(())` by default for media whose link layer does not bind credentials
-///    to the session key).
+/// 3. **Two-phase session-key rotation**
+///    ([`prepare_session_key_rotation`](Self::prepare_session_key_rotation)): phase 1 validates and
+///    prepares any session-bound transport credentials **without mutating** `transport`, returning
+///    an infallible [`SessionRotationCommit`] closure that phase 2 executes only after all pure
+///    validations and durable disk persistence succeed.
 pub trait NodeNetworkParameters: Any + fmt::Debug + MaybeSendSync {
     /// Validate these network parameters and instantiate a [`SharedTransport`] bound to
     /// `delegatee_key`.
@@ -45,26 +164,45 @@ pub trait NodeNetworkParameters: Any + fmt::Debug + MaybeSendSync {
         None
     }
 
-    /// Synchronize the live `transport` when the node rotates its active session key to `next_key`.
+    /// Phase 1 of two-phase session-key rotation: derive and validate transport state for
+    /// `next_key` **without mutating** `transport`, returning an infallible phase-2 commit closure.
     ///
-    /// Defaults to `Ok(())` for media whose link layer does not carry session-signed credentials.
-    fn on_session_key_rotated(
+    /// # Concurrency & Lock-Ordering Contract
+    ///
+    /// Both `prepare_session_key_rotation` and the returned [`SessionRotationCommit`] closure run
+    /// synchronously while `Processor`'s internal `SessionKeyRing` write lock is held:
+    /// - Implementations **must** remain synchronous and non-blocking (never awaiting network I/O).
+    /// - Implementations **must not** re-enter `Processor` methods that read or write the session
+    ///   key ring (such as `Processor::signing_horizon` or `Processor::renew_delegatee_key`).
+    /// - Phase 1 (`prepare_session_key_rotation`) **must not** mutate `transport` before returning,
+    ///   and Phase 2 (`SessionRotationCommit`) **must** be infallible.
+    ///
+    /// Defaults to an empty no-op commit closure for media whose link layer does not carry
+    /// session-signed credentials.
+    fn prepare_session_key_rotation(
         &self,
         _transport: &SharedTransport,
         _next_key: &DelegateeKey,
-    ) -> Result<()> {
-        Ok(())
+    ) -> Result<SessionRotationCommit> {
+        Ok(Box::new(|| {}))
+    }
+
+    /// Project these network parameters into a tagged [`NetworkConfigDescriptor`] for lossless
+    /// serialization into [`ProcessorConfigSerialized`], returning `None` if this parameter type is
+    /// purely programmatic.
+    fn to_network_descriptor(&self) -> Option<NetworkConfigDescriptor> {
+        None
     }
 }
 
 /// Implementation of [`NodeNetworkParameters`] for the built-in [`TransportNetworkConfig`].
 impl NodeNetworkParameters for TransportNetworkConfig {
-    /// Derive initial session-signed traversal credentials from `delegatee_key` (falling back to
-    /// the raw server specification if signing is unavailable for a synthetic test key) and
-    /// construct the platform's [`SharedTransport`].
+    /// Strictly derive session-signed traversal credentials from `delegatee_key` and construct the
+    /// platform's [`SharedTransport`], failing closed if any ICE/TURN URL or server public key is
+    /// malformed.
     fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
-        let signed = delegatee_key.sign_ice_servers(self.traversal_servers());
-        Ok(self.build_shared_transport(signed.as_deref().ok()))
+        let signed = derive_session_ice_servers(self.traversal_servers(), delegatee_key)?;
+        instantiate_builtin_transport(self, &signed)
     }
 
     /// Return the configured external endpoint hint, if any.
@@ -72,19 +210,245 @@ impl NodeNetworkParameters for TransportNetworkConfig {
         TransportNetworkConfig::endpoint_hint(self)
     }
 
-    /// Re-sign the configured traversal server template with `next_key` and atomically update the
-    /// live `transport`'s session credentials.
-    fn on_session_key_rotated(
+    /// Re-sign the configured traversal server template with `next_key`, strictly parse the
+    /// resulting ICE server list in phase 1 without mutating `transport`, and return an infallible
+    /// phase-2 closure that atomically commits `(raw_credentials, parsed_ice_servers)`.
+    fn prepare_session_key_rotation(
         &self,
         transport: &SharedTransport,
         next_key: &DelegateeKey,
-    ) -> Result<()> {
-        let signed = next_key
-            .sign_ice_servers(self.traversal_servers())
-            .map_err(Error::CoreError)?;
-        transport.update_session_credentials(&signed);
-        Ok(())
+    ) -> Result<SessionRotationCommit> {
+        let signed = derive_session_ice_servers(self.traversal_servers(), next_key)?;
+        TransportNetworkConfig::prepare_ice_server_rotation(transport, signed)
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
     }
+}
+
+/// Built-in WebRTC network parameters pairing [`TransportNetworkConfig`] with an explicit
+/// [`TurnCredentialMode`] (`Delegatee` by default, or `Account` for non-expiring account-signed
+/// TURN credentials).
+#[derive(Clone, Debug)]
+pub struct WebrtcNetworkParameters {
+    config: TransportNetworkConfig,
+    credential_mode: TurnCredentialMode,
+}
+
+impl WebrtcNetworkParameters {
+    /// Create [`WebrtcNetworkParameters`] using default session-scoped [`TurnCredentialMode::Delegatee`].
+    pub const fn new(config: TransportNetworkConfig) -> Self {
+        Self {
+            config,
+            credential_mode: TurnCredentialMode::Delegatee,
+        }
+    }
+
+    /// Override the [`TurnCredentialMode`] used to sign `?pubkey=` TURN server URLs.
+    pub fn with_credential_mode(mut self, credential_mode: TurnCredentialMode) -> Self {
+        self.credential_mode = credential_mode;
+        self
+    }
+
+    /// Borrow the underlying [`TransportNetworkConfig`].
+    pub const fn transport_config(&self) -> &TransportNetworkConfig {
+        &self.config
+    }
+
+    /// Return the configured [`TurnCredentialMode`].
+    pub const fn credential_mode(&self) -> &TurnCredentialMode {
+        &self.credential_mode
+    }
+}
+
+impl NodeNetworkParameters for WebrtcNetworkParameters {
+    fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
+        let signed = match &self.credential_mode {
+            TurnCredentialMode::Delegatee => {
+                derive_session_ice_servers(self.config.traversal_servers(), delegatee_key)?
+            }
+            TurnCredentialMode::Account(account_key) => {
+                derive_account_ice_servers(self.config.traversal_servers(), account_key)?
+            }
+        };
+        instantiate_builtin_transport(&self.config, &signed)
+    }
+
+    fn endpoint_hint(&self) -> Option<&str> {
+        self.config.endpoint_hint()
+    }
+
+    fn prepare_session_key_rotation(
+        &self,
+        transport: &SharedTransport,
+        next_key: &DelegateeKey,
+    ) -> Result<SessionRotationCommit> {
+        match &self.credential_mode {
+            TurnCredentialMode::Delegatee => self
+                .config
+                .prepare_session_key_rotation(transport, next_key),
+            TurnCredentialMode::Account(_) => Ok(Box::new(|| {})),
+        }
+    }
+
+    fn to_network_descriptor(&self) -> Option<NetworkConfigDescriptor> {
+        match &self.credential_mode {
+            TurnCredentialMode::Delegatee => Some(webrtc_descriptor_from_config(&self.config)),
+            TurnCredentialMode::Account(_) => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebrtcDescriptorParams {
+    #[serde(default)]
+    ice_servers: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    external_address: Option<String>,
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_min",
+        skip_serializing_if = "Option::is_none"
+    )]
+    udp_port_min: Option<u16>,
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_max",
+        skip_serializing_if = "Option::is_none"
+    )]
+    udp_port_max: Option<u16>,
+}
+
+fn webrtc_descriptor_from_config(config: &TransportNetworkConfig) -> NetworkConfigDescriptor {
+    let range = config.udp_port_range();
+    let params = serde_json::to_value(WebrtcDescriptorParams {
+        ice_servers: config.traversal_servers().to_owned(),
+        external_address: config.endpoint_hint().map(str::to_owned),
+        udp_port_min: range.map(UdpPortRange::min),
+        udp_port_max: range.map(UdpPortRange::max),
+    })
+    .unwrap_or_else(|_| default_empty_network_params());
+    NetworkConfigDescriptor {
+        kind: "webrtc".to_string(),
+        params,
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[derive(Clone, Debug)]
+struct DummyNetworkParameters {
+    config: TransportNetworkConfig,
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl NodeNetworkParameters for DummyNetworkParameters {
+    fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
+        let signed = derive_session_ice_servers(self.config.traversal_servers(), delegatee_key)?;
+        self.config
+            .try_build_dummy_transport(Some(&signed))
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
+    }
+
+    fn endpoint_hint(&self) -> Option<&str> {
+        self.config.endpoint_hint()
+    }
+
+    fn prepare_session_key_rotation(
+        &self,
+        transport: &SharedTransport,
+        next_key: &DelegateeKey,
+    ) -> Result<SessionRotationCommit> {
+        let signed = derive_session_ice_servers(self.config.traversal_servers(), next_key)?;
+        TransportNetworkConfig::prepare_ice_server_rotation(transport, signed)
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
+    }
+
+    fn to_network_descriptor(&self) -> Option<NetworkConfigDescriptor> {
+        let mut desc = webrtc_descriptor_from_config(&self.config);
+        desc.kind = "dummy".to_string();
+        Some(desc)
+    }
+}
+
+fn network_transport_registry() -> &'static RwLock<BTreeMap<String, NetworkParametersFactory>> {
+    static REGISTRY: OnceLock<RwLock<BTreeMap<String, NetworkParametersFactory>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut map: BTreeMap<String, NetworkParametersFactory> = BTreeMap::new();
+        map.insert(
+            "webrtc".to_string(),
+            Arc::new(|params| {
+                let decoded: WebrtcDescriptorParams = serde_json::from_value(params.clone())
+                    .map_err(|err| {
+                        Error::InvalidConfig(format!("invalid 'webrtc' network params: {err}"))
+                    })?;
+                let range = parse_udp_port_range(decoded.udp_port_min, decoded.udp_port_max)?;
+                Ok(Arc::new(TransportNetworkConfig::new(
+                    decoded.ice_servers,
+                    decoded.external_address,
+                    range,
+                )))
+            }),
+        );
+        #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+        map.insert(
+            "dummy".to_string(),
+            Arc::new(|params| {
+                let decoded: WebrtcDescriptorParams = serde_json::from_value(params.clone())
+                    .map_err(|err| {
+                        Error::InvalidConfig(format!("invalid 'dummy' network params: {err}"))
+                    })?;
+                let range = parse_udp_port_range(decoded.udp_port_min, decoded.udp_port_max)?;
+                Ok(Arc::new(DummyNetworkParameters {
+                    config: TransportNetworkConfig::new(
+                        decoded.ice_servers,
+                        decoded.external_address,
+                        range,
+                    ),
+                }))
+            }),
+        );
+        RwLock::new(map)
+    })
+}
+
+/// Register a custom [`NodeNetworkParameters`] factory under `kind` so native `config.yaml`,
+/// [`ProcessorConfigSerialized`], FFI, and browser WASM serialized configurations can instantiate
+/// `network: { kind: "<kind>", params: { ... } }` (#1291).
+///
+/// Built-in transport kinds (`"webrtc"` and `"dummy"`) are reserved and cannot be overwritten.
+pub fn register_network_transport_factory<F>(kind: impl Into<String>, factory: F) -> Result<()>
+where F: Fn(&serde_json::Value) -> Result<Arc<dyn NodeNetworkParameters>> + Send + Sync + 'static {
+    let kind = kind.into();
+    let normalized = kind.trim();
+    if normalized.is_empty() {
+        return Err(Error::InvalidConfig(
+            "network transport kind must not be empty".to_string(),
+        ));
+    }
+    if matches!(normalized, "webrtc" | "dummy") {
+        return Err(Error::InvalidConfig(format!(
+            "cannot overwrite reserved built-in network transport kind '{normalized}'"
+        )));
+    }
+    network_transport_registry()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(normalized.to_owned(), Arc::new(factory));
+    Ok(())
+}
+
+/// Resolve a deserialized [`NetworkConfigDescriptor`] into a concrete [`NodeNetworkParameters`]
+/// instance via the process-wide transport registry.
+pub fn resolve_network_config_descriptor(
+    descriptor: &NetworkConfigDescriptor,
+) -> Result<Arc<dyn NodeNetworkParameters>> {
+    let kind = descriptor.kind.trim();
+    let factory = network_transport_registry()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(kind)
+        .cloned()
+        .ok_or_else(|| Error::InvalidConfig(format!("unknown network transport kind '{kind}'")))?;
+    factory(&descriptor.params)
 }
 
 /// ProcessorConfig is usually serialized as json or yaml.
@@ -215,11 +579,19 @@ impl ProcessorConfig {
         self
     }
 
-    /// Returns the validated local UDP port range when configured on the built-in transport config.
+    /// Returns the validated local UDP port range when configured on a built-in UDP-capable
+    /// transport (`TransportNetworkConfig` or `WebrtcNetworkParameters`), or `None` when no port
+    /// range is set or when custom [`NodeNetworkParameters`] are injected (custom media manage
+    /// their own local socket or radio channel allocation internally).
     pub fn udp_port_range(&self) -> Option<UdpPortRange> {
-        (self.network_parameters.as_ref() as &dyn Any)
-            .downcast_ref::<TransportNetworkConfig>()
-            .and_then(TransportNetworkConfig::udp_port_range)
+        let any = self.network_parameters.as_ref() as &dyn Any;
+        if let Some(cfg) = any.downcast_ref::<TransportNetworkConfig>() {
+            return cfg.udp_port_range();
+        }
+        if let Some(webrtc) = any.downcast_ref::<WebrtcNetworkParameters>() {
+            return webrtc.transport_config().udp_port_range();
+        }
+        None
     }
 
     /// The longer heartbeat of the two registries this node publishes, online nodes and onion
@@ -285,9 +657,11 @@ pub struct ProcessorConfigSerialized {
     /// Use 1 for main network.
     pub(crate) network_id: u32,
     /// Traversal/relay server specification string (serialized under the `ice_servers` key for
-    /// config file compatibility).
+    /// config file compatibility; defaults to empty when `network` selects a non-ICE transport).
+    #[serde(default)]
     pub(crate) ice_servers: String,
     /// Optional external endpoint locator advertised by this node.
+    #[serde(default)]
     pub(crate) external_address: Option<String>,
     /// Inclusive lower local UDP port bound.
     #[serde(default, alias = "webrtc_udp_port_min")]
@@ -295,6 +669,11 @@ pub struct ProcessorConfigSerialized {
     /// Inclusive upper local UDP port bound.
     #[serde(default, alias = "webrtc_udp_port_max")]
     pub(crate) udp_port_max: Option<u16>,
+    /// Optional serde-extensible tagged transport descriptor (`{ kind, params }`).
+    /// When present, overrides the legacy `ice_servers` / `external_address` / `udp_port_*`
+    /// WebRTC fields and resolves through [`resolve_network_config_descriptor`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) network: Option<NetworkConfigDescriptor>,
     /// A string representing the dumped `DelegateeKey`.
     pub(crate) delegatee_key: String,
     /// An unsigned integer representing the stabilization interval in seconds.
@@ -402,22 +781,41 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
-        let Some(transport_config) =
+        let (ice_servers, external_address, udp_port_min, udp_port_max, network) = if let Some(
+            transport_config,
+        ) =
             (ins.network_parameters.as_ref() as &dyn Any).downcast_ref::<TransportNetworkConfig>()
-        else {
+        {
+            let udp_port_range = transport_config.udp_port_range();
+            (
+                transport_config.traversal_servers().to_owned(),
+                ins.network_parameters.endpoint_hint().map(str::to_owned),
+                udp_port_range.map(UdpPortRange::min),
+                udp_port_range.map(UdpPortRange::max),
+                None,
+            )
+        } else if let Some(descriptor) = ins.network_parameters.to_network_descriptor() {
+            (
+                String::new(),
+                ins.network_parameters.endpoint_hint().map(str::to_owned),
+                None,
+                None,
+                Some(descriptor),
+            )
+        } else {
             return Err(Error::InvalidConfig(
-                "cannot losslessly serialize custom NodeNetworkParameters into ProcessorConfigSerialized"
+                "cannot losslessly serialize custom NodeNetworkParameters into ProcessorConfigSerialized \
+                 (implement `to_network_descriptor` and register via `register_network_transport_factory`)"
                     .to_string(),
             ));
         };
-        let udp_port_range = transport_config.udp_port_range();
-        let traversal_servers = transport_config.traversal_servers().to_owned();
         Ok(Self {
             network_id: ins.network_id,
-            ice_servers: traversal_servers,
-            external_address: ins.network_parameters.endpoint_hint().map(str::to_owned),
-            udp_port_min: udp_port_range.map(UdpPortRange::min),
-            udp_port_max: udp_port_range.map(UdpPortRange::max),
+            ice_servers,
+            external_address,
+            udp_port_min,
+            udp_port_max,
+            network,
             delegatee_key: ins.delegatee_key.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
@@ -452,7 +850,17 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
 impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
-        let udp_port_range = parse_udp_port_range(ins.udp_port_min, ins.udp_port_max)?;
+        let network_parameters: Arc<dyn NodeNetworkParameters> = match ins.network.as_ref() {
+            Some(descriptor) => resolve_network_config_descriptor(descriptor)?,
+            None => {
+                let udp_port_range = parse_udp_port_range(ins.udp_port_min, ins.udp_port_max)?;
+                Arc::new(TransportNetworkConfig::new(
+                    ins.ice_servers,
+                    ins.external_address,
+                    udp_port_range,
+                ))
+            }
+        };
         let remote_rpc_proxy = ins
             .remote_rpc_proxy_url
             .as_deref()
@@ -466,11 +874,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
         Ok(Self {
             network_id: ins.network_id,
-            network_parameters: Arc::new(TransportNetworkConfig::new(
-                ins.ice_servers,
-                ins.external_address,
-                udp_port_range,
-            )),
+            network_parameters,
             delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,

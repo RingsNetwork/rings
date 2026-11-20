@@ -1,6 +1,8 @@
 //! The crossing-offer decision table (`Law (Crossing offer)`, `Law (Tie-break)`), and the
 //! release a yield applies only in the state it was decided on (`Law (Decided state)`).
 
+use bytes::Bytes;
+
 use super::crossing_offer_verdict;
 use super::CrossingOfferVerdict;
 use super::Handshake;
@@ -16,13 +18,15 @@ fn ordered() -> (Did, Did) {
     (Did::from(1_u32), Did::from(2_u32))
 }
 
-/// An offering attempt of `owner` whose offer was sent under `tx_id`.
+/// An offering attempt of `owner` whose initial offer (`step_index == 0`) was sent under `tx_id`.
 fn sent(owner: OfferOwner, tx_id: uuid::Uuid) -> Handshake {
     Handshake::Offering {
         owner,
         phase: OfferPhase::Sent {
-            handshake: "offer".to_string(),
+            step_index: 0,
+            handshake: Bytes::from_static(b"offer"),
             tx_id,
+            session_id: None,
         },
     }
 }
@@ -60,7 +64,8 @@ fn test_sent_overlay_offer_follows_the_tie_break() {
     assert_eq!(
         crossing_offer_verdict(&offer, OfferOwner::Overlay, smaller, larger),
         CrossingOfferVerdict::CounterOffer {
-            handshake: "offer".to_string(),
+            handshake: Bytes::from_static(b"offer"),
+            session_id: None,
             tx_id,
         }
     );
@@ -137,7 +142,24 @@ fn test_answered_and_answering_attempts_refuse() {
         owner: OfferOwner::Overlay,
         phase: OfferPhase::Answered,
     };
-    for handshake in [answered, Handshake::Answering] {
+    let continuation_sent = Handshake::Offering {
+        owner: OfferOwner::Overlay,
+        phase: OfferPhase::Sent {
+            step_index: 2,
+            handshake: Bytes::from_static(b"step2"),
+            tx_id: uuid::Uuid::new_v4(),
+            session_id: Some([1u8; 16]),
+        },
+    };
+    let awaiting_continuation = Handshake::Answering {
+        awaiting_step: Some((2, [2u8; 16])),
+    };
+    for handshake in [
+        answered,
+        continuation_sent,
+        Handshake::answering(),
+        awaiting_continuation,
+    ] {
         for carrier in CARRIERS {
             for (local, peer) in [(smaller, larger), (larger, smaller)] {
                 assert_eq!(
@@ -161,7 +183,7 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
     let decided = Handshake::offering(OfferOwner::Overlay);
 
     let tx_id = uuid::Uuid::new_v4();
-    assert!(registry.mark_offer_sent(attempt, "offer".to_string(), tx_id));
+    assert!(registry.mark_offer_sent(attempt, 0, Bytes::from_static(b"offer"), tx_id, None,));
     assert_eq!(registry.replace_pending_in(attempt, &decided, 1)?, None);
     assert_eq!(registry.pending_attempt(peer), Some(attempt));
 
@@ -171,23 +193,23 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
         .expect("a yield decided on the current state applies");
     assert_ne!(answering, attempt);
     assert_eq!(registry.pending_attempt(peer), Some(answering));
-    assert_eq!(registry.handshake(answering), Some(&Handshake::Answering));
+    assert_eq!(registry.handshake(answering), Some(&Handshake::answering()));
     assert_eq!(registry.handshake(attempt), None);
     assert!(registry.superseded_by_peer(attempt));
     Ok(())
 }
 
-/// Formal poset & absorbing-state model check over the complete 7-state `Handshake` space:
+/// Formal poset & absorbing-state model check over the complete `Handshake` space (including
+/// multi-step `Sent { step_index >= 2 }` and `Answering { awaiting_step }`):
 ///
-/// 1. `rank(Creating) = 0 < rank(Sent) = 1 < rank(Answered) = rank(Answering) = 2`.
-/// 2. Every state of maximal rank (`rank == 2`: `Offering(Overlay, Answered)`,
-///    `Offering(External, Answered)`, and `Answering`) is an absorbing terminal state under
+/// 1. `rank(Creating) = 0 < rank(Sent(0)) = 1 < rank(Sent(2k>0)) = rank(Answered) = rank(Answering) = 2`.
+/// 2. Every state of maximal rank (`rank == 2`) is an absorbing terminal state under
 ///    `crossing_offer_verdict`: it returns `CrossingOfferVerdict::Refuse` for every carrier
 ///    (`Overlay` and `External`) and every DID order (`smaller < larger` and `larger > smaller`),
-///    so an in-flight `Answering` or `Answered` generation can never be self-preempted by a
-///    duplicate or overlapping offer.
+///    so an in-flight `Answering`, `Answered`, or multi-round `Sent(2k>0)` generation can never be
+///    self-preempted by a duplicate or overlapping step-0 offer.
 /// 3. Whenever `crossing_offer_verdict(h, ..) == Yield`, applying `replace_pending_in` transitions
-///    the registry slot to `Handshake::Answering` (`rank == 2 > rank(h)`), ensuring any yield loop
+///    the registry slot to `Handshake::answering()` (`rank == 2 > rank(h)`), ensuring any yield loop
 ///    terminates in at most one replacement step.
 #[test]
 fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> Result<()> {
@@ -198,14 +220,14 @@ fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> R
                 ..
             } => 0,
             Handshake::Offering {
-                phase: OfferPhase::Sent { .. },
+                phase: OfferPhase::Sent { step_index: 0, .. },
                 ..
             } => 1,
             Handshake::Offering {
-                phase: OfferPhase::Answered,
+                phase: OfferPhase::Sent { .. } | OfferPhase::Answered,
                 ..
             }
-            | Handshake::Answering => 2,
+            | Handshake::Answering { .. } => 2,
         }
     }
 
@@ -218,13 +240,25 @@ fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> R
         sent(OfferOwner::External, tx_id),
         Handshake::Offering {
             owner: OfferOwner::Overlay,
+            phase: OfferPhase::Sent {
+                step_index: 2,
+                handshake: Bytes::from_static(b"step2"),
+                tx_id,
+                session_id: Some([3u8; 16]),
+            },
+        },
+        Handshake::Offering {
+            owner: OfferOwner::Overlay,
             phase: OfferPhase::Answered,
         },
         Handshake::Offering {
             owner: OfferOwner::External,
             phase: OfferPhase::Answered,
         },
-        Handshake::Answering,
+        Handshake::answering(),
+        Handshake::Answering {
+            awaiting_step: Some((2, [4u8; 16])),
+        },
     ];
 
     for state in &all_states {
@@ -252,7 +286,7 @@ fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> R
                     let next_state = registry
                         .handshake(replaced)
                         .expect("replacement generation must have a signaling state");
-                    assert_eq!(next_state, &Handshake::Answering);
+                    assert_eq!(next_state, &Handshake::answering());
                     assert!(
                         rank(next_state) > r,
                         "yield must strictly increase signaling rank ({r} -> {})",

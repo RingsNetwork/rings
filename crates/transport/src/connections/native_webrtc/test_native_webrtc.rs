@@ -120,7 +120,8 @@ async fn test_answer_offer_defers_outbound_stun_checks_until_after_answer_return
     let offerer = offerer_transport
         .new_connection("responder", Box::new(NoopCallback))
         .await?;
-    let real_offer_sdp = offerer.create_offer().await?;
+    let real_offer_bytes = offerer.create_offer().await?;
+    let real_offer_sdp = String::from_utf8(real_offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     let (stripped_base_offer, _) = split_sdp_remote_candidates(&real_offer_sdp);
     let _ = offerer.close().await;
 
@@ -138,7 +139,10 @@ async fn test_answer_offer_defers_outbound_stun_checks_until_after_answer_return
     let responder = responder_transport
         .new_connection("offerer_live", Box::new(NoopCallback))
         .await?;
-    let answer_sdp = responder.answer_offer(synthetic_offer.clone()).await?;
+    let answer_bytes = responder
+        .answer_offer(Bytes::from(synthetic_offer.clone()))
+        .await?;
+    let answer_sdp = String::from_utf8(answer_bytes.to_vec()).expect("UTF-8 answer SDP");
     assert!(
         answer_sdp.contains("a=candidate:"),
         "responder answer SDP must contain gathered local candidates"
@@ -178,7 +182,9 @@ async fn test_answer_offer_defers_outbound_stun_checks_until_after_answer_return
     let responder_cancelled = responder_transport
         .new_connection("offerer_cancelled", Box::new(NoopCallback))
         .await?;
-    let _ = responder_cancelled.answer_offer(cancelled_offer).await?;
+    let _ = responder_cancelled
+        .answer_offer(Bytes::from(cancelled_offer))
+        .await?;
     responder_cancelled.close().await?;
     tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY + Duration::from_millis(150)).await;
     assert!(
@@ -328,8 +334,9 @@ impl crate::core::callback::TransportCallback for OrderedStateCallback {
             let conn = lock_recover(&self.on_failed_close).take();
             if let Some(conn) = conn {
                 let witness = conn
-                    .physical_close_witness()
-                    .expect("live connection exposes physical close witness");
+                    .upgrade()
+                    .expect("live connection exposes physical close witness")
+                    .physical_close_witness();
                 conn.close().await.map_err(Box::new)?;
                 assert!(
                     witness.is_complete(),
@@ -383,7 +390,7 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
     let connection_state = ConnectionStateCell::new();
     let observe_and_dispatch = |state: RTCPeerConnectionState| {
         let state_change: TransportConnectionState = state.into();
-        connection_state.observe_webrtc(state_change);
+        connection_state.observe_phase(state_change);
         inner_cb.dispatch_peer_connection_state(state_change);
     };
 
@@ -514,13 +521,14 @@ async fn test_failed_callback_closes_connection_without_deadlocking_and_preserve
         )
         .await?;
 
-    let witness = sender.physical_close_witness()?;
+    let witness = sender.upgrade()?.physical_close_witness();
     *lock_recover(&callback_state.on_failed_close) = Some(sender.clone());
 
     let offer = sender.create_offer().await?;
     let answer = receiver.answer_offer(offer).await?;
-    let tampered_answer = corrupt_sdp_fingerprint(&answer);
-    sender.accept_answer(tampered_answer).await?;
+    let answer_sdp = String::from_utf8(answer.to_vec()).expect("UTF-8 answer SDP");
+    let tampered_answer = corrupt_sdp_fingerprint(&answer_sdp);
+    sender.accept_answer(Bytes::from(tampered_answer)).await?;
 
     tokio::time::timeout(Duration::from_secs(10), closed_notified.notified())
         .await
@@ -783,7 +791,8 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         )
         .await?;
 
-    let offer_sdp = sender.create_offer().await?;
+    let offer_bytes = sender.create_offer().await?;
+    let offer_sdp = String::from_utf8(offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     assert!(
         offer_sdp.contains("typ relay"),
         "UDP-blocked offerer with ?transport=tcp must gather a relay candidate via TCP TURN: {offer_sdp}"
@@ -797,7 +806,7 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         "offerer must connect to the TURN server over TCP"
     );
 
-    let answer_sdp = receiver.answer_offer(offer_sdp).await?;
+    let answer_sdp = receiver.answer_offer(offer_bytes).await?;
     sender.accept_answer(answer_sdp).await?;
 
     sender.wait_for_channel_open().await?;
@@ -842,7 +851,8 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         )
         .await?;
     let gather_started = std::time::Instant::now();
-    let normal_offer_sdp = normal_sender.create_offer().await?;
+    let normal_offer_bytes = normal_sender.create_offer().await?;
+    let normal_offer_sdp = String::from_utf8(normal_offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     assert!(
         gather_started.elapsed() < Duration::from_secs(4),
         "normal UDP offerer with TCP TURN bridge must not stall on a 5 s STUN srflx timeout: {:?}",

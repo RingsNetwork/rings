@@ -1,8 +1,5 @@
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Arc;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Mutex;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::MutexGuard;
 
 /// Lifecycle state of a transport connection.
@@ -72,51 +69,54 @@ impl ConnectionStateSnapshot {
         self.channel_open
     }
 
-    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
     fn apply(self, event: ConnectionStateEvent) -> Self {
         match event {
             ConnectionStateEvent::Close => Self::new(TransportConnectionState::Closed, false),
-            ConnectionStateEvent::OutboundDataChannels(_) if self.state.is_terminal() => self,
-            ConnectionStateEvent::OutboundDataChannels(open) => Self::new(self.state, open),
-            ConnectionStateEvent::Webrtc(_) if self.state == TransportConnectionState::Closed => {
+            ConnectionStateEvent::Channels(_) if self.state.is_terminal() => self,
+            ConnectionStateEvent::Channels(open) => Self::new(self.state, open),
+            ConnectionStateEvent::Phase(_) if self.state == TransportConnectionState::Closed => {
                 self
             }
-            ConnectionStateEvent::Webrtc(TransportConnectionState::Closed) => {
+            ConnectionStateEvent::Phase(TransportConnectionState::Closed) => {
                 Self::new(TransportConnectionState::Closed, false)
             }
-            ConnectionStateEvent::Webrtc(_) if self.state == TransportConnectionState::Failed => {
+            ConnectionStateEvent::Phase(_) if self.state == TransportConnectionState::Failed => {
                 self
             }
-            ConnectionStateEvent::Webrtc(TransportConnectionState::Failed) => {
+            ConnectionStateEvent::Phase(TransportConnectionState::Failed) => {
                 Self::new(TransportConnectionState::Failed, false)
             }
-            ConnectionStateEvent::Webrtc(next) => Self::new(next, self.channel_open),
+            ConnectionStateEvent::Phase(next) => Self::new(next, self.channel_open),
         }
     }
 }
 
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 #[derive(Clone, Copy)]
 enum ConnectionStateEvent {
-    Webrtc(TransportConnectionState),
-    OutboundDataChannels(bool),
+    Phase(TransportConnectionState),
+    Channels(bool),
     Close,
 }
 
-/// Shared event-maintained transport state for concrete backends.
+/// Shared event-maintained transport product-state cell for concrete connection backends.
 ///
 /// Clone law: every clone references the same state cell; cloning does not
 /// duplicate protocol state. `Closed` is absorbing, and terminal states can
-/// never retain or regain an open data channel.
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
-#[derive(Clone)]
-pub(crate) struct ConnectionStateCell {
+/// never retain or regain open payload channels.
+#[derive(Clone, Debug)]
+pub struct ConnectionStateCell {
     state: Arc<Mutex<ConnectionStateSnapshot>>,
 }
 
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+impl Default for ConnectionStateCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectionStateCell {
-    pub(crate) fn new() -> Self {
+    /// Construct a new [`ConnectionStateCell`] in `(New, false)`.
+    pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ConnectionStateSnapshot::new(
                 TransportConnectionState::New,
@@ -136,19 +136,23 @@ impl ConnectionStateCell {
         *state = state.apply(event);
     }
 
-    pub(crate) fn observe_webrtc(&self, state: TransportConnectionState) {
-        self.apply(ConnectionStateEvent::Webrtc(state));
+    /// Record a connection-phase transition on this cell.
+    pub fn observe_phase(&self, state: TransportConnectionState) {
+        self.apply(ConnectionStateEvent::Phase(state));
     }
 
-    pub(crate) fn observe_outbound_data_channels(&self, open: bool) {
-        self.apply(ConnectionStateEvent::OutboundDataChannels(open));
+    /// Record whether all outbound payload channels are open (`true`) or closed (`false`).
+    pub fn observe_channels(&self, open: bool) {
+        self.apply(ConnectionStateEvent::Channels(open));
     }
 
-    pub(crate) fn close(&self) {
+    /// Permanently transition this cell to `(Closed, false)`.
+    pub fn close(&self) {
         self.apply(ConnectionStateEvent::Close);
     }
 
-    pub(crate) fn snapshot(&self) -> ConnectionStateSnapshot {
+    /// Read one atomic `(state, channel_open)` snapshot.
+    pub fn snapshot(&self) -> ConnectionStateSnapshot {
         *self.lock()
     }
 }

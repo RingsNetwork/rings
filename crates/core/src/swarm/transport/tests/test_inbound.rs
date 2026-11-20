@@ -37,11 +37,11 @@ async fn test_a_link_frame_of_another_wire_version_is_refused_before_decoding() 
     let recorder = ApplicationRecorder::attach(&transport)?;
     let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
-    let offer = Message::ConnectNodeSend(ConnectNodeSend {
-        handshake: String::new(),
-        dht_protocol_mode: transport.dht_protocol_mode(),
-        relay_custody: RelayCustody::Holds,
-    });
+    let offer = Message::ConnectNodeSend(ConnectNodeSend::initial_offer(
+        bytes::Bytes::new(),
+        transport.dht_protocol_mode(),
+        RelayCustody::Holds,
+    ));
     let theirs = WIRE_VERSION + 1;
     let mut frame = local_wire(offer, &pending.session, transport.dht.did)?.to_vec();
     frame[6..8].copy_from_slice(&theirs.to_be_bytes());

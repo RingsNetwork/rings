@@ -28,6 +28,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 #[cfg(rings_transport_runtime)]
 use std::sync::Mutex;
+use std::sync::Weak;
+use std::time::Duration;
 
 use bytes::Bytes;
 
@@ -45,6 +47,7 @@ use crate::core::callback::InboundCreditLease;
 #[cfg(rings_transport_runtime)]
 use crate::core::credit::credit_index;
 use crate::core::credit::CreditIndex;
+use crate::core::credit::LaneSignal;
 #[cfg(rings_transport_runtime)]
 use crate::core::credit::PerLane;
 use crate::core::pool::ChannelLane;
@@ -58,6 +61,69 @@ use crate::error::Result;
 use crate::notifier::Notifier;
 #[cfg(rings_transport_runtime)]
 use crate::sync_utils::lock_recover;
+
+/// Retry backoff between failed outbound credit-control frame transmissions.
+pub const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
+
+/// RAII outbound credit-control frame dequeued from [`InnerTransportCallback::next_credit_frame`].
+///
+/// # Invariant (Zero Lost Cumulative Credit)
+///
+/// If this guard is dropped before [`Self::mark_sent`] is called (for example because the backend's
+/// send failed or its pump task was cancelled), the underlying cumulative `LaneSignal` is
+/// automatically requeued onto the lane's outbox so the peer's sender can never stall permanently.
+#[derive(Debug)]
+pub struct CreditFrame {
+    wire: Bytes,
+    index: CreditIndex,
+    signal: Option<LaneSignal>,
+    link: Weak<LinkCredit>,
+}
+
+impl CreditFrame {
+    /// Borrow the wire-encoded `TransportMessage::Signal` bytes to transmit on [`Self::lane`].
+    pub const fn wire(&self) -> &Bytes {
+        &self.wire
+    }
+
+    /// Return the [`ChannelLane`] on which this credit control frame belongs.
+    pub const fn lane(&self) -> ChannelLane {
+        self.index.lane()
+    }
+
+    /// Disarm automatic requeue after the wire frame has been accepted for transmission.
+    pub fn mark_sent(&mut self) {
+        self.signal = None;
+    }
+}
+
+impl Drop for CreditFrame {
+    fn drop(&mut self) {
+        if let Some(signal) = self.signal.take() {
+            if let Some(link) = self.link.upgrade() {
+                let _ = link.requeue(self.index, signal);
+            }
+        }
+    }
+}
+
+/// Weakly-held periodic idle-lane shrink handle created by
+/// [`InnerTransportCallback::weak_idle_checker`].
+///
+/// Holds only a [`Weak`] reference to the connection's credit state so periodic timer loops never
+/// keep retired connections or callbacks alive.
+#[derive(Clone, Debug)]
+pub struct IdleLaneChecker {
+    link: Weak<LinkCredit>,
+}
+
+impl IdleLaneChecker {
+    /// Run one idle-lane shrink pass (`Law 3`), returning `false` once the connection's credit
+    /// state has been closed or dropped.
+    pub fn check_once(&self) -> bool {
+        self.link.upgrade().is_some_and(|link| link.idle_check())
+    }
+}
 
 /// The frames of one lane admitted and not yet handed to the protocol callback.
 #[cfg(rings_transport_runtime)]
@@ -281,39 +347,178 @@ impl InnerTransportCallback {
     }
 
     /// Run `send_raw` under one credit of `lane` (taken from `permit` or reserved now), encoding
-    /// `payload` into its wire frame (`custom_frame_wire`) and settling the credit according to
-    /// `permit`'s acceptance outcome.
+    /// `payload` into its wire frame (`custom_frame_wire`), verifying `wire.len() <= max_message_size`,
+    /// claiming `permit` into an [`IrrevocableSendPermit`](crate::core::transport::IrrevocableSendPermit),
+    /// and enforcing generation retirement via `retire_generation` if `send_raw` fails or is
+    /// cancelled before calling [`IrrevocableSendPermit::accept`](crate::core::transport::IrrevocableSendPermit::accept).
     ///
     /// External [`ConnectionInterface`](crate::core::transport::ConnectionInterface) backends use
-    /// this adapter to implement `send_message_with_permit` with full credit-window enforcement
-    /// without accessing crate-private internals.
-    pub async fn send_custom_wire<F, Fut>(
+    /// this adapter to implement `send_message_with_permit` with full type-enforced credit-window,
+    /// frame-size, and post-irrevocable retirement guarantees.
+    pub async fn send_custom_wire<R, F, Fut>(
         &self,
         payload: Bytes,
         lane: ChannelLane,
         mut permit: SendPermit,
+        max_message_size: usize,
+        retire_generation: R,
         send_raw: F,
     ) -> Result<crate::delivery::DeliveryFuture>
     where
-        F: FnOnce(Bytes, ChannelLane, SendPermit) -> Fut,
-        Fut: Future<Output = Result<crate::delivery::DeliveryFuture>>,
+        R: FnOnce(),
+        F: FnOnce(Bytes, ChannelLane, crate::core::transport::IrrevocableSendPermit) -> Fut,
+        Fut: Future<
+            Output = Result<(
+                crate::core::transport::AcceptedSendPermit,
+                crate::delivery::DeliveryFuture,
+            )>,
+        >,
     {
         let _credit = self.credit_for_custom_send(lane, &mut permit).await?;
         let wire = rings_codec::serialize(&TransportMessage::Custom(payload)).map(Bytes::from)?;
-        send_raw(wire, lane, permit).await
+        if wire.len() > max_message_size {
+            return Err(Error::FrameTooLarge {
+                size: wire.len(),
+                max: max_message_size,
+            });
+        }
+        let acceptance = permit.acceptance();
+        let Some(irrevocable) = permit.try_mark_irrevocable() else {
+            return Err(Error::SendPermitRevoked);
+        };
+        struct RetireOnIncomplete<R: FnOnce()> {
+            acceptance: crate::core::transport::SendAcceptance,
+            retire: Option<R>,
+        }
+        impl<R: FnOnce()> Drop for RetireOnIncomplete<R> {
+            fn drop(&mut self) {
+                if self.acceptance.failed_after_irrevocable() {
+                    if let Some(retire) = self.retire.take() {
+                        retire();
+                    }
+                }
+            }
+        }
+        let mut guard = RetireOnIncomplete {
+            acceptance,
+            retire: Some(retire_generation),
+        };
+        let (_accepted, delivery) = send_raw(wire, lane, irrevocable).await?;
+        guard.retire = None;
+        Ok(delivery)
     }
 
-    /// Wait for the next outbound wire-encoded credit control frame on `index`, returning `None`
-    /// once the connection's credit state is closed.
+    /// Wait for the next outbound wire-encoded credit control frame on `index`, returning
+    /// `Ok(None)` once the connection's credit state is closed.
     ///
-    /// External [`ConnectionInterface`](crate::core::transport::ConnectionInterface) backends can
-    /// spawn one pump per [`CreditIndex::ALL`] forwarding each returned `Bytes` frame over the
-    /// peer link so credit windows replenish across turns.
-    pub async fn next_credit_frame(&self, index: CreditIndex) -> Option<Bytes> {
-        let signal = self.link_credit.next_signal(index).await?;
-        rings_codec::serialize(&TransportMessage::Signal(signal))
-            .ok()
-            .map(Bytes::from)
+    /// Returns a RAII [`CreditFrame`] guard that automatically requeues the underlying cumulative
+    /// credit signal on drop unless [`CreditFrame::mark_sent`] is called after wire transmission
+    /// succeeds, preventing lost credit signals from stalling a remote sender.
+    pub async fn next_credit_frame(&self, index: CreditIndex) -> Result<Option<CreditFrame>> {
+        let Some(signal) = self.link_credit.next_signal(index).await else {
+            return Ok(None);
+        };
+        match rings_codec::serialize(&TransportMessage::Signal(signal)) {
+            Ok(bytes) => Ok(Some(CreditFrame {
+                wire: Bytes::from(bytes),
+                index,
+                signal: Some(signal),
+                link: Arc::downgrade(&self.link_credit),
+            })),
+            Err(err) => {
+                let _ = self.link_credit.requeue(index, signal);
+                Err(Error::Codec(err))
+            }
+        }
+    }
+
+    /// Run one idle-lane pool shrink pass (`Law 3`). Returns `false` once the connection's credit
+    /// state is closed.
+    pub fn idle_check(&self) -> bool {
+        self.link_credit.idle_check()
+    }
+
+    /// Return a weak [`IdleLaneChecker`] handle that runs periodic [`Self::idle_check`] passes
+    /// without keeping the connection or callback alive.
+    pub fn weak_idle_checker(&self) -> IdleLaneChecker {
+        IdleLaneChecker {
+            link: Arc::downgrade(&self.link_credit),
+        }
+    }
+
+    /// Spawn the complete per-lane credit signal pumps (with automatic requeue and
+    /// [`CREDIT_RESEND_PAUSE`] retry backoff) plus the periodic [`super::LANE_IDLE_PERIOD`]
+    /// weak idle-lane shrinker for an external backend.
+    ///
+    /// The `send_control` closure transmits a serialized control frame on `lane`, returning
+    /// `Err(Error::ConnectionReleased(_))` once the physical connection has permanently closed.
+    /// Returns [`Error::CreditPumpUnavailable`] if the runtime cannot schedule the driver tasks.
+    #[cfg(rings_transport_runtime)]
+    #[allow(clippy::disallowed_methods)]
+    pub fn spawn_credit_driver<S, Fut>(&self, send_control: S) -> Result<()>
+    where
+        S: Fn(Bytes, ChannelLane) -> Fut + Clone + rings_runtime::MaybeSendSync + 'static,
+        Fut: Future<Output = Result<()>> + rings_runtime::MaybeSend + 'static,
+    {
+        for index in CreditIndex::ALL {
+            let link = Arc::clone(&self.link_credit);
+            let send = send_control.clone();
+            rings_runtime::spawn_detached(async move {
+                while let Some(signal) = link.next_signal(index).await {
+                    let wire = match rings_codec::serialize(&TransportMessage::Signal(signal)) {
+                        Ok(bytes) => Bytes::from(bytes),
+                        Err(error) => {
+                            tracing::error!(peer = %link.peer, ?error, "failed to encode credit signal");
+                            let _ = link.requeue(index, signal);
+                            return;
+                        }
+                    };
+                    let mut frame = CreditFrame {
+                        wire: wire.clone(),
+                        index,
+                        signal: Some(signal),
+                        link: Arc::downgrade(&link),
+                    };
+                    match send(wire, index.lane()).await {
+                        Ok(()) => {
+                            frame.mark_sent();
+                        }
+                        Err(Error::ConnectionReleased(_)) => {
+                            frame.mark_sent();
+                            return;
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                peer = %link.peer,
+                                ?error,
+                                "external transport failed to send credit frame; backing off and requeuing"
+                            );
+                            drop(frame);
+                            if rings_runtime::sleep(CREDIT_RESEND_PAUSE).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|_| Error::CreditPumpUnavailable(self.cid.to_string()))?;
+        }
+        let checker = self.weak_idle_checker();
+        rings_runtime::spawn_detached(async move {
+            loop {
+                if rings_runtime::sleep(super::link_credit::LANE_IDLE_PERIOD)
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+                if !checker.check_once() {
+                    return;
+                }
+            }
+        })
+        .map_err(|_| Error::CreditPumpUnavailable(self.cid.to_string()))?;
+        Ok(())
     }
 
     /// Notify the data channel is open.
@@ -588,7 +793,7 @@ impl InnerTransportCallback {
     /// it this callback, so the callback's drop cannot be what releases the sender: the
     /// generation's end is. Every terminal state (`Failed`, `Closed`) closes the credit, and a
     /// backend whose local close emits no state change closes it there.
-    pub(crate) fn close_link_credit(&self) {
+    pub fn close_link_credit(&self) {
         self.link_credit.close();
     }
 }

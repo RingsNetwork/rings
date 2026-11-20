@@ -5,7 +5,6 @@ use std::path::PathBuf;
 
 use rings_gateway::GatewayConfig;
 use rings_gateway::GatewayPlan;
-use rings_turn::TurnCredentialSigner;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -314,6 +313,11 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub udp_port_max: Option<u16>,
+    /// Optional serde-extensible tagged transport configuration (`{ kind, params }`).
+    /// When present, overrides the default `"webrtc"` transport constructed from `ice_servers`,
+    /// `external_ip`, and `udp_port_min` / `udp_port_max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<crate::processor::NetworkConfigDescriptor>,
     /// Persistent DHT data storage configuration.
     pub data_storage: StorageConfig,
     /// Peer measurement storage configuration.
@@ -328,31 +332,16 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             Error::OpenFileError(format!("{}: {error}", delegatee_key_path.display()))
         })?;
 
-        let ice_servers = config
-            .delegator_key
-            .as_deref()
-            .and_then(|path| super::horizon::read_delegator_secret_key(path).ok())
-            .filter(|delegator_key| {
-                delegatee_key
-                    .trim()
-                    .parse::<crate::prelude::DelegateeKey>()
-                    .is_ok_and(|parsed| {
-                        crate::prelude::rings_core::dht::Did::from(delegator_key.address())
-                            == parsed.delegator_did()
-                    })
-            })
-            .and_then(|delegator_key| delegator_key.sign_ice_servers(&config.ice_servers).ok())
-            .unwrap_or(config.ice_servers);
-
         let udp_range =
             crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
 
         Ok(Self {
             network_id: config.network_id,
-            ice_servers,
+            ice_servers: config.ice_servers,
             external_address: config.external_ip,
             udp_port_min: udp_range.map(|range| range.min()),
             udp_port_max: udp_range.map(|range| range.max()),
+            network: config.network,
             delegatee_key,
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval_secs: config.online_node_heartbeat_interval_secs,
@@ -424,6 +413,7 @@ impl Config {
             external_ip: None,
             udp_port_min: None,
             udp_port_max: None,
+            network: None,
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }

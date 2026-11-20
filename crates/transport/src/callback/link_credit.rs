@@ -60,8 +60,7 @@ mod view;
 /// pool and admitted no frame for it is shrunk to its floor (load-bounds paper, Law 3). On a
 /// link whose round trip exceeds it, a lane paused for one round trip is shrunk, and its next
 /// burst waits one round trip for pooled credit again; no frame is refused.
-#[cfg(any(feature = "dummy", rings_transport_webrtc))]
-pub(crate) const LANE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
+pub const LANE_IDLE_PERIOD: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub use pool::NodeFramePool;
 pub use view::LaneCreditView;
@@ -464,12 +463,11 @@ impl LinkCredit {
         );
     }
 
-    #[cfg(any(feature = "dummy", rings_transport_webrtc))]
     /// The idle check, made every [`LANE_IDLE_PERIOD`] by its driver (`credit_pump` in a WebRTC
-    /// backend, the controlled scheduler's virtual clock in the dummy one), or by a test: every
-    /// data lane that holds a share of the pool and admitted no
-    /// frame since the last check is shrunk to its floor (Law 3). Returns `false` once the
-    /// connection is gone, which ends the driver.
+    /// backend, `CreditDriver` in an external backend, or the controlled scheduler's virtual clock
+    /// in the dummy one), or by a test: every data lane that holds a share of the pool and
+    /// admitted no frame since the last check is shrunk to its floor (Law 3). Returns `false` once
+    /// the connection is gone, which ends the driver.
     pub(crate) fn idle_check(&self) -> bool {
         let pumps = {
             let mut state = self.lock();
@@ -532,7 +530,6 @@ impl LinkCredit {
         })
     }
 
-    #[cfg(rings_transport_webrtc)]
     /// Queue `signal` on the lane of `index` again after its send failed, idempotent as every
     /// signal is. Post: `false`, queuing nothing, once the connection is gone, when no send can
     /// succeed.
