@@ -343,7 +343,7 @@ impl TransportSpec {
         ));
         Ok(SwarmTransport::new(SwarmTransportParts {
             network_id: 0,
-            webrtc: SwarmWebrtcConfig::new("".to_string(), None, None),
+            transport: crate::tests::test_transport(""),
             delegatee_key,
             dht,
             measure: Some(self.measure),
@@ -402,7 +402,7 @@ fn finger_request(transport: &SwarmTransport, slot: usize) -> Result<FingerFixRe
 }
 
 #[cfg(feature = "dummy")]
-pub(super) async fn open_dummy_data_channel_before_ice_connected(
+pub(super) async fn open_dummy_channel_before_transport_connected(
     transport: &SwarmTransport,
     peer: Did,
 ) -> Result<()> {
@@ -412,17 +412,17 @@ pub(super) async fn open_dummy_data_channel_before_ice_connected(
 
     connection
         .connection
-        .webrtc_answer_offer("remote-dummy-connection".to_string())
+        .answer_offer("remote-dummy-connection".to_string())
         .await
         .map_err(Error::Transport)?;
     // The browser callback order under test: the channel opens while the peer connection still
     // reports `Connecting`. The dummy is causal on its own, so the order is set explicitly.
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
     assert_eq!(
-        connection.webrtc_connection_state(),
-        WebrtcConnectionState::Connecting
+        connection.connection_state(),
+        TransportConnectionState::Connecting
     );
-    assert!(connection.connection.data_channel_is_open());
+    assert!(connection.connection.channel_is_open());
     Ok(())
 }
 
@@ -430,9 +430,14 @@ pub(super) async fn open_dummy_data_channel_before_ice_connected(
 fn test_swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .build();
+    let swarm = SwarmBuilder::new(
+        7,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        delegatee_key,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .build();
 
     assert_eq!(
         swarm.dht_virtual_nodes(),
@@ -451,10 +456,15 @@ fn test_swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -
     let key = SecretKey::random();
     let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
     let requested = MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1);
-    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), delegatee_key)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .dht_virtual_nodes(requested)
-        .build();
+    let swarm = SwarmBuilder::new(
+        7,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        delegatee_key,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .dht_virtual_nodes(requested)
+    .build();
 
     assert_eq!(
         swarm.dht_virtual_nodes(),
@@ -480,7 +490,7 @@ async fn test_successor_failover_considers_active_peer_outside_topology_hints() 
         let (attempt, _offer) = transport
             .prepare_connection_offer_with_attempt(peer, callback)
             .await?;
-        open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+        open_dummy_channel_before_transport_connected(&transport, peer).await?;
         assert!(transport.activate_connection_for_test(attempt)?);
     }
     transport.dht.admit_connected(removed, None)?;
@@ -658,9 +668,9 @@ impl PendingPeer {
     /// Admit the handshake through the production path: the data channel opens before ICE
     /// connects.
     async fn admit(&self, transport: &SwarmTransport) -> Result<()> {
-        open_dummy_data_channel_before_ice_connected(transport, self.peer).await?;
+        open_dummy_channel_before_transport_connected(transport, self.peer).await?;
         self.callback
-            .on_data_channel_open(&self.peer.to_string())
+            .on_channel_open(&self.peer.to_string())
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     }
@@ -811,7 +821,7 @@ async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
 /// reaches the application; the later admission is announced as `PeerAdmitted` alone.
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_pending_disconnected_before_data_channel_open_is_not_reported() -> Result<()> {
+async fn test_pending_disconnected_before_channel_open_is_not_reported() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let recorder = ApplicationRecorder::attach(&transport)?;
@@ -820,7 +830,7 @@ async fn test_pending_disconnected_before_data_channel_open_is_not_reported() ->
 
     pending
         .callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Disconnected)
+        .on_connection_state_change(&peer.to_string(), TransportConnectionState::Disconnected)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -856,14 +866,14 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, offer_callback)
         .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
 
     let opening_transport = Arc::clone(&transport);
     let opening = tokio::spawn(async move {
         let callback =
             SwarmTransportCallback::new(opening_transport).with_pending_connection_attempt(attempt);
         callback
-            .on_data_channel_open(&peer.to_string())
+            .on_channel_open(&peer.to_string())
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
@@ -874,7 +884,7 @@ async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -
     let terminal_callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(attempt);
     terminal_callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
+        .on_connection_state_change(&peer.to_string(), TransportConnectionState::Closed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 

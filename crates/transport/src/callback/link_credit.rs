@@ -26,21 +26,14 @@
 //! the tasks it unblocked after committing its state. The node's pool is locked on its own,
 //! never together with a link's lock, and never across a suspension point either.
 
-#[cfg(rings_transport_backend)]
 use std::future::poll_fn;
-#[cfg(rings_transport_backend)]
 use std::future::Future;
-#[cfg(not(rings_transport_backend))]
-use std::marker::PhantomData;
 use std::mem;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-#[cfg(rings_transport_backend)]
 use std::sync::Weak;
-#[cfg(rings_transport_backend)]
 use std::task::Context;
-#[cfg(rings_transport_backend)]
 use std::task::Poll;
 use std::task::Waker;
 
@@ -54,12 +47,9 @@ use crate::core::credit::ReceiveWindow;
 use crate::core::credit::SendCredit;
 use crate::core::pool::ChannelLane;
 #[cfg(test)]
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
-#[cfg(rings_transport_backend)]
+use crate::core::pool::CHANNEL_POOL_SIZE;
 use crate::core::transport::SendAcceptance;
-#[cfg(rings_transport_backend)]
 use crate::error::Error;
-#[cfg(rings_transport_backend)]
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
@@ -113,7 +103,6 @@ impl SignalOutbox {
         }
     }
 
-    #[cfg(rings_transport_backend)]
     /// Take one signal to send: a return first, then a shrink, then a credit.
     fn take(&mut self) -> Option<LaneSignal> {
         if let Some((bound, generation)) = self.returned.take() {
@@ -132,7 +121,6 @@ impl SignalOutbox {
 /// wait removes exactly its own entry when it ends.
 struct SendWaiter {
     /// The wait's identity.
-    #[cfg(rings_transport_backend)]
     id: u64,
     /// The task to wake.
     waker: Waker,
@@ -145,7 +133,6 @@ struct LinkCreditState {
     /// Senders waiting for credit, per lane.
     send_waiters: PerLane<Vec<SendWaiter>>,
     /// The identity of the next credit wait.
-    #[cfg(rings_transport_backend)]
     next_waiter: u64,
     /// The receiving end of each lane.
     receive: PerLane<ReceiveWindow>,
@@ -175,7 +162,6 @@ impl LinkCreditState {
     }
 }
 
-#[cfg(rings_transport_backend)]
 impl LinkCreditState {
     /// Register `waker` for the wait `id` on credit index `index`, giving the wait its identity
     /// on its first registration; a wait that registers again only refreshes its waker.
@@ -223,7 +209,6 @@ impl LinkCredit {
             state: Mutex::new(LinkCreditState {
                 send: PerLane::from_fn(|index| SendCredit::new(CreditWindow::of(index))),
                 send_waiters: PerLane::default(),
-                #[cfg(rings_transport_backend)]
                 next_waiter: 0,
                 receive: PerLane::from_fn(|index| ReceiveWindow::new(CreditWindow::of(index))),
                 outbox: PerLane::default(),
@@ -247,7 +232,6 @@ impl LinkCredit {
         lock_recover(&self.state)
     }
 
-    #[cfg(rings_transport_backend)]
     /// Wait for one credit on `lane`.
     ///
     /// Law (backpressure, not a verdict). The wait ends only when the peer raises the lane's
@@ -263,7 +247,6 @@ impl LinkCredit {
         poll_fn(|context| self.poll_reserve(wait.index, &mut wait.id, context)).await
     }
 
-    #[cfg(rings_transport_backend)]
     /// One attempt of [`Self::reserve`]: a reservation now, or the wait `id` registered (and
     /// logged when it starts).
     fn poll_reserve(
@@ -299,7 +282,6 @@ impl LinkCredit {
         Poll::Pending
     }
 
-    #[cfg(rings_transport_backend)]
     /// Remove the wait `id` on credit index `index`: it ended, granted or abandoned.
     fn forget_waiter(&self, index: CreditIndex, id: u64) {
         self.lock().send_waiters[index].retain(|waiter| waiter.id != id);
@@ -529,7 +511,6 @@ impl LinkCredit {
         pumps.into_iter().for_each(Waker::wake);
     }
 
-    #[cfg(rings_transport_backend)]
     /// Wait for a signal to send on the lane of `index`, and take it.
     ///
     /// Post: `Some` with the next signal of the lane's outbox; `None` once the connection is
@@ -606,9 +587,9 @@ impl LinkCredit {
 
     /// Frames of each lane admitted and not yet released.
     #[cfg(test)]
-    pub(crate) fn occupancy(&self) -> [u64; DATA_CHANNEL_POOL_SIZE as usize] {
+    pub(crate) fn occupancy(&self) -> [u64; CHANNEL_POOL_SIZE as usize] {
         let mut receive = self.lock().receive;
-        let mut occupancy = [0; DATA_CHANNEL_POOL_SIZE as usize];
+        let mut occupancy = [0; CHANNEL_POOL_SIZE as usize];
         for ((_, window), slot) in receive.iter_mut().zip(occupancy.iter_mut()) {
             *slot = window.occupancy();
         }
@@ -624,7 +605,6 @@ impl Drop for LinkCredit {
     }
 }
 
-#[cfg(rings_transport_backend)]
 /// One pending credit wait, of [`LinkCredit::reserve`] or [`LaneCreditView::credited`]: its
 /// registration is removed when it ends, granted or abandoned, so an abandoned wait leaves no
 /// waker behind. It holds the link weakly: a link already gone holds no waker of it.
@@ -637,7 +617,6 @@ struct CreditWait {
     id: Option<u64>,
 }
 
-#[cfg(rings_transport_backend)]
 impl CreditWait {
     /// A wait on credit index `index` of `link`, not yet registered.
     fn new(link: Weak<LinkCredit>, index: CreditIndex) -> Self {
@@ -649,7 +628,6 @@ impl CreditWait {
     }
 }
 
-#[cfg(rings_transport_backend)]
 impl Drop for CreditWait {
     fn drop(&mut self) {
         if let (Some(id), Some(link)) = (self.id, self.link.upgrade()) {
@@ -666,12 +644,8 @@ impl Drop for CreditWait {
 /// the send is timed. Dropping the reservation unused returns the credit.
 ///
 /// [`SendPermit::with_credit`]: crate::core::transport::SendPermit::with_credit
-pub struct LaneCreditReservation(
-    #[cfg(rings_transport_backend)] pub(crate) CreditReservation,
-    #[cfg(not(rings_transport_backend))] PhantomData<()>,
-);
+pub struct LaneCreditReservation(pub(crate) CreditReservation);
 
-#[cfg(rings_transport_backend)]
 /// One credit held for a send, settled when the reservation is dropped.
 ///
 /// Law (exact accounting). The credit is spent iff the bound send crossed its irrevocable
@@ -689,7 +663,6 @@ pub(crate) struct CreditReservation {
     send: Option<SendAcceptance>,
 }
 
-#[cfg(rings_transport_backend)]
 impl CreditReservation {
     /// Whether the credit is of `link`'s connection: a credit settles only its own window.
     pub(crate) fn is_of(&self, link: &Arc<LinkCredit>) -> bool {
@@ -704,7 +677,6 @@ impl CreditReservation {
     }
 }
 
-#[cfg(rings_transport_backend)]
 impl Drop for CreditReservation {
     fn drop(&mut self) {
         let irrevocable = self

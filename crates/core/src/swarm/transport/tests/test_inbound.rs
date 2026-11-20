@@ -38,7 +38,7 @@ async fn test_a_link_frame_of_another_wire_version_is_refused_before_decoding() 
     let pending = pending_peer(&transport).await?;
     pending.admit(&transport).await?;
     let offer = Message::ConnectNodeSend(ConnectNodeSend {
-        sdp: String::new(),
+        handshake: String::new(),
         dht_protocol_mode: transport.dht_protocol_mode(),
         relay_custody: RelayCustody::Holds,
     });
@@ -107,16 +107,16 @@ async fn admit_after_one_held_frame(
     assert_eq!(pending.callback.pre_admission_held_count_for_test(), 1);
     assert_eq!(recorder.observed(), 0);
 
-    transport.force_peer_connection_state_without_callback(
+    transport.force_connection_state_without_callback(
         pending.peer,
-        WebrtcConnectionState::Connecting,
+        TransportConnectionState::Connecting,
     )?;
-    transport.force_peer_data_channel_open_without_callback(pending.peer, Some(true))?;
+    transport.force_peer_channel_open_without_callback(pending.peer, Some(true))?;
     let callback = Arc::clone(&pending.callback);
     let cid = pending.peer.to_string();
     let open = tokio::spawn(async move {
         callback
-            .on_data_channel_open(&cid)
+            .on_channel_open(&cid)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });

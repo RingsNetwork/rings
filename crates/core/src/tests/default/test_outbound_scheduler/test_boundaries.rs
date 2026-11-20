@@ -5,7 +5,7 @@ use crate::swarm::application::ApplicationData;
 async fn test_outbound_capacity_is_reserved_before_readiness_wait() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let _pending_open = PendingDataChannelOpenGuard::new();
+    let _pending_open = PendingChannelOpenGuard::new();
     let swarm = node1.swarm.clone();
     let send = tokio::spawn(async move {
         swarm

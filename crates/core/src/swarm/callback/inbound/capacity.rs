@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_transport::core::pool::ChannelLane;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
 use super::InboundLane;
 use super::INBOUND_LANE_COUNT;
@@ -41,12 +41,12 @@ const _: () = {
     // The largest charge an honest first chunk takes, `n·d₀` for a message of at most
     // `TRANSPORT_MAX_SIZE` cut into data-channel-sized chunks, fits one peer's budget (#932).
     assert!(
-        retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE + MAX_DATA_CHANNEL_MESSAGE_SIZE)
+        retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE + MAX_CHANNEL_MESSAGE_SIZE)
             <= INBOUND_PEER_BYTE_CAPACITY
     );
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
-    assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
+    assert!(memory_reservation(MAX_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
     assert!(
         memory_reservation(crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES)
             <= INBOUND_RESERVED_BYTES_PER_LANE
@@ -57,7 +57,7 @@ const _: () = {
     // The largest honest message fits the open-message pool alone, and the open messages of
     // every slot of the default topology fit the mailbox (load-bounds paper, Def. 6).
     assert!(
-        retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE + MAX_DATA_CHANNEL_MESSAGE_SIZE)
+        retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE + MAX_CHANNEL_MESSAGE_SIZE)
             <= OPEN_SHARES.pool
     );
     assert!(

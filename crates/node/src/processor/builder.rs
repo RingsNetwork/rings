@@ -17,9 +17,7 @@ use crate::prelude::rings_core::dht::RelayReplication;
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
     pub(in crate::processor) network_id: u32,
-    pub(in crate::processor) ice_servers: String,
-    pub(in crate::processor) external_address: Option<String>,
-    pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
+    pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
     pub(in crate::processor) delegatee_key: DelegateeKey,
     pub(in crate::processor) onion_process_epoch: Option<OnionProcessEpoch>,
     pub(in crate::processor) clock: SharedClock,
@@ -68,9 +66,7 @@ impl ProcessorBuilder {
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
         Ok(Self {
             network_id: config.network_id,
-            ice_servers: config.ice_servers.clone(),
-            external_address: config.external_address.clone(),
-            webrtc_udp_port_range: config.webrtc_udp_port_range()?,
+            network_parameters: Arc::clone(&config.network_parameters),
             delegatee_key: config.delegatee_key.clone(),
             onion_process_epoch: None,
             clock: config.clock.clone(),
@@ -274,6 +270,13 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Inject custom [`NodeNetworkParameters`] to customize the processor's transport (#1291).
+    pub fn network_parameters<P>(mut self, params: P) -> Self
+    where P: NodeNetworkParameters + 'static {
+        self.network_parameters = Arc::new(params);
+        self
+    }
+
     /// Route native remote JSON-RPC requests (`nodeDid`, `answerOffer`, `acceptAnswer`) through
     /// `proxy` instead of connecting directly.
     pub fn remote_rpc_proxy(mut self, proxy: crate::remote_endpoint::RemoteRpcProxy) -> Self {
@@ -301,7 +304,7 @@ impl ProcessorBuilder {
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
-        let endpoint_hint = self.external_address.clone();
+        let endpoint_hint = self.network_parameters.endpoint_hint().map(str::to_owned);
         let initial_epoch = self
             .onion_process_epoch
             .unwrap_or_else(|| OnionProcessEpoch::from_rng(&mut self.rng.lock_rng()));
@@ -351,9 +354,13 @@ impl ProcessorBuilder {
         let observability = Arc::new(crate::observability::Observability::new_with_clock(
             self.clock.clone(),
         ));
+        let shared_transport = self
+            .network_parameters
+            .build_transport(&self.delegatee_key)?;
+
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
-            &self.ice_servers,
+            shared_transport,
             storage,
             self.delegatee_key,
         );
@@ -393,13 +400,6 @@ impl ProcessorBuilder {
         };
         swarm_builder = swarm_builder.observer(observer);
 
-        if let Some(external_address) = self.external_address {
-            swarm_builder = swarm_builder.external_address(external_address);
-        }
-        if let Some(range) = self.webrtc_udp_port_range {
-            swarm_builder = swarm_builder.webrtc_udp_port_range(range);
-        }
-
         let measure = self.measure;
         if let Some(measure) = &measure {
             let implementation: MeasureImpl = measure.clone();
@@ -411,6 +411,7 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
+            network_parameters: self.network_parameters,
             onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new_for_did(
                 onion_entry_guard_storage,

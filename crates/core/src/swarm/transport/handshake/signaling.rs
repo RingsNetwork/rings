@@ -208,7 +208,7 @@ impl SwarmTransport {
             local = %self.dht.did,
             peer = %peer,
             generation = attempt.generation,
-            sdp_bytes = offer.sdp.len(),
+            handshake_bytes = offer.handshake.len(),
             "connection offer send start"
         );
         let mut payload = match sender

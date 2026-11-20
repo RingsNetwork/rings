@@ -16,7 +16,7 @@ use crate::error::Result;
 /// one state and cannot be pending, admitting, and active at the same time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
-pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
+pub(in crate::swarm::transport) enum PeerSlotLifecycle {
     Pending {
         attempt: PendingConnectionAttempt,
         started_at_ms: i64,
@@ -31,7 +31,7 @@ pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
     Active { attempt: PendingConnectionAttempt },
 }
 
-impl PeerConnectionLifecycle {
+impl PeerSlotLifecycle {
     pub(in crate::swarm::transport) const fn attempt(self) -> PendingConnectionAttempt {
         match self {
             Self::Pending { attempt, .. }
@@ -70,14 +70,14 @@ impl<T> RetirementOutcome<T> {
 }
 
 pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
-    state: &'state mut PeerConnectionLifecycle,
+    state: &'state mut PeerSlotLifecycle,
     attempt: PendingConnectionAttempt,
 }
 
 impl AdmittingConnection<'_> {
     /// Apply `Admitting(attempt) -> Active(attempt)`.
     pub(in crate::swarm::transport) fn activate(self) {
-        *self.state = PeerConnectionLifecycle::Active {
+        *self.state = PeerSlotLifecycle::Active {
             attempt: self.attempt,
         };
     }
@@ -218,7 +218,7 @@ impl ReservationVerdict {
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
     bounds: LifecycleBounds,
     next_generation: u64,
-    peers: BTreeMap<Did, PeerConnectionLifecycle>,
+    peers: BTreeMap<Did, PeerSlotLifecycle>,
     /// The signaling state of every pending record (`Invariant (Signaling)`).
     handshakes: BTreeMap<Did, Handshake>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
@@ -317,11 +317,10 @@ impl ConnectionLifecycleRegistry {
         handshake: Handshake,
     ) {
         self.handshakes.insert(attempt.peer, handshake);
-        self.peers
-            .insert(attempt.peer, PeerConnectionLifecycle::Pending {
-                attempt,
-                started_at_ms: now_ms,
-            });
+        self.peers.insert(attempt.peer, PeerSlotLifecycle::Pending {
+            attempt,
+            started_at_ms: now_ms,
+        });
     }
 
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
@@ -357,7 +356,7 @@ impl ConnectionLifecycleRegistry {
         self.bounds = bounds;
     }
 
-    pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerConnectionLifecycle> {
+    pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerSlotLifecycle> {
         self.peers.get(&peer).copied()
     }
 
@@ -366,9 +365,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Admitting { .. })
-            | Some(PeerConnectionLifecycle::Active { .. })
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Admitting { .. })
+            | Some(PeerSlotLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -378,9 +377,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. })
-            | Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Active { .. }) | None => None,
+            Some(PeerSlotLifecycle::Pending { attempt, .. })
+            | Some(PeerSlotLifecycle::Admitting { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Active { .. }) | None => None,
         }
     }
 
@@ -390,9 +389,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Pending { .. })
-            | Some(PeerConnectionLifecycle::Active { .. })
+            Some(PeerSlotLifecycle::Admitting { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Pending { .. })
+            | Some(PeerSlotLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -402,9 +401,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Active { attempt }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Pending { .. })
-            | Some(PeerConnectionLifecycle::Admitting { .. })
+            Some(PeerSlotLifecycle::Active { attempt }) => Some(attempt),
+            Some(PeerSlotLifecycle::Pending { .. })
+            | Some(PeerSlotLifecycle::Admitting { .. })
             | None => None,
         }
     }
@@ -451,14 +450,13 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active { attempt }
+                    PeerSlotLifecycle::Active { attempt }
                         if !self.send_terminal.contains(attempt) =>
                     {
                         Some((*peer, *attempt))
                     }
-                    PeerConnectionLifecycle::Active { .. } => None,
-                    PeerConnectionLifecycle::Pending { .. }
-                    | PeerConnectionLifecycle::Admitting { .. } => None,
+                    PeerSlotLifecycle::Active { .. } => None,
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. } => None,
                 })
                 .collect(),
         }
@@ -470,9 +468,8 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active { attempt } => Some((*peer, *attempt)),
-                    PeerConnectionLifecycle::Pending { .. }
-                    | PeerConnectionLifecycle::Admitting { .. } => None,
+                    PeerSlotLifecycle::Active { attempt } => Some((*peer, *attempt)),
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. } => None,
                 })
                 .collect(),
         }
@@ -486,7 +483,7 @@ impl ConnectionLifecycleRegistry {
         let Some(state) = self.peers.get_mut(&attempt.peer) else {
             return false;
         };
-        let PeerConnectionLifecycle::Pending {
+        let PeerSlotLifecycle::Pending {
             attempt: current,
             started_at_ms,
         } = *state
@@ -496,7 +493,7 @@ impl ConnectionLifecycleRegistry {
         if current != attempt {
             return false;
         }
-        *state = PeerConnectionLifecycle::Admitting {
+        *state = PeerSlotLifecycle::Admitting {
             attempt,
             started_at_ms,
         };
@@ -511,7 +508,7 @@ impl ConnectionLifecycleRegistry {
         let state = self.peers.get_mut(&attempt.peer)?;
         if !matches!(
             *state,
-            PeerConnectionLifecycle::Admitting {
+            PeerSlotLifecycle::Admitting {
                 attempt: current,
                 ..
             } if current == attempt
@@ -566,7 +563,7 @@ impl ConnectionLifecycleRegistry {
     ) -> bool {
         if !matches!(
             self.state(attempt.peer),
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt: current,
                 ..
             }) if current == attempt
@@ -642,15 +639,15 @@ impl ConnectionLifecycleRegistry {
             .values()
             .filter_map(|state| {
                 let (attempt, started_at_ms, phase) = match state {
-                    PeerConnectionLifecycle::Pending {
+                    PeerSlotLifecycle::Pending {
                         attempt,
                         started_at_ms,
                     } => (attempt, started_at_ms, UnadmittedPhase::Pending),
-                    PeerConnectionLifecycle::Admitting {
+                    PeerSlotLifecycle::Admitting {
                         attempt,
                         started_at_ms,
                     } => (attempt, started_at_ms, UnadmittedPhase::Admitting),
-                    PeerConnectionLifecycle::Active { .. } => return None,
+                    PeerSlotLifecycle::Active { .. } => return None,
                 };
                 let age_ms = now_ms.saturating_sub(*started_at_ms);
                 let was_offering =
@@ -711,7 +708,7 @@ impl ConnectionLifecycleRegistry {
     pub(in crate::swarm::transport) fn mark_offer_sent(
         &mut self,
         attempt: PendingConnectionAttempt,
-        sdp: String,
+        handshake: String,
         tx_id: uuid::Uuid,
     ) -> bool {
         self.advance_handshake(attempt, |current| match current {
@@ -720,7 +717,7 @@ impl ConnectionLifecycleRegistry {
                 phase: OfferPhase::Creating,
             } => Some(Handshake::Offering {
                 owner: *owner,
-                phase: OfferPhase::Sent { sdp, tx_id },
+                phase: OfferPhase::Sent { handshake, tx_id },
             }),
             Handshake::Offering { .. } | Handshake::Answering => None,
         })
@@ -781,7 +778,7 @@ impl ConnectionLifecycleRegistry {
         attempt: PendingConnectionAttempt,
     ) -> bool {
         match self.state(attempt.peer) {
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt: current, ..
             }) => {
                 current != attempt
@@ -791,10 +788,10 @@ impl ConnectionLifecycleRegistry {
                     )
             }
             Some(
-                PeerConnectionLifecycle::Admitting {
+                PeerSlotLifecycle::Admitting {
                     attempt: current, ..
                 }
-                | PeerConnectionLifecycle::Active {
+                | PeerSlotLifecycle::Active {
                     attempt: current, ..
                 },
             ) => current != attempt,
@@ -809,8 +806,7 @@ impl ConnectionLifecycleRegistry {
             .filter(|state| {
                 matches!(
                     state,
-                    PeerConnectionLifecycle::Pending { .. }
-                        | PeerConnectionLifecycle::Admitting { .. }
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. }
                 )
             })
             .count()

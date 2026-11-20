@@ -34,14 +34,14 @@ async fn test_pending_finger_update_is_applied_when_attempt_is_admitted() -> Res
     ));
     // Move past the retry cooldown while staying inside the shared admission timeout.
     tokio::time::advance(std::time::Duration::from_millis(11_000)).await;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
 
     // Reuse the original attempt token so the synthetic data-channel callback
     // can promote only the generation that queued the finger proof.
     let callback = SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(attempt);
     callback
-        .on_data_channel_open(&peer.to_string())
+        .on_channel_open(&peer.to_string())
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -93,7 +93,7 @@ async fn test_admitting_finger_update_is_retained_until_atomic_commit() -> Resul
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
 
     assert!(transport.begin_connection_admission_for_test(attempt)?);
     let observed = transport
@@ -129,9 +129,8 @@ async fn test_pending_finger_update_applies_if_admission_wins_queue_race() -> Re
         .await?;
 
     assert!(transport.activate_connection_for_test(attempt)?);
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    transport.force_connection_state_without_callback(peer, TransportConnectionState::Connected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
     assert_eq!(
         transport.record_finger_candidate(peer, finger_request(&transport, finger_index)?)?,
         FingerUpdateDisposition::Applied
@@ -327,10 +326,10 @@ async fn test_yield_pending_in_rebinds_deferred_finger_update_to_answering() -> 
                 .with_pending_connection_attempt(answering),
         )
         .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    open_dummy_channel_before_transport_connected(&transport, peer).await?;
     SwarmTransportCallback::new(Arc::clone(&transport))
         .with_pending_connection_attempt(answering)
-        .on_data_channel_open(&peer.to_string())
+        .on_channel_open(&peer.to_string())
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 

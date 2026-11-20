@@ -215,7 +215,7 @@ fn test_repair_cursor_identity_ignores_entry_iteration_order() {
 
 #[test]
 fn test_repair_phase_admits_one_bounded_storage_sync_batch() {
-    let frame_bytes = rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+    let frame_bytes = rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
     assert_eq!(SYNC_BATCH_MAX_BYTES, frame_bytes / 4);
     assert_eq!(STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP, 1);

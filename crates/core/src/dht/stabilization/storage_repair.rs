@@ -581,7 +581,7 @@ mod tests {
         let swarm = Arc::new(
             SwarmBuilder::new(
                 0,
-                "stun://stun.l.google.com:19302",
+                crate::tests::test_transport("stun://stun.l.google.com:19302"),
                 Box::new(MemStorage::new()),
                 session,
             )
@@ -611,7 +611,7 @@ mod tests {
         let swarm = Arc::new(
             SwarmBuilder::new(
                 0,
-                "stun://stun.l.google.com:19302",
+                crate::tests::test_transport("stun://stun.l.google.com:19302"),
                 Box::new(MemStorage::new()),
                 session,
             )

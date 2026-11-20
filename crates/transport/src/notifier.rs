@@ -119,10 +119,10 @@ pub(crate) async fn wait_for_data_channel_open(
     let initial = snapshot();
     // `Disconnected` remains eligible: buffered bytes may flush after ICE
     // recovery, and the delivery future observes whether that happened.
-    if initial.webrtc().is_terminal() {
-        return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
+    if initial.state().is_terminal() {
+        return Err(Error::ChannelOpen("Connection unavailable".to_string()));
     }
-    if initial.data_channel_open() {
+    if initial.channel_open() {
         return Ok(());
     }
 
@@ -131,12 +131,12 @@ pub(crate) async fn wait_for_data_channel_open(
         .await?;
 
     let after = snapshot();
-    if after.data_channel_open() {
+    if after.channel_open() {
         Ok(())
-    } else if after.webrtc().is_terminal() {
-        Err(Error::DataChannelOpen("Connection unavailable".to_string()))
+    } else if after.state().is_terminal() {
+        Err(Error::ChannelOpen("Connection unavailable".to_string()))
     } else {
-        Err(Error::DataChannelOpen(format!(
+        Err(Error::ChannelOpen(format!(
             "DataChannel not open in {timeout_seconds} seconds"
         )))
     }

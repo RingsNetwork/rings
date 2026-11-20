@@ -1,12 +1,91 @@
+use std::any::Any;
+use std::fmt;
+
 use rings_core::dht::default_storage_virtual_positions_per_owner;
 use rings_core::dht::VirtualNodeConfig;
 use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SystemClock;
+use rings_runtime::MaybeSendSync;
+use rings_transport::core::transport::SharedTransport;
+pub use rings_transport::network_config::TransportNetworkConfig;
+pub use rings_transport::network_config::UdpPortRange;
+pub use rings_transport::network_config::UdpPortRangeError;
+use rings_turn::TurnCredentialSigner;
 
 use super::*;
 use crate::remote_endpoint::RemoteRpcProxy;
+
+/// Trait defining the network parameters that customize and instantiate a node's transport (#1291).
+///
+/// From first principles, every interaction between a node (`Processor`, `ProcessorBuilder`,
+/// `ProcessorConfig`) and its network parameters reduces to three orthogonal operations:
+/// 1. **Transport instantiation** ([`build_transport`](Self::build_transport)): validates the
+///    medium's parameters and constructs a [`SharedTransport`] bound to the node's initial
+///    [`DelegateeKey`].
+/// 2. **Advertised locator hint** ([`endpoint_hint`](Self::endpoint_hint)): returns an optional
+///    external locator published in the node's online presence descriptor (`None` by default for
+///    proximity ad-hoc media such as packet radio, Bluetooth ad-hoc, ultrasonic ad-hoc, or
+///    unaddressed client nodes).
+/// 3. **Session-key rotation reaction** ([`on_session_key_rotated`](Self::on_session_key_rotated)):
+///    synchronizes the live [`SharedTransport`] when the node rotates its [`DelegateeKey`] in
+///    process (a no-op `Ok(())` by default for media whose link layer does not bind credentials
+///    to the session key).
+pub trait NodeNetworkParameters: Any + fmt::Debug + MaybeSendSync {
+    /// Validate these network parameters and instantiate a [`SharedTransport`] bound to
+    /// `delegatee_key`.
+    fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport>;
+
+    /// Return the external endpoint or locator hint advertised in the node's online presence
+    /// descriptor, if any.
+    ///
+    /// Defaults to `None` (appropriate for proximity ad-hoc media or nodes without a public locator).
+    fn endpoint_hint(&self) -> Option<&str> {
+        None
+    }
+
+    /// Synchronize the live `transport` when the node rotates its active session key to `next_key`.
+    ///
+    /// Defaults to `Ok(())` for media whose link layer does not carry session-signed credentials.
+    fn on_session_key_rotated(
+        &self,
+        _transport: &SharedTransport,
+        _next_key: &DelegateeKey,
+    ) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Implementation of [`NodeNetworkParameters`] for the built-in [`TransportNetworkConfig`].
+impl NodeNetworkParameters for TransportNetworkConfig {
+    /// Derive initial session-signed traversal credentials from `delegatee_key` (falling back to
+    /// the raw server specification if signing is unavailable for a synthetic test key) and
+    /// construct the platform's [`SharedTransport`].
+    fn build_transport(&self, delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
+        let signed = delegatee_key.sign_ice_servers(self.traversal_servers());
+        Ok(self.build_shared_transport(signed.as_deref().ok()))
+    }
+
+    /// Return the configured external endpoint hint, if any.
+    fn endpoint_hint(&self) -> Option<&str> {
+        TransportNetworkConfig::endpoint_hint(self)
+    }
+
+    /// Re-sign the configured traversal server template with `next_key` and atomically update the
+    /// live `transport`'s session credentials.
+    fn on_session_key_rotated(
+        &self,
+        transport: &SharedTransport,
+        next_key: &DelegateeKey,
+    ) -> Result<()> {
+        let signed = next_key
+            .sign_ice_servers(self.traversal_servers())
+            .map_err(Error::CoreError)?;
+        transport.update_session_credentials(&signed);
+        Ok(())
+    }
+}
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -16,14 +95,8 @@ pub struct ProcessorConfig {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub(in crate::processor) network_id: u32,
-    /// ICE servers for webrtc
-    pub(in crate::processor) ice_servers: String,
-    /// External address for webrtc
-    pub(in crate::processor) external_address: Option<String>,
-    /// Inclusive lower native WebRTC UDP port bound.
-    pub(in crate::processor) webrtc_udp_port_min: Option<u16>,
-    /// Inclusive upper native WebRTC UDP port bound.
-    pub(in crate::processor) webrtc_udp_port_max: Option<u16>,
+    /// Abstract network parameters customizing the transport layer (#1291).
+    pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
     /// [DelegateeKey].
     pub(in crate::processor) delegatee_key: DelegateeKey,
     /// Stabilization interval.
@@ -54,19 +127,20 @@ pub struct ProcessorConfig {
 
 #[wasm_export]
 impl ProcessorConfig {
-    /// Creates a new `ProcessorConfig` instance without an external address.
+    /// Creates a new `ProcessorConfig` instance without an external endpoint hint.
     pub fn new(
         network_id: u32,
-        ice_servers: String,
+        traversal_servers: String,
         delegatee_key: DelegateeKey,
         stabilize_interval: u64,
     ) -> Self {
         Self {
             network_id,
-            ice_servers,
-            external_address: None,
-            webrtc_udp_port_min: None,
-            webrtc_udp_port_max: None,
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                traversal_servers,
+                None,
+                None,
+            )),
             delegatee_key,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
@@ -128,9 +202,24 @@ impl ProcessorConfig {
         self.online_node_type = node_type;
         self
     }
-    /// Returns the validated native WebRTC UDP port range, when configured.
-    pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
-        parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
+
+    /// Return the configured [`NodeNetworkParameters`].
+    pub fn network_parameters(&self) -> &Arc<dyn NodeNetworkParameters> {
+        &self.network_parameters
+    }
+
+    /// Inject custom [`NodeNetworkParameters`] to customize the transport layer (#1291).
+    pub fn with_network_parameters<P>(mut self, params: P) -> Self
+    where P: NodeNetworkParameters + 'static {
+        self.network_parameters = Arc::new(params);
+        self
+    }
+
+    /// Returns the validated local UDP port range when configured on the built-in transport config.
+    pub fn udp_port_range(&self) -> Option<UdpPortRange> {
+        (self.network_parameters.as_ref() as &dyn Any)
+            .downcast_ref::<TransportNetworkConfig>()
+            .and_then(TransportNetworkConfig::udp_port_range)
     }
 
     /// The longer heartbeat of the two registries this node publishes, online nodes and onion
@@ -195,14 +284,17 @@ pub struct ProcessorConfigSerialized {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub(crate) network_id: u32,
-    /// A string representing ICE servers for WebRTC
+    /// Traversal/relay server specification string (serialized under the `ice_servers` key for
+    /// config file compatibility).
     pub(crate) ice_servers: String,
-    /// An optional string representing the external address for WebRTC
+    /// Optional external endpoint locator advertised by this node.
     pub(crate) external_address: Option<String>,
-    /// Inclusive lower native WebRTC UDP port bound.
-    pub(crate) webrtc_udp_port_min: Option<u16>,
-    /// Inclusive upper native WebRTC UDP port bound.
-    pub(crate) webrtc_udp_port_max: Option<u16>,
+    /// Inclusive lower local UDP port bound.
+    #[serde(default, alias = "webrtc_udp_port_min")]
+    pub(crate) udp_port_min: Option<u16>,
+    /// Inclusive upper local UDP port bound.
+    #[serde(default, alias = "webrtc_udp_port_max")]
+    pub(crate) udp_port_max: Option<u16>,
     /// A string representing the dumped `DelegateeKey`.
     pub(crate) delegatee_key: String,
     /// An unsigned integer representing the stabilization interval in seconds.
@@ -251,16 +343,14 @@ pub struct ProcessorConfigSerialized {
     pub(crate) remote_rpc_proxy_url: Option<String>,
 }
 
-pub(crate) fn parse_webrtc_udp_port_range(
+pub(crate) fn parse_udp_port_range(
     min: Option<u16>,
     max: Option<u16>,
-) -> Result<Option<WebrtcUdpPortRange>> {
+) -> Result<Option<UdpPortRange>> {
     match (min, max) {
         (None, None) => Ok(None),
-        (Some(min), Some(max)) => WebrtcUdpPortRange::new(min, max)
-            .map(Some)
-            .map_err(Error::from),
-        (min, max) => Err(Error::IncompleteWebrtcUdpPortRange { min, max }),
+        (Some(min), Some(max)) => UdpPortRange::new(min, max).map(Some).map_err(Error::from),
+        (min, max) => Err(Error::IncompleteUdpPortRange { min, max }),
     }
 }
 
@@ -312,12 +402,22 @@ pub(in crate::processor) fn validate_onion_role_config(
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
+        let Some(transport_config) =
+            (ins.network_parameters.as_ref() as &dyn Any).downcast_ref::<TransportNetworkConfig>()
+        else {
+            return Err(Error::InvalidConfig(
+                "cannot losslessly serialize custom NodeNetworkParameters into ProcessorConfigSerialized"
+                    .to_string(),
+            ));
+        };
+        let udp_port_range = transport_config.udp_port_range();
+        let traversal_servers = transport_config.traversal_servers().to_owned();
         Ok(Self {
             network_id: ins.network_id,
-            ice_servers: ins.ice_servers.clone(),
-            external_address: ins.external_address.clone(),
-            webrtc_udp_port_min: ins.webrtc_udp_port_min,
-            webrtc_udp_port_max: ins.webrtc_udp_port_max,
+            ice_servers: traversal_servers,
+            external_address: ins.network_parameters.endpoint_hint().map(str::to_owned),
+            udp_port_min: udp_port_range.map(UdpPortRange::min),
+            udp_port_max: udp_port_range.map(UdpPortRange::max),
             delegatee_key: ins.delegatee_key.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
@@ -352,8 +452,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
 impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
-        let webrtc_udp_port_range =
-            parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
+        let udp_port_range = parse_udp_port_range(ins.udp_port_min, ins.udp_port_max)?;
         let remote_rpc_proxy = ins
             .remote_rpc_proxy_url
             .as_deref()
@@ -367,10 +466,11 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
         Ok(Self {
             network_id: ins.network_id,
-            ice_servers: ins.ice_servers.clone(),
-            external_address: ins.external_address.clone(),
-            webrtc_udp_port_min: webrtc_udp_port_range.map(WebrtcUdpPortRange::min),
-            webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
+            network_parameters: Arc::new(TransportNetworkConfig::new(
+                ins.ice_servers,
+                ins.external_address,
+                udp_port_range,
+            )),
             delegatee_key: DelegateeKey::from_str(&ins.delegatee_key)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
             online_node_heartbeat_interval,

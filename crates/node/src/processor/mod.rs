@@ -38,7 +38,6 @@ use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -112,9 +111,13 @@ mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
-pub(crate) use config::parse_webrtc_udp_port_range;
+pub(crate) use config::parse_udp_port_range;
+pub use config::NodeNetworkParameters;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+pub use config::TransportNetworkConfig;
+pub use config::UdpPortRange;
+pub use config::UdpPortRangeError;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
 pub use handshake::OfferReplyKind;
@@ -144,6 +147,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Live delegatee key and retained unexpired previous keys, shared across clones (#1153).
     session_keys: Arc<SessionKeyRing>,
+    /// Abstract network parameters customizing this node's transport (#1291).
+    network_parameters: Arc<dyn NodeNetworkParameters>,
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
@@ -214,7 +219,19 @@ impl Processor {
     }
 
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
-    /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport and session-bound transport
+    /// credentials in lockstep on success (#1153, #1291).
+    ///
+    /// # Invariant (Four-Component Transactional Lockstep)
+    ///
+    /// Across every renewal outcome (`MintErr`, `ValidationErr`, `TransportRotationErr`,
+    /// `PersistErr`, `SwarmErr`, and `CommitOk`), `(k_ring, k_disk, k_swarm, k_transport)` never
+    /// diverge:
+    /// 1. `on_session_key_rotated` runs before `persist(next)` and `swarm.set_delegatee_key`,
+    ///    so any transport credential derivation or rotation failure aborts before touching disk
+    ///    or swarm state.
+    /// 2. If `persist(next)` or `swarm.set_delegatee_key` fails after `on_session_key_rotated`,
+    ///    `on_session_key_rotated` is rolled back with the prior active key before returning `Err`.
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
         now_ms: u128,
@@ -225,13 +242,34 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
-        let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            persist(next)?;
-            self.swarm
-                .set_delegatee_key(next.clone())
-                .map_err(Error::CoreError)
-        })?;
+        let (_next, horizon) = self
+            .session_keys
+            .renew_with(now_ms, mint, |current, next| {
+                self.network_parameters
+                    .on_session_key_rotated(self.swarm.transport(), next)?;
+                if let Err(err) = persist(next).and_then(|()| {
+                    self.swarm
+                        .set_delegatee_key(next.clone())
+                        .map_err(Error::CoreError)
+                }) {
+                    let _ = self
+                        .network_parameters
+                        .on_session_key_rotated(self.swarm.transport(), current);
+                    return Err(err);
+                }
+                Ok(())
+            })?;
         Ok(horizon)
+    }
+
+    /// Return the currently installed session-bound transport credential string, if any.
+    pub fn session_transport_credentials(&self) -> Option<String> {
+        self.swarm.transport().session_credentials()
+    }
+
+    /// Return the [`NodeNetworkParameters`] customizing this processor's transport.
+    pub fn network_parameters(&self) -> &Arc<dyn NodeNetworkParameters> {
+        &self.network_parameters
     }
 
     /// Replace this node's active session key in process at `now_ms`, retaining the previous key

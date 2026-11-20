@@ -98,3 +98,26 @@ fn test_oauth_credential_is_rejected() {
         IceCredentialType::Password,
     );
 }
+
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+#[wasm_bindgen_test::wasm_bindgen_test]
+fn test_transform() {
+    use js_sys::Array;
+    use js_sys::Reflect;
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::JsValue;
+    use web_sys::RtcIceServer;
+
+    let c = "turn://ryan@ethereum.org:9090/nginx/v2";
+    let ret_a: RtcIceServer = IceServer::from_str(c).unwrap().into();
+    let ret_urls = Reflect::get(&ret_a, &JsValue::from_str("urls")).unwrap();
+    let urls: &Array = ret_urls.as_ref().unchecked_ref();
+    assert_eq!(
+        urls.get(0),
+        JsValue::from_str("turn:ethereum.org:9090/nginx/v2")
+    );
+    assert_eq!(urls.get(1), JsValue::UNDEFINED);
+
+    let username = Reflect::get(&ret_a, &JsValue::from_str("username")).unwrap();
+    assert_eq!(username, JsValue::from_str("ryan"));
+}

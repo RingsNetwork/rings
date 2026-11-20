@@ -89,12 +89,12 @@ macro_rules! sample_message_body {
 }
 
 sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend {
-    sdp: String::new(),
+    handshake: String::new(),
     dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
     relay_custody: RelayCustody::Holds,
 });
 sample_message_body!(ConnectNodeReport, |_fixture| ConnectNodeReport {
-    sdp: String::new(),
+    handshake: String::new(),
     dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
     relay_custody: RelayCustody::Holds,
 });
@@ -433,7 +433,7 @@ fn test_message_metadata_wire_indices_follow_enum_declaration_order() -> Result<
 fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<()> {
     #[derive(Serialize)]
     struct Flattened {
-        sdp: String,
+        handshake: String,
         network_id: u32,
         storage_redundancy: u16,
         dht_virtual_nodes: u16,
@@ -441,7 +441,7 @@ fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<(
     }
 
     let flattened = Flattened {
-        sdp: "v=0".to_string(),
+        handshake: "v=0".to_string(),
         network_id: 7,
         storage_redundancy: 3,
         dht_virtual_nodes: 160,
@@ -449,12 +449,12 @@ fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<(
     };
     let mode = DhtProtocolMode::new(7, 3, 160);
     let offer = ConnectNodeSend {
-        sdp: "v=0".to_string(),
+        handshake: "v=0".to_string(),
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     };
     let answer = ConnectNodeReport {
-        sdp: "v=0".to_string(),
+        handshake: "v=0".to_string(),
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     };

@@ -68,7 +68,7 @@ const ADMITTED_AT_MS: u64 = 0;
 /// the exact-generation guard under test.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum LifecycleEvent {
-    /// The data channel of this generation opened (`on_data_channel_open`).
+    /// The data channel of this generation opened (`on_channel_open`).
     ChannelOpened(PendingConnectionAttempt),
     /// A send on this generation failed terminally (`mark_send_terminal`).
     SendTerminal(PendingConnectionAttempt),

@@ -20,15 +20,11 @@
 //! - **Lifetime.** The view holds the link weakly, and a pending wait removes its waker when it
 //!   ends, granted or abandoned.
 
-#[cfg(rings_transport_backend)]
 use std::future::poll_fn;
-#[cfg(rings_transport_backend)]
 use std::sync::Arc;
 use std::sync::Weak;
-#[cfg(rings_transport_backend)]
 use std::task::Poll;
 
-#[cfg(rings_transport_backend)]
 use super::CreditWait;
 use super::LinkCredit;
 use crate::core::credit::credit_index;
@@ -48,7 +44,6 @@ pub struct LaneCreditView {
 }
 
 impl LaneCreditView {
-    #[cfg(rings_transport_backend)]
     /// The view of `lane` of `link`.
     pub(crate) fn new(link: &Arc<LinkCredit>, lane: ChannelLane) -> Self {
         Self {
@@ -86,7 +81,6 @@ impl LaneCreditView {
 
     /// Wait until the lane may send one frame without waiting for credit (`true`), or until the
     /// connection generation is gone (`false`). Reserves nothing (the read-only law).
-    #[cfg(rings_transport_backend)]
     pub async fn credited(&self) -> bool {
         let mut wait = CreditWait::new(self.link.clone(), self.index);
         poll_fn(|context| {
@@ -105,14 +99,7 @@ impl LaneCreditView {
         })
         .await
     }
-
-    /// Without a backend no connection grants credit, so the wait ends at once: the link is
-    /// gone.
-    #[cfg(not(rings_transport_backend))]
-    pub async fn credited(&self) -> bool {
-        false
-    }
 }
 
-#[cfg(all(test, rings_transport_backend))]
+#[cfg(test)]
 mod test_view;

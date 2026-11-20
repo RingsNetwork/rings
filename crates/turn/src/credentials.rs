@@ -1,26 +1,24 @@
 use std::str::FromStr;
 
+use rings_core::delegation::Account;
+use rings_core::delegation::DelegateeKey;
+use rings_core::delegation::Delegation;
+use rings_core::dht::Did;
+use rings_core::ecc::keccak256;
+use rings_core::ecc::keys::SigningSecretKey;
+use rings_core::ecc::prime_order::NonIdentityPoint;
+use rings_core::ecc::prime_order::NonZeroScalar;
+use rings_core::ecc::prime_order::SHARED_SECRET_BYTES;
+use rings_core::ecc::signers;
+use rings_core::ecc::PublicKey;
+use rings_core::ecc::Secp256k1;
+use rings_core::ecc::SecretKey;
+use rings_core::error::Error;
+use rings_core::error::Result;
+use rings_core::utils;
 use serde::Deserialize;
 use serde::Serialize;
 use zeroize::Zeroizing;
-
-use super::Account;
-use super::DelegateeKey;
-use super::Delegation;
-use super::DelegatorAuthorization;
-use crate::dht::Did;
-use crate::ecc::keccak256;
-use crate::ecc::keys::SigningSecretKey;
-use crate::ecc::prime_order::NonIdentityPoint;
-use crate::ecc::prime_order::NonZeroScalar;
-use crate::ecc::prime_order::SHARED_SECRET_BYTES;
-use crate::ecc::signers;
-use crate::ecc::PublicKey;
-use crate::ecc::Secp256k1;
-use crate::ecc::SecretKey;
-use crate::error::Error;
-use crate::error::Result;
-use crate::utils;
 
 /// Domain separator for TURN long-term credential signatures produced by a [`DelegateeKey`] or
 /// direct [`Account`] / [`Did`] signer.
@@ -216,7 +214,7 @@ impl TurnAuthIdentity {
     /// Borrow the authorizing or signing [`Account`].
     pub fn account(&self) -> &Account {
         match self {
-            Self::Delegation(delegation) => &delegation.delegator,
+            Self::Delegation(delegation) => delegation.delegator(),
             Self::Account(account) => account,
         }
     }
@@ -474,7 +472,7 @@ impl TurnCredentials {
         server_key: &SecretKey,
         at_ms: u128,
     ) -> Result<VerifiedTurnAuth> {
-        Self::verify_under(username, server_key, at_ms, DelegatorAuthorization::Verify)
+        Self::verify_with_mode(username, server_key, at_ms, false)
     }
 
     /// Decode and verify a STUN `USERNAME` attribute against `server_key` at `at_ms` when the
@@ -484,12 +482,7 @@ impl TurnCredentials {
         server_key: &SecretKey,
         at_ms: u128,
     ) -> Result<VerifiedTurnAuth> {
-        Self::verify_under(
-            username,
-            server_key,
-            at_ms,
-            DelegatorAuthorization::Established,
-        )
+        Self::verify_with_mode(username, server_key, at_ms, true)
     }
 
     /// Decode the `(TurnAuthIdentity, optional_session_pubkey, sig_bytes, sig_b58)` parts from
@@ -548,11 +541,11 @@ impl TurnCredentials {
         Err(Error::Decode)
     }
 
-    pub(crate) fn verify_under(
+    fn verify_with_mode(
         username: &str,
         server_key: &SecretKey,
         at_ms: u128,
-        authorization: DelegatorAuthorization,
+        established: bool,
     ) -> Result<VerifiedTurnAuth> {
         let server_pubkey = server_key.pubkey();
         let (identity, session_pubkey, sig_bytes, _sig_b58) =
@@ -560,7 +553,11 @@ impl TurnCredentials {
         let client_pubkey = match (&identity, session_pubkey) {
             (TurnAuthIdentity::Delegation(delegation), _) => {
                 let transcript = pack_turn_auth(delegation, server_pubkey)?;
-                delegation.signer_under(&transcript, &sig_bytes, at_ms, authorization)?
+                if established {
+                    delegation.recover_established_signer_at(&transcript, &sig_bytes, at_ms)?
+                } else {
+                    delegation.recover_signer_at(&transcript, &sig_bytes, at_ms)?
+                }
             }
             (TurnAuthIdentity::Account(Account::Secp256k1(did)), None) => {
                 let transcript = pack_turn_did_auth(*did, server_pubkey);
@@ -571,7 +568,7 @@ impl TurnCredentials {
             }
             (TurnAuthIdentity::Account(account), Some(session_pk)) => {
                 let _ = NonIdentityPoint::<Secp256k1>::try_from(session_pk)?;
-                if matches!(authorization, DelegatorAuthorization::Verify) {
+                if !established {
                     let transcript = pack_turn_account_auth(account, session_pk, server_pubkey);
                     if !account.account_verifier().verify(&transcript, &sig_bytes) {
                         return Err(Error::VerifySignatureFailed);
@@ -611,61 +608,42 @@ fn sign_ice_servers_with(
     Ok(out.join(";"))
 }
 
-impl DelegateeKey {
-    /// Generate signature- and ECDH-backed [`TurnCredentials`] from this [`DelegateeKey`] for
-    /// `server_pubkey`.
-    pub fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
+/// Extension trait for signing [`TurnCredentials`] and populating `turn://` / `turns://`
+/// ICE server URLs with [`DelegateeKey`], [`SecretKey`], or [`SigningSecretKey`].
+pub trait TurnCredentialSigner {
+    /// Generate signature- and ECDH-backed [`TurnCredentials`] for `server_pubkey`.
+    fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials>;
+
+    /// Populate `turn://` and `turns://` URLs carrying `?pubkey=<base58(server_pubkey)>` in a
+    /// `;`-separated ICE server string with [`TurnCredentials`] signed by `self`.
+    fn sign_ice_servers(&self, ice_servers: &str) -> Result<String> {
+        sign_ice_servers_with(ice_servers, |server_pubkey| {
+            self.turn_credentials(server_pubkey)
+        })
+    }
+}
+
+impl TurnCredentialSigner for DelegateeKey {
+    fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
         TurnCredentials::from_delegatee_key(self, server_pubkey)
     }
-
-    /// Populate `turn://` and `turns://` URLs carrying `?pubkey=<base58(server_pubkey)>` in a
-    /// `;`-separated ICE server string with [`TurnCredentials`] signed by this [`DelegateeKey`].
-    pub fn sign_ice_servers(&self, ice_servers: &str) -> Result<String> {
-        sign_ice_servers_with(ice_servers, |server_pubkey| {
-            self.turn_credentials(server_pubkey)
-        })
-    }
 }
 
-impl SecretKey {
-    /// Generate non-expiring signature- and ECDH-backed [`TurnCredentials`] signed directly by
-    /// this secp256k1 [`SecretKey`] (`Did`) for `server_pubkey`.
-    pub fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
+impl TurnCredentialSigner for SecretKey {
+    fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
         TurnCredentials::from_secret_key(self, server_pubkey)
     }
-
-    /// Populate `turn://` and `turns://` URLs carrying `?pubkey=<base58(server_pubkey)>` in a
-    /// `;`-separated ICE server string with non-expiring [`TurnCredentials`] signed directly by
-    /// this [`SecretKey`].
-    pub fn sign_ice_servers(&self, ice_servers: &str) -> Result<String> {
-        sign_ice_servers_with(ice_servers, |server_pubkey| {
-            self.turn_credentials(server_pubkey)
-        })
-    }
 }
 
-impl SigningSecretKey {
-    /// Generate non-expiring signature- and ECDH-backed [`TurnCredentials`] signed directly by
-    /// this [`SigningSecretKey`] for `server_pubkey`.
-    pub fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
+impl TurnCredentialSigner for SigningSecretKey {
+    fn turn_credentials(&self, server_pubkey: PublicKey<33>) -> Result<TurnCredentials> {
         TurnCredentials::from_signing_key(self, server_pubkey)
-    }
-
-    /// Populate `turn://` and `turns://` URLs carrying `?pubkey=<base58(server_pubkey)>` in a
-    /// `;`-separated ICE server string with non-expiring [`TurnCredentials`] signed directly by
-    /// this [`SigningSecretKey`].
-    pub fn sign_ice_servers(&self, ice_servers: &str) -> Result<String> {
-        sign_ice_servers_with(ice_servers, |server_pubkey| {
-            self.turn_credentials(server_pubkey)
-        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::str::FromStr;
-
-    use rings_transport::ice_server::IceServer;
+    use rings_core::delegation::DelegationBuilder;
 
     use super::*;
 
@@ -764,7 +742,22 @@ mod tests {
     #[test]
     fn widest_delegation_fits_within_stun_username_limit() {
         let server_pubkey = SecretKey::random().pubkey();
-        let widest_key = Delegation::widest_key_for_test();
+        let bls_key = SigningSecretKey::random_bls12381().unwrap();
+        let bls_pk = match bls_key.public_key().unwrap() {
+            rings_core::ecc::VerificationPublicKey::Bls12381(pk) => pk,
+            _ => unreachable!(),
+        };
+        let entity = base58_monero::encode_check(&bls_pk.0).unwrap();
+        let builder = DelegationBuilder::new(entity, "bls12381".to_string())
+            .set_ttl(u64::MAX)
+            .set_ts(u128::MAX);
+        let sig = bls_key
+            .sign_raw(builder.unsigned_proof().as_bytes())
+            .unwrap();
+        let widest_key = builder
+            .set_delegator_signature(sig)
+            .build_at(u128::MAX)
+            .unwrap();
         let creds = TurnCredentials::from_delegatee_key(&widest_key, server_pubkey).unwrap();
         assert!(creds.username.len() <= MAX_STUN_USERNAME_BYTES);
     }
@@ -791,7 +784,7 @@ mod tests {
             TurnCredentials::verify_at(
                 &creds.username,
                 &server_key,
-                ts_ms - crate::consts::TS_OFFSET_TOLERANCE_MS - 1
+                ts_ms - rings_core::consts::TS_OFFSET_TOLERANCE_MS - 1
             ),
             Err(Error::DelegationNotYetValid)
         ));
@@ -802,17 +795,18 @@ mod tests {
         let server_key = SecretKey::random();
         let server_pubkey = server_key.pubkey();
         let account_key = SecretKey::random();
-        let other_key = SecretKey::random();
         let ts_ms = 1_700_000_000_000;
         let ttl_ms = 60_000;
         let delegatee_key = DelegateeKey::new_with_seckey_at(&account_key, ttl_ms, ts_ms).unwrap();
-        let other_delegatee = DelegateeKey::new_with_seckey_at(&other_key, ttl_ms, ts_ms).unwrap();
+        let other_delegatee =
+            DelegateeKey::new_with_seckey_at(&account_key, ttl_ms, ts_ms).unwrap();
 
         let creds = delegatee_key.turn_credentials(server_pubkey).unwrap();
         let other_creds = other_delegatee.turn_credentials(server_pubkey).unwrap();
-        let (delegation_b58, _) = creds.username.split_once('.').unwrap();
-        let (_, other_sig) = other_creds.username.split_once('.').unwrap();
-        let forged_username = format!("{delegation_b58}.{other_sig}");
+
+        let (claim_part, _) = creds.username.split_once('.').unwrap();
+        let (_, other_sig_part) = other_creds.username.split_once('.').unwrap();
+        let forged_username = format!("{claim_part}.{other_sig_part}");
 
         assert!(matches!(
             TurnCredentials::verify_at(&forged_username, &server_key, ts_ms + 1_000),
@@ -831,30 +825,22 @@ mod tests {
         let creds = delegatee_key.turn_credentials(server_pubkey).unwrap();
 
         let turn_with_pk =
-            format_turn_server_url("turn://turn.rings.rs:3478/relay", server_pubkey).unwrap();
+            format_turn_server_url("turn://198.51.100.10:3478?transport=udp", server_pubkey)
+                .unwrap();
         let raw = format!(
-            "stun://stun.l.google.com:19302;{turn_with_pk};turn://custom:secret@other.turn.rs:3478"
+            "stun://stun.l.google.com:19302;{turn_with_pk};turn://bob:secret@198.51.100.11:3478"
         );
         let signed = delegatee_key.sign_ice_servers(&raw).unwrap();
-        let parsed = IceServer::vec_from_str(&signed).unwrap();
-        assert_eq!(parsed.len(), 3);
-
-        assert_eq!(parsed[0].urls, vec!["stun:stun.l.google.com:19302"]);
-        assert_eq!(parsed[0].username, "");
-        assert_eq!(parsed[0].credential, "");
-
-        assert_eq!(parsed[1].urls, vec!["turn:turn.rings.rs:3478/relay"]);
-        assert_eq!(parsed[1].username, creds.username);
-        assert_eq!(parsed[1].credential, creds.credential);
-
-        assert_eq!(parsed[2].urls, vec!["turn:other.turn.rs:3478"]);
-        assert_eq!(parsed[2].username, "custom");
-        assert_eq!(parsed[2].credential, "secret");
-
-        let single =
-            IceServer::from_str(&creds.apply_to_ice_server_url("turn://127.0.0.1:3478")).unwrap();
-        assert_eq!(single.urls, vec!["turn:127.0.0.1:3478"]);
-        assert_eq!(single.username, creds.username);
-        assert_eq!(single.credential, creds.credential);
+        let entries: Vec<&str> = signed.split(';').collect();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], "stun://stun.l.google.com:19302");
+        assert_eq!(
+            entries[1],
+            format!(
+                "turn://{}:{}@198.51.100.10:3478?transport=udp",
+                creds.username, creds.credential
+            )
+        );
+        assert_eq!(entries[2], "turn://bob:secret@198.51.100.11:3478");
     }
 }

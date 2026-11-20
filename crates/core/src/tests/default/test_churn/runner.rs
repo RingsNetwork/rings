@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::driver::ChurnTraceDriver;
 use super::inbox::deliver_rejoined_inbox_messages;
@@ -532,9 +532,9 @@ async fn execute_churn_event(
                     let _ = peer_node
                         .swarm
                         .transport
-                        .force_peer_connection_state_without_callback(
+                        .force_connection_state_without_callback(
                             node_did,
-                            WebrtcConnectionState::Closed,
+                            TransportConnectionState::Closed,
                         );
                 }
             }

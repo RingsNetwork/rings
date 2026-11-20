@@ -13,7 +13,7 @@ use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
 use super::connection::await_bounded_connection_close;
-use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
+use super::connection::CHANNEL_CLOSE_TIMEOUT;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use super::deadline_hold;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -45,14 +45,14 @@ use crate::message::Transaction;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
-pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
+pub(super) const CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
 
 #[cfg(test)]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(not(test))]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
+const CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
 
 /// `deadline`, one of a frame's two deadlines (its send acceptance and its delivery stall),
 /// unless a test holds the frame deadlines on this thread.
@@ -103,7 +103,7 @@ pub(super) fn delivery_stalled(
 /// The stall deadline of a frame's delivery wait in this build.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn delivery_stall_deadline_for_test() -> Duration {
-    DATA_CHANNEL_DELIVERY_TIMEOUT
+    CHANNEL_DELIVERY_TIMEOUT
 }
 
 /// When a delivery to one peer last settled: the reference of that peer's stall deadline.
@@ -211,7 +211,7 @@ impl ChunkSendCancelReason {
             Self::AdmissionCheckFailed(error) | Self::RouteCheckFailed(error) => Err(error),
             Self::TransportNotReady(readiness) => Err(Error::TransportNotReady {
                 state: readiness.state(),
-                data_channel_open: readiness.data_channel_open(),
+                channel_open: readiness.channel_open(),
             }),
         }
     }
@@ -348,7 +348,7 @@ pub(super) async fn send_data_with_timeout(
         .connection()
         .send_data(data, lane, send_permit)
         .fuse();
-    let accept_deadline = frame_deadline(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT);
+    let accept_deadline = frame_deadline(CHANNEL_SEND_ACCEPT_TIMEOUT);
     let timeout = sleep(accept_deadline).fuse();
     pin_mut!(send, timeout);
 
@@ -383,7 +383,7 @@ pub(super) async fn send_data_with_timeout(
                 if !acceptance.try_cancel() {
                     return expire_irrevocable_send(admitted, did, bytes, context).await;
                 }
-                return ChunkSendProgress::Ready(Err(Error::DataChannelSendQueueTimeout {
+                return ChunkSendProgress::Ready(Err(Error::ChannelSendQueueTimeout {
                     peer: did,
                     timeout_ms: accept_deadline.as_millis(),
                     bytes,
@@ -473,9 +473,9 @@ async fn expire_irrevocable_send(
     context: &'static str,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
     terminate_accepted_connection(admitted, "send_completion_timeout").await;
-    ChunkSendProgress::Ready(Err(Error::DataChannelSendCompletionTimeout {
+    ChunkSendProgress::Ready(Err(Error::ChannelSendCompletionTimeout {
         peer: did,
-        timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
+        timeout_ms: CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
         bytes,
         context,
     }))
@@ -588,7 +588,7 @@ pub(super) async fn await_delivery_or_cancel(
     let delivery = delivery.fuse();
     pin_mut!(delivery);
     let admitted_at = Instant::now();
-    let stall_deadline = frame_deadline(DATA_CHANNEL_DELIVERY_TIMEOUT);
+    let stall_deadline = frame_deadline(CHANNEL_DELIVERY_TIMEOUT);
 
     loop {
         if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
@@ -601,7 +601,7 @@ pub(super) async fn await_delivery_or_cancel(
             stall_deadline,
         ) {
             terminate_accepted_connection(admitted, "delivery_timeout").await;
-            return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
+            return ChunkSendProgress::Ready(Err(Error::ChannelDeliveryTimeout {
                 peer: did,
                 timeout_ms: stall_deadline.as_millis(),
                 context: phase,
@@ -657,7 +657,7 @@ pub(super) async fn terminate_accepted_connection(
             peer = %admitted.attempt().peer(),
             generation = admitted.attempt().generation(),
             cause,
-            timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
+            timeout_ms = CHANNEL_CLOSE_TIMEOUT.as_millis(),
             "timed out cleaning up terminal data-channel generation"
         ),
         Err(error) => log_terminal_cleanup_failure(admitted, cause, "close", &error),
@@ -728,7 +728,7 @@ mod tests {
     /// [`frame_chunk`] can emit, with every field it leaves free at its widest (the signer's
     /// delegation in both slots, [`Delegation::widest_for_test`]; the sequence, timestamps and
     /// lifetimes at their types' maxima; the chunk header at the most chunks one message is cut
-    /// into; `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes), encodes to exactly its chunk data plus
+    /// into; `MAX_CHANNEL_MESSAGE_SIZE` data bytes), encodes to exactly its chunk data plus
     /// [`MAX_CHUNK_ENVELOPE_OVERHEAD`], and the transport wrapper adds exactly
     /// [`TRANSPORT_CUSTOM_OVERHEAD`]. The fields `frame_chunk` fixes (no `reply_via`, the
     /// relay aim toward the receiver, an exhausted hop budget) are taken as it fixes them.
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn test_chunk_envelope_reserves_are_the_widest_framed_chunk() -> Result<()> {
         use rings_transport::core::transport::custom_frame_wire;
-        use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+        use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
         use crate::chunk::ChunkMeta;
         use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
@@ -752,7 +752,7 @@ mod tests {
         let most_chunks = TRANSPORT_MAX_SIZE.div_ceil(MIN_CHUNK_DATA);
         let chunk = Chunk {
             chunk: [most_chunks, most_chunks],
-            data: bytes::Bytes::from(vec![u8::MAX; MAX_DATA_CHANNEL_MESSAGE_SIZE]),
+            data: bytes::Bytes::from(vec![u8::MAX; MAX_CHANNEL_MESSAGE_SIZE]),
             meta: ChunkMeta {
                 id: uuid::Uuid::from_u128(u128::MAX),
                 ts_ms: u128::MAX,
@@ -777,7 +777,7 @@ mod tests {
         let wire = custom_frame_wire(frame.clone()).map_err(Error::CodecSerialize)?;
         assert_eq!(
             frame.len(),
-            MAX_DATA_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD
+            MAX_CHANNEL_MESSAGE_SIZE + MAX_CHUNK_ENVELOPE_OVERHEAD
         );
         assert_eq!(wire.len(), frame.len() + TRANSPORT_CUSTOM_OVERHEAD);
         Ok(())

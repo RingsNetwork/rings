@@ -333,7 +333,7 @@ fn build_repair_nodes(count: usize) -> Vec<Node> {
             Node::build(
                 SwarmBuilder::new(
                     0,
-                    crate::tests::default::TEST_ICE_SERVERS,
+                    crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
                     Box::new(MemStorage::new()),
                     session,
                 )
@@ -357,7 +357,7 @@ fn build_finger_nodes(key_indices: &[usize]) -> Vec<Node> {
             Node::build(
                 SwarmBuilder::new(
                     0,
-                    crate::tests::default::TEST_ICE_SERVERS,
+                    crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
                     Box::new(MemStorage::new()),
                     session,
                 )

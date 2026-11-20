@@ -24,13 +24,13 @@ use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelPool;
-use crate::core::sdp::IceCandidateTier;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::error::Error;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
+use crate::sdp::IceCandidateTier;
 
 /// Budget of the test: far below the gathering's own timeout, so a gathering the close does
 /// not end fails the test by name.
@@ -100,7 +100,7 @@ async fn local_close_ends_a_gathering_in_progress() {
 
     closed.expect("local close succeeds");
     assert!(
-        matches!(&gathered, Err(Error::WebrtcLocalSdpGenerationError(message)) if message == "Local connection closed"),
+        matches!(&gathered, Err(Error::LocalHandshakeGenerationError(message)) if message == "Local connection closed"),
         "{gathered:?}"
     );
 }
@@ -304,7 +304,7 @@ async fn stalled_gathering_settles_once_candidates_arrive() {
     connection.target_tier.set(IceCandidateTier::Host);
 
     let sdp = connection
-        .webrtc_create_offer()
+        .create_offer()
         .await
         .expect("offer gathering must settle before the 60 s timeout");
     assert!(

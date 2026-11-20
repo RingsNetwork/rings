@@ -106,7 +106,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 next_hop = %ctx.relay.next_hop,
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
-                sdp_bytes = msg.sdp.len(),
+                handshake_bytes = msg.handshake.len(),
                 "CONNECT_NODE offer forward"
             );
             drop_unlinked_return(
@@ -120,7 +120,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 local = %self.dht.did,
                 peer = %peer,
                 tx_id = %ctx.transaction.tx_id,
-                sdp_bytes = msg.sdp.len(),
+                handshake_bytes = msg.handshake.len(),
                 "CONNECT_NODE offer answer start"
             );
             // The reply, an answer or a counter-offer, retraces the offer's path (#947); the
@@ -171,7 +171,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 next_hop = %ctx.relay.next_hop,
                 relay_destination = %ctx.relay.destination,
                 transaction_destination = %ctx.transaction.destination,
-                sdp_bytes = msg.sdp.len(),
+                handshake_bytes = msg.handshake.len(),
                 "CONNECT_NODE answer forward"
             );
             drop_unlinked_return(
@@ -185,7 +185,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 local = %self.dht.did,
                 peer = %peer,
                 tx_id = %ctx.transaction.tx_id,
-                sdp_bytes = msg.sdp.len(),
+                handshake_bytes = msg.handshake.len(),
                 "CONNECT_NODE answer accept start"
             );
             // The answer applies only to the generation whose offer left under this

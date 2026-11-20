@@ -1,14 +1,11 @@
-use super::effective_max_message_size;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use super::ConnectionStateCell;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use super::ConnectionStateSnapshot;
 use super::IrrevocableSendGuard;
 use super::SendPermit;
+use super::TransportConnectionState;
 use super::TransportMessage;
-use super::WebrtcConnectionState;
-use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
-use super::MIN_MAX_MESSAGE_SIZE;
 
 mod test_send_permit;
 mod test_state;

@@ -5,7 +5,6 @@ mod send;
 mod state;
 
 pub use interface::custom_frame_wire;
-pub use interface::effective_max_message_size;
 #[cfg(any(
     feature = "dummy",
     feature = "native-webrtc",
@@ -15,10 +14,12 @@ pub(crate) use interface::stored_max_message_size;
 pub(crate) use interface::BorrowedTransportMessage;
 pub use interface::BoxedTransport;
 pub use interface::ConnectionInterface;
+pub use interface::DynConnection;
+pub use interface::DynTransportInterface;
+pub use interface::SharedTransport;
 pub use interface::TransportInterface;
-#[cfg(any(test, rings_transport_backend))]
 pub(crate) use interface::TransportMessage;
-pub use interface::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+pub use interface::MAX_CHANNEL_MESSAGE_SIZE;
 pub use interface::MIN_MAX_MESSAGE_SIZE;
 #[cfg(any(feature = "dummy", test))]
 pub(crate) use send::IrrevocableSendGuard;
@@ -31,7 +32,7 @@ pub use send::IRREVOCABLE_SEND_COMPLETION_TIMEOUT;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 pub(crate) use state::ConnectionStateCell;
 pub use state::ConnectionStateSnapshot;
-pub use state::WebrtcConnectionState;
+pub use state::TransportConnectionState;
 
 pub use crate::callback::link_credit::LaneCreditReservation;
 pub use crate::callback::link_credit::LaneCreditView;

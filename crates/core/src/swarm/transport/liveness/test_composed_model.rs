@@ -70,7 +70,7 @@ use rings_transport::core::credit::CreditIndex;
 use rings_transport::core::credit::CreditWindow;
 use rings_transport::core::credit::ReceiveWindow;
 use rings_transport::core::credit::SendCredit;
-use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
+use rings_transport::core::pool::CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT;
 use stateright::Checker;
 use stateright::Expectation;
@@ -1024,7 +1024,7 @@ fn test_each_refuted_design_is_refuted_by_the_composed_model() {
 }
 
 /// Differential refinement check: the production outbound (`SenderBounded`, `ReservedCapacity`)
-/// and inbound (`InboundCapacity`, `DATA_CHANNEL_POOL_SIZE < INBOUND_PEER_CAPACITY`) components
+/// and inbound (`InboundCapacity`, `CHANNEL_POOL_SIZE < INBOUND_PEER_CAPACITY`) components
 /// satisfy every structural law assumed by `Discipline::Production` and refute the corresponding
 /// mutant assumptions if violated.
 #[test]
@@ -1079,14 +1079,14 @@ fn test_production_outbound_and_inbound_components_refine_composed_laws() {
     );
 
     // 2. Inbound per-peer event share and lane isolation (`SlowHandler` / `HandOffWithoutAwait`):
-    //    with `InboundCompletion::Await`, each of the `DATA_CHANNEL_POOL_SIZE` transport lanes
+    //    with `InboundCompletion::Await`, each of the `CHANNEL_POOL_SIZE` transport lanes
     //    hands at most one frame to the actor at a time; verify `InboundCapacity` admits one
     //    in-flight frame on every non-control channel lane from `peer_a` and still admits
     //    `InboundLane::DhtControl` (`Request` and `Probe`) without waiting!
-    assert!(usize::from(DATA_CHANNEL_POOL_SIZE) < INBOUND_MODEL_PEER_EVENTS);
+    assert!(usize::from(CHANNEL_POOL_SIZE) < INBOUND_MODEL_PEER_EVENTS);
     let inbound = Arc::new(InboundCapacity::new());
     let mut stalled_data_handlers = Vec::new();
-    for _ in 1..DATA_CHANNEL_POOL_SIZE {
+    for _ in 1..CHANNEL_POOL_SIZE {
         let req = InboundRequest::bytes_for_test(Some(peer_a), InboundLane::Storage, 1024);
         let permit = inbound
             .try_admit(&req)

@@ -2,7 +2,7 @@
 //! generation, and dropping it stops its transfer.
 
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use tokio::time::Duration;
 
 use crate::dht::StorageSyncDestination;
@@ -144,8 +144,8 @@ async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() ->
     assert!(!node1.swarm.transport.is_send_terminal_attempt(attempt)?);
     assert!(node1.swarm.transport.get_connection(peer).is_none());
     assert_eq!(
-        connection.webrtc_connection_state(),
-        WebrtcConnectionState::Closed
+        connection.connection_state(),
+        TransportConnectionState::Closed
     );
     wait_for_test_condition(
         "terminal cleanup must release retained transfer capacity",

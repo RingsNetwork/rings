@@ -45,28 +45,24 @@ use crate::callback::link_credit::LANE_IDLE_PERIOD;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
+use crate::connection_pool::Pool;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 use crate::core::pool::ChannelPool;
 use crate::core::pool::LanePool;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
-use crate::core::sdp::parse_sdp_candidate_tier;
-use crate::core::sdp::IceCandidateTier;
-use crate::core::sdp::IceGatherState;
-use crate::core::sdp::IceSettleWindow;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 use crate::core::send::operation::send_sync;
-use crate::core::transport::effective_max_message_size;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::SendPermit;
+use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
-use crate::core::transport::WebrtcConnectionState;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
@@ -76,11 +72,15 @@ use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
+use crate::network_config::UdpPortRange;
 use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::within;
 use crate::notifier::Notifier;
-use crate::pool::Pool;
-use crate::webrtc_config::WebrtcUdpPortRange;
+use crate::sdp::effective_max_message_size;
+use crate::sdp::parse_sdp_candidate_tier;
+use crate::sdp::IceCandidateTier;
+use crate::sdp::IceGatherState;
+use crate::sdp::IceSettleWindow;
 
 mod send_lifecycle;
 use send_lifecycle::BrowserLifecycle;
@@ -417,6 +417,7 @@ impl Drop for WebSysWebrtcConnection {
 /// [WebSysWebrtcTransport] manages all the [WebSysWebrtcConnection] and
 /// provides methods to create, get and close connections.
 pub struct WebSysWebrtcTransport {
+    session_credentials: RefCell<String>,
     ice_servers: RefCell<Vec<IceServer>>,
     pool: Pool<WebSysWebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
@@ -541,8 +542,8 @@ impl WebSysWebrtcConnection {
             Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
         )
         .await?;
-        if self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed {
-            return Err(Error::WebrtcLocalSdpGenerationError(
+        if self.connection_state.snapshot().state() == TransportConnectionState::Closed {
+            return Err(Error::LocalHandshakeGenerationError(
                 "Local connection closed".to_string(),
             ));
         }
@@ -550,7 +551,7 @@ impl WebSysWebrtcConnection {
         let local_sdp = self
             .webrtc_conn
             .local_description()
-            .ok_or(Error::WebrtcLocalSdpGenerationError(
+            .ok_or(Error::LocalHandshakeGenerationError(
                 "local_description is None".to_string(),
             ))
             .map(|x| x.sdp())?;
@@ -558,7 +559,7 @@ impl WebSysWebrtcConnection {
         if self.webrtc_conn.ice_gathering_state() != RtcIceGatheringState::Complete
             && !has_gathered_candidates
         {
-            return Err(Error::WebrtcLocalSdpGenerationError(format!(
+            return Err(Error::LocalHandshakeGenerationError(format!(
                 "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
             )));
         }
@@ -572,12 +573,13 @@ impl WebSysWebrtcTransport {
     pub fn new(
         ice_servers: &str,
         _external_address: Option<String>,
-        _udp_port_range: Option<WebrtcUdpPortRange>,
+        _udp_port_range: Option<UdpPortRange>,
     ) -> Self {
-        let ice_servers = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
+        let parsed_ice_servers = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
 
         Self {
-            ice_servers: RefCell::new(ice_servers),
+            session_credentials: RefCell::new(ice_servers.to_string()),
+            ice_servers: RefCell::new(parsed_ice_servers),
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
         }
@@ -586,6 +588,7 @@ impl WebSysWebrtcTransport {
     /// Replace the ICE server list used for subsequent peer connections and update active
     /// browser peer connections in place via `RTCPeerConnection.setConfiguration`.
     pub fn set_ice_servers(&self, ice_servers: &str) {
+        *self.session_credentials.borrow_mut() = ice_servers.to_string();
         let parsed = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
         let target_tier = IceServer::target_candidate_tier(&parsed);
         *self.ice_servers.borrow_mut() = parsed.clone();
@@ -640,7 +643,7 @@ impl FrameSink for WebSysWebrtcConnection {
 
 #[async_trait(?Send)]
 impl ConnectionInterface for WebSysWebrtcConnection {
-    type Sdp = String;
+    type Handshake = String;
     type Error = Error;
 
     delegate_to_callback!();
@@ -653,7 +656,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
     }
 
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
+    async fn create_offer(&self) -> Result<Self::Handshake> {
         let promise = self.webrtc_conn.create_offer();
         let offer_js_value = JsFuture::from(promise).await.map_err(Error::WebSysWebrtc)?;
         let offer = RtcSessionDescription::from(offer_js_value);
@@ -668,8 +671,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         self.webrtc_gather().await
     }
 
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
-        tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
+    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
+        tracing::debug!("answer_offer, offer: {offer:?}");
         // Read the negotiated limit, but record it only after the *whole* answer path
         // (setRemoteDescription + createAnswer + setLocalDescription + gather) has succeeded, so a
         // failure midway does not leave a partially-updated connection carrying a stale size.
@@ -698,8 +701,8 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         Ok(local_sdp)
     }
 
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
-        tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
+    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
+        tracing::debug!("accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
 
         let set_remote_init = RtcSessionDescriptionInit::new(RtcSdpType::Answer);
@@ -714,7 +717,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         Ok(())
     }
 
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+    async fn wait_for_channel_open(&self) -> Result<()> {
         wait_for_data_channel_open(
             || self.connection_state.snapshot(),
             &self.webrtc_data_channel_state_notifier,
@@ -731,14 +734,14 @@ impl ConnectionInterface for WebSysWebrtcConnection {
 
 fn decode_data_channel_message(data: JsValue) -> Result<Vec<u8>> {
     let buffer = data.dyn_into::<js_sys::ArrayBuffer>().map_err(|_| {
-        Error::DataChannelMessage(
+        Error::ChannelMessage(
             "received a non-ArrayBuffer value after configuring binaryType".to_string(),
         )
     })?;
     let bytes = buffer.byte_length() as usize;
     if inbound_frame_exceeds_protocol_ceiling(bytes) {
-        return Err(Error::DataChannelMessage(format!(
-            "inbound frame of {bytes} bytes exceeds the {MAX_DATA_CHANNEL_MESSAGE_SIZE}-byte protocol ceiling"
+        return Err(Error::ChannelMessage(format!(
+            "inbound frame of {bytes} bytes exceeds the {MAX_CHANNEL_MESSAGE_SIZE}-byte protocol ceiling"
         )));
     }
     let message = js_sys::Uint8Array::new(&buffer).to_vec();
@@ -824,7 +827,7 @@ fn wire_peer_connection_state(
 ) {
     let state_source = webrtc_conn.clone();
     let on_state_change = Closure::wrap(Box::new(move |_| {
-        let state_change: WebrtcConnectionState = state_source.connection_state().into();
+        let state_change: TransportConnectionState = state_source.connection_state().into();
         tracing::debug!("peer connection state changed: {state_change:?}");
         connection_state.observe_webrtc(state_change);
         inner_cb.dispatch_peer_connection_state(state_change);
@@ -840,7 +843,7 @@ fn create_outbound_data_channels(
     connection_state: &ConnectionStateCell,
     handlers: &Rc<RefCell<ConnectionHandlers>>,
 ) -> Result<()> {
-    for index in 0..DATA_CHANNEL_POOL_SIZE {
+    for index in 0..CHANNEL_POOL_SIZE {
         let channel = webrtc_conn.create_data_channel(&data_channel_label(ChannelLane::new(index)));
         let open_pool = channel_pool.clone();
         let open_cb = inner_cb.clone();
@@ -853,7 +856,7 @@ fn create_outbound_data_channels(
             let cb = open_cb.clone();
             spawn_local(async move {
                 if all_ready {
-                    cb.on_data_channel_open().await;
+                    cb.on_channel_open().await;
                 }
             });
         }) as Box<dyn FnMut()>);
@@ -878,7 +881,7 @@ fn create_outbound_data_channels(
             let cb = close_cb.clone();
             spawn_local(async move {
                 if all_closed {
-                    cb.on_data_channel_close().await;
+                    cb.on_channel_close().await;
                 }
             });
         }) as Box<dyn FnMut()>);
@@ -1000,12 +1003,31 @@ impl TransportInterface for WebSysWebrtcTransport {
         self.pool.safely_remove_if_current(connection).await
     }
 
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<crate::core::transport::DynConnection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
+    }
+
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
     }
 
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
+    }
+
+    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<()> {
+        effective_max_message_size(remote_handshake).map(|_| ())
+    }
+
+    fn update_session_credentials(&self, credentials: &str) {
+        self.set_ice_servers(credentials);
+    }
+
+    fn session_credentials(&self) -> Option<String> {
+        Some(self.session_credentials.borrow().clone())
     }
 }
 
@@ -1045,7 +1067,7 @@ impl From<IceServer> for JsValue {
     }
 }
 
-impl From<RtcPeerConnectionState> for WebrtcConnectionState {
+impl From<RtcPeerConnectionState> for TransportConnectionState {
     fn from(s: RtcPeerConnectionState) -> Self {
         match s {
             RtcPeerConnectionState::New => Self::New,
@@ -1156,27 +1178,27 @@ mod tests {
         assert!(matches!(result, Err(Error::SendPermitRevoked)));
         assert!(!called.get());
         assert_ne!(
-            connection_state.snapshot().webrtc(),
-            WebrtcConnectionState::Closed
+            connection_state.snapshot().state(),
+            TransportConnectionState::Closed
         );
     }
 
     #[wasm_bindgen_test]
     async fn test_browser_send_failure_retires_connection_and_rejects_later_send() {
         let (peer_connection, connection_state, connection) = test_backend();
-        connection_state.observe_webrtc(WebrtcConnectionState::Connected);
+        connection_state.observe_webrtc(TransportConnectionState::Connected);
         connection_state.observe_outbound_data_channels(true);
         let permit = SendPermit::always();
         let acceptance = permit.acceptance();
         let result = connection
             .send_after_permit(permit, Arc::new(AtomicU64::new(0)), 1, || {
-                Err::<(), _>(Error::DataChannelMessage(
+                Err::<(), _>(Error::ChannelMessage(
                     "injected browser send failure".to_string(),
                 ))
             })
             .await;
 
-        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+        assert!(matches!(result, Err(Error::ChannelMessage(_))));
         assert!(!acceptance.is_accepted());
         // The public error return must follow the actual browser close call, not just fencing.
         assert_eq!(
@@ -1184,8 +1206,8 @@ mod tests {
             RtcPeerConnectionState::Closed
         );
         assert_eq!(
-            connection_state.snapshot().webrtc(),
-            WebrtcConnectionState::Closed
+            connection_state.snapshot().state(),
+            TransportConnectionState::Closed
         );
         assert!(matches!(
             connection
@@ -1195,19 +1217,19 @@ mod tests {
                     SendPermit::always(),
                 )
                 .await,
-            Err(Error::DataChannelOpen(_))
+            Err(Error::ChannelOpen(_))
         ));
     }
 
     #[wasm_bindgen_test]
     fn test_oversized_browser_frame_is_rejected_before_copy() {
-        let length = u32::try_from(MAX_DATA_CHANNEL_MESSAGE_SIZE + 1)
+        let length = u32::try_from(MAX_CHANNEL_MESSAGE_SIZE + 1)
             .expect("protocol ceiling must fit in a JavaScript array length");
         let array = js_sys::Uint8Array::new_with_length(length);
 
         let result = decode_data_channel_message(array.buffer().into());
 
-        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+        assert!(matches!(result, Err(Error::ChannelMessage(_))));
     }
 
     #[wasm_bindgen_test]
@@ -1285,7 +1307,7 @@ mod tests {
         assert!(matches!(result, Err(Error::SendByteCountOverflow)));
         assert!(!called.get());
         assert!(!acceptance.is_irrevocable());
-        assert_ne!(state.snapshot().webrtc(), WebrtcConnectionState::Closed);
+        assert_ne!(state.snapshot().state(), TransportConnectionState::Closed);
         assert_eq!(enqueued.load(Ordering::SeqCst), u64::MAX);
     }
 }

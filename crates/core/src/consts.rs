@@ -49,7 +49,7 @@ pub const TRANSPORT_MAX_SIZE: usize = 60_000_000;
 /// once wrapped.
 ///
 /// Derivation: the enum tag (1 byte) and the varint length prefix of a frame of at most
-/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes (3 bytes), `1 + 3 = 4`; the supremum, witnessed with
+/// `MAX_CHANNEL_MESSAGE_SIZE` bytes (3 bytes), `1 + 3 = 4`; the supremum, witnessed with
 /// equality by `test_chunk_envelope_reserves_are_the_widest_framed_chunk`.
 pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// Bytes reserved, per chunk, for the `MessagePayload` envelope a chunk is re-wrapped in before
@@ -65,7 +65,7 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 4;
 /// carries; `SignatureAlgorithm::signature_len`), every timestamp, lifetime and sequence at its
 /// type's maximum, the chunk header at the most chunks one message is cut into
 /// (`TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA`), and the length prefixes of
-/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` data bytes. The value is that supremum, witnessed with
+/// `MAX_CHANNEL_MESSAGE_SIZE` data bytes. The value is that supremum, witnessed with
 /// equality through `frame_chunk` itself by
 /// `test_chunk_envelope_reserves_are_the_widest_framed_chunk`: a larger reserve wastes the same
 /// bytes in every chunk frame (#925), a smaller one lets a frame overflow the channel. A field
@@ -79,22 +79,22 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 742;
 /// widest signaling path an honest carrier records (connect signaling, #947: a return
 /// retracing a full hop budget of relays, which `Law (Bound)` of the path caps, each hop its
 /// DID's 20 canonical bytes, #952), and the length prefix of a message of up to
-/// `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
+/// `MAX_CHANNEL_MESSAGE_SIZE` bytes; the supremum, witnessed with equality by
 /// `test_payload_envelope_reserve_is_the_widest_envelope`.
 pub const MAX_PAYLOAD_ENVELOPE_OVERHEAD: usize = 2009;
-/// Maximum bytes of the serialized session description (`ConnectNodeSend.sdp` and
-/// `ConnectNodeReport.sdp`), enforced at creation, deserialization, and handshake admission
+/// Maximum bytes of the serialized session description (`ConnectNodeSend.handshake` and
+/// `ConnectNodeReport.handshake`), enforced at creation, deserialization, and handshake admission
 /// (#1130).
 ///
 /// A data-channel-only WebRTC SDP is 500–2,000 bytes in practice; 4 KiB accommodates ~30 ICE
 /// candidates while bounding the widest DHT control message below [`MIN_MAX_MESSAGE_SIZE`].
-pub const MAX_SDP_BYTES: usize = 4096;
+pub const MAX_HANDSHAKE_BYTES: usize = 4096;
 /// Encoded bytes of a `Message::ConnectNodeSend` or `Message::ConnectNodeReport`, at most
-/// (#1130): the `Message` variant tag (1), the varint length prefix of [`MAX_SDP_BYTES`] (2),
-/// [`MAX_SDP_BYTES`] (4096), `DhtProtocolMode` at its widest (`u32::MAX` network ID, 5; two
+/// (#1130): the `Message` variant tag (1), the varint length prefix of [`MAX_HANDSHAKE_BYTES`] (2),
+/// [`MAX_HANDSHAKE_BYTES`] (4096), `DhtProtocolMode` at its widest (`u32::MAX` network ID, 5; two
 /// `u16::MAX` counts, 3 each), and `RelayCustody` (1), `1 + 2 + 4096 + 5 + 3 + 3 + 1 = 4111`;
 /// witnessed with equality by `test_min_max_message_size_fits_widest_control_payloads_whole`.
-pub const CONNECT_NODE_WIRE_MAX: usize = MAX_SDP_BYTES + 15;
+pub const CONNECT_NODE_WIRE_MAX: usize = MAX_HANDSHAKE_BYTES + 15;
 /// Control-frame law (#1130): the transport's [`MIN_MAX_MESSAGE_SIZE`] floor equals the widest
 /// `ConnectNodeSend` / `ConnectNodeReport` payload (`CONNECT_NODE_WIRE_MAX` plus the 2008-byte
 /// envelope around a `< 16 KiB` message, whose 2-byte `transaction.data` length prefix is one

@@ -40,7 +40,7 @@ where
     C: FrameSink + MaybeSendSync,
 {
     let connection = connection.upgrade()?;
-    connection.webrtc_wait_for_data_channel_open().await?;
+    connection.wait_for_channel_open().await?;
     connection
         .send_frame(TransportMessage::Signal(signal), lane, SendPermit::always())
         .await

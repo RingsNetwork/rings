@@ -69,7 +69,7 @@ async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )
@@ -322,7 +322,7 @@ async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Re
     let node = Node::build(
         SwarmBuilder::new(
             0,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )

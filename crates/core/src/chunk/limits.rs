@@ -1,5 +1,5 @@
 use rings_transport::core::credit::LANE_CREDIT_WINDOW;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 
 use crate::consts::MAX_TTL_MS;
 use crate::consts::MIN_CHUNK_DATA;
@@ -65,7 +65,7 @@ impl ReassemblyLimits {
         Self {
             max_pending_messages: 512,
             // A chunk crosses the wire as one data-channel message, capped by SCTP.
-            max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            max_chunk_data_len: MAX_CHANNEL_MESSAGE_SIZE,
             // The sender refuses to send more than this, so a larger reassembled message is forged;
             // this is what stops the "one id, huge `total`, stream unique positions" attack.
             max_message_bytes: TRANSPORT_MAX_SIZE,
@@ -86,7 +86,7 @@ impl ReassemblyLimits {
     pub fn constrained() -> Self {
         Self {
             max_pending_messages: 64,
-            max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            max_chunk_data_len: MAX_CHANNEL_MESSAGE_SIZE,
             max_message_bytes: TRANSPORT_MAX_SIZE,
             max_chunks_per_message: TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA + 1,
             max_completed_ids: 256,

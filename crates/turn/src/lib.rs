@@ -10,41 +10,59 @@
     )
 )]
 
-#[cfg(target_family = "wasm")]
-compile_error!("rings-turn is a native-only crate: it binds UDP TURN and relay sockets");
-
+#[cfg(not(target_family = "wasm"))]
 mod auth;
+#[cfg(not(target_family = "wasm"))]
 mod config;
+mod credentials;
+#[cfg(not(target_family = "wasm"))]
 mod error;
+#[cfg(not(target_family = "wasm"))]
 mod server;
 
+#[cfg(not(target_family = "wasm"))]
 pub use auth::DelegationAuthHandler;
+#[cfg(not(target_family = "wasm"))]
 pub use auth::TurnAdmissionPolicy;
+#[cfg(not(target_family = "wasm"))]
 pub use auth::DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY;
+#[cfg(not(target_family = "wasm"))]
 pub use config::RelayAddressConfig;
+#[cfg(not(target_family = "wasm"))]
 pub use config::RelayPeerPolicy;
+#[cfg(not(target_family = "wasm"))]
 pub use config::TurnServerConfig;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_ALLOCATIONS;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_NONCES;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_TURN_PORT;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_TURN_REALM;
+pub use credentials::extract_turn_server_pubkey;
+pub use credentials::format_turn_server_url;
+pub use credentials::pack_turn_account_auth;
+pub use credentials::pack_turn_auth;
+pub use credentials::pack_turn_did_auth;
+pub use credentials::TurnAuthIdentity;
+pub use credentials::TurnCredentialSigner;
+pub use credentials::TurnCredentials;
+pub use credentials::VerifiedTurnAuth;
+pub use credentials::MAX_STUN_USERNAME_BYTES;
+pub use credentials::TURN_AUTH_DOMAIN;
+#[cfg(not(target_family = "wasm"))]
 pub use error::Result;
+#[cfg(not(target_family = "wasm"))]
 pub use error::TurnError;
-pub use rings_core::delegation::extract_turn_server_pubkey;
-pub use rings_core::delegation::format_turn_server_url;
-pub use rings_core::delegation::pack_turn_account_auth;
-pub use rings_core::delegation::pack_turn_auth;
-pub use rings_core::delegation::pack_turn_did_auth;
-pub use rings_core::delegation::TurnAuthIdentity;
-pub use rings_core::delegation::TurnCredentials;
-pub use rings_core::delegation::VerifiedTurnAuth;
-pub use rings_core::delegation::MAX_STUN_USERNAME_BYTES;
-pub use rings_core::delegation::TURN_AUTH_DOMAIN;
+#[cfg(not(target_family = "wasm"))]
 pub use server::TurnServer;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
     use std::net::IpAddr;
     use std::net::Ipv4Addr;

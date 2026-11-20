@@ -8,13 +8,13 @@ use super::DummyConnectionState;
 use super::CONNS;
 use crate::callback::InnerTransportCallback;
 use crate::core::drop_guard::ArmedDropGuard;
-use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::TransportConnectionState;
 use crate::sync_utils::lock_recover;
 
 fn mark_connection_state_closed(connection_state: &Arc<Mutex<DummyConnectionState>>) -> bool {
     let mut state = lock_recover(connection_state);
-    let notify = state.webrtc != WebrtcConnectionState::Closed;
-    state.webrtc = WebrtcConnectionState::Closed;
+    let notify = state.webrtc != TransportConnectionState::Closed;
+    state.webrtc = TransportConnectionState::Closed;
     state.data_channel_open_override = Some(false);
     notify
 }
@@ -95,15 +95,15 @@ impl DummyRetirementFence {
         let callback = Arc::clone(&self.callback);
         self.runtime.spawn(async move {
             callback
-                .on_peer_connection_state_change(WebrtcConnectionState::Closed)
+                .on_connection_state_change(TransportConnectionState::Closed)
                 .await;
-            callback.on_data_channel_close().await;
+            callback.on_channel_close().await;
             if let Some(remote) = remote {
                 remote
-                    .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
+                    .set_connection_state(TransportConnectionState::Disconnected)
                     .await;
                 remote
-                    .set_webrtc_connection_state(WebrtcConnectionState::Closed)
+                    .set_connection_state(TransportConnectionState::Closed)
                     .await;
             }
         });

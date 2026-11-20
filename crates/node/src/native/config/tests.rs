@@ -34,8 +34,8 @@ endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 15
 external_ip: null
-webrtc_udp_port_min: null
-webrtc_udp_port_max: null
+udp_port_min: null
+udp_port_max: null
 data_storage:
   path: /Users/foo/.rings/data
   capacity: 200000000
@@ -111,8 +111,8 @@ ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 15
 dht_virtual_nodes: 0
 external_ip: null
-webrtc_udp_port_min: null
-webrtc_udp_port_max: null
+udp_port_min: null
+udp_port_max: null
 data_storage:
   path: /Users/foo/.rings/data
   capacity: 200000000
@@ -135,8 +135,8 @@ endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 15
 external_ip: null
-webrtc_udp_port_min: null
-webrtc_udp_port_max: null
+udp_port_min: null
+udp_port_max: null
 data_storage:
   path: /Users/foo/.rings/data
   capacity: 200000000
@@ -340,31 +340,31 @@ fn rendered_yaml_section_completes_a_config_without_one() {
 }
 
 #[test]
-fn test_config_with_valid_webrtc_udp_range_builds_processor_config() {
+fn test_config_with_valid_udp_range_builds_processor_config() {
     let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
-    config.webrtc_udp_port_min = Some(49160);
-    config.webrtc_udp_port_max = Some(49200);
+    config.udp_port_min = Some(49160);
+    config.udp_port_max = Some(49200);
 
     let processor_config = ProcessorConfig::try_from(config);
     let _ = fs::remove_file(delegatee_key_path);
 
     assert!(matches!(
-        processor_config.and_then(|config| config.webrtc_udp_port_range()),
+        processor_config.map(|config| config.udp_port_range()),
         Ok(Some(range)) if range.min() == 49160 && range.max() == 49200
     ));
 }
 
 #[test]
-fn test_config_with_partial_webrtc_udp_range_is_rejected() {
+fn test_config_with_partial_udp_range_is_rejected() {
     let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
-    config.webrtc_udp_port_min = Some(49160);
+    config.udp_port_min = Some(49160);
 
     let processor_config = ProcessorConfig::try_from(config);
     let _ = fs::remove_file(delegatee_key_path);
 
     assert!(matches!(
         processor_config,
-        Err(Error::IncompleteWebrtcUdpPortRange {
+        Err(Error::IncompleteUdpPortRange {
             min: Some(49160),
             max: None
         })
@@ -527,11 +527,9 @@ fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signatu
     let mut config = Config::new(&delegatee_path);
     config.delegator_key = Some(delegator_path.to_string_lossy().into_owned());
     let turn_server_pubkey = SecretKey::random().pubkey();
-    let turn_url = crate::prelude::rings_core::delegation::format_turn_server_url(
-        "turn://turn.rings.rs:3478",
-        turn_server_pubkey,
-    )
-    .expect("format turn server url");
+    let turn_url =
+        rings_turn::format_turn_server_url("turn://turn.rings.rs:3478", turn_server_pubkey)
+            .expect("format turn server url");
     config.ice_servers = format!("stun://stun.l.google.com:19302;{turn_url}");
 
     let serialized =

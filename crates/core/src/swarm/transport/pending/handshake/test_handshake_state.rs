@@ -21,7 +21,7 @@ fn sent(owner: OfferOwner, tx_id: uuid::Uuid) -> Handshake {
     Handshake::Offering {
         owner,
         phase: OfferPhase::Sent {
-            sdp: "offer".to_string(),
+            handshake: "offer".to_string(),
             tx_id,
         },
     }
@@ -60,7 +60,7 @@ fn test_sent_overlay_offer_follows_the_tie_break() {
     assert_eq!(
         crossing_offer_verdict(&offer, OfferOwner::Overlay, smaller, larger),
         CrossingOfferVerdict::CounterOffer {
-            sdp: "offer".to_string(),
+            handshake: "offer".to_string(),
             tx_id,
         }
     );
