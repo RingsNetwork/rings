@@ -51,6 +51,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
     /// The heartbeat of this node's mail descriptor (#1117), if it takes mail.
     pub(in crate::processor) mail_registration: Option<Arc<dyn RegistrationTask>>,
+    /// Custom periodic DHT registration tasks attached by external service crates.
+    pub(in crate::processor) extra_registrations: Vec<Arc<dyn RegistrationTask>>,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(in crate::processor) remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
@@ -96,6 +98,7 @@ impl ProcessorBuilder {
             #[cfg(rings_native)]
             service_registration: None,
             mail_registration: None,
+            extra_registrations: Vec::new(),
             remote_rpc_proxy: config.remote_rpc_proxy.clone(),
         })
     }
@@ -114,6 +117,13 @@ impl ProcessorBuilder {
     pub fn receive_mail(mut self, offer: MailOffer) -> Self {
         let did = self.delegatee_key.delegator_did();
         self.mail_registration = Some(Arc::new(MailRegistration::new(did, offer)));
+        self
+    }
+
+    /// Attach an external periodic DHT [`RegistrationTask`] so the processor publishes its lease
+    /// descriptor on every heartbeat and on the first admitted edge (#855, #918).
+    pub fn register_task(mut self, task: Arc<dyn RegistrationTask>) -> Self {
+        self.extra_registrations.push(task);
         self
     }
 
@@ -252,6 +262,11 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Return the onion symbols currently configured on this builder.
+    pub const fn configured_onion_role(&self) -> &OnionRole<OnionExitOffer> {
+        &self.onion_role
+    }
+
     /// Override the initial onion process epoch instead of drawing one from the builder's RNG.
     pub fn onion_process_epoch(mut self, epoch: OnionProcessEpoch) -> Self {
         self.onion_process_epoch = Some(epoch);
@@ -349,6 +364,7 @@ impl ProcessorBuilder {
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);
         registration_tasks.extend(self.mail_registration);
+        registration_tasks.extend(self.extra_registrations);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new_with_clock(

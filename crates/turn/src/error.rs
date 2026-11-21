@@ -11,6 +11,28 @@ pub enum TurnError {
     #[error("TURN server error: {0}")]
     Turn(#[from] turn::Error),
 
+    /// Underlying `stun` crate message encoding or decoding error.
+    #[error("STUN protocol error: {0}")]
+    Stun(#[from] stun::Error),
+
+    /// Unclaimed session reservations reached `max_reservations`.
+    #[error("TURN session reservation cap reached (max_reservations={max_reservations})")]
+    ReservationCapacityReached {
+        /// Configured maximum concurrent unclaimed TURN session reservations.
+        max_reservations: usize,
+    },
+
+    /// Active allocations plus unclaimed session reservations reached `max_allocations`.
+    #[error("TURN allocation capacity reached (max_allocations={max_allocations})")]
+    AllocationCapacityReached {
+        /// Configured maximum concurrent TURN allocations.
+        max_allocations: usize,
+    },
+
+    /// Session reservation TTL must be non-zero.
+    #[error("TURN session reservation TTL must be greater than zero")]
+    InvalidReservationTtl,
+
     /// Underlying `webrtc-util` connection error.
     #[error("WebRTC util connection error: {0}")]
     Util(#[from] webrtc_util::Error),

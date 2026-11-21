@@ -39,6 +39,10 @@ pub use config::DEFAULT_MAX_NONCES;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 #[cfg(not(target_family = "wasm"))]
+pub use config::DEFAULT_MAX_RESERVATIONS;
+#[cfg(not(target_family = "wasm"))]
+pub use config::DEFAULT_MAX_RESERVATION_TTL;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_TURN_PORT;
@@ -49,18 +53,23 @@ pub use credentials::format_turn_server_url;
 pub use credentials::pack_turn_account_auth;
 pub use credentials::pack_turn_auth;
 pub use credentials::pack_turn_did_auth;
+pub use credentials::SignedTurnSessionTicket;
 pub use credentials::TurnAuthIdentity;
 pub use credentials::TurnCredentialSigner;
 pub use credentials::TurnCredentials;
+pub use credentials::TurnSessionTicket;
 pub use credentials::VerifiedTurnAuth;
 pub use credentials::MAX_STUN_USERNAME_BYTES;
 pub use credentials::TURN_AUTH_DOMAIN;
+pub use credentials::TURN_SESSION_TICKET_DOMAIN;
 #[cfg(not(target_family = "wasm"))]
 pub use error::Result;
 #[cfg(not(target_family = "wasm"))]
 pub use error::TurnError;
 #[cfg(not(target_family = "wasm"))]
 pub use server::TurnServer;
+#[cfg(not(target_family = "wasm"))]
+pub use server::TurnSessionReservation;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
@@ -2079,6 +2088,186 @@ mod tests {
         restart_cfg.listen_addr = server_addr;
         let restarted = TurnServer::start(restart_cfg).await?;
         restarted.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_relays_udp_with_unlinkable_session_ticket_and_rejects_replay() -> Result<()>
+    {
+        // Configure an empty allowlist (`TurnAdmissionPolicy::allowlist([])`) to prove that
+        // server-issued unlinkable `SessionTicket` credentials authenticate without exposing or
+        // requiring any client DID.
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
+        let server = TurnServer::start(cfg).await?;
+
+        let eph_key = SecretKey::random();
+        let ttl = Duration::from_secs(60);
+        let reservation = server.reserve_exit_session(eph_key.pubkey(), ttl).await?;
+        let creds = reservation
+            .ticket
+            .to_turn_credentials(&eph_key, server.server_pubkey())?;
+
+        // Connect an unmodified standard TURN client using the unlinkable ticket credentials.
+        let client_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let turn_client = Client::new(ClientConfig {
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
+            conn: client_conn,
+            username: creds.username.clone(),
+            password: creds.credential.clone(),
+            realm: DEFAULT_TURN_REALM.to_string(),
+            software: String::new(),
+            rto_in_ms: 0,
+            vnet: None,
+        })
+        .await?;
+        turn_client.listen().await?;
+
+        let allocated_conn = turn_client.allocate().await?;
+        let allocated_relay_addr = allocated_conn.local_addr()?;
+        assert_eq!(
+            server.active_reservation_count().await,
+            0,
+            "claiming a ticket must release its unclaimed reservation slot"
+        );
+
+        let peer_socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let peer_addr = peer_socket.local_addr()?;
+
+        let outbound_msg = b"single-hop-session-ticket-outbound";
+        allocated_conn.send_to(outbound_msg, peer_addr).await?;
+
+        let mut peer_buf = [0u8; 256];
+        let (n, observed_relay_src) =
+            tokio::time::timeout(Duration::from_secs(5), peer_socket.recv_from(&mut peer_buf))
+                .await
+                .expect("peer should receive datagram from TURN relay")?;
+        assert_eq!(observed_relay_src, allocated_relay_addr);
+        assert_eq!(&peer_buf[..n], outbound_msg);
+
+        let inbound_msg = b"single-hop-session-ticket-inbound";
+        peer_socket
+            .send_to(inbound_msg, allocated_relay_addr)
+            .await?;
+
+        let mut client_buf = [0u8; 256];
+        let (n_in, observed_peer_src) = tokio::time::timeout(
+            Duration::from_secs(5),
+            allocated_conn.recv_from(&mut client_buf),
+        )
+        .await
+        .expect("client should receive inbound datagram from TURN relay")?;
+        assert_eq!(observed_peer_src, peer_addr);
+        assert_eq!(&client_buf[..n_in], inbound_msg);
+
+        // Re-using the single-use `creds` session ticket on a second client must be rejected.
+        let replay_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let replay_client = Client::new(ClientConfig {
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
+            conn: replay_conn,
+            username: creds.username,
+            password: creds.credential,
+            realm: DEFAULT_TURN_REALM.to_string(),
+            software: String::new(),
+            rto_in_ms: 0,
+            vnet: None,
+        })
+        .await?;
+        replay_client.listen().await?;
+        assert!(
+            replay_client.allocate().await.is_err(),
+            "single-use SessionTicket must reject a second Allocate attempt"
+        );
+        let _ = replay_client.close().await;
+
+        allocated_conn.close().await?;
+        turn_client.close().await?;
+        server.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_reservations_honor_injected_clock_and_reservation_flood_cap() -> Result<()>
+    {
+        let t0: u128 = rings_core::utils::get_epoch_ms();
+        let clock = Arc::new(ManualClock::new(t0));
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.clock = clock.clone();
+        // Set `max_allocations = 1` and `max_reservations = 2` to verify that unclaimed
+        // reservations hold neither OS sockets nor `max_allocations` permits before `Allocate`,
+        // and that requested TTLs exceeding `max_reservation_ttl` (`60s` default) are clamped.
+        cfg.max_allocations = 1;
+        cfg.max_reservations = 2;
+        let server = TurnServer::start(cfg).await?;
+
+        let key1 = SecretKey::random();
+        let res1 = server
+            .reserve_exit_session(key1.pubkey(), Duration::from_secs(3_600))
+            .await?;
+        assert_eq!(
+            res1.ticket.ticket.expires_at_ms,
+            t0 + DEFAULT_MAX_RESERVATION_TTL.as_millis(),
+            "excessive reservation TTL must be clamped to max_reservation_ttl (60s)"
+        );
+
+        let key2 = SecretKey::random();
+        let _res2 = server
+            .reserve_exit_session(key2.pubkey(), Duration::from_secs(30))
+            .await?;
+        assert_eq!(server.active_reservation_count().await, 2);
+        assert_eq!(
+            server.allocations_info(None).await?.len(),
+            0,
+            "unclaimed reservations must not consume active allocation slots"
+        );
+
+        // Unauthenticated reservation flood cannot exceed `max_reservations = 2`.
+        for _ in 0..8 {
+            let flood_key = SecretKey::random();
+            let err = server
+                .reserve_exit_session(flood_key.pubkey(), Duration::from_secs(30))
+                .await
+                .expect_err("reservation flood must fail once max_reservations == 2 is reached");
+            assert!(matches!(err, TurnError::ReservationCapacityReached {
+                max_reservations: 2
+            }));
+        }
+        assert_eq!(server.active_reservation_count().await, 2);
+
+        // Normal authenticated client allocation still succeeds using the single `max_allocations = 1`
+        // slot while 2 unclaimed reservations are active.
+        let did_key = SecretKey::random();
+        let creds = did_key.turn_credentials(server.server_pubkey())?;
+        let client_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
+        let client = Client::new(ClientConfig {
+            stun_serv_addr: server.local_addr().to_string(),
+            turn_serv_addr: server.local_addr().to_string(),
+            conn: client_conn,
+            username: creds.username,
+            password: creds.credential,
+            realm: DEFAULT_TURN_REALM.to_string(),
+            software: String::new(),
+            rto_in_ms: 0,
+            vnet: None,
+        })
+        .await?;
+        client.listen().await?;
+        let alloc_conn = client.allocate().await?;
+
+        // Advancing the injected ManualClock past 60s expires both unclaimed reservations.
+        clock.set(t0 + 60_001);
+        assert_eq!(server.active_reservation_count().await, 0);
+        let key3 = SecretKey::random();
+        let res3 = server
+            .reserve_exit_session(key3.pubkey(), Duration::from_secs(30))
+            .await?;
+        assert_eq!(res3.ticket.ticket.expires_at_ms, t0 + 90_001);
+
+        alloc_conn.close().await?;
+        client.close().await?;
+        server.close().await?;
         Ok(())
     }
 }

@@ -456,6 +456,70 @@ impl Processor {
         crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
     }
 
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s belong to `eligible_stage_dids`.
+    pub async fn build_onion_pipeline_route_for_dids(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+        eligible_stage_dids: &std::collections::BTreeSet<Did>,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, |desc| {
+            eligible_stage_dids.contains(&desc.did)
+        })
+        .await
+    }
+
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s satisfy `predicate`.
+    pub async fn build_onion_pipeline_route_filtered(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+        predicate: impl Fn(&crate::onion::OnionInvokeDescriptor) -> bool,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, predicate)
+            .await
+    }
+
+    /// Fetch a DHT registry `topic` and return the newest valid [`crate::descriptor::SignedDescriptor`]
+    /// per DID at the processor's current clock (#918).
+    pub async fn lookup_registry_descriptors<D>(
+        &self,
+        topic: &str,
+        include_expired: bool,
+    ) -> Result<Vec<D>>
+    where
+        D: crate::descriptor::SignedDescriptor + crate::descriptor::RegistryElement,
+    {
+        let Some(entry) = self.fetch_topic_entry(topic).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::descriptor::latest_valid_by_did(
+            crate::descriptor::heard_descriptors::<D>(&entry),
+            self.clock().now_ms(),
+            self.swarm.network_id(),
+            include_expired,
+        ))
+    }
+
+    /// Fetch the raw normalized DHT [`entry::Entry`] stored under `topic`, if any.
+    pub async fn fetch_topic_entry(&self, topic: &str) -> Result<Option<entry::Entry>> {
+        let entry_key = entry::Entry::gen_did(topic)?;
+        self.fetch_storage_entry(entry_key).await
+    }
+
+    /// Execute one registration pass for every configured [`RegistrationTask`] on this processor.
+    ///
+    /// Hidden test/simulation helper: production nodes publish registrations exclusively through
+    /// the cooperative daemon started by [`Self::listen`] / [`Self::listen_with`].
+    #[doc(hidden)]
+    pub async fn register_all_once(&self) -> Result<()> {
+        let context = self.registration_context();
+        for task in &self.registration_tasks {
+            task.register_once(&context).await?;
+        }
+        Ok(())
+    }
+
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering
     /// `service` (every service when empty).
     fn select_onion_exits_from_entry(

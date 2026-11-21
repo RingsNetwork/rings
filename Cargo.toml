@@ -31,7 +31,7 @@ rings-dns-relay = { path = "crates/dns-relay", version = "1.0.0-pre.6" }
 rings-gateway = { path = "crates/gateway", version = "1.0.0-pre.6" }
 rings-measure = { path = "crates/measure", version = "1.0.0-pre.6" }
 rings-network-policy = { path = "crates/network-policy", version = "1.0.0-pre.6" }
-rings-node = { path = "crates/node", version = "1.0.0-pre.6" }
+rings-node = { path = "crates/node", version = "1.0.0-pre.6", default-features = false }
 rings-rpc = { path = "crates/rpc", version = "1.0.0-pre.6", default-features = false }
 rings-runtime = { path = "crates/runtime", version = "1.0.0-pre.6", default-features = false }
 rings-test-support = { path = "crates/test-support" }

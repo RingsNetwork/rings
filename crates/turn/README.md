@@ -43,7 +43,7 @@ Standard WebRTC clients (both browser `RTCPeerConnection` and native `webrtc-rs`
 
 Because `credential` depends on the ECDH shared secret `x(client_sk · server_pk) == x(server_sk · client_pk)`, passive on-path UDP observers who see `USERNAME` in cleartext cannot recover `credential` or impersonate the client on a new TURN allocation.
 
-Two signing modes are supported via `TurnCredentials`:
+Two long-term identity signing modes and one unlinkable ephemeral ticket mode are supported via `TurnCredentials`:
 
 - **Direct DID / Account Signature (Non-Expiring)**:
   - **Secp256k1 `SecretKey` / `Did`**:
@@ -60,6 +60,19 @@ Two signing modes are supported via `TurnCredentials`:
   - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || shared_secret || delegatee_sig))`
   - Signed transcript: `"rings-turn-auth-v1\n<hex(delegation.digest())>\n<hex(server_pubkey)>"` (`pack_turn_auth`)
   - Ideal for browser tabs and nodes that keep their root `delegator_key` offline; when a running node renews its `DelegateeKey`, `SwarmTransport` automatically refreshes its TURN credentials and updates active peer connections while `rings-turn` keeps existing established 5-tuple allocations alive across renewal.
+- **Unlinkable `SessionTicket` (`tkt-` Prefix, Single-Use)**:
+  - `username`: `tkt-<base58(codec(SignedTurnSessionTicket))>.<base58(ephemeral_client_sig)>`
+  - `credential`: `base58(keccak256("rings-turn-credential-v1\n" || ECDH(ephemeral_client_sk, server_pk) || ephemeral_client_sig))`
+  - Acquired anonymously over an onion `invoke` loop (`turn.ticket` at `invoke<64,1024,500ms>`), exposing **zero `Did` or `Delegation` bytes** in the cleartext STUN `USERNAME` attribute. Each ticket is bound to a single reservation slot (capped by `max_reservations`) and consumed at most once on `Allocate`.
+
+### Single-Hop Threat Model
+
+| Party | Learns | Does NOT Learn |
+| --- | --- | --- |
+| TURN server (`SessionTicket` mode) | Client IP, remote peer IP (`XOR-PEER-ADDRESS`), relayed bytes (DTLS/SRTP ciphertext) | Client `Did`, client `Delegation`, client overlay address during `turn.ticket` issuance |
+| TURN server (`Did` / `Delegation` mode) | Client IP, remote peer IP, client `Did` | Root private key or TURN `credential` from passive capture |
+| Remote WebRTC peer (relay-only policy) | TURN server public relay address (`XOR-RELAYED-ADDRESS`) | Client IP (when ICE uses relay candidates only) |
+| Passive UDP observer | Cleartext STUN `USERNAME` (`tkt-…` or identity claim) and packet sizes/timing | TURN `credential` password; client `Did` in `SessionTicket` mode |
 <!-- ANCHOR_END: model -->
 
 ## Standalone Binary (`rings-turn`)
@@ -120,6 +133,15 @@ Options:
       --max-nonces <MAX_NONCES>
           Maximum number of active nonce challenges tracked concurrently
           [env: RINGS_TURN_MAX_NONCES=] [default: 4096]
+      --max-allocations <MAX_ALLOCATIONS>
+          Maximum number of active TURN relay allocations stored concurrently
+          [env: RINGS_TURN_MAX_ALLOCATIONS=] [default: 1024]
+      --max-reservations <MAX_RESERVATIONS>
+          Maximum number of unclaimed session-ticket reservations stored concurrently (0 disables)
+          [env: RINGS_TURN_MAX_RESERVATIONS=] [default: 256]
+      --max-reservation-ttl-secs <MAX_RESERVATION_TTL_SECS>
+          Maximum lifetime in seconds of an unclaimed session-ticket reservation
+          [env: RINGS_TURN_MAX_RESERVATION_TTL_SECS=] [default: 60]
   -h, --help
           Print help
   -V, --version

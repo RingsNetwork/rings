@@ -207,13 +207,14 @@ impl DelegationAuthHandler {
         let (identity, _, _, _) = TurnCredentials::decode_username_parts(username)?;
         let verification_ts_ms = match (&identity, established_allocation) {
             (TurnAuthIdentity::Delegation(delegation), true) => delegation.created_at_ms(),
+            (TurnAuthIdentity::SessionTicket(signed), true) => signed.ticket.expires_at_ms,
             _ => now_ms,
         };
         let cache_entry = match &identity {
             TurnAuthIdentity::Delegation(delegation) => {
                 CacheEntry::Delegation(delegation.digest()?)
             }
-            TurnAuthIdentity::Account(_) => {
+            TurnAuthIdentity::Account(_) | TurnAuthIdentity::SessionTicket(_) => {
                 CacheEntry::DirectAccount(keccak256(username.as_bytes()))
             }
         };
@@ -236,9 +237,11 @@ impl DelegationAuthHandler {
             verified
         };
 
-        let did = verified.did();
-        if !self.policy.is_admitted(did) {
-            return Err(TurnError::DelegatorNotAdmitted(did));
+        if !matches!(verified.identity, TurnAuthIdentity::SessionTicket(_)) {
+            let did = verified.did();
+            if !self.policy.is_admitted(did) {
+                return Err(TurnError::DelegatorNotAdmitted(did));
+            }
         }
 
         let key = generate_auth_key(username, realm, &verified.credential);
@@ -284,6 +287,15 @@ impl AuthHandler for DelegationAuthHandler {
                             %src_addr,
                             %realm,
                             "admitted TURN request via direct DID/Account signature"
+                        );
+                    }
+                    TurnAuthIdentity::SessionTicket(signed) => {
+                        tracing::debug!(
+                            ephemeral_did = %signed.ticket.ephemeral_did(),
+                            %src_addr,
+                            %realm,
+                            established_allocation,
+                            "admitted TURN request via unlinkable SessionTicket"
                         );
                     }
                 }
