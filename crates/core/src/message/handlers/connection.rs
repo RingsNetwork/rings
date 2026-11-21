@@ -209,16 +209,17 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                     );
                     Ok(())
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        local = %self.dht.did,
-                        peer = %peer,
-                        tx_id = %ctx.transaction.tx_id,
-                        error = ?error,
-                        "CONNECT_NODE answer accept failed"
-                    );
-                    Err(error)
-                }
+                Err(error) => drop_unlinked_return(Err(error), "CONNECT_NODE answer").inspect_err(
+                    |logged_error| {
+                        tracing::warn!(
+                            local = %self.dht.did,
+                            peer = %peer,
+                            tx_id = %ctx.transaction.tx_id,
+                            error = ?logged_error,
+                            "CONNECT_NODE answer accept failed"
+                        );
+                    },
+                ),
             }
         }
     }

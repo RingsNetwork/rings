@@ -1037,12 +1037,20 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
     use rings_transport::notifier::wait_for_data_channel_open;
     use rings_transport::notifier::Notifier;
 
-    type Switchboard = Arc<DashMap<(String, String), Arc<InnerTransportCallback>>>;
+    type Switchboard = Arc<
+        DashMap<
+            (String, String),
+            (
+                Arc<InnerTransportCallback>,
+                std::sync::Weak<CustomMeshConnection>,
+            ),
+        >,
+    >;
 
     struct CustomMeshConnection {
         local_id: String,
         peer_id: String,
-        mode_steps: u8, // 0, 1, or 3 (or 99 = responder erroneously returns Done on non-final step)
+        mode_steps: u8, // 0, 1, 3, 11 (optimistic inline 1-step), or 99 (faulty responder)
         negotiated_max: Arc<std::sync::atomic::AtomicUsize>,
         oversized_final: bool,
         sent_frames: Arc<std::sync::atomic::AtomicUsize>,
@@ -1109,7 +1117,9 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                         cb.close_link_credit();
                     },
                     move |wire, target_lane, irrevocable| async move {
-                        let Some(peer_cb) = switchboard.get(&target_key).map(|r| Arc::clone(&*r))
+                        let Some(peer_cb) = switchboard
+                            .get(&target_key)
+                            .map(|r| Arc::clone(&r.value().0))
                         else {
                             return Err(rings_transport::error::Error::MessageNotDelivered(
                                 "missing mesh peer".to_string(),
@@ -1151,7 +1161,7 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                 self.spawn_connected();
                 return Ok(HandshakeStep::Done);
             }
-            if self.mode_steps == 1 {
+            if self.mode_steps == 1 || self.mode_steps == 11 {
                 return match (self.stage.load(Ordering::Acquire), inbound.as_deref()) {
                     (0, None) => {
                         self.stage.store(1, Ordering::Release);
@@ -1165,11 +1175,23 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                                     + 1
                             ])));
                         }
+                        if self.mode_steps == 11 {
+                            // Optimistic 1-step backend reporting local channel readiness inline
+                            // before `SendFinal` leaves (`R3-A1` witness).
+                            self.mark_connected_inline().await;
+                        }
                         Ok(HandshakeStep::SendFinal(Bytes::from_static(&[0xaa, 0x01])))
                     }
                     (0, Some([0xaa, 0x01])) => {
                         self.stage.store(2, Ordering::Release);
                         self.spawn_connected();
+                        if let Some(paired) = self
+                            .switchboard
+                            .get(&(self.peer_id.clone(), self.local_id.clone()))
+                            .and_then(|entry| entry.value().1.upgrade())
+                        {
+                            paired.spawn_connected();
+                        }
                         Ok(HandshakeStep::Done)
                     }
                     (stage, other) => {
@@ -1286,7 +1308,9 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                 let switchboard = Arc::clone(&switchboard);
                 let target_key = target_key.clone();
                 async move {
-                    let Some(peer_cb) = switchboard.get(&target_key).map(|r| Arc::clone(&*r))
+                    let Some(peer_cb) = switchboard
+                        .get(&target_key)
+                        .map(|r| Arc::clone(&r.value().0))
                     else {
                         return Err(rings_transport::error::Error::MessageNotDelivered(
                             "peer not yet registered".to_string(),
@@ -1296,10 +1320,6 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                     Ok(())
                 }
             })?;
-            self.switchboard.insert(
-                (self.local_id.clone(), cid.to_string()),
-                Arc::clone(&inner_cb),
-            );
             let conn = CustomMeshConnection {
                 local_id: self.local_id.clone(),
                 peer_id: cid.to_string(),
@@ -1310,10 +1330,17 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
                 stage: AtomicU8::new(0),
                 state: ConnectionStateCell::new(),
                 notifier,
-                callback: inner_cb,
+                callback: Arc::clone(&inner_cb),
                 switchboard: Arc::clone(&self.switchboard),
             };
-            self.pool.safely_insert(cid, conn).await
+            let conn_ref = self.pool.safely_insert(cid, conn).await?;
+            let live = conn_ref.upgrade()?;
+            self.switchboard.insert(
+                (self.local_id.clone(), cid.to_string()),
+                (inner_cb, Arc::downgrade(&live)),
+            );
+            drop(live);
+            Ok(conn_ref)
         }
 
         async fn close_connection_if_current(
@@ -1710,8 +1737,8 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
     //   1-step offer!
     {
         let a6_switchboard: Switchboard = Arc::new(DashMap::new());
-        let one_a = build_custom_node(k1, 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
-        let one_b = build_custom_node(k2, 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
+        let one_a = build_custom_node(k1.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
+        let one_b = build_custom_node(k2.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
         let (smaller_one, larger_one) = if one_a.did() < one_b.did() {
             (&one_a, &one_b)
         } else {
@@ -1737,12 +1764,129 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
         let OfferReply::Answer(None) = larger_one.swarm.answer_offer_step(offer_s).await? else {
             panic!("larger 1-step initiator must yield and complete responder step");
         };
-        wait_until_result("larger 1-step responder admits smaller", || {
-            larger_one.swarm.is_peer_admitted(smaller_one.did())
-        })
+        wait_until_result(
+            "both 1-step peers mutually admitted after tie-break",
+            || {
+                Ok(larger_one.swarm.is_peer_admitted(smaller_one.did())?
+                    && smaller_one.swarm.is_peer_admitted(larger_one.did())?)
+            },
+        )
         .await?;
         one_a.swarm.close().await?;
         one_b.swarm.close().await?;
+    }
+
+    // - R3-A1: Optimistic 1-step backend reporting local channel readiness inline before `SendFinal`
+    //   leaves routes its initial `ConnectNodeSend` over the existing relay hop rather than over
+    //   the half-open direct link whose responder has not yet received step 0!
+    {
+        let r3_sb: Switchboard = Arc::new(DashMap::new());
+        let o1 = build_custom_node(k1.clone(), 11, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o2 = build_custom_node(k2.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o3 = build_custom_node(k3.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o4 = build_custom_node(k4.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+
+        // Establish clockwise ring `o1 -> o2 -> o3 -> o4 -> o1` (`o1 <-> o3` unlinked).
+        for (left, right) in [(&o2, &o1), (&o2, &o3), (&o3, &o4), (&o4, &o1)] {
+            let (_, Some(offer_lr)) = left.swarm.offer_connection_step(right.did()).await? else {
+                panic!("expected 1-step offer");
+            };
+            let OfferReply::Answer(None) = right.swarm.answer_offer_step(offer_lr).await? else {
+                panic!("expected 1-step completion");
+            };
+            wait_until_result("1-step ring edge admitted", || {
+                Ok(left.swarm.is_peer_admitted(right.did())?
+                    && right.swarm.is_peer_admitted(left.did())?)
+            })
+            .await?;
+            wait_for_msgs([&o1, &o2, &o3, &o4]).await;
+        }
+        assert!(unlinked(&o1, o3.did())? && unlinked(&o3, o1.did())?);
+
+        // Now dial `o3` from `o1` over the overlay (`Swarm::connect`): even though `o1`
+        // (`mode_steps == 11`) marks its local channel open inline before `SendFinal` leaves,
+        // `send_connection_offer` routes via `o2` so `o3` receives step 0 and opens its side!
+        o1.swarm.connect(o3.did()).await?;
+        wait_until_result("o3 admits o1 over relayed 1-step offer", || {
+            Ok(o3.swarm.is_peer_admitted(o1.did())? && o1.swarm.is_peer_admitted(o3.did())?)
+        })
+        .await?;
+        o1.swarm.close().await?;
+        o2.swarm.close().await?;
+        o3.swarm.close().await?;
+        o4.swarm.close().await?;
+    }
+
+    // - R3-A2 & R3-B1: Stateless pre-claim header violations (`step_index = 7, final_step = false`
+    //   or `session_id = None`) never abandon a live `Sent(0)` / `Active` slot, and
+    //   `Swarm::prepare_delegatee_key_rotation` holds exclusive rotation lock across commit.
+    {
+        let guard_sb: Switchboard = Arc::new(DashMap::new());
+        let g_key_1 = SecretKey::random();
+        let g_key_2 = SecretKey::random();
+        let g_session_2 = crate::delegation::DelegateeKey::new_with_seckey(&g_key_2)?;
+        let g1 = build_custom_node(g_key_1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &guard_sb)?;
+        let g2 = build_custom_node(g_key_2, 3, MAX_CHANNEL_MESSAGE_SIZE, &guard_sb)?;
+
+        let (g_attempt, Some(_offer0)) = g1.swarm.offer_connection_step(g2.did()).await? else {
+            panic!("expected step-0 offer");
+        };
+        let forged_step7 = g2
+            .swarm
+            .transport
+            .application_egress()
+            .originate(
+                Message::ConnectNodeReport(crate::message::ConnectNodeReport {
+                    step_index: 7,
+                    final_step: false,
+                    session_id: Some([0x77; 16]),
+                    handshake: Bytes::from_static(&[0xff, 0x01, 0x02]),
+                    dht_protocol_mode: g2.swarm.transport.dht_protocol_mode(),
+                    relay_custody: g2.swarm.transport.dht.relay_custody(),
+                }),
+                g1.did(),
+                Some(g2.did()),
+            )
+            .await?;
+        assert!(matches!(
+            g1.swarm
+                .accept_answer_step_for(g_attempt, forged_step7)
+                .await,
+            Err(Error::InvalidMessage(_))
+        ));
+        assert_eq!(
+            g1.swarm.transport.pending_connection_count()?,
+            1,
+            "pre-claim MAX_HANDSHAKE_STEPS violation must not abandon live Sent(0) slot"
+        );
+        g1.swarm.abandon_connection_attempt(g_attempt).await;
+        assert_eq!(g1.swarm.transport.pending_connection_count()?, 0);
+
+        let now_ms = g1.swarm.clock().now_ms();
+        let next_del = crate::delegation::DelegateeKey::new_with_seckey_at(
+            &g_key_1,
+            crate::consts::DEFAULT_DELEGATION_TTL_MS + 60_000,
+            now_ms,
+        )?;
+        let commit_token = g1.swarm.prepare_delegatee_key_rotation(&next_del)?;
+        assert!(
+            g1.swarm
+                .transport
+                .delegatee_rotation_lock
+                .try_lock()
+                .is_err(),
+            "SwarmRotationCommit must hold delegatee_rotation_lock until committed or dropped"
+        );
+        commit_token.commit();
+        assert!(g1
+            .swarm
+            .transport
+            .delegatee_rotation_lock
+            .try_lock()
+            .is_ok());
+        let _ = g_session_2;
+        g1.swarm.close().await?;
+        g2.swarm.close().await?;
     }
 
     valid_zero_1.swarm.close().await?;

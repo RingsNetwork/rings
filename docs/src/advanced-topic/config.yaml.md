@@ -83,14 +83,15 @@ measure_storage:
   capacity: 200000000
 ```
 
-Unknown keys are rejected (`deny_unknown_fields`). Nine top-level keys are **required** and must
+Unknown keys are rejected (`deny_unknown_fields`). Eight top-level keys are **required** and must
 always be present in `config.yaml`: `network_id`, `delegatee_key`, `internal_api_port`,
-`external_api_addr`, `endpoint_url`, `ice_servers`, `stabilize_interval`, `data_storage` (`path`
-and `capacity`), and `measure_storage` (`path` and `capacity`). Every other field is **optional**
-and defaults to the value shown above (or `null` / empty when omitted by `rings init`, such as
+`external_api_addr`, `endpoint_url`, `stabilize_interval`, `data_storage` (`path` and `capacity`),
+and `measure_storage` (`path` and `capacity`). Every other field is **optional** and defaults to the
+value shown above (or `null` / empty when omitted by `rings init`, such as `ice_servers`,
 `delegator_key`, `remote_rpc_proxy_url`, `api_token_path`, `api_allowed_origins`,
 `onion_http_proxy_addr`, `services`, `dns_relay`, `external_ip`, `udp_port_min` / `udp_port_max`,
-and `network`).
+and `network`; note that `ice_servers` / `external_ip` / `udp_port_*` and `network` are mutually
+exclusive).
 
 ## Identity and network
 

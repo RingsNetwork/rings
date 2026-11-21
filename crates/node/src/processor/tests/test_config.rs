@@ -496,6 +496,15 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
         "turn://turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
         "turn:turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
         "turns:turn.rings.rs:5349?pubkey=",
+        "turn://turn.rings.rs:3478?\npubkey=NOT_VALID_BASE58",
+        &format!(
+            "{}&pubkey=BAD",
+            rings_turn::format_turn_server_url(
+                "turn:turn.rings.rs:3478",
+                SecretKey::random().pubkey()
+            )
+            .unwrap()
+        ),
     ] {
         let bad_ice_cfg =
             ProcessorConfig::new(0, bad_spec.to_string(), adhoc_config.delegatee_key(), 3);
@@ -619,6 +628,34 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     );
     assert_eq!(serialized.udp_port_min, Some(50000));
     assert_eq!(serialized.udp_port_max, Some(50100));
+
+    // Explicit `"webrtc"` network descriptor round-trips as `network: Some({ kind: "webrtc", ... })`
+    // without collapsing to flat fields, and preserves `udp_port_range()`!
+    let mut webrtc_desc_serialized = ProcessorConfigSerialized::try_from(onion_test_config())?;
+    webrtc_desc_serialized.ice_servers.clear();
+    webrtc_desc_serialized.external_address = None;
+    webrtc_desc_serialized.udp_port_min = None;
+    webrtc_desc_serialized.udp_port_max = None;
+    webrtc_desc_serialized.network = Some(crate::processor::NetworkConfigDescriptor {
+        kind: "webrtc".to_string(),
+        params: serde_json::json!({
+            "ice_servers": "stun://stun.l.google.com:19302",
+            "external_address": "https://node.rings.network:50000",
+            "udp_port_min": 50000,
+            "udp_port_max": 50100
+        }),
+    });
+    let webrtc_desc_cfg = ProcessorConfig::try_from(webrtc_desc_serialized)?;
+    assert_eq!(webrtc_desc_cfg.udp_port_range(), Some(range));
+    let reserialized_webrtc_desc = ProcessorConfigSerialized::try_from(webrtc_desc_cfg)?;
+    assert_eq!(
+        reserialized_webrtc_desc
+            .network
+            .as_ref()
+            .map(|d| d.kind.as_str()),
+        Some("webrtc")
+    );
+    assert!(reserialized_webrtc_desc.ice_servers.is_empty());
 
     // 4. Attempting to losslessly serialize an unregistered programmatic `NodeNetworkParameters`
     //    implementation (returning `to_network_descriptor = None`) fails explicitly.

@@ -117,6 +117,9 @@ impl FromStr for IceServer {
     type Err = IceServerError;
     fn from_str(s: &str) -> Result<Self, IceServerError> {
         let trimmed = s.trim();
+        if trimmed.bytes().any(|b| b.is_ascii_control()) {
+            return Err(IceServerError::InvalidControlCharacter);
+        }
         let normalized;
         let to_parse = if !trimmed.contains("://") {
             if let Some((scheme_part, rest)) = trimmed.split_once(':') {

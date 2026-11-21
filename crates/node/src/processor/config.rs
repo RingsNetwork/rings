@@ -260,7 +260,9 @@ impl NodeNetworkParameters for WebrtcNetworkParameters {
                 derive_account_ice_servers(self.config.traversal_servers(), account_key)?
             }
         };
-        instantiate_builtin_transport(&self.config, &signed)
+        self.config
+            .try_build_shared_transport(Some(&signed))
+            .map_err(|err| Error::InvalidConfig(err.to_string()))
     }
 
     fn endpoint_hint(&self) -> Option<&str> {
@@ -372,10 +374,12 @@ fn network_transport_registry() -> &'static RwLock<BTreeMap<String, NetworkParam
                         Error::InvalidConfig(format!("invalid 'webrtc' network params: {err}"))
                     })?;
                 let range = parse_udp_port_range(decoded.udp_port_min, decoded.udp_port_max)?;
-                Ok(Arc::new(TransportNetworkConfig::new(
-                    decoded.ice_servers,
-                    decoded.external_address,
-                    range,
+                Ok(Arc::new(WebrtcNetworkParameters::new(
+                    TransportNetworkConfig::new(
+                        decoded.ice_servers,
+                        decoded.external_address,
+                        range,
+                    ),
                 )))
             }),
         );

@@ -218,8 +218,37 @@ impl SwarmTransport {
             handshake_bytes = offer.handshake.len(),
             "connection offer send start"
         );
+        // Exclude `peer` itself when choosing the overlay hop for an initial `ConnectNodeSend`:
+        // if an optimistic 1-step (`SendFinal`) backend reported channel readiness before
+        // returning step 0, `attempt` may already appear in `sender.is_connected(peer)` even
+        // though the remote peer has not yet received step 0 or allocated its connection.
+        let origination = match self
+            .dht
+            .origination(peer, |cand| cand != peer && sender.is_connected(cand))
+        {
+            Ok(origination) => origination,
+            Err(error) => {
+                return Err(self
+                    .classify_step_failure(attempt, error, "originating connection offer")
+                    .await?);
+            }
+        };
+        let Some(hop) = origination.hop else {
+            return Err(self
+                .classify_step_failure(
+                    attempt,
+                    Error::RelayDestinationUnreachable { destination: peer },
+                    "originating connection offer",
+                )
+                .await?);
+        };
         let mut payload = match sender
-            .originate(Message::ConnectNodeSend(offer.clone()), peer, None)
+            .originate_through(
+                Message::ConnectNodeSend(offer.clone()),
+                hop,
+                peer,
+                origination.reply_via,
+            )
             .await
         {
             Ok(payload) => payload,
@@ -496,23 +525,18 @@ impl SwarmTransport {
             ));
         }
         let Some(sid) = answer.session_id else {
-            let err =
-                Error::InvalidMessage("non-final ConnectNodeReport missing session_id".to_string());
-            return Err(self
-                .classify_step_failure(attempt, err, "validating continuation report")
-                .await?);
+            return Err(Error::InvalidMessage(
+                "non-final ConnectNodeReport missing session_id".to_string(),
+            ));
         };
         if answer.step_index.saturating_add(1)
             >= rings_transport::core::transport::MAX_HANDSHAKE_STEPS
         {
-            let err = Error::InvalidMessage(format!(
+            return Err(Error::InvalidMessage(format!(
                 "handshake step {} exceeds MAX_HANDSHAKE_STEPS ({})",
                 answer.step_index.saturating_add(1),
                 rings_transport::core::transport::MAX_HANDSHAKE_STEPS
-            ));
-            return Err(self
-                .classify_step_failure(attempt, err, "advancing initiator continuation")
-                .await?);
+            )));
         }
 
         // Atomically transition `Sent -> ClaimedReply` under the lifecycle lock before detaching

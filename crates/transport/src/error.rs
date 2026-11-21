@@ -17,6 +17,10 @@ pub enum IceServerError {
     /// Cannot extract host from url
     #[error("Cannot extract host from url")]
     UrlMissHost,
+
+    /// ICE server URL contains interior ASCII control characters (`\t`, `\r`, `\n`, etc.)
+    #[error("ICE server URL contains ASCII control characters")]
+    InvalidControlCharacter,
 }
 
 /// Errors produced by transport connections, pools, and backend adapters.

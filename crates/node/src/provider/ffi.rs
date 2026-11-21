@@ -539,14 +539,11 @@ pub unsafe extern "C" fn rings_node_new_provider_with_serialized_config(
 ) -> *mut ProviderHandle {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<*mut ProviderHandle> {
-            let mut config_text = c_char_to_string(serialized_config)?;
+            let config_text = zeroize::Zeroizing::new(c_char_to_string(serialized_config)?);
             let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
             let parsed_config = ProcessorConfig::from_str(&config_text);
-            // Overwrite the raw serialized config buffer immediately after parsing so session
+            // Zeroize the raw serialized config buffer immediately after parsing so session
             // secret key material does not linger on the heap.
-            unsafe {
-                config_text.as_bytes_mut().fill(0);
-            }
             drop(config_text);
             let config = parsed_config?.online_node_type(OnlineNodeType::Ffi);
 

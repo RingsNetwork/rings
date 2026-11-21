@@ -111,7 +111,10 @@ pub enum HandshakeStep {
     /// expected before this side's handshake completes.
     Send(Bytes),
     /// Transmit these final handshake bytes to the peer; this side expects no further inbound
-    /// handshake message and may transition to channel readiness immediately.
+    /// handshake message. Responder final steps (`step_index >= 1`) and multi-round initiator
+    /// final steps (`step_index >= 2`) may transition to channel readiness immediately; a 1-step
+    /// initial offer (`step_index == 0`) should report `channel_open = true` once the remote peer
+    /// establishes the link upon processing step 0 so crossing 1-step offers can tie-break cleanly.
     SendFinal(Bytes),
     /// This side's handshake is complete with no outbound handshake message to transmit.
     Done,

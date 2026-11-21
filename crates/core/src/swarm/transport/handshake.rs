@@ -894,6 +894,13 @@ impl SwarmTransport {
                 "non-final ConnectNodeReport missing session_id".to_string(),
             ));
         }
+        if !answer_msg.final_step && answer_msg.step_index.saturating_add(1) >= MAX_HANDSHAKE_STEPS
+        {
+            return Err(Error::InvalidMessage(format!(
+                "handshake step {} exceeds MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})",
+                answer_msg.step_index.saturating_add(1)
+            )));
+        }
 
         let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
             (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))
@@ -909,17 +916,6 @@ impl SwarmTransport {
                 return Err(Error::SwarmMissTransport(peer));
             }
         };
-
-        if !answer_msg.final_step && answer_msg.step_index.saturating_add(1) >= MAX_HANDSHAKE_STEPS
-        {
-            let err = Error::InvalidMessage(format!(
-                "handshake step {} exceeds MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})",
-                answer_msg.step_index.saturating_add(1)
-            ));
-            return Err(self
-                .classify_step_failure(attempt, err, "advancing initiator continuation")
-                .await?);
-        }
 
         // Atomically claim the inbound reply under the lifecycle lock before running any backend
         // step, verifying that `attempt` is an `Offering` generation awaiting `answer_msg.step_index`
@@ -983,31 +979,24 @@ impl SwarmTransport {
             state = ?conn.connection_state(),
             "connection answer accept start"
         );
-        match conn
-            .connection
-            .handshake_step(Some(answer_msg.handshake.clone()))
-            .await
+        match self
+            .run_handshake_step(
+                attempt,
+                &conn,
+                Some(answer_msg.handshake.clone()),
+                "accepting connection answer",
+            )
+            .await?
         {
-            Ok(HandshakeStep::Done) => {}
-            Ok(other) => {
-                let err = rings_transport::error::Error::LocalHandshakeGenerationError(format!(
-                    "expected HandshakeStep::Done on final answer, got {other:?}"
-                ));
-                self.abandon_pending_connection(attempt, "accepting connection answer")
-                    .await;
-                return Err(Error::Transport(err));
-            }
-            Err(error) => {
-                self.abandon_pending_connection(attempt, "accepting connection answer")
-                    .await;
-                tracing::warn!(
-                    target: "rings_core::swarm::transport::handshake",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    error = ?error,
-                    "connection answer accept failed"
-                );
-                return Err(Error::Transport(error));
+            HandshakeStep::Done => {}
+            other => {
+                let err =
+                    Error::Transport(rings_transport::error::Error::RemoteHandshakeApplyError(
+                        format!("expected HandshakeStep::Done on final answer, got {other:?}"),
+                    ));
+                return Err(self
+                    .classify_step_failure(attempt, err, "accepting connection answer")
+                    .await?);
             }
         }
         self.ensure_negotiated_max_message_size_or_abandon(
@@ -1019,10 +1008,7 @@ impl SwarmTransport {
         self.dht
             .observe_relay_custody(peer, answer_msg.relay_custody)?;
         if !self.is_current_connection_attempt(attempt)? {
-            return Err(Error::ConnectionAttemptSuperseded {
-                peer,
-                generation: attempt.generation,
-            });
+            return Err(self.lost_slot(attempt)?);
         }
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",

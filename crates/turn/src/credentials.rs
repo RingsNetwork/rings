@@ -139,14 +139,21 @@ pub fn extract_turn_server_pubkey(raw_url: &str) -> Option<PublicKey<33>> {
         let query = query_and_frag
             .split_once('#')
             .map_or(query_and_frag, |(q, _)| q);
+        let mut found: Option<PublicKey<33>> = None;
         for pair in query.split('&') {
-            if let Some((key, value)) = pair.split_once('=') {
-                if key.eq_ignore_ascii_case("pubkey") {
-                    if let Some(pk) = decode_secp256k1_pubkey_b58(value) {
-                        return Some(pk);
-                    }
+            let (key, value_opt) = match pair.split_once('=') {
+                Some((k, v)) => (k, Some(v)),
+                None => (pair, None),
+            };
+            if key.eq_ignore_ascii_case("pubkey") {
+                let pk = value_opt.and_then(decode_secp256k1_pubkey_b58)?;
+                if found.replace(pk).is_some() {
+                    return None;
                 }
             }
+        }
+        if let Some(pk) = found {
+            return Some(pk);
         }
     }
 

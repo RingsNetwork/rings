@@ -185,6 +185,7 @@ pub(crate) struct SwarmTransportParts {
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: SharedTransport,
+    delegatee_rotation_lock: Mutex<()>,
     delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
@@ -311,6 +312,7 @@ impl SwarmTransport {
         Self {
             network_id,
             transport,
+            delegatee_rotation_lock: Mutex::new(()),
             delegatee_key: RwLock::new(delegatee_key),
             dht,
             storage_redundancy: settings.storage_redundancy,
@@ -547,9 +549,19 @@ impl SwarmTransport {
             .unwrap_or_else(PoisonError::into_inner) = delegatee_key;
     }
 
+    /// Acquire exclusive session-key rotation right, recovering across poisoned mutex state so
+    /// two-phase preparation and commit remain infallible and serialized against
+    /// [`Self::set_delegatee_key`].
+    pub(crate) fn lock_delegatee_rotation(&self) -> MutexGuard<'_, ()> {
+        self.delegatee_rotation_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Replace the session key this node signs with, when it carries a valid delegator
     /// signature for the same account DID and strictly advances the signing horizon.
     pub(crate) fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
+        let _rotation_guard = self.lock_delegatee_rotation();
         if delegatee_key.delegator_did() != self.dht.did {
             return Err(Error::VerifySignatureFailed);
         }

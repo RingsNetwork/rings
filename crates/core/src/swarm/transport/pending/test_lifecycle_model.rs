@@ -62,7 +62,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 enum PeerLifecycle {
     #[default]
     Absent,
@@ -445,7 +445,7 @@ fn explore(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ModelSignaling {
     Creating(OfferOwner),
     Sent { owner: OfferOwner, final_step: bool },
@@ -493,7 +493,7 @@ struct ProductView {
     superseded_by_peer: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 struct ProductModel {
     peer: PeerLifecycle,
     signaling: Option<ModelSignaling>,
@@ -974,7 +974,10 @@ impl ProductImpl {
 
 #[test]
 fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
-    const MAX_DEPTH: usize = 4;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
+
+    const MAX_DEPTH: usize = 8;
     let actions = [
         ProductAction::ReserveOffering(OfferOwner::Overlay),
         ProductAction::ReserveOffering(OfferOwner::External),
@@ -1044,37 +1047,61 @@ fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
         ProductAction::Timeout,
     ];
 
-    fn explore_product(
-        model: ProductModel,
-        implementation: ProductImpl,
-        actions: &[ProductAction],
-        remaining_depth: usize,
-    ) {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut saw_step4_claimed = false;
+    let mut saw_step4_answered = false;
+
+    let init_model = ProductModel::default();
+    let init_impl = ProductImpl::new();
+    visited.insert(init_model);
+    queue.push_back((init_model, init_impl, 0usize));
+
+    while let Some((model, implementation, depth)) = queue.pop_front() {
         let model_view = model.view();
         let impl_view = implementation.view();
         assert_eq!(model_view, impl_view);
-        // Invariant (Signaling): signaling state exists iff the peer is in `Pending`.
         assert_eq!(
             model_view.signaling.is_some(),
             matches!(model_view.peer, PeerLifecycle::Pending(_))
         );
-        if remaining_depth == 0 {
-            return;
+        if matches!(
+            model_view.signaling,
+            Some(ModelSignaling::ClaimedReply { next_step: 4, .. })
+        ) {
+            saw_step4_claimed = true;
         }
-        for &action in actions {
-            explore_product(
-                model.apply(action),
-                implementation.clone().apply(action),
-                actions,
-                remaining_depth - 1,
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        for &action in &actions {
+            let next_model = model.apply(action);
+            let next_impl = implementation.clone().apply(action);
+            let next_view = next_model.view();
+            assert_eq!(next_view, next_impl.view());
+            assert_eq!(
+                next_view.signaling.is_some(),
+                matches!(next_view.peer, PeerLifecycle::Pending(_))
             );
+            if matches!(action, ProductAction::MarkContinuationSent {
+                step: 4,
+                final_step: true,
+                ..
+            }) && matches!(
+                model_view.signaling,
+                Some(ModelSignaling::ClaimedReply { next_step: 4, .. })
+            ) && matches!(next_view.signaling, Some(ModelSignaling::Answered(_)))
+            {
+                saw_step4_answered = true;
+            }
+            if visited.insert(next_model) {
+                queue.push_back((next_model, next_impl, depth + 1));
+            }
         }
     }
 
-    explore_product(
-        ProductModel::default(),
-        ProductImpl::new(),
-        &actions,
-        MAX_DEPTH,
+    assert!(
+        saw_step4_claimed && saw_step4_answered,
+        "5-step continuation states (ClaimedReply(4) -> Answered) must be explored"
     );
 }

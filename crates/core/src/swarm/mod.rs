@@ -139,16 +139,17 @@ impl Swarm {
 
     /// Non-mutating validation phase of two-phase session-key rotation (#1291): verify that
     /// `delegatee_key` authorizes this node's account DID, carries a valid delegator signature,
-    /// and strictly advances the signing horizon relative to the currently committed key,
-    /// returning a linear [`SwarmRotationCommit`] token whose [`SwarmRotationCommit::commit`]
-    /// step is infallible.
+    /// and strictly advances the signing horizon relative to the currently committed key while
+    /// holding rotation exclusion until [`SwarmRotationCommit::commit`] (or drop) completes.
     pub fn prepare_delegatee_key_rotation(
         &self,
         delegatee_key: &DelegateeKey,
     ) -> Result<SwarmRotationCommit<'_>> {
+        let rotation_guard = self.transport.lock_delegatee_rotation();
         self.transport.validate_next_delegatee_key(delegatee_key)?;
         Ok(SwarmRotationCommit {
             swarm: self,
+            _rotation_guard: rotation_guard,
             next_key: delegatee_key.clone(),
         })
     }
@@ -469,6 +470,15 @@ impl Swarm {
         attempt: ConnectionAttempt,
     ) -> Result<bool> {
         self.transport.cancel_pending_connection(attempt.0).await
+    }
+
+    /// Unconditionally abandon connection generation `attempt` when its outbound handshake step was
+    /// never transmitted to the remote peer, retiring `Pending`, `Admitting`, and prematurely
+    /// `Active` generations of `attempt` while leaving any peer-superseded generation untouched.
+    pub async fn abandon_connection_attempt(&self, attempt: ConnectionAttempt) {
+        self.transport
+            .abandon_pending_connection(attempt.0, "abandoning unsent connection attempt")
+            .await;
     }
 
     /// Take the local step of a successor lookup for `key`, and route the lookup when the
@@ -1036,10 +1046,13 @@ impl Swarm {
 /// Proof token returned by [`Swarm::prepare_delegatee_key_rotation`] after validating account DID,
 /// delegator signature, and strict signing-horizon monotonicity (#1291).
 ///
-/// Consuming [`Self::commit`] in Phase 2 after durable storage persistence swaps the validated key
-/// into the [`Swarm`] infallibly without exposing any unchecked public mutation entrypoint.
+/// Holds rotation exclusion across Phase 1 -> durable persistence -> [`Self::commit`], so neither
+/// [`Swarm::set_delegatee_key`] nor another [`Swarm::prepare_delegatee_key_rotation`] can interleave
+/// and regress the signing horizon before Phase 2 commits.
+#[must_use = "dropping SwarmRotationCommit without calling .commit() discards the prepared key rotation"]
 pub struct SwarmRotationCommit<'a> {
     swarm: &'a Swarm,
+    _rotation_guard: std::sync::MutexGuard<'a, ()>,
     next_key: DelegateeKey,
 }
 

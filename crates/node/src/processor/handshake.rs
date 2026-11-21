@@ -308,7 +308,7 @@ impl Processor {
             .ok()
             .is_some_and(|m| matches!(m, Message::ConnectNodeSend(ref s) if s.final_step))
         {
-            self.abandon_handshake(attempt).await;
+            self.swarm.abandon_connection_attempt(attempt).await;
             return Err(HandshakeFailure::from_stage(
                 peer,
                 Error::CreateOffer,
