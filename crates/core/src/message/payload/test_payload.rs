@@ -959,7 +959,7 @@ fn test_compressed_payload_preserves_canonical_signatures_across_slot_encodings(
         42,
         None,
         Message::ConnectNodeSend(crate::message::ConnectNodeSend::initial_offer(
-            Bytes::from("rings-core:transport-handshake:v1\nquic://127.0.0.1:49160\n".repeat(8)),
+            Bytes::from("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n".repeat(8)),
             crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
             crate::dht::RelayCustody::Holds,
         )),
@@ -1038,22 +1038,23 @@ fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames()
         pk48
     );
 
-    let handshake_bytes = Bytes::from_static(
+    let sdp = Bytes::from_static(
         concat!(
-            "rings-core:transport-handshake:v1\n",
-            "quic://127.0.0.1:49160\n",
-            "wss://0.0.0.0:443\n",
-            "rings-delegation-v1\ned25519\n0x",
-            "rings-core:message-verification:transaction\n",
-            "rings-core:message-verification:payload\n",
-            "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+            "v=0\r\no=- 8473928174 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n",
+            "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
+            "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
+            "a=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuvwx\r\n",
+            "a=ice-options:trickle\r\n",
+            "a=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\n",
+            "a=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
+            "a=candidate:1 1 udp 2130706431 192.0.2.10 54321 typ host generation 0\r\n",
         )
         .as_bytes(),
     );
     let next_hop: Did = SecretKey::random().address().into();
     let payload = new_payload(
         Message::ConnectNodeSend(crate::message::ConnectNodeSend::initial_offer(
-            handshake_bytes,
+            sdp,
             crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
             crate::dht::RelayCustody::Holds,
         )),
@@ -1065,7 +1066,7 @@ fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames()
     let with_dict = lz4_flex::block::compress_with_dict(&raw_body, super::WIRE_COMPRESSION_DICT);
     assert!(
         with_dict.len() < without_dict.len(),
-        "static protocol dictionary must compress a single handshake frame more than dictionary-free LZ4 ({} >= {})",
+        "static protocol dictionary must compress a single SDP frame more than dictionary-free LZ4 ({} >= {})",
         with_dict.len(),
         without_dict.len()
     );

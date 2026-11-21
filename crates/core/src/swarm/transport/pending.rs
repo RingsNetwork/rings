@@ -19,7 +19,6 @@ pub(super) use handshake::crossing_offer_verdict;
 pub(super) use handshake::CrossingOfferVerdict;
 pub(super) use handshake::Handshake;
 pub(crate) use handshake::OfferOwner;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(super) use handshake::OfferPhase;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;

@@ -494,6 +494,8 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     for bad_spec in [
         "not-a-valid-ice-url",
         "turn://turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
+        "turn:turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
+        "turns:turn.rings.rs:5349?pubkey=",
     ] {
         let bad_ice_cfg =
             ProcessorConfig::new(0, bad_spec.to_string(), adhoc_config.delegatee_key(), 3);
@@ -505,6 +507,35 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
             "malformed ICE/TURN spec '{bad_spec}' must fail closed at build"
         );
     }
+
+    // Standard RFC 7065 `turn:host:port?pubkey=<valid>` form validates and signs credentials cleanly!
+    let turn_server_pk = SecretKey::random().pubkey();
+    let rfc7065_valid =
+        rings_turn::format_turn_server_url("turn:203.0.113.10:3478", turn_server_pk).unwrap();
+    let rfc7065_cfg = ProcessorConfig::new(0, rfc7065_valid, adhoc_config.delegatee_key(), 3);
+    let rfc7065_proc = test_processor_builder(&rfc7065_cfg).build()?;
+    let committed_rfc7065 = rfc7065_proc
+        .session_transport_credentials()
+        .expect("dummy transport records signed credentials");
+    assert!(
+        committed_rfc7065.starts_with("turn://")
+            && committed_rfc7065.contains("@203.0.113.10:3478")
+            && !committed_rfc7065.contains("pubkey="),
+        "RFC 7065 turn: URL must be signed into canonical turn://user:pass@host:port, got {committed_rfc7065}"
+    );
+
+    // Parse errors on serialized `ProcessorConfig` omit source snippets so secret `delegatee_key`
+    // material cannot leak into error messages or logs (B2).
+    let secret_marker = "SECRET_DELEGATEE_MARKER_DO_NOT_LEAK";
+    let bad_serialized = format!("network_id: \"not-a-u32\"\ndelegatee_key: \"{secret_marker}\"\n");
+    let parse_err = std::str::FromStr::from_str(&bad_serialized)
+        .map(|_: ProcessorConfig| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !parse_err.contains(secret_marker),
+        "ProcessorConfig parse error must not include YAML source snippets: {parse_err}"
+    );
 
     // 2. Routed transport implementing `endpoint_hint`, `prepare_session_key_rotation`, and
     //    `to_network_descriptor` commits rotation callbacks and round-trips through YAML!
@@ -519,6 +550,15 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
             rotations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
     })?;
+    assert!(
+        matches!(
+            crate::processor::register_network_transport_factory("test-custom-routed", |_| {
+                Err(Error::InvalidConfig("hijack".to_string()))
+            }),
+            Err(Error::InvalidConfig(_))
+        ),
+        "duplicate custom transport kind registration must be rejected"
+    );
 
     let t1 = get_epoch_ms() + 1_000;
     let delegator = SecretKey::random();

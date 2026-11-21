@@ -63,12 +63,16 @@ pub enum TurnCredentialMode {
     /// Static account-scoped mode: signs `?pubkey=` TURN URLs directly with a non-expiring
     /// [`SigningSecretKey`] (`Did` / `Account`) at startup and leaves credentials unchanged across
     /// session-key rotations.
+    ///
+    /// Note: `Account`-mode [`WebrtcNetworkParameters`] intentionally return `None` from
+    /// [`NodeNetworkParameters::to_network_descriptor`] so long-lived account secret keys are never
+    /// serialized into [`ProcessorConfigSerialized`] documents.
     Account(Arc<SigningSecretKey>),
 }
 
-/// Validate that every `turn:` / `turns:` entry carrying a `pubkey=` query parameter encodes a
-/// valid secp256k1 server public key, rather than silently leaving a malformed `?pubkey=` template
-/// unsigned.
+/// Validate that every `turn://`, `turns://`, RFC 7065 `turn:`, or `turns:` entry carrying a
+/// `pubkey` query parameter encodes a valid secp256k1 server public key, rather than silently
+/// leaving a malformed `?pubkey=` template unsigned.
 fn validate_turn_pubkey_templates(spec: &str) -> Result<()> {
     let trimmed = spec.trim();
     if trimmed.is_empty() {
@@ -76,25 +80,12 @@ fn validate_turn_pubkey_templates(spec: &str) -> Result<()> {
     }
     for entry in trimmed.split(';') {
         let entry = entry.trim();
-        let Some((scheme, rest)) = entry.split_once("://") else {
-            continue;
-        };
-        if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
-            continue;
-        }
-        if let Some((_, query_and_frag)) = rest.split_once('?') {
-            let query = query_and_frag
-                .split_once('#')
-                .map_or(query_and_frag, |(q, _)| q);
-            let has_pubkey_param = query.split('&').any(|pair| {
-                pair.split_once('=')
-                    .is_some_and(|(k, _)| k.eq_ignore_ascii_case("pubkey"))
-            });
-            if has_pubkey_param && rings_turn::extract_turn_server_pubkey(entry).is_none() {
-                return Err(Error::InvalidConfig(format!(
-                    "invalid TURN server pubkey in '{entry}'"
-                )));
-            }
+        if rings_turn::has_turn_pubkey_query_param(entry)
+            && rings_turn::extract_turn_server_pubkey(entry).is_none()
+        {
+            return Err(Error::InvalidConfig(format!(
+                "invalid TURN server pubkey in '{entry}'"
+            )));
         }
     }
     Ok(())
@@ -414,7 +405,9 @@ fn network_transport_registry() -> &'static RwLock<BTreeMap<String, NetworkParam
 /// [`ProcessorConfigSerialized`], FFI, and browser WASM serialized configurations can instantiate
 /// `network: { kind: "<kind>", params: { ... } }` (#1291).
 ///
-/// Built-in transport kinds (`"webrtc"` and `"dummy"`) are reserved and cannot be overwritten.
+/// Built-in transport kinds (`"webrtc"` and `"dummy"`) are reserved and cannot be overwritten,
+/// and duplicate registrations for an already-registered custom `kind` fail with
+/// [`Error::InvalidConfig`] rather than silently hijacking an existing factory.
 pub fn register_network_transport_factory<F>(kind: impl Into<String>, factory: F) -> Result<()>
 where F: Fn(&serde_json::Value) -> Result<Arc<dyn NodeNetworkParameters>> + Send + Sync + 'static {
     let kind = kind.into();
@@ -429,11 +422,18 @@ where F: Fn(&serde_json::Value) -> Result<Arc<dyn NodeNetworkParameters>> + Send
             "cannot overwrite reserved built-in network transport kind '{normalized}'"
         )));
     }
-    network_transport_registry()
+    let mut guard = network_transport_registry()
         .write()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(normalized.to_owned(), Arc::new(factory));
-    Ok(())
+        .unwrap_or_else(PoisonError::into_inner);
+    match guard.entry(normalized.to_owned()) {
+        std::collections::btree_map::Entry::Occupied(_) => Err(Error::InvalidConfig(format!(
+            "network transport kind '{normalized}' is already registered"
+        ))),
+        std::collections::btree_map::Entry::Vacant(vacant) => {
+            vacant.insert(Arc::new(factory));
+            Ok(())
+        }
+    }
 }
 
 /// Resolve a deserialized [`NetworkConfigDescriptor`] into a concrete [`NodeNetworkParameters`]
@@ -641,9 +641,14 @@ impl ProcessorConfig {
 
 impl FromStr for ProcessorConfig {
     type Err = Error;
-    /// Reveal config from serialized string.
+    /// Reveal config from serialized string (with YAML error source snippets disabled so secret
+    /// `delegatee_key` lines are never echoed in formatted error messages).
     fn from_str(ser: &str) -> Result<Self> {
-        Ok(serde_saphyr::from_str::<ProcessorConfig>(ser)?)
+        let mut options = serde_saphyr::Options::default();
+        options.with_snippet = false;
+        Ok(serde_saphyr::from_str_with_options::<ProcessorConfig>(
+            ser, options,
+        )?)
     }
 }
 
@@ -795,13 +800,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
                 None,
             )
         } else if let Some(descriptor) = ins.network_parameters.to_network_descriptor() {
-            (
-                String::new(),
-                ins.network_parameters.endpoint_hint().map(str::to_owned),
-                None,
-                None,
-                Some(descriptor),
-            )
+            (String::new(), None, None, None, Some(descriptor))
         } else {
             return Err(Error::InvalidConfig(
                 "cannot losslessly serialize custom NodeNetworkParameters into ProcessorConfigSerialized \
@@ -851,7 +850,19 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         let network_parameters: Arc<dyn NodeNetworkParameters> = match ins.network.as_ref() {
-            Some(descriptor) => resolve_network_config_descriptor(descriptor)?,
+            Some(descriptor) => {
+                if !ins.ice_servers.trim().is_empty()
+                    || ins.external_address.is_some()
+                    || ins.udp_port_min.is_some()
+                    || ins.udp_port_max.is_some()
+                {
+                    return Err(Error::InvalidConfig(
+                        "cannot specify both `network` and legacy flat WebRTC fields (`ice_servers`, `external_address`, `udp_port_min`, `udp_port_max`)"
+                            .to_string(),
+                    ));
+                }
+                resolve_network_config_descriptor(descriptor)?
+            }
             None => {
                 let udp_port_range = parse_udp_port_range(ins.udp_port_min, ins.udp_port_max)?;
                 Arc::new(TransportNetworkConfig::new(

@@ -115,8 +115,6 @@ pub enum HandshakeStep {
     SendFinal(Bytes),
     /// This side's handshake is complete with no outbound handshake message to transmit.
     Done,
-    /// Waiting for an inbound handshake message before producing the next outbound step.
-    Wait,
 }
 
 /// Abstract multi-step handshake and credit-bounded framed message transport for a peer link.
@@ -196,28 +194,30 @@ pub trait ConnectionInterface: 'static {
     async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep, Self::Error>;
 
     /// Convenience adapter for 2-step offer/answer callers: start initiator step `0` and return
-    /// the outbound handshake bytes (or empty `Bytes` for 0-step transports).
+    /// the non-final outbound offer bytes.
     async fn create_offer(&self) -> Result<Bytes, Self::Error> {
         match self.handshake_step(None).await? {
-            HandshakeStep::Send(bytes) | HandshakeStep::SendFinal(bytes) => Ok(bytes),
-            HandshakeStep::Done => Ok(Bytes::new()),
-            HandshakeStep::Wait => Err(Error::LocalHandshakeGenerationError(
-                "transport returned HandshakeStep::Wait on initial step".to_string(),
-            )
-            .into()),
+            HandshakeStep::Send(bytes) => Ok(bytes),
+            HandshakeStep::SendFinal(_) | HandshakeStep::Done => {
+                Err(Error::LocalHandshakeGenerationError(
+                    "expected HandshakeStep::Send on 2-step create_offer".to_string(),
+                )
+                .into())
+            }
         }
     }
 
     /// Convenience adapter for 2-step offer/answer callers: feed `offer` into step `1` and return
-    /// the responder's outbound handshake bytes.
+    /// the responder's final outbound answer bytes.
     async fn answer_offer(&self, offer: Bytes) -> Result<Bytes, Self::Error> {
         match self.handshake_step(Some(offer)).await? {
-            HandshakeStep::Send(bytes) | HandshakeStep::SendFinal(bytes) => Ok(bytes),
-            HandshakeStep::Done => Ok(Bytes::new()),
-            HandshakeStep::Wait => Err(Error::LocalHandshakeGenerationError(
-                "transport returned HandshakeStep::Wait on responder step".to_string(),
-            )
-            .into()),
+            HandshakeStep::SendFinal(bytes) => Ok(bytes),
+            HandshakeStep::Send(_) | HandshakeStep::Done => {
+                Err(Error::LocalHandshakeGenerationError(
+                    "expected HandshakeStep::SendFinal on 2-step answer_offer".to_string(),
+                )
+                .into())
+            }
         }
     }
 
@@ -226,7 +226,7 @@ pub trait ConnectionInterface: 'static {
     async fn accept_answer(&self, answer: Bytes) -> Result<(), Self::Error> {
         match self.handshake_step(Some(answer)).await? {
             HandshakeStep::Done => Ok(()),
-            HandshakeStep::Send(_) | HandshakeStep::SendFinal(_) | HandshakeStep::Wait => {
+            HandshakeStep::Send(_) | HandshakeStep::SendFinal(_) => {
                 Err(Error::LocalHandshakeGenerationError(
                     "expected HandshakeStep::Done when completing 2-step answer".to_string(),
                 )

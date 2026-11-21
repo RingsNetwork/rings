@@ -259,14 +259,15 @@ impl Processor {
         let (_next, horizon) = self
             .session_keys
             .renew_with(now_ms, mint, |_current, next| {
-                self.swarm
-                    .validate_next_delegatee_key(next)
+                let commit_swarm = self
+                    .swarm
+                    .prepare_delegatee_key_rotation(next)
                     .map_err(Error::CoreError)?;
                 let commit_transport = self
                     .network_parameters
                     .prepare_session_key_rotation(self.swarm.transport(), next)?;
                 persist(next)?;
-                self.swarm.commit_delegatee_key_unchecked(next.clone());
+                commit_swarm.commit();
                 commit_transport();
                 Ok(())
             })?;

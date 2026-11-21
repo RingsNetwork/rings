@@ -139,15 +139,18 @@ impl Swarm {
 
     /// Non-mutating validation phase of two-phase session-key rotation (#1291): verify that
     /// `delegatee_key` authorizes this node's account DID, carries a valid delegator signature,
-    /// and strictly advances the signing horizon relative to the currently committed key.
-    pub fn validate_next_delegatee_key(&self, delegatee_key: &DelegateeKey) -> Result<()> {
-        self.transport.validate_next_delegatee_key(delegatee_key)
-    }
-
-    /// Infallible commit phase of two-phase session-key rotation (#1291): swap in an
-    /// already-validated `delegatee_key` after durable storage commit has succeeded.
-    pub fn commit_delegatee_key_unchecked(&self, delegatee_key: DelegateeKey) {
-        self.transport.commit_delegatee_key_unchecked(delegatee_key);
+    /// and strictly advances the signing horizon relative to the currently committed key,
+    /// returning a linear [`SwarmRotationCommit`] token whose [`SwarmRotationCommit::commit`]
+    /// step is infallible.
+    pub fn prepare_delegatee_key_rotation(
+        &self,
+        delegatee_key: &DelegateeKey,
+    ) -> Result<SwarmRotationCommit<'_>> {
+        self.transport.validate_next_delegatee_key(delegatee_key)?;
+        Ok(SwarmRotationCommit {
+            swarm: self,
+            next_key: delegatee_key.clone(),
+        })
     }
 
     /// Get this swarm's network id.
@@ -819,19 +822,20 @@ impl Swarm {
             .answer_remote_connection(peer, self.transport_callback(), &msg)
             .await?
         {
-            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) if report.final_step => self
-                .transport
-                .settle_handshake_step(
-                    attempt,
-                    "wrapping connection answer",
-                    self.transport.application_egress().originate(
-                        Message::ConnectNodeReport(report),
-                        peer,
-                        Some(self.did()),
-                    ),
-                )
-                .await
-                .map(OfferReply::Answer),
+            OfferReply::Answer(Some(CreatedAnswer { attempt, report })) if report.final_step => {
+                self.transport
+                    .settle_handshake_step(
+                        attempt,
+                        "wrapping connection answer",
+                        self.transport.application_egress().originate(
+                            Message::ConnectNodeReport(report),
+                            peer,
+                            Some(self.did()),
+                        ),
+                    )
+                    .await
+                    .map(OfferReply::Answer)
+            }
             OfferReply::Answer(Some(CreatedAnswer { attempt, .. })) => {
                 let err = Error::Transport(rings_transport::error::Error::UnsupportedOperation(
                     "out-of-band answer_offer requires a 2-step transport; use answer_offer_step or Swarm::connect"
@@ -842,18 +846,119 @@ impl Swarm {
                     .classify_step_failure(attempt, err, "answering out-of-band offer")
                     .await?)
             }
-            OfferReply::Answer(None) => Err(Error::Transport(
-                rings_transport::error::Error::UnsupportedOperation(
-                    "out-of-band answer_offer completed without a reply payload; use answer_offer_step"
-                        .to_string(),
-                ),
-            )),
+            OfferReply::Answer(None) => {
+                if let Some(attempt) = self.transport.unadmitted_attempt(peer)? {
+                    self.transport
+                        .abandon_pending_connection(attempt, "answering out-of-band offer")
+                        .await;
+                }
+                Err(Error::Transport(
+                    rings_transport::error::Error::UnsupportedOperation(
+                        "out-of-band answer_offer completed without a reply payload; use answer_offer_step"
+                            .to_string(),
+                    ),
+                ))
+            }
             OfferReply::CounterOffer(CounterOffer { offer, .. }) => self
                 .transport
                 .application_egress()
                 .originate(Message::ConnectNodeSend(offer), peer, Some(self.did()))
                 .await
                 .map(OfferReply::CounterOffer),
+        }
+    }
+
+    /// Verify a remote `ConnectNodeReport` handshake step and apply it to the pending initiator
+    /// handshake (#1291), returning `Ok(None)` when a final report completes the handshake or
+    /// `Ok(Some(payload))` containing the next signed even `ConnectNodeSend` continuation step for
+    /// `>= 3`-step out-of-band handshakes.
+    pub async fn accept_answer_step(
+        &self,
+        answer_payload: MessagePayload,
+    ) -> Result<Option<MessagePayload>> {
+        self.accept_answer_step_with(None, answer_payload).await
+    }
+
+    /// Verify a remote `ConnectNodeReport` handshake step and apply it to the exact initiator
+    /// generation `attempt` reserved by [`Swarm::offer_connection_step`] (#1291), returning
+    /// `Ok(None)` when a final report completes the handshake or `Ok(Some(payload))` containing
+    /// the next signed even `ConnectNodeSend` continuation step.
+    pub async fn accept_answer_step_for(
+        &self,
+        attempt: ConnectionAttempt,
+        answer_payload: MessagePayload,
+    ) -> Result<Option<MessagePayload>> {
+        self.accept_answer_step_with(Some(attempt.0), answer_payload)
+            .await
+    }
+
+    async fn accept_answer_step_with(
+        &self,
+        expected: Option<PendingConnectionAttempt>,
+        answer_payload: MessagePayload,
+    ) -> Result<Option<MessagePayload>> {
+        if !answer_payload
+            .verify_transaction_and_payload_at(self.network_id(), self.transport.now_ms())
+        {
+            return Err(Error::VerifySignatureFailed);
+        }
+
+        let Message::ConnectNodeReport(ref msg) = answer_payload.transaction.data()? else {
+            return Err(Error::InvalidMessage(
+                "Should be ConnectNodeReport".to_string(),
+            ));
+        };
+        if answer_payload.transaction.destination != self.did() {
+            return Err(Error::InvalidMessage(
+                "ConnectNodeReport destination does not match this node".to_string(),
+            ));
+        }
+        self.transport
+            .admit_final_transaction(
+                &answer_payload.transaction,
+                MessageCategory::DhtControl.into(),
+                Principal::Local,
+            )
+            .await?;
+
+        let peer = answer_payload.transaction.signer();
+        match self
+            .transport
+            .accept_remote_connection(peer, msg, expected, None)
+            .await?
+        {
+            InitiatorReplyOutcome::Completed => Ok(None),
+            InitiatorReplyOutcome::Continue {
+                attempt,
+                offer: next_offer,
+            } => {
+                let payload = self
+                    .transport
+                    .settle_handshake_step(
+                        attempt,
+                        "wrapping continuation connection offer",
+                        self.transport.application_egress().originate(
+                            Message::ConnectNodeSend(next_offer.clone()),
+                            peer,
+                            Some(self.did()),
+                        ),
+                    )
+                    .await?;
+                if let Err(error) =
+                    self.transport
+                        .mark_offer_sent(attempt, &next_offer, payload.transaction.tx_id)
+                {
+                    return Err(self
+                        .transport
+                        .classify_step_failure(
+                            attempt,
+                            error,
+                            "marking continuation connection offer sent",
+                        )
+                        .await?);
+                }
+                Ok(Some(payload))
+            }
         }
     }
 
@@ -901,7 +1006,8 @@ impl Swarm {
         }
         if !msg.final_step {
             return Err(Error::InvalidMessage(
-                "out-of-band accept_answer requires a final ConnectNodeReport".to_string(),
+                "out-of-band accept_answer requires a final ConnectNodeReport; use accept_answer_step"
+                    .to_string(),
             ));
         }
         self.transport
@@ -919,10 +1025,29 @@ impl Swarm {
             .await?
         {
             InitiatorReplyOutcome::Completed => Ok(()),
-            InitiatorReplyOutcome::Continue(_) => Err(Error::InvalidMessage(
+            InitiatorReplyOutcome::Continue { .. } => Err(Error::InvalidMessage(
                 "out-of-band accept_answer received non-final multi-step ConnectNodeReport"
                     .to_string(),
             )),
         }
+    }
+}
+
+/// Proof token returned by [`Swarm::prepare_delegatee_key_rotation`] after validating account DID,
+/// delegator signature, and strict signing-horizon monotonicity (#1291).
+///
+/// Consuming [`Self::commit`] in Phase 2 after durable storage persistence swaps the validated key
+/// into the [`Swarm`] infallibly without exposing any unchecked public mutation entrypoint.
+pub struct SwarmRotationCommit<'a> {
+    swarm: &'a Swarm,
+    next_key: DelegateeKey,
+}
+
+impl SwarmRotationCommit<'_> {
+    /// Infallibly install the pre-validated [`DelegateeKey`] into the bound [`Swarm`].
+    pub fn commit(self) {
+        self.swarm
+            .transport
+            .commit_delegatee_key_unchecked(self.next_key);
     }
 }

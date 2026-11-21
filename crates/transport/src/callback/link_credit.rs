@@ -530,6 +530,29 @@ impl LinkCredit {
         })
     }
 
+    /// Wait for a signal on `index` through a weak handle, so detached driver tasks never retain
+    /// a strong reference to [`LinkCredit`] when an external connection drops without closing.
+    #[cfg(rings_transport_runtime)]
+    pub(crate) fn next_signal_weak(
+        weak: &Weak<Self>,
+        index: CreditIndex,
+    ) -> impl Future<Output = Option<LaneSignal>> + '_ {
+        poll_fn(move |context| {
+            let Some(link) = weak.upgrade() else {
+                return Poll::Ready(None);
+            };
+            let mut state = link.lock();
+            if let Some(signal) = state.outbox[index].take() {
+                return Poll::Ready(Some(signal));
+            }
+            if state.closed {
+                return Poll::Ready(None);
+            }
+            state.pump[index] = Some(context.waker().clone());
+            Poll::Pending
+        })
+    }
+
     /// Queue `signal` on the lane of `index` again after its send failed, idempotent as every
     /// signal is. Post: `false`, queuing nothing, once the connection is gone, when no send can
     /// succeed.
@@ -595,9 +618,19 @@ impl LinkCredit {
 }
 
 /// A link ends by its drop, closed or not: whatever the node's pool still counts for its edge
-/// leaves the pool, so a link dropped without `close` holds no share, and no demand, after it.
+/// leaves the pool, and any weak credit-driver pump tasks wake to observe `None`, so a link
+/// dropped without `close` holds no share, no demand, and no leaked background tasks after it.
 impl Drop for LinkCredit {
     fn drop(&mut self) {
+        let pumps = {
+            let mut state = self.lock();
+            state
+                .pump
+                .iter_mut()
+                .filter_map(|(_, pump)| pump.take())
+                .collect::<Vec<_>>()
+        };
+        pumps.into_iter().for_each(Waker::wake);
         self.pool.release(self.edge);
     }
 }

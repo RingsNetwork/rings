@@ -208,6 +208,35 @@ impl DummyConnectionState {
 const HANDSHAKE_ROLE_FRESH: u8 = 0;
 const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
 const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+const HANDSHAKE_ROLE_FAILED: u8 = 4;
+
+struct HandshakeRoleGuard<'a> {
+    role: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> HandshakeRoleGuard<'a> {
+    fn new(role: &'a AtomicU8) -> Self {
+        Self {
+            role,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, next_role: u8) {
+        self.role.store(next_role, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for HandshakeRoleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.role.store(HANDSHAKE_ROLE_FAILED, Ordering::Release);
+        }
+    }
+}
 
 /// In-memory connection used by [`DummyTransport`] to model transport events.
 pub struct DummyConnection {
@@ -730,68 +759,96 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
-        let role = self.handshake_role.load(Ordering::Acquire);
-        match (role, inbound) {
-            (HANDSHAKE_ROLE_FRESH, None) => {
+        match inbound {
+            None => {
                 self.handshake_role
-                    .store(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Ordering::Release);
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| {
+                        Error::LocalHandshakeGenerationError(
+                            "unexpected initial handshake step on active dummy connection"
+                                .to_string(),
+                        )
+                    })?;
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
                 self.set_connection_state(TransportConnectionState::New)
                     .await;
+                role_guard.commit(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
                 Ok(HandshakeStep::Send(Bytes::from(
                     self.rand_id.clone().into_bytes(),
                 )))
             }
-            (HANDSHAKE_ROLE_FRESH, Some(offer_bytes)) => {
-                let offer = std::str::from_utf8(&offer_bytes)
-                    .map_err(|err| {
-                        Error::RemoteHandshakeApplyError(format!(
-                            "invalid UTF-8 handshake payload: {err}"
-                        ))
-                    })?
-                    .to_owned();
-                let negotiated_max_message_size = effective_max_message_size(&offer)?;
-                // Set remote rand id before setting state so that the remote connection can be found in callback.
-                self.set_remote_rand_id(offer);
-                self.set_connection_state(TransportConnectionState::Connecting)
-                    .await;
-                self.remote_max_message_size
-                    .store(negotiated_max_message_size, Ordering::Release);
-                self.handshake_role
-                    .store(HANDSHAKE_ROLE_ESTABLISHED, Ordering::Release);
-                Ok(HandshakeStep::SendFinal(Bytes::from(
-                    self.rand_id.clone().into_bytes(),
-                )))
-            }
-            (HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Some(answer_bytes)) => {
-                let answer = std::str::from_utf8(&answer_bytes)
-                    .map_err(|err| {
-                        Error::RemoteHandshakeApplyError(format!(
-                            "invalid UTF-8 handshake payload: {err}"
-                        ))
-                    })?
-                    .to_owned();
-                let negotiated_max_message_size = effective_max_message_size(&answer)?;
-                // Set remote rand id before setting state so that the remote connection can be found in callback.
-                self.set_remote_rand_id(answer);
-                self.remote_max_message_size
-                    .store(negotiated_max_message_size, Ordering::Release);
-                self.handshake_role
-                    .store(HANDSHAKE_ROLE_ESTABLISHED, Ordering::Release);
-                self.set_connection_state(TransportConnectionState::Connected)
-                    .await;
-
-                if let Some(remote_conn) = self.remote_conn() {
-                    remote_conn
-                        .set_connection_state(TransportConnectionState::Connected)
+            Some(inbound_bytes) => {
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let offer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 handshake payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let negotiated_max_message_size = effective_max_message_size(&offer)?;
+                    // Set remote rand id before setting state so that the remote connection can be found in callback.
+                    self.set_remote_rand_id(offer);
+                    self.set_connection_state(TransportConnectionState::Connecting)
                         .await;
+                    self.remote_max_message_size
+                        .store(negotiated_max_message_size, Ordering::Release);
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::SendFinal(Bytes::from(
+                        self.rand_id.clone().into_bytes(),
+                    )));
                 }
 
-                Ok(HandshakeStep::Done)
-            }
-            (_, None) => Err(Error::LocalHandshakeGenerationError(
-                "unexpected initial handshake step on active dummy connection".to_string(),
-            )),
-            (HANDSHAKE_ROLE_ESTABLISHED, Some(_)) | (_, Some(_)) => {
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let answer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 handshake payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let negotiated_max_message_size = effective_max_message_size(&answer)?;
+                    // Set remote rand id before setting state so that the remote connection can be found in callback.
+                    self.set_remote_rand_id(answer);
+                    self.remote_max_message_size
+                        .store(negotiated_max_message_size, Ordering::Release);
+                    self.set_connection_state(TransportConnectionState::Connected)
+                        .await;
+
+                    if let Some(remote_conn) = self.remote_conn() {
+                        remote_conn
+                            .set_connection_state(TransportConnectionState::Connected)
+                            .await;
+                    }
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::Done);
+                }
+
                 Err(Error::RemoteHandshakeApplyError(
                     "unexpected inbound handshake step on established dummy connection".to_string(),
                 ))

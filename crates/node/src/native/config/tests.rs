@@ -633,6 +633,16 @@ fn test_config_supports_tagged_network_descriptor_section() {
             "udp_port_max": 51010
         }),
     });
+    // Specifying both `network` and non-empty `ice_servers` fails closed rather than silently
+    // ignoring the top-level `ice_servers` setting.
+    assert!(
+        matches!(
+            ProcessorConfig::try_from(config.clone()),
+            Err(Error::InvalidConfig(_))
+        ),
+        "conflicting network + ice_servers must fail closed"
+    );
+    config.ice_servers.clear();
     let proc_cfg = ProcessorConfig::try_from(config).expect("tagged network section resolves");
     let _ = fs::remove_file(delegatee_key_path);
     assert_eq!(

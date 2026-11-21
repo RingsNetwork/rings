@@ -257,6 +257,35 @@ mod test_send_cancellation;
 const HANDSHAKE_ROLE_FRESH: u8 = 0;
 const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
 const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+const HANDSHAKE_ROLE_FAILED: u8 = 4;
+
+struct HandshakeRoleGuard<'a> {
+    role: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> HandshakeRoleGuard<'a> {
+    fn new(role: &'a AtomicU8) -> Self {
+        Self {
+            role,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, next_role: u8) {
+        self.role.store(next_role, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for HandshakeRoleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.role.store(HANDSHAKE_ROLE_FAILED, Ordering::Release);
+        }
+    }
+}
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
@@ -438,6 +467,9 @@ pub struct WebrtcTransport {
     pool: Pool<WebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
+    /// Captured Tokio runtime handle used when [`Self::commit_prepared_ice_servers`] is called
+    /// from an external non-Tokio thread (such as a synchronous FFI caller).
+    runtime_handle: std::sync::RwLock<Option<tokio::runtime::Handle>>,
 }
 
 impl WebrtcConnection {
@@ -705,6 +737,7 @@ impl WebrtcTransport {
             udp_port_range,
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
+            runtime_handle: std::sync::RwLock::new(tokio::runtime::Handle::try_current().ok()),
         }
     }
 
@@ -724,6 +757,7 @@ impl WebrtcTransport {
             udp_port_range,
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
+            runtime_handle: std::sync::RwLock::new(tokio::runtime::Handle::try_current().ok()),
         })
     }
 
@@ -753,7 +787,13 @@ impl WebrtcTransport {
 
         let active_connections = self.pool.connections();
         if !active_connections.is_empty() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let maybe_runtime = tokio::runtime::Handle::try_current().ok().or_else(|| {
+                self.runtime_handle
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            });
+            if let Some(runtime) = maybe_runtime {
                 for conn in active_connections {
                     runtime.spawn(async move {
                         if let Err(error) = conn.refresh_ice_servers().await {
@@ -1003,46 +1043,75 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
-        let role = self.handshake_role.load(Ordering::Acquire);
-        match (role, inbound) {
-            (HANDSHAKE_ROLE_FRESH, None) => {
+        match inbound {
+            None => {
                 self.handshake_role
-                    .store(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Ordering::Release);
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| {
+                        Error::LocalHandshakeGenerationError(
+                            "unexpected initial handshake step on active WebRTC connection"
+                                .to_string(),
+                        )
+                    })?;
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
                 let sdp = self.create_offer_sdp().await?;
+                role_guard.commit(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
                 Ok(HandshakeStep::Send(Bytes::from(sdp.into_bytes())))
             }
-            (HANDSHAKE_ROLE_FRESH, Some(offer_bytes)) => {
-                let offer = std::str::from_utf8(&offer_bytes)
-                    .map_err(|err| {
-                        Error::RemoteHandshakeApplyError(format!(
-                            "invalid UTF-8 SDP offer payload: {err}"
-                        ))
-                    })?
-                    .to_owned();
-                let local_sdp = self.answer_offer_sdp(offer).await?;
-                self.handshake_role
-                    .store(HANDSHAKE_ROLE_ESTABLISHED, Ordering::Release);
-                Ok(HandshakeStep::SendFinal(Bytes::from(
-                    local_sdp.into_bytes(),
-                )))
-            }
-            (HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Some(answer_bytes)) => {
-                let answer = std::str::from_utf8(&answer_bytes)
-                    .map_err(|err| {
-                        Error::RemoteHandshakeApplyError(format!(
-                            "invalid UTF-8 SDP answer payload: {err}"
-                        ))
-                    })?
-                    .to_owned();
-                self.accept_answer_sdp(answer).await?;
-                self.handshake_role
-                    .store(HANDSHAKE_ROLE_ESTABLISHED, Ordering::Release);
-                Ok(HandshakeStep::Done)
-            }
-            (_, None) => Err(Error::LocalHandshakeGenerationError(
-                "unexpected initial handshake step on active WebRTC connection".to_string(),
-            )),
-            (HANDSHAKE_ROLE_ESTABLISHED, Some(_)) | (_, Some(_)) => {
+            Some(inbound_bytes) => {
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let offer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 SDP offer payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let local_sdp = self.answer_offer_sdp(offer).await?;
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::SendFinal(Bytes::from(
+                        local_sdp.into_bytes(),
+                    )));
+                }
+
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let answer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 SDP answer payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.accept_answer_sdp(answer).await?;
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::Done);
+                }
+
                 Err(Error::RemoteHandshakeApplyError(
                     "unexpected inbound handshake step on established WebRTC connection"
                         .to_string(),
@@ -1385,6 +1454,15 @@ impl TransportInterface for WebrtcTransport {
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
+        if let Ok(current) = tokio::runtime::Handle::try_current() {
+            let mut slot = self
+                .runtime_handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_none() {
+                *slot = Some(current);
+            }
+        }
         self.pool.ensure_peer_slot_available(cid)?;
 
         let (webrtc_conn, sdp_extra_host_candidates, configured_ice_servers, turn_tcp_bridge) =

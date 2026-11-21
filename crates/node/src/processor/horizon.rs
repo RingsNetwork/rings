@@ -727,7 +727,10 @@ mod tests {
                 .unwrap()
                 .build_at(t0)
                 .unwrap();
-            skew_proc.swarm.commit_delegatee_key_unchecked(k2.clone());
+            skew_proc
+                .swarm
+                .set_delegatee_key(k2.clone())
+                .expect("advancing swarm key to k2 must succeed");
             let swarm_val_err = skew_proc.renew_delegatee_key_with(
                 renew_ms,
                 |_| Ok(k1.clone()),

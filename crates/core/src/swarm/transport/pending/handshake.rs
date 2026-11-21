@@ -1,13 +1,13 @@
 //! The signaling state of a pending attempt (#947, #1291).
 //!
-//! A pending generation is either offering (initiator) or answering (responder) across an
-//! `0..=MAX_HANDSHAKE_STEPS` transport handshake. The state lives in the lifecycle registry beside
+//! A pending generation is either offering (initiator) or answering (responder) across a
+//! `0..MAX_HANDSHAKE_STEPS` transport handshake. The state lives in the lifecycle registry beside
 //! the pending record and is created and dropped by the same transitions, so no reader can observe
 //! a pending attempt without its signaling state or a signaling state without its attempt.
 //!
 //! ```text
-//! Offering(o): Creating ──sent(step=0)──▶ Sent(0, bytes, tx) ──cont──▶ Sent(2k, ..) ──done──▶ Answered
-//! Answering:   Answering(None) ◀──claim──▶ Answering(Some(2k, sid))
+//! Offering(o): Creating ──sent(0)──▶ Sent(0, final, bytes, tx) ──claim──▶ ClaimedReply(2k, sid) ──sent──▶ Sent(2k, ..) / Answered
+//! Answering:   Answering(None) ◀──claim/await──▶ Answering(Some(2k, sid))
 //! ```
 //!
 //! Law (Crossing offer): an initial offer (`step_index == 0`) from `peer` meeting this node's
@@ -38,11 +38,16 @@ pub(crate) enum OfferPhase {
     /// Step `0` is being created; nothing has left this node.
     Creating,
     /// Outbound initiator step `step_index` (`0` for the initial offer, even `2, 4, ...` for
-    /// multi-round continuations) left under transaction `tx_id` and awaits odd reply
-    /// `step_index + 1`.
+    /// multi-round continuations) left under transaction `tx_id`. When `final_step` is `false`, it
+    /// awaits odd reply `step_index + 1`; when `step_index == 0 && final_step == true` (a 1-step
+    /// announce), it expects no reply while still participating in `Law (Tie-break)` against a
+    /// crossing initial offer from the peer.
     Sent {
         /// Zero-based even step index (`0, 2, 4, ...`) sent by the initiator.
         step_index: u8,
+        /// Whether this sent step was final (`true` only for 1-step `step_index == 0` offers;
+        /// final continuation steps `>= 2` move directly to [`Self::Answered`]).
+        final_step: bool,
         /// The step's binary handshake payload (retained for counter-offering when `step_index == 0`).
         handshake: Bytes,
         /// The transaction the step left under; its reply echoes it.
@@ -50,7 +55,17 @@ pub(crate) enum OfferPhase {
         /// Optional 128-bit session correlation ID for `>= 3`-step handshakes.
         session_id: Option<[u8; 16]>,
     },
-    /// All handshake signaling steps have completed (`Done` or `SendFinal`); awaiting channel open.
+    /// Atomically claimed an inbound non-final odd `ConnectNodeReport` and is now computing and
+    /// sending even continuation step `next_step_index` (`2, 4, ...`) under `session_id`. Prevents
+    /// duplicate reports under the same transaction from racing into `handshake_step`.
+    ClaimedReply {
+        /// Next even outbound step index (`2, 4, ...`) to be produced and marked sent.
+        next_step_index: u8,
+        /// Session correlation ID established for this multi-step handshake.
+        session_id: [u8; 16],
+    },
+    /// All handshake signaling steps have completed (`Done` or `SendFinal` at `step_index >= 2`);
+    /// awaiting channel open.
     Answered,
 }
 
@@ -106,6 +121,8 @@ pub(crate) enum CrossingOfferVerdict {
     Yield,
     /// This node keeps its unanswered initial overlay offer, sent under `tx_id`, and sends it back.
     CounterOffer {
+        /// Whether the initial offer was a 1-step final step (`true`) or expects a reply (`false`).
+        final_step: bool,
         /// The initial offer's binary handshake payload.
         handshake: Bytes,
         /// Optional session correlation ID sent with step `0`.
@@ -164,11 +181,13 @@ pub(crate) fn crossing_offer_verdict(
             phase:
                 OfferPhase::Sent {
                     step_index: 0,
+                    final_step,
                     handshake,
                     tx_id,
                     session_id,
                 },
         } => CrossingOfferVerdict::CounterOffer {
+            final_step: *final_step,
             handshake: handshake.clone(),
             session_id: *session_id,
             tx_id: *tx_id,
@@ -178,11 +197,7 @@ pub(crate) fn crossing_offer_verdict(
             phase: OfferPhase::Sent { step_index: 0, .. },
         }
         | Handshake::Offering {
-            phase: OfferPhase::Sent { .. },
-            ..
-        }
-        | Handshake::Offering {
-            phase: OfferPhase::Answered,
+            phase: OfferPhase::Sent { .. } | OfferPhase::ClaimedReply { .. } | OfferPhase::Answered,
             ..
         }
         | Handshake::Answering { .. } => CrossingOfferVerdict::Refuse,

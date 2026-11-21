@@ -89,14 +89,51 @@ pub fn format_turn_server_url(raw_url: &str, server_pubkey: PublicKey<33>) -> Re
     }
 }
 
-/// Extract a TURN server's secp256k1 [`PublicKey<33>`] from a `turn://` or `turns://` URL's
-/// `?pubkey=<base58>` query parameter (or `turn://<base58_pubkey>@host:port` userinfo).
-pub fn extract_turn_server_pubkey(raw_url: &str) -> Option<PublicKey<33>> {
+/// Split a `turn://`, `turns://`, RFC 7065 `turn:`, or `turns:` URI into `(scheme, rest)` (with
+/// any leading `//` stripped from `rest`), matching [`rings_transport::ice_server::IceServer`]'s
+/// scheme normalization so validation and credential signing cover the exact same URI space.
+fn split_turn_scheme_and_rest(raw_url: &str) -> Option<(&str, &str)> {
     let trimmed = raw_url.trim();
-    let (scheme, rest) = trimmed.split_once("://")?;
+    let (scheme, after_colon) = trimmed.split_once(':')?;
     if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
         return None;
     }
+    if let Some(rest) = after_colon.strip_prefix("//") {
+        return (!rest.is_empty()).then_some((scheme, rest));
+    }
+    if !after_colon.is_empty() && !after_colon.starts_with('/') {
+        return Some((scheme, after_colon));
+    }
+    None
+}
+
+/// Return `true` if `raw_url` uses a `turn` or `turns` URI scheme (`turn://...` or RFC 7065
+/// `turn:...`) and includes a `pubkey` query parameter (whether valid, empty, or malformed).
+pub fn has_turn_pubkey_query_param(raw_url: &str) -> bool {
+    let trimmed = raw_url.trim();
+    let Some((scheme, after_colon)) = trimmed.split_once(':') else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
+        return false;
+    }
+    let Some((_, query_and_frag)) = after_colon.split_once('?') else {
+        return false;
+    };
+    let query = query_and_frag
+        .split_once('#')
+        .map_or(query_and_frag, |(q, _)| q);
+    query.split('&').any(|pair| {
+        let key = pair.split_once('=').map_or(pair, |(k, _)| k);
+        key.eq_ignore_ascii_case("pubkey")
+    })
+}
+
+/// Extract a TURN server's secp256k1 [`PublicKey<33>`] from a `turn://`, `turns://`, `turn:`, or
+/// `turns:` URL's `?pubkey=<base58>` query parameter (or `turn://<base58_pubkey>@host:port`
+/// userinfo).
+pub fn extract_turn_server_pubkey(raw_url: &str) -> Option<PublicKey<33>> {
+    let (_scheme, rest) = split_turn_scheme_and_rest(raw_url)?;
 
     if let Some((_, query_and_frag)) = rest.split_once('?') {
         let query = query_and_frag
@@ -568,20 +605,18 @@ impl TurnCredentials {
         })
     }
 
-    /// Format this credential pair into a `turn://` or `turns://` server URL when the URL carries
-    /// no explicit `username:password`.
+    /// Format this credential pair into a `turn://`, `turns://`, `turn:`, or `turns:` server URL
+    /// when the URL carries no explicit `username:password`.
     ///
     /// Any `?pubkey=...` query parameter used for server public-key discovery is stripped from the
-    /// resulting ICE server URL so standard WebRTC URL parsers accept it. `stun://` URLs and
-    /// `turn://` URLs that already specify `username:password@host` are returned unchanged.
+    /// resulting canonical `turn://user:pass@host:port` ICE server URL so standard WebRTC URL
+    /// parsers accept it. `stun://` URLs and `turn` URLs that already specify
+    /// `username:password@host` are returned unchanged.
     pub fn apply_to_ice_server_url(&self, raw_url: &str) -> String {
         let trimmed = raw_url.trim();
-        let Some((scheme, rest)) = trimmed.split_once("://") else {
+        let Some((scheme, rest)) = split_turn_scheme_and_rest(trimmed) else {
             return trimmed.to_string();
         };
-        if !scheme.eq_ignore_ascii_case("turn") && !scheme.eq_ignore_ascii_case("turns") {
-            return trimmed.to_string();
-        }
         let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = rest.get(..authority_end).unwrap_or(rest);
         let raw_suffix = rest.get(authority_end..).unwrap_or("");
@@ -1040,6 +1075,44 @@ mod tests {
             )
         );
         assert_eq!(entries[2], "turn://bob:secret@198.51.100.11:3478");
+
+        // Standard RFC 7065 `turn:host:port?pubkey=...` and `turns:host:port?pubkey=...` forms
+        // without `//` must also be detected, extracted, and signed identically!
+        let rfc7065_turn =
+            format_turn_server_url("turn:198.51.100.10:3478?transport=udp", server_pubkey).unwrap();
+        let rfc7065_turns =
+            format_turn_server_url("turns:198.51.100.10:5349?transport=tcp", server_pubkey)
+                .unwrap();
+        assert!(has_turn_pubkey_query_param(&rfc7065_turn));
+        assert!(has_turn_pubkey_query_param(
+            "turn:198.51.100.10:3478?pubkey=invalid"
+        ));
+        assert_eq!(
+            extract_turn_server_pubkey(&rfc7065_turn),
+            Some(server_pubkey)
+        );
+        assert_eq!(
+            extract_turn_server_pubkey("turn:198.51.100.10:3478?pubkey=invalid"),
+            None
+        );
+        let signed_rfc7065 = delegatee_key
+            .sign_ice_servers(&format!("{rfc7065_turn};{rfc7065_turns}"))
+            .unwrap();
+        let rfc_entries: Vec<&str> = signed_rfc7065.split(';').collect();
+        assert_eq!(
+            rfc_entries[0],
+            format!(
+                "turn://{}:{}@198.51.100.10:3478?transport=udp",
+                creds.username, creds.credential
+            )
+        );
+        assert_eq!(
+            rfc_entries[1],
+            format!(
+                "turns://{}:{}@198.51.100.10:5349?transport=tcp",
+                creds.username, creds.credential
+            )
+        );
     }
 
     #[test]

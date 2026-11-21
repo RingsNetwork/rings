@@ -50,6 +50,7 @@ pub use config::DEFAULT_TURN_PORT;
 pub use config::DEFAULT_TURN_REALM;
 pub use credentials::extract_turn_server_pubkey;
 pub use credentials::format_turn_server_url;
+pub use credentials::has_turn_pubkey_query_param;
 pub use credentials::pack_turn_account_auth;
 pub use credentials::pack_turn_auth;
 pub use credentials::pack_turn_did_auth;

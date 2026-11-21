@@ -410,8 +410,22 @@ pub(super) async fn open_dummy_channel_before_transport_connected(
         .get_raw_connection(peer)
         .ok_or(Error::SwarmMissTransport(peer))?;
 
-    // The browser callback order under test: the channel opens while the peer connection still
-    // reports `Connecting`. The dummy is causal on its own, so the order is set explicitly.
+    // Complete the real dummy handshake step so `remote_rand_id` and `negotiated_max_message_size`
+    // are populated through the production `handshake_step` path, then override only the physical
+    // phase to `Connecting` with `channel_open = true` to model the browser callback order.
+    let step = connection
+        .connection
+        .handshake_step(Some(bytes::Bytes::from_static(b"remote-dummy-connection")))
+        .await
+        .map_err(Error::Transport)?;
+    assert!(
+        matches!(
+            step,
+            rings_transport::core::transport::HandshakeStep::Done
+                | rings_transport::core::transport::HandshakeStep::SendFinal(_)
+        ),
+        "dummy connection must complete handshake_step(Some(..)) on initiator or responder, got {step:?}"
+    );
     transport
         .force_connection_state_without_callback(peer, TransportConnectionState::Connecting)?;
     transport.force_peer_channel_open_without_callback(peer, Some(true))?;

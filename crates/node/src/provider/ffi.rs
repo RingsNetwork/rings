@@ -41,6 +41,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::future::IntoFuture;
 use std::ptr;
+use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -538,10 +539,16 @@ pub unsafe extern "C" fn rings_node_new_provider_with_serialized_config(
 ) -> *mut ProviderHandle {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<*mut ProviderHandle> {
-            let config_text = c_char_to_string(serialized_config)?;
+            let mut config_text = c_char_to_string(serialized_config)?;
             let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
-            let config = serde_saphyr::from_str::<ProcessorConfig>(&config_text)?
-                .online_node_type(OnlineNodeType::Ffi);
+            let parsed_config = ProcessorConfig::from_str(&config_text);
+            // Overwrite the raw serialized config buffer immediately after parsing so session
+            // secret key material does not linger on the heap.
+            unsafe {
+                config_text.as_bytes_mut().fill(0);
+            }
+            drop(config_text);
+            let config = parsed_config?.online_node_type(OnlineNodeType::Ffi);
 
             let creation = std::thread::Builder::new()
                 .name("rings-ffi-provider-init".to_owned())
@@ -582,8 +589,19 @@ pub unsafe extern "C" fn rings_node_new_provider_with_serialized_config(
     )) {
         Ok(Ok(provider_ptr)) => provider_ptr,
         Ok(Err(error)) => {
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                tracing::error!("FFI serialized provider creation failed: {error}");
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &error {
+                Error::SerdeYamlError(_) => {
+                    tracing::error!(
+                        code = error.code(),
+                        "FFI serialized provider creation failed: invalid YAML/JSON configuration syntax or schema"
+                    );
+                }
+                _ => {
+                    tracing::error!(
+                        code = error.code(),
+                        "FFI serialized provider creation failed: {error}"
+                    );
+                }
             }));
             ptr::null_mut()
         }

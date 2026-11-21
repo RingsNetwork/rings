@@ -122,22 +122,30 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
         "controlled delivery should prevent automatic DataChannelOpen join"
     );
 
-    let attempt = node1
+    // Saturate all of node1's outbound transfer capacity classes toward node2 (and drop inbound
+    // frames from node2 so node2's own convergence queries do not trigger sender-bounded answers)
+    // before delivering ChannelOpen: the real callback admission path (`on_channel_open` ->
+    // `admit_pending_connection`) commits local admission while every follow-up convergence send
+    // from node1 fails with backpressure.
+    dummy_controlled::set_drop_messages(true);
+    let held_capacity = node1
         .swarm
         .transport
-        .pending_attempt(node2.did())?
-        .expect("established connection must hold a pending attempt before ChannelOpen");
-    assert!(node1
-        .swarm
-        .transport
-        .begin_ready_connection_admission(attempt)?);
-    dummy_controlled::set_max_message_size(1);
-    let handler = MessageHandler::new(node1.swarm.transport.clone());
-    assert!(handler.admit_dht_attempt(attempt).await?);
+        .hold_all_outbound_capacity_for_test(node2.did())?;
+    let node1_dispatched = crate::tests::DispatchedFrames::from_now(&node1.swarm.transport);
 
+    drain_controlled_dummy_events().await;
+
+    assert_eq!(
+        node1_dispatched.count(),
+        0,
+        "follow-up convergence send from node1 must fail under saturated outbound capacity"
+    );
+    drop(held_capacity);
+    dummy_controlled::set_drop_messages(false);
     dummy_controlled::enable(false);
-    dummy_controlled::set_max_message_size(0);
 
+    assert!(node1.swarm.is_peer_admitted(node2.did())?);
     assert!(
         node1.dht().successors().list()?.contains(&node2.did()),
         "local join must survive failed follow-up convergence sends"

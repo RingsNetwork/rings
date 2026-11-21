@@ -105,8 +105,8 @@ and `network`).
   in process before its signing horizon (#1153). Relative paths are resolved next to `config.yaml`.
   `rings init` leaves this unset so the account private key is not stored unless the operator opts
   into online renewal; see [Delegations and keys](../cli.md#delegations-and-keys).
-* `ice_servers` *(required)*: STUN or TURN servers used by the built-in WebRTC transport, separated by `;`.
-  STUN is ordinary discovery; TURN is optional (needed when both peers are behind Symmetric NATs or UDP-restricted firewalls) and never a gateway prerequisite. Bare `turn://...?pubkey=<base58(server_pubkey)>` URLs without `user:pass@` are automatically signed with the node's active `delegatee_key` (`Delegation` signature + ECDH credential) for [`rings-turn`](../turn-server.md) and rotated in lockstep whenever `delegator_key` renews `delegatee_key` in process, while explicit `user:pass@` credentials are preserved for third-party TURN servers.
+* `ice_servers` *(used when `network` is omitted; defaults to empty when `network` is set)*: STUN or TURN servers used by the built-in WebRTC transport, separated by `;`.
+  STUN is ordinary discovery; TURN is optional (needed when both peers are behind Symmetric NATs or UDP-restricted firewalls) and never a gateway prerequisite. Bare `turn://...?pubkey=<base58(server_pubkey)>` (and RFC 7065 `turn:...?pubkey=<base58(server_pubkey)>`) URLs without `user:pass@` are automatically signed with the node's active `delegatee_key` (`Delegation` signature + ECDH credential) for [`rings-turn`](../turn-server.md) and rotated in lockstep whenever `delegator_key` renews `delegatee_key` in process, while explicit `user:pass@` credentials are preserved for third-party TURN servers. Malformed ICE server entries fail closed at startup. Specifying both `network` and top-level `ice_servers` / `external_ip` / `udp_port_*` is rejected as an explicit configuration conflict.
 
   ```yaml
   ice_servers: stun://stun.l.google.com:19302;turn://turn.example.org:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d

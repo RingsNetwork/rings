@@ -461,15 +461,18 @@ impl InnerTransportCallback {
         Fut: Future<Output = Result<()>> + rings_runtime::MaybeSend + 'static,
     {
         for index in CreditIndex::ALL {
-            let link = Arc::clone(&self.link_credit);
+            let weak_link = Arc::downgrade(&self.link_credit);
+            let peer = Arc::clone(&self.cid);
             let send = send_control.clone();
             rings_runtime::spawn_detached(async move {
-                while let Some(signal) = link.next_signal(index).await {
+                while let Some(signal) = LinkCredit::next_signal_weak(&weak_link, index).await {
                     let wire = match rings_codec::serialize(&TransportMessage::Signal(signal)) {
                         Ok(bytes) => Bytes::from(bytes),
                         Err(error) => {
-                            tracing::error!(peer = %link.peer, ?error, "failed to encode credit signal");
-                            let _ = link.requeue(index, signal);
+                            tracing::error!(peer = %peer, ?error, "failed to encode credit signal");
+                            if let Some(link) = weak_link.upgrade() {
+                                let _ = link.requeue(index, signal);
+                            }
                             return;
                         }
                     };
@@ -477,7 +480,7 @@ impl InnerTransportCallback {
                         wire: wire.clone(),
                         index,
                         signal: Some(signal),
-                        link: Arc::downgrade(&link),
+                        link: weak_link.clone(),
                     };
                     match send(wire, index.lane()).await {
                         Ok(()) => {
@@ -489,7 +492,7 @@ impl InnerTransportCallback {
                         }
                         Err(error) => {
                             tracing::debug!(
-                                peer = %link.peer,
+                                peer = %peer,
                                 ?error,
                                 "external transport failed to send credit frame; backing off and requeuing"
                             );

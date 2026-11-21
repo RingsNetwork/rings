@@ -22,7 +22,7 @@ pub enum IceServerError {
 /// Errors produced by transport connections, pools, and backend adapters.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// WebRTC error: {0}
     #[error("WebRTC error: {0}")]
     Webrtc(#[from] webrtc::error::Error),
@@ -83,12 +83,12 @@ pub enum Error {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// No Tokio runtime is available to drive a native data-channel write.
     #[error("Native data-channel send requires an active Tokio runtime")]
     NativeSendRuntimeUnavailable,
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// An irrevocable native data-channel write exceeded its completion bound.
     #[error("Native data-channel send did not complete within {timeout_ms}ms")]
     NativeSendCompletionTimeout {
@@ -96,22 +96,22 @@ pub enum Error {
         timeout_ms: u128,
     },
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native task driving an irrevocable data-channel write stopped unexpectedly.
     #[error("Native data-channel send task stopped: {0}")]
     NativeSendTask(#[source] tokio::task::JoinError),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native data-channel send panicked while still owned by its caller.
     #[error("Native data-channel send panicked: {0}")]
     NativeSendPanic(String),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native task driving physical connection close stopped unexpectedly.
     #[error("Native connection close task stopped: {0}")]
     NativeConnectionCloseTask(#[source] tokio::task::JoinError),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native connection did not close within its bounded retirement interval.
     #[error("Native connection retirement did not complete within {timeout_ms}ms")]
     NativeConnectionRetirementTimeout {
@@ -281,12 +281,12 @@ impl Error {
                 class: BackendSendFailureClass::Fatal,
                 ..
             } => TransportSendFailureClass::Fatal,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Self::Webrtc(_)
             | Self::NativeSendCompletionTimeout { .. }
             | Self::NativeSendTask(_)
             | Self::NativeSendPanic(_) => TransportSendFailureClass::Ambiguous,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Self::NativeSendRuntimeUnavailable
             | Self::NativeConnectionCloseTask(_)
             | Self::NativeConnectionRetirementTimeout { .. } => TransportSendFailureClass::Fatal,
@@ -348,9 +348,9 @@ mod tests {
 
         let ambiguous = [
             Error::MessageNotDelivered("closed".to_string()),
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendCompletionTimeout { timeout_ms: 100 },
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendPanic("boom".to_string()),
             #[cfg(feature = "dummy")]
             Error::DummyIrrevocableSendTaskStopped,
@@ -382,9 +382,9 @@ mod tests {
             Error::ForeignCredit("peer".to_string()),
             Error::CreditPumpUnavailable("peer".to_string()),
             Error::ChannelPoolEmpty,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendRuntimeUnavailable,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeConnectionRetirementTimeout { timeout_ms: 100 },
             #[cfg(feature = "dummy")]
             Error::DummyConnectionRetiredBeforeDispatch,

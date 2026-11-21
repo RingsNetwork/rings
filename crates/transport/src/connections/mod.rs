@@ -136,11 +136,11 @@ pub fn physical_close_witness(
 ) -> crate::error::Result<PhysicalCloseWitness> {
     let conn = connection.upgrade()?;
     let any = conn.as_any();
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     if let Some(native) = any.downcast_ref::<WebrtcConnection>() {
         return Ok(native.physical_close_witness());
     }
-    #[cfg(feature = "dummy")]
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     if let Some(dummy) = any.downcast_ref::<DummyConnection>() {
         return Ok(dummy.physical_close_witness());
     }

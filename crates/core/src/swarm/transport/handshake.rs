@@ -1,4 +1,4 @@
-//! The connection handshake: multi-step `handshake_step` (`0..=MAX_HANDSHAKE_STEPS`), crossing
+//! The connection handshake: multi-step `handshake_step` (`0..MAX_HANDSHAKE_STEPS`), crossing
 //! initial offers, and recorded-path signaling (#945, #947, #1291).
 //!
 //! An offer reserves a pending generation whose signaling state ([`Handshake`]) records who
@@ -32,6 +32,7 @@ use super::pending::AnswerSlot;
 use super::pending::CrossingOfferVerdict;
 use super::pending::Handshake;
 use super::pending::OfferOwner;
+use super::pending::OfferPhase;
 use super::pending::PendingConnectionAttempt;
 use super::pending::PendingTransportConnection;
 use super::pending::RawConnectionOwner;
@@ -102,8 +103,14 @@ pub(crate) enum ResponderStepOutcome {
 pub(crate) enum InitiatorReplyOutcome {
     /// Initiator completed (`HandshakeStep::Done`).
     Completed,
-    /// Initiator produced an even continuation step (`ConnectNodeSend` with `step_index >= 2`).
-    Continue(ConnectNodeSend),
+    /// Initiator produced an even continuation step (`ConnectNodeSend` with `step_index >= 2`)
+    /// for the claimed `PendingConnectionAttempt`.
+    Continue {
+        /// Initiator generation owning this multi-step handshake.
+        attempt: PendingConnectionAttempt,
+        /// Next even outbound `ConnectNodeSend` step.
+        offer: ConnectNodeSend,
+    },
 }
 
 /// An answer this node created, with the generation reserved for it.
@@ -266,12 +273,22 @@ impl SwarmTransport {
                     minimum: MIN_MAX_MESSAGE_SIZE,
                 },
             );
-            return Err(self.classify_step_failure(attempt, err, operation).await?);
+            if self.is_current_connection_attempt(attempt)? {
+                self.abandon_pending_connection(attempt, operation).await;
+            } else if self.with_connection_lifecycle(|| {
+                Ok(self.peer_lifecycles()?.superseded_by_peer(attempt))
+            })? {
+                return Err(Error::ConnectionAttemptSuperseded {
+                    peer: attempt.peer,
+                    generation: attempt.generation,
+                });
+            }
+            return Err(err);
         }
         Ok(())
     }
 
-    /// Apply `Creating -> Sent` (or `Sent(2k) -> Sent(2k+2)` / `Answered` for `final_step`) to
+    /// Apply `Creating -> Sent(0, final_step, ..)` or `ClaimedReply(2k) -> Sent(2k) / Answered` to
     /// `attempt`; when it no longer owns its slot, the error says why ([`Self::lost_slot`]).
     pub(in crate::swarm) fn mark_offer_sent(
         &self,
@@ -280,20 +297,19 @@ impl SwarmTransport {
         tx_id: uuid::Uuid,
     ) -> Result<()> {
         let marked = self.with_connection_lifecycle(|| {
-            if offer.final_step {
-                if self.peer_lifecycles()?.pending_attempt(attempt.peer) == Some(attempt) {
-                    Ok(self.peer_lifecycles()?.mark_offer_answered(attempt, None))
-                } else {
-                    self.is_current_connection_attempt(attempt)
-                }
-            } else {
+            if self.peer_lifecycles()?.pending_attempt(attempt.peer) == Some(attempt) {
                 Ok(self.peer_lifecycles()?.mark_offer_sent(
                     attempt,
                     offer.step_index,
+                    offer.final_step,
                     offer.handshake.clone(),
                     tx_id,
                     offer.session_id,
                 ))
+            } else if offer.final_step {
+                self.is_current_connection_attempt(attempt)
+            } else {
+                Ok(false)
             }
         })?;
         if marked {
@@ -390,7 +406,7 @@ impl SwarmTransport {
                 .await?;
                 let still_valid = self.with_connection_lifecycle(|| {
                     if self.peer_lifecycles()?.pending_attempt(attempt.peer) == Some(attempt) {
-                        Ok(self.peer_lifecycles()?.mark_offer_answered(attempt, None))
+                        Ok(self.peer_lifecycles()?.mark_zero_step_completed(attempt))
                     } else {
                         self.is_current_connection_attempt(attempt)
                     }
@@ -444,17 +460,6 @@ impl SwarmTransport {
                     relay_custody: self.dht.relay_custody(),
                 }))
             }
-            HandshakeStep::Wait => Err(self
-                .classify_step_failure(
-                    attempt,
-                    Error::Transport(
-                        rings_transport::error::Error::LocalHandshakeGenerationError(
-                            "transport returned HandshakeStep::Wait on initial step".to_string(),
-                        ),
-                    ),
-                    "creating connection offer",
-                )
-                .await?),
         }
     }
 
@@ -570,22 +575,16 @@ impl SwarmTransport {
                 }))
             }
             HandshakeStep::Done => {
-                self.ensure_negotiated_max_message_size_or_abandon(
-                    attempt,
-                    conn,
-                    "completing responder handshake",
-                )
-                .await?;
-                Ok(ResponderStepOutcome::Completed)
-            }
-            HandshakeStep::Wait => {
-                let err = Error::Transport(
-                    rings_transport::error::Error::LocalHandshakeGenerationError(
-                        "transport returned HandshakeStep::Wait on responder step".to_string(),
-                    ),
-                );
+                let err =
+                    Error::Transport(rings_transport::error::Error::RemoteHandshakeApplyError(
+                        "unexpected HandshakeStep::Done on non-final inbound step".to_string(),
+                    ));
                 Err(self
-                    .classify_step_failure(attempt, err, "creating connection answer")
+                    .classify_step_failure(
+                        attempt,
+                        err,
+                        "completing responder step on non-final inbound step",
+                    )
                     .await?)
             }
         }
@@ -669,6 +668,7 @@ impl SwarmTransport {
             match crossing_offer_verdict(&handshake, carrier, self.dht.did, peer) {
                 CrossingOfferVerdict::Refuse => return Err(Error::AlreadyConnected),
                 CrossingOfferVerdict::CounterOffer {
+                    final_step,
                     handshake,
                     session_id,
                     tx_id,
@@ -676,7 +676,7 @@ impl SwarmTransport {
                     return Ok(IncomingOfferSlot::CounterOffer(CounterOffer {
                         offer: ConnectNodeSend {
                             step_index: 0,
-                            final_step: false,
+                            final_step,
                             session_id,
                             handshake,
                             dht_protocol_mode: self.dht_protocol_mode(),
@@ -802,7 +802,7 @@ impl SwarmTransport {
                     "ConnectNodeSend continuation missing session_id".to_string(),
                 ));
             };
-            let (attempt, conn) = self.with_connection_lifecycle(|| {
+            let (attempt, maybe_conn) = self.with_connection_lifecycle(|| {
                 let Some(attempt) = self.peer_lifecycles()?.claim_answering_continuation(
                     peer,
                     offer_msg.step_index,
@@ -810,11 +810,13 @@ impl SwarmTransport {
                 ) else {
                     return Err(Error::SwarmMissTransport(peer));
                 };
-                let Some(conn) = self.get_raw_connection(peer) else {
-                    return Err(Error::SwarmMissTransport(peer));
-                };
-                Ok((attempt, conn))
+                Ok((attempt, self.get_raw_connection(peer)))
             })?;
+            let Some(conn) = maybe_conn else {
+                self.abandon_pending_connection(attempt, "missing raw connection for continuation")
+                    .await;
+                return Err(Error::SwarmMissTransport(peer));
+            };
             if let Err(err) =
                 self.validate_inbound_handshake_step(offer_msg.step_index, &offer_msg.handshake)
             {
@@ -887,6 +889,12 @@ impl SwarmTransport {
             )));
         }
 
+        if !answer_msg.final_step && answer_msg.session_id.is_none() {
+            return Err(Error::InvalidMessage(
+                "non-final ConnectNodeReport missing session_id".to_string(),
+            ));
+        }
+
         let (attempt, conn) = match (expected, self.answer_slot(peer)?) {
             (Some(expected), AnswerSlot::Pending(owner, _) | AnswerSlot::Owned(owner))
                 if owner != expected =>
@@ -902,6 +910,55 @@ impl SwarmTransport {
             }
         };
 
+        if !answer_msg.final_step && answer_msg.step_index.saturating_add(1) >= MAX_HANDSHAKE_STEPS
+        {
+            let err = Error::InvalidMessage(format!(
+                "handshake step {} exceeds MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})",
+                answer_msg.step_index.saturating_add(1)
+            ));
+            return Err(self
+                .classify_step_failure(attempt, err, "advancing initiator continuation")
+                .await?);
+        }
+
+        // Atomically claim the inbound reply under the lifecycle lock before running any backend
+        // step, verifying that `attempt` is an `Offering` generation awaiting `answer_msg.step_index`
+        // under matching `tx_id` / `session_id` (rejecting `Answering` slots and duplicate reports).
+        self.with_connection_lifecycle(|| {
+            let mut lifecycles = self.peer_lifecycles()?;
+            if lifecycles.claim_offer_reply(
+                attempt,
+                tx_id,
+                answer_msg.step_index,
+                answer_msg.final_step,
+                answer_msg.session_id,
+            ) {
+                return Ok(());
+            }
+            match lifecycles.handshake(attempt) {
+                Some(Handshake::Offering {
+                    phase:
+                        OfferPhase::Sent {
+                            step_index: sent_step,
+                            final_step: false,
+                            tx_id: sent_tx,
+                            session_id: sent_sid,
+                            ..
+                        },
+                    ..
+                }) if tx_id.is_none_or(|t| t == *sent_tx) => {
+                    Err(Error::InvalidMessage(format!(
+                        "ConnectNodeReport (step {}, session {:?}) does not match pending offer (step {sent_step}, session {sent_sid:?})",
+                        answer_msg.step_index, answer_msg.session_id
+                    )))
+                }
+                _ => Err(Error::ConnectionAttemptSuperseded {
+                    peer,
+                    generation: attempt.generation,
+                }),
+            }
+        })?;
+
         if let Err(err) =
             self.validate_inbound_handshake_step(answer_msg.step_index, &answer_msg.handshake)
         {
@@ -911,113 +968,12 @@ impl SwarmTransport {
         }
 
         if !answer_msg.final_step {
-            let Some(sid) = answer_msg.session_id else {
-                return Err(Error::InvalidMessage(
-                    "non-final ConnectNodeReport missing session_id".to_string(),
-                ));
-            };
-            let next_even_step = answer_msg.step_index.saturating_add(1);
-            if next_even_step >= MAX_HANDSHAKE_STEPS {
-                let err = Error::InvalidMessage(format!(
-                    "handshake step {next_even_step} exceeds MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})"
-                ));
-                return Err(self
-                    .classify_step_failure(attempt, err, "advancing initiator continuation")
-                    .await?);
-            }
-            let step = self
-                .run_handshake_step(
-                    attempt,
-                    &conn,
-                    Some(answer_msg.handshake.clone()),
-                    "continuation",
-                )
-                .await?;
-            match step {
-                HandshakeStep::SendFinal(bytes) => {
-                    if bytes.len() > self.max_handshake_step_bytes() {
-                        return Err(self
-                            .classify_step_failure(
-                                attempt,
-                                Error::HandshakeAboveMax(bytes.len()),
-                                "checking initiator final continuation size",
-                            )
-                            .await?);
-                    }
-                    self.ensure_negotiated_max_message_size_or_abandon(
-                        attempt,
-                        &conn,
-                        "completing initiator final continuation",
-                    )
-                    .await?;
-                    self.dht
-                        .observe_relay_custody(peer, answer_msg.relay_custody)?;
-                    return Ok(InitiatorReplyOutcome::Continue(ConnectNodeSend {
-                        step_index: next_even_step,
-                        final_step: true,
-                        session_id: Some(sid),
-                        handshake: bytes,
-                        dht_protocol_mode: self.dht_protocol_mode(),
-                        relay_custody: self.dht.relay_custody(),
-                    }));
-                }
-                HandshakeStep::Send(bytes) => {
-                    if next_even_step.saturating_add(1) >= MAX_HANDSHAKE_STEPS {
-                        let err = Error::Transport(
-                            rings_transport::error::Error::LocalHandshakeGenerationError(format!(
-                                "handshake exceeded MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})"
-                            )),
-                        );
-                        return Err(self
-                            .classify_step_failure(
-                                attempt,
-                                err,
-                                "checking multi-step initiator bound",
-                            )
-                            .await?);
-                    }
-                    if bytes.len() > self.max_handshake_step_bytes() {
-                        return Err(self
-                            .classify_step_failure(
-                                attempt,
-                                Error::HandshakeAboveMax(bytes.len()),
-                                "checking initiator continuation size",
-                            )
-                            .await?);
-                    }
-                    self.dht
-                        .observe_relay_custody(peer, answer_msg.relay_custody)?;
-                    return Ok(InitiatorReplyOutcome::Continue(ConnectNodeSend {
-                        step_index: next_even_step,
-                        final_step: false,
-                        session_id: Some(sid),
-                        handshake: bytes,
-                        dht_protocol_mode: self.dht_protocol_mode(),
-                        relay_custody: self.dht.relay_custody(),
-                    }));
-                }
-                other => {
-                    let err = Error::Transport(
-                        rings_transport::error::Error::LocalHandshakeGenerationError(format!(
-                            "expected Send or SendFinal in response to non-final report, got {other:?}"
-                        )),
-                    );
-                    return Err(self
-                        .classify_step_failure(attempt, err, "advancing initiator continuation")
-                        .await?);
-                }
-            }
+            let sid = answer_msg.session_id.unwrap_or_default();
+            return self
+                .advance_claimed_initiator_continuation(attempt, &conn, answer_msg, sid)
+                .await;
         }
 
-        let answered = self.with_connection_lifecycle(|| {
-            Ok(self.peer_lifecycles()?.mark_offer_answered(attempt, tx_id))
-        })?;
-        if !answered {
-            return Err(Error::ConnectionAttemptSuperseded {
-                peer,
-                generation: attempt.generation,
-            });
-        }
         tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -1078,6 +1034,104 @@ impl SwarmTransport {
         );
 
         Ok(InitiatorReplyOutcome::Completed)
+    }
+
+    /// Execute the backend step for an initiator generation whose non-final `ConnectNodeReport`
+    /// has already been atomically claimed into `OfferPhase::ClaimedReply`.
+    pub(super) async fn advance_claimed_initiator_continuation(
+        &self,
+        attempt: PendingConnectionAttempt,
+        conn: &SwarmConnection,
+        answer_msg: &ConnectNodeReport,
+        sid: [u8; 16],
+    ) -> Result<InitiatorReplyOutcome> {
+        let peer = attempt.peer;
+        let next_even_step = answer_msg.step_index.saturating_add(1);
+        let step = self
+            .run_handshake_step(
+                attempt,
+                conn,
+                Some(answer_msg.handshake.clone()),
+                "continuation",
+            )
+            .await?;
+        match step {
+            HandshakeStep::SendFinal(bytes) => {
+                if bytes.len() > self.max_handshake_step_bytes() {
+                    return Err(self
+                        .classify_step_failure(
+                            attempt,
+                            Error::HandshakeAboveMax(bytes.len()),
+                            "checking initiator final continuation size",
+                        )
+                        .await?);
+                }
+                self.ensure_negotiated_max_message_size_or_abandon(
+                    attempt,
+                    conn,
+                    "completing initiator final continuation",
+                )
+                .await?;
+                self.dht
+                    .observe_relay_custody(peer, answer_msg.relay_custody)?;
+                Ok(InitiatorReplyOutcome::Continue {
+                    attempt,
+                    offer: ConnectNodeSend {
+                        step_index: next_even_step,
+                        final_step: true,
+                        session_id: Some(sid),
+                        handshake: bytes,
+                        dht_protocol_mode: self.dht_protocol_mode(),
+                        relay_custody: self.dht.relay_custody(),
+                    },
+                })
+            }
+            HandshakeStep::Send(bytes) => {
+                if next_even_step.saturating_add(1) >= MAX_HANDSHAKE_STEPS {
+                    let err = Error::Transport(
+                        rings_transport::error::Error::LocalHandshakeGenerationError(format!(
+                            "handshake exceeded MAX_HANDSHAKE_STEPS ({MAX_HANDSHAKE_STEPS})"
+                        )),
+                    );
+                    return Err(self
+                        .classify_step_failure(attempt, err, "checking multi-step initiator bound")
+                        .await?);
+                }
+                if bytes.len() > self.max_handshake_step_bytes() {
+                    return Err(self
+                        .classify_step_failure(
+                            attempt,
+                            Error::HandshakeAboveMax(bytes.len()),
+                            "checking initiator continuation size",
+                        )
+                        .await?);
+                }
+                self.dht
+                    .observe_relay_custody(peer, answer_msg.relay_custody)?;
+                Ok(InitiatorReplyOutcome::Continue {
+                    attempt,
+                    offer: ConnectNodeSend {
+                        step_index: next_even_step,
+                        final_step: false,
+                        session_id: Some(sid),
+                        handshake: bytes,
+                        dht_protocol_mode: self.dht_protocol_mode(),
+                        relay_custody: self.dht.relay_custody(),
+                    },
+                })
+            }
+            HandshakeStep::Done => {
+                let err = Error::Transport(
+                    rings_transport::error::Error::LocalHandshakeGenerationError(
+                        "expected Send or SendFinal in response to non-final report, got Done"
+                            .to_string(),
+                    ),
+                );
+                Err(self
+                    .classify_step_failure(attempt, err, "advancing initiator continuation")
+                    .await?)
+            }
+        }
     }
 }
 

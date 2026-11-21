@@ -385,6 +385,35 @@ impl ChannelPool<TrackedChannel> {
 const HANDSHAKE_ROLE_FRESH: u8 = 0;
 const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
 const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+const HANDSHAKE_ROLE_FAILED: u8 = 4;
+
+struct HandshakeRoleGuard<'a> {
+    role: &'a Cell<u8>,
+    committed: bool,
+}
+
+impl<'a> HandshakeRoleGuard<'a> {
+    fn new(role: &'a Cell<u8>) -> Self {
+        Self {
+            role,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, next_role: u8) {
+        self.role.set(next_role);
+        self.committed = true;
+    }
+}
+
+impl Drop for HandshakeRoleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.role.set(HANDSHAKE_ROLE_FAILED);
+        }
+    }
+}
 
 /// A connection that implemented by web_sys library.
 /// Used for browser environment.
@@ -767,12 +796,15 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
         match (self.handshake_role.get(), inbound) {
             (HANDSHAKE_ROLE_FRESH, None) => {
-                self.handshake_role
-                    .set(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
+                self.handshake_role.set(HANDSHAKE_ROLE_IN_PROGRESS);
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
                 let sdp = self.create_offer_sdp().await?;
+                role_guard.commit(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
                 Ok(HandshakeStep::Send(Bytes::from(sdp.into_bytes())))
             }
             (HANDSHAKE_ROLE_FRESH, Some(offer_bytes)) => {
+                self.handshake_role.set(HANDSHAKE_ROLE_IN_PROGRESS);
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
                 let offer = std::str::from_utf8(&offer_bytes)
                     .map_err(|err| {
                         Error::RemoteHandshakeApplyError(format!(
@@ -781,12 +813,14 @@ impl ConnectionInterface for WebSysWebrtcConnection {
                     })?
                     .to_owned();
                 let local_sdp = self.answer_offer_sdp(offer).await?;
-                self.handshake_role.set(HANDSHAKE_ROLE_ESTABLISHED);
+                role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
                 Ok(HandshakeStep::SendFinal(Bytes::from(
                     local_sdp.into_bytes(),
                 )))
             }
             (HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER, Some(answer_bytes)) => {
+                self.handshake_role.set(HANDSHAKE_ROLE_IN_PROGRESS);
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
                 let answer = std::str::from_utf8(&answer_bytes)
                     .map_err(|err| {
                         Error::RemoteHandshakeApplyError(format!(
@@ -795,7 +829,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
                     })?
                     .to_owned();
                 self.accept_answer_sdp(answer).await?;
-                self.handshake_role.set(HANDSHAKE_ROLE_ESTABLISHED);
+                role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
                 Ok(HandshakeStep::Done)
             }
             (_, None) => Err(Error::LocalHandshakeGenerationError(

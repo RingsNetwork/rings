@@ -707,12 +707,15 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
-    /// Apply `Offering(o, Creating) -> Offering(o, Sent(0, bytes, tx_id, sid))` or advance an
-    /// active multi-round exchange `Offering(o, Sent(2k, ..)) -> Offering(o, Sent(2k + 2, ..))`.
+    /// Apply `Offering(o, Creating) -> Offering(o, Sent(0, final_step, bytes, tx_id, sid))` for
+    /// step `0` (including 1-step `final_step == true`, which stays in `Sent(0)` so crossing
+    /// 1-step offers resolve via `Law (Tie-break)`), or advance a claimed multi-round continuation
+    /// `Offering(o, ClaimedReply(2k, sid)) -> Offering(o, Sent(2k, false, ..))` / `Answered`.
     pub(in crate::swarm::transport) fn mark_offer_sent(
         &mut self,
         attempt: PendingConnectionAttempt,
         step_index: u8,
+        final_step: bool,
         handshake: Bytes,
         tx_id: uuid::Uuid,
         session_id: Option<[u8; 16]>,
@@ -728,6 +731,7 @@ impl ConnectionLifecycleRegistry {
                 owner: *owner,
                 phase: OfferPhase::Sent {
                     step_index: 0,
+                    final_step,
                     handshake,
                     tx_id,
                     session_id,
@@ -736,52 +740,103 @@ impl ConnectionLifecycleRegistry {
             Handshake::Offering {
                 owner,
                 phase:
-                    OfferPhase::Sent {
-                        step_index: prev_step,
-                        session_id: prev_sid,
-                        ..
+                    OfferPhase::ClaimedReply {
+                        next_step_index,
+                        session_id: expected_sid,
                     },
-            } if step_index == prev_step.saturating_add(2)
-                && session_id.is_some()
-                && prev_sid.is_none_or(|existing| Some(existing) == session_id) =>
-            {
-                Some(Handshake::Offering {
-                    owner: *owner,
-                    phase: OfferPhase::Sent {
-                        step_index,
-                        handshake,
-                        tx_id,
-                        session_id,
-                    },
-                })
+            } if step_index == *next_step_index && session_id == Some(*expected_sid) => {
+                if final_step {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Answered,
+                    })
+                } else {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Sent {
+                            step_index,
+                            final_step: false,
+                            handshake,
+                            tx_id,
+                            session_id,
+                        },
+                    })
+                }
             }
             Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
 
-    /// Apply `Offering(o, Sent(_, t)) -> Offering(o, Answered)` for a final reply echoing `t`
-    /// (`tx_id = Some(t)`); an out-of-band reply or 0/1-step initiator completion (`tx_id = None`)
-    /// also accepts an offer in `Creating` or `Sent`.
-    pub(in crate::swarm::transport) fn mark_offer_answered(
+    /// Apply `Offering(o, Creating) -> Offering(o, Answered)` when a 0-step initiator completes
+    /// locally with no outbound signaling message.
+    pub(in crate::swarm::transport) fn mark_zero_step_completed(
         &mut self,
         attempt: PendingConnectionAttempt,
-        tx_id: Option<uuid::Uuid>,
     ) -> bool {
         self.advance_handshake(attempt, |current| match current {
             Handshake::Offering {
                 owner,
-                phase: OfferPhase::Sent { tx_id: sent, .. },
-            } if tx_id.is_none_or(|tx_id| tx_id == *sent) => Some(Handshake::Offering {
+                phase: OfferPhase::Creating,
+            } => Some(Handshake::Offering {
                 owner: *owner,
                 phase: OfferPhase::Answered,
             }),
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Atomically validate and claim an inbound `ConnectNodeReport` (`report_step_index`,
+    /// `report_final`, `report_session_id`) on `attempt`:
+    /// - Requires `Handshake::Offering` in `OfferPhase::Sent { final_step: false, .. }` (never
+    ///   matches `Answering`, `ClaimedReply`, `Answered`, or a 1-step `final_step: true` offer);
+    /// - Requires `tx_id` (when `Some`) to match the sent transaction, `report_step_index ==
+    ///   sent_step + 1`, and any established `session_id` to match;
+    /// - Transitions to `OfferPhase::Answered` when `report_final` is `true`, or to
+    ///   `OfferPhase::ClaimedReply { next_step_index: report_step_index + 1, session_id }` when
+    ///   `report_final` is `false`.
+    pub(in crate::swarm::transport) fn claim_offer_reply(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        tx_id: Option<uuid::Uuid>,
+        report_step_index: u8,
+        report_final: bool,
+        report_session_id: Option<[u8; 16]>,
+    ) -> bool {
+        self.advance_handshake(attempt, |current| match current {
             Handshake::Offering {
                 owner,
-                phase: OfferPhase::Creating,
-            } if tx_id.is_none() => Some(Handshake::Offering {
-                owner: *owner,
-                phase: OfferPhase::Answered,
-            }),
+                phase:
+                    OfferPhase::Sent {
+                        step_index,
+                        final_step: false,
+                        tx_id: sent,
+                        session_id: sent_sid,
+                        ..
+                    },
+            } if tx_id.is_none_or(|expected_tx| expected_tx == *sent)
+                && report_step_index == step_index.saturating_add(1)
+                && sent_sid.is_none_or(|sid| report_session_id == Some(sid)) =>
+            {
+                if report_final {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Answered,
+                    })
+                } else {
+                    let sid = report_session_id?;
+                    let next_step_index = report_step_index.saturating_add(1);
+                    if next_step_index >= MAX_HANDSHAKE_STEPS {
+                        return None;
+                    }
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::ClaimedReply {
+                            next_step_index,
+                            session_id: sid,
+                        },
+                    })
+                }
+            }
             Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
@@ -847,6 +902,7 @@ impl ConnectionLifecycleRegistry {
                 phase:
                     OfferPhase::Sent {
                         step_index,
+                        final_step: false,
                         tx_id: sent,
                         session_id,
                         ..

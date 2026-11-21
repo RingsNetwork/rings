@@ -229,6 +229,8 @@ pub struct Config {
     #[serde(default)]
     pub allow_remote_external_api: bool,
     /// WebRTC ICE server list, independent from optional gateway ingress.
+    /// Defaults to empty when `network: { kind, params }` selects the transport explicitly.
+    #[serde(default)]
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,
@@ -334,6 +336,16 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 
         let udp_range =
             crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
+        if config.network.is_some()
+            && (!config.ice_servers.trim().is_empty()
+                || config.external_ip.is_some()
+                || udp_range.is_some())
+        {
+            return Err(Error::InvalidConfig(
+                "cannot specify both `network` and legacy flat WebRTC fields (`ice_servers`, `external_ip`, `udp_port_min`, `udp_port_max`)"
+                    .to_string(),
+            ));
+        }
 
         Ok(Self {
             network_id: config.network_id,

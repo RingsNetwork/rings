@@ -24,7 +24,23 @@ fn sent(owner: OfferOwner, tx_id: uuid::Uuid) -> Handshake {
         owner,
         phase: OfferPhase::Sent {
             step_index: 0,
+            final_step: false,
             handshake: Bytes::from_static(b"offer"),
+            tx_id,
+            session_id: None,
+        },
+    }
+}
+
+/// A 1-step offering attempt of `owner` whose final initial offer (`step_index == 0, final_step == true`)
+/// was sent under `tx_id`.
+fn sent_final_initial(owner: OfferOwner, tx_id: uuid::Uuid) -> Handshake {
+    Handshake::Offering {
+        owner,
+        phase: OfferPhase::Sent {
+            step_index: 0,
+            final_step: true,
+            handshake: Bytes::from_static(b"announce"),
             tx_id,
             session_id: None,
         },
@@ -64,6 +80,7 @@ fn test_sent_overlay_offer_follows_the_tie_break() {
     assert_eq!(
         crossing_offer_verdict(&offer, OfferOwner::Overlay, smaller, larger),
         CrossingOfferVerdict::CounterOffer {
+            final_step: false,
             handshake: Bytes::from_static(b"offer"),
             session_id: None,
             tx_id,
@@ -71,6 +88,20 @@ fn test_sent_overlay_offer_follows_the_tie_break() {
     );
     assert_eq!(
         crossing_offer_verdict(&offer, OfferOwner::Overlay, larger, smaller),
+        CrossingOfferVerdict::Yield
+    );
+    let final_offer = sent_final_initial(OfferOwner::Overlay, tx_id);
+    assert_eq!(
+        crossing_offer_verdict(&final_offer, OfferOwner::Overlay, smaller, larger),
+        CrossingOfferVerdict::CounterOffer {
+            final_step: true,
+            handshake: Bytes::from_static(b"announce"),
+            session_id: None,
+            tx_id,
+        }
+    );
+    assert_eq!(
+        crossing_offer_verdict(&final_offer, OfferOwner::Overlay, larger, smaller),
         CrossingOfferVerdict::Yield
     );
 }
@@ -146,9 +177,17 @@ fn test_answered_and_answering_attempts_refuse() {
         owner: OfferOwner::Overlay,
         phase: OfferPhase::Sent {
             step_index: 2,
+            final_step: false,
             handshake: Bytes::from_static(b"step2"),
             tx_id: uuid::Uuid::new_v4(),
             session_id: Some([1u8; 16]),
+        },
+    };
+    let claimed_reply = Handshake::Offering {
+        owner: OfferOwner::Overlay,
+        phase: OfferPhase::ClaimedReply {
+            next_step_index: 2,
+            session_id: [5u8; 16],
         },
     };
     let awaiting_continuation = Handshake::Answering {
@@ -157,6 +196,7 @@ fn test_answered_and_answering_attempts_refuse() {
     for handshake in [
         answered,
         continuation_sent,
+        claimed_reply,
         Handshake::answering(),
         awaiting_continuation,
     ] {
@@ -183,7 +223,7 @@ fn test_a_yield_releases_only_the_state_it_was_decided_on() -> Result<()> {
     let decided = Handshake::offering(OfferOwner::Overlay);
 
     let tx_id = uuid::Uuid::new_v4();
-    assert!(registry.mark_offer_sent(attempt, 0, Bytes::from_static(b"offer"), tx_id, None,));
+    assert!(registry.mark_offer_sent(attempt, 0, false, Bytes::from_static(b"offer"), tx_id, None,));
     assert_eq!(registry.replace_pending_in(attempt, &decided, 1)?, None);
     assert_eq!(registry.pending_attempt(peer), Some(attempt));
 
@@ -224,7 +264,8 @@ fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> R
                 ..
             } => 1,
             Handshake::Offering {
-                phase: OfferPhase::Sent { .. } | OfferPhase::Answered,
+                phase:
+                    OfferPhase::Sent { .. } | OfferPhase::ClaimedReply { .. } | OfferPhase::Answered,
                 ..
             }
             | Handshake::Answering { .. } => 2,
@@ -238,10 +279,20 @@ fn test_handshake_signaling_poset_rank_and_absorbing_answering_invariants() -> R
         Handshake::offering(OfferOwner::External),
         sent(OfferOwner::Overlay, tx_id),
         sent(OfferOwner::External, tx_id),
+        sent_final_initial(OfferOwner::Overlay, tx_id),
+        sent_final_initial(OfferOwner::External, tx_id),
+        Handshake::Offering {
+            owner: OfferOwner::Overlay,
+            phase: OfferPhase::ClaimedReply {
+                next_step_index: 2,
+                session_id: [7u8; 16],
+            },
+        },
         Handshake::Offering {
             owner: OfferOwner::Overlay,
             phase: OfferPhase::Sent {
                 step_index: 2,
+                final_step: false,
                 handshake: Bytes::from_static(b"step2"),
                 tx_id,
                 session_id: Some([3u8; 16]),

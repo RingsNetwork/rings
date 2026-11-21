@@ -67,17 +67,32 @@ pub(crate) const MAX_COMPRESSED_FRAME_WIRE_BYTES: usize =
 
 /// Pre-shared compile-time protocol dictionary for [`FrameKind::CompressedPayload`] (#1282, #1291).
 ///
-/// Contains transport-agnostic Rings protocol strings, delegation domain tags, common endpoint URI
-/// prefixes, and canonical zero-run padding so even the first occurrence inside a small
-/// `DhtControl` or `Storage` frame matches against the static dictionary window without embedding
-/// transport-specific session-description syntax inside `rings-core`.
+/// Contains canonical WebRTC SDP boilerplate lines, ICE candidate tokens, Rings delegation domain
+/// tags, common endpoint URI prefixes, and canonical zero-run padding as pure static byte data so
+/// even the first occurrence inside a small `DhtControl` or `Storage` frame matches against the
+/// static dictionary window.
 pub(crate) const WIRE_COMPRESSION_DICT: &[u8] = concat!(
+    "v=0\r\no=- ",
+    " 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n",
+    "a=group:BUNDLE 0\r\na=msid-semantic: WMS\r\n",
+    "m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\n",
+    "a=ice-ufrag:",
+    "\r\na=ice-pwd:",
+    "\r\na=ice-options:trickle\r\n",
+    "a=fingerprint:sha-256 ",
+    "\r\na=setup:actpass\r\na=setup:active\r\na=setup:passive\r\n",
+    "a=mid:0\r\na=sctp-port:5000\r\na=max-message-size:65536\r\n",
+    "a=candidate:",
+    " 1 udp 2130706431 ",
+    " 1 tcp 1518280447 ",
+    " typ host generation 0\r\n",
+    " typ srflx raddr 0.0.0.0 rport 0 generation 0\r\n",
+    " typ relay raddr 0.0.0.0 rport 0 generation 0\r\n",
     "rings-delegation-v1\nsecp256k1\n0x",
     "rings-delegation-v1\ned25519\n0x",
     "rings-delegation-v1\nbls12381\n0x",
     "rings-core:message-verification:transaction",
     "rings-core:message-verification:payload",
-    "rings-core:transport-handshake:v1\n",
     "https://",
     "http://",
     "wss://",
