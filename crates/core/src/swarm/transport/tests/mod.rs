@@ -410,13 +410,10 @@ pub(super) async fn open_dummy_channel_before_transport_connected(
         .get_raw_connection(peer)
         .ok_or(Error::SwarmMissTransport(peer))?;
 
-    connection
-        .connection
-        .answer_offer(bytes::Bytes::from_static(b"remote-dummy-connection"))
-        .await
-        .map_err(Error::Transport)?;
     // The browser callback order under test: the channel opens while the peer connection still
     // reports `Connecting`. The dummy is causal on its own, so the order is set explicitly.
+    transport
+        .force_connection_state_without_callback(peer, TransportConnectionState::Connecting)?;
     transport.force_peer_channel_open_without_callback(peer, Some(true))?;
     assert_eq!(
         connection.connection_state(),

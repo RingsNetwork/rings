@@ -110,7 +110,6 @@ async fn test_handle_join() -> Result<()> {
 #[tokio::test]
 async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<()> {
     dummy_controlled::enable(true);
-    dummy_controlled::set_max_message_size(1);
 
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
@@ -123,7 +122,18 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
         "controlled delivery should prevent automatic DataChannelOpen join"
     );
 
-    drain_controlled_dummy_events().await;
+    let attempt = node1
+        .swarm
+        .transport
+        .pending_attempt(node2.did())?
+        .expect("established connection must hold a pending attempt before ChannelOpen");
+    assert!(node1
+        .swarm
+        .transport
+        .begin_ready_connection_admission(attempt)?);
+    dummy_controlled::set_max_message_size(1);
+    let handler = MessageHandler::new(node1.swarm.transport.clone());
+    assert!(handler.admit_dht_attempt(attempt).await?);
 
     dummy_controlled::enable(false);
     dummy_controlled::set_max_message_size(0);
