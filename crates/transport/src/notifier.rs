@@ -13,11 +13,8 @@ use std::time::Duration;
 
 use rings_runtime::TimerError;
 
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::core::transport::ConnectionStateSnapshot;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::error::Error;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
@@ -110,8 +107,10 @@ impl Future for Notifier {
 
 /// Wait until the data channels of the connection whose state `snapshot` reads are open, or
 /// fail at once if the connection is terminal, or after `timeout_seconds` without opening.
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
-pub(crate) async fn wait_for_data_channel_open(
+///
+/// Exposed publicly so built-in and external custom [`crate::core::transport::ConnectionInterface`]
+/// implementations share the same channel-readiness wait semantics.
+pub async fn wait_for_data_channel_open(
     snapshot: impl Fn() -> ConnectionStateSnapshot,
     notifier: &Notifier,
     timeout_seconds: u8,

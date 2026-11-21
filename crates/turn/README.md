@@ -179,6 +179,6 @@ In a Rings node's `config.yaml` (or `--ice-servers` CLI flag), add the `turn://`
 ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d
 ```
 
-- If `delegator_key` is configured in `config.yaml`, the node automatically signs the `turn://...?pubkey=<server_pubkey>` URL using a **non-expiring direct DID signature + ECDH credential** and strips `?pubkey=...` before passing the standard `turn://user:pass@host:port` URI to WebRTC.
-- Otherwise, `SwarmTransport` automatically signs the `turn://...?pubkey=<server_pubkey>` URL using the node's `DelegateeKey` and refreshes it whenever `DelegateeKey` is renewed in process.
+- Nodes sign `turn://...?pubkey=<server_pubkey>` (and RFC 7065 `turn:...?pubkey=<server_pubkey>`) URLs dynamically with their active `DelegateeKey` (`Delegation` + ECDH shared secret), strip `?pubkey=...` before passing the canonical `turn://user:pass@host:port` URI to WebRTC, and rotate TURN credentials automatically in lockstep whenever `DelegateeKey` is renewed in process.
+- Non-expiring direct account-level DID credentials are available programmatically via `WebrtcNetworkParameters::with_credential_mode(TurnCredentialMode::Account(...))`.
 - Explicit credentials (`turn://user:pass@other-turn.example.org:3478`) are preserved as-is for compatibility with third-party TURN servers.

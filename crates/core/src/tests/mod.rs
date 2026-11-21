@@ -48,8 +48,16 @@ pub(crate) const TEST_NETWORK_ID: u32 = 0;
 pub(crate) fn test_transport(
     traversal_servers: &str,
 ) -> rings_transport::core::transport::SharedTransport {
-    rings_transport::network_config::TransportNetworkConfig::new(traversal_servers, None, None)
-        .build_shared_transport(Some(traversal_servers))
+    let cfg =
+        rings_transport::network_config::TransportNetworkConfig::new(traversal_servers, None, None);
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    {
+        cfg.build_dummy_transport(Some(traversal_servers))
+    }
+    #[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+    {
+        cfg.build_shared_transport(Some(traversal_servers))
+    }
 }
 
 /// A delegatee key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation

@@ -55,10 +55,10 @@ Options:
           HTTP(S) proxy URL for remote JSON-RPC endpoints (seed and HTTP handshakes); local loopback RPC always bypasses proxies [env: REMOTE_RPC_PROXY_URL=]
       --external-ip <EXTERNAL_IP>
           external ip address [env: EXTERNAL_IP=]
-      --webrtc-udp-port-min <WEBRTC_UDP_PORT_MIN>
-          Minimum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-max. [env: WEBRTC_UDP_PORT_MIN=]
-      --webrtc-udp-port-max <WEBRTC_UDP_PORT_MAX>
-          Maximum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-min. [env: WEBRTC_UDP_PORT_MAX=]
+      --udp-port-min <UDP_PORT_MIN>
+          Minimum local UDP port used for transport candidate gathering. Must be paired with --udp-port-max. [env: UDP_PORT_MIN=]
+      --udp-port-max <UDP_PORT_MAX>
+          Maximum local UDP port used for transport candidate gathering. Must be paired with --udp-port-min. [env: UDP_PORT_MAX=]
       --storage-path <STORAGE_PATH>
           Storage files location. If not provided, use data_storage.path in config file or ~/.rings/data [env: STORAGE_PATH=]
       --storage-capacity <STORAGE_CAPACITY>

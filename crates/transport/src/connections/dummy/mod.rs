@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -11,6 +13,7 @@ use dashmap::DashMap;
 use lazy_static::lazy_static;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -19,12 +22,14 @@ use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
 use crate::connection_pool::Pool;
 use crate::connection_ref::ConnectionRef;
+use crate::connections::PhysicalCloseWitness;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::HandshakeStep;
 use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportConnectionState;
@@ -34,6 +39,8 @@ use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
+use crate::ice_server::parse_ice_servers_strict;
+use crate::ice_server::IceServer;
 use crate::network_config::UdpPortRange;
 use crate::notifier::Notifier;
 use crate::sdp::effective_max_message_size;
@@ -198,6 +205,39 @@ impl DummyConnectionState {
     }
 }
 
+const HANDSHAKE_ROLE_FRESH: u8 = 0;
+const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
+const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+const HANDSHAKE_ROLE_FAILED: u8 = 4;
+
+struct HandshakeRoleGuard<'a> {
+    role: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> HandshakeRoleGuard<'a> {
+    fn new(role: &'a AtomicU8) -> Self {
+        Self {
+            role,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, next_role: u8) {
+        self.role.store(next_role, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for HandshakeRoleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.role.store(HANDSHAKE_ROLE_FAILED, Ordering::Release);
+        }
+    }
+}
+
 /// In-memory connection used by [`DummyTransport`] to model transport events.
 pub struct DummyConnection {
     rand_id: String,
@@ -205,9 +245,11 @@ pub struct DummyConnection {
     event_sender: mpsc::UnboundedSender<Event>,
     remote_rand_id: Arc<Mutex<Option<String>>>,
     remote_max_message_size: AtomicUsize,
+    handshake_role: AtomicU8,
     event_listener: JoinHandle<()>,
     connection_state: Arc<Mutex<DummyConnectionState>>,
     accepting_events: Arc<AtomicBool>,
+    physical_close_completed: Arc<watch::Sender<bool>>,
     retirement_runtime: tokio::runtime::Handle,
     /// The payload frames of this connection's transport; see
     /// [`DummyTransport::dispatched_payload_frames`].
@@ -217,7 +259,7 @@ pub struct DummyConnection {
 /// [DummyTransport] manages all the [DummyConnection] and
 /// provides methods to create, get and close connections.
 pub struct DummyTransport {
-    session_credentials: std::sync::RwLock<String>,
+    ice_state: std::sync::RwLock<(String, Vec<IceServer>)>,
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -229,6 +271,12 @@ pub struct DummyTransport {
 impl DummyConnection {
     pub(crate) fn generation_id(&self) -> &str {
         &self.rand_id
+    }
+
+    /// Subscribe a monotone [`PhysicalCloseWitness`] that resolves once this connection's
+    /// retirement finishes.
+    pub fn physical_close_witness(&self) -> PhysicalCloseWitness {
+        PhysicalCloseWitness::new(self.physical_close_completed.subscribe())
     }
 
     /// A connection that counts the payload frames it dispatches in `dispatched`, its transport's
@@ -261,12 +309,14 @@ impl DummyConnection {
             event_sender: tx,
             remote_rand_id: Default::default(),
             remote_max_message_size: AtomicUsize::new(0),
+            handshake_role: AtomicU8::new(HANDSHAKE_ROLE_FRESH),
             event_listener,
             connection_state: Arc::new(Mutex::new(DummyConnectionState {
                 webrtc: TransportConnectionState::New,
                 data_channel_open_override: None,
             })),
             accepting_events: Arc::new(AtomicBool::new(true)),
+            physical_close_completed: Arc::new(watch::channel(false).0),
             retirement_runtime,
             dispatched,
         }
@@ -429,29 +479,66 @@ impl DummyConnection {
 }
 
 impl DummyTransport {
-    /// Create a new [DummyTransport] instance.
+    /// Create a new [DummyTransport] instance, logging and ignoring invalid ICE configuration.
     pub fn new(
         ice_servers: &str,
         _external_address: Option<String>,
         _udp_port_range: Option<UdpPortRange>,
     ) -> Self {
-        let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
+        let parsed = parse_ice_servers_or_warn(ice_servers, "dummy");
 
         Self {
-            session_credentials: std::sync::RwLock::new(ice_servers.to_string()),
+            ice_state: std::sync::RwLock::new((ice_servers.to_string(), parsed)),
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
             dispatched: Arc::default(),
         }
     }
 
+    /// Create a new [DummyTransport] instance, failing closed when `ice_servers` is malformed.
+    pub fn new_strict(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _udp_port_range: Option<UdpPortRange>,
+    ) -> Result<Self> {
+        let parsed = parse_ice_servers_strict(ice_servers)?;
+        Ok(Self {
+            ice_state: std::sync::RwLock::new((ice_servers.to_string(), parsed)),
+            pool: Pool::new(),
+            frame_pool: NodeFramePool::new(),
+            dispatched: Arc::default(),
+        })
+    }
+
     /// Validate and replace the ICE server list used for subsequent peer connections.
     pub fn set_ice_servers(&self, ice_servers: &str) {
-        let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
+        let parsed = parse_ice_servers_or_warn(ice_servers, "dummy");
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+    }
+
+    /// Strictly validate and replace the ICE server list, returning [`Error::IceServer`] without
+    /// mutating state if `ice_servers` is malformed.
+    pub fn try_set_ice_servers(&self, ice_servers: &str) -> Result<()> {
+        let parsed = parse_ice_servers_strict(ice_servers)?;
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+        Ok(())
+    }
+
+    /// Atomically commit a pre-validated `(raw_credentials, parsed_ice_servers)` pair.
+    pub fn commit_prepared_ice_servers(&self, raw: String, parsed: Vec<IceServer>) {
         *self
-            .session_credentials
+            .ice_state
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = ice_servers.to_string();
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (raw, parsed);
+    }
+
+    /// Return the currently committed raw session credential / ICE server string.
+    pub fn session_credentials(&self) -> String {
+        self.ice_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .clone()
     }
 
     /// Test hook: the payload frames this transport's connections have dispatched, over every
@@ -650,10 +737,13 @@ impl FrameSink for DummyConnection {
 
 #[async_trait]
 impl ConnectionInterface for DummyConnection {
-    type Handshake = String;
     type Error = Error;
 
     delegate_to_callback!();
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
         self.connection_state().snapshot()
@@ -668,39 +758,102 @@ impl ConnectionInterface for DummyConnection {
         }
     }
 
-    async fn create_offer(&self) -> Result<Self::Handshake> {
-        self.set_connection_state(TransportConnectionState::New)
-            .await;
-        Ok(self.rand_id.clone())
-    }
+    async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
+        match inbound {
+            None => {
+                self.handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| {
+                        Error::LocalHandshakeGenerationError(
+                            "unexpected initial handshake step on active dummy connection"
+                                .to_string(),
+                        )
+                    })?;
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                self.set_connection_state(TransportConnectionState::New)
+                    .await;
+                role_guard.commit(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
+                Ok(HandshakeStep::Send(Bytes::from(
+                    self.rand_id.clone().into_bytes(),
+                )))
+            }
+            Some(inbound_bytes) => {
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let offer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 handshake payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let negotiated_max_message_size = effective_max_message_size(&offer)?;
+                    // Set remote rand id before setting state so that the remote connection can be found in callback.
+                    self.set_remote_rand_id(offer);
+                    self.set_connection_state(TransportConnectionState::Connecting)
+                        .await;
+                    self.remote_max_message_size
+                        .store(negotiated_max_message_size, Ordering::Release);
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::SendFinal(Bytes::from(
+                        self.rand_id.clone().into_bytes(),
+                    )));
+                }
 
-    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
-        let negotiated_max_message_size = effective_max_message_size(&offer)?;
-        // Set remote rand id before setting state so that the remote connection can be found in callback.
-        self.set_remote_rand_id(offer);
-        self.set_connection_state(TransportConnectionState::Connecting)
-            .await;
-        self.remote_max_message_size
-            .store(negotiated_max_message_size, Ordering::Release);
-        Ok(self.rand_id.clone())
-    }
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let answer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 handshake payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let negotiated_max_message_size = effective_max_message_size(&answer)?;
+                    // Set remote rand id before setting state so that the remote connection can be found in callback.
+                    self.set_remote_rand_id(answer);
+                    self.remote_max_message_size
+                        .store(negotiated_max_message_size, Ordering::Release);
+                    self.set_connection_state(TransportConnectionState::Connected)
+                        .await;
 
-    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
-        let negotiated_max_message_size = effective_max_message_size(&answer)?;
-        // Set remote rand id before setting state so that the remote connection can be found in callback.
-        self.set_remote_rand_id(answer);
-        self.remote_max_message_size
-            .store(negotiated_max_message_size, Ordering::Release);
-        self.set_connection_state(TransportConnectionState::Connected)
-            .await;
+                    if let Some(remote_conn) = self.remote_conn() {
+                        remote_conn
+                            .set_connection_state(TransportConnectionState::Connected)
+                            .await;
+                    }
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::Done);
+                }
 
-        if let Some(remote_conn) = self.remote_conn() {
-            remote_conn
-                .set_connection_state(TransportConnectionState::Connected)
-                .await;
+                Err(Error::RemoteHandshakeApplyError(
+                    "unexpected inbound handshake step on established dummy connection".to_string(),
+                ))
+            }
         }
-
-        Ok(())
     }
 
     async fn wait_for_channel_open(&self) -> Result<()> {
@@ -722,23 +875,6 @@ impl ConnectionInterface for DummyConnection {
             std::future::pending::<()>().await;
         }
         retirement.finish();
-        Ok(())
-    }
-
-    fn dummy_generation_id(&self) -> Result<String> {
-        Ok(self.generation_id().to_string())
-    }
-
-    fn force_dummy_connection_state_without_callback(
-        &self,
-        state: TransportConnectionState,
-    ) -> Result<()> {
-        self.force_connection_state_without_callback(state);
-        Ok(())
-    }
-
-    fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
-        self.force_data_channel_open_without_callback(open);
         Ok(())
     }
 }
@@ -801,24 +937,10 @@ impl TransportInterface for DummyTransport {
         self.pool.connection_ids()
     }
 
-    fn validate_remote_offer(&self, remote_handshake: &str) -> Result<()> {
-        effective_max_message_size(remote_handshake).map(|_| ())
-    }
-
-    fn update_session_credentials(&self, credentials: &str) {
-        self.set_ice_servers(credentials);
-    }
-
-    fn session_credentials(&self) -> Option<String> {
-        Some(
-            self.session_credentials
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
-        )
-    }
-
-    fn dispatched_payload_frames(&self) -> usize {
-        Self::dispatched_payload_frames(self)
+    fn validate_inbound_handshake(&self, _step_index: u8, payload: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(payload).map_err(|err| {
+            Error::RemoteHandshakeApplyError(format!("invalid UTF-8 handshake payload: {err}"))
+        })?;
+        effective_max_message_size(text).map(|_| ())
     }
 }

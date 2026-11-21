@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
+use crate::error::Error;
 use crate::error::IceServerError;
 use crate::sdp::IceCandidateTier;
 
@@ -61,6 +62,16 @@ impl IceServer {
             .max()
             .unwrap_or(IceCandidateTier::Host)
     }
+}
+
+/// Strictly parse a semicolon-delimited ICE server specification string, returning `Ok(Vec::new())`
+/// for empty/whitespace input and failing closed with [`Error::IceServer`] on any malformed entry.
+pub fn parse_ice_servers_strict(config: &str) -> crate::error::Result<Vec<IceServer>> {
+    let config = config.trim();
+    if config.is_empty() {
+        return Ok(Vec::new());
+    }
+    IceServer::vec_from_str(config).map_err(Error::IceServer)
 }
 
 /// Parse ICE servers, log invalid configuration, and continue without servers.

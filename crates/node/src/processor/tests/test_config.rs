@@ -398,9 +398,9 @@ fn test_serialized_remote_rpc_proxy_url_round_trips_and_validates() -> Result<()
 }
 
 /// Verifies that the first-principles [`NodeNetworkParameters`] contract (`build_transport`,
-/// optional `endpoint_hint`, and optional `on_session_key_rotated`) is model-complete for
-/// arbitrary transport parameters without requiring IP/UDP or relay server fields when a
-/// medium does not use them.
+/// optional `endpoint_hint`, optional `prepare_session_key_rotation`, and optional
+/// `to_network_descriptor`) is model-complete for arbitrary transport parameters, fails closed on
+/// malformed ICE/TURN configuration, and round-trips registered custom kinds through serialized YAML.
 #[tokio::test]
 async fn test_node_network_parameters_contract_is_complete_for_custom_transports() -> Result<()> {
     /// Custom transport parameters requiring only `build_transport` (e.g. proximity ad-hoc media
@@ -426,13 +426,13 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
         }
     }
 
-    /// Custom transport parameters advertising an explicit locator and tracking session-key
-    /// rotations via `on_session_key_rotated`.
+    /// Custom transport parameters advertising an explicit locator, tracking two-phase session-key
+    /// rotations, and projecting into a registered `NetworkConfigDescriptor`.
     #[derive(Clone, Debug)]
     struct CustomRoutedParams {
         /// External endpoint locator advertised in the online-node descriptor.
         locator: String,
-        /// Observed session-key rotation count.
+        /// Observed committed session-key rotation count.
         rotations: Arc<std::sync::atomic::AtomicUsize>,
     }
 
@@ -453,20 +453,29 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
             Some(&self.locator)
         }
 
-        /// Record that the node rotated its session key.
-        fn on_session_key_rotated(
+        /// Prepare an infallible commit incrementing `rotations` once phase 2 executes.
+        fn prepare_session_key_rotation(
             &self,
             _transport: &rings_transport::core::transport::SharedTransport,
             _next_key: &DelegateeKey,
-        ) -> Result<()> {
-            self.rotations
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
+        ) -> Result<crate::processor::SessionRotationCommit> {
+            let rotations = Arc::clone(&self.rotations);
+            Ok(Box::new(move || {
+                rotations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }))
+        }
+
+        /// Project into a serde-extensible `NetworkConfigDescriptor`.
+        fn to_network_descriptor(&self) -> Option<crate::processor::NetworkConfigDescriptor> {
+            Some(crate::processor::NetworkConfigDescriptor {
+                kind: "test-custom-routed".to_string(),
+                params: serde_json::json!({ "locator": self.locator }),
+            })
         }
     }
 
     // 1. Minimal transport implementing only `build_transport` uses defaults (`endpoint_hint = None`,
-    //    `on_session_key_rotated = Ok(())`) and rotates session keys cleanly.
+    //    `prepare_session_key_rotation = no-op`) and builds cleanly.
     let adhoc_config =
         onion_test_config().with_network_parameters(MinimalAdHocParams { valid: true });
     let adhoc_processor = test_processor_builder(&adhoc_config).build()?;
@@ -480,8 +489,77 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
         Err(Error::InvalidConfig(_))
     ));
 
-    // 2. Routed transport implementing `endpoint_hint` and `on_session_key_rotated` receives
-    //    lockstep rotation callbacks when `renew_delegatee_key` succeeds.
+    // Malformed ICE server URLs and malformed `?pubkey=` TURN URLs fail closed at build time
+    // instead of logging a warning and starting with zero traversal servers (Impl #3).
+    for bad_spec in [
+        "not-a-valid-ice-url",
+        "turn://turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
+        "turn:turn.rings.rs:3478?pubkey=NOT_VALID_BASE58",
+        "turns:turn.rings.rs:5349?pubkey=",
+    ] {
+        let bad_ice_cfg =
+            ProcessorConfig::new(0, bad_spec.to_string(), adhoc_config.delegatee_key(), 3);
+        assert!(
+            matches!(
+                test_processor_builder(&bad_ice_cfg).build(),
+                Err(Error::InvalidConfig(_))
+            ),
+            "malformed ICE/TURN spec '{bad_spec}' must fail closed at build"
+        );
+    }
+
+    // Standard RFC 7065 `turn:host:port?pubkey=<valid>` form validates and signs credentials cleanly!
+    let turn_server_pk = SecretKey::random().pubkey();
+    let rfc7065_valid =
+        rings_turn::format_turn_server_url("turn:203.0.113.10:3478", turn_server_pk).unwrap();
+    let rfc7065_cfg = ProcessorConfig::new(0, rfc7065_valid, adhoc_config.delegatee_key(), 3);
+    let rfc7065_proc = test_processor_builder(&rfc7065_cfg).build()?;
+    let committed_rfc7065 = rfc7065_proc
+        .session_transport_credentials()
+        .expect("dummy transport records signed credentials");
+    assert!(
+        committed_rfc7065.starts_with("turn://")
+            && committed_rfc7065.contains("@203.0.113.10:3478")
+            && !committed_rfc7065.contains("pubkey="),
+        "RFC 7065 turn: URL must be signed into canonical turn://user:pass@host:port, got {committed_rfc7065}"
+    );
+
+    // Parse errors on serialized `ProcessorConfig` omit source snippets so secret `delegatee_key`
+    // material cannot leak into error messages or logs (B2).
+    let secret_marker = "SECRET_DELEGATEE_MARKER_DO_NOT_LEAK";
+    let bad_serialized = format!("network_id: \"not-a-u32\"\ndelegatee_key: \"{secret_marker}\"\n");
+    let parse_err = std::str::FromStr::from_str(&bad_serialized)
+        .map(|_: ProcessorConfig| ())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        !parse_err.contains(secret_marker),
+        "ProcessorConfig parse error must not include YAML source snippets: {parse_err}"
+    );
+
+    // 2. Routed transport implementing `endpoint_hint`, `prepare_session_key_rotation`, and
+    //    `to_network_descriptor` commits rotation callbacks and round-trips through YAML!
+    crate::processor::register_network_transport_factory("test-custom-routed", |params| {
+        let locator = params
+            .get("locator")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::InvalidConfig("missing locator".to_string()))?
+            .to_owned();
+        Ok(Arc::new(CustomRoutedParams {
+            locator,
+            rotations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }))
+    })?;
+    assert!(
+        matches!(
+            crate::processor::register_network_transport_factory("test-custom-routed", |_| {
+                Err(Error::InvalidConfig("hijack".to_string()))
+            }),
+            Err(Error::InvalidConfig(_))
+        ),
+        "duplicate custom transport kind registration must be rejected"
+    );
+
     let t1 = get_epoch_ms() + 1_000;
     let delegator = SecretKey::random();
     let initial_key = DelegateeKey::new_with_seckey_at(
@@ -503,6 +581,18 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
             rotations: Arc::clone(&rotations),
         });
     routed_config.advertise_presence = false;
+
+    let serialized_routed = ProcessorConfigSerialized::try_from(routed_config.clone())?;
+    assert_eq!(
+        serialized_routed.network.as_ref().map(|d| d.kind.as_str()),
+        Some("test-custom-routed")
+    );
+    let restored_routed = ProcessorConfig::try_from(serialized_routed)?;
+    assert_eq!(
+        restored_routed.network_parameters().endpoint_hint(),
+        Some("wss://node.rings.network/ws")
+    );
+
     let routed_processor = test_processor_builder(&routed_config).build_at(t1)?;
     assert_eq!(
         routed_processor.network_parameters().endpoint_hint(),
@@ -530,9 +620,8 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     assert_eq!(serialized.udp_port_min, Some(50000));
     assert_eq!(serialized.udp_port_max, Some(50100));
 
-    // 4. Attempting to losslessly serialize a custom `NodeNetworkParameters` implementation
-    //    into `ProcessorConfigSerialized` must fail explicitly instead of silently replacing it
-    //    with an empty `TransportNetworkConfig`.
+    // 4. Attempting to losslessly serialize an unregistered programmatic `NodeNetworkParameters`
+    //    implementation (returning `to_network_descriptor = None`) fails explicitly.
     let custom_cfg =
         onion_test_config().with_network_parameters(MinimalAdHocParams { valid: true });
     assert!(matches!(
@@ -543,30 +632,44 @@ async fn test_node_network_parameters_contract_is_complete_for_custom_transports
     Ok(())
 }
 
-/// Constructive model-completeness proof for external transport backends (#1291):
+/// Constructive model-completeness proof for external transport backends (#1291, Impl #6):
 /// implements a completely independent in-memory `TransportInterface` + `ConnectionInterface`
 /// inside `rings-node` (an external crate relative to `rings-transport`) using **only** public
-/// `rings-transport` APIs — with zero delegation to `DummyTransport` or `WebrtcTransport` —
-/// injects it into two `Processor` instances via [`NodeNetworkParameters`], performs a full
-/// 3-step handshake (`create_offer -> answer_offer -> accept_answer`), and verifies credit-bounded
-/// custom payload delivery across the live connection.
+/// `rings-transport` APIs — with zero delegation to `DummyTransport` or `WebrtcTransport`:
+/// 1. Stores `Weak<MemoryConnection>` in the switchboard (no leaked `Arc` cycles on close/drop).
+/// 2. Uses `ConnectionStateCell` + `wait_for_data_channel_open` for async channel-open waiting.
+/// 3. Implements `handshake_step` and `as_any`.
+/// 4. Sends `3 * INBOUND_PEER_FRAME_CAPACITY` (192) frames across a single lane while injecting a
+///    transient credit-frame send failure, proving `spawn_credit_driver` + `CreditFrame` RAII
+///    requeue replenishes credit windows without deadlock and delivers every payload byte intact.
+/// 5. Asserts `NodeFramePool::used_frames() == 0` after `close()`, and verifies end-to-end
+///    `Processor` handshake + `Swarm::send_direct_message` application delivery.
 #[tokio::test]
 async fn test_independent_external_transport_backend_completes_handshake_and_credit_bounded_send(
 ) -> Result<()> {
+    use std::any::Any;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::Ordering;
     use std::sync::Mutex;
+    use std::sync::Weak;
 
     use async_trait::async_trait;
     use bytes::Bytes;
     use rings_transport::callback::InnerTransportCallback;
     use rings_transport::callback::NodeFramePool;
+    use rings_transport::callback::INBOUND_PEER_FRAME_CAPACITY;
     use rings_transport::connection_pool::Pool;
     use rings_transport::connection_ref::ConnectionRef;
+    use rings_transport::core::callback::AdmittedInboundMessage;
     use rings_transport::core::callback::BoxedTransportCallback;
-    use rings_transport::core::credit::CreditIndex;
+    use rings_transport::core::callback::TransportCallback;
     use rings_transport::core::pool::ChannelLane;
     use rings_transport::core::transport::ConnectionInterface;
+    use rings_transport::core::transport::ConnectionStateCell;
     use rings_transport::core::transport::ConnectionStateSnapshot;
+    use rings_transport::core::transport::HandshakeStep;
     use rings_transport::core::transport::LaneCreditView;
     use rings_transport::core::transport::SendPermit;
     use rings_transport::core::transport::SharedTransport;
@@ -576,13 +679,15 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
     use rings_transport::delivery::DeliveryFuture;
     use rings_transport::delivery::SendCreditWait;
     use rings_transport::error::Error as TransportError;
+    use rings_transport::notifier::wait_for_data_channel_open;
     use rings_transport::notifier::Notifier;
 
-    /// Shared in-memory switchboard connecting independent `MemoryConnection` endpoints by id.
+    /// Shared in-memory switchboard holding **weak** references to live `MemoryConnection`
+    /// endpoints so closing or dropping a connection never leaks an `Arc` cycle.
     #[derive(Clone, Default)]
     struct MemorySwitchboard {
-        /// Registry of live memory endpoints keyed by their handshake token.
-        endpoints: Arc<Mutex<HashMap<String, Arc<MemoryConnection>>>>,
+        endpoints: Arc<Mutex<HashMap<String, Weak<MemoryConnection>>>>,
+        fail_next_credit_send: Arc<AtomicBool>,
     }
 
     impl std::fmt::Debug for MemorySwitchboard {
@@ -591,57 +696,46 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
         }
     }
 
-    /// Independent external connection backend implementing [`ConnectionInterface`] purely via
-    /// public `rings-transport` credit and callback APIs (zero built-in transport delegation).
+    impl MemorySwitchboard {
+        fn resolve(&self, id: &str) -> Option<Arc<MemoryConnection>> {
+            self.endpoints
+                .lock()
+                .unwrap()
+                .get(id)
+                .and_then(Weak::upgrade)
+        }
+    }
+
     struct MemoryConnection {
-        /// Unique endpoint token exchanged as the opaque handshake payload.
         endpoint_id: String,
-        /// Switchboard used to resolve the peer endpoint during handshake and frame delivery.
         switchboard: MemorySwitchboard,
-        /// Negotiated peer endpoint token once handshake completes.
         peer_id: Mutex<Option<String>>,
-        /// Connection lifecycle state snapshot.
-        state: Mutex<ConnectionStateSnapshot>,
-        /// Public credit and inbound-admission callback adapter from `rings-transport`.
+        stage: AtomicU8,
+        state: ConnectionStateCell,
         callback: Arc<InnerTransportCallback>,
-        /// Notifier woken when channel opens or closes.
         open_notifier: Notifier,
     }
 
     impl MemoryConnection {
-        /// Deliver a raw wire frame into this endpoint's credit-admitted inbound pipeline.
-        fn deliver_raw(&self, raw: Bytes, lane: ChannelLane) {
-            self.callback.receive_inbound_frame(raw, lane);
-        }
-
-        /// Spawn one credit pump per [`CreditIndex::ALL`] using public
-        /// [`InnerTransportCallback::next_credit_frame`].
-        #[allow(clippy::disallowed_methods)]
-        fn spawn_credit_pumps(self: &Arc<Self>) {
-            for index in CreditIndex::ALL {
-                let conn = Arc::downgrade(self);
-                let cb = Arc::clone(&self.callback);
-                tokio::spawn(async move {
-                    while let Some(frame) = cb.next_credit_frame(index).await {
-                        let Some(conn) = conn.upgrade() else {
-                            break;
-                        };
-                        let peer_id = conn.peer_id.lock().unwrap().clone();
-                        if let Some(peer) = peer_id.and_then(|id| {
-                            conn.switchboard.endpoints.lock().unwrap().get(&id).cloned()
-                        }) {
-                            peer.deliver_raw(frame, index.lane());
-                        }
-                    }
-                });
-            }
+        async fn activate(&self) {
+            self.state
+                .observe_phase(TransportConnectionState::Connected);
+            self.state.observe_channels(true);
+            self.open_notifier.wake();
+            self.callback
+                .on_connection_state_change(TransportConnectionState::Connected)
+                .await;
+            self.callback.on_channel_open().await;
         }
     }
 
     #[async_trait]
     impl ConnectionInterface for MemoryConnection {
-        type Handshake = String;
         type Error = TransportError;
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
 
         async fn send_message_with_permit(
             &self,
@@ -649,27 +743,35 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
             lane: ChannelLane,
             permit: SendPermit,
         ) -> std::result::Result<DeliveryFuture, TransportError> {
+            let peer_id = self.peer_id.lock().unwrap().clone();
+            let switchboard = self.switchboard.clone();
+            let state = self.state.clone();
+            let cb = Arc::clone(&self.callback);
             self.callback
-                .send_custom_wire(payload, lane, permit, |wire, lane, permit| async move {
-                    let Some(proof) = permit.try_mark_irrevocable() else {
-                        return Err(TransportError::SendPermitRevoked);
-                    };
-                    let peer_id = self.peer_id.lock().unwrap().clone().ok_or_else(|| {
-                        TransportError::ChannelOpen("peer not linked".to_string())
-                    })?;
-                    let peer = self
-                        .switchboard
-                        .endpoints
-                        .lock()
-                        .unwrap()
-                        .get(&peer_id)
-                        .cloned()
-                        .ok_or_else(|| TransportError::ChannelOpen("peer offline".to_string()))?;
-                    peer.deliver_raw(wire, lane);
-                    proof.mark_accepted();
-                    let delivered: DeliveryFuture = Box::pin(std::future::ready(Ok(())));
-                    Ok(delivered)
-                })
+                .send_custom_wire(
+                    payload,
+                    lane,
+                    permit,
+                    self.max_message_size(),
+                    move || {
+                        state.close();
+                        cb.close_link_credit();
+                    },
+                    move |wire, target_lane, irrevocable| async move {
+                        let id = peer_id.ok_or_else(|| {
+                            TransportError::ChannelOpen("peer not linked".to_string())
+                        })?;
+                        let peer = switchboard.resolve(&id).ok_or_else(|| {
+                            TransportError::ChannelOpen("peer offline".to_string())
+                        })?;
+                        let accepted = irrevocable.accept();
+                        peer.callback.receive_inbound_frame(wire, target_lane);
+                        Ok((
+                            accepted,
+                            Box::pin(std::future::ready(Ok(()))) as DeliveryFuture,
+                        ))
+                    },
+                )
                 .await
         }
 
@@ -682,88 +784,90 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
         }
 
         fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-            *self.state.lock().unwrap()
+            self.state.snapshot()
         }
 
         fn max_message_size(&self) -> usize {
             MAX_CHANNEL_MESSAGE_SIZE
         }
 
-        async fn create_offer(&self) -> std::result::Result<String, TransportError> {
-            *self.state.lock().unwrap() =
-                ConnectionStateSnapshot::new(TransportConnectionState::New, false);
-            Ok(self.endpoint_id.clone())
-        }
-
-        async fn answer_offer(&self, offer: String) -> std::result::Result<String, TransportError> {
-            *self.peer_id.lock().unwrap() = Some(offer);
-            *self.state.lock().unwrap() =
-                ConnectionStateSnapshot::new(TransportConnectionState::Connecting, false);
-            Ok(self.endpoint_id.clone())
-        }
-
-        async fn accept_answer(&self, answer: String) -> std::result::Result<(), TransportError> {
-            *self.peer_id.lock().unwrap() = Some(answer.clone());
-            *self.state.lock().unwrap() =
-                ConnectionStateSnapshot::new(TransportConnectionState::Connected, true);
-            self.open_notifier.wake();
-            self.callback
-                .dispatch_peer_connection_state(TransportConnectionState::Connected);
-            self.callback.on_channel_open().await;
-
-            let peer = self
-                .switchboard
-                .endpoints
-                .lock()
-                .unwrap()
-                .get(&answer)
-                .cloned();
-            if let Some(peer) = peer {
-                *peer.state.lock().unwrap() =
-                    ConnectionStateSnapshot::new(TransportConnectionState::Connected, true);
-                peer.open_notifier.wake();
-                peer.callback
-                    .dispatch_peer_connection_state(TransportConnectionState::Connected);
-                peer.callback.on_channel_open().await;
+        async fn handshake_step(
+            &self,
+            inbound: Option<Bytes>,
+        ) -> std::result::Result<HandshakeStep, TransportError> {
+            match (self.stage.load(Ordering::Acquire), inbound) {
+                (0, None) => {
+                    self.stage.store(1, Ordering::Release);
+                    self.state.observe_phase(TransportConnectionState::New);
+                    Ok(HandshakeStep::Send(Bytes::from(self.endpoint_id.clone())))
+                }
+                (0, Some(offer_bytes)) => {
+                    let remote_id = String::from_utf8(offer_bytes.to_vec()).map_err(|e| {
+                        TransportError::RemoteHandshakeApplyError(e.to_string())
+                    })?;
+                    *self.peer_id.lock().unwrap() = Some(remote_id);
+                    self.stage.store(2, Ordering::Release);
+                    self.state
+                        .observe_phase(TransportConnectionState::Connecting);
+                    Ok(HandshakeStep::SendFinal(Bytes::from(self.endpoint_id.clone())))
+                }
+                (1, Some(answer_bytes)) => {
+                    let remote_id = String::from_utf8(answer_bytes.to_vec()).map_err(|e| {
+                        TransportError::RemoteHandshakeApplyError(e.to_string())
+                    })?;
+                    *self.peer_id.lock().unwrap() = Some(remote_id.clone());
+                    self.stage.store(2, Ordering::Release);
+                    self.activate().await;
+                    if let Some(peer) = self.switchboard.resolve(&remote_id) {
+                        peer.activate().await;
+                    }
+                    Ok(HandshakeStep::Done)
+                }
+                (stage, other) => Err(TransportError::RemoteHandshakeApplyError(format!(
+                    "unexpected MemoryConnection handshake transition stage={stage} inbound={other:?}"
+                ))),
             }
-            Ok(())
         }
 
         async fn wait_for_channel_open(&self) -> std::result::Result<(), TransportError> {
-            if self.channel_is_open() {
-                Ok(())
-            } else {
-                Err(TransportError::ChannelOpen("channel not open".to_string()))
-            }
+            wait_for_data_channel_open(|| self.state.snapshot(), &self.open_notifier, 5).await
         }
 
         async fn close(&self) -> std::result::Result<(), TransportError> {
-            *self.state.lock().unwrap() =
-                ConnectionStateSnapshot::new(TransportConnectionState::Closed, false);
+            self.state.close();
+            self.open_notifier.wake();
+            self.callback.close_link_credit();
             self.switchboard
                 .endpoints
                 .lock()
                 .unwrap()
                 .remove(&self.endpoint_id);
             self.callback
-                .dispatch_peer_connection_state(TransportConnectionState::Closed);
+                .on_connection_state_change(TransportConnectionState::Closed)
+                .await;
             self.callback.on_channel_close().await;
             Ok(())
         }
     }
 
-    /// Independent external [`TransportInterface`] managing [`MemoryConnection`] instances.
     struct MemoryTransport {
-        /// Shared switchboard linking peers in this test network.
         switchboard: MemorySwitchboard,
-        /// Per-peer connection pool.
         pool: Pool<MemoryConnection>,
-        /// Shared node frame pool for credit window lending.
         frame_pool: NodeFramePool,
-        /// Monotonic endpoint id counter.
         seq: std::sync::atomic::AtomicU64,
-        /// Prefix differentiating endpoints across nodes.
         prefix: String,
+    }
+
+    impl MemoryTransport {
+        fn new(switchboard: MemorySwitchboard, prefix: &str) -> Self {
+            Self {
+                switchboard,
+                pool: Pool::new(),
+                frame_pool: NodeFramePool::new(),
+                seq: std::sync::atomic::AtomicU64::new(0),
+                prefix: prefix.to_owned(),
+            }
+        }
     }
 
     #[async_trait]
@@ -776,10 +880,11 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
             cid: &str,
             callback: BoxedTransportCallback,
         ) -> std::result::Result<ConnectionRef<MemoryConnection>, TransportError> {
+            self.pool.ensure_peer_slot_available(cid)?;
             let id = format!(
                 "{}-{}",
                 self.prefix,
-                self.seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                self.seq.fetch_add(1, Ordering::SeqCst)
             );
             let notifier = Notifier::default();
             let inner_cb = Arc::new(InnerTransportCallback::new(
@@ -792,21 +897,53 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
                 endpoint_id: id.clone(),
                 switchboard: self.switchboard.clone(),
                 peer_id: Mutex::new(None),
-                state: Mutex::new(ConnectionStateSnapshot::new(
-                    TransportConnectionState::New,
-                    false,
-                )),
-                callback: inner_cb,
+                stage: AtomicU8::new(0),
+                state: ConnectionStateCell::new(),
+                callback: Arc::clone(&inner_cb),
                 open_notifier: notifier,
             };
             let conn_ref = self.pool.safely_insert(cid, conn).await?;
             let live = conn_ref.upgrade()?;
+            let weak_conn = Arc::downgrade(&live);
             self.switchboard
                 .endpoints
                 .lock()
                 .unwrap()
-                .insert(id, Arc::clone(&live));
-            live.spawn_credit_pumps();
+                .insert(id, Weak::clone(&weak_conn));
+
+            let sb = self.switchboard.clone();
+            inner_cb.spawn_credit_driver(move |wire, lane| {
+                let weak_conn = Weak::clone(&weak_conn);
+                let sb = sb.clone();
+                async move {
+                    let Some(conn) = weak_conn.upgrade() else {
+                        return Err(TransportError::ConnectionReleased(
+                            "memory connection dropped".to_string(),
+                        ));
+                    };
+                    if sb.fail_next_credit_send.swap(false, Ordering::AcqRel) {
+                        return Err(TransportError::Backend {
+                            class: rings_transport::error::BackendSendFailureClass::Ambiguous,
+                            source: Box::new(std::io::Error::other(
+                                "injected transient credit-frame send error",
+                            )),
+                        });
+                    }
+                    let Some(peer_id) = conn.peer_id.lock().unwrap().clone() else {
+                        return Err(TransportError::ChannelOpen(
+                            "peer not yet linked".to_string(),
+                        ));
+                    };
+                    let Some(peer) = sb.resolve(&peer_id) else {
+                        return Err(TransportError::ConnectionReleased(
+                            "remote memory connection closed".to_string(),
+                        ));
+                    };
+                    peer.callback.receive_inbound_frame(wire, lane);
+                    Ok(())
+                }
+            })?;
+            drop(live);
             Ok(conn_ref)
         }
 
@@ -829,24 +966,129 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
         }
     }
 
-    /// [`NodeNetworkParameters`] implementation that injects [`MemoryTransport`] into `Processor`.
+    // Part A: Direct multi-window transfer (`3 * INBOUND_PEER_FRAME_CAPACITY` = 192 frames) with
+    // transient credit-send failure injection, payload byte verification, weak switchboard cleanup,
+    // and `NodeFramePool::used_frames() == 0` after close!
+    struct RecordingCallback {
+        received: Arc<Mutex<Vec<Bytes>>>,
+        notify: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl TransportCallback for RecordingCallback {
+        async fn on_admitted_message(
+            &self,
+            message: AdmittedInboundMessage<'_>,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            let (_cid, payload, _permit) = message.into_parts();
+            self.received.lock().unwrap().push(payload);
+            self.notify.notify_waiters();
+            Ok(())
+        }
+    }
+
+    let direct_sb = MemorySwitchboard::default();
+    let t_sender = MemoryTransport::new(direct_sb.clone(), "raw-tx");
+    let t_receiver = MemoryTransport::new(direct_sb.clone(), "raw-rx");
+    let received_payloads = Arc::new(Mutex::new(Vec::new()));
+    let rx_notify = Arc::new(tokio::sync::Notify::new());
+
+    let c_tx = t_sender
+        .new_connection(
+            "peer-rx",
+            Box::new(RecordingCallback {
+                received: Arc::new(Mutex::new(Vec::new())),
+                notify: Arc::new(tokio::sync::Notify::new()),
+            }),
+        )
+        .await
+        .unwrap();
+    let c_rx = t_receiver
+        .new_connection(
+            "peer-tx",
+            Box::new(RecordingCallback {
+                received: Arc::clone(&received_payloads),
+                notify: Arc::clone(&rx_notify),
+            }),
+        )
+        .await
+        .unwrap();
+
+    let HandshakeStep::Send(offer_bytes) = c_tx.handshake_step(None).await.unwrap() else {
+        panic!("expected step 0 Send");
+    };
+    let HandshakeStep::SendFinal(answer_bytes) =
+        c_rx.handshake_step(Some(offer_bytes)).await.unwrap()
+    else {
+        panic!("expected step 1 SendFinal");
+    };
+    let HandshakeStep::Done = c_tx.handshake_step(Some(answer_bytes)).await.unwrap() else {
+        panic!("expected step 2 Done");
+    };
+    c_tx.wait_for_channel_open().await.unwrap();
+    c_rx.wait_for_channel_open().await.unwrap();
+
+    let data_lane = ChannelLane::new(1);
+    let total_frames = 3 * INBOUND_PEER_FRAME_CAPACITY;
+    let mut expected_payloads = Vec::with_capacity(total_frames);
+    for idx in 0..total_frames {
+        if idx == INBOUND_PEER_FRAME_CAPACITY {
+            // Arm a transient credit-frame failure right as window replenishment is needed!
+            direct_sb
+                .fail_next_credit_send
+                .store(true, Ordering::Release);
+        }
+        let body = Bytes::from(format!("external-frame-{idx:04}"));
+        expected_payloads.push(body.clone());
+        let credit =
+            tokio::time::timeout(Duration::from_secs(5), c_tx.reserve_send_credit(data_lane))
+                .await
+                .expect("credit pump must replenish window after transient failure")
+                .unwrap();
+        let delivery = c_tx
+            .send_message_with_permit(body, data_lane, SendPermit::always().with_credit(credit))
+            .await
+            .unwrap();
+        delivery.await.unwrap();
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while received_payloads.lock().unwrap().len() < total_frames {
+            rx_notify.notified().await;
+        }
+    })
+    .await
+    .expect("all 192 frames delivered to receiver callback");
+    assert_eq!(*received_payloads.lock().unwrap(), expected_payloads);
+    assert!(
+        !direct_sb.fail_next_credit_send.load(Ordering::Acquire),
+        "injected transient credit failure must have fired and recovered"
+    );
+
+    t_sender.close_connection_if_current(&c_tx).await.unwrap();
+    t_receiver.close_connection_if_current(&c_rx).await.unwrap();
+    drop(c_tx);
+    drop(c_rx);
+    assert_eq!(t_sender.frame_pool.used_frames(), 0);
+    assert_eq!(t_receiver.frame_pool.used_frames(), 0);
+    assert!(
+        direct_sb.endpoints.lock().unwrap().is_empty(),
+        "weak switchboard must hold zero endpoints after close"
+    );
+
+    // Part B: Full two-`Processor` handshake and `Swarm::send_direct_message` application delivery!
     #[derive(Clone, Debug)]
     struct MemoryNetworkParams {
-        /// Shared switchboard connecting nodes in this test.
         switchboard: MemorySwitchboard,
-        /// Node label prefix.
         prefix: String,
     }
 
     impl NodeNetworkParameters for MemoryNetworkParams {
         fn build_transport(&self, _delegatee_key: &DelegateeKey) -> Result<SharedTransport> {
-            Ok(Arc::new(MemoryTransport {
-                switchboard: self.switchboard.clone(),
-                pool: Pool::new(),
-                frame_pool: NodeFramePool::new(),
-                seq: std::sync::atomic::AtomicU64::new(0),
-                prefix: self.prefix.clone(),
-            }))
+            Ok(Arc::new(MemoryTransport::new(
+                self.switchboard.clone(),
+                &self.prefix,
+            )))
         }
     }
 
@@ -861,6 +1103,7 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
     });
     let p1 = test_processor_builder(&cfg1).build()?;
     let p2 = test_processor_builder(&cfg2).build()?;
+    let p2_inbox = p2.swarm.application_inbox().map_err(Error::CoreError)?;
 
     let expected_peer = p2.did();
     let offer = p1
@@ -881,37 +1124,38 @@ async fn test_independent_external_transport_backend_completes_handshake_and_cre
         .await
         .map_err(Error::CoreError)?;
 
-    // Both processors completed handshake over the independent external transport and can send
-    // credit-admitted frames through `ConnectionInterface::reserve_send_credit` +
-    // `send_message_with_permit`.
-    let conn = p1
-        .swarm
-        .transport()
-        .dyn_connection(&expected_peer.to_string())
-        .map_err(rings_core::error::Error::Transport)
-        .map_err(Error::CoreError)?;
-    let live = conn
-        .upgrade()
-        .map_err(rings_core::error::Error::Transport)
-        .map_err(Error::CoreError)?;
-    let credit = live
-        .reserve_send_credit(ChannelLane::PRIORITY)
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if p1.swarm.is_peer_admitted(p2.did()).unwrap_or(false)
+                && p2.swarm.is_peer_admitted(p1.did()).unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("p1 and p2 must admit each other over MemoryTransport");
+
+    let app_payload =
+        rings_core::swarm::application::ApplicationData::custom(b"hello-from-external-transport");
+    p1.swarm
+        .send_direct_message(app_payload.clone(), expected_peer)
         .await
-        .map_err(rings_core::error::Error::Transport)
         .map_err(Error::CoreError)?;
-    let delivery = live
-        .send_message_with_permit(
-            Bytes::from_static(b"hello-from-external-transport"),
-            ChannelLane::PRIORITY,
-            SendPermit::always().with_credit(credit),
-        )
-        .await
-        .map_err(rings_core::error::Error::Transport)
-        .map_err(Error::CoreError)?;
-    delivery
-        .await
-        .map_err(rings_core::error::Error::Transport)
-        .map_err(Error::CoreError)?;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(delivery) = p2_inbox.next().await {
+            if let rings_core::swarm::application::ApplicationDelivery::Message(msg) = delivery {
+                assert_eq!(msg.from, p1.did());
+                assert_eq!(msg.data, app_payload);
+                return;
+            }
+        }
+        panic!("p2 application inbox closed before delivering direct message");
+    })
+    .await
+    .expect("p2 application inbox must receive p1 direct message");
 
     p1.close().await?;
     p2.close().await?;

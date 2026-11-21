@@ -75,8 +75,11 @@ impl FrameSink for FlakyCreditConnection {
 /// unreachable here.
 #[async_trait]
 impl ConnectionInterface for FlakyCreditConnection {
-    type Handshake = String;
     type Error = Error;
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     async fn send_message_with_permit(
         &self,
@@ -105,15 +108,10 @@ impl ConnectionInterface for FlakyCreditConnection {
         crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE
     }
 
-    async fn create_offer(&self) -> Result<String> {
-        Err(Error::ChannelOpen("no signalling in this test".into()))
-    }
-
-    async fn answer_offer(&self, _: String) -> Result<String> {
-        Err(Error::ChannelOpen("no signalling in this test".into()))
-    }
-
-    async fn accept_answer(&self, _: String) -> Result<()> {
+    async fn handshake_step(
+        &self,
+        _: Option<Bytes>,
+    ) -> Result<crate::core::transport::HandshakeStep> {
         Err(Error::ChannelOpen("no signalling in this test".into()))
     }
 

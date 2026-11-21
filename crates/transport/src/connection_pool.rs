@@ -5,8 +5,6 @@ use std::sync::Arc;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rings_runtime::MaybeSendSync;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 use crate::connection_ref::ConnectionRef;
 use crate::core::transport::ConnectionInterface;
@@ -104,18 +102,11 @@ impl<C> Pool<C> {
     }
 }
 
-impl<C, S> Pool<C>
-where
-    C: ConnectionInterface<Error = Error, Handshake = S> + MaybeSendSync,
-    S: Serialize + DeserializeOwned + Send + Sync + 'static,
+impl<C> Pool<C>
+where C: ConnectionInterface<Error = Error> + MaybeSendSync
 {
     /// Reject an early connection setup while the peer already occupies its slot.
-    #[cfg(any(
-        feature = "dummy",
-        feature = "native-webrtc",
-        feature = "web-sys-webrtc"
-    ))]
-    pub(crate) fn ensure_peer_slot_available(&self, cid: &str) -> Result<()> {
+    pub fn ensure_peer_slot_available(&self, cid: &str) -> Result<()> {
         if self
             .connection(cid)
             .is_ok_and(|connection| connection.connection_state().occupies_peer_slot())
@@ -218,8 +209,11 @@ mod tests {
 
     #[async_trait]
     impl ConnectionInterface for TestConnection {
-        type Handshake = String;
         type Error = Error;
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
 
         async fn send_message_with_permit(
             &self,
@@ -255,21 +249,12 @@ mod tests {
             1
         }
 
-        async fn create_offer(&self) -> Result<Self::Handshake> {
+        async fn handshake_step(
+            &self,
+            _: Option<Bytes>,
+        ) -> Result<crate::core::transport::HandshakeStep> {
             Err(Error::ChannelOpen(
-                "test connection cannot create offers".to_string(),
-            ))
-        }
-
-        async fn answer_offer(&self, _: Self::Handshake) -> Result<Self::Handshake> {
-            Err(Error::ChannelOpen(
-                "test connection cannot answer offers".to_string(),
-            ))
-        }
-
-        async fn accept_answer(&self, _: Self::Handshake) -> Result<()> {
-            Err(Error::ChannelOpen(
-                "test connection cannot accept answers".to_string(),
+                "test connection cannot handshake".to_string(),
             ))
         }
 

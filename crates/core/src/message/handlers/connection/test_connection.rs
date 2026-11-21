@@ -194,12 +194,11 @@ async fn test_a_refused_offer_is_logged_once_at_debug_and_answered() -> Result<(
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_msgs([&node1, &node2]).await;
-    let offer = ConnectNodeSend {
-        handshake: serde_json::to_string("never read: the slot refuses first")
-            .map_err(|_| Error::SerializeToString)?,
-        dht_protocol_mode: node2.swarm.dht_protocol_mode(),
-        relay_custody: node2.swarm.transport.dht.relay_custody(),
-    };
+    let offer = ConnectNodeSend::initial_offer(
+        bytes::Bytes::from_static(b"never read: the slot refuses first"),
+        node2.swarm.dht_protocol_mode(),
+        node2.swarm.transport.dht.relay_custody(),
+    );
     let mut request = node2
         .swarm
         .transport

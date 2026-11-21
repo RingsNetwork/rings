@@ -191,5 +191,5 @@ accounting requires no wall-clock synchronization between peers (#908).
 Every cryptographic proof uses an explicit, domain-separated signing transcript (`rings-delegation-v1`
 and EIP-712 / account verifiers for delegations, `rings-core:message-verification:transaction` for
 transactions, `rings-core:message-verification:payload` for hop carriers, and dedicated inbox,
-receipt, descriptor, and onion domains), paired with wire-versioned framing (`WIRE_VERSION = 4` in
+receipt, descriptor, and onion domains), paired with wire-versioned framing (`WIRE_VERSION = 5` in
 Rings 1.0).

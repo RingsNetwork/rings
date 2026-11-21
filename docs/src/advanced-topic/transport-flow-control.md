@@ -13,7 +13,7 @@ link](delegation-references.md)).
 ## Credit
 
 A receiver holds at most `LANE_CREDIT_WINDOW` (16) frames of a lane, so at most
-`INBOUND_PEER_FRAME_CAPACITY` (64) frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE` bytes per
+`INBOUND_PEER_FRAME_CAPACITY` (64) frames of at most `MAX_CHANNEL_MESSAGE_SIZE` bytes per
 connection. Every lane has a floor it is always granted: the priority lane its whole window, each
 data lane one frame. Beyond its floor a data lane borrows from the node's frame pool, up to the
 window (see below). The receiver advertises credit, as a cumulative `Credit(limit, generation)`

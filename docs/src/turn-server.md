@@ -105,8 +105,8 @@ In a node's [`config.yaml`](advanced-topic/config.yaml.md) (or via `rings run --
 ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d
 ```
 
-- When `delegator_key` is configured in `config.yaml`, the node signs `turn://...?pubkey=<server_pubkey>` entries directly with its DID key and ECDH shared secret, which **never expires**.
-- When only `delegatee_key` is configured, the node signs `turn://...?pubkey=<server_pubkey>` entries with its `DelegateeKey` and ECDH shared secret and refreshes them automatically whenever `DelegateeKey` is renewed.
+- The node signs `turn://...?pubkey=<server_pubkey>` (and RFC 7065 `turn:...?pubkey=<server_pubkey>`) entries dynamically with its active `DelegateeKey` and ECDH shared secret, and automatically rotates TURN credentials in lockstep whenever `DelegateeKey` is renewed in process (for example when `delegator_key` is configured in `config.yaml`).
+- Non-expiring account-level DID credentials are available programmatically for embedded/SDK callers via `WebrtcNetworkParameters::with_credential_mode(TurnCredentialMode::Account(...))`.
 - Explicit `turn://user:pass@host:port` entries are left untouched for third-party TURN servers.
 
 ## DHT Service Discovery and Anonymous `turn.ticket` Issuance (`rings-turn-service`)

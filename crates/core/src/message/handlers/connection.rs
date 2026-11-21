@@ -190,11 +190,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             );
             // The answer applies only to the generation whose offer left under this
             // transaction (#947); a late one, for an offer since released, touches nothing.
-            match self
-                .transport
-                .accept_signaled_answer(peer, ctx.transaction.tx_id, msg)
-                .await
-            {
+            match self.transport.handle_signaled_report(ctx, msg).await {
                 Ok(true) => {
                     tracing::trace!(
                         local = %self.dht.did,

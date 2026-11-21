@@ -1,18 +1,20 @@
-//! The signaling state of a pending attempt (#947).
+//! The signaling state of a pending attempt (#947, #1291).
 //!
-//! A pending generation is either offering or answering. An offer advances through the phases
-//! below; an answering generation has none, and holds its slot until it is admitted, released
-//! or expires. The state lives in the lifecycle registry beside the pending
-//! record and is created and dropped by the same transitions, so no reader can observe a
-//! pending attempt without its signaling state or a signaling state without its attempt.
+//! A pending generation is either offering (initiator) or answering (responder) across a
+//! `0..MAX_HANDSHAKE_STEPS` transport handshake. The state lives in the lifecycle registry beside
+//! the pending record and is created and dropped by the same transitions, so no reader can observe
+//! a pending attempt without its signaling state or a signaling state without its attempt.
 //!
 //! ```text
-//! Offering(o): Creating ──sent(sdp, tx)──▶ Sent(sdp, tx) ──answer──▶ Answered
+//! Offering(o): Creating ──sent(0)──▶ Sent(0, final, bytes, tx) ──claim──▶ ClaimedReply(2k, sid) ──sent──▶ Sent(2k, ..) / Answered
+//! Answering:   Answering(None) ◀──claim/await──▶ Answering(Some(2k, sid))
 //! ```
 //!
-//! Law (Crossing offer): an offer from `peer` meeting this node's pending attempt for `peer`
-//! is decided by [`crossing_offer_verdict`] alone, a pure function of the attempt's signaling
-//! state, the offer's carrier and the two DIDs.
+//! Law (Crossing offer): an initial offer (`step_index == 0`) from `peer` meeting this node's
+//! pending attempt for `peer` is decided by [`crossing_offer_verdict`] alone, a pure function of
+//! the attempt's signaling state, the offer's carrier and the two DIDs.
+
+use bytes::Bytes;
 
 use crate::dht::Did;
 
@@ -33,16 +35,37 @@ pub(crate) enum OfferOwner {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
 pub(crate) enum OfferPhase {
-    /// The offer is being created (ICE gathering); nothing has left this node.
+    /// Step `0` is being created; nothing has left this node.
     Creating,
-    /// The offer left under transaction `tx_id` and is unanswered.
+    /// Outbound initiator step `step_index` (`0` for the initial offer, even `2, 4, ...` for
+    /// multi-round continuations) left under transaction `tx_id`. When `final_step` is `false`, it
+    /// awaits odd reply `step_index + 1`; when `step_index == 0 && final_step == true` (a 1-step
+    /// announce), it expects no reply while still participating in `Law (Tie-break)` against a
+    /// crossing initial offer from the peer.
     Sent {
-        /// The offer's SDP as sent, for a counter-offer.
-        handshake: String,
-        /// The transaction the offer left under; its answer echoes it.
+        /// Zero-based even step index (`0, 2, 4, ...`) sent by the initiator.
+        step_index: u8,
+        /// Whether this sent step was final (`true` only for 1-step `step_index == 0` offers;
+        /// final continuation steps `>= 2` move directly to [`Self::Answered`]).
+        final_step: bool,
+        /// The step's binary handshake payload (retained for counter-offering when `step_index == 0`).
+        handshake: Bytes,
+        /// The transaction the step left under; its reply echoes it.
         tx_id: uuid::Uuid,
+        /// Optional 128-bit session correlation ID for `>= 3`-step handshakes.
+        session_id: Option<[u8; 16]>,
     },
-    /// An answer to the offer is being, or was, applied.
+    /// Atomically claimed an inbound non-final odd `ConnectNodeReport` and is now computing and
+    /// sending even continuation step `next_step_index` (`2, 4, ...`) under `session_id`. Prevents
+    /// duplicate reports under the same transaction from racing into `handshake_step`.
+    ClaimedReply {
+        /// Next even outbound step index (`2, 4, ...`) to be produced and marked sent.
+        next_step_index: u8,
+        /// Session correlation ID established for this multi-step handshake.
+        session_id: [u8; 16],
+    },
+    /// All handshake signaling steps have completed (`Done` or `SendFinal` at `step_index >= 2`);
+    /// awaiting channel open.
     Answered,
 }
 
@@ -50,17 +73,21 @@ pub(crate) enum OfferPhase {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
 pub(crate) enum Handshake {
-    /// This node offered.
+    /// This node initiated the handshake.
     Offering {
         /// Who drives the offer.
         owner: OfferOwner,
         /// How far the offer has got.
         phase: OfferPhase,
     },
-    /// This node answers the peer's offer. Any further offer from the peer is refused while
-    /// the answer is in flight (a copy of the answered offer included): the slot is that
-    /// handshake's until it is admitted, released, or expires.
-    Answering,
+    /// This node answers the peer's offer. Any crossing initial offer (`step_index == 0`) from the
+    /// peer is refused while the answer is in flight; when a multi-round responder step (`Send`)
+    /// awaits even continuation step `step_index` under `session_id`, `awaiting_step` holds
+    /// `Some((step_index, session_id))`.
+    Answering {
+        /// Expected next even initiator continuation `(step_index, session_id)`, if any.
+        awaiting_step: Option<(u8, [u8; 16])>,
+    },
 }
 
 impl Handshake {
@@ -69,25 +96,37 @@ impl Handshake {
     #[cfg(test)]
     pub(crate) const TEST_DEFAULT: Self = Self::offering(OfferOwner::External);
 
-    /// A new offering attempt of `owner`, still creating its offer.
+    /// A new offering attempt of `owner`, still creating its initial step.
     pub(crate) const fn offering(owner: OfferOwner) -> Self {
         Self::Offering {
             owner,
             phase: OfferPhase::Creating,
         }
     }
+
+    /// A new responder attempt answering an initial step (`step_index == 0`).
+    pub(crate) const fn answering() -> Self {
+        Self::Answering {
+            awaiting_step: None,
+        }
+    }
 }
 
-/// What an offer from a peer does to this node's pending attempt for that peer.
+/// What an initial offer (`step_index == 0`) from a peer does to this node's pending attempt for
+/// that peer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CrossingOfferVerdict {
     /// This node abandons its attempt and answers the offer; the answering generation replaces
     /// the attempt in one transition (`Law (Atomic yield)`).
     Yield,
-    /// This node keeps its unanswered overlay offer, sent under `tx_id`, and sends it back.
+    /// This node keeps its unanswered initial overlay offer, sent under `tx_id`, and sends it back.
     CounterOffer {
-        /// The offer's SDP.
-        handshake: String,
+        /// Whether the initial offer was a 1-step final step (`true`) or expects a reply (`false`).
+        final_step: bool,
+        /// The initial offer's binary handshake payload.
+        handshake: Bytes,
+        /// Optional session correlation ID sent with step `0`.
+        session_id: Option<[u8; 16]>,
         /// The transaction the offer left under.
         tx_id: uuid::Uuid,
     },
@@ -95,26 +134,25 @@ pub(crate) enum CrossingOfferVerdict {
     Refuse,
 }
 
-/// Decide an offer from `peer`, carried by `carrier`, meeting this node's (`local`) pending
-/// attempt in `handshake`.
+/// Decide an initial offer (`step_index == 0`) from `peer`, carried by `carrier`, meeting this
+/// node's (`local`) pending attempt in `handshake`.
 ///
 /// ```text
-/// Offering(_, Creating)                     ──▶ Yield     nothing crossed yet: no tie
-/// Offering(Overlay, Sent(_)),  c = External ──▶ Yield     the out-of-band offer prevails
-/// Offering(External, Sent(_)), c = Overlay  ──▶ Refuse    this node's out-of-band offer prevails
-/// Offering(o, Sent(s, t)), c = o, l < p     ──▶ CounterOffer(s, t)   if o = Overlay
-///                                           ──▶ Refuse               if o = External
-/// Offering(o, Sent(_)),    c = o, l > p     ──▶ Yield     the smaller DID's offer prevails
-/// Offering(_, Answered)                     ──▶ Refuse    an answer is being applied
-/// Answering                                 ──▶ Refuse    the slot answers the peer's own offer
+/// Offering(_, Creating)                        ──▶ Yield     nothing crossed yet: no tie
+/// Offering(Overlay, Sent(0, ..)), c = External ──▶ Yield     the out-of-band offer prevails
+/// Offering(External, Sent(0, ..)), c = Overlay ──▶ Refuse    this node's out-of-band offer prevails
+/// Offering(o, Sent(0, h, t, s)), c = o, l < p  ──▶ CounterOffer(h, s, t) if o = Overlay
+///                                              ──▶ Refuse                if o = External
+/// Offering(o, Sent(0, ..)),      c = o, l > p  ──▶ Yield     the smaller DID's offer prevails
+/// Offering(_, Sent(2k>0, ..))                  ──▶ Refuse    responder already answered step 0
+/// Offering(_, Answered)                        ──▶ Refuse    signaling steps completed
+/// Answering { .. }                             ──▶ Refuse    the slot answers the peer's own offer
 /// ```
 ///
-/// Law (Tie-break): of two crossing unanswered offers exactly one side yields. An offer carried
-/// out of band prevails over an overlay offer: its answer returns the way the offer came, while
-/// a counter-offer to it could be answered only through this node's `acceptAnswer`, which a
-/// node's public HTTP API does not serve. Of two offers carried alike the larger DID yields,
-/// and the other sends its own offer back unless an external owner carries it; so whenever
-/// either overlay offer is delivered the edge is established.
+/// Law (Tie-break): of two crossing unanswered initial offers (`step_index == 0`) exactly one side
+/// yields. Once step `0` has been answered (either moving to `Sent { step_index >= 2 }` in a
+/// multi-round handshake or `Answered`), the attempt is absorbing (`Refuse`), preventing a delayed
+/// copy of step `0` from preempting an already-matched multi-step exchange.
 pub(crate) fn crossing_offer_verdict(
     handshake: &Handshake,
     carrier: OfferOwner,
@@ -128,32 +166,41 @@ pub(crate) fn crossing_offer_verdict(
         } => CrossingOfferVerdict::Yield,
         Handshake::Offering {
             owner: OfferOwner::Overlay,
-            phase: OfferPhase::Sent { .. },
+            phase: OfferPhase::Sent { step_index: 0, .. },
         } if carrier == OfferOwner::External => CrossingOfferVerdict::Yield,
         Handshake::Offering {
             owner: OfferOwner::External,
-            phase: OfferPhase::Sent { .. },
+            phase: OfferPhase::Sent { step_index: 0, .. },
         } if carrier == OfferOwner::Overlay => CrossingOfferVerdict::Refuse,
         Handshake::Offering {
-            phase: OfferPhase::Sent { .. },
+            phase: OfferPhase::Sent { step_index: 0, .. },
             ..
         } if local > peer => CrossingOfferVerdict::Yield,
         Handshake::Offering {
             owner: OfferOwner::Overlay,
-            phase: OfferPhase::Sent { handshake, tx_id },
+            phase:
+                OfferPhase::Sent {
+                    step_index: 0,
+                    final_step,
+                    handshake,
+                    tx_id,
+                    session_id,
+                },
         } => CrossingOfferVerdict::CounterOffer {
+            final_step: *final_step,
             handshake: handshake.clone(),
+            session_id: *session_id,
             tx_id: *tx_id,
         },
         Handshake::Offering {
             owner: OfferOwner::External,
-            phase: OfferPhase::Sent { .. },
+            phase: OfferPhase::Sent { step_index: 0, .. },
         }
         | Handshake::Offering {
-            phase: OfferPhase::Answered,
+            phase: OfferPhase::Sent { .. } | OfferPhase::ClaimedReply { .. } | OfferPhase::Answered,
             ..
         }
-        | Handshake::Answering => CrossingOfferVerdict::Refuse,
+        | Handshake::Answering { .. } => CrossingOfferVerdict::Refuse,
     }
 }
 

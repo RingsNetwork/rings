@@ -510,18 +510,30 @@ fn test_delegator_key_defaults_to_none_and_resolves_relative_to_config_dir() {
 }
 
 #[test]
-fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signature() {
+fn test_config_preserves_turn_pubkey_template_and_rotates_delegatee_turn_credentials_live() {
+    use std::sync::Arc;
+
+    use rings_core::ecc::keys::SigningSecretKey;
+    use rings_turn::TurnCredentialSigner;
+
+    use crate::processor::ProcessorBuilder;
+    use crate::processor::TransportNetworkConfig;
+    use crate::processor::TurnCredentialMode;
+    use crate::processor::WebrtcNetworkParameters;
+    use crate::processor::SIGNING_HORIZON_LEAD_MS;
+
     let root = std::env::temp_dir().join(format!("rings-config-turn-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&root).expect("create temp config dir");
 
     let delegator = SecretKey::random();
     let did = crate::prelude::rings_core::dht::Did::from(delegator.address());
-    let delegatee =
-        DelegateeKey::new_with_seckey_at(&delegator, 60_000, 1_700_000_000_000).unwrap();
+    let t0: u128 = 1_800_000_000_000;
+    let ttl_ms = u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+    let delegatee_k0 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
 
     let delegatee_path = root.join("delegatee_key");
     let delegator_path = root.join("ecdsa_key");
-    fs::write(&delegatee_path, delegatee.dump().unwrap()).expect("write delegatee key");
+    fs::write(&delegatee_path, delegatee_k0.dump().unwrap()).expect("write delegatee key");
     fs::write(&delegator_path, delegator.to_string()).expect("write delegator key");
 
     let mut config = Config::new(&delegatee_path);
@@ -530,24 +542,117 @@ fn test_config_with_delegator_key_signs_turn_ice_servers_with_direct_did_signatu
     let turn_url =
         rings_turn::format_turn_server_url("turn://turn.rings.rs:3478", turn_server_pubkey)
             .expect("format turn server url");
-    config.ice_servers = format!("stun://stun.l.google.com:19302;{turn_url}");
+    let raw_template = format!("stun://stun.l.google.com:19302;{turn_url}");
+    config.ice_servers = raw_template.clone();
 
+    // 1. `ProcessorConfigSerialized::try_from(config)` preserves the raw `?pubkey=` template
+    //    instead of pre-signing with `delegator_key`, so `NodeNetworkParameters` remains the
+    //    single owner of session credential derivation and live key rotation works.
     let serialized =
         ProcessorConfigSerialized::try_from(config).expect("serialize processor config");
     let _ = fs::remove_dir_all(&root);
+    assert_eq!(serialized.ice_servers, raw_template);
 
-    let expected_creds = delegator
+    // 2. Building `Processor` signs TURN credentials with `delegatee_k0`, and `renew_delegatee_key`
+    //    rotates the live transport's TURN credentials to `delegatee_k1` in lockstep.
+    let proc_cfg = ProcessorConfig::try_from(serialized).expect("build processor config");
+    let processor = ProcessorBuilder::from_config(&proc_cfg)
+        .expect("processor builder")
+        .advertise_presence(false)
+        .build_at(t0)
+        .expect("build processor at t0");
+    assert_eq!(
+        processor.session_transport_credentials().as_deref(),
+        Some(
+            delegatee_k0
+                .sign_ice_servers(&raw_template)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    let renew_ms = processor.signing_horizon().horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+    let delegatee_k1 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms).unwrap();
+    processor
+        .renew_delegatee_key(delegatee_k1.clone(), renew_ms)
+        .expect("live delegatee rotation");
+    assert_eq!(
+        processor.session_transport_credentials().as_deref(),
+        Some(
+            delegatee_k1
+                .sign_ice_servers(&raw_template)
+                .unwrap()
+                .as_str()
+        )
+    );
+
+    // 3. Explicit `TurnCredentialMode::Account` remains available for callers opting into static
+    //    account-signed TURN credentials.
+    let account_params = WebrtcNetworkParameters::new(TransportNetworkConfig::new(
+        raw_template.clone(),
+        None,
+        None,
+    ))
+    .with_credential_mode(TurnCredentialMode::Account(Arc::new(
+        SigningSecretKey::Secp256k1(delegator.clone()),
+    )));
+    let account_cfg = ProcessorConfig::new(1, String::new(), delegatee_k0, 15)
+        .with_network_parameters(account_params);
+    let account_proc = ProcessorBuilder::from_config(&account_cfg)
+        .expect("account builder")
+        .advertise_presence(false)
+        .build_at(t0)
+        .expect("account processor");
+    let expected_account_creds = delegator
         .turn_credentials(turn_server_pubkey)
         .expect("direct DID turn credentials");
     assert_eq!(
-        serialized.ice_servers,
-        format!(
-            "stun://stun.l.google.com:19302;turn://{}:{}@turn.rings.rs:3478",
-            expected_creds.username, expected_creds.credential
+        account_proc.session_transport_credentials().as_deref(),
+        Some(
+            format!(
+                "stun://stun.l.google.com:19302;turn://{}:{}@turn.rings.rs:3478",
+                expected_account_creds.username, expected_account_creds.credential
+            )
+            .as_str()
         )
     );
-    assert!(expected_creds.username.starts_with(&format!("{did}.")));
-    assert!(!expected_creds.username.contains(&expected_creds.credential));
+    assert!(expected_account_creds
+        .username
+        .starts_with(&format!("{did}.")));
+}
+
+#[test]
+fn test_config_supports_tagged_network_descriptor_section() {
+    let (mut config, delegatee_key_path) = config_with_delegatee_key_file();
+    config.network = Some(crate::processor::NetworkConfigDescriptor {
+        kind: "webrtc".to_string(),
+        params: serde_json::json!({
+            "ice_servers": "stun://stun.l.google.com:19302",
+            "external_address": "https://edge.rings.rs:50001",
+            "udp_port_min": 51000,
+            "udp_port_max": 51010
+        }),
+    });
+    // Specifying both `network` and non-empty `ice_servers` fails closed rather than silently
+    // ignoring the top-level `ice_servers` setting.
+    assert!(
+        matches!(
+            ProcessorConfig::try_from(config.clone()),
+            Err(Error::InvalidConfig(_))
+        ),
+        "conflicting network + ice_servers must fail closed"
+    );
+    config.ice_servers.clear();
+    let proc_cfg = ProcessorConfig::try_from(config).expect("tagged network section resolves");
+    let _ = fs::remove_file(delegatee_key_path);
+    assert_eq!(
+        proc_cfg.network_parameters().endpoint_hint(),
+        Some("https://edge.rings.rs:50001")
+    );
+    assert_eq!(
+        proc_cfg.udp_port_range().map(|r| (r.min(), r.max())),
+        Some((51000, 51010))
+    );
 }
 
 /// Malformed YAML, here a quoted scalar left open, reports the scanner's error and where

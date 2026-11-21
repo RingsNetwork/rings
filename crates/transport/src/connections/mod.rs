@@ -69,8 +69,6 @@ pub use crate::connections::dummy::DummyConnection;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use crate::connections::dummy::DummyTransport;
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-pub use crate::connections::native_webrtc::NativePhysicalCloseWitness;
-#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcConnection;
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcTransport;
@@ -78,3 +76,141 @@ pub use crate::connections::native_webrtc::WebrtcTransport;
 pub use crate::connections::web_sys_webrtc::WebSysWebrtcConnection;
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub use crate::connections::web_sys_webrtc::WebSysWebrtcTransport;
+
+/// Stable monotone observation that a native or dummy connection generation's physical teardown
+/// completed successfully.
+#[cfg(all(
+    any(feature = "native-webrtc", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+#[derive(Clone)]
+pub struct PhysicalCloseWitness {
+    completed: tokio::sync::watch::Receiver<bool>,
+}
+
+#[cfg(all(
+    any(feature = "native-webrtc", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+impl PhysicalCloseWitness {
+    /// Wrap a monotone `false -> true` watch receiver into a [`PhysicalCloseWitness`].
+    pub(crate) fn new(completed: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self { completed }
+    }
+
+    /// Return `true` only after the underlying physical connection teardown has completed.
+    pub fn is_complete(&self) -> bool {
+        *self.completed.borrow()
+    }
+
+    /// Await the physical close outcome: `true` once the connection's close path has completed,
+    /// `false` if every holder of the connection dropped without completing teardown.
+    ///
+    /// Law (no lost wake-up): `wait_for` inspects the stored state before suspending, and the
+    /// value transitions `false -> true` at most once.
+    pub async fn completed(mut self) -> bool {
+        self.completed
+            .wait_for(|completed| *completed)
+            .await
+            .is_ok()
+    }
+}
+
+/// Alias retained for callers observing native connection teardown completion.
+#[cfg(all(
+    any(feature = "native-webrtc", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub type NativePhysicalCloseWitness = PhysicalCloseWitness;
+
+/// Subscribe a [`PhysicalCloseWitness`] from a type-erased [`ConnectionRef`](crate::connection_ref::ConnectionRef)
+/// by downcasting via [`ConnectionInterface::as_any`](crate::core::transport::ConnectionInterface::as_any)
+/// instead of polluting [`ConnectionInterface`](crate::core::transport::ConnectionInterface) with
+/// backend-specific witness methods.
+#[cfg(all(
+    any(feature = "native-webrtc", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub fn physical_close_witness(
+    connection: &crate::connection_ref::ConnectionRef<crate::core::transport::DynConnection>,
+) -> crate::error::Result<PhysicalCloseWitness> {
+    let conn = connection.upgrade()?;
+    let any = conn.as_any();
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+    if let Some(native) = any.downcast_ref::<WebrtcConnection>() {
+        return Ok(native.physical_close_witness());
+    }
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    if let Some(dummy) = any.downcast_ref::<DummyConnection>() {
+        return Ok(dummy.physical_close_witness());
+    }
+    Err(crate::error::Error::UnsupportedOperation(
+        "physical_close_witness".to_string(),
+    ))
+}
+
+/// Read a [`DummyConnection`]'s generation identifier through [`ConnectionInterface::as_any`](crate::core::transport::ConnectionInterface::as_any).
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn dummy_generation_id(
+    connection: &crate::connection_ref::ConnectionRef<crate::core::transport::DynConnection>,
+) -> crate::error::Result<String> {
+    let conn = connection.upgrade()?;
+    let dummy = conn
+        .as_any()
+        .downcast_ref::<DummyConnection>()
+        .ok_or_else(|| {
+            crate::error::Error::UnsupportedOperation("dummy_generation_id".to_string())
+        })?;
+    Ok(dummy.generation_id().to_string())
+}
+
+/// Force a [`DummyConnection`]'s connection state without firing its callback, via
+/// [`ConnectionInterface::as_any`](crate::core::transport::ConnectionInterface::as_any).
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn force_dummy_connection_state_without_callback(
+    connection: &crate::connection_ref::ConnectionRef<crate::core::transport::DynConnection>,
+    state: crate::core::transport::TransportConnectionState,
+) -> crate::error::Result<()> {
+    let conn = connection.upgrade()?;
+    let dummy = conn
+        .as_any()
+        .downcast_ref::<DummyConnection>()
+        .ok_or_else(|| {
+            crate::error::Error::UnsupportedOperation(
+                "force_dummy_connection_state_without_callback".to_string(),
+            )
+        })?;
+    dummy.force_connection_state_without_callback(state);
+    Ok(())
+}
+
+/// Force a [`DummyConnection`]'s channel-open override without firing its callback, via
+/// [`ConnectionInterface::as_any`](crate::core::transport::ConnectionInterface::as_any).
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn force_dummy_channel_open_without_callback(
+    connection: &crate::connection_ref::ConnectionRef<crate::core::transport::DynConnection>,
+    open: Option<bool>,
+) -> crate::error::Result<()> {
+    let conn = connection.upgrade()?;
+    let dummy = conn
+        .as_any()
+        .downcast_ref::<DummyConnection>()
+        .ok_or_else(|| {
+            crate::error::Error::UnsupportedOperation(
+                "force_dummy_channel_open_without_callback".to_string(),
+            )
+        })?;
+    dummy.force_data_channel_open_without_callback(open);
+    Ok(())
+}
+
+/// Read the total payload frames dispatched by a [`DummyTransport`] behind a type-erased
+/// [`SharedTransport`](crate::core::transport::SharedTransport), returning `0` for non-dummy
+/// transports.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub fn dispatched_payload_frames(transport: &crate::core::transport::SharedTransport) -> usize {
+    transport
+        .as_any()
+        .downcast_ref::<DummyTransport>()
+        .map_or(0, DummyTransport::dispatched_payload_frames)
+}
