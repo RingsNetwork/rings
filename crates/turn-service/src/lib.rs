@@ -1,23 +1,22 @@
-//! DHT-registered single-hop private TURN service discovery (`TurnServiceDescriptor`,
-//! `TurnServiceRegistration`) and anonymous `turn.ticket` onion `invoke` ticket issuance (#1292).
-//!
-//! ## Single-Hop Threat Model
-//!
-//! - **Ticket issuance (`turn.ticket` over Onion `invoke`)**: any Rings node (native, FFI, or
-//!   browser WASM) acquires a [`SignedTurnSessionTicket`] from a TURN node over a guard-closed
-//!   Sphinx `invoke` loop (`shape = invoke<64,1024,500ms>`, `backend = "turn.ticket"`). The TURN
-//!   node sees only the preceding relay hop and the client's single-use `ephemeral_client_pubkey`,
-//!   learning neither the client's [`Did`] nor its overlay/IP address during reservation.
-//! - **TURN allocation & relay (`RFC 5766`)**: when the client's `RTCPeerConnection` connects to
-//!   the returned `turn://tkt-…:<pass>@host:port` ICE URL, the TURN server necessarily sees the
-//!   client's source IP and the remote peer's IP (`XOR-PEER-ADDRESS`), as in standard single-hop
-//!   TURN, **but never learns the client's Rings [`Did`]** because the `tkt-` `USERNAME` claim
-//!   carries zero `Did` or `Delegation` bytes.
+#![doc = include_str!("../README.md")]
+#![deny(missing_docs)]
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,13 +26,40 @@ use rings_core::domain_tag;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::ecc::VerificationPublicKey;
-use rings_core::measure::PeerQuality;
-use rings_core::message::DhtProtocolMode;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
-use rings_core::utils::SharedRng;
 use rings_network_policy::validate_public_url_host;
+use rings_node::descriptor::heard_descriptors;
+use rings_node::descriptor::latest_valid_by_did;
+use rings_node::descriptor::sign_descriptor_body;
+use rings_node::descriptor::RegistryElement;
+use rings_node::descriptor::SignedDescriptor;
+use rings_node::descriptor::SignedDescriptorBody;
+use rings_node::error::Error;
+use rings_node::error::Result;
+use rings_node::onion::OnionBackendName;
+use rings_node::onion::OnionInputType;
+use rings_node::onion::OnionInvokeOffer;
+use rings_node::onion::OnionInvokePolicy;
+use rings_node::onion::OnionInvokeShape;
+use rings_node::onion::OnionInvokeStage;
+use rings_node::onion::OnionLatencyClass;
+use rings_node::onion::OnionPipelineHandle;
+use rings_node::onion::OnionPipelineRoute;
+use rings_node::onion::OnionRouteError;
+use rings_node::onion::OnionWidthClass;
+use rings_node::prelude::entry;
+use rings_node::processor::Processor;
+use rings_node::processor::ProcessorBuilder;
+use rings_node::provider::LocalRpcMethod;
+use rings_node::provider::Provider;
+use rings_node::registration::validate_schedule;
+use rings_node::registration::DhtRegistrationPublisher;
+use rings_node::registration::LeaseTerms;
+use rings_node::registration::RegistrationContext;
+use rings_node::registration::RegistrationTask;
+use rings_node::registration::TimingKeys;
 use rings_turn::extract_turn_server_pubkey;
 use rings_turn::format_turn_server_url;
 use rings_turn::SignedTurnSessionTicket;
@@ -41,41 +67,10 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use crate::descriptor::heard_descriptors;
-use crate::descriptor::latest_valid_by_did;
-use crate::descriptor::sign_descriptor_body;
-use crate::descriptor::RegistryElement;
-use crate::descriptor::SignedDescriptor;
-use crate::descriptor::SignedDescriptorBody;
-use crate::error::Error;
-use crate::error::Result;
-use crate::onion::directory::build_onion_pipeline_route;
-use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::OnionBackendName;
-use crate::onion::OnionEntryGuards;
-use crate::onion::OnionExitDescriptor;
-use crate::onion::OnionInputType;
-use crate::onion::OnionInvokeDescriptor;
-use crate::onion::OnionInvokeOffer;
-use crate::onion::OnionInvokePolicy;
-use crate::onion::OnionInvokeShape;
-use crate::onion::OnionInvokeStage;
-use crate::onion::OnionLatencyClass;
-use crate::onion::OnionPipelineHandle;
-use crate::onion::OnionPipelineRoute;
-use crate::onion::OnionRouteError;
-use crate::onion::OnionWidthClass;
-use crate::online::OnlineNodeDescriptor;
-use crate::prelude::entry;
-use crate::processor::Processor;
-use crate::registration::validate_schedule;
-use crate::registration::DhtRegistrationPublisher;
-use crate::registration::LeaseTerms;
-use crate::registration::RegistrationContext;
-use crate::registration::RegistrationTask;
-use crate::registration::TimingKeys;
+#[cfg(all(test, not(target_family = "wasm")))]
+mod test_wire_goldens;
 
-/// Global DHT registry topic on which TURN-capable nodes publish [`TurnServiceDescriptor`]s.
+/// Global DHT registry topic on which TURN service hosts publish [`TurnServiceDescriptor`]s.
 pub const TURN_SERVICES_TOPIC: &str = "turn_services";
 
 /// Canonical open `invoke` backend name for anonymous TURN session-ticket issuance (#1292).
@@ -98,8 +93,8 @@ pub const DEFAULT_TURN_TICKET_MAX_CONCURRENT: u32 = 16;
 pub const DEFAULT_TURN_TICKET_MAX_INVOCATIONS_PER_MINUTE: u64 = 120;
 
 /// Message family of the TURN service descriptor signature.
-const TURN_SERVICE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
-    domain_tag!("rings-node:turn-service-descriptor");
+pub const TURN_SERVICE_DESCRIPTOR_DOMAIN_TAG: DomainTag =
+    domain_tag!("rings-turn:service-descriptor");
 
 /// Default heartbeat interval for TURN service descriptor republication.
 pub const DEFAULT_TURN_SERVICE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -248,20 +243,27 @@ pub struct TurnServiceDescriptorBody {
     pub network_id: u32,
     /// Connectable public TURN listener URL (`turn://host:port` or `turns://host:port`).
     pub turn_url: String,
-    /// The TURN server's compressed secp256k1 public key (`server_pubkey`) used for ECDH
-    /// credential derivation and server-grant verification.
+    /// Compressed secp256k1 public key (`PublicKey<33>`) of the TURN server for ECDH credentials.
     pub server_pubkey: PublicKey<33>,
     /// Freshness window `T` in milliseconds.
     pub fresh_for_ms: u64,
-    /// Lease end `ℓ` in milliseconds since Unix epoch.
+    /// Signed lease expiration `ℓ` in Unix epoch milliseconds.
     pub expires_at_ms: u128,
 }
 
-impl TurnServiceDescriptorBody {
-    fn signing_data(&self) -> rings_core::error::Result<Vec<u8>> {
-        rings_codec::serialize(self).map_err(rings_core::error::Error::CodecSerialize)
-    }
+/// Signed DHT lease descriptor advertising a TURN relay service on [`TURN_SERVICES_TOPIC`].
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct TurnServiceDescriptor {
+    /// Signed descriptor payload.
+    pub body: TurnServiceDescriptorBody,
+    /// Unsigned carrier dot timestamp `τ*` recorded when read from the DHT.
+    #[serde(default, skip)]
+    pub heartbeat_at_ms: u128,
+    /// Signature binding `body` to the node's delegation and overlay.
+    pub signature: MessageVerification,
 }
+
+impl RegistryElement for TurnServiceDescriptor {}
 
 impl SignedDescriptorBody for TurnServiceDescriptorBody {
     type Descriptor = TurnServiceDescriptor;
@@ -281,71 +283,15 @@ impl SignedDescriptorBody for TurnServiceDescriptorBody {
     }
 
     fn body_signing_data(&self) -> rings_core::error::Result<Vec<u8>> {
-        self.signing_data()
+        rings_codec::serialize(self).map_err(rings_core::error::Error::CodecSerialize)
     }
 
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor {
         TurnServiceDescriptor {
             body: self,
-            signature,
             heartbeat_at_ms: 0,
+            signature,
         }
-    }
-}
-
-/// Signed DHT descriptor advertising a Rings TURN service endpoint and its `server_pubkey` (#1292).
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct TurnServiceDescriptor {
-    /// The signed descriptor fields.
-    pub body: TurnServiceDescriptorBody,
-    /// Signature covering `body`, signed by the hosting node's session [`DelegateeKey`].
-    pub signature: MessageVerification,
-    /// Local observation timestamp (`dot` of the registry element), neither signed nor wire-encoded.
-    #[serde(skip)]
-    pub heartbeat_at_ms: u128,
-}
-
-impl TurnServiceDescriptor {
-    /// Create and sign a [`TurnServiceDescriptor`].
-    pub fn new_signed(
-        body: TurnServiceDescriptorBody,
-        signer: MessageSigner<impl Borrow<DelegateeKey>>,
-    ) -> rings_core::error::Result<Self> {
-        sign_descriptor_body(
-            body,
-            signer,
-            "turn service descriptor DID/public key/session mismatch",
-        )
-    }
-
-    /// Return whether this descriptor's `turn_url` is publicly routable and `server_pubkey` is
-    /// well-formed.
-    pub fn has_valid_endpoint(&self) -> bool {
-        validate_turn_service_endpoint(&self.body.turn_url, self.body.server_pubkey).is_ok()
-    }
-
-    /// Format this descriptor as an unsigned `turn://host:port?pubkey=<base58(server_pubkey)>` URL
-    /// suitable for [`rings_turn::TurnCredentialSigner::sign_ice_servers`].
-    pub fn ice_server_base_url(&self) -> Result<String> {
-        let canonical =
-            validate_turn_service_endpoint(&self.body.turn_url, self.body.server_pubkey)?;
-        format_turn_server_url(&canonical, self.body.server_pubkey).map_err(Error::CoreError)
-    }
-
-    /// Filter and deduplicate `descriptors` to the latest valid descriptor per node [`Did`] under
-    /// `network_id` at `now_ms`, rejecting any descriptor with a non-public `turn_url` host.
-    pub fn latest_valid_by_did(
-        descriptors: impl IntoIterator<Item = Self>,
-        now_ms: u128,
-        network_id: u32,
-        include_expired: bool,
-    ) -> Vec<Self> {
-        latest_valid_by_did(
-            descriptors.into_iter().filter(Self::has_valid_endpoint),
-            now_ms,
-            network_id,
-            include_expired,
-        )
     }
 }
 
@@ -381,22 +327,63 @@ impl SignedDescriptor for TurnServiceDescriptor {
     }
 
     fn descriptor_signing_data(&self) -> rings_core::error::Result<Vec<u8>> {
-        self.body.signing_data()
+        self.body.body_signing_data()
     }
 
-    fn heard_at(self, heartbeat_at_ms: u128) -> Self {
-        Self {
-            heartbeat_at_ms,
-            ..self
-        }
+    fn heard_at(mut self, heartbeat_at_ms: u128) -> Self {
+        self.heartbeat_at_ms = heartbeat_at_ms;
+        self
     }
 }
 
-impl RegistryElement for TurnServiceDescriptor {}
+impl TurnServiceDescriptor {
+    /// Sign `body` with `signer`, enforcing DID/key/overlay binding.
+    pub fn new_signed(
+        body: TurnServiceDescriptorBody,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
+    ) -> rings_core::error::Result<Self> {
+        sign_descriptor_body(
+            body,
+            signer,
+            "turn service descriptor DID does not match signer delegation",
+        )
+    }
 
-/// Configuration offer for publishing a [`TurnServiceDescriptor`] to the DHT on every heartbeat
-/// (#1292).
-#[derive(Clone, Debug, PartialEq, Eq)]
+    /// Return `true` iff `turn_url` is a valid publicly routable TURN endpoint and `server_pubkey`
+    /// is a valid secp256k1 point.
+    pub fn has_valid_endpoint(&self) -> bool {
+        validate_turn_service_endpoint(&self.body.turn_url, self.body.server_pubkey).is_ok()
+    }
+
+    /// Format this descriptor as a `pubkey=`-annotated TURN ICE server template URL ready for
+    /// [`rings_turn::TurnCredentialSigner::sign_ice_servers`].
+    pub fn ice_server_base_url(&self) -> Result<String> {
+        let canonical =
+            validate_turn_service_endpoint(&self.body.turn_url, self.body.server_pubkey)?;
+        format_turn_server_url(&canonical, self.body.server_pubkey)
+            .map_err(|e| Error::InvalidConfig(e.to_string()))
+    }
+
+    /// Select the newest valid and publicly routable [`TurnServiceDescriptor`] per DID.
+    pub fn latest_valid_by_did(
+        descriptors: impl IntoIterator<Item = Self>,
+        now_ms: u128,
+        network_id: u32,
+        include_expired: bool,
+    ) -> Vec<Self> {
+        latest_valid_by_did(
+            descriptors
+                .into_iter()
+                .filter(TurnServiceDescriptor::has_valid_endpoint),
+            now_ms,
+            network_id,
+            include_expired,
+        )
+    }
+}
+
+/// Validated configuration for announcing a node's TURN relay service in the DHT (#1292).
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnServiceOffer {
     turn_url: String,
     server_pubkey: PublicKey<33>,
@@ -405,8 +392,8 @@ pub struct TurnServiceOffer {
 }
 
 impl TurnServiceOffer {
-    /// Construct a validated [`TurnServiceOffer`] with default heartbeat (`30s`) and TTL (`90s`).
-    pub fn new(turn_url: impl Into<String>, server_pubkey: PublicKey<33>) -> Result<Self> {
+    /// Construct a [`TurnServiceOffer`] with default heartbeat (`30s`) and TTL (`90s`).
+    pub fn new(turn_url: impl AsRef<str>, server_pubkey: PublicKey<33>) -> Result<Self> {
         Self::with_schedule(
             turn_url,
             server_pubkey,
@@ -415,35 +402,37 @@ impl TurnServiceOffer {
         )
     }
 
-    /// Construct a validated [`TurnServiceOffer`] with explicit `heartbeat_interval` and `ttl`.
+    /// Construct a [`TurnServiceOffer`] with custom lease heartbeat and TTL schedule.
     pub fn with_schedule(
-        turn_url: impl Into<String>,
+        turn_url: impl AsRef<str>,
         server_pubkey: PublicKey<33>,
         heartbeat_interval: Duration,
         ttl: Duration,
     ) -> Result<Self> {
-        let raw_url = turn_url.into();
-        let normalized_url = validate_turn_service_endpoint(&raw_url, server_pubkey)?;
-        let keys = TimingKeys {
-            heartbeat_interval: "turn_service_heartbeat_interval",
-            ttl: "turn_service_ttl",
-            enabled_by: None,
-        };
-        validate_schedule(&keys, heartbeat_interval, ttl)?;
+        let canonical_url = validate_turn_service_endpoint(turn_url.as_ref(), server_pubkey)?;
+        validate_schedule(
+            &TimingKeys {
+                heartbeat_interval: "turn_service.heartbeat_interval",
+                ttl: "turn_service.ttl",
+                enabled_by: None,
+            },
+            heartbeat_interval,
+            ttl,
+        )?;
         Ok(Self {
-            turn_url: normalized_url,
+            turn_url: canonical_url,
             server_pubkey,
             heartbeat_interval,
             ttl,
         })
     }
 
-    /// Return the connectable TURN base URL (`turn://host:port` or `turns://host:port`).
+    /// Return the canonicalized `turn_url` (`turn://host:port` or `turns://host:port`).
     pub fn turn_url(&self) -> &str {
         &self.turn_url
     }
 
-    /// Return the TURN server's secp256k1 [`PublicKey<33>`].
+    /// Return the TURN server's compressed secp256k1 public key.
     pub const fn server_pubkey(&self) -> PublicKey<33> {
         self.server_pubkey
     }
@@ -462,14 +451,14 @@ impl TurnServiceOffer {
 /// Periodic DHT registration task publishing a node's [`TurnServiceDescriptor`] onto
 /// [`TURN_SERVICES_TOPIC`] (#1292).
 #[derive(Clone, Debug)]
-pub(crate) struct TurnServiceRegistration {
+pub struct TurnServiceRegistration {
     offer: TurnServiceOffer,
     publisher: DhtRegistrationPublisher<[TurnServiceDescriptor; 1]>,
 }
 
 impl TurnServiceRegistration {
     /// Construct a new [`TurnServiceRegistration`] for `offer`.
-    pub(crate) fn new(offer: TurnServiceOffer) -> Self {
+    pub fn new(offer: TurnServiceOffer) -> Self {
         Self {
             publisher: DhtRegistrationPublisher::new(
                 TURN_SERVICES_TOPIC.to_string(),
@@ -481,11 +470,12 @@ impl TurnServiceRegistration {
     }
 
     /// Decode all well-formed [`TurnServiceDescriptor`]s from a DHT [`entry::Entry`].
-    pub(crate) fn descriptors_from_entry(entry: &entry::Entry) -> Vec<TurnServiceDescriptor> {
+    pub fn descriptors_from_entry(entry: &entry::Entry) -> Vec<TurnServiceDescriptor> {
         heard_descriptors(entry)
     }
 
-    pub(crate) fn descriptor_at(
+    /// Sign a [`TurnServiceDescriptor`] for `context` under `terms`.
+    pub fn descriptor_at(
         &self,
         context: &RegistrationContext<'_>,
         terms: LeaseTerms,
@@ -503,8 +493,8 @@ impl TurnServiceRegistration {
     }
 }
 
-#[cfg_attr(rings_browser, async_trait(?Send))]
-#[cfg_attr(rings_native, async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl RegistrationTask for TurnServiceRegistration {
     fn name(&self) -> &'static str {
         "turn-service"
@@ -523,6 +513,31 @@ impl RegistrationTask for TurnServiceRegistration {
             .await
             .map(drop)
     }
+}
+
+/// Attach a [`TurnServiceRegistration`] for `offer` onto `builder` via `rings-node`'s generic
+/// [`ProcessorBuilder::register_task`] hook.
+pub fn announce_turn_service(
+    builder: ProcessorBuilder,
+    offer: TurnServiceOffer,
+) -> ProcessorBuilder {
+    builder.register_task(Arc::new(TurnServiceRegistration::new(offer)))
+}
+
+/// List signed, publicly routable [`TurnServiceDescriptor`]s from [`TURN_SERVICES_TOPIC`].
+pub async fn lookup_turn_services(
+    processor: &Processor,
+    include_expired: bool,
+) -> Result<Vec<TurnServiceDescriptor>> {
+    let Some(entry) = processor.fetch_topic_entry(TURN_SERVICES_TOPIC).await? else {
+        return Ok(Vec::new());
+    };
+    Ok(TurnServiceDescriptor::latest_valid_by_did(
+        TurnServiceRegistration::descriptors_from_entry(&entry),
+        processor.clock().now_ms(),
+        processor.swarm.network_id(),
+        include_expired,
+    ))
 }
 
 /// Request payload sent inside the `64`-byte carried input of [`TURN_TICKET_INVOKE_SHAPE`] to
@@ -684,8 +699,8 @@ fn redact_ice_url_password(ice_url: &str) -> String {
     format!("{scheme}://{user}:<redacted>@{host_part}")
 }
 
-/// Build the 1-stage Kleisli [`crate::onion::OnionInvokePipeline`] for `turn.ticket`.
-pub fn turn_ticket_pipeline() -> Result<crate::onion::OnionInvokePipeline> {
+/// Build the 1-stage Kleisli [`rings_node::onion::OnionInvokePipeline`] for `turn.ticket`.
+pub fn turn_ticket_pipeline() -> Result<rings_node::onion::OnionInvokePipeline> {
     let backend = OnionBackendName::parse(TURN_TICKET_INVOKE_BACKEND)?;
     let stage = OnionInvokeStage::new(TURN_TICKET_INVOKE_SHAPE, backend, Vec::new())?;
     Ok(stage.into_pipeline())
@@ -764,82 +779,9 @@ pub async fn acquire_turn_ticket_over_route(
     }
 }
 
-struct TurnTicketDirectoryReader<'a> {
-    processor: &'a Processor,
-    eligible_turn_dids: BTreeSet<Did>,
-}
-
-#[cfg_attr(rings_browser, async_trait(?Send))]
-#[cfg_attr(rings_native, async_trait)]
-impl OnionDirectoryReader for TurnTicketDirectoryReader<'_> {
-    fn local_did(&self) -> Did {
-        self.processor.did()
-    }
-
-    fn dht_protocol_mode(&self) -> DhtProtocolMode {
-        self.processor.swarm.dht_protocol_mode()
-    }
-
-    async fn live_online_nodes(&self) -> Result<Vec<OnlineNodeDescriptor>> {
-        self.processor.lookup_online_nodes(false).await
-    }
-
-    async fn live_onion_exits(&self, service: &str) -> Result<Vec<OnionExitDescriptor>> {
-        self.processor.lookup_onion_exits(service, false).await
-    }
-
-    async fn live_onion_invokes(&self) -> Result<Vec<OnionInvokeDescriptor>> {
-        let invokes = self
-            .processor
-            .lookup_onion_invokes(
-                Some(TURN_TICKET_INVOKE_SHAPE),
-                TURN_TICKET_INVOKE_BACKEND,
-                false,
-            )
-            .await?;
-        Ok(invokes
-            .into_iter()
-            .filter(|desc| self.eligible_turn_dids.contains(&desc.did))
-            .collect())
-    }
-
-    async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        self.processor
-            .peer_measurements()
-            .await
-            .into_iter()
-            .map(|m| (m.did, m.quality))
-            .collect()
-    }
-
-    fn direct_peer_dids(&self) -> BTreeSet<Did> {
-        let local = self.processor.did();
-        self.processor
-            .swarm
-            .peer_dids()
-            .into_iter()
-            .filter(|did| *did != local)
-            .collect()
-    }
-
-    fn onion_entry_guards(&self) -> &OnionEntryGuards {
-        self.processor.onion_entry_guards()
-    }
-
-    fn now_ms(&self) -> u128 {
-        self.processor.clock().now_ms()
-    }
-
-    fn route_rng(&self) -> SharedRng {
-        self.processor.rng().clone()
-    }
-}
-
 /// Discover a live TURN service from the DHT (optionally pinned to `target_did`), build a
 /// guard-closed Sphinx `invoke` loop to its `turn.ticket` backend, and return a ready
 /// `turn://tkt-…:<pass>@host:port` [`AcquiredTurnTicket`].
-///
-/// Works identically across native Rust, C FFI (`Provider::request_internal`), and browser WASM.
 pub async fn acquire_turn_ticket(
     processor: &Processor,
     pipeline_handle: &OnionPipelineHandle,
@@ -847,8 +789,7 @@ pub async fn acquire_turn_ticket(
     target_did: Option<Did>,
 ) -> Result<AcquiredTurnTicket> {
     let local_did = processor.did();
-    let services: BTreeMap<Did, TurnServiceDescriptor> = processor
-        .lookup_turn_services(false)
+    let services: BTreeMap<Did, TurnServiceDescriptor> = lookup_turn_services(processor, false)
         .await?
         .into_iter()
         .filter(|desc| desc.body.did != local_did)
@@ -862,12 +803,11 @@ pub async fn acquire_turn_ticket(
         }));
     }
 
-    let reader = TurnTicketDirectoryReader {
-        processor,
-        eligible_turn_dids: services.keys().copied().collect(),
-    };
+    let eligible: BTreeSet<Did> = services.keys().copied().collect();
     let pipeline = turn_ticket_pipeline()?;
-    let route = build_onion_pipeline_route(&reader, &pipeline).await?;
+    let route = processor
+        .build_onion_pipeline_route_for_dids(&pipeline, &eligible)
+        .await?;
     let selected_did = route
         .descriptors()
         .first()
@@ -891,26 +831,152 @@ pub async fn acquire_turn_ticket(
     .await
 }
 
-/// Native `turn.ticket` [`crate::onion::OnionInvokeBackend`] backed by a local
-/// [`rings_turn::TurnServer`] (#1292).
-#[cfg(rings_native)]
-#[derive(Clone)]
-pub struct TurnTicketInvokeBackend {
-    server: std::sync::Arc<rings_turn::TurnServer>,
+/// Convenience helper acquiring an [`AcquiredTurnTicket`] directly through a [`Provider`].
+pub async fn request_turn_ticket(
+    provider: &Provider,
+    ttl: Duration,
+    target_did: Option<Did>,
+) -> Result<AcquiredTurnTicket> {
+    let pipeline = provider.onion_pipeline()?;
+    acquire_turn_ticket(provider.processor(), &pipeline, ttl, target_did).await
 }
 
-#[cfg(rings_native)]
+struct LookupTurnServicesRpc {
+    processor: std::sync::Weak<Processor>,
+}
+
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+impl LocalRpcMethod for LookupTurnServicesRpc {
+    async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let processor = self.processor.upgrade().ok_or(Error::RegistrationStopped)?;
+        let include_expired = params
+            .get("include_expired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let services = lookup_turn_services(&processor, include_expired).await?;
+        Ok(serde_json::to_value(services)?)
+    }
+}
+
+struct RequestTurnTicketRpc {
+    processor: std::sync::Weak<Processor>,
+    pipeline: OnionPipelineHandle,
+}
+
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+impl LocalRpcMethod for RequestTurnTicketRpc {
+    async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value> {
+        let processor = self.processor.upgrade().ok_or(Error::RegistrationStopped)?;
+        let ttl_ms = params
+            .get("ttl_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(DEFAULT_TURN_TICKET_TTL_MS);
+        let target_did = match params.get("target_did").and_then(serde_json::Value::as_str) {
+            Some(raw) if !raw.trim().is_empty() => Some(Did::from_str(raw.trim())?),
+            _ => None,
+        };
+        let acquired = acquire_turn_ticket(
+            &processor,
+            &self.pipeline,
+            Duration::from_millis(ttl_ms),
+            target_did,
+        )
+        .await?;
+        Ok(serde_json::to_value(acquired)?)
+    }
+}
+
+/// Register `"lookupTurnServices"` and `"requestTurnTicket"` on `provider` via
+/// [`Provider::register_local_rpc_method`] so C FFI, JSON-RPC, and browser callers can invoke TURN
+/// discovery and anonymous ticket acquisition without `rings-node` carrying any TURN primitives.
+pub fn install_turn_client_rpc(provider: &Provider) -> Result<()> {
+    let pipeline = provider.onion_pipeline()?;
+    let weak = Arc::downgrade(provider.processor());
+    provider.register_local_rpc_method("lookupTurnServices", LookupTurnServicesRpc {
+        processor: weak.clone(),
+    })?;
+    provider.register_local_rpc_method("requestTurnTicket", RequestTurnTicketRpc {
+        processor: weak,
+        pipeline,
+    })
+}
+
+/// Browser WASM binding to list live, validated [`TurnServiceDescriptor`]s from a [`Provider`].
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "lookupTurnServices")]
+pub fn wasm_lookup_turn_services(
+    provider: &Provider,
+    include_expired: Option<bool>,
+) -> js_sys::Promise {
+    let processor = Arc::clone(provider.processor());
+    let include_expired = include_expired.unwrap_or(false);
+    wasm_bindgen_futures::future_to_promise(async move {
+        let services = lookup_turn_services(&processor, include_expired)
+            .await
+            .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?;
+        Ok(serde_wasm_bindgen::to_value(&services)
+            .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?)
+    })
+}
+
+/// Browser WASM binding to anonymously acquire a `turn://tkt-…:<pass>@host:port`
+/// [`AcquiredTurnTicket`] over a guard-closed Sphinx `invoke` loop.
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[wasm_bindgen::prelude::wasm_bindgen(js_name = "requestTurnTicket")]
+pub fn wasm_request_turn_ticket(
+    provider: &Provider,
+    ttl_ms: Option<u64>,
+    target_did: Option<String>,
+) -> js_sys::Promise {
+    let provider = provider.clone();
+    wasm_bindgen_futures::future_to_promise(async move {
+        let parsed_did = match target_did.as_deref() {
+            Some(raw) if !raw.trim().is_empty() => Some(
+                Did::from_str(raw.trim())
+                    .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?,
+            ),
+            _ => None,
+        };
+        let ttl = Duration::from_millis(ttl_ms.unwrap_or(DEFAULT_TURN_TICKET_TTL_MS));
+        let acquired = request_turn_ticket(&provider, ttl, parsed_did)
+            .await
+            .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?;
+        Ok(serde_wasm_bindgen::to_value(&acquired)
+            .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?)
+    })
+}
+
+/// Native `turn.ticket` [`rings_node::onion::OnionInvokeBackend`] backed by a local
+/// [`rings_turn::TurnServer`] (#1292).
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+#[derive(Clone)]
+pub struct TurnTicketInvokeBackend {
+    server: Arc<rings_turn::TurnServer>,
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 impl TurnTicketInvokeBackend {
-    /// Wrap a running [`rings_turn::TurnServer`] as an [`crate::onion::OnionInvokeBackend`].
-    pub const fn new(server: std::sync::Arc<rings_turn::TurnServer>) -> Self {
+    /// Wrap a running [`rings_turn::TurnServer`] as an [`rings_node::onion::OnionInvokeBackend`].
+    pub const fn new(server: Arc<rings_turn::TurnServer>) -> Self {
         Self { server }
     }
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 #[async_trait]
-impl crate::onion::OnionInvokeBackend for TurnTicketInvokeBackend {
-    async fn invoke(&self, call: crate::onion::OnionInvokeCall) -> Result<Vec<u8>> {
+impl rings_node::onion::OnionInvokeBackend for TurnTicketInvokeBackend {
+    async fn invoke(&self, call: rings_node::onion::OnionInvokeCall) -> Result<Vec<u8>> {
         if call.shape != TURN_TICKET_INVOKE_SHAPE
             || call.backend.as_str() != TURN_TICKET_INVOKE_BACKEND
         {
@@ -955,11 +1021,14 @@ impl crate::onion::OnionInvokeBackend for TurnTicketInvokeBackend {
 
 /// Register [`TurnTicketInvokeBackend`] on `pipeline_handle` under [`TURN_TICKET_INVOKE_SHAPE`]
 /// and [`TURN_TICKET_INVOKE_BACKEND`].
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 pub fn register_turn_ticket_invoke_backend(
     pipeline_handle: &OnionPipelineHandle,
     policy: OnionInvokePolicy,
-    server: std::sync::Arc<rings_turn::TurnServer>,
+    server: Arc<rings_turn::TurnServer>,
 ) -> Result<()> {
     let backend = OnionBackendName::parse(TURN_TICKET_INVOKE_BACKEND)?;
     pipeline_handle.register_invoke(
@@ -970,14 +1039,17 @@ pub fn register_turn_ticket_invoke_backend(
     )
 }
 
-/// Native YAML configuration section (`turn_service:`) for hosting an embedded
-/// [`rings_turn::TurnServer`], announcing its [`TurnServiceDescriptor`] in the DHT, and serving
-/// `turn.ticket` over onion `invoke` (#1292).
-#[cfg(rings_native)]
+/// Native YAML configuration (`turn_service:`) for hosting a [`rings_turn::TurnServer`],
+/// announcing its [`TurnServiceDescriptor`] in the DHT, and serving `turn.ticket` over onion
+/// `invoke` (#1292).
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnServiceConfig {
-    /// Local UDP/TCP socket address the embedded TURN server listens on.
+    /// Local UDP/TCP socket address the TURN server listens on.
     #[serde(default = "default_turn_listen_addr")]
     pub listen_addr: SocketAddr,
     /// Public IPv4/IPv6 address advertised in `XOR-RELAYED-ADDRESS`.
@@ -1041,7 +1113,10 @@ pub struct TurnServiceConfig {
     pub ticket_invoke_policy: OnionInvokePolicy,
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 impl std::fmt::Debug for TurnServiceConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TurnServiceConfig")
@@ -1075,7 +1150,10 @@ impl std::fmt::Debug for TurnServiceConfig {
     }
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_listen_addr() -> SocketAddr {
     SocketAddr::new(
         std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
@@ -1083,47 +1161,105 @@ const fn default_turn_listen_addr() -> SocketAddr {
     )
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 fn default_turn_realm() -> String {
     rings_turn::DEFAULT_TURN_REALM.to_string()
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_max_nonces() -> usize {
     rings_turn::DEFAULT_MAX_NONCES
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_max_allocations() -> usize {
     rings_turn::DEFAULT_MAX_ALLOCATIONS
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_max_reservations() -> usize {
     rings_turn::DEFAULT_MAX_RESERVATIONS
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_max_permissions_per_allocation() -> usize {
     rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_heartbeat_interval_secs() -> u64 {
     30
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_ttl_secs() -> u64 {
     90
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_issue_tickets() -> bool {
     true
 }
 
-#[cfg(rings_native)]
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+impl Default for TurnServiceConfig {
+    fn default() -> Self {
+        Self {
+            listen_addr: default_turn_listen_addr(),
+            public_ip: None,
+            advertised_ip: None,
+            turn_url: None,
+            relay_bind_ip: None,
+            min_port: None,
+            max_port: None,
+            realm: default_turn_realm(),
+            server_key: None,
+            allow_private_peers: false,
+            max_nonces: default_turn_max_nonces(),
+            max_allocations: default_turn_max_allocations(),
+            max_reservations: default_turn_max_reservations(),
+            max_permissions_per_allocation: default_turn_max_permissions_per_allocation(),
+            channel_bind_timeout_secs: 0,
+            allow_dids: Vec::new(),
+            heartbeat_interval_secs: default_turn_heartbeat_interval_secs(),
+            ttl_secs: default_turn_ttl_secs(),
+            issue_tickets: default_turn_issue_tickets(),
+            ticket_invoke_policy: default_turn_ticket_invoke_policy(),
+        }
+    }
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 impl TurnServiceConfig {
     /// Return the [`OnionInvokeOffer`] advertised when `self.issue_tickets` is enabled,
     /// validating that `advertise_onion_relay` is enabled on the node.
@@ -1156,7 +1292,6 @@ impl TurnServiceConfig {
         use std::net::IpAddr;
         use std::net::Ipv4Addr;
         use std::net::Ipv6Addr;
-        use std::str::FromStr;
 
         let server_key = match self.server_key.as_deref() {
             Some(raw) => {
@@ -1250,13 +1385,103 @@ impl TurnServiceConfig {
     }
 }
 
-#[cfg(all(test, rings_native))]
+/// Top-level YAML configuration combining a `rings-node` native [`rings_node::native::config::Config`]
+/// with a [`TurnServiceConfig`] for the standalone `rings-turn-service` daemon.
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnServiceDaemonConfig {
+    /// Underlying `rings-node` native configuration (`network_id`, key, seeds, onion relay, etc.).
+    pub node: rings_node::native::config::Config,
+    /// TURN relay server and overlay announcement configuration.
+    pub turn_service: TurnServiceConfig,
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+impl TurnServiceDaemonConfig {
+    /// Validate and derive a [`ProcessorBuilder`] (plus its [`rings_core::utils::SharedClock`])
+    /// with the `turn.ticket` [`OnionInvokeOffer`] merged into `onion_role` when
+    /// `turn_service.issue_tickets` is enabled.
+    pub fn to_processor_builder(
+        &self,
+    ) -> Result<(ProcessorBuilder, rings_core::utils::SharedClock)> {
+        let invoke_offer = self
+            .turn_service
+            .onion_invoke_offer(self.node.advertise_onion_relay)?;
+        let pc: rings_node::processor::ProcessorConfig = self.node.clone().try_into()?;
+        let clock = pc.clock().clone();
+        let mut builder = ProcessorBuilder::from_config(&pc)?;
+        if let Some(turn_invoke) = invoke_offer {
+            let role = match builder.configured_onion_role().clone() {
+                rings_node::onion::OnionRole::Client => {
+                    return Err(Error::InvalidConfig(
+                        "turn_service.issue_tickets requires advertise_onion_relay: true"
+                            .to_string(),
+                    ));
+                }
+                rings_node::onion::OnionRole::Relay => {
+                    rings_node::onion::OnionRole::Invoke(turn_invoke)
+                }
+                rings_node::onion::OnionRole::Exit(exit_offer) => {
+                    rings_node::onion::OnionRole::Both {
+                        exit: exit_offer,
+                        invoke: turn_invoke,
+                    }
+                }
+                rings_node::onion::OnionRole::Invoke(existing) => {
+                    rings_node::onion::OnionRole::Invoke(merge_invoke_offers(
+                        &existing,
+                        &turn_invoke,
+                    )?)
+                }
+                rings_node::onion::OnionRole::Both { exit, invoke } => {
+                    rings_node::onion::OnionRole::Both {
+                        exit,
+                        invoke: merge_invoke_offers(&invoke, &turn_invoke)?,
+                    }
+                }
+            };
+            builder = builder.onion_role(role);
+        }
+        Ok((builder, clock))
+    }
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+fn merge_invoke_offers(
+    first: &OnionInvokeOffer,
+    second: &OnionInvokeOffer,
+) -> Result<OnionInvokeOffer> {
+    let mut entries = Vec::new();
+    for ((shape, backend), &policy) in first.entries().chain(second.entries()) {
+        entries.push((*shape, backend.clone(), policy));
+    }
+    OnionInvokeOffer::new(entries)
+}
+
+#[cfg(all(
+    test,
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 mod tests {
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
 
+    use rings_core::swarm::OfferReply;
     use rings_core::utils::ManualClock;
+    use rings_node::onion::OnionRole;
+    use rings_node::processor::ProcessorConfig;
     use rings_test_support::with_hang_guard;
     use rings_turn::RelayAddressConfig;
     use rings_turn::TurnAdmissionPolicy;
@@ -1265,21 +1490,47 @@ mod tests {
     use rings_turn::TurnServerConfig;
 
     use super::*;
-    use crate::onion::OnionInvokeDescriptorBody;
-    use crate::onion::OnionRole;
-    use crate::onion::ONION_INVOKES_TOPIC;
-    use crate::online::OnlineNodeCapabilities;
-    use crate::online::OnlineNodeDescriptor;
-    use crate::online::OnlineNodeDescriptorBody;
-    use crate::online::OnlineNodeType;
-    use crate::online::ONLINE_NODES_TOPIC;
-    use crate::processor::ProcessorBuilder;
-    use crate::processor::ProcessorConfig;
-    use crate::provider::Provider;
-    #[cfg(not(feature = "dummy"))]
-    use crate::tests::native::network_test_guard;
-    use crate::tests::native::prepare_processor_with_onion_role;
-    use crate::tests::native::signal_edge;
+
+    fn registry_entry<D: RegistryElement>(
+        topic: &str,
+        descriptors: Vec<D>,
+    ) -> Result<entry::Entry> {
+        let data = descriptors
+            .into_iter()
+            .map(|descriptor| descriptor.to_element().map_err(Error::CoreError))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(entry::Entry::new(
+            entry::Entry::gen_did(topic)?,
+            data,
+            entry::EntryKind::Data,
+        ))
+    }
+
+    async fn signal_edge(
+        first: &Processor,
+        second: &Processor,
+    ) -> std::result::Result<(), rings_core::error::Error> {
+        let res = async {
+            let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
+            match second.swarm.answer_offer(offer).await? {
+                OfferReply::Answer(answer) => first.swarm.accept_answer_for(attempt, answer).await,
+                OfferReply::CounterOffer(counter_offer) => {
+                    let answer = first
+                        .swarm
+                        .answer_offer(counter_offer)
+                        .await?
+                        .answer()
+                        .ok_or(rings_core::error::Error::AlreadyConnected)?;
+                    second.swarm.accept_answer(answer).await
+                }
+            }
+        }
+        .await;
+        match res {
+            Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
+            other => other,
+        }
+    }
 
     #[test]
     fn validate_turn_service_endpoint_rejects_loopback_private_link_local_ula_and_unspecified() {
@@ -1332,6 +1583,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn daemon_config_validates_relay_requirement_and_redacts_server_key() {
+        let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+        let key_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(key_file.path(), key.dump().unwrap()).unwrap();
+        let mut node_cfg = rings_node::native::config::Config::new(key_file.path());
+        node_cfg.advertise_onion_relay = false;
+        let secret_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let turn_cfg = TurnServiceConfig {
+            public_ip: Some(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))),
+            server_key: Some(secret_hex.to_string()),
+            ..TurnServiceConfig::default()
+        };
+        assert!(
+            !format!("{turn_cfg:?}").contains(secret_hex),
+            "TurnServiceConfig Debug must redact server_key"
+        );
+
+        let bad = TurnServiceDaemonConfig {
+            node: node_cfg.clone(),
+            turn_service: turn_cfg.clone(),
+        };
+        assert!(
+            bad.to_processor_builder().is_err(),
+            "issue_tickets must fail when node.advertise_onion_relay is false"
+        );
+
+        node_cfg.advertise_onion_relay = true;
+        let ok = TurnServiceDaemonConfig {
+            node: node_cfg,
+            turn_service: turn_cfg,
+        };
+        let (builder, _) = ok.to_processor_builder().unwrap();
+        assert!(builder.configured_onion_role().invoke().is_some());
+    }
+
     #[tokio::test]
     async fn turn_service_registration_publishes_discovers_and_filters_malicious_descriptors(
     ) -> Result<()> {
@@ -1344,13 +1631,15 @@ mod tests {
         let offer = TurnServiceOffer::new("turn://turn.rings.rs:3478", turn_server_pubkey)?;
         let config =
             ProcessorConfig::new(1, "".to_string(), delegatee_key.clone(), 15).with_clock(clock);
-        let processor = ProcessorBuilder::from_config(&config)?
-            .announce_turn_service(offer)
-            .build_at(t0)?;
+        let processor = announce_turn_service(
+            ProcessorBuilder::from_config(&config)?.advertise_presence(false),
+            offer,
+        )
+        .build()?;
 
         // Seed a maliciously signed descriptor advertising a loopback `turn_url` directly into the
-        // DHT topic, then run `register_all_once_for_test` (which appends this node's valid lease)
-        // so both descriptors coexist in the raw DHT entry.
+        // DHT topic, then run `register_all_once` (which appends this node's valid lease) so both
+        // descriptors coexist in the raw DHT entry.
         let evil_account = SecretKey::random();
         let evil_delegatee = DelegateeKey::new_with_seckey_at(&evil_account, 600_000, t0).unwrap();
         let evil_signer = MessageSigner::new(evil_delegatee.clone(), 1);
@@ -1371,15 +1660,13 @@ mod tests {
         )
         .unwrap();
         processor
-            .storage_store(Processor::registry_entry(TURN_SERVICES_TOPIC, vec![
-                evil_desc,
-            ])?)
+            .storage_store(registry_entry(TURN_SERVICES_TOPIC, vec![evil_desc])?)
             .await?;
 
-        processor.register_all_once_for_test().await?;
+        processor.register_all_once().await?;
 
         let raw_entry = processor
-            .fetch_storage_entry(entry::Entry::gen_did(TURN_SERVICES_TOPIC)?)
+            .fetch_topic_entry(TURN_SERVICES_TOPIC)
             .await?
             .expect("turn_services entry must exist");
         assert_eq!(
@@ -1388,7 +1675,7 @@ mod tests {
             "both valid and malicious descriptors must be present in the raw DHT entry"
         );
 
-        let discovered = processor.lookup_turn_services(false).await?;
+        let discovered = lookup_turn_services(&processor, false).await?;
         assert_eq!(
             discovered.len(),
             1,
@@ -1412,117 +1699,54 @@ mod tests {
     struct OverlayTestNode {
         processor: Arc<Processor>,
         provider: Arc<Provider>,
+        stop: rings_core::lifecycle::StopSource,
+        tasks: tokio::task::JoinSet<()>,
     }
 
     impl OverlayTestNode {
-        async fn new(role: OnionRole<crate::onion::OnionExitOffer>) -> Result<Self> {
-            let processor = Arc::new(prepare_processor_with_onion_role(role).await);
+        async fn new(
+            role: OnionRole<rings_node::onion::OnionExitOffer>,
+            turn_offer: Option<TurnServiceOffer>,
+        ) -> Result<Self> {
+            let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
+            let advertise_presence = role.registers_relay();
+            let config = ProcessorConfig::new(1, "".to_string(), key, 3_600).onion_role(role);
+            let mut builder = ProcessorBuilder::from_config(&config)?
+                .advertise_presence(advertise_presence)
+                .replay_storage(Box::new(rings_core::storage::MemStorage::new()));
+            if let Some(offer) = turn_offer {
+                builder = announce_turn_service(builder, offer);
+            }
+            let processor = Arc::new(builder.build()?);
             let provider = Arc::new(Provider::from_processor(Arc::clone(&processor)));
-            let _ = provider.onion_runtime()?;
+            let _ = provider.onion_pipeline()?;
             provider.set_backend()?;
+            install_turn_client_rpc(&provider)?;
+            let stop = rings_core::lifecycle::StopSource::new();
+            let listen_provider = Arc::clone(&provider);
+            let listen_stop = stop.token();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(async move {
+                let _ = listen_provider.listen_with(listen_stop).await;
+            });
             Ok(Self {
                 processor,
                 provider,
+                stop,
+                tasks,
             })
         }
 
-        fn signed_online_descriptor(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
-            let key = self.processor.delegatee_key();
-            let network_id = self.processor.swarm.network_id();
-            let mode = self.processor.swarm.dht_protocol_mode();
-            let capabilities = if self.processor.onion_role().registers_relay() {
-                OnlineNodeCapabilities::onion_relay(self.processor.onion_process_epoch().get())
-            } else {
-                OnlineNodeCapabilities::default()
-            };
-            OnlineNodeDescriptor::new_signed(
-                OnlineNodeDescriptorBody {
-                    did: self.processor.did(),
-                    public_key: key
-                        .delegation()
-                        .delegator_verification_pubkey()
-                        .map_err(Error::CoreError)?,
-                    delegatee_public_key: key.delegatee_public_key(),
-                    node_type: OnlineNodeType::Native,
-                    network_id,
-                    storage_redundancy: mode.storage_redundancy,
-                    dht_virtual_nodes: mode.dht_virtual_nodes,
-                    capabilities,
-                    endpoint_hint: None,
-                    started_at_ms: now_ms,
-                    fresh_for_ms: 90_000,
-                    expires_at_ms: now_ms + 90_000,
-                    version: "test".to_string(),
-                },
-                MessageSigner::new(key, network_id),
-            )
-            .map_err(Error::CoreError)
-        }
-
-        fn signed_turn_ticket_invoke_descriptor(
-            &self,
-            policy: OnionInvokePolicy,
-            now_ms: u128,
-        ) -> Result<OnionInvokeDescriptor> {
-            let key = self.processor.delegatee_key();
-            let network_id = self.processor.swarm.network_id();
-            OnionInvokeDescriptor::new_signed(
-                OnionInvokeDescriptorBody {
-                    did: self.processor.did(),
-                    public_key: key
-                        .delegation()
-                        .delegator_verification_pubkey()
-                        .map_err(Error::CoreError)?,
-                    delegatee_public_key: key.delegatee_public_key(),
-                    process_epoch: self.processor.onion_process_epoch().get(),
-                    node_type: OnlineNodeType::Native,
-                    network_id,
-                    shape: TURN_TICKET_INVOKE_SHAPE,
-                    backend: OnionBackendName::parse(TURN_TICKET_INVOKE_BACKEND)?,
-                    policy,
-                    started_at_ms: now_ms,
-                    fresh_for_ms: 90_000,
-                    expires_at_ms: now_ms + 90_000,
-                    version: "test".to_string(),
-                },
-                MessageSigner::new(key, network_id),
-            )
-            .map_err(Error::CoreError)
-        }
-
-        fn signed_turn_service_descriptor(
-            &self,
-            turn_url: &str,
-            server_pubkey: PublicKey<33>,
-            now_ms: u128,
-        ) -> Result<TurnServiceDescriptor> {
-            let key = self.processor.delegatee_key();
-            let network_id = self.processor.swarm.network_id();
-            TurnServiceDescriptor::new_signed(
-                TurnServiceDescriptorBody {
-                    did: self.processor.did(),
-                    public_key: key
-                        .delegation()
-                        .delegator_verification_pubkey()
-                        .map_err(Error::CoreError)?,
-                    network_id,
-                    turn_url: turn_url.to_string(),
-                    server_pubkey,
-                    fresh_for_ms: 90_000,
-                    expires_at_ms: now_ms + 90_000,
-                },
-                MessageSigner::new(key, network_id),
-            )
-            .map_err(Error::CoreError)
+        async fn shutdown(mut self) -> Result<()> {
+            self.stop.request_stop();
+            while self.tasks.join_next().await.is_some() {}
+            self.processor.close().await
         }
     }
 
     #[tokio::test]
     async fn turn_ticket_onion_invoke_issues_unlinkable_ice_url_and_caps_reservation_flood(
     ) -> Result<()> {
-        #[cfg(not(feature = "dummy"))]
-        let _serial = network_test_guard().await;
-
         let t0: u128 = rings_core::utils::get_epoch_ms();
         let turn_clock = Arc::new(ManualClock::new(t0));
 
@@ -1547,10 +1771,15 @@ mod tests {
             max_concurrent: 16,
             max_invocations_per_minute: 64,
         };
-        let client = OverlayTestNode::new(OnionRole::Client).await?;
-        let turn_node =
-            OverlayTestNode::new(OnionRole::Invoke(turn_ticket_invoke_offer(invoke_policy)?))
-                .await?;
+        let advertised_turn_url = format!("turn://1.1.1.1:{}", turn_server.local_addr().port());
+        let turn_offer = TurnServiceOffer::new(&advertised_turn_url, turn_server.server_pubkey())?;
+
+        let client = OverlayTestNode::new(OnionRole::Client, None).await?;
+        let turn_node = OverlayTestNode::new(
+            OnionRole::Invoke(turn_ticket_invoke_offer(invoke_policy)?),
+            Some(turn_offer),
+        )
+        .await?;
         register_turn_ticket_invoke_backend(
             &turn_node.provider.onion_pipeline()?,
             invoke_policy,
@@ -1559,63 +1788,33 @@ mod tests {
 
         let mut relays = Vec::with_capacity(4);
         for _ in 0..4 {
-            relays.push(OverlayTestNode::new(OnionRole::Relay).await?);
+            relays.push(OverlayTestNode::new(OnionRole::Relay, None).await?);
         }
 
         // Connect full mesh among client, turn_node, and the 4 relays so any guard-closed 1-stage
         // loop (`H = 5`, requiring 4 distinct relay registrants) can route end-to-end.
-        let mut all_nodes = vec![&client, &turn_node];
-        for r in &relays {
-            all_nodes.push(r);
-        }
-        for i in 0..all_nodes.len() {
-            for j in (i + 1)..all_nodes.len() {
-                signal_edge(&all_nodes[i].processor, &all_nodes[j].processor).await?;
+        let all_refs = std::iter::once(&client)
+            .chain(std::iter::once(&turn_node))
+            .chain(relays.iter())
+            .collect::<Vec<_>>();
+        for i in 0..all_refs.len() {
+            for j in (i + 1)..all_refs.len() {
+                signal_edge(&all_refs[i].processor, &all_refs[j].processor).await?;
             }
         }
 
-        let overlay_nodes = std::iter::once(&turn_node)
-            .chain(relays.iter())
-            .collect::<Vec<_>>();
-        let online_descriptors = overlay_nodes
-            .iter()
-            .map(|n| n.signed_online_descriptor(t0))
-            .collect::<Result<Vec<_>>>()?;
-        let invoke_desc = turn_node.signed_turn_ticket_invoke_descriptor(invoke_policy, t0)?;
-        let advertised_turn_url = format!("turn://1.1.1.1:{}", turn_server.local_addr().port());
-        let turn_desc = turn_node.signed_turn_service_descriptor(
-            &advertised_turn_url,
-            turn_server.server_pubkey(),
-            t0,
-        )?;
+        // Publish each registrant's own signed descriptors directly to the live DHT over the
+        // connected mesh (`OnlineNodeDescriptor`, `OnionInvokeDescriptor`, `TurnServiceDescriptor`).
+        turn_node.processor.register_all_once().await?;
+        for r in &relays {
+            r.processor.register_all_once().await?;
+        }
 
-        client
-            .processor
-            .storage_store(Processor::registry_entry(
-                ONLINE_NODES_TOPIC,
-                online_descriptors,
-            )?)
-            .await?;
-        client
-            .processor
-            .storage_store(Processor::registry_entry(ONION_INVOKES_TOPIC, vec![
-                invoke_desc,
-            ])?)
-            .await?;
-        client
-            .processor
-            .storage_store(Processor::registry_entry(TURN_SERVICES_TOPIC, vec![
-                turn_desc,
-            ])?)
-            .await?;
-
-        // 1. Client acquires ticket #1 anonymously over the Sphinx loop via `Provider::request_turn_ticket`.
+        // 1. Client acquires ticket #1 anonymously over the Sphinx loop.
         let acquired_1 = with_hang_guard(
             "acquire turn ticket #1",
             Duration::from_secs(10),
-            client
-                .provider
-                .request_turn_ticket(Duration::from_secs(30), None),
+            request_turn_ticket(&client.provider, Duration::from_secs(30), None),
         )
         .await?;
         assert!(acquired_1.ice_url.starts_with("turn://tkt-"));
@@ -1632,9 +1831,11 @@ mod tests {
         let _acquired_2 = with_hang_guard(
             "acquire turn ticket #2",
             Duration::from_secs(10),
-            client
-                .provider
-                .request_turn_ticket(Duration::from_secs(30), Some(turn_node.processor.did())),
+            request_turn_ticket(
+                &client.provider,
+                Duration::from_secs(30),
+                Some(turn_node.processor.did()),
+            ),
         )
         .await?;
         assert_eq!(turn_server.active_reservation_count().await, 2);
@@ -1643,9 +1844,7 @@ mod tests {
         let third_err = with_hang_guard(
             "acquire turn ticket #3 over cap",
             Duration::from_secs(10),
-            client
-                .provider
-                .request_turn_ticket(Duration::from_secs(30), None),
+            request_turn_ticket(&client.provider, Duration::from_secs(30), None),
         )
         .await
         .expect_err("3rd unclaimed ticket must be rejected by max_reservations=2");
@@ -1654,8 +1853,8 @@ mod tests {
             "unexpected rejection error: {third_err}"
         );
 
-        // 4. Verify `requestTurnTicket` via `Provider::request_internal` (used by FFI & WASM)
-        //    succeeds as soon as expired reservations release their permits!
+        // 4. Verify `requestTurnTicket` via `Provider::request_internal` (registered externally via
+        //    `install_turn_client_rpc`) succeeds once expired reservations release their permits.
         turn_clock.set(t0 + 30_001);
         let rpc_val = with_hang_guard(
             "requestTurnTicket internal RPC",
@@ -1676,8 +1875,10 @@ mod tests {
         assert!(!parsed_ice.credential.is_empty());
 
         turn_server.close().await.unwrap();
-        for node in all_nodes {
-            node.processor.close().await?;
+        client.shutdown().await?;
+        turn_node.shutdown().await?;
+        for relay in relays {
+            relay.shutdown().await?;
         }
         Ok(())
     }

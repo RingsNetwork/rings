@@ -456,29 +456,48 @@ impl Processor {
         crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
     }
 
-    /// List signed TURN relay service descriptors from [`crate::turn_service::TURN_SERVICES_TOPIC`]
-    /// (#1292).
-    pub async fn lookup_turn_services(
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s belong to `eligible_stage_dids`.
+    pub async fn build_onion_pipeline_route_for_dids(
         &self,
-        include_expired: bool,
-    ) -> Result<Vec<crate::turn_service::TurnServiceDescriptor>> {
-        let entry_key = entry::Entry::gen_did(crate::turn_service::TURN_SERVICES_TOPIC)?;
-        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
-            return Ok(vec![]);
-        };
-        Ok(
-            crate::turn_service::TurnServiceDescriptor::latest_valid_by_did(
-                crate::turn_service::TurnServiceRegistration::descriptors_from_entry(&entry),
-                self.clock().now_ms(),
-                self.swarm.network_id(),
-                include_expired,
-            ),
-        )
+        pipeline: &crate::onion::OnionInvokePipeline,
+        eligible_stage_dids: &std::collections::BTreeSet<Did>,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, |desc| {
+            eligible_stage_dids.contains(&desc.did)
+        })
+        .await
     }
 
-    /// Execute one registration pass for every configured registration task on this processor.
-    #[cfg(all(test, rings_native))]
-    pub(crate) async fn register_all_once_for_test(&self) -> Result<()> {
+    /// Fetch a DHT registry `topic` and return the newest valid [`crate::descriptor::SignedDescriptor`]
+    /// per DID at the processor's current clock (#918).
+    pub async fn lookup_registry_descriptors<D>(
+        &self,
+        topic: &str,
+        include_expired: bool,
+    ) -> Result<Vec<D>>
+    where
+        D: crate::descriptor::SignedDescriptor + crate::descriptor::RegistryElement,
+    {
+        let Some(entry) = self.fetch_topic_entry(topic).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::descriptor::latest_valid_by_did(
+            crate::descriptor::heard_descriptors::<D>(&entry),
+            self.clock().now_ms(),
+            self.swarm.network_id(),
+            include_expired,
+        ))
+    }
+
+    /// Fetch the raw normalized DHT [`entry::Entry`] stored under `topic`, if any.
+    pub async fn fetch_topic_entry(&self, topic: &str) -> Result<Option<entry::Entry>> {
+        let entry_key = entry::Entry::gen_did(topic)?;
+        self.fetch_storage_entry(entry_key).await
+    }
+
+    /// Execute one registration pass for every configured [`RegistrationTask`] on this processor.
+    pub async fn register_all_once(&self) -> Result<()> {
         let context = self.registration_context();
         for task in &self.registration_tasks {
             task.register_once(&context).await?;

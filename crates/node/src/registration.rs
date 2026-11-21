@@ -103,7 +103,7 @@ pub(crate) const fn default_advertise_presence() -> bool {
 /// clock, which an owner whose clock runs up to `σ = TS_OFFSET_TOLERANCE_MS` ahead retires at
 /// `L − σ`; `Λ / 2 < L − σ`, so the carrier also outlives every gap between heartbeats, a failed
 /// one included (`2I < Λ`).
-pub(crate) fn registry_refresh_bound() -> Duration {
+pub fn registry_refresh_bound() -> Duration {
     registry_lease() / 2
 }
 
@@ -159,13 +159,13 @@ pub(crate) fn validate_registration_timing(
 }
 
 /// The settings that schedule one registry, as its timing errors name them.
-pub(crate) struct TimingKeys<'a> {
+pub struct TimingKeys<'a> {
     /// The setting of the heartbeat interval.
-    pub(crate) heartbeat_interval: &'a str,
+    pub heartbeat_interval: &'a str,
     /// The setting of the descriptor time-to-live.
-    pub(crate) ttl: &'a str,
+    pub ttl: &'a str,
     /// The switch that enables the registry, if one does.
-    pub(crate) enabled_by: Option<&'a str>,
+    pub enabled_by: Option<&'a str>,
 }
 
 /// Validate a registry's scheduling: the heartbeat interval is below the descriptor TTL and
@@ -177,7 +177,7 @@ pub(crate) struct TimingKeys<'a> {
 /// `t_w − τ* ≤ T`, and `τ*` is stamped on the publisher's clock when the heartbeat is sent; the
 /// heartbeat's propagation to the owners must fit in `T − I`. `T ≤ Λ` because a reader refuses
 /// a longer window as not a registry's (the lease law of `descriptor`).
-pub(crate) fn validate_schedule(
+pub fn validate_schedule(
     keys: &TimingKeys<'_>,
     heartbeat_interval: Duration,
     ttl: Duration,
@@ -216,7 +216,7 @@ pub(crate) fn validate_schedule(
 ///
 /// The context exposes only the node facts and DHT publication operation that a
 /// registry needs. The task does not own the processor.
-pub(crate) struct RegistrationContext<'a> {
+pub struct RegistrationContext<'a> {
     processor: &'a Processor,
     stop: StopToken,
     /// When set, every append asks its owners for a store report (#866), and its receipt is
@@ -254,11 +254,13 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return whether the owning registration daemon has requested shutdown.
-    pub(crate) fn should_stop(&self) -> bool {
+    pub fn should_stop(&self) -> bool {
         self.stop.should_stop()
     }
 
-    pub(crate) fn ensure_running(&self) -> Result<()> {
+    /// Return [`Error::RegistrationStopped`] if the owning registration daemon has requested
+    /// shutdown.
+    pub fn ensure_running(&self) -> Result<()> {
         if self.should_stop() {
             return Err(Error::RegistrationStopped);
         }
@@ -266,37 +268,37 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the local node DID.
-    pub(crate) fn did(&self) -> Did {
+    pub fn did(&self) -> Did {
         self.processor.did()
     }
 
     /// Return the current Unix epoch timestamp in milliseconds from the processor's clock.
-    pub(crate) fn now_ms(&self) -> u128 {
+    pub fn now_ms(&self) -> u128 {
         self.processor.clock().now_ms()
     }
 
     /// Return the local network id.
-    pub(crate) fn network_id(&self) -> u32 {
+    pub fn network_id(&self) -> u32 {
         self.processor.swarm.network_id()
     }
 
     /// Return storage redundancy for the local DHT protocol mode.
-    pub(crate) fn storage_redundancy(&self) -> u16 {
+    pub fn storage_redundancy(&self) -> u16 {
         self.processor.swarm.storage_redundancy()
     }
 
     /// Return storage virtual-node positions for the local DHT protocol mode.
-    pub(crate) fn dht_virtual_nodes(&self) -> u16 {
+    pub fn dht_virtual_nodes(&self) -> u16 {
         self.processor.swarm.dht_virtual_nodes()
     }
 
     /// Return the relay custody the local node declares: whether it holds relay mail.
-    pub(crate) fn relay_custody(&self) -> RelayCustody {
+    pub fn relay_custody(&self) -> RelayCustody {
         self.processor.swarm.dht().relay_custody()
     }
 
     /// Return the account verification public key.
-    pub(crate) fn delegator_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+    pub fn delegator_verification_pubkey(&self) -> Result<VerificationPublicKey> {
         self.processor
             .swarm
             .delegator_verification_pubkey()
@@ -304,12 +306,12 @@ impl<'a> RegistrationContext<'a> {
     }
 
     /// Return the local session signing key.
-    pub(crate) fn delegatee_key(&self) -> DelegateeKey {
+    pub fn delegatee_key(&self) -> DelegateeKey {
         self.processor.delegatee_key()
     }
 
     /// The authority that signs this node's descriptors: its delegatee key inside its overlay.
-    pub(crate) fn message_signer(&self) -> MessageSigner<DelegateeKey> {
+    pub fn message_signer(&self) -> MessageSigner<DelegateeKey> {
         MessageSigner::new(self.delegatee_key(), self.network_id())
     }
 
@@ -320,7 +322,7 @@ impl<'a> RegistrationContext<'a> {
 
     /// Append `data` to `topic`, stopping cooperatively with the registration; a reporting
     /// context keeps the append's store receipt.
-    pub(crate) async fn append_data(&self, topic: &str, data: Bytes) -> Result<()> {
+    pub async fn append_data(&self, topic: &str, data: Bytes) -> Result<()> {
         let Some(receipts) = &self.receipts else {
             return self
                 .storage()
@@ -344,11 +346,11 @@ impl<'a> RegistrationContext<'a> {
 /// The terms of a registry lease: the signed lease end `ℓ` and freshness window `T` every
 /// descriptor of the lease carries (see the lease law of `descriptor`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct LeaseTerms {
+pub struct LeaseTerms {
     /// Freshness window `T` in milliseconds.
-    pub(crate) fresh_for_ms: u64,
+    pub fresh_for_ms: u64,
     /// Lease end `ℓ` in milliseconds since Unix epoch.
-    pub(crate) expires_at_ms: u128,
+    pub expires_at_ms: u128,
 }
 
 /// The descriptors one registration publishes under a lease: one (`[D; 1]`) or one per service
@@ -356,7 +358,7 @@ pub(crate) struct LeaseTerms {
 ///
 /// Law: `heard_at(t)` maps [`SignedDescriptor::heard_at`] over the descriptors and keeps their
 /// number and order.
-pub(crate) trait LeaseDescriptors: Clone {
+pub trait LeaseDescriptors: Clone {
     /// The descriptor type.
     type Descriptor: SignedDescriptor + RegistryElement;
 
@@ -424,7 +426,7 @@ struct HeldLease<S> {
 ///     otherwise ─▶ held ← sign(bodies(t + Λ)); Extend(held.elements)
 /// ```
 #[derive(Clone, Debug)]
-pub(crate) struct DhtRegistrationPublisher<S> {
+pub struct DhtRegistrationPublisher<S> {
     topic: String,
     /// The renewal margin `2I`: a lease is renewed once fewer than two heartbeats remain in it.
     renewal_margin_ms: u128,
@@ -438,7 +440,7 @@ pub(crate) struct DhtRegistrationPublisher<S> {
 impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
     /// A publisher for `topic` whose heartbeat runs every `heartbeat_interval` and whose
     /// descriptors are fresh for `fresh_for`.
-    pub(crate) fn new(
+    pub fn new(
         topic: impl Into<String>,
         heartbeat_interval: Duration,
         fresh_for: Duration,
@@ -456,7 +458,7 @@ impl<S: LeaseDescriptors> DhtRegistrationPublisher<S> {
     ///
     /// Each append is rerouted as `Processor::storage_fetch` documents, and its rerouting wait
     /// ends at the registration's stop.
-    pub(crate) async fn publish_lease(
+    pub async fn publish_lease(
         &self,
         context: &RegistrationContext<'_>,
         now_ms: u128,
@@ -537,7 +539,7 @@ fn signing_data<D: SignedDescriptor>(descriptors: &[D]) -> Result<Vec<Vec<u8>>> 
 /// Periodic node-layer registration.
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-pub(crate) trait RegistrationTask: MaybeSendSync {
+pub trait RegistrationTask: MaybeSendSync {
     /// Stable name used in logs.
     fn name(&self) -> &'static str;
 

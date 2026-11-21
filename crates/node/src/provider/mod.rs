@@ -1,5 +1,6 @@
 //! General Provider, this module provide Provider implementation for FFI and WASM
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -8,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use rings_core::delegation::DelegateeKey;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
@@ -25,6 +27,7 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationMessage;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use rings_runtime::MaybeSendSync;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -243,6 +246,14 @@ fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
     value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
 }
 
+/// Asynchronous local RPC handler registered on a [`Provider`] by external service crates.
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+pub trait LocalRpcMethod: MaybeSendSync {
+    /// Handle one JSON-RPC call invoked via [`Provider::request_internal`].
+    async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value>;
+}
+
 /// General Provider holding the node processor, RPC dispatcher, and extension registry.
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -253,6 +264,8 @@ pub struct Provider {
     extensions: crate::extension::ext::Extensions,
     dispatch_drops: Arc<DispatchDrops>,
     e2e_inbox: Arc<E2eInbox>,
+    /// External local RPC methods installed on this provider.
+    custom_rpc: Arc<Mutex<BTreeMap<String, Arc<dyn LocalRpcMethod>>>>,
     /// The onion runtime installed in this provider's registry, shared by its clones; its lock
     /// serializes the check-and-install, so the runtime is installed at most once.
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
@@ -327,6 +340,7 @@ impl Provider {
             extensions,
             dispatch_drops: Arc::default(),
             e2e_inbox: Arc::default(),
+            custom_rpc: Arc::new(Mutex::new(BTreeMap::new())),
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
@@ -335,6 +349,23 @@ impl Provider {
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             pagehide,
         }
+    }
+
+    /// Return a reference to the underlying [`Processor`] driving this provider.
+    pub const fn processor(&self) -> &Arc<Processor> {
+        &self.processor
+    }
+
+    /// Register an external [`LocalRpcMethod`] reachable through [`Self::request_internal`] (and
+    /// C FFI / browser RPC dispatch).
+    pub fn register_local_rpc_method(
+        &self,
+        method: impl Into<String>,
+        handler: impl LocalRpcMethod + 'static,
+    ) -> Result<()> {
+        let mut table = self.custom_rpc.lock().map_err(|_| Error::Lock)?;
+        table.insert(method.into(), Arc::new(handler));
+        Ok(())
     }
 
     /// The shared protocol registry. The [`Backend`] serving core's application inbox clones
@@ -383,28 +414,6 @@ impl Provider {
     pub fn onion_pipeline(&self) -> Result<crate::onion::OnionPipelineHandle> {
         self.onion_runtime()
             .map(crate::onion::OnionPipelineHandle::new)
-    }
-
-    /// Discover a live TURN service from the DHT and anonymously acquire an unlinkable
-    /// `turn://tkt-…:<pass>@host:port` [`crate::turn_service::AcquiredTurnTicket`] over a
-    /// guard-closed Sphinx `invoke` loop (#1292).
-    pub async fn acquire_turn_ticket(
-        &self,
-        ttl: std::time::Duration,
-        target_did: Option<Did>,
-    ) -> Result<crate::turn_service::AcquiredTurnTicket> {
-        let pipeline = self.onion_pipeline()?;
-        crate::turn_service::acquire_turn_ticket(&self.processor, &pipeline, ttl, target_did).await
-    }
-
-    /// Alias for [`Self::acquire_turn_ticket`] on non-browser-WASM targets.
-    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-    pub async fn request_turn_ticket(
-        &self,
-        ttl: std::time::Duration,
-        target_did: Option<Did>,
-    ) -> Result<crate::turn_service::AcquiredTurnTicket> {
-        self.acquire_turn_ticket(ttl, target_did).await
     }
 
     /// The drop counters the [`Backend`] serving this provider's application inbox records in.
@@ -598,6 +607,7 @@ impl Provider {
             extensions,
             dispatch_drops,
             e2e_inbox,
+            custom_rpc,
             onion_runtime,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint,
@@ -611,6 +621,7 @@ impl Provider {
             extensions,
             dispatch_drops,
             e2e_inbox,
+            custom_rpc,
             onion_runtime,
         ));
         #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -867,30 +878,14 @@ impl Provider {
                     .renew_delegatee_key(next, self.processor.clock().now_ms())?;
                 return Ok(serde_json::to_value(self.signing_horizon_snapshot())?);
             }
-            "lookupTurnServices" => {
-                let include_expired = params
-                    .get("include_expired")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                let services = self.processor.lookup_turn_services(include_expired).await?;
-                return Ok(serde_json::to_value(services)?);
-            }
-            "requestTurnTicket" => {
-                let ttl_ms = params
-                    .get("ttl_ms")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(crate::turn_service::DEFAULT_TURN_TICKET_TTL_MS);
-                let target_did = match params.get("target_did").and_then(serde_json::Value::as_str)
-                {
-                    Some(raw) if !raw.trim().is_empty() => Some(Did::from_str(raw.trim())?),
-                    _ => None,
-                };
-                let acquired = self
-                    .acquire_turn_ticket(std::time::Duration::from_millis(ttl_ms), target_did)
-                    .await?;
-                return Ok(serde_json::to_value(acquired)?);
-            }
             _ => {}
+        }
+        let custom_handler = {
+            let table = self.custom_rpc.lock().map_err(|_| Error::Lock)?;
+            table.get(method.as_str()).cloned()
+        };
+        if let Some(handler) = custom_handler {
+            return handler.call(params).await;
         }
         #[cfg(all(feature = "browser", target_family = "wasm"))]
         let onion_directory_endpoint = onion_directory_endpoint_from_rpc(method.as_str(), &params);

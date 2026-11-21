@@ -106,13 +106,14 @@ ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=2494
 - When only `delegatee_key` is configured, the node signs `turn://...?pubkey=<server_pubkey>` entries with its `DelegateeKey` and ECDH shared secret and refreshes them automatically whenever `DelegateeKey` is renewed.
 - Explicit `turn://user:pass@host:port` entries are left untouched for third-party TURN servers.
 
-## DHT Service Discovery and Anonymous `turn.ticket` Issuance
+## DHT Service Discovery and Anonymous `turn.ticket` Issuance (`rings-turn-service`)
 
-Native `rings-node` daemons can host an embedded `rings-turn` server, publish a signed `TurnServiceDescriptor` onto the `turn_services` DHT topic (rejecting loopback, private, link-local, ULA, and unspecified `turn_url` hosts at both offer validation and client discovery), and issue unlinkable `SessionTicket` credentials over the `turn.ticket` onion `invoke` backend (`invoke<64,1024,500ms>`):
+Neither `rings-core` nor `rings-node` embeds TURN or WebRTC service primitives. Instead, the external `rings-turn-service` crate (`rings-turn-service init` / `rings-turn-service run --config ...`) composes `rings-turn` over `rings-node`'s generic DHT lease registry and Sphinx `invoke` pipeline: it publishes a signed `TurnServiceDescriptor` onto the `turn_services` DHT topic (rejecting loopback, private, link-local, ULA, and unspecified `turn_url` hosts at both offer validation and client discovery) and issues unlinkable `SessionTicket` credentials over the `turn.ticket` onion `invoke` backend (`invoke<64,1024,500ms>`):
 
 ```yaml
-advertise_presence: true
-advertise_onion_relay: true
+node:
+  advertise_presence: true
+  advertise_onion_relay: true
 turn_service:
   listen_addr: 0.0.0.0:3478
   public_ip: 1.1.1.1
@@ -127,6 +128,6 @@ turn_service:
     max_invocations_per_minute: 120
 ```
 
-Any client node (native Rust `Provider::request_turn_ticket`, C FFI `rings_node_request("requestTurnTicket", ...)`, or browser WASM `provider.request_turn_ticket(ttl_ms, target_did)`) discovers live `TurnServiceDescriptor` entries from `turn_services`, sends `(ephemeral_client_pubkey, ttl_ms)` through a guard-closed Sphinx `invoke` loop to `turn.ticket`, verifies the returned `SignedTurnSessionTicket` against the descriptor's `server_pubkey`, and receives a ready `turn://tkt-…:<pass>@host:port` ICE URL.
+Any client node (native Rust `rings_turn_service::request_turn_ticket`, C FFI / JSON-RPC via `rings_turn_service::install_turn_client_rpc` + `requestTurnTicket`, or browser WASM `lookupTurnServices` / `requestTurnTicket`) discovers live `TurnServiceDescriptor` entries from `turn_services`, sends `(ephemeral_client_pubkey, ttl_ms)` through a guard-closed Sphinx `invoke` loop to `turn.ticket`, verifies the returned `SignedTurnSessionTicket` against the descriptor's `server_pubkey`, and receives a ready `turn://tkt-…:<pass>@host:port` ICE URL.
 
 In this single-hop private TURN mode, the TURN server necessarily observes the client's IP and remote peer's IP when relaying media, **but never learns the client's `Did` or overlay identity**.

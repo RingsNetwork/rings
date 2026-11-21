@@ -4840,6 +4840,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-turn-service"
+version = "1.0.0-pre.6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "js-sys",
+ "rings-codec",
+ "rings-core",
+ "rings-network-policy",
+ "rings-node",
+ "rings-test-support",
+ "rings-transport",
+ "rings-turn",
+ "serde",
+ "serde-reflection",
+ "serde-saphyr",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "rings-webview"
 version = "1.0.0-pre.6"
 dependencies = [
