@@ -1891,10 +1891,7 @@ mod tests {
         ))
     }
 
-    async fn signal_edge(
-        first: &Processor,
-        second: &Processor,
-    ) -> std::result::Result<(), rings_core::error::Error> {
+    async fn signal_edge(first: &Processor, second: &Processor) -> Result<()> {
         let res = async {
             let (attempt, offer) = first.swarm.offer_connection(second.did()).await?;
             match second.swarm.answer_offer(offer).await? {
@@ -1912,9 +1909,26 @@ mod tests {
         }
         .await;
         match res {
-            Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
-            other => other,
+            Ok(())
+            | Err(
+                rings_core::error::Error::AlreadyConnected
+                | rings_core::error::Error::ConnectionAttemptSuperseded { .. },
+            ) => {}
+            Err(other) => return Err(Error::CoreError(other)),
         }
+        with_hang_guard(
+            "await mutual peer admission",
+            Duration::from_secs(30),
+            async {
+                while !first.swarm.peer_dids().contains(&second.did())
+                    || !second.swarm.peer_dids().contains(&first.did())
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await;
+        Ok(())
     }
 
     #[test]
@@ -2236,8 +2250,6 @@ mod tests {
     struct OverlayTestNode {
         processor: Arc<Processor>,
         provider: Arc<Provider>,
-        stop: rings_core::lifecycle::StopSource,
-        tasks: tokio::task::JoinSet<()>,
     }
 
     impl OverlayTestNode {
@@ -2251,6 +2263,7 @@ mod tests {
             let config = ProcessorConfig::new(1, "".to_string(), key, 3_600).onion_role(role);
             let mut builder = ProcessorBuilder::from_config(&config)?
                 .advertise_presence(advertise_presence)
+                .storage(Box::new(rings_core::storage::MemStorage::new()))
                 .replay_storage(Box::new(rings_core::storage::MemStorage::new()));
             if let Some(offer) = turn_offer {
                 builder = announce_turn_service(builder, offer);
@@ -2262,18 +2275,9 @@ mod tests {
             if install_custom_rpc {
                 install_turn_client_rpc(&provider)?;
             }
-            let stop = rings_core::lifecycle::StopSource::new();
-            let listen_provider = Arc::clone(&provider);
-            let listen_stop = stop.token();
-            let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(async move {
-                let _ = listen_provider.listen_with(listen_stop).await;
-            });
             Ok(Self {
                 processor,
                 provider,
-                stop,
-                tasks,
             })
         }
 
@@ -2284,9 +2288,7 @@ mod tests {
             Self::new_with_options(role, turn_offer, false).await
         }
 
-        async fn shutdown(mut self) -> Result<()> {
-            self.stop.request_stop();
-            while self.tasks.join_next().await.is_some() {}
+        async fn shutdown(self) -> Result<()> {
             self.processor.close().await
         }
     }
