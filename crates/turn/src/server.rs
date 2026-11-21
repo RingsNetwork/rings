@@ -360,10 +360,7 @@ type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDel
 
 struct ReservedTurnSession {
     expires_at_ms: u128,
-    relay_addr: SocketAddr,
-    relay_conn: Arc<PolicyRelayConn>,
     reservation_permit: OwnedSemaphorePermit,
-    capacity_permit: OwnedSemaphorePermit,
 }
 
 /// Result of reserving a TURN relay session on a [`TurnServer`] (#1292).
@@ -371,8 +368,6 @@ struct ReservedTurnSession {
 pub struct TurnSessionReservation {
     /// Server-signed unlinkable session ticket used to derive [`TurnCredentials`].
     pub ticket: SignedTurnSessionTicket,
-    /// The `XOR-RELAYED-ADDRESS` bound for this reserved allocation.
-    pub relay_addr: SocketAddr,
     /// This TURN server's connectable advertised address.
     pub server_addr: SocketAddr,
     /// This TURN server's compressed secp256k1 [`PublicKey<33>`].
@@ -2018,7 +2013,7 @@ async fn prune_expired_reserved_sessions_map(
     reserved_sessions: &Mutex<HashMap<[u8; 16], ReservedTurnSession>>,
     now_ms: u128,
 ) -> usize {
-    let (expired, remaining): (Vec<ReservedTurnSession>, usize) = {
+    let (_expired, remaining): (Vec<ReservedTurnSession>, usize) = {
         let mut guard = reserved_sessions.lock().await;
         let keys: Vec<[u8; 16]> = guard
             .iter()
@@ -2028,20 +2023,6 @@ async fn prune_expired_reserved_sessions_map(
         let removed = keys.into_iter().filter_map(|k| guard.remove(&k)).collect();
         (removed, guard.len())
     };
-    if !expired.is_empty() {
-        let mut closing = Vec::with_capacity(expired.len());
-        for session in expired {
-            let taken = session.relay_conn.begin_close();
-            drop(session.reservation_permit);
-            drop(session.capacity_permit);
-            closing.push((session.relay_conn, taken));
-        }
-        tokio::spawn(async move {
-            for (relay_conn, taken) in closing {
-                relay_conn.finish_close(taken).await;
-            }
-        });
-    }
     remaining
 }
 
@@ -2431,100 +2412,70 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    let (relay_addr, relay_conn, capacity_permit) = match decoded_identity {
-        Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
-            let claimed = {
-                let mut guard = reserved_sessions.lock().await;
-                if let Some(peeked) = guard.get(&signed_ticket.ticket.session_id) {
-                    if need_even_port && peeked.relay_addr.port() % 2 != 0 {
-                        drop(guard);
-                        send_authenticated_error(
-                            conn,
-                            src_addr,
-                            m,
-                            CODE_INSUFFICIENT_CAPACITY,
-                            b"Reserved Relay Port Is Not Even",
-                            None,
-                            mi_key,
-                        )
-                        .await;
-                        return;
-                    }
-                }
-                guard.remove(&signed_ticket.ticket.session_id)
-            };
-            let Some(reserved) = claimed else {
-                send_authenticated_error(
-                    conn,
-                    src_addr,
-                    m,
-                    CODE_UNAUTHORIZED,
-                    b"Session Ticket Unknown or Already Consumed",
-                    None,
-                    mi_key,
-                )
-                .await;
-                return;
-            };
-            if now_ms > reserved.expires_at_ms {
-                let taken = reserved.relay_conn.begin_close();
-                drop(reserved.reservation_permit);
-                drop(reserved.capacity_permit);
-                tokio::spawn(async move {
-                    reserved.relay_conn.finish_close(taken).await;
-                });
-                send_authenticated_error(
-                    conn,
-                    src_addr,
-                    m,
-                    CODE_UNAUTHORIZED,
-                    b"Session Ticket Expired",
-                    None,
-                    mi_key,
-                )
-                .await;
-                return;
-            }
-            drop(reserved.reservation_permit);
-            (
-                reserved.relay_addr,
-                reserved.relay_conn,
-                reserved.capacity_permit,
+    if let Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) = decoded_identity {
+        let claimed = {
+            let mut guard = reserved_sessions.lock().await;
+            guard.remove(&signed_ticket.ticket.session_id)
+        };
+        let Some(reserved) = claimed else {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_UNAUTHORIZED,
+                b"Session Ticket Unknown or Already Consumed",
+                None,
+                mi_key,
             )
+            .await;
+            return;
+        };
+        if now_ms > reserved.expires_at_ms {
+            drop(reserved.reservation_permit);
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_UNAUTHORIZED,
+                b"Session Ticket Expired",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
         }
-        _ => {
-            let Ok(capacity_permit) = Arc::clone(capacity_sem).try_acquire_owned() else {
-                send_authenticated_error(
-                    conn,
-                    src_addr,
-                    m,
-                    CODE_INSUFFICIENT_CAPACITY,
-                    b"Allocation Capacity Reached",
-                    None,
-                    mi_key,
-                )
-                .await;
-                return;
-            };
-            let Ok((relay_conn, relay_addr)) = relay_generator
-                .allocate_relay_conn(use_ipv4, need_even_port)
-                .await
-            else {
-                drop(capacity_permit);
-                send_authenticated_error(
-                    conn,
-                    src_addr,
-                    m,
-                    CODE_INSUFFICIENT_CAPACITY,
-                    b"Insufficient Capacity",
-                    None,
-                    mi_key,
-                )
-                .await;
-                return;
-            };
-            (relay_addr, relay_conn, capacity_permit)
-        }
+        drop(reserved.reservation_permit);
+    }
+
+    let Ok(capacity_permit) = Arc::clone(capacity_sem).try_acquire_owned() else {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Allocation Capacity Reached",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
+    };
+    let Ok((relay_conn, relay_addr)) = relay_generator
+        .allocate_relay_conn(use_ipv4, need_even_port)
+        .await
+    else {
+        drop(capacity_permit);
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Insufficient Capacity",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
     };
 
     finalize_allocate_install(
@@ -3055,11 +3006,8 @@ pub struct TurnServer {
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     clock: SharedClock,
-    relay_generator: Arc<PolicyRelayAddressGenerator>,
-    relay_is_ipv4: bool,
-    max_allocations: usize,
     max_reservations: usize,
-    capacity_sem: Arc<Semaphore>,
+    max_reservation_ttl: Duration,
     reservation_sem: Arc<Semaphore>,
     allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
     reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
@@ -3133,6 +3081,7 @@ impl TurnServer {
 
         let max_allocations = config.max_allocations.max(1);
         let max_reservations = config.max_reservations;
+        let max_reservation_ttl = config.max_reservation_ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
         let capacity_sem = Arc::new(Semaphore::new(max_allocations));
         let reservation_sem = Arc::new(Semaphore::new(max_reservations));
         tokio::spawn(Self::read_loop(
@@ -3161,11 +3110,8 @@ impl TurnServer {
             realm: config.realm,
             auth_handler,
             clock,
-            relay_generator,
-            relay_is_ipv4,
-            max_allocations,
             max_reservations,
-            capacity_sem,
+            max_reservation_ttl,
             reservation_sem,
             allocations,
             reserved_sessions,
@@ -3707,8 +3653,9 @@ impl TurnServer {
 
     /// Reserve a TURN session on this server with an unlinkable [`SignedTurnSessionTicket`] (#1292).
     ///
-    /// Enforces both the per-server reservation cap (`max_reservations`) and the total allocation
-    /// cap (`max_allocations`). Expired unclaimed reservations are pruned first to release permits.
+    /// Enforces `max_reservations` and clamps the unclaimed reservation window to
+    /// `max_reservation_ttl` (`<= 60s` by default). No relay socket or `max_allocations` permit is
+    /// bound until the client authenticates `Allocate` with the returned ticket.
     pub async fn reserve_exit_session(
         &self,
         ephemeral_client_pubkey: PublicKey<33>,
@@ -3718,29 +3665,18 @@ impl TurnServer {
             rings_core::ecc::prime_order::NonIdentityPoint::<rings_core::ecc::Secp256k1>::try_from(
                 ephemeral_client_pubkey,
             )?;
-        if ttl.is_zero() {
+        if ttl.is_zero() || self.max_reservation_ttl.is_zero() {
             return Err(crate::error::TurnError::InvalidReservationTtl);
         }
-        let clamped_ttl = ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
+        let clamped_ttl = ttl.min(self.max_reservation_ttl);
         let now_ms = self.clock.now_ms();
         let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
-        let _ = active_allocation_count(&self.allocations).await;
         let Ok(reservation_permit) = Arc::clone(&self.reservation_sem).try_acquire_owned() else {
             return Err(crate::error::TurnError::ReservationCapacityReached {
                 max_reservations: self.max_reservations,
             });
         };
-        let Ok(capacity_permit) = Arc::clone(&self.capacity_sem).try_acquire_owned() else {
-            drop(reservation_permit);
-            return Err(crate::error::TurnError::AllocationCapacityReached {
-                max_allocations: self.max_allocations,
-            });
-        };
 
-        let (relay_conn, relay_addr) = self
-            .relay_generator
-            .allocate_relay_conn(self.relay_is_ipv4, false)
-            .await?;
         let mut session_id = [0u8; 16];
         rand::thread_rng().fill(&mut session_id);
         let expires_at_ms = now_ms.saturating_add(clamped_ttl.as_millis());
@@ -3754,15 +3690,11 @@ impl TurnServer {
             let mut guard = self.reserved_sessions.lock().await;
             guard.insert(session_id, ReservedTurnSession {
                 expires_at_ms,
-                relay_addr,
-                relay_conn,
                 reservation_permit,
-                capacity_permit,
             });
         }
         Ok(TurnSessionReservation {
             ticket,
-            relay_addr,
             server_addr: self.advertised_addr,
             server_pubkey: self.server_pubkey(),
         })
@@ -3774,14 +3706,7 @@ impl TurnServer {
         let mut done_rx = self.done_rx.clone();
         let _ = done_rx.wait_for(|&done| done).await;
         delete_all_allocations(&self.allocations).await;
-        let remaining_reserved: Vec<ReservedTurnSession> = {
-            let mut guard = self.reserved_sessions.lock().await;
-            guard.drain().map(|(_, s)| s).collect()
-        };
-        for session in remaining_reserved {
-            let taken = session.relay_conn.begin_close();
-            session.relay_conn.finish_close(taken).await;
-        }
+        self.reserved_sessions.lock().await.clear();
         Ok(())
     }
 }

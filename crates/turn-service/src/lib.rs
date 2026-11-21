@@ -13,7 +13,10 @@
 
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -23,15 +26,19 @@ use async_trait::async_trait;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::domain_tag;
+use rings_core::ecc::prime_order::NonIdentityPoint;
 use rings_core::ecc::PublicKey;
+use rings_core::ecc::Secp256k1;
 use rings_core::ecc::SecretKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::message::DomainTag;
 use rings_core::message::MessageSigner;
 use rings_core::message::MessageVerification;
+use rings_core::message::SigningDomain;
 use rings_network_policy::validate_public_url_host;
 use rings_node::descriptor::heard_descriptors;
 use rings_node::descriptor::latest_valid_by_did;
+use rings_node::descriptor::latest_valid_by_key;
 use rings_node::descriptor::sign_descriptor_body;
 use rings_node::descriptor::RegistryElement;
 use rings_node::descriptor::SignedDescriptor;
@@ -47,12 +54,17 @@ use rings_node::onion::OnionInvokeStage;
 use rings_node::onion::OnionLatencyClass;
 use rings_node::onion::OnionPipelineHandle;
 use rings_node::onion::OnionPipelineRoute;
+use rings_node::onion::OnionProcessEpoch;
 use rings_node::onion::OnionRouteError;
 use rings_node::onion::OnionWidthClass;
 use rings_node::prelude::entry;
 use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::provider::LocalRpcMethod;
+use rings_node::provider::LookupRegistryResponse;
+use rings_node::provider::OnionEligibleStage;
+use rings_node::provider::OnionInvokeRpcRequest;
+use rings_node::provider::OnionInvokeRpcResponse;
 use rings_node::provider::Provider;
 use rings_node::registration::validate_schedule;
 use rings_node::registration::DhtRegistrationPublisher;
@@ -173,9 +185,6 @@ pub fn validate_turn_service_endpoint(
         }
     };
 
-    // Parse through the special `http://` scheme so IPv4 literals (including shorthand/hex/octal
-    // forms), bracketed IPv6 literals, IDNA domains, and port numbers are canonicalized before
-    // checking `validate_public_url_host`.
     let synthetic_http = format!("http://{authority}");
     let parsed_http = Url::parse(&synthetic_http).map_err(|e| {
         Error::InvalidConfig(format!("invalid turn_url authority {authority:?}: {e}"))
@@ -239,6 +248,12 @@ pub struct TurnServiceDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
+    /// Session delegatee public key of the process publishing this descriptor, matching the
+    /// signing delegation and Sphinx hop key `pk_i`.
+    pub delegatee_public_key: PublicKey<33>,
+    /// Process epoch `e_n` of the publishing node process, matching its `relay` and `turn.ticket`
+    /// `invoke` registrations.
+    pub process_epoch: OnionProcessEpoch,
     /// Overlay network identifier.
     pub network_id: u32,
     /// Connectable public TURN listener URL (`turn://host:port` or `turns://host:port`).
@@ -334,19 +349,58 @@ impl SignedDescriptor for TurnServiceDescriptor {
         self.heartbeat_at_ms = heartbeat_at_ms;
         self
     }
+
+    fn descriptor_verify_signature_at(&self, network_id: u32, at_ms: u128) -> bool {
+        if self.body.network_id != network_id {
+            return false;
+        }
+        if NonIdentityPoint::<Secp256k1>::try_from(self.body.delegatee_public_key).is_err() {
+            return false;
+        }
+        if Did::from(self.body.delegatee_public_key.address())
+            != self.signature.delegation.delegatee_did()
+        {
+            return false;
+        }
+        let did = self.body.did;
+        if self.body.public_key.did() != did || self.signature.delegation.delegator_did() != did {
+            return false;
+        }
+        let Ok(delegator_pk) = self.signature.delegation.delegator_verification_pubkey() else {
+            return false;
+        };
+        if delegator_pk != self.body.public_key {
+            return false;
+        }
+        let Ok(data) = self.descriptor_signing_data() else {
+            return false;
+        };
+        let domain = SigningDomain::new(TURN_SERVICE_DESCRIPTOR_DOMAIN_TAG, network_id);
+        self.signature.verify_at(domain, &data, at_ms)
+    }
 }
 
 impl TurnServiceDescriptor {
-    /// Sign `body` with `signer`, enforcing DID/key/overlay binding.
+    /// Sign `body` with `signer`, enforcing DID, account key, delegatee session key, and overlay
+    /// binding.
     pub fn new_signed(
         body: TurnServiceDescriptorBody,
         signer: MessageSigner<impl Borrow<DelegateeKey>>,
     ) -> rings_core::error::Result<Self> {
-        sign_descriptor_body(
+        let _ = NonIdentityPoint::<Secp256k1>::try_from(body.delegatee_public_key)?;
+        let expected_delegatee = Did::from(body.delegatee_public_key.address());
+        let signed = sign_descriptor_body(
             body,
             signer,
             "turn service descriptor DID does not match signer delegation",
-        )
+        )?;
+        if signed.signature.delegation.delegatee_did() != expected_delegatee {
+            return Err(rings_core::error::Error::InvalidMessage(
+                "turn service descriptor delegatee_public_key does not match signer session key"
+                    .to_string(),
+            ));
+        }
+        Ok(signed)
     }
 
     /// Return `true` iff `turn_url` is a valid publicly routable TURN endpoint and `server_pubkey`
@@ -364,21 +418,43 @@ impl TurnServiceDescriptor {
             .map_err(|e| Error::InvalidConfig(e.to_string()))
     }
 
-    /// Select the newest valid and publicly routable [`TurnServiceDescriptor`] per DID.
+    /// Select the newest cryptographically valid [`TurnServiceDescriptor`] per `(DID, process_epoch)`
+    /// first, and then retain only publicly routable endpoints.
+    ///
+    /// Deduplicating before endpoint filtering guarantees that a newer lease carrying a revoked or
+    /// invalid endpoint supersedes and suppresses an older valid lease for that process rather than
+    /// falling back to stale state, while keying by `(did, process_epoch)` allows multiple daemon
+    /// processes sharing one account [`Did`] to coexist without overwriting one another.
+    pub fn latest_valid_by_process(
+        descriptors: impl IntoIterator<Item = Self>,
+        now_ms: u128,
+        network_id: u32,
+        include_expired: bool,
+    ) -> Vec<Self> {
+        latest_valid_by_key(
+            descriptors,
+            |descriptor| (descriptor.body.did, descriptor.body.process_epoch),
+            now_ms,
+            network_id,
+            include_expired,
+        )
+        .into_values()
+        .filter(TurnServiceDescriptor::has_valid_endpoint)
+        .collect()
+    }
+
+    /// Select the newest cryptographically valid [`TurnServiceDescriptor`] per [`Did`] first, and
+    /// then retain only publicly routable endpoints.
     pub fn latest_valid_by_did(
         descriptors: impl IntoIterator<Item = Self>,
         now_ms: u128,
         network_id: u32,
         include_expired: bool,
     ) -> Vec<Self> {
-        latest_valid_by_did(
-            descriptors
-                .into_iter()
-                .filter(TurnServiceDescriptor::has_valid_endpoint),
-            now_ms,
-            network_id,
-            include_expired,
-        )
+        latest_valid_by_did(descriptors, now_ms, network_id, include_expired)
+            .into_iter()
+            .filter(TurnServiceDescriptor::has_valid_endpoint)
+            .collect()
     }
 }
 
@@ -483,6 +559,8 @@ impl TurnServiceRegistration {
         let body = TurnServiceDescriptorBody {
             did: context.did(),
             public_key: context.delegator_verification_pubkey()?,
+            delegatee_public_key: context.delegatee_key().delegatee_public_key(),
+            process_epoch: context.onion_process_epoch(),
             network_id: context.network_id(),
             turn_url: self.offer.turn_url.clone(),
             server_pubkey: self.offer.server_pubkey,
@@ -524,7 +602,8 @@ pub fn announce_turn_service(
     builder.register_task(Arc::new(TurnServiceRegistration::new(offer)))
 }
 
-/// List signed, publicly routable [`TurnServiceDescriptor`]s from [`TURN_SERVICES_TOPIC`].
+/// List signed, publicly routable [`TurnServiceDescriptor`]s from [`TURN_SERVICES_TOPIC`],
+/// deduplicated per `(did, process_epoch)` with supersession applied before endpoint filtering.
 pub async fn lookup_turn_services(
     processor: &Processor,
     include_expired: bool,
@@ -532,12 +611,47 @@ pub async fn lookup_turn_services(
     let Some(entry) = processor.fetch_topic_entry(TURN_SERVICES_TOPIC).await? else {
         return Ok(Vec::new());
     };
-    Ok(TurnServiceDescriptor::latest_valid_by_did(
+    Ok(TurnServiceDescriptor::latest_valid_by_process(
         TurnServiceRegistration::descriptors_from_entry(&entry),
         processor.clock().now_ms(),
         processor.swarm.network_id(),
         include_expired,
     ))
+}
+
+/// Decode and validate [`TurnServiceDescriptor`]s from a generic `rings-node`
+/// [`LookupRegistryResponse`] (`lookupRegistry` local/FFI/WASM RPC).
+pub fn decode_turn_services_from_registry_response(
+    response: &LookupRegistryResponse,
+    include_expired: bool,
+) -> Result<Vec<TurnServiceDescriptor>> {
+    if response.topic != TURN_SERVICES_TOPIC {
+        return Err(Error::InvalidConfig(format!(
+            "expected registry topic {TURN_SERVICES_TOPIC:?}, got {:?}",
+            response.topic
+        )));
+    }
+    let decoded = response.elements.iter().filter_map(|elem| {
+        let raw = base64::decode(elem.data_base64.as_str()).ok()?;
+        TurnServiceDescriptor::from_element(raw.as_slice())
+            .ok()
+            .map(|desc| desc.heard_at(elem.heartbeat_at_ms))
+    });
+    Ok(TurnServiceDescriptor::latest_valid_by_process(
+        decoded,
+        response.now_ms,
+        response.network_id,
+        include_expired,
+    ))
+}
+
+/// List live, publicly routable [`TurnServiceDescriptor`]s via [`Provider::lookup_registry_raw`].
+pub async fn lookup_turn_services_via_provider(
+    provider: &Provider,
+    include_expired: bool,
+) -> Result<Vec<TurnServiceDescriptor>> {
+    let raw = provider.lookup_registry_raw(TURN_SERVICES_TOPIC).await?;
+    decode_turn_services_from_registry_response(&raw, include_expired)
 }
 
 /// Request payload sent inside the `64`-byte carried input of [`TURN_TICKET_INVOKE_SHAPE`] to
@@ -546,7 +660,7 @@ pub async fn lookup_turn_services(
 pub struct TurnTicketRequest {
     /// Fresh single-use client secp256k1 public key for ECDH password derivation and client proof.
     pub ephemeral_client_pubkey: PublicKey<33>,
-    /// Requested unclaimed reservation TTL in milliseconds.
+    /// Requested unclaimed reservation TTL in milliseconds (clamped to server `max_reservation_ttl`).
     pub ttl_ms: u64,
 }
 
@@ -555,21 +669,19 @@ pub struct TurnTicketRequest {
 pub enum TurnTicketRejection {
     /// Request was malformed, carried an invalid secp256k1 point, or had zero TTL.
     InvalidRequest,
-    /// Server reservation cap (`max_reservations`) or allocation cap (`max_allocations`) reached.
+    /// Server reservation cap (`max_reservations`) reached.
     CapacityReached,
-    /// Underlying TURN relay socket allocation failed.
+    /// Underlying TURN ticket issuance failed.
     InternalError,
 }
 
 /// Response payload returned inside the `1024`-byte output of [`TURN_TICKET_INVOKE_SHAPE`] (#1292).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnTicketOutcome {
-    /// Successfully reserved a TURN allocation and issued a server-signed session ticket.
+    /// Successfully reserved an unlinkable session slot and issued a server-signed session ticket.
     Issued {
-        /// Unlinkable signed session ticket.
+        /// Unlinkable signed session ticket (relay socket is bound lazily on `Allocate`).
         ticket: SignedTurnSessionTicket,
-        /// Reserved public relay UDP address (`XOR-RELAYED-ADDRESS`).
-        relay_addr: SocketAddr,
         /// Issuing TURN server's compressed secp256k1 public key.
         server_pubkey: PublicKey<33>,
     },
@@ -663,12 +775,12 @@ pub fn decode_turn_ticket_outcome(bytes: &[u8]) -> Result<TurnTicketOutcome> {
 pub struct AcquiredTurnTicket {
     /// Complete standard ICE server URL (`turn://tkt-…:<pass>@host:port`) ready for WebRTC.
     pub ice_url: String,
-    /// Reserved public relay UDP address (`XOR-RELAYED-ADDRESS`).
-    pub relay_addr: SocketAddr,
     /// Ticket expiration timestamp in Unix epoch milliseconds.
     pub expires_at_ms: u128,
     /// Overlay [`Did`] of the TURN service node that issued the ticket.
     pub turn_did: Did,
+    /// Process epoch of the TURN service process that issued the ticket.
+    pub turn_process_epoch: OnionProcessEpoch,
     /// Compressed secp256k1 [`PublicKey<33>`] of the issuing TURN server.
     pub server_pubkey: PublicKey<33>,
 }
@@ -678,9 +790,9 @@ impl std::fmt::Debug for AcquiredTurnTicket {
         let redacted_url = redact_ice_url_password(&self.ice_url);
         f.debug_struct("AcquiredTurnTicket")
             .field("ice_url", &redacted_url)
-            .field("relay_addr", &self.relay_addr)
             .field("expires_at_ms", &self.expires_at_ms)
             .field("turn_did", &self.turn_did)
+            .field("turn_process_epoch", &self.turn_process_epoch)
             .field("server_pubkey", &self.server_pubkey)
             .finish()
     }
@@ -706,6 +818,168 @@ pub fn turn_ticket_pipeline() -> Result<rings_node::onion::OnionInvokePipeline> 
     Ok(stage.into_pipeline())
 }
 
+fn verify_and_build_acquired_ticket(
+    ephemeral_client_key: &SecretKey,
+    turn_descriptor: &TurnServiceDescriptor,
+    outcome: TurnTicketOutcome,
+    now_ms: u128,
+) -> Result<AcquiredTurnTicket> {
+    let canonical_turn_url = validate_turn_service_endpoint(
+        &turn_descriptor.body.turn_url,
+        turn_descriptor.body.server_pubkey,
+    )?;
+    match outcome {
+        TurnTicketOutcome::Issued {
+            ticket,
+            server_pubkey,
+        } => {
+            if server_pubkey != turn_descriptor.body.server_pubkey {
+                return Err(Error::InvalidConfig(
+                    "turn.ticket response server_pubkey does not match signed TurnServiceDescriptor"
+                        .to_string(),
+                ));
+            }
+            ticket
+                .verify_grant_at(server_pubkey, now_ms)
+                .map_err(Error::CoreError)?;
+            let creds = ticket
+                .to_turn_credentials(ephemeral_client_key, server_pubkey)
+                .map_err(Error::CoreError)?;
+            let ice_url = creds.apply_to_ice_server_url(&canonical_turn_url);
+            Ok(AcquiredTurnTicket {
+                ice_url,
+                expires_at_ms: ticket.ticket.expires_at_ms,
+                turn_did: turn_descriptor.body.did,
+                turn_process_epoch: turn_descriptor.body.process_epoch,
+                server_pubkey,
+            })
+        }
+        TurnTicketOutcome::Rejected(TurnTicketRejection::CapacityReached) => Err(
+            Error::RemoteRpcError("TURN server ticket reservation capacity reached".to_string()),
+        ),
+        TurnTicketOutcome::Rejected(TurnTicketRejection::InvalidRequest) => Err(
+            Error::InvalidConfig("TURN server rejected ticket request as invalid".to_string()),
+        ),
+        TurnTicketOutcome::Rejected(TurnTicketRejection::InternalError) => Err(
+            Error::RemoteRpcError("TURN server failed to reserve ticket session".to_string()),
+        ),
+    }
+}
+
+/// Client-side state for an in-flight `turn.ticket` request prepared for `rings-node`'s generic
+/// `"onionInvoke"` RPC (`librings_node` FFI or `rings-node` browser WASM).
+pub struct PendingTurnTicketAttempt {
+    ephemeral_client_key: SecretKey,
+    services: BTreeMap<(Did, OnionProcessEpoch), TurnServiceDescriptor>,
+}
+
+impl std::fmt::Debug for PendingTurnTicketAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingTurnTicketAttempt")
+            .field(
+                "ephemeral_client_pubkey",
+                &self.ephemeral_client_key.pubkey(),
+            )
+            .field("candidate_count", &self.services.len())
+            .finish()
+    }
+}
+
+impl PendingTurnTicketAttempt {
+    /// Verify an [`OnionInvokeRpcResponse`] returned by `rings-node`'s `"onionInvoke"` primitive
+    /// against the signed [`TurnServiceDescriptor`] of `(stage_did, stage_process_epoch)` and
+    /// derive the ready [`AcquiredTurnTicket`].
+    pub fn complete(
+        self,
+        response: &OnionInvokeRpcResponse,
+        now_ms: u128,
+    ) -> Result<AcquiredTurnTicket> {
+        let key = (response.stage_did, response.stage_process_epoch);
+        let turn_descriptor = self.services.get(&key).ok_or_else(|| {
+            Error::InvalidConfig(
+                "selected onionInvoke stage (did, process_epoch) missing from validated TurnServiceDescriptors"
+                    .to_string(),
+            )
+        })?;
+        if turn_descriptor.body.delegatee_public_key != response.stage_delegatee_public_key {
+            return Err(Error::InvalidConfig(
+                "selected onionInvoke stage delegatee_public_key does not match TurnServiceDescriptor"
+                    .to_string(),
+            ));
+        }
+        let output_bytes = base64::decode(response.output_base64.as_str())
+            .map_err(|e| Error::InvalidConfig(format!("invalid output_base64: {e}")))?;
+        let outcome = decode_turn_ticket_outcome(&output_bytes)?;
+        verify_and_build_acquired_ticket(
+            &self.ephemeral_client_key,
+            turn_descriptor,
+            outcome,
+            now_ms,
+        )
+    }
+}
+
+/// Prepare a generic `rings-node` [`OnionInvokeRpcRequest`] (for C FFI `rings_node_request` or
+/// browser WASM `provider.onionInvoke`) from validated [`TurnServiceDescriptor`]s.
+pub fn prepare_turn_ticket_onion_invoke(
+    services: impl IntoIterator<Item = TurnServiceDescriptor>,
+    exclude_did: Option<Did>,
+    ttl: Duration,
+    target_did: Option<Did>,
+) -> Result<(PendingTurnTicketAttempt, OnionInvokeRpcRequest)> {
+    let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
+    if ttl_ms == 0 {
+        return Err(Error::InvalidConfig(
+            "TURN ticket TTL must be greater than zero".to_string(),
+        ));
+    }
+    let service_map: BTreeMap<(Did, OnionProcessEpoch), TurnServiceDescriptor> = services
+        .into_iter()
+        .filter(|desc| exclude_did.is_none_or(|local| desc.body.did != local))
+        .filter(|desc| target_did.is_none_or(|wanted| desc.body.did == wanted))
+        .filter(TurnServiceDescriptor::has_valid_endpoint)
+        .map(|desc| ((desc.body.did, desc.body.process_epoch), desc))
+        .collect();
+    if service_map.is_empty() {
+        return Err(Error::OnionRouteError(OnionRouteError::NoLiveSymbol {
+            shape: TURN_TICKET_INVOKE_SHAPE.to_string(),
+            backend: TURN_TICKET_INVOKE_BACKEND.to_string(),
+        }));
+    }
+
+    let ephemeral_client_key = SecretKey::random();
+    let request = TurnTicketRequest {
+        ephemeral_client_pubkey: ephemeral_client_key.pubkey(),
+        ttl_ms,
+    };
+    let input_bytes = encode_turn_ticket_request(&request)?;
+    let eligible_stages: Vec<OnionEligibleStage> = service_map
+        .values()
+        .map(|desc| OnionEligibleStage {
+            did: desc.body.did,
+            process_epoch: Some(desc.body.process_epoch),
+            delegatee_public_key: Some(desc.body.delegatee_public_key),
+        })
+        .collect();
+    let backend = OnionBackendName::parse(TURN_TICKET_INVOKE_BACKEND)?;
+    let rpc_request = OnionInvokeRpcRequest {
+        shape: TURN_TICKET_INVOKE_SHAPE,
+        backend,
+        constants_base64: None,
+        input_base64: base64::encode(&input_bytes),
+        eligible_dids: None,
+        eligible_stages: Some(eligible_stages),
+        timeout_ms: None,
+    };
+    Ok((
+        PendingTurnTicketAttempt {
+            ephemeral_client_key,
+            services: service_map,
+        },
+        rpc_request,
+    ))
+}
+
 /// Acquire an unlinkable [`AcquiredTurnTicket`] (`turn://tkt-…:<pass>@host:port`) over an
 /// already-selected [`OnionPipelineRoute`] and validated [`TurnServiceDescriptor`].
 pub async fn acquire_turn_ticket_over_route(
@@ -715,7 +989,7 @@ pub async fn acquire_turn_ticket_over_route(
     ttl: Duration,
     now_ms: u128,
 ) -> Result<AcquiredTurnTicket> {
-    let canonical_turn_url = validate_turn_service_endpoint(
+    let _ = validate_turn_service_endpoint(
         &turn_descriptor.body.turn_url,
         turn_descriptor.body.server_pubkey,
     )?;
@@ -737,51 +1011,13 @@ pub async fn acquire_turn_ticket_over_route(
         .invoke_pipeline_over_route(route, &pipeline, &input_bytes)
         .await?;
     let outcome = decode_turn_ticket_outcome(&output_bytes)?;
-
-    match outcome {
-        TurnTicketOutcome::Issued {
-            ticket,
-            relay_addr,
-            server_pubkey,
-        } => {
-            if server_pubkey != turn_descriptor.body.server_pubkey {
-                return Err(Error::InvalidConfig(
-                    "turn.ticket response server_pubkey does not match signed TurnServiceDescriptor"
-                        .to_string(),
-                ));
-            }
-            ticket
-                .verify_grant_at(server_pubkey, now_ms)
-                .map_err(Error::CoreError)?;
-            let creds = ticket
-                .to_turn_credentials(&ephemeral_client_key, server_pubkey)
-                .map_err(Error::CoreError)?;
-            let ice_url = creds.apply_to_ice_server_url(&canonical_turn_url);
-            Ok(AcquiredTurnTicket {
-                ice_url,
-                relay_addr,
-                expires_at_ms: ticket.ticket.expires_at_ms,
-                turn_did: turn_descriptor.body.did,
-                server_pubkey,
-            })
-        }
-        TurnTicketOutcome::Rejected(TurnTicketRejection::CapacityReached) => Err(
-            Error::RemoteRpcError("TURN server ticket reservation capacity reached".to_string()),
-        ),
-        TurnTicketOutcome::Rejected(TurnTicketRejection::InvalidRequest) => Err(
-            Error::InvalidConfig("TURN server rejected ticket request as invalid".to_string()),
-        ),
-        TurnTicketOutcome::Rejected(TurnTicketRejection::InternalError) => {
-            Err(Error::RemoteRpcError(
-                "TURN server failed to allocate relay session for ticket".to_string(),
-            ))
-        }
-    }
+    verify_and_build_acquired_ticket(&ephemeral_client_key, turn_descriptor, outcome, now_ms)
 }
 
 /// Discover a live TURN service from the DHT (optionally pinned to `target_did`), build a
-/// guard-closed Sphinx `invoke` loop to its `turn.ticket` backend, and return a ready
-/// `turn://tkt-…:<pass>@host:port` [`AcquiredTurnTicket`].
+/// guard-closed Sphinx `invoke` loop matched by `(did, process_epoch, delegatee_public_key)` to its
+/// `turn.ticket` backend, and return a ready `turn://tkt-…:<pass>@host:port`
+/// [`AcquiredTurnTicket`].
 pub async fn acquire_turn_ticket(
     processor: &Processor,
     pipeline_handle: &OnionPipelineHandle,
@@ -789,13 +1025,14 @@ pub async fn acquire_turn_ticket(
     target_did: Option<Did>,
 ) -> Result<AcquiredTurnTicket> {
     let local_did = processor.did();
-    let services: BTreeMap<Did, TurnServiceDescriptor> = lookup_turn_services(processor, false)
-        .await?
-        .into_iter()
-        .filter(|desc| desc.body.did != local_did)
-        .filter(|desc| target_did.is_none_or(|wanted| desc.body.did == wanted))
-        .map(|desc| (desc.body.did, desc))
-        .collect();
+    let services: BTreeMap<(Did, OnionProcessEpoch), TurnServiceDescriptor> =
+        lookup_turn_services(processor, false)
+            .await?
+            .into_iter()
+            .filter(|desc| desc.body.did != local_did)
+            .filter(|desc| target_did.is_none_or(|wanted| desc.body.did == wanted))
+            .map(|desc| ((desc.body.did, desc.body.process_epoch), desc))
+            .collect();
     if services.is_empty() {
         return Err(Error::OnionRouteError(OnionRouteError::NoLiveSymbol {
             shape: TURN_TICKET_INVOKE_SHAPE.to_string(),
@@ -803,23 +1040,27 @@ pub async fn acquire_turn_ticket(
         }));
     }
 
-    let eligible: BTreeSet<Did> = services.keys().copied().collect();
     let pipeline = turn_ticket_pipeline()?;
     let route = processor
-        .build_onion_pipeline_route_for_dids(&pipeline, &eligible)
+        .build_onion_pipeline_route_filtered(&pipeline, |desc| {
+            services
+                .get(&(desc.did, desc.process_epoch))
+                .is_some_and(|turn_desc| {
+                    turn_desc.body.delegatee_public_key == desc.delegatee_public_key
+                })
+        })
         .await?;
-    let selected_did = route
-        .descriptors()
-        .first()
-        .map(|desc| desc.did)
-        .ok_or_else(|| {
-            Error::InvalidConfig("selected turn.ticket route had no stage descriptor".to_string())
-        })?;
-    let turn_descriptor = services.get(&selected_did).ok_or_else(|| {
-        Error::InvalidConfig(
-            "selected turn.ticket stage DID missing from validated TURN service set".to_string(),
-        )
+    let stage_desc = route.descriptors().first().ok_or_else(|| {
+        Error::InvalidConfig("selected turn.ticket route had no stage descriptor".to_string())
     })?;
+    let turn_descriptor = services
+        .get(&(stage_desc.did, stage_desc.process_epoch))
+        .ok_or_else(|| {
+            Error::InvalidConfig(
+                "selected turn.ticket stage (did, process_epoch) missing from validated TURN service set"
+                    .to_string(),
+            )
+        })?;
 
     acquire_turn_ticket_over_route(
         pipeline_handle,
@@ -831,25 +1072,38 @@ pub async fn acquire_turn_ticket(
     .await
 }
 
-/// Convenience helper acquiring an [`AcquiredTurnTicket`] directly through a [`Provider`].
+/// Cross-platform helper acquiring an [`AcquiredTurnTicket`] directly through [`Provider`]'s
+/// generic `lookup_registry_raw` + `onion_invoke_raw` primitives (identical on native and browser
+/// WASM).
 pub async fn request_turn_ticket(
     provider: &Provider,
     ttl: Duration,
     target_did: Option<Did>,
 ) -> Result<AcquiredTurnTicket> {
-    let pipeline = provider.onion_pipeline()?;
-    acquire_turn_ticket(provider.processor(), &pipeline, ttl, target_did).await
+    let registry = provider.lookup_registry_raw(TURN_SERVICES_TOPIC).await?;
+    let services = decode_turn_services_from_registry_response(&registry, false)?;
+    let (pending, invoke_req) = prepare_turn_ticket_onion_invoke(
+        services,
+        Some(provider.processor().did()),
+        ttl,
+        target_did,
+    )?;
+    let invoke_resp = provider.onion_invoke_raw(invoke_req).await?;
+    pending.complete(&invoke_resp, provider.processor().clock().now_ms())
 }
 
 struct LookupTurnServicesRpc {
-    processor: std::sync::Weak<Processor>,
+    provider_processor: std::sync::Weak<Processor>,
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl LocalRpcMethod for LookupTurnServicesRpc {
     async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value> {
-        let processor = self.processor.upgrade().ok_or(Error::RegistrationStopped)?;
+        let processor = self
+            .provider_processor
+            .upgrade()
+            .ok_or(Error::RegistrationStopped)?;
         let include_expired = params
             .get("include_expired")
             .and_then(serde_json::Value::as_bool)
@@ -888,14 +1142,18 @@ impl LocalRpcMethod for RequestTurnTicketRpc {
     }
 }
 
-/// Register `"lookupTurnServices"` and `"requestTurnTicket"` on `provider` via
-/// [`Provider::register_local_rpc_method`] so C FFI, JSON-RPC, and browser callers can invoke TURN
-/// discovery and anonymous ticket acquisition without `rings-node` carrying any TURN primitives.
+/// Optional convenience helper registering `"lookupTurnServices"` and `"requestTurnTicket"` on an
+/// in-process [`Provider`] via [`Provider::register_local_rpc_method`].
+///
+/// External C FFI (`librings_node`) and `rings-node` WASM callers that link only `rings-node` can
+/// instead invoke `rings-node`'s built-in `"lookupRegistry"` (`topic: "turn_services"`) and
+/// `"onionInvoke"` primitives directly (paired with [`decode_turn_services_from_registry_response`]
+/// and [`prepare_turn_ticket_onion_invoke`]).
 pub fn install_turn_client_rpc(provider: &Provider) -> Result<()> {
     let pipeline = provider.onion_pipeline()?;
     let weak = Arc::downgrade(provider.processor());
     provider.register_local_rpc_method("lookupTurnServices", LookupTurnServicesRpc {
-        processor: weak.clone(),
+        provider_processor: weak.clone(),
     })?;
     provider.register_local_rpc_method("requestTurnTicket", RequestTurnTicketRpc {
         processor: weak,
@@ -910,10 +1168,10 @@ pub fn wasm_lookup_turn_services(
     provider: &Provider,
     include_expired: Option<bool>,
 ) -> js_sys::Promise {
-    let processor = Arc::clone(provider.processor());
+    let provider = provider.clone();
     let include_expired = include_expired.unwrap_or(false);
     wasm_bindgen_futures::future_to_promise(async move {
-        let services = lookup_turn_services(&processor, include_expired)
+        let services = lookup_turn_services_via_provider(&provider, include_expired)
             .await
             .map_err(|e| wasm_bindgen::JsError::new(&e.to_string()))?;
         Ok(serde_wasm_bindgen::to_value(&services)
@@ -1000,7 +1258,6 @@ impl rings_node::onion::OnionInvokeBackend for TurnTicketInvokeBackend {
                 {
                     Ok(res) => TurnTicketOutcome::Issued {
                         ticket: res.ticket,
-                        relay_addr: res.relay_addr,
                         server_pubkey: res.server_pubkey,
                     },
                     Err(
@@ -1090,6 +1347,9 @@ pub struct TurnServiceConfig {
     /// Maximum concurrent unclaimed `SessionTicket` reservations.
     #[serde(default = "default_turn_max_reservations")]
     pub max_reservations: usize,
+    /// Maximum lifetime in seconds of an unclaimed `SessionTicket` reservation (`60s` default).
+    #[serde(default = "default_turn_max_reservation_ttl_secs")]
+    pub max_reservation_ttl_secs: u64,
     /// Maximum active peer IP permissions per TURN allocation.
     #[serde(default = "default_turn_max_permissions_per_allocation")]
     pub max_permissions_per_allocation: usize,
@@ -1136,6 +1396,7 @@ impl std::fmt::Debug for TurnServiceConfig {
             .field("max_nonces", &self.max_nonces)
             .field("max_allocations", &self.max_allocations)
             .field("max_reservations", &self.max_reservations)
+            .field("max_reservation_ttl_secs", &self.max_reservation_ttl_secs)
             .field(
                 "max_permissions_per_allocation",
                 &self.max_permissions_per_allocation,
@@ -1197,6 +1458,14 @@ const fn default_turn_max_reservations() -> usize {
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
 ))]
+const fn default_turn_max_reservation_ttl_secs() -> u64 {
+    rings_turn::DEFAULT_MAX_RESERVATION_TTL.as_secs()
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
 const fn default_turn_max_permissions_per_allocation() -> usize {
     rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION
 }
@@ -1245,6 +1514,7 @@ impl Default for TurnServiceConfig {
             max_nonces: default_turn_max_nonces(),
             max_allocations: default_turn_max_allocations(),
             max_reservations: default_turn_max_reservations(),
+            max_reservation_ttl_secs: default_turn_max_reservation_ttl_secs(),
             max_permissions_per_allocation: default_turn_max_permissions_per_allocation(),
             channel_bind_timeout_secs: 0,
             allow_dids: Vec::new(),
@@ -1278,6 +1548,12 @@ impl TurnServiceConfig {
         if self.max_reservations == 0 {
             return Err(Error::InvalidConfig(
                 "turn_service.max_reservations must be > 0 when issue_tickets is enabled"
+                    .to_string(),
+            ));
+        }
+        if self.max_reservation_ttl_secs == 0 {
+            return Err(Error::InvalidConfig(
+                "turn_service.max_reservation_ttl_secs must be > 0 when issue_tickets is enabled"
                     .to_string(),
             ));
         }
@@ -1363,6 +1639,7 @@ impl TurnServiceConfig {
             max_nonces: self.max_nonces.max(1),
             max_allocations: self.max_allocations.max(1),
             max_reservations: self.max_reservations,
+            max_reservation_ttl: Duration::from_secs(self.max_reservation_ttl_secs),
             max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
@@ -1418,39 +1695,40 @@ impl TurnServiceDaemonConfig {
         let clock = pc.clock().clone();
         let mut builder = ProcessorBuilder::from_config(&pc)?;
         if let Some(turn_invoke) = invoke_offer {
-            let role = match builder.configured_onion_role().clone() {
-                rings_node::onion::OnionRole::Client => {
-                    return Err(Error::InvalidConfig(
-                        "turn_service.issue_tickets requires advertise_onion_relay: true"
-                            .to_string(),
-                    ));
-                }
-                rings_node::onion::OnionRole::Relay => {
-                    rings_node::onion::OnionRole::Invoke(turn_invoke)
-                }
-                rings_node::onion::OnionRole::Exit(exit_offer) => {
-                    rings_node::onion::OnionRole::Both {
-                        exit: exit_offer,
-                        invoke: turn_invoke,
-                    }
-                }
-                rings_node::onion::OnionRole::Invoke(existing) => {
-                    rings_node::onion::OnionRole::Invoke(merge_invoke_offers(
-                        &existing,
-                        &turn_invoke,
-                    )?)
-                }
-                rings_node::onion::OnionRole::Both { exit, invoke } => {
-                    rings_node::onion::OnionRole::Both {
-                        exit,
-                        invoke: merge_invoke_offers(&invoke, &turn_invoke)?,
-                    }
-                }
-            };
-            builder = builder.onion_role(role);
+            builder = apply_turn_invoke_offer_to_builder(builder, turn_invoke)?;
         }
         Ok((builder, clock))
     }
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+fn apply_turn_invoke_offer_to_builder(
+    builder: ProcessorBuilder,
+    turn_invoke: OnionInvokeOffer,
+) -> Result<ProcessorBuilder> {
+    let role = match builder.configured_onion_role().clone() {
+        rings_node::onion::OnionRole::Client => {
+            return Err(Error::InvalidConfig(
+                "turn_service.issue_tickets requires advertise_onion_relay: true".to_string(),
+            ));
+        }
+        rings_node::onion::OnionRole::Relay => rings_node::onion::OnionRole::Invoke(turn_invoke),
+        rings_node::onion::OnionRole::Exit(exit_offer) => rings_node::onion::OnionRole::Both {
+            exit: exit_offer,
+            invoke: turn_invoke,
+        },
+        rings_node::onion::OnionRole::Invoke(existing) => {
+            rings_node::onion::OnionRole::Invoke(merge_invoke_offers(&existing, &turn_invoke)?)
+        }
+        rings_node::onion::OnionRole::Both { exit, invoke } => rings_node::onion::OnionRole::Both {
+            exit,
+            invoke: merge_invoke_offers(&invoke, &turn_invoke)?,
+        },
+    };
+    Ok(builder.onion_role(role))
 }
 
 #[cfg(all(
@@ -1466,6 +1744,113 @@ fn merge_invoke_offers(
         entries.push((*shape, backend.clone(), policy));
     }
     OnionInvokeOffer::new(entries)
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+struct TurnDaemonHooks {
+    turn_server: Arc<rings_turn::TurnServer>,
+    offer: TurnServiceOffer,
+    turn_invoke: Option<OnionInvokeOffer>,
+    ticket_invoke_policy: OnionInvokePolicy,
+}
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+#[async_trait]
+impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
+    fn configure_builder(
+        &mut self,
+        mut builder: ProcessorBuilder,
+    ) -> anyhow::Result<ProcessorBuilder> {
+        if let Some(ref turn_invoke) = self.turn_invoke {
+            builder = apply_turn_invoke_offer_to_builder(builder, turn_invoke.clone())?;
+        }
+        Ok(announce_turn_service(builder, self.offer.clone()))
+    }
+
+    async fn configure_provider(&mut self, provider: &Arc<Provider>) -> anyhow::Result<()> {
+        if self.turn_invoke.is_some() {
+            let pipeline = provider.onion_pipeline()?;
+            register_turn_ticket_invoke_backend(
+                &pipeline,
+                self.ticket_invoke_policy,
+                Arc::clone(&self.turn_server),
+            )?;
+        }
+        install_turn_client_rpc(provider)?;
+        tracing::info!(
+            did = %provider.processor().did(),
+            turn_listen = %self.turn_server.local_addr(),
+            turn_advertised = %self.turn_server.advertised_addr(),
+            issue_tickets = self.turn_invoke.is_some(),
+            "rings-turn-service attached to native foreground daemon"
+        );
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) -> anyhow::Result<()> {
+        self.turn_server
+            .close()
+            .await
+            .map_err(|e| anyhow::anyhow!("closing TurnServer failed: {e}"))
+    }
+}
+
+/// Start [`rings_turn::TurnServer`] and run a full foreground Rings node daemon (persistent
+/// [`rings_node::native::stores::NodeStores`] including authoritative replay storage,
+/// [`rings_node::native::bootstrap::BootstrapSupervisor`], internal/external HTTP JSON-RPC
+/// signaling endpoints, delegation renewal/horizon supervision, [`TurnServiceDescriptor`]
+/// announcement, and `turn.ticket` onion `invoke` serving) until `SIGINT`/`SIGTERM`.
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub async fn run_turn_service_daemon(
+    options: rings_node::native::daemon::NativeNodeRunOptions,
+    turn_service: TurnServiceConfig,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let turn_invoke = turn_service
+        .onion_invoke_offer(options.config.advertise_onion_relay)
+        .context("validating turn_service onion invoke configuration")?;
+    let pc = rings_node::processor::ProcessorConfig::try_from(options.config.clone())
+        .context("validating node configuration")?;
+    let server_cfg = turn_service
+        .to_turn_server_config(pc.clock().clone())
+        .context("building TurnServerConfig")?;
+    let turn_server = Arc::new(
+        rings_turn::TurnServer::start(server_cfg)
+            .await
+            .context("starting TurnServer")?,
+    );
+    let offer = match turn_service.service_offer(&turn_server) {
+        Ok(offer) => offer,
+        Err(err) => {
+            let _ = turn_server.close().await;
+            return Err(err.into());
+        }
+    };
+
+    let server_cleanup = Arc::clone(&turn_server);
+    let hooks = TurnDaemonHooks {
+        turn_server,
+        offer,
+        turn_invoke,
+        ticket_invoke_policy: turn_service.ticket_invoke_policy,
+    };
+    let run_res = rings_node::native::daemon::run_foreground_node(options, hooks).await;
+    let close_res = server_cleanup.close().await;
+    match (run_res, close_res) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), _) => Err(err),
+        (Ok(()), Err(err)) => Err(anyhow::anyhow!("closing TurnServer failed: {err}")),
+    }
 }
 
 #[cfg(all(
@@ -1620,7 +2005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_service_registration_publishes_discovers_and_filters_malicious_descriptors(
+    async fn turn_service_registration_publishes_discovers_and_supersedes_invalid_newer_leases(
     ) -> Result<()> {
         let t0: u128 = rings_core::utils::get_epoch_ms();
         let clock = Arc::new(ManualClock::new(t0));
@@ -1637,30 +2022,56 @@ mod tests {
         )
         .build()?;
 
-        // Seed a maliciously signed descriptor advertising a loopback `turn_url` directly into the
-        // DHT topic, then run `register_all_once` (which appends this node's valid lease) so both
-        // descriptors coexist in the raw DHT entry.
+        // Seed BOTH:
+        // 1. An older valid descriptor (`expires_at_ms = t0 + 60_000`) for `evil_account` / `epoch_a`.
+        // 2. A newer descriptor (`expires_at_ms = t0 + 90_000`) for the SAME `(did, epoch_a)` that
+        //    switches `turn_url` to an invalid loopback endpoint (`turn://127.0.0.1:3478`).
+        // Deduplicating BEFORE `has_valid_endpoint` must let #2 supersede #1 and then filter #2 out,
+        // rather than resurrecting the superseded older lease #1!
         let evil_account = SecretKey::random();
         let evil_delegatee = DelegateeKey::new_with_seckey_at(&evil_account, 600_000, t0).unwrap();
-        let evil_signer = MessageSigner::new(evil_delegatee.clone(), 1);
-        let evil_desc = TurnServiceDescriptor::new_signed(
+        let epoch_a = OnionProcessEpoch::new([0x42; 16]);
+        let older_valid = TurnServiceDescriptor::new_signed(
             TurnServiceDescriptorBody {
                 did: evil_delegatee.delegator_did(),
                 public_key: evil_delegatee
                     .delegation()
                     .delegator_verification_pubkey()
                     .unwrap(),
+                delegatee_public_key: evil_delegatee.delegatee_public_key(),
+                process_epoch: epoch_a,
+                network_id: 1,
+                turn_url: "turn://evil-old.rings.rs:3478".to_string(),
+                server_pubkey: SecretKey::random().pubkey(),
+                fresh_for_ms: 60_000,
+                expires_at_ms: t0 + 60_000,
+            },
+            MessageSigner::new(evil_delegatee.clone(), 1),
+        )
+        .unwrap();
+        let newer_invalid = TurnServiceDescriptor::new_signed(
+            TurnServiceDescriptorBody {
+                did: evil_delegatee.delegator_did(),
+                public_key: evil_delegatee
+                    .delegation()
+                    .delegator_verification_pubkey()
+                    .unwrap(),
+                delegatee_public_key: evil_delegatee.delegatee_public_key(),
+                process_epoch: epoch_a,
                 network_id: 1,
                 turn_url: "turn://127.0.0.1:3478".to_string(),
                 server_pubkey: SecretKey::random().pubkey(),
                 fresh_for_ms: 90_000,
                 expires_at_ms: t0 + 90_000,
             },
-            evil_signer,
+            MessageSigner::new(evil_delegatee, 1),
         )
         .unwrap();
         processor
-            .storage_store(registry_entry(TURN_SERVICES_TOPIC, vec![evil_desc])?)
+            .storage_store(registry_entry(TURN_SERVICES_TOPIC, vec![
+                older_valid,
+                newer_invalid,
+            ])?)
             .await?;
 
         processor.register_all_once().await?;
@@ -1671,18 +2082,22 @@ mod tests {
             .expect("turn_services entry must exist");
         assert_eq!(
             TurnServiceRegistration::descriptors_from_entry(&raw_entry).len(),
-            2,
-            "both valid and malicious descriptors must be present in the raw DHT entry"
+            3,
+            "all three descriptors must coexist in the raw DHT entry"
         );
 
         let discovered = lookup_turn_services(&processor, false).await?;
         assert_eq!(
             discovered.len(),
             1,
-            "malicious loopback descriptor must be filtered out on discovery"
+            "newer invalid lease must supersede and suppress older valid lease for the same process"
         );
         let desc = &discovered[0];
         assert_eq!(desc.body.did, processor.did());
+        assert_eq!(
+            desc.body.delegatee_public_key,
+            delegatee_key.delegatee_public_key()
+        );
         assert_eq!(desc.body.turn_url, "turn://turn.rings.rs:3478");
         assert_eq!(desc.body.server_pubkey, turn_server_pubkey);
 
@@ -1693,7 +2108,129 @@ mod tests {
         assert!(signed_url.starts_with("turn://"));
         assert!(signed_url.ends_with("@turn.rings.rs:3478"));
         assert!(!signed_url.contains("pubkey="));
+        processor.close().await?;
         Ok(())
+    }
+
+    #[test]
+    fn multi_process_descriptors_under_same_did_coexist_and_bind_delegatee_key() {
+        let t0: u128 = rings_core::utils::get_epoch_ms();
+        let shared_account = SecretKey::random();
+        let proc1_key = DelegateeKey::new_with_seckey_at(&shared_account, 600_000, t0).unwrap();
+        let proc2_key = DelegateeKey::new_with_seckey_at(&shared_account, 600_000, t0).unwrap();
+        let epoch1 = OnionProcessEpoch::new([0x11; 16]);
+        let epoch2 = OnionProcessEpoch::new([0x22; 16]);
+        let server1_pk = SecretKey::random().pubkey();
+        let server2_pk = SecretKey::random().pubkey();
+
+        let desc1 = TurnServiceDescriptor::new_signed(
+            TurnServiceDescriptorBody {
+                did: proc1_key.delegator_did(),
+                public_key: proc1_key
+                    .delegation()
+                    .delegator_verification_pubkey()
+                    .unwrap(),
+                delegatee_public_key: proc1_key.delegatee_public_key(),
+                process_epoch: epoch1,
+                network_id: 1,
+                turn_url: "turn://turn-a.rings.rs:3478".to_string(),
+                server_pubkey: server1_pk,
+                fresh_for_ms: 90_000,
+                expires_at_ms: t0 + 90_000,
+            },
+            MessageSigner::new(&proc1_key, 1),
+        )
+        .unwrap()
+        .heard_at(t0);
+
+        let desc2 = TurnServiceDescriptor::new_signed(
+            TurnServiceDescriptorBody {
+                did: proc2_key.delegator_did(),
+                public_key: proc2_key
+                    .delegation()
+                    .delegator_verification_pubkey()
+                    .unwrap(),
+                delegatee_public_key: proc2_key.delegatee_public_key(),
+                process_epoch: epoch2,
+                network_id: 1,
+                turn_url: "turn://turn-b.rings.rs:3478".to_string(),
+                server_pubkey: server2_pk,
+                fresh_for_ms: 90_000,
+                expires_at_ms: t0 + 90_050,
+            },
+            MessageSigner::new(&proc2_key, 1),
+        )
+        .unwrap()
+        .heard_at(t0);
+
+        // Forged delegatee_public_key (signing with proc1_key while claiming proc2's delegatee_public_key)
+        // must be rejected both at signing and verification.
+        assert!(TurnServiceDescriptor::new_signed(
+            TurnServiceDescriptorBody {
+                delegatee_public_key: proc2_key.delegatee_public_key(),
+                ..desc1.body.clone()
+            },
+            MessageSigner::new(&proc1_key, 1),
+        )
+        .is_err());
+
+        let by_proc = TurnServiceDescriptor::latest_valid_by_process(
+            vec![desc1.clone(), desc2.clone()],
+            t0,
+            1,
+            false,
+        );
+        assert_eq!(
+            by_proc.len(),
+            2,
+            "two processes sharing one DID with distinct process_epochs must both remain addressable"
+        );
+
+        let (pending, rpc_req) =
+            prepare_turn_ticket_onion_invoke(by_proc, None, Duration::from_secs(30), None).unwrap();
+        assert_eq!(rpc_req.eligible_stages.as_ref().unwrap().len(), 2);
+
+        // Completing against process #1's stage response selects server1_pk (`turn-a.rings.rs`)
+        // even though process #2 had a later `expires_at_ms`!
+        let fake_server1 = SecretKey::random();
+        let desc1_matching = TurnServiceDescriptor::new_signed(
+            TurnServiceDescriptorBody {
+                server_pubkey: fake_server1.pubkey(),
+                ..desc1.body
+            },
+            MessageSigner::new(&proc1_key, 1),
+        )
+        .unwrap()
+        .heard_at(t0);
+        let (pending2, _) = prepare_turn_ticket_onion_invoke(
+            vec![desc1_matching, desc2],
+            None,
+            Duration::from_secs(30),
+            None,
+        )
+        .unwrap();
+        let eph_pk = pending2.ephemeral_client_key.pubkey();
+        let ticket =
+            SignedTurnSessionTicket::issue([0x55; 16], eph_pk, t0 + 30_000, &fake_server1).unwrap();
+        let out_frame = encode_turn_ticket_outcome(&TurnTicketOutcome::Issued {
+            ticket,
+            server_pubkey: fake_server1.pubkey(),
+        })
+        .unwrap();
+        let acquired = pending2
+            .complete(
+                &OnionInvokeRpcResponse {
+                    stage_did: proc1_key.delegator_did(),
+                    stage_process_epoch: epoch1,
+                    stage_delegatee_public_key: proc1_key.delegatee_public_key(),
+                    output_base64: base64::encode(&out_frame),
+                },
+                t0,
+            )
+            .unwrap();
+        assert!(acquired.ice_url.ends_with("@turn-a.rings.rs:3478"));
+        assert_eq!(acquired.turn_process_epoch, epoch1);
+        drop(pending);
     }
 
     struct OverlayTestNode {
@@ -1704,9 +2241,10 @@ mod tests {
     }
 
     impl OverlayTestNode {
-        async fn new(
+        async fn new_with_options(
             role: OnionRole<rings_node::onion::OnionExitOffer>,
             turn_offer: Option<TurnServiceOffer>,
+            install_custom_rpc: bool,
         ) -> Result<Self> {
             let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
             let advertise_presence = role.registers_relay();
@@ -1721,7 +2259,9 @@ mod tests {
             let provider = Arc::new(Provider::from_processor(Arc::clone(&processor)));
             let _ = provider.onion_pipeline()?;
             provider.set_backend()?;
-            install_turn_client_rpc(&provider)?;
+            if install_custom_rpc {
+                install_turn_client_rpc(&provider)?;
+            }
             let stop = rings_core::lifecycle::StopSource::new();
             let listen_provider = Arc::clone(&provider);
             let listen_stop = stop.token();
@@ -1737,6 +2277,13 @@ mod tests {
             })
         }
 
+        async fn new(
+            role: OnionRole<rings_node::onion::OnionExitOffer>,
+            turn_offer: Option<TurnServiceOffer>,
+        ) -> Result<Self> {
+            Self::new_with_options(role, turn_offer, false).await
+        }
+
         async fn shutdown(mut self) -> Result<()> {
             self.stop.request_stop();
             while self.tasks.join_next().await.is_some() {}
@@ -1745,7 +2292,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn turn_ticket_onion_invoke_issues_unlinkable_ice_url_and_caps_reservation_flood(
+    async fn turn_ticket_onion_invoke_works_over_builtin_rings_node_rpc_and_relays_udp(
     ) -> Result<()> {
         let t0: u128 = rings_core::utils::get_epoch_ms();
         let turn_clock = Arc::new(ManualClock::new(t0));
@@ -1774,7 +2321,10 @@ mod tests {
         let advertised_turn_url = format!("turn://1.1.1.1:{}", turn_server.local_addr().port());
         let turn_offer = TurnServiceOffer::new(&advertised_turn_url, turn_server.server_pubkey())?;
 
-        let client = OverlayTestNode::new(OnionRole::Client, None).await?;
+        // Notice `install_custom_rpc = false`: `client` is a stock `rings-node` Provider with NO
+        // `install_turn_client_rpc` installed, matching shipped `librings_node` FFI and `rings-node`
+        // browser WASM builds!
+        let client = OverlayTestNode::new_with_options(OnionRole::Client, None, false).await?;
         let turn_node = OverlayTestNode::new(
             OnionRole::Invoke(turn_ticket_invoke_offer(invoke_policy)?),
             Some(turn_offer),
@@ -1791,8 +2341,6 @@ mod tests {
             relays.push(OverlayTestNode::new(OnionRole::Relay, None).await?);
         }
 
-        // Connect full mesh among client, turn_node, and the 4 relays so any guard-closed 1-stage
-        // loop (`H = 5`, requiring 4 distinct relay registrants) can route end-to-end.
         let all_refs = std::iter::once(&client)
             .chain(std::iter::once(&turn_node))
             .chain(relays.iter())
@@ -1803,21 +2351,24 @@ mod tests {
             }
         }
 
-        // Publish each registrant's own signed descriptors directly to the live DHT over the
-        // connected mesh (`OnlineNodeDescriptor`, `OnionInvokeDescriptor`, `TurnServiceDescriptor`).
         turn_node.processor.register_all_once().await?;
         for r in &relays {
             r.processor.register_all_once().await?;
         }
 
-        // 1. Client acquires ticket #1 anonymously over the Sphinx loop.
+        // 1. Client acquires ticket #1 via `request_turn_ticket` (which uses `lookup_registry_raw` +
+        //    `onion_invoke_raw`), requesting 3600s and verifying server clamps to 60s (`DEFAULT_MAX_RESERVATION_TTL`).
         let acquired_1 = with_hang_guard(
             "acquire turn ticket #1",
             Duration::from_secs(10),
-            request_turn_ticket(&client.provider, Duration::from_secs(30), None),
+            request_turn_ticket(&client.provider, Duration::from_secs(3_600), None),
         )
         .await?;
         assert!(acquired_1.ice_url.starts_with("turn://tkt-"));
+        assert_eq!(
+            acquired_1.expires_at_ms,
+            t0 + rings_turn::DEFAULT_MAX_RESERVATION_TTL.as_millis()
+        );
         assert!(!acquired_1
             .ice_url
             .contains(&client.processor.did().to_string()));
@@ -1853,24 +2404,45 @@ mod tests {
             "unexpected rejection error: {third_err}"
         );
 
-        // 4. Verify `requestTurnTicket` via `Provider::request_internal` (registered externally via
-        //    `install_turn_client_rpc`) succeeds once expired reservations release their permits.
-        turn_clock.set(t0 + 30_001);
-        let rpc_val = with_hang_guard(
-            "requestTurnTicket internal RPC",
+        // 4. Advance clock past 60s so both unclaimed reservations expire, then drive ONLY
+        //    `Provider::request_internal("lookupRegistry")` + `Provider::request_internal("onionInvoke")`
+        //    (the exact JSON-RPC surface of shipped `librings_node` C FFI & `rings-node` WASM!) and
+        //    verify an unmodified TURN UDP client allocates and relays datagrams with the ticket!
+        turn_clock.set(t0 + 60_001);
+        let raw_lookup_json = with_hang_guard(
+            "lookupRegistry builtin RPC",
             Duration::from_secs(10),
             client.provider.request_internal(
-                "requestTurnTicket".to_string(),
-                serde_json::json!({ "ttl_ms": 30_000 }),
+                "lookupRegistry".to_string(),
+                serde_json::json!({ "topic": TURN_SERVICES_TOPIC }),
             ),
         )
         .await?;
-        let acquired_via_rpc: AcquiredTurnTicket = serde_json::from_value(rpc_val)?;
-        let parsed_ice: rings_transport::ice_server::IceServer =
-            acquired_via_rpc
-                .ice_url
-                .parse()
-                .map_err(|e| Error::InvalidConfig(format!("invalid ICE URL: {e}")))?;
+        let lookup_resp: LookupRegistryResponse = serde_json::from_value(raw_lookup_json)?;
+        let services = decode_turn_services_from_registry_response(&lookup_resp, false)?;
+        assert_eq!(services.len(), 1);
+        let (pending, invoke_req) = prepare_turn_ticket_onion_invoke(
+            services,
+            Some(client.processor.did()),
+            Duration::from_secs(30),
+            None,
+        )?;
+        let raw_invoke_json = with_hang_guard(
+            "onionInvoke builtin RPC",
+            Duration::from_secs(10),
+            client.provider.request_internal(
+                "onionInvoke".to_string(),
+                serde_json::to_value(&invoke_req)?,
+            ),
+        )
+        .await?;
+        let invoke_resp: OnionInvokeRpcResponse = serde_json::from_value(raw_invoke_json)?;
+        let acquired_via_builtin_rpc = pending.complete(&invoke_resp, t0 + 60_001)?;
+
+        let parsed_ice: rings_transport::ice_server::IceServer = acquired_via_builtin_rpc
+            .ice_url
+            .parse()
+            .map_err(|e| Error::InvalidConfig(format!("invalid ICE URL: {e}")))?;
         assert!(parsed_ice.username.starts_with("tkt-"));
         assert!(!parsed_ice.credential.is_empty());
 

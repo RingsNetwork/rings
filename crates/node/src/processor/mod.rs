@@ -469,6 +469,17 @@ impl Processor {
         .await
     }
 
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s satisfy `predicate`.
+    pub async fn build_onion_pipeline_route_filtered(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+        predicate: impl Fn(&crate::onion::OnionInvokeDescriptor) -> bool,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, predicate)
+            .await
+    }
+
     /// Fetch a DHT registry `topic` and return the newest valid [`crate::descriptor::SignedDescriptor`]
     /// per DID at the processor's current clock (#918).
     pub async fn lookup_registry_descriptors<D>(
@@ -497,6 +508,10 @@ impl Processor {
     }
 
     /// Execute one registration pass for every configured [`RegistrationTask`] on this processor.
+    ///
+    /// Hidden test/simulation helper: production nodes publish registrations exclusively through
+    /// the cooperative daemon started by [`Self::listen`] / [`Self::listen_with`].
+    #[doc(hidden)]
     pub async fn register_all_once(&self) -> Result<()> {
         let context = self.registration_context();
         for task in &self.registration_tasks {

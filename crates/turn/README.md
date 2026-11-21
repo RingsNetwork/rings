@@ -139,6 +139,9 @@ Options:
       --max-reservations <MAX_RESERVATIONS>
           Maximum number of unclaimed session-ticket reservations stored concurrently (0 disables)
           [env: RINGS_TURN_MAX_RESERVATIONS=] [default: 256]
+      --max-reservation-ttl-secs <MAX_RESERVATION_TTL_SECS>
+          Maximum lifetime in seconds of an unclaimed session-ticket reservation
+          [env: RINGS_TURN_MAX_RESERVATION_TTL_SECS=] [default: 60]
   -h, --help
           Print help
   -V, --version

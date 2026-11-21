@@ -32,6 +32,13 @@ pub const DEFAULT_MAX_ALLOCATIONS: usize = 1024;
 /// concurrently per server (#1292).
 pub const DEFAULT_MAX_RESERVATIONS: usize = 256;
 
+/// Default maximum lifetime of an unclaimed [`crate::SignedTurnSessionTicket`] reservation (`60s`).
+///
+/// Bounding unclaimed ticket lifetime independently of `MAXIMUM_ALLOCATION_LIFETIME` (`3600s`)
+/// ensures anonymous `turn.ticket` requests cannot hold reservation slots past a brief handshake
+/// window.
+pub const DEFAULT_MAX_RESERVATION_TTL: Duration = Duration::from_secs(60);
+
 /// Default maximum number of active peer IP permissions per TURN allocation.
 pub const DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION: usize = 64;
 
@@ -279,6 +286,8 @@ pub struct TurnServerConfig {
     /// Maximum number of unclaimed [`crate::SignedTurnSessionTicket`] reservations retained
     /// concurrently (#1292). `0` disables ticket reservations.
     pub max_reservations: usize,
+    /// Upper bound applied to unclaimed [`crate::SignedTurnSessionTicket`] reservation TTLs.
+    pub max_reservation_ttl: Duration,
     /// Maximum number of active peer IP permissions retained concurrently per allocation.
     pub max_permissions_per_allocation: usize,
     /// ChannelBind lifetime (`Duration::ZERO` uses the RFC 5766 default of 10 minutes).
@@ -301,6 +310,7 @@ impl std::fmt::Debug for TurnServerConfig {
             .field("max_nonces", &self.max_nonces)
             .field("max_allocations", &self.max_allocations)
             .field("max_reservations", &self.max_reservations)
+            .field("max_reservation_ttl", &self.max_reservation_ttl)
             .field(
                 "max_permissions_per_allocation",
                 &self.max_permissions_per_allocation,
@@ -323,6 +333,7 @@ impl Default for TurnServerConfig {
             max_nonces: DEFAULT_MAX_NONCES,
             max_allocations: DEFAULT_MAX_ALLOCATIONS,
             max_reservations: DEFAULT_MAX_RESERVATIONS,
+            max_reservation_ttl: DEFAULT_MAX_RESERVATION_TTL,
             max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::default(),
@@ -349,6 +360,7 @@ impl TurnServerConfig {
             max_nonces: DEFAULT_MAX_NONCES,
             max_allocations: DEFAULT_MAX_ALLOCATIONS,
             max_reservations: DEFAULT_MAX_RESERVATIONS,
+            max_reservation_ttl: DEFAULT_MAX_RESERVATION_TTL,
             max_permissions_per_allocation: DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION,
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::AllowAnyDelegation,

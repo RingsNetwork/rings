@@ -64,6 +64,9 @@ Options:
       --max-reservations <MAX_RESERVATIONS>
           Maximum number of unclaimed session-ticket reservations stored concurrently (0 disables)
           [env: RINGS_TURN_MAX_RESERVATIONS=] [default: 256]
+      --max-reservation-ttl-secs <MAX_RESERVATION_TTL_SECS>
+          Maximum lifetime in seconds of an unclaimed session-ticket reservation
+          [env: RINGS_TURN_MAX_RESERVATION_TTL_SECS=] [default: 60]
   -h, --help
           Print help
   -V, --version
@@ -108,11 +111,10 @@ ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=2494
 
 ## DHT Service Discovery and Anonymous `turn.ticket` Issuance (`rings-turn-service`)
 
-Neither `rings-core` nor `rings-node` embeds TURN or WebRTC service primitives. Instead, the external `rings-turn-service` crate (`rings-turn-service init` / `rings-turn-service run --config ...`) composes `rings-turn` over `rings-node`'s generic DHT lease registry and Sphinx `invoke` pipeline: it publishes a signed `TurnServiceDescriptor` onto the `turn_services` DHT topic (rejecting loopback, private, link-local, ULA, and unspecified `turn_url` hosts at both offer validation and client discovery) and issues unlinkable `SessionTicket` credentials over the `turn.ticket` onion `invoke` backend (`invoke<64,1024,500ms>`):
+Neither `rings-core` nor `rings-node` embeds TURN or WebRTC service primitives. Instead, the external `rings-turn-service` crate (`rings-turn-service init` / `rings-turn-service run --config ...`) runs a full foreground Rings node daemon (persistent `NodeStores` including authoritative replay storage, `BootstrapSupervisor`, HTTP JSON-RPC endpoints, and delegation horizon renewal) via `rings_node::native::daemon::run_foreground_node`, composing `rings-turn` over `rings-node`'s generic DHT lease registry and Sphinx `invoke` pipeline. It publishes a signed `TurnServiceDescriptor` (`(did, delegatee_public_key, process_epoch, server_pubkey, turn_url)`) onto the `turn_services` DHT topic and issues unlinkable `SessionTicket` credentials over the `turn.ticket` onion `invoke` backend (`invoke<64,1024,500ms>`), holding zero OS relay sockets until the client authenticates `Allocate`:
 
 ```yaml
 node:
-  advertise_presence: true
   advertise_onion_relay: true
 turn_service:
   listen_addr: 0.0.0.0:3478
@@ -122,12 +124,13 @@ turn_service:
   max_port: 65535
   max_allocations: 1024
   max_reservations: 256
+  max_reservation_ttl_secs: 60
   issue_tickets: true
   ticket_invoke_policy:
     max_concurrent: 16
     max_invocations_per_minute: 120
 ```
 
-Any client node (native Rust `rings_turn_service::request_turn_ticket`, C FFI / JSON-RPC via `rings_turn_service::install_turn_client_rpc` + `requestTurnTicket`, or browser WASM `lookupTurnServices` / `requestTurnTicket`) discovers live `TurnServiceDescriptor` entries from `turn_services`, sends `(ephemeral_client_pubkey, ttl_ms)` through a guard-closed Sphinx `invoke` loop to `turn.ticket`, verifies the returned `SignedTurnSessionTicket` against the descriptor's `server_pubkey`, and receives a ready `turn://tkt-…:<pass>@host:port` ICE URL.
+Any client node (native Rust `rings_turn_service::request_turn_ticket`, shipped `librings_node` C FFI / `rings-node` browser WASM via `rings-node`'s generic `"lookupRegistry"` + `"onionInvoke"` RPC primitives, or `rings-turn-service` WASM `lookupTurnServices` / `requestTurnTicket`) discovers live `TurnServiceDescriptor` entries from `turn_services`, sends `(ephemeral_client_pubkey, ttl_ms)` through a guard-closed Sphinx `invoke` loop matched to the exact `(did, process_epoch, delegatee_public_key)` stage, verifies the returned `SignedTurnSessionTicket` against the descriptor's `server_pubkey`, and receives a ready `turn://tkt-…:<pass>@host:port` ICE URL.
 
 In this single-hop private TURN mode, the TURN server necessarily observes the client's IP and remote peer's IP when relaying media, **but never learns the client's `Did` or overlay identity**.

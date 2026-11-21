@@ -1,10 +1,6 @@
 //! Wire golden vectors for `rings-turn-service` (`TurnServiceDescriptor` and `turn.ticket`
 //! fixed-width frames), pinned against [`WIRE_VERSION`] outside `rings-core` and `rings-node`.
 
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
-use std::net::SocketAddrV4;
-
 use rings_core::consts::DEFAULT_DELEGATION_TTL_MS;
 use rings_core::delegation::Account;
 use rings_core::delegation::DelegateeKey;
@@ -17,6 +13,7 @@ use rings_core::message::WIRE_VERSION;
 use rings_node::descriptor::RegistryElement;
 use rings_node::descriptor::SignedDescriptor;
 use rings_node::descriptor::SignedDescriptorBody;
+use rings_node::onion::OnionProcessEpoch;
 use rings_turn::SignedTurnSessionTicket;
 use serde_reflection::Samples;
 use serde_reflection::Tracer;
@@ -37,7 +34,7 @@ use crate::TURN_TICKET_INVOKE_SHAPE;
 
 const PINNED: (u16, &str) = (
     4,
-    "18933d5613c5f6420dc529acde391ab94d39a84c349e42fa71df3dbdb48affd5",
+    "6a86b00cd6771cdf4ff2a4f0afc311bb3e82f426aeeae853029d76849d5d6b3f",
 );
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -110,6 +107,7 @@ fn turn_service_wire_goldens_match_pinned_version() {
     let server_key = fixture_secret(BOB_SERVER_SEED);
     let server_pubkey = server_key.pubkey();
     let ephemeral_pk = alice.delegatee_key.delegatee_public_key();
+    let process_epoch = OnionProcessEpoch::new([0x33; 16]);
 
     let mut tracer = Tracer::new(TracerConfig::default());
     let mut samples = Samples::new();
@@ -117,6 +115,8 @@ fn turn_service_wire_goldens_match_pinned_version() {
     let body = TurnServiceDescriptorBody {
         did: alice.did,
         public_key: alice.public_key.clone(),
+        delegatee_public_key: ephemeral_pk,
+        process_epoch,
         network_id: GOLDEN_NETWORK_ID,
         turn_url: "turn://turn.rings.rs:3478".to_string(),
         server_pubkey,
@@ -157,11 +157,9 @@ fn turn_service_wire_goldens_match_pinned_version() {
     .unwrap();
     let issued = TurnTicketOutcome::Issued {
         ticket: signed_ticket,
-        relay_addr: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 49152)),
         server_pubkey,
     };
     tracer.trace_value(&mut samples, &issued).unwrap();
-    tracer.trace_type::<SocketAddr>(&samples).unwrap();
     tracer.trace_type::<TurnTicketOutcome>(&samples).unwrap();
     tracer.trace_type::<TurnTicketRejection>(&samples).unwrap();
 

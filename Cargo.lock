@@ -4845,6 +4845,7 @@ version = "1.0.0-pre.6"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.13.1",
  "bytes",
  "clap",
  "js-sys",

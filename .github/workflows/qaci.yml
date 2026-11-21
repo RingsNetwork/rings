@@ -246,6 +246,9 @@ jobs:
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
+      - name: Run clippy for turn-service wasm
+        run: cargo clippy -p rings-turn-service --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+
   wasm_frontend:
     name: Build and test the frontend and dweb for wasm
     timeout-minutes: 45

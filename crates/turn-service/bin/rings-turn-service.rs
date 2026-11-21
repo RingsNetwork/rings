@@ -6,19 +6,16 @@ use std::fs;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
-use rings_core::lifecycle::StopSource;
+use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::config::Config as NodeConfig;
-use rings_node::provider::Provider;
-use rings_turn::TurnServer;
-use rings_turn_service::announce_turn_service;
-use rings_turn_service::install_turn_client_rpc;
-use rings_turn_service::register_turn_ticket_invoke_backend;
+use rings_node::native::daemon::NativeNodeRunOptions;
+use rings_node::seed::Seed;
+use rings_node::util::loader::ResourceLoader;
+use rings_turn_service::run_turn_service_daemon;
 use rings_turn_service::TurnServiceConfig;
 use rings_turn_service::TurnServiceDaemonConfig;
 use tracing_subscriber::EnvFilter;
@@ -45,11 +42,31 @@ enum Commands {
         #[arg(long, default_value = "203.0.113.10")]
         public_ip: IpAddr,
     },
-    /// Start the TURN server, publish `TurnServiceDescriptor` to the DHT, and serve `turn.ticket`.
+    /// Start the TURN server and full Rings foreground node (persistent `NodeStores`, bootstrap
+    /// supervisor, JSON-RPC endpoints, delegation horizon, `TurnServiceDescriptor` DHT publisher,
+    /// and `turn.ticket` onion `invoke` handler).
     Run {
         /// Path to the `TurnServiceDaemonConfig` YAML file.
         #[arg(short, long)]
         config: PathBuf,
+        /// Optional root directory overriding `node.data_storage` and `node.measure_storage`.
+        #[arg(long)]
+        storage_path: Option<String>,
+        /// Optional storage capacity override applied when `--storage-path` is set.
+        #[arg(long)]
+        storage_capacity: Option<u32>,
+        /// Optional seed file or URL whose peers are appended to `node.bootstrap.peers`.
+        #[arg(long)]
+        bootstrap_seed: Option<String>,
+        /// Optional API authentication token file path override.
+        #[arg(long)]
+        api_token_path: Option<String>,
+        /// Optional allowed CORS origin(s) for the HTTP JSON-RPC endpoints.
+        #[arg(long = "api-allowed-origin")]
+        api_allowed_origins: Vec<String>,
+        /// Allow binding the external HTTP JSON-RPC API on non-loopback addresses.
+        #[arg(long)]
+        allow_remote_external_api: bool,
     },
 }
 
@@ -85,87 +102,40 @@ async fn main() -> anyhow::Result<()> {
                 .context("serializing TurnServiceDaemonConfig to YAML")?;
             fs::write(&output, yaml)
                 .with_context(|| format!("writing config to {}", output.display()))?;
-            tracing::info!(path = %output.display(), "wrote sample rings-turn-service configuration");
+            load_or_create_api_token(&output, daemon_cfg.node.api_token_path.as_deref())?;
+            tracing::info!(
+                path = %output.display(),
+                "wrote sample rings-turn-service configuration and initialized API token file"
+            );
             Ok(())
         }
-        Commands::Run { config } => {
+        Commands::Run {
+            config,
+            storage_path,
+            storage_capacity,
+            bootstrap_seed,
+            api_token_path,
+            api_allowed_origins,
+            allow_remote_external_api,
+        } => {
+            let config_path_str = config.to_string_lossy().to_string();
             let raw = fs::read_to_string(&config)
                 .with_context(|| format!("reading config from {}", config.display()))?;
-            let daemon_cfg: TurnServiceDaemonConfig = serde_saphyr::from_str(&raw)
+            let mut daemon_cfg: TurnServiceDaemonConfig = serde_saphyr::from_str(&raw)
                 .with_context(|| format!("parsing YAML config {}", config.display()))?;
-            let (builder, clock) = daemon_cfg
-                .to_processor_builder()
-                .context("validating TurnServiceDaemonConfig")?;
-
-            let server_cfg = daemon_cfg
-                .turn_service
-                .to_turn_server_config(clock)
-                .context("building TurnServerConfig")?;
-            let turn_server = Arc::new(
-                TurnServer::start(server_cfg)
+            if let Some(source) = bootstrap_seed {
+                let seed = Seed::load(source.as_str())
                     .await
-                    .context("starting TurnServer")?,
-            );
-            let offer = match daemon_cfg.turn_service.service_offer(&turn_server) {
-                Ok(offer) => offer,
-                Err(err) => {
-                    let _ = turn_server.close().await;
-                    return Err(err.into());
-                }
-            };
-
-            let builder = builder.replay_storage(Box::new(rings_core::storage::MemStorage::new()));
-            let processor = match announce_turn_service(builder, offer).build() {
-                Ok(p) => Arc::new(p),
-                Err(err) => {
-                    let _ = turn_server.close().await;
-                    return Err(err.into());
-                }
-            };
-
-            let provider = Arc::new(Provider::from_processor(Arc::clone(&processor)));
-            if daemon_cfg.turn_service.issue_tickets {
-                let pipeline = provider.onion_pipeline()?;
-                register_turn_ticket_invoke_backend(
-                    &pipeline,
-                    daemon_cfg.turn_service.ticket_invoke_policy,
-                    Arc::clone(&turn_server),
-                )?;
+                    .with_context(|| format!("loading bootstrap seed {source}"))?;
+                daemon_cfg.node.bootstrap.peers.extend(seed.peers);
             }
-            install_turn_client_rpc(&provider)?;
-            provider.set_backend()?;
-
-            tracing::info!(
-                did = %processor.did(),
-                turn_listen = %turn_server.local_addr(),
-                turn_advertised = %turn_server.advertised_addr(),
-                issue_tickets = daemon_cfg.turn_service.issue_tickets,
-                "rings-turn-service started"
-            );
-
-            let stop = StopSource::new();
-            let listen_provider = Arc::clone(&provider);
-            let listen_stop = stop.token();
-            let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(async move {
-                listen_provider
-                    .listen_with(listen_stop)
-                    .await
-                    .context("provider listen_with failed")
-            });
-
-            tokio::signal::ctrl_c()
-                .await
-                .context("waiting for Ctrl-C signal")?;
-            tracing::info!("shutting down rings-turn-service");
-            stop.request_stop();
-            let _ = tokio::time::timeout(Duration::from_secs(5), async {
-                while tasks.join_next().await.is_some() {}
-            })
-            .await;
-            let _ = turn_server.close().await;
-            let _ = processor.close().await;
-            Ok(())
+            let mut options = NativeNodeRunOptions::new(config_path_str, daemon_cfg.node);
+            options.storage_path = storage_path;
+            options.storage_capacity = storage_capacity;
+            options.api_token_path_override = api_token_path;
+            options.api_allowed_origins_override = api_allowed_origins;
+            options.allow_remote_external_api_override = allow_remote_external_api;
+            run_turn_service_daemon(options, daemon_cfg.turn_service).await
         }
     }
 }

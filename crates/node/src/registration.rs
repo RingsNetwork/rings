@@ -310,6 +310,11 @@ impl<'a> RegistrationContext<'a> {
         self.processor.delegatee_key()
     }
 
+    /// Return the current process epoch (`OnionProcessEpoch`) of this node.
+    pub fn onion_process_epoch(&self) -> crate::onion::OnionProcessEpoch {
+        self.processor.onion_process_epoch().get()
+    }
+
     /// The authority that signs this node's descriptors: its delegatee key inside its overlay.
     pub fn message_signer(&self) -> MessageSigner<DelegateeKey> {
         MessageSigner::new(self.delegatee_key(), self.network_id())

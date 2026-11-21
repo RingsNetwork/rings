@@ -41,6 +41,8 @@ pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_MAX_RESERVATIONS;
 #[cfg(not(target_family = "wasm"))]
+pub use config::DEFAULT_MAX_RESERVATION_TTL;
+#[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 #[cfg(not(target_family = "wasm"))]
 pub use config::DEFAULT_TURN_PORT;
@@ -2102,7 +2104,6 @@ mod tests {
         let eph_key = SecretKey::random();
         let ttl = Duration::from_secs(60);
         let reservation = server.reserve_exit_session(eph_key.pubkey(), ttl).await?;
-        let reserved_relay_addr = reservation.relay_addr;
         let creds = reservation
             .ticket
             .to_turn_credentials(&eph_key, server.server_pubkey())?;
@@ -2124,11 +2125,7 @@ mod tests {
         turn_client.listen().await?;
 
         let allocated_conn = turn_client.allocate().await?;
-        assert_eq!(
-            allocated_conn.local_addr()?,
-            reserved_relay_addr,
-            "Allocate must return the reserved XOR-RELAYED-ADDRESS"
-        );
+        let allocated_relay_addr = allocated_conn.local_addr()?;
         assert_eq!(
             server.active_reservation_count().await,
             0,
@@ -2146,12 +2143,12 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(5), peer_socket.recv_from(&mut peer_buf))
                 .await
                 .expect("peer should receive datagram from TURN relay")?;
-        assert_eq!(observed_relay_src, reserved_relay_addr);
+        assert_eq!(observed_relay_src, allocated_relay_addr);
         assert_eq!(&peer_buf[..n], outbound_msg);
 
         let inbound_msg = b"single-hop-session-ticket-inbound";
         peer_socket
-            .send_to(inbound_msg, reserved_relay_addr)
+            .send_to(inbound_msg, allocated_relay_addr)
             .await?;
 
         let mut client_buf = [0u8; 256];
@@ -2194,28 +2191,39 @@ mod tests {
     #[tokio::test]
     async fn turn_server_reservations_honor_injected_clock_and_reservation_flood_cap() -> Result<()>
     {
-        let t0: u128 = 2_000_000_000_000;
+        let t0: u128 = rings_core::utils::get_epoch_ms();
         let clock = Arc::new(ManualClock::new(t0));
         let mut cfg = TurnServerConfig::loopback_ephemeral();
         cfg.clock = clock.clone();
-        cfg.max_allocations = 4;
+        // Set `max_allocations = 1` and `max_reservations = 2` to verify that unclaimed
+        // reservations hold neither OS sockets nor `max_allocations` permits before `Allocate`,
+        // and that requested TTLs exceeding `max_reservation_ttl` (`60s` default) are clamped.
+        cfg.max_allocations = 1;
         cfg.max_reservations = 2;
         let server = TurnServer::start(cfg).await?;
 
         let key1 = SecretKey::random();
         let res1 = server
-            .reserve_exit_session(key1.pubkey(), Duration::from_secs(30))
+            .reserve_exit_session(key1.pubkey(), Duration::from_secs(3_600))
             .await?;
-        assert_eq!(res1.ticket.ticket.expires_at_ms, t0 + 30_000);
+        assert_eq!(
+            res1.ticket.ticket.expires_at_ms,
+            t0 + DEFAULT_MAX_RESERVATION_TTL.as_millis(),
+            "excessive reservation TTL must be clamped to max_reservation_ttl (60s)"
+        );
 
         let key2 = SecretKey::random();
         let _res2 = server
             .reserve_exit_session(key2.pubkey(), Duration::from_secs(30))
             .await?;
         assert_eq!(server.active_reservation_count().await, 2);
+        assert_eq!(
+            server.allocations_info(None).await?.len(),
+            0,
+            "unclaimed reservations must not consume active allocation slots"
+        );
 
-        // Unauthenticated reservation flood cannot exceed `max_reservations = 2` even though
-        // `max_allocations = 4` still has headroom.
+        // Unauthenticated reservation flood cannot exceed `max_reservations = 2`.
         for _ in 0..8 {
             let flood_key = SecretKey::random();
             let err = server
@@ -2228,7 +2236,8 @@ mod tests {
         }
         assert_eq!(server.active_reservation_count().await, 2);
 
-        // Normal authenticated client allocation still succeeds using remaining `max_allocations`.
+        // Normal authenticated client allocation still succeeds using the single `max_allocations = 1`
+        // slot while 2 unclaimed reservations are active.
         let did_key = SecretKey::random();
         let creds = did_key.turn_credentials(server.server_pubkey())?;
         let client_conn = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
@@ -2247,14 +2256,14 @@ mod tests {
         client.listen().await?;
         let alloc_conn = client.allocate().await?;
 
-        // Advancing the injected ManualClock past 30s expires unclaimed reservations and frees capacity.
-        clock.set(t0 + 30_001);
+        // Advancing the injected ManualClock past 60s expires both unclaimed reservations.
+        clock.set(t0 + 60_001);
         assert_eq!(server.active_reservation_count().await, 0);
         let key3 = SecretKey::random();
         let res3 = server
             .reserve_exit_session(key3.pubkey(), Duration::from_secs(30))
             .await?;
-        assert_eq!(res3.ticket.ticket.expires_at_ms, t0 + 60_001);
+        assert_eq!(res3.ticket.ticket.expires_at_ms, t0 + 90_001);
 
         alloc_conn.close().await?;
         client.close().await?;

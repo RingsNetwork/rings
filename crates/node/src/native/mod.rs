@@ -7,6 +7,8 @@ pub mod bootstrap;
 pub mod cli;
 /// Native-node configuration file model and defaults.
 pub mod config;
+// Documented by its own module docs, whose intra-doc links resolve in its scope.
+pub mod daemon;
 /// Native JSON-RPC endpoint server.
 pub mod endpoint;
 /// Foreground native TUN gateway supervision.
