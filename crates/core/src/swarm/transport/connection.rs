@@ -804,9 +804,11 @@ impl SwarmTransport {
         let Some(conn) = self.get_raw_connection(peer) else {
             return Err(Error::SwarmMissTransport(peer));
         };
-        conn.connection
-            .force_dummy_connection_state_without_callback(state)
-            .map_err(Error::Transport)
+        rings_transport::connections::force_dummy_connection_state_without_callback(
+            &conn.connection,
+            state,
+        )
+        .map_err(Error::Transport)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -818,16 +820,18 @@ impl SwarmTransport {
         let Some(conn) = self.get_raw_connection(peer) else {
             return Err(Error::SwarmMissTransport(peer));
         };
-        conn.connection
-            .force_dummy_channel_open_without_callback(open)
-            .map_err(Error::Transport)
+        rings_transport::connections::force_dummy_channel_open_without_callback(
+            &conn.connection,
+            open,
+        )
+        .map_err(Error::Transport)
     }
 
     /// Test builds: the payload frames this node's transport has dispatched, over every
     /// connection; see [`crate::tests::DispatchedFrames`].
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn dispatched_payload_frames_for_test(&self) -> usize {
-        self.transport.dispatched_payload_frames()
+        rings_transport::connections::dispatched_payload_frames(&self.transport)
     }
 
     pub(crate) async fn get_and_check_send_connection(

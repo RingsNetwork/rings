@@ -485,7 +485,6 @@ impl ReceiveWindow {
         self.lent.max(liability.saturating_sub(window.floor))
     }
 
-    #[cfg(any(test, feature = "dummy", rings_transport_webrtc))]
     /// The idle check: a lane that holds a share of the pool and admitted no frame since the
     /// last check is shrunk to its floor, in a new generation; returns the `Shrink` to send.
     pub(crate) fn idle_shrink(&mut self, window: CreditWindow) -> Option<LaneSignal> {

@@ -65,11 +65,12 @@ pub(crate) const MAX_COMPRESSED_PAYLOAD_BYTES: usize = MAX_CHANNEL_MESSAGE_SIZE;
 pub(crate) const MAX_COMPRESSED_FRAME_WIRE_BYTES: usize =
     FRAME_HEADER_LEN + MAX_COMPRESSED_PAYLOAD_BYTES;
 
-/// Pre-shared compile-time protocol dictionary for [`FrameKind::CompressedPayload`] (#1282).
+/// Pre-shared compile-time protocol dictionary for [`FrameKind::CompressedPayload`] (#1282, #1291).
 ///
-/// Contains canonical WebRTC SDP boilerplate lines, ICE candidate tokens, and Rings protocol
-/// strings so even the first occurrence inside a small `DhtControl` or `Storage` frame matches
-/// against the static dictionary window.
+/// Contains canonical WebRTC SDP boilerplate lines, ICE candidate tokens, Rings delegation domain
+/// tags, common endpoint URI prefixes, and canonical zero-run padding as pure static byte data so
+/// even the first occurrence inside a small `DhtControl` or `Storage` frame matches against the
+/// static dictionary window.
 pub(crate) const WIRE_COMPRESSION_DICT: &[u8] = concat!(
     "v=0\r\no=- ",
     " 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n",
@@ -89,10 +90,16 @@ pub(crate) const WIRE_COMPRESSION_DICT: &[u8] = concat!(
     " typ relay raddr 0.0.0.0 rport 0 generation 0\r\n",
     "rings-delegation-v1\nsecp256k1\n0x",
     "rings-delegation-v1\ned25519\n0x",
+    "rings-delegation-v1\nbls12381\n0x",
     "rings-core:message-verification:transaction",
     "rings-core:message-verification:payload",
     "https://",
+    "http://",
     "wss://",
+    "ws://",
+    "quic://",
+    "127.0.0.1:",
+    "0.0.0.0:",
     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
 )
 .as_bytes();

@@ -86,6 +86,8 @@ use self::frame_ledger::FrameLedger;
 pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::handshake::CounterOffer;
 pub(crate) use self::handshake::CreatedAnswer;
+pub(crate) use self::handshake::InitialOfferStep;
+pub(crate) use self::handshake::InitiatorReplyOutcome;
 pub use self::handshake::OfferReply;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
@@ -183,6 +185,7 @@ pub(crate) struct SwarmTransportParts {
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: SharedTransport,
+    delegatee_rotation_lock: Mutex<()>,
     delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
@@ -309,6 +312,7 @@ impl SwarmTransport {
         Self {
             network_id,
             transport,
+            delegatee_rotation_lock: Mutex::new(()),
             delegatee_key: RwLock::new(delegatee_key),
             dht,
             storage_redundancy: settings.storage_redundancy,
@@ -516,9 +520,48 @@ impl SwarmTransport {
             .clone()
     }
 
+    /// Validate `delegatee_key` without mutating state: verifies DID ownership, delegator
+    /// authorization signature, and strict signing-horizon advancement relative to the current key.
+    pub(crate) fn validate_next_delegatee_key(&self, delegatee_key: &DelegateeKey) -> Result<()> {
+        if delegatee_key.delegator_did() != self.dht.did {
+            return Err(Error::VerifySignatureFailed);
+        }
+        let delegation = delegatee_key.delegation();
+        delegation.verify_delegator_authorization_at(delegation.created_at_ms())?;
+        let next_horizon = crate::swarm::signing_horizon_ms(delegation.expires_at_ms());
+        let current = self
+            .delegatee_key
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current_horizon =
+            crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
+        if next_horizon <= current_horizon {
+            return Err(Error::DelegationExpiresWithinMargin);
+        }
+        Ok(())
+    }
+
+    /// Infallibly install an already-validated `delegatee_key`.
+    pub(crate) fn commit_delegatee_key_unchecked(&self, delegatee_key: DelegateeKey) {
+        *self
+            .delegatee_key
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = delegatee_key;
+    }
+
+    /// Acquire exclusive session-key rotation right, recovering across poisoned mutex state so
+    /// two-phase preparation and commit remain infallible and serialized against
+    /// [`Self::set_delegatee_key`].
+    pub(crate) fn lock_delegatee_rotation(&self) -> MutexGuard<'_, ()> {
+        self.delegatee_rotation_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Replace the session key this node signs with, when it carries a valid delegator
     /// signature for the same account DID and strictly advances the signing horizon.
     pub(crate) fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
+        let _rotation_guard = self.lock_delegatee_rotation();
         if delegatee_key.delegator_did() != self.dht.did {
             return Err(Error::VerifySignatureFailed);
         }
@@ -739,7 +782,7 @@ impl SwarmTransport {
 impl SwarmConnection {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn dummy_generation_id(&self) -> Result<String> {
-        self.connection.dummy_generation_id().map_err(Into::into)
+        rings_transport::connections::dummy_generation_id(&self.connection).map_err(Into::into)
     }
 
     /// Wait for one credit to send a frame on `lane`: the receiver's backpressure, untimed (see
@@ -797,7 +840,7 @@ impl SwarmConnection {
     pub(crate) fn physical_close_witness(
         &self,
     ) -> Result<rings_transport::connections::NativePhysicalCloseWitness> {
-        self.connection.physical_close_witness().map_err(Into::into)
+        rings_transport::connections::physical_close_witness(&self.connection).map_err(Into::into)
     }
 
     /// The largest single data-channel message this connection can carry — the negotiated

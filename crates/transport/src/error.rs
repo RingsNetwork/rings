@@ -17,12 +17,16 @@ pub enum IceServerError {
     /// Cannot extract host from url
     #[error("Cannot extract host from url")]
     UrlMissHost,
+
+    /// ICE server URL contains interior ASCII control characters (`\t`, `\r`, `\n`, etc.)
+    #[error("ICE server URL contains ASCII control characters")]
+    InvalidControlCharacter,
 }
 
 /// Errors produced by transport connections, pools, and backend adapters.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// WebRTC error: {0}
     #[error("WebRTC error: {0}")]
     Webrtc(#[from] webrtc::error::Error),
@@ -64,12 +68,31 @@ pub enum Error {
     #[error("Send byte accounting exceeds u64")]
     SendByteCountOverflow,
 
-    #[cfg(feature = "native-webrtc")]
+    /// An outbound wire frame (`{size}` bytes) exceeded the connection's `max_message_size` (`{max}` bytes).
+    #[error("Outbound transport frame of {size} bytes exceeds max_message_size {max}")]
+    FrameTooLarge {
+        /// Encoded wire frame size in bytes.
+        size: usize,
+        /// Negotiated or configured `max_message_size` in bytes.
+        max: usize,
+    },
+
+    /// External custom transport backend failure paired with its post-admission send class.
+    #[error("Custom transport backend error ({class:?}): {source}")]
+    Backend {
+        /// Whether the failure is ambiguous (post-irrevocable) or fatal (invariant/config).
+        class: BackendSendFailureClass,
+        /// Underlying backend error cause.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// No Tokio runtime is available to drive a native data-channel write.
     #[error("Native data-channel send requires an active Tokio runtime")]
     NativeSendRuntimeUnavailable,
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// An irrevocable native data-channel write exceeded its completion bound.
     #[error("Native data-channel send did not complete within {timeout_ms}ms")]
     NativeSendCompletionTimeout {
@@ -77,22 +100,22 @@ pub enum Error {
         timeout_ms: u128,
     },
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native task driving an irrevocable data-channel write stopped unexpectedly.
     #[error("Native data-channel send task stopped: {0}")]
     NativeSendTask(#[source] tokio::task::JoinError),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native data-channel send panicked while still owned by its caller.
     #[error("Native data-channel send panicked: {0}")]
     NativeSendPanic(String),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native task driving physical connection close stopped unexpectedly.
     #[error("Native connection close task stopped: {0}")]
     NativeConnectionCloseTask(#[source] tokio::task::JoinError),
 
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     /// A native connection did not close within its bounded retirement interval.
     #[error("Native connection retirement did not complete within {timeout_ms}ms")]
     NativeConnectionRetirementTimeout {
@@ -120,17 +143,25 @@ pub enum Error {
     #[error("Dummy irrevocable send task stopped before completion")]
     DummyIrrevocableSendTaskStopped,
 
-    /// WebRTC local SDP generation error: {0}
-    #[error("WebRTC local SDP generation error: {0}")]
+    /// Local transport handshake generation error: {0}
+    #[error("Local transport handshake generation error: {0}")]
     LocalHandshakeGenerationError(String),
 
-    /// The remote SDP advertised `a=max-message-size:{advertised}`, below the protocol floor
+    /// Remote transport handshake validation or application error: {0}
+    #[error("Remote transport handshake error: {0}")]
+    RemoteHandshakeApplyError(String),
+
+    /// Operation `{0}` is not supported by the active concrete transport backend.
+    #[error("Transport backend does not support operation `{0}`")]
+    UnsupportedOperation(String),
+
+    /// The remote peer advertised `max_message_size = {advertised}`, below the protocol floor
     /// `{minimum}` needed to carry every DHT control message unchunked.
     #[error(
-        "Remote SDP max-message-size {advertised} is below the minimum {minimum} required for unchunked DHT control"
+        "Remote transport max-message-size {advertised} is below the minimum {minimum} required for unchunked DHT control"
     )]
     RemoteMaxMessageSizeTooSmall {
-        /// Positive `a=max-message-size` advertised by the remote SDP.
+        /// Positive `max_message_size` advertised by the remote peer.
         advertised: usize,
         /// Minimum `max_message_size` required (`MIN_MAX_MESSAGE_SIZE`).
         minimum: usize,
@@ -206,7 +237,38 @@ pub enum TransportSendFailureClass {
     Fatal,
 }
 
+/// Post-admission failure classification available to external custom [`Error::Backend`]
+/// implementations.
+///
+/// Pre-acceptance errors (`SendPermitRevoked` and `LinkCreditClosed`) are reserved exclusively for
+/// pre-claim paths inside `rings-transport`, preserving Lemma (T) (`PreAcceptance` soundness) by
+/// construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum BackendSendFailureClass {
+    /// The send failed after or during an irrevocable backend write; the frame may or may not have
+    /// been transmitted.
+    Ambiguous,
+    /// Configuration, pairing, or pre-dispatch invariant failure that cannot be retried.
+    Fatal,
+}
+
 impl Error {
+    /// Construct an [`Error::Backend`] with [`BackendSendFailureClass::Ambiguous`].
+    pub fn backend_ambiguous(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend {
+            class: BackendSendFailureClass::Ambiguous,
+            source: Box::new(source),
+        }
+    }
+
+    /// Construct an [`Error::Backend`] with [`BackendSendFailureClass::Fatal`].
+    pub fn backend_fatal(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend {
+            class: BackendSendFailureClass::Fatal,
+            source: Box::new(source),
+        }
+    }
+
     /// Classify this transport error into its [`TransportSendFailureClass`], total over all
     /// compiled backend variants.
     pub const fn send_failure_class(&self) -> TransportSendFailureClass {
@@ -215,12 +277,20 @@ impl Error {
                 TransportSendFailureClass::PreAcceptance
             }
             Self::MessageNotDelivered(_) => TransportSendFailureClass::Ambiguous,
-            #[cfg(feature = "native-webrtc")]
+            Self::Backend {
+                class: BackendSendFailureClass::Ambiguous,
+                ..
+            } => TransportSendFailureClass::Ambiguous,
+            Self::Backend {
+                class: BackendSendFailureClass::Fatal,
+                ..
+            } => TransportSendFailureClass::Fatal,
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Self::Webrtc(_)
             | Self::NativeSendCompletionTimeout { .. }
             | Self::NativeSendTask(_)
             | Self::NativeSendPanic(_) => TransportSendFailureClass::Ambiguous,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Self::NativeSendRuntimeUnavailable
             | Self::NativeConnectionCloseTask(_)
             | Self::NativeConnectionRetirementTimeout { .. } => TransportSendFailureClass::Fatal,
@@ -238,7 +308,10 @@ impl Error {
             | Self::Timer(_)
             | Self::ChannelMessage(_)
             | Self::SendByteCountOverflow
+            | Self::FrameTooLarge { .. }
             | Self::LocalHandshakeGenerationError(_)
+            | Self::RemoteHandshakeApplyError(_)
+            | Self::UnsupportedOperation(_)
             | Self::RemoteMaxMessageSizeTooSmall { .. }
             | Self::UdpPortRange(_)
             | Self::ConnectionAlreadyExists(_)
@@ -279,9 +352,9 @@ mod tests {
 
         let ambiguous = [
             Error::MessageNotDelivered("closed".to_string()),
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendCompletionTimeout { timeout_ms: 100 },
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendPanic("boom".to_string()),
             #[cfg(feature = "dummy")]
             Error::DummyIrrevocableSendTaskStopped,
@@ -313,9 +386,9 @@ mod tests {
             Error::ForeignCredit("peer".to_string()),
             Error::CreditPumpUnavailable("peer".to_string()),
             Error::ChannelPoolEmpty,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeSendRuntimeUnavailable,
-            #[cfg(feature = "native-webrtc")]
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
             Error::NativeConnectionRetirementTimeout { timeout_ms: 100 },
             #[cfg(feature = "dummy")]
             Error::DummyConnectionRetiredBeforeDispatch,

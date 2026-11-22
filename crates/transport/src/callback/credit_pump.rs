@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use rings_runtime::MaybeSendSync;
 
+pub(crate) use super::inner::CREDIT_RESEND_PAUSE;
 use super::link_credit::LinkCredit;
 use super::link_send::FrameSink;
 use crate::connection_ref::ConnectionRef;
@@ -23,11 +24,6 @@ use crate::core::transport::TransportMessage;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
-
-/// How long a lane's credit pump pauses after a failed send before it sends the credit again:
-/// a send fails transiently when one of the connection's outbound channels is closed or not yet
-/// open, and the pause keeps a send that fails at once from spinning the pump.
-pub(crate) const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
 
 /// Send `signal` on `lane` of `connection`, once its data channels are open. A signal frame is
 /// never charged against credit, so the send never waits on the peer.

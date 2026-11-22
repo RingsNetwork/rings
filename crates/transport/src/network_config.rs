@@ -2,17 +2,12 @@
 
 use std::fmt;
 #[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
+    all(feature = "dummy", not(target_family = "wasm")),
+    all(feature = "native-webrtc", not(target_family = "wasm")),
     all(feature = "web-sys-webrtc", target_family = "wasm")
 ))]
 use std::sync::Arc;
 
-#[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    all(feature = "web-sys-webrtc", target_family = "wasm")
-))]
 use crate::core::transport::SharedTransport;
 
 /// A validated inclusive local UDP port range `[min, max]`.
@@ -185,34 +180,40 @@ impl TransportNetworkConfig {
         &self.traversal_servers
     }
 
-    /// Instantiate the active platform's [`SharedTransport`] using `initial_session_credential`
-    /// (falling back to the raw `traversal_servers` specification when no signed credential is
-    /// supplied).
+    /// Instantiate the active platform's production [`SharedTransport`] using
+    /// `initial_session_credential` (falling back to the raw `traversal_servers` specification
+    /// when no signed credential is supplied).
+    ///
+    /// Unlike Cargo feature unification, enabling `rings-transport/dummy` elsewhere in a workspace
+    /// dependency graph never overrides `WebrtcTransport` when `native-webrtc` is present; callers
+    /// that explicitly want the deterministic in-memory backend call `Self::build_dummy_transport`.
     #[cfg(any(
-        feature = "dummy",
-        feature = "native-webrtc",
-        all(feature = "web-sys-webrtc", target_family = "wasm")
+        all(
+            not(target_family = "wasm"),
+            any(feature = "native-webrtc", feature = "dummy")
+        ),
+        all(target_family = "wasm", feature = "web-sys-webrtc")
     ))]
     pub fn build_shared_transport(
         &self,
         initial_session_credential: Option<&str>,
     ) -> SharedTransport {
         let credentials = initial_session_credential.unwrap_or(&self.traversal_servers);
-        #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
         {
-            Arc::new(crate::connections::DummyTransport::new(
+            Arc::new(crate::connections::WebrtcTransport::new(
                 credentials,
                 self.endpoint_hint.clone(),
                 self.udp_port_range,
             ))
         }
         #[cfg(all(
-            feature = "native-webrtc",
-            not(feature = "dummy"),
+            feature = "dummy",
+            not(feature = "native-webrtc"),
             not(target_family = "wasm")
         ))]
         {
-            Arc::new(crate::connections::WebrtcTransport::new(
+            Arc::new(crate::connections::DummyTransport::new(
                 credentials,
                 self.endpoint_hint.clone(),
                 self.udp_port_range,
@@ -229,6 +230,157 @@ impl TransportNetworkConfig {
                 self.udp_port_range,
             ))
         }
+    }
+
+    /// Strictly parse and instantiate the active platform's production [`SharedTransport`],
+    /// failing closed with [`crate::error::Error::IceServer`] if the traversal server
+    /// specification or `initial_session_credential` is malformed.
+    #[cfg(any(
+        all(
+            not(target_family = "wasm"),
+            any(feature = "native-webrtc", feature = "dummy")
+        ),
+        all(target_family = "wasm", feature = "web-sys-webrtc")
+    ))]
+    pub fn try_build_shared_transport(
+        &self,
+        initial_session_credential: Option<&str>,
+    ) -> crate::error::Result<SharedTransport> {
+        let credentials = initial_session_credential.unwrap_or(&self.traversal_servers);
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+        {
+            Ok(Arc::new(crate::connections::WebrtcTransport::new_strict(
+                credentials,
+                self.endpoint_hint.clone(),
+                self.udp_port_range,
+            )?))
+        }
+        #[cfg(all(
+            feature = "dummy",
+            not(feature = "native-webrtc"),
+            not(target_family = "wasm")
+        ))]
+        {
+            Ok(Arc::new(crate::connections::DummyTransport::new_strict(
+                credentials,
+                self.endpoint_hint.clone(),
+                self.udp_port_range,
+            )?))
+        }
+        #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+        {
+            #[allow(clippy::arc_with_non_send_sync)]
+            let transport = Arc::new(crate::connections::WebSysWebrtcTransport::new_strict(
+                credentials,
+                self.endpoint_hint.clone(),
+                self.udp_port_range,
+            )?);
+            Ok(transport)
+        }
+    }
+
+    /// Explicitly instantiate the deterministic in-memory [`DummyTransport`](crate::connections::DummyTransport)
+    /// regardless of whether `native-webrtc` is also unified in the Cargo feature graph.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub fn build_dummy_transport(
+        &self,
+        initial_session_credential: Option<&str>,
+    ) -> SharedTransport {
+        let credentials = initial_session_credential.unwrap_or(&self.traversal_servers);
+        Arc::new(crate::connections::DummyTransport::new(
+            credentials,
+            self.endpoint_hint.clone(),
+            self.udp_port_range,
+        ))
+    }
+
+    /// Strictly parse and instantiate the deterministic in-memory
+    /// [`DummyTransport`](crate::connections::DummyTransport), failing closed when the traversal
+    /// server specification or `initial_session_credential` is malformed.
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub fn try_build_dummy_transport(
+        &self,
+        initial_session_credential: Option<&str>,
+    ) -> crate::error::Result<SharedTransport> {
+        let credentials = initial_session_credential.unwrap_or(&self.traversal_servers);
+        Ok(Arc::new(crate::connections::DummyTransport::new_strict(
+            credentials,
+            self.endpoint_hint.clone(),
+            self.udp_port_range,
+        )?))
+    }
+
+    /// Inspect the currently committed session-bound credential string on a built-in transport
+    /// (`WebrtcTransport`, `DummyTransport`, or `WebSysWebrtcTransport`), returning `None` for
+    /// custom external transports that do not carry ICE server state.
+    pub fn session_credentials_of(transport: &SharedTransport) -> Option<String> {
+        let any = transport.as_any();
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+        if let Some(webrtc) = any.downcast_ref::<crate::connections::WebrtcTransport>() {
+            return Some(webrtc.session_credentials());
+        }
+        #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+        if let Some(dummy) = any.downcast_ref::<crate::connections::DummyTransport>() {
+            return Some(dummy.session_credentials());
+        }
+        #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+        if let Some(web_sys) = any.downcast_ref::<crate::connections::WebSysWebrtcTransport>() {
+            return Some(web_sys.session_credentials());
+        }
+        let _ = any;
+        None
+    }
+
+    /// Phase-1 preparation for two-phase session-key rotation on a built-in ICE-backed transport:
+    /// strictly parses `credentials` into `Vec<IceServer>` and verifies that `transport` is a
+    /// supported built-in backend **before** mutating any state, returning an infallible phase-2
+    /// commit closure that atomically swaps `(raw_credentials, parsed_ice_servers)`.
+    pub fn prepare_ice_server_rotation(
+        transport: &SharedTransport,
+        credentials: String,
+    ) -> crate::error::Result<Box<dyn FnOnce()>> {
+        let parsed = crate::ice_server::parse_ice_servers_strict(&credentials)?;
+        let any = transport.as_any();
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+        if any.is::<crate::connections::WebrtcTransport>() {
+            let handle = Arc::clone(transport);
+            return Ok(Box::new(move || {
+                if let Some(webrtc) = handle
+                    .as_any()
+                    .downcast_ref::<crate::connections::WebrtcTransport>()
+                {
+                    webrtc.commit_prepared_ice_servers(credentials, parsed);
+                }
+            }));
+        }
+        #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+        if any.is::<crate::connections::DummyTransport>() {
+            let handle = Arc::clone(transport);
+            return Ok(Box::new(move || {
+                if let Some(dummy) = handle
+                    .as_any()
+                    .downcast_ref::<crate::connections::DummyTransport>()
+                {
+                    dummy.commit_prepared_ice_servers(credentials, parsed);
+                }
+            }));
+        }
+        #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+        if any.is::<crate::connections::WebSysWebrtcTransport>() {
+            let handle = Arc::clone(transport);
+            return Ok(Box::new(move || {
+                if let Some(web_sys) = handle
+                    .as_any()
+                    .downcast_ref::<crate::connections::WebSysWebrtcTransport>()
+                {
+                    web_sys.commit_prepared_ice_servers(credentials, parsed);
+                }
+            }));
+        }
+        let _ = (any, parsed);
+        Err(crate::error::Error::UnsupportedOperation(
+            "transport backend does not support ICE server credential rotation".to_string(),
+        ))
     }
 }
 

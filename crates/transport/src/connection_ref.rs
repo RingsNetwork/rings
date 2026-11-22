@@ -1,5 +1,6 @@
-//! This module contains the [ConnectionRef] struct.
+//! Weak connection reference handle [`ConnectionRef`] implementing [`ConnectionInterface`].
 
+use std::any::Any;
 use std::future::ready;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -7,13 +8,12 @@ use std::sync::Weak;
 use async_trait::async_trait;
 use bytes::Bytes;
 use rings_runtime::MaybeSendSync;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 use crate::core::pool::ChannelLane;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::DynConnection;
+use crate::core::transport::HandshakeStep;
 use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportConnectionState;
@@ -23,9 +23,11 @@ use crate::delivery::SendCreditWait;
 use crate::error::Error;
 use crate::error::Result;
 
-/// [ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
-/// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
-/// It serves as the return value for the `connection` method of [TransportInterface](crate::core::transport::TransportInterface).
+/// Weak reference to a pooled connection generation that forwards [`ConnectionInterface`] calls
+/// while the physical connection remains live in [`crate::connection_pool::Pool`].
+///
+/// Once the connection generation is retired from the pool and dropped, operations return
+/// [`Error::ConnectionReleased`].
 pub struct ConnectionRef<C: ?Sized = DynConnection> {
     cid: String,
     conn: Weak<C>,
@@ -41,7 +43,7 @@ impl<C: ?Sized> Clone for ConnectionRef<C> {
 }
 
 impl<C: ?Sized> ConnectionRef<C> {
-    /// Create a new connection reference.
+    /// Create a new weak [`ConnectionRef`] bound to `cid` and `conn`.
     pub fn new(cid: &str, conn: &Arc<C>) -> Self {
         Self {
             cid: cid.to_string(),
@@ -49,9 +51,16 @@ impl<C: ?Sized> ConnectionRef<C> {
         }
     }
 
-    /// Attempt to upgrade this weak handle to a strong [`Arc`] to the live connection,
-    /// returning [`Error::ConnectionReleased`] if the physical connection has already been
+    /// Upgrade this weak handle to a temporary strong [`Arc`] to the live connection, returning
+    /// [`Error::ConnectionReleased`] if the physical connection generation has already been
     /// retired and dropped.
+    ///
+    /// # Lifetime Contract
+    ///
+    /// Callers MUST drop the returned [`Arc`] promptly at the end of the single operation being
+    /// performed and MUST NOT store it across asynchronous waits or in long-lived structures;
+    /// holding a strong [`Arc`] pins the underlying connection and its callback state past pool
+    /// retirement.
     pub fn upgrade(&self) -> Result<Arc<C>> {
         match self.conn.upgrade() {
             Some(conn) => Ok(conn),
@@ -59,7 +68,8 @@ impl<C: ?Sized> ConnectionRef<C> {
         }
     }
 
-    pub(crate) fn cid(&self) -> &str {
+    /// Return the connection identifier (`cid`) bound to this handle.
+    pub fn cid(&self) -> &str {
         &self.cid
     }
 
@@ -84,7 +94,7 @@ impl<C: ?Sized> ConnectionRef<C> {
 }
 
 impl<C> ConnectionRef<C>
-where C: ConnectionInterface<Handshake = String, Error = Error> + MaybeSendSync + 'static
+where C: ConnectionInterface<Error = Error> + MaybeSendSync + 'static
 {
     /// Erase the concrete connection type parameter into [`ConnectionRef<DynConnection>`],
     /// preserving the underlying weak allocation pointer for slot-identity checks.
@@ -97,50 +107,16 @@ where C: ConnectionInterface<Handshake = String, Error = Error> + MaybeSendSync 
     }
 }
 
-#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-impl<C> ConnectionRef<C>
-where C: ConnectionInterface<Error = Error> + ?Sized
-{
-    /// Capture a witness that survives pool removal and observes completed native close.
-    pub fn physical_close_witness(&self) -> Result<crate::connections::NativePhysicalCloseWitness> {
-        self.upgrade()?.physical_close_witness()
-    }
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl<C> ConnectionRef<C>
-where C: ConnectionInterface<Error = Error> + ?Sized
-{
-    /// Stable physical generation identifier used by deterministic dummy simulations.
-    pub fn dummy_generation_id(&self) -> Result<String> {
-        self.upgrade()?.dummy_generation_id()
-    }
-
-    /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
-    pub fn force_dummy_connection_state_without_callback(
-        &self,
-        state: TransportConnectionState,
-    ) -> Result<()> {
-        self.upgrade()?
-            .force_dummy_connection_state_without_callback(state)
-    }
-
-    /// Test hook: override dummy data-channel readiness without dispatching callbacks.
-    pub fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
-        self.upgrade()?
-            .force_dummy_channel_open_without_callback(open)
-    }
-}
-
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
-impl<C, S> ConnectionInterface for ConnectionRef<C>
-where
-    C: ConnectionInterface<Error = Error, Handshake = S> + MaybeSendSync + ?Sized,
-    for<'async_trait> S: Serialize + DeserializeOwned + Send + Sync + 'async_trait,
+impl<C> ConnectionInterface for ConnectionRef<C>
+where C: ConnectionInterface<Error = Error> + MaybeSendSync + ?Sized + 'static
 {
-    type Handshake = C::Handshake;
     type Error = C::Error;
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 
     async fn send_message_with_permit(
         &self,
@@ -180,29 +156,14 @@ where
             ))
     }
 
-    // On a released reference this reports the interop default rather than an error, by deliberate
-    // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
-    // planner), and threading a `Result` through it and every backend for this one edge would add
-    // churn out of proportion to the case. It is harmless because a send on a released ref fails
-    // anyway (`send_message` upgrades the same `Weak` and returns `ConnectionReleased`), so the
-    // framing plan computed against the default is never actually transmitted. See the
-    // `released_ref_*` tests.
     fn max_message_size(&self) -> usize {
         self.upgrade()
             .map(|c| c.max_message_size())
             .unwrap_or(MAX_CHANNEL_MESSAGE_SIZE)
     }
 
-    async fn create_offer(&self) -> Result<Self::Handshake> {
-        self.upgrade()?.create_offer().await
-    }
-
-    async fn answer_offer(&self, offer: Self::Handshake) -> Result<Self::Handshake> {
-        self.upgrade()?.answer_offer(offer).await
-    }
-
-    async fn accept_answer(&self, answer: Self::Handshake) -> Result<()> {
-        self.upgrade()?.accept_answer(answer).await
+    async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
+        self.upgrade()?.handshake_step(inbound).await
     }
 
     async fn wait_for_channel_open(&self) -> Result<()> {
@@ -211,31 +172,6 @@ where
 
     async fn close(&self) -> Result<()> {
         self.upgrade()?.close().await
-    }
-
-    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-    fn physical_close_witness(&self) -> Result<crate::connections::NativePhysicalCloseWitness> {
-        self.upgrade()?.physical_close_witness()
-    }
-
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn dummy_generation_id(&self) -> Result<String> {
-        self.upgrade()?.dummy_generation_id()
-    }
-
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_connection_state_without_callback(
-        &self,
-        state: TransportConnectionState,
-    ) -> Result<()> {
-        self.upgrade()?
-            .force_dummy_connection_state_without_callback(state)
-    }
-
-    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-    fn force_dummy_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
-        self.upgrade()?
-            .force_dummy_channel_open_without_callback(open)
     }
 }
 
@@ -252,8 +188,11 @@ mod tests {
     #[cfg_attr(target_family = "wasm", async_trait(?Send))]
     #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl ConnectionInterface for Mock {
-        type Handshake = String;
         type Error = Error;
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
 
         fn max_message_size(&self) -> usize {
             4242
@@ -276,13 +215,7 @@ mod tests {
         fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
             unreachable!()
         }
-        async fn create_offer(&self) -> Result<Self::Handshake> {
-            unreachable!()
-        }
-        async fn answer_offer(&self, _: Self::Handshake) -> Result<Self::Handshake> {
-            unreachable!()
-        }
-        async fn accept_answer(&self, _: Self::Handshake) -> Result<()> {
+        async fn handshake_step(&self, _: Option<Bytes>) -> Result<HandshakeStep> {
             unreachable!()
         }
         async fn wait_for_channel_open(&self) -> Result<()> {
@@ -294,7 +227,7 @@ mod tests {
     }
 
     /// A live ref forwards to the inner connection; a released one reports the interop default
-    /// rather than erroring (see the deliberate-design note on `max_message_size`).
+    /// rather than erroring.
     #[test]
     fn test_released_ref_max_message_size_falls_back_to_default() {
         let conn = Arc::new(Mock);
@@ -309,8 +242,7 @@ mod tests {
         );
     }
 
-    /// A released ref surfaces the release as an error on the data path (so the default reported
-    /// above is never actually transmitted against).
+    /// A released ref surfaces the release as an error on the data path.
     #[test]
     fn test_released_ref_upgrade_errors() {
         let conn = Arc::new(Mock);

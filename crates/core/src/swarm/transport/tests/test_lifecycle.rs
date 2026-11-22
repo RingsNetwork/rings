@@ -958,7 +958,9 @@ async fn test_candidate_dial_backoff_ignores_inbound_yielded_and_capacity_refusa
     let answering = transport
         .reserve_pending_connection_for(
             inbound_peer,
-            crate::swarm::transport::pending::Handshake::Answering,
+            crate::swarm::transport::pending::Handshake::Answering {
+                awaiting_step: None,
+            },
         )
         .await?;
     transport
@@ -978,7 +980,9 @@ async fn test_candidate_dial_backoff_ignores_inbound_yielded_and_capacity_refusa
         lifecycles.reserve_for(
             inbound_peer,
             expired_time,
-            crate::swarm::transport::pending::Handshake::Answering,
+            crate::swarm::transport::pending::Handshake::Answering {
+                awaiting_step: None,
+            },
         )?;
     }
     transport.expire_pending_connections().await?;

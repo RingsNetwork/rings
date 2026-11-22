@@ -29,6 +29,24 @@ impl crate::swarm::transport::SwarmTransport {
         Ok(held)
     }
 
+    /// Hold every outbound transfer reservation across all classes toward `peer`, refusing all
+    /// immediate protocol/storage convergence sends until dropped.
+    pub(crate) fn hold_all_outbound_capacity_for_test(&self, peer: Did) -> Result<Vec<impl Sized>> {
+        let handle = self.outbound_schedulers.handle(peer)?;
+        let mut held = Vec::new();
+        for class in [
+            TransferClass::Application,
+            TransferClass::E2e,
+            TransferClass::Storage,
+            TransferClass::DhtControl,
+        ] {
+            while let Ok(permit) = handle.reserve(peer, class, 1) {
+                held.push(permit);
+            }
+        }
+        Ok(held)
+    }
+
     /// Saturate the live scheduler's lower classes toward `peer`, record a violation if
     /// control is then refused, and return the lower classes' overload error.
     pub(crate) fn exercise_class_reservation_pressure_for_simulation(

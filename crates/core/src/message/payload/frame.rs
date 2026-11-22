@@ -4,7 +4,7 @@
 //!   frame        = MAGIC ‖ wire_version ‖ rest(wire_version)
 //!   MAGIC        = "RINGS\0"                      fixed forever
 //!   wire_version = u16, big-endian                fixed forever, read before any codec
-//!   rest(4)      = kind ‖ body(kind)              kind: 0 payload, 1 link control, 2 compressed payload
+//!   rest(5)      = kind ‖ body(kind)              kind: 0 payload, 1 link control, 2 compressed payload
 //! ```
 //!
 //! Law (frame header): every version reads `MAGIC ‖ wire_version` the same way, and decodes

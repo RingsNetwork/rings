@@ -134,3 +134,23 @@ struct ProviderHandle *rings_node_new_provider_with_callback(
   }
   return provider;
 }
+
+struct ProviderHandle *rings_node_new_provider_with_serialized_config(
+    const char *serialized_config,
+    const char *storage_path) {
+  (void)storage_path;
+  if (serialized_config == NULL || storage_path == NULL) {
+    return NULL;
+  }
+  struct ProviderHandle *provider = malloc(sizeof(struct ProviderHandle));
+  if (provider == NULL) {
+    return NULL;
+  }
+  provider->signer = NULL;
+  provider->account = copy_string("serialized-config");
+  if (provider->account == NULL) {
+    free(provider);
+    return NULL;
+  }
+  return provider;
+}

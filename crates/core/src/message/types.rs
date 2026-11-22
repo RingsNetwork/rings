@@ -3,6 +3,7 @@
 //! Most of the messages follow the Ping/Pong pattern, where there is a one-to-one correspondence between them,
 //! such as xxxSend and xxxReport messages.
 
+use bytes::Bytes;
 use rings_transport::core::pool::ChannelLane;
 use serde::Deserialize;
 use serde::Serialize;
@@ -78,11 +79,12 @@ impl DhtProtocolMode {
     }
 }
 
-/// Decode a connect-signaling handshake string, refusing one above [`MAX_HANDSHAKE_BYTES`] (#1130).
+/// Decode a connect-signaling binary handshake payload, refusing one above
+/// [`MAX_HANDSHAKE_BYTES`] (#1130, #1291).
 fn deserialize_connect_handshake<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
-) -> std::result::Result<String, D::Error> {
-    let handshake = String::deserialize(deserializer)?;
+) -> std::result::Result<Bytes, D::Error> {
+    let handshake = Bytes::deserialize(deserializer)?;
     if handshake.len() > MAX_HANDSHAKE_BYTES {
         return Err(serde::de::Error::custom(Error::HandshakeAboveMax(
             handshake.len(),
@@ -91,34 +93,88 @@ fn deserialize_connect_handshake<'de, D: serde::Deserializer<'de>>(
     Ok(handshake)
 }
 
-/// MessageType use to ask for connection, send to remote with transport_uuid and handshake_info.
+/// Initiator connect-signaling step message (`step_index == 0` for the initial offer, even
+/// `step_index >= 2` for multi-round continuation steps).
 ///
-/// Wire law: the codec writes a struct as its fields in order with no framing, so
-/// `{handshake, dht_protocol_mode, relay_custody}` encodes byte-for-byte as `{handshake, network_id,
-/// storage_redundancy, dht_virtual_nodes, relay_custody}` (see the tests).
-#[derive(Debug, Deserialize, Serialize, Clone)]
+/// Wire law: the codec writes a struct as its fields in declaration order with no framing, so
+/// `{step_index, final_step, session_id, handshake, dht_protocol_mode, relay_custody}` encodes
+/// byte-for-byte as `{step_index, final_step, session_id, handshake, network_id,
+/// storage_redundancy, dht_virtual_nodes, relay_custody}`.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct ConnectNodeSend {
-    /// Serialized transport handshake offer.
+    /// Zero-based handshake step index (`0` for the initial offer, even `2, 4, ...` for initiator
+    /// continuation steps).
+    pub step_index: u8,
+    /// Whether this step concludes outbound signaling for the initiator (`SendFinal`).
+    pub final_step: bool,
+    /// Optional 128-bit handshake session correlation identifier for multi-round (`>= 3`-step)
+    /// handshakes.
+    pub session_id: Option<[u8; 16]>,
+    /// Opaque binary transport handshake payload (at most [`MAX_HANDSHAKE_BYTES`] bytes).
     #[serde(deserialize_with = "deserialize_connect_handshake")]
-    pub handshake: String,
+    pub handshake: Bytes,
     /// The DHT protocol the offering node runs; the receiver answers only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
     /// Whether the offering node holds relay mail; relay custody moves past one that does not.
     pub relay_custody: RelayCustody,
 }
 
-/// MessageType report to origin with own transport_uuid and handshake_info.
+impl ConnectNodeSend {
+    /// Construct an initial (`step_index == 0`, non-final) offer step.
+    pub fn initial_offer(
+        handshake: impl Into<Bytes>,
+        dht_protocol_mode: DhtProtocolMode,
+        relay_custody: RelayCustody,
+    ) -> Self {
+        Self {
+            step_index: 0,
+            final_step: false,
+            session_id: None,
+            handshake: handshake.into(),
+            dht_protocol_mode,
+            relay_custody,
+        }
+    }
+}
+
+/// Responder connect-signaling reply message (odd `step_index`: `1` for the initial answer,
+/// `3, 5, ...` for multi-round responder continuation replies).
 ///
 /// Same wire law as [`ConnectNodeSend`].
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct ConnectNodeReport {
-    /// Serialized transport handshake answer.
+    /// Zero-based handshake step index (odd `1, 3, ...` for responder replies).
+    pub step_index: u8,
+    /// Whether this step concludes outbound signaling for the responder (`SendFinal`).
+    pub final_step: bool,
+    /// Optional 128-bit handshake session correlation identifier for multi-round (`>= 3`-step)
+    /// handshakes.
+    pub session_id: Option<[u8; 16]>,
+    /// Opaque binary transport handshake payload (at most [`MAX_HANDSHAKE_BYTES`] bytes).
     #[serde(deserialize_with = "deserialize_connect_handshake")]
-    pub handshake: String,
+    pub handshake: Bytes,
     /// The DHT protocol the answering node runs; the initiator admits only a matching one.
     pub dht_protocol_mode: DhtProtocolMode,
     /// Whether the answering node holds relay mail; relay custody moves past one that does not.
     pub relay_custody: RelayCustody,
+}
+
+impl ConnectNodeReport {
+    /// Construct a final 2-step answer (`step_index == 1`, `final_step == true`).
+    pub fn final_answer(
+        handshake: impl Into<Bytes>,
+        dht_protocol_mode: DhtProtocolMode,
+        relay_custody: RelayCustody,
+    ) -> Self {
+        Self {
+            step_index: 1,
+            final_step: true,
+            session_id: None,
+            handshake: handshake.into(),
+            dht_protocol_mode,
+            relay_custody,
+        }
+    }
 }
 
 /// MessageType use to find successor in a chord ring.

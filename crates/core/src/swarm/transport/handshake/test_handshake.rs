@@ -212,7 +212,7 @@ async fn test_creating_offer_yields_in_both_did_orders() -> Result<()> {
             .is_current_connection_attempt(creating)?);
         assert_eq!(
             handshake_of(local, remote.did())?,
-            Some(Handshake::Answering)
+            Some(Handshake::answering())
         );
         assert!(
             remote
@@ -328,7 +328,7 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
         .swarm
         .transport
         .peer_lifecycles()?
-        .mark_offer_answered(sent, Some(tx_id)));
+        .claim_offer_reply(sent, Some(tx_id), 1, true, None));
 
     let (_, delayed) = larger.swarm.offer_connection(smaller.did()).await?;
     assert!(matches!(
@@ -347,16 +347,17 @@ async fn test_answered_and_answering_generations_refuse_a_delayed_offer() -> Res
         .transport
         .protocol_egress()
         .originate(
-            Message::ConnectNodeSend(ConnectNodeSend {
-                handshake: offer.transaction.data::<Message>().and_then(
-                    |message| match message {
+            Message::ConnectNodeSend(ConnectNodeSend::initial_offer(
+                offer
+                    .transaction
+                    .data::<Message>()
+                    .and_then(|message| match message {
                         Message::ConnectNodeSend(offer) => Ok(offer.handshake),
                         _ => Err(Error::InvalidMessage("not an offer".to_string())),
-                    },
-                )?,
-                dht_protocol_mode: first.swarm.dht_protocol_mode(),
-                relay_custody: first.swarm.transport.dht.relay_custody(),
-            }),
+                    })?,
+                first.swarm.dht_protocol_mode(),
+                first.swarm.transport.dht.relay_custody(),
+            )),
             second.did(),
             Some(second.did()),
         )
@@ -463,7 +464,7 @@ async fn test_late_answer_is_not_applied_to_a_newer_generation() -> Result<()> {
     let second_tx = uuid::Uuid::new_v4();
     transport.mark_offer_sent(newer, &second_offer, second_tx)?;
 
-    let OfferReply::Answer(late) = node2
+    let OfferReply::Answer(Some(late)) = node2
         .swarm
         .transport
         .answer_remote_connection(
@@ -485,8 +486,11 @@ async fn test_late_answer_is_not_applied_to_a_newer_generation() -> Result<()> {
         Some(Handshake::Offering {
             owner: OfferOwner::Overlay,
             phase: OfferPhase::Sent {
+                step_index: 0,
+                final_step: false,
                 handshake: second_offer.handshake,
                 tx_id: second_tx,
+                session_id: None,
             },
         }),
         "the newer generation is untouched"
@@ -611,7 +615,7 @@ async fn test_yielded_offer_is_superseded_before_the_answer_is_created() -> Resu
     assert_ne!(answering, creating);
     assert_eq!(
         handshake_of(&node1, node2.did())?,
-        Some(Handshake::Answering)
+        Some(Handshake::answering())
     );
 
     let failure = transport
@@ -675,12 +679,13 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     use rings_transport::error::Error as TransportError;
 
     let [node1, node2] = ring_nodes::<2>()?;
-    let handshake_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
-        let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
+    let handshake_with_limit = |raw_bytes: &bytes::Bytes, limit: usize| -> Result<bytes::Bytes> {
+        let base = std::str::from_utf8(raw_bytes)
+            .map_err(|err| Error::InvalidMessage(format!("invalid UTF-8 offer: {err}")))?;
         let annotated = format!(
             "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
         );
-        serde_json::to_string(&annotated).map_err(Error::Serialize)
+        Ok(bytes::Bytes::from(annotated))
     };
 
     // 1. An incoming offer below MIN_MAX_MESSAGE_SIZE is refused before reconciling the slot:
@@ -739,7 +744,7 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
     let Message::ConnectNodeSend(valid_offer) = offer_payload.transaction.data::<Message>()? else {
         return Err(Error::InvalidMessage("not an offer".to_string()));
     };
-    let OfferReply::Answer(mut created_answer) = node2
+    let OfferReply::Answer(Some(mut created_answer)) = node2
         .swarm
         .transport
         .answer_remote_connection(
@@ -791,7 +796,7 @@ async fn test_handshake_refuses_sdp_below_min_max_message_size() -> Result<()> {
         return Err(Error::InvalidMessage("not an offer".to_string()));
     };
     floor_offer.handshake = handshake_with_limit(&floor_offer.handshake, MIN_MAX_MESSAGE_SIZE)?;
-    let OfferReply::Answer(mut floor_answer) = node2
+    let OfferReply::Answer(Some(mut floor_answer)) = node2
         .swarm
         .transport
         .answer_remote_connection(
@@ -878,11 +883,13 @@ async fn test_connect_originate_failure_abandons_pending_slot_and_records_single
         .swarm
         .transport
         .mark_offer_sent(attempt, &offer, tx_id)?;
-    assert!(node_a
-        .swarm
-        .transport
-        .peer_lifecycles()?
-        .mark_offer_answered(attempt, Some(tx_id)));
+    assert!(node_a.swarm.transport.peer_lifecycles()?.claim_offer_reply(
+        attempt,
+        Some(tx_id),
+        1,
+        true,
+        None
+    ));
 
     let send_err = node_a
         .swarm
@@ -912,12 +919,13 @@ async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejecti
     use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
 
     let [node1, node2] = ring_nodes::<2>()?;
-    let handshake_with_limit = |raw_json_sdp: &str, limit: usize| -> Result<String> {
-        let base: String = serde_json::from_str(raw_json_sdp).map_err(Error::Deserialize)?;
+    let handshake_with_limit = |raw_bytes: &bytes::Bytes, limit: usize| -> Result<bytes::Bytes> {
+        let base = std::str::from_utf8(raw_bytes)
+            .map_err(|err| Error::InvalidMessage(format!("invalid UTF-8 offer: {err}")))?;
         let annotated = format!(
             "{base}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=max-message-size:{limit}\r\n"
         );
-        serde_json::to_string(&annotated).map_err(Error::Serialize)
+        Ok(bytes::Bytes::from(annotated))
     };
     let (creating, _local_offer) = node2
         .swarm
@@ -940,12 +948,13 @@ async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejecti
     let invalid_offers = [
         {
             let mut oversized = valid_offer.clone();
-            oversized.handshake = "x".repeat(crate::consts::MAX_HANDSHAKE_BYTES + 1);
+            oversized.handshake =
+                bytes::Bytes::from(vec![b'x'; crate::consts::MAX_HANDSHAKE_BYTES + 1]);
             oversized
         },
         {
             let mut malformed = valid_offer.clone();
-            malformed.handshake = "{not-valid-json".to_string();
+            malformed.handshake = bytes::Bytes::from_static(&[0xff, 0xfe, 0xfd]);
             malformed
         },
         {
@@ -984,5 +993,907 @@ async fn test_rejected_offer_is_pure_no_op_across_all_pre_reconciliation_rejecti
             "rejected offer must not mutate or replace the transport pool entry"
         );
     }
+    Ok(())
+}
+
+/// Architectural Witness (Issue #1291 F1 & F2):
+/// 1. A **0-step** pre-established custom transport (`handshake_step(None) -> HandshakeStep::Done`)
+///    admits directly through `Swarm::connect` with zero overlay `ConnectNodeSend` messages, and
+///    `rings-core` rejects a 0-step connection whose `max_message_size()` is below
+///    `MIN_MAX_MESSAGE_SIZE`.
+/// 2. A **3-step** binary custom transport (`Send(step 0) -> Send(step 1, final=false) ->
+///    SendFinal(step 2) -> Done`) completes end-to-end across a multi-hop DHT relay (`n1 -> n2 -> n3`),
+///    admits both endpoints, and carries application traffic over non-UTF-8 binary handshake steps.
+#[tokio::test]
+async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_edges_and_enforce_size_floor(
+) -> Result<()> {
+    use std::any::Any;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use dashmap::DashMap;
+    use rings_transport::callback::InnerTransportCallback;
+    use rings_transport::callback::NodeFramePool;
+    use rings_transport::connection_pool::Pool;
+    use rings_transport::connection_ref::ConnectionRef;
+    use rings_transport::core::callback::BoxedTransportCallback;
+    use rings_transport::core::pool::ChannelLane;
+    use rings_transport::core::transport::ConnectionInterface;
+    use rings_transport::core::transport::ConnectionStateCell;
+    use rings_transport::core::transport::ConnectionStateSnapshot;
+    use rings_transport::core::transport::HandshakeStep;
+    use rings_transport::core::transport::LaneCreditView;
+    use rings_transport::core::transport::SendPermit;
+    use rings_transport::core::transport::SharedTransport;
+    use rings_transport::core::transport::TransportConnectionState;
+    use rings_transport::core::transport::TransportInterface;
+    use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
+    use rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE;
+    use rings_transport::delivery::DeliveryFuture;
+    use rings_transport::delivery::SendCreditWait;
+    use rings_transport::notifier::wait_for_data_channel_open;
+    use rings_transport::notifier::Notifier;
+
+    type Switchboard = Arc<
+        DashMap<
+            (String, String),
+            (
+                Arc<InnerTransportCallback>,
+                std::sync::Weak<CustomMeshConnection>,
+            ),
+        >,
+    >;
+
+    struct CustomMeshConnection {
+        local_id: String,
+        peer_id: String,
+        mode_steps: u8, // 0, 1, 3, 11 (optimistic inline 1-step), or 99 (faulty responder)
+        negotiated_max: Arc<std::sync::atomic::AtomicUsize>,
+        oversized_final: bool,
+        sent_frames: Arc<std::sync::atomic::AtomicUsize>,
+        stage: AtomicU8,
+        state: ConnectionStateCell,
+        notifier: Notifier,
+        callback: Arc<InnerTransportCallback>,
+        switchboard: Switchboard,
+    }
+
+    impl CustomMeshConnection {
+        fn spawn_connected(&self) {
+            self.state
+                .observe_phase(TransportConnectionState::Connected);
+            self.state.observe_channels(true);
+            self.notifier.wake();
+            let cb = Arc::clone(&self.callback);
+            tokio::spawn(async move {
+                cb.on_connection_state_change(TransportConnectionState::Connected)
+                    .await;
+                cb.on_channel_open().await;
+            });
+        }
+
+        async fn mark_connected_inline(&self) {
+            self.state
+                .observe_phase(TransportConnectionState::Connected);
+            self.state.observe_channels(true);
+            self.notifier.wake();
+            self.callback
+                .on_connection_state_change(TransportConnectionState::Connected)
+                .await;
+            self.callback.on_channel_open().await;
+        }
+    }
+
+    #[async_trait]
+    impl ConnectionInterface for CustomMeshConnection {
+        type Error = rings_transport::error::Error;
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        async fn send_message_with_permit(
+            &self,
+            payload: Bytes,
+            lane: ChannelLane,
+            permit: SendPermit,
+        ) -> rings_transport::error::Result<DeliveryFuture> {
+            let switchboard = Arc::clone(&self.switchboard);
+            let target_key = (self.peer_id.clone(), self.local_id.clone());
+            let state = self.state.clone();
+            let cb = Arc::clone(&self.callback);
+            let sent_frames = Arc::clone(&self.sent_frames);
+            self.callback
+                .send_custom_wire(
+                    payload,
+                    lane,
+                    permit,
+                    self.max_message_size(),
+                    move || {
+                        state.close();
+                        cb.close_link_credit();
+                    },
+                    move |wire, target_lane, irrevocable| async move {
+                        let Some(peer_cb) = switchboard
+                            .get(&target_key)
+                            .map(|r| Arc::clone(&r.value().0))
+                        else {
+                            return Err(rings_transport::error::Error::MessageNotDelivered(
+                                "missing mesh peer".to_string(),
+                            ));
+                        };
+                        let accepted = irrevocable.accept();
+                        sent_frames.fetch_add(1, Ordering::AcqRel);
+                        peer_cb.receive_inbound_frame(wire, target_lane);
+                        Ok((accepted, Box::pin(async { Ok(()) }) as DeliveryFuture))
+                    },
+                )
+                .await
+        }
+
+        fn reserve_send_credit(
+            &self,
+            lane: ChannelLane,
+        ) -> SendCreditWait<rings_transport::error::Error> {
+            Box::pin(self.callback.reserve_credit(lane))
+        }
+
+        fn send_credit_view(&self, lane: ChannelLane) -> LaneCreditView {
+            self.callback.send_credit_view(lane)
+        }
+
+        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+            self.state.snapshot()
+        }
+
+        fn max_message_size(&self) -> usize {
+            self.negotiated_max.load(Ordering::Acquire)
+        }
+
+        async fn handshake_step(
+            &self,
+            inbound: Option<Bytes>,
+        ) -> rings_transport::error::Result<HandshakeStep> {
+            if self.mode_steps == 0 {
+                self.spawn_connected();
+                return Ok(HandshakeStep::Done);
+            }
+            if self.mode_steps == 1 || self.mode_steps == 11 {
+                return match (self.stage.load(Ordering::Acquire), inbound.as_deref()) {
+                    (0, None) => {
+                        self.stage.store(1, Ordering::Release);
+                        if self.oversized_final {
+                            // Open channel inline first so `attempt` becomes `Active`, then return
+                            // an oversized final step to witness A2!
+                            self.mark_connected_inline().await;
+                            return Ok(HandshakeStep::SendFinal(Bytes::from(vec![
+                                0xaa;
+                                crate::consts::MAX_HANDSHAKE_BYTES
+                                    + 1
+                            ])));
+                        }
+                        if self.mode_steps == 11 {
+                            // Optimistic 1-step backend reporting local channel readiness inline
+                            // before `SendFinal` leaves (`R3-A1` witness).
+                            self.mark_connected_inline().await;
+                        }
+                        Ok(HandshakeStep::SendFinal(Bytes::from_static(&[0xaa, 0x01])))
+                    }
+                    (0, Some([0xaa, 0x01])) => {
+                        self.stage.store(2, Ordering::Release);
+                        self.spawn_connected();
+                        if let Some(paired) = self
+                            .switchboard
+                            .get(&(self.peer_id.clone(), self.local_id.clone()))
+                            .and_then(|entry| entry.value().1.upgrade())
+                        {
+                            paired.spawn_connected();
+                        }
+                        Ok(HandshakeStep::Done)
+                    }
+                    (stage, other) => {
+                        Err(rings_transport::error::Error::RemoteHandshakeApplyError(
+                            format!("unexpected 1-step transition stage={stage} inbound={other:?}"),
+                        ))
+                    }
+                };
+            }
+            if self.mode_steps == 99 {
+                // Faulty responder returning `Done` on a non-final inbound step (A4 witness).
+                return match inbound {
+                    None => Ok(HandshakeStep::Send(Bytes::from_static(b"nonfinal-offer"))),
+                    Some(_) => Ok(HandshakeStep::Done),
+                };
+            }
+
+            // 3-step non-UTF-8 binary handshake:
+            // Initiator: None -> Send([0xff, 0x00, 0x01]), Some([0xff, 0x01, 0x02]) -> SendFinal([0xff, 0x02, 0x03]) + spawn_connected
+            // Responder: Some([0xff, 0x00, 0x01]) -> Send([0xff, 0x01, 0x02]), Some([0xff, 0x02, 0x03]) -> Done + spawn_connected
+            match (self.stage.load(Ordering::Acquire), inbound.as_deref()) {
+                (0, None) => {
+                    self.stage.store(1, Ordering::Release);
+                    Ok(HandshakeStep::Send(Bytes::from_static(&[0xff, 0x00, 0x01])))
+                }
+                (0, Some([0xff, 0x00, 0x01])) => {
+                    self.stage.store(2, Ordering::Release);
+                    Ok(HandshakeStep::Send(Bytes::from_static(&[0xff, 0x01, 0x02])))
+                }
+                (1, Some([0xff, 0x01, 0x02])) => {
+                    self.stage.store(3, Ordering::Release);
+                    self.spawn_connected();
+                    Ok(HandshakeStep::SendFinal(Bytes::from_static(&[
+                        0xff, 0x02, 0x03,
+                    ])))
+                }
+                (2, Some([0xff, 0x02, 0x03])) => {
+                    self.stage.store(3, Ordering::Release);
+                    self.spawn_connected();
+                    Ok(HandshakeStep::Done)
+                }
+                (stage, other) => Err(rings_transport::error::Error::RemoteHandshakeApplyError(
+                    format!("unexpected 3-step transition stage={stage} inbound={other:?}"),
+                )),
+            }
+        }
+
+        async fn wait_for_channel_open(&self) -> rings_transport::error::Result<()> {
+            wait_for_data_channel_open(|| self.state.snapshot(), &self.notifier, 5).await
+        }
+
+        async fn close(&self) -> rings_transport::error::Result<()> {
+            self.switchboard
+                .remove(&(self.local_id.clone(), self.peer_id.clone()));
+            self.state.close();
+            self.notifier.wake();
+            self.callback.close_link_credit();
+            Ok(())
+        }
+    }
+
+    struct CustomMeshTransport {
+        local_id: String,
+        mode_steps: u8,
+        negotiated_max: Arc<std::sync::atomic::AtomicUsize>,
+        oversized_final: bool,
+        sent_frames: Arc<std::sync::atomic::AtomicUsize>,
+        pool: Pool<CustomMeshConnection>,
+        frame_pool: NodeFramePool,
+        switchboard: Switchboard,
+    }
+
+    impl CustomMeshTransport {
+        fn new(
+            local_id: String,
+            mode_steps: u8,
+            negotiated_max: usize,
+            switchboard: Switchboard,
+        ) -> Self {
+            Self {
+                local_id,
+                mode_steps,
+                negotiated_max: Arc::new(std::sync::atomic::AtomicUsize::new(negotiated_max)),
+                oversized_final: false,
+                sent_frames: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                pool: Pool::new(),
+                frame_pool: NodeFramePool::new(),
+                switchboard,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TransportInterface for CustomMeshTransport {
+        type Connection = CustomMeshConnection;
+        type Error = rings_transport::error::Error;
+
+        async fn new_connection(
+            &self,
+            cid: &str,
+            callback: BoxedTransportCallback,
+        ) -> rings_transport::error::Result<ConnectionRef<Self::Connection>> {
+            self.pool.ensure_peer_slot_available(cid)?;
+            let notifier = Notifier::default();
+            let inner_cb = Arc::new(InnerTransportCallback::new(
+                cid,
+                callback,
+                notifier.clone(),
+                self.frame_pool.clone(),
+            ));
+            let switchboard = Arc::clone(&self.switchboard);
+            let target_key = (cid.to_string(), self.local_id.clone());
+            inner_cb.spawn_credit_driver(move |wire, lane| {
+                let switchboard = Arc::clone(&switchboard);
+                let target_key = target_key.clone();
+                async move {
+                    let Some(peer_cb) = switchboard
+                        .get(&target_key)
+                        .map(|r| Arc::clone(&r.value().0))
+                    else {
+                        return Err(rings_transport::error::Error::MessageNotDelivered(
+                            "peer not yet registered".to_string(),
+                        ));
+                    };
+                    peer_cb.receive_inbound_frame(wire, lane);
+                    Ok(())
+                }
+            })?;
+            let conn = CustomMeshConnection {
+                local_id: self.local_id.clone(),
+                peer_id: cid.to_string(),
+                mode_steps: self.mode_steps,
+                negotiated_max: Arc::clone(&self.negotiated_max),
+                oversized_final: self.oversized_final,
+                sent_frames: Arc::clone(&self.sent_frames),
+                stage: AtomicU8::new(0),
+                state: ConnectionStateCell::new(),
+                notifier,
+                callback: Arc::clone(&inner_cb),
+                switchboard: Arc::clone(&self.switchboard),
+            };
+            let conn_ref = self.pool.safely_insert(cid, conn).await?;
+            let live = conn_ref.upgrade()?;
+            self.switchboard.insert(
+                (self.local_id.clone(), cid.to_string()),
+                (inner_cb, Arc::downgrade(&live)),
+            );
+            drop(live);
+            Ok(conn_ref)
+        }
+
+        async fn close_connection_if_current(
+            &self,
+            connection: &ConnectionRef<Self::Connection>,
+        ) -> rings_transport::error::Result<bool> {
+            self.pool.safely_remove_if_current(connection).await
+        }
+
+        fn connection(
+            &self,
+            cid: &str,
+        ) -> rings_transport::error::Result<ConnectionRef<Self::Connection>> {
+            self.pool.connection(cid)
+        }
+
+        fn connection_ids(&self) -> Vec<String> {
+            self.pool.connection_ids()
+        }
+    }
+
+    let build_custom_node = |key: SecretKey,
+                             mode_steps: u8,
+                             negotiated_max: usize,
+                             switchboard: &Switchboard|
+     -> Result<Node> {
+        let session = crate::delegation::DelegateeKey::new_with_seckey(&key)?;
+        let did = session.delegator_did();
+        let transport: SharedTransport = Arc::new(CustomMeshTransport::new(
+            did.to_string(),
+            mode_steps,
+            negotiated_max,
+            Arc::clone(switchboard),
+        ));
+        Ok(Node::build(
+            SwarmBuilder::new(
+                TEST_NETWORK_ID,
+                transport,
+                Box::new(crate::storage::MemStorage::new()),
+                session,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .dht_succ_max(1)
+            .dht_finger_table_size(0)
+            .dht_virtual_nodes(0),
+        ))
+    };
+
+    // Part A: 0-step custom transport enforces MIN_MAX_MESSAGE_SIZE floor, and succeeds when >= floor
+    // with zero ConnectNodeSend messages.
+    let zero_switchboard: Switchboard = Arc::new(DashMap::new());
+    let [k1, k2, k3, k4] = fixed_secret_keys::<4>()?;
+    let undersized_zero =
+        build_custom_node(k1.clone(), 0, MIN_MAX_MESSAGE_SIZE - 1, &zero_switchboard)?;
+    let peer_zero = build_custom_node(k2.clone(), 0, MAX_CHANNEL_MESSAGE_SIZE, &zero_switchboard)?;
+    let err = undersized_zero.swarm.connect(peer_zero.did()).await;
+    assert!(
+        matches!(
+            err,
+            Err(Error::Transport(
+                rings_transport::error::Error::RemoteMaxMessageSizeTooSmall { .. }
+            ))
+        ),
+        "0-step transport advertising below MIN_MAX_MESSAGE_SIZE must be rejected by rings-core, got {err:?}"
+    );
+
+    let valid_zero_1_transport = Arc::new(CustomMeshTransport::new(
+        crate::delegation::DelegateeKey::new_with_seckey(&k1)?
+            .delegator_did()
+            .to_string(),
+        0,
+        MAX_CHANNEL_MESSAGE_SIZE,
+        Arc::clone(&zero_switchboard),
+    ));
+    let valid_zero_2_transport = Arc::new(CustomMeshTransport::new(
+        crate::delegation::DelegateeKey::new_with_seckey(&k2)?
+            .delegator_did()
+            .to_string(),
+        0,
+        MAX_CHANNEL_MESSAGE_SIZE,
+        Arc::clone(&zero_switchboard),
+    ));
+    let valid_zero_1 = Node::build(
+        SwarmBuilder::new(
+            TEST_NETWORK_ID,
+            Arc::clone(&valid_zero_1_transport) as SharedTransport,
+            Box::new(crate::storage::MemStorage::new()),
+            crate::delegation::DelegateeKey::new_with_seckey(&k1)?,
+        )
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .dht_succ_max(1)
+        .dht_finger_table_size(0)
+        .dht_virtual_nodes(0),
+    );
+    let valid_zero_2 = Node::build(
+        SwarmBuilder::new(
+            TEST_NETWORK_ID,
+            Arc::clone(&valid_zero_2_transport) as SharedTransport,
+            Box::new(crate::storage::MemStorage::new()),
+            crate::delegation::DelegateeKey::new_with_seckey(&k2)?,
+        )
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .dht_succ_max(1)
+        .dht_finger_table_size(0)
+        .dht_virtual_nodes(0),
+    );
+    let (_zero_attempt, maybe_offer) = valid_zero_1
+        .swarm
+        .offer_connection_step(valid_zero_2.did())
+        .await?;
+    assert!(
+        maybe_offer.is_none(),
+        "0-step offer_connection_step must return None without fabricating a ConnectNodeSend"
+    );
+    assert_eq!(
+        valid_zero_1_transport.sent_frames.load(Ordering::Acquire),
+        0,
+        "0-step offer_connection_step must transmit zero frames before admission"
+    );
+    valid_zero_2.swarm.connect(valid_zero_1.did()).await?;
+    wait_until_result(
+        "0-step peers admit each other without overlay signaling",
+        || {
+            Ok(valid_zero_1.swarm.is_peer_admitted(valid_zero_2.did())?
+                && valid_zero_2.swarm.is_peer_admitted(valid_zero_1.did())?)
+        },
+    )
+    .await?;
+
+    // Part B: 3-step binary custom transport across a 4-node ring (n1 -> n2 -> n3 -> n4 -> n1),
+    // bootstrapped EXCLUSIVELY through the public out-of-band Swarm step API (`offer_connection_step`
+    // -> `answer_offer_step` -> `accept_answer_step_for` -> `answer_offer_step`), and then routed
+    // across relay `n2` via `n1.swarm.connect(n3.did())`!
+    let three_switchboard: Switchboard = Arc::new(DashMap::new());
+    let n1 = build_custom_node(k1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &three_switchboard)?;
+    let n2 = build_custom_node(k2.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &three_switchboard)?;
+    let n3 = build_custom_node(k3.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &three_switchboard)?;
+    let n4 = build_custom_node(k4.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &three_switchboard)?;
+    let n3_inbox = n3.swarm.application_inbox()?;
+
+    for (left, right) in [(&n1, &n2), (&n2, &n3), (&n3, &n4), (&n4, &n1)] {
+        let (attempt_l, Some(offer0_payload)) =
+            left.swarm.offer_connection_step(right.did()).await?
+        else {
+            panic!("expected step-0 ConnectNodeSend payload");
+        };
+        let OfferReply::Answer(Some(ans1_payload)) =
+            right.swarm.answer_offer_step(offer0_payload).await?
+        else {
+            panic!("expected step-1 non-final ConnectNodeReport payload");
+        };
+        // Public `accept_answer` rejects non-final reports, while `accept_answer_step_for` returns
+        // the signed step-2 continuation payload!
+        assert!(left
+            .swarm
+            .accept_answer(ans1_payload.clone())
+            .await
+            .is_err());
+        let Some(offer2_payload) = left
+            .swarm
+            .accept_answer_step_for(attempt_l, ans1_payload)
+            .await?
+        else {
+            panic!("expected step-2 SendFinal continuation payload");
+        };
+        let OfferReply::Answer(None) = right.swarm.answer_offer_step(offer2_payload).await? else {
+            panic!("expected responder completion on step 2");
+        };
+        wait_until_result("3-step bootstrap link admitted", || {
+            Ok(left.swarm.is_peer_admitted(right.did())?
+                && right.swarm.is_peer_admitted(left.did())?)
+        })
+        .await?;
+        wait_for_msgs([&n1, &n2, &n3, &n4]).await;
+    }
+
+    // Now n1 dials n3 over the DHT (`n1 -> n2 -> n3`), exercising the full 3-step overlay signaling
+    // (`ConnectNodeSend(step=0)` -> `ConnectNodeReport(step=1, final=false)` -> `ConnectNodeSend(step=2, final=true)`)!
+    assert!(unlinked(&n1, n3.did())? && unlinked(&n3, n1.did())?);
+    n1.swarm.connect(n3.did()).await?;
+    wait_until_result("3-step relayed connect n1 <-> n3 admitted", || {
+        Ok(n1.swarm.is_peer_admitted(n3.did())? && n3.swarm.is_peer_admitted(n1.did())?)
+    })
+    .await?;
+
+    // Send an application message directly over the admitted 3-step custom transport edge!
+    n1.swarm
+        .send_direct_message(
+            crate::swarm::application::ApplicationData::custom(b"hello over 3-step transport"),
+            n3.did(),
+        )
+        .await?;
+    loop {
+        let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), n3_inbox.next())
+            .await
+            .map_err(|_| Error::InvalidMessage("timed out waiting for n3 inbox".to_string()))?
+        else {
+            return Err(Error::InvalidMessage("n3 inbox closed".to_string()));
+        };
+        if let crate::swarm::application::ApplicationDelivery::Message(msg) = event {
+            assert_eq!(
+                msg.data,
+                crate::swarm::application::ApplicationData::custom(b"hello over 3-step transport")
+            );
+            break;
+        }
+    }
+
+    // Part C: Witness edge cases A2, A3, A4, A5, and A6:
+    // - A2: When a `SendFinal` backend opens its channels (making `attempt` Active) before the
+    //   final signaling step fails (e.g. `HandshakeAboveMax` or failed send), the prematurely
+    //   admitted generation is retired so no half-open edge blocks future offers.
+    {
+        let a2_switchboard: Switchboard = Arc::new(DashMap::new());
+        let mut t_a2 = CustomMeshTransport::new(
+            crate::delegation::DelegateeKey::new_with_seckey(&k1)?
+                .delegator_did()
+                .to_string(),
+            1,
+            MAX_CHANNEL_MESSAGE_SIZE,
+            Arc::clone(&a2_switchboard),
+        );
+        t_a2.oversized_final = true;
+        let node_a2 = Node::build(
+            SwarmBuilder::new(
+                TEST_NETWORK_ID,
+                Arc::new(t_a2),
+                Box::new(crate::storage::MemStorage::new()),
+                crate::delegation::DelegateeKey::new_with_seckey(&k1)?,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .dht_virtual_nodes(0),
+        );
+        let peer_a2 = build_custom_node(k2.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &a2_switchboard)?;
+        let err = node_a2.swarm.offer_connection_step(peer_a2.did()).await;
+        assert!(
+            matches!(err, Err(Error::HandshakeAboveMax(_))),
+            "expected HandshakeAboveMax on oversized SendFinal, got {err:?}"
+        );
+        assert!(
+            !node_a2.swarm.is_peer_admitted(peer_a2.did())?,
+            "prematurely admitted SendFinal generation must be retired on final-step failure"
+        );
+        // And a fresh incoming 1-step offer from peer_a2 is NOT refused as AlreadyConnected!
+        let (_peer_attempt, Some(peer_offer)) =
+            peer_a2.swarm.offer_connection_step(node_a2.did()).await?
+        else {
+            panic!("expected 1-step offer");
+        };
+        let OfferReply::Answer(None) = node_a2.swarm.answer_offer_step(peer_offer).await? else {
+            panic!("expected 1-step responder completion");
+        };
+        wait_until_result(
+            "node_a2 admits peer_a2 after retiring failed SendFinal",
+            || node_a2.swarm.is_peer_admitted(peer_a2.did()),
+        )
+        .await?;
+        node_a2.swarm.close().await?;
+        peer_a2.swarm.close().await?;
+    }
+
+    // - A3: Duplicate non-final step-1 reports under the same transaction cannot both drive the
+    //   backend state machine, and an `Answering` slot rejects an inbound `ConnectNodeReport`.
+    {
+        let a3_switchboard: Switchboard = Arc::new(DashMap::new());
+        let a3_init = build_custom_node(k1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a3_switchboard)?;
+        let a3_resp = build_custom_node(k2.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a3_switchboard)?;
+        let (attempt, Some(offer0)) = a3_init.swarm.offer_connection_step(a3_resp.did()).await?
+        else {
+            panic!("expected step-0 offer");
+        };
+        let OfferReply::Answer(Some(ans1)) = a3_resp.swarm.answer_offer_step(offer0).await? else {
+            panic!("expected step-1 report");
+        };
+        // `a3_resp` is currently in `Handshake::Answering`: feeding a forged report to `a3_resp`
+        // with `expected = None` (`accept_answer_step`) must be rejected without touching its slot!
+        let Message::ConnectNodeReport(ans1_msg) = ans1.transaction.data::<Message>()? else {
+            panic!("expected ConnectNodeReport");
+        };
+        let forged_to_responder = a3_init
+            .swarm
+            .transport
+            .application_egress()
+            .originate(
+                Message::ConnectNodeReport(ans1_msg.clone()),
+                a3_resp.did(),
+                Some(a3_init.did()),
+            )
+            .await?;
+        assert!(
+            a3_resp
+                .swarm
+                .accept_answer_step(forged_to_responder)
+                .await
+                .is_err(),
+            "Answering generation must reject inbound ConnectNodeReport"
+        );
+        // First step-1 report succeeds on `a3_init`; a second distinct signed step-1 report for the
+        // same generation is rejected before touching the backend!
+        let Some(_offer2) = a3_init.swarm.accept_answer_step_for(attempt, ans1).await? else {
+            panic!("expected step-2 continuation");
+        };
+        let dup_ans1 = a3_resp
+            .swarm
+            .transport
+            .application_egress()
+            .originate(
+                Message::ConnectNodeReport(ans1_msg),
+                a3_init.did(),
+                Some(a3_resp.did()),
+            )
+            .await?;
+        assert!(
+            a3_init
+                .swarm
+                .accept_answer_step_for(attempt, dup_ans1)
+                .await
+                .is_err(),
+            "duplicate step-1 report after claim must be rejected"
+        );
+        a3_init.swarm.close().await?;
+        a3_resp.swarm.close().await?;
+    }
+
+    // - A4: When the responder backend returns `HandshakeStep::Done` on a non-final inbound offer,
+    //   `answer_offer_step` rejects it as a protocol error and abandons the responder slot.
+    {
+        let a4_switchboard: Switchboard = Arc::new(DashMap::new());
+        let a4_init = build_custom_node(k1.clone(), 99, MAX_CHANNEL_MESSAGE_SIZE, &a4_switchboard)?;
+        let a4_resp = build_custom_node(k2.clone(), 99, MAX_CHANNEL_MESSAGE_SIZE, &a4_switchboard)?;
+        let (_attempt, Some(nonfinal_offer)) =
+            a4_init.swarm.offer_connection_step(a4_resp.did()).await?
+        else {
+            panic!("expected non-final offer");
+        };
+        assert!(
+            a4_resp
+                .swarm
+                .answer_offer_step(nonfinal_offer)
+                .await
+                .is_err(),
+            "responder returning Done on non-final inbound step must fail and abandon"
+        );
+        assert_eq!(a4_resp.swarm.transport.pending_connection_count()?, 0);
+        a4_init.swarm.close().await?;
+        a4_resp.swarm.close().await?;
+    }
+
+    // - A5: When a pending connection passes handshake validation (`>= MIN_MAX_MESSAGE_SIZE`) and
+    //   subsequently reports `< MIN_MAX_MESSAGE_SIZE` at `on_channel_open` admission time,
+    //   `admit_pending_connection` rejects AND cancels the unadmitted attempt immediately.
+    {
+        let a5_switchboard: Switchboard = Arc::new(DashMap::new());
+        let a5_transport = Arc::new(CustomMeshTransport::new(
+            crate::delegation::DelegateeKey::new_with_seckey(&k1)?
+                .delegator_did()
+                .to_string(),
+            3,
+            MAX_CHANNEL_MESSAGE_SIZE,
+            Arc::clone(&a5_switchboard),
+        ));
+        let a5_node = Node::build(
+            SwarmBuilder::new(
+                TEST_NETWORK_ID,
+                Arc::clone(&a5_transport) as SharedTransport,
+                Box::new(crate::storage::MemStorage::new()),
+                crate::delegation::DelegateeKey::new_with_seckey(&k1)?,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .dht_virtual_nodes(0),
+        );
+        let peer_did = crate::delegation::DelegateeKey::new_with_seckey(&k2)?.delegator_did();
+        let (_attempt, Some(_offer0)) = a5_node.swarm.offer_connection_step(peer_did).await? else {
+            panic!("expected step-0 offer");
+        };
+        assert_eq!(a5_node.swarm.transport.pending_connection_count()?, 1);
+        // Shrink negotiated_max below MIN_MAX_MESSAGE_SIZE right before channel open fires!
+        a5_transport
+            .negotiated_max
+            .store(MIN_MAX_MESSAGE_SIZE - 1, Ordering::Release);
+        let conn_ref = a5_transport.connection(&peer_did.to_string())?;
+        conn_ref.upgrade()?.mark_connected_inline().await;
+        assert_eq!(
+            a5_node.swarm.transport.pending_connection_count()?,
+            0,
+            "admission-time RemoteMaxMessageSizeTooSmall must cancel the unadmitted attempt"
+        );
+        assert!(!a5_node.swarm.is_peer_admitted(peer_did)?);
+        a5_node.swarm.close().await?;
+    }
+
+    // - A6: Two 1-step initiators crossing each other resolve via `Law (Tie-break)` instead of
+    //   deadlocking in `Answered`: the larger-DID initiator yields and admits the smaller-DID's
+    //   1-step offer!
+    {
+        let a6_switchboard: Switchboard = Arc::new(DashMap::new());
+        let one_a = build_custom_node(k1.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
+        let one_b = build_custom_node(k2.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &a6_switchboard)?;
+        let (smaller_one, larger_one) = if one_a.did() < one_b.did() {
+            (&one_a, &one_b)
+        } else {
+            (&one_b, &one_a)
+        };
+        let (_att_s, Some(offer_s)) = smaller_one
+            .swarm
+            .offer_connection_step(larger_one.did())
+            .await?
+        else {
+            panic!("expected 1-step offer from smaller");
+        };
+        let (_att_l, Some(offer_l)) = larger_one
+            .swarm
+            .offer_connection_step(smaller_one.did())
+            .await?
+        else {
+            panic!("expected 1-step offer from larger");
+        };
+        // Smaller refuses larger's crossing out-of-band offer, while larger YIELDS to smaller's
+        // 1-step offer and completes admission!
+        assert!(smaller_one.swarm.answer_offer_step(offer_l).await.is_err());
+        let OfferReply::Answer(None) = larger_one.swarm.answer_offer_step(offer_s).await? else {
+            panic!("larger 1-step initiator must yield and complete responder step");
+        };
+        wait_until_result(
+            "both 1-step peers mutually admitted after tie-break",
+            || {
+                Ok(larger_one.swarm.is_peer_admitted(smaller_one.did())?
+                    && smaller_one.swarm.is_peer_admitted(larger_one.did())?)
+            },
+        )
+        .await?;
+        one_a.swarm.close().await?;
+        one_b.swarm.close().await?;
+    }
+
+    // - R3-A1: Optimistic 1-step backend reporting local channel readiness inline before `SendFinal`
+    //   leaves routes its initial `ConnectNodeSend` over the existing relay hop rather than over
+    //   the half-open direct link whose responder has not yet received step 0!
+    {
+        let r3_sb: Switchboard = Arc::new(DashMap::new());
+        let o1 = build_custom_node(k1.clone(), 11, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o2 = build_custom_node(k2.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o3 = build_custom_node(k3.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+        let o4 = build_custom_node(k4.clone(), 1, MAX_CHANNEL_MESSAGE_SIZE, &r3_sb)?;
+
+        // Establish clockwise ring `o1 -> o2 -> o3 -> o4 -> o1` (`o1 <-> o3` unlinked).
+        for (left, right) in [(&o2, &o1), (&o2, &o3), (&o3, &o4), (&o4, &o1)] {
+            let (_, Some(offer_lr)) = left.swarm.offer_connection_step(right.did()).await? else {
+                panic!("expected 1-step offer");
+            };
+            let OfferReply::Answer(None) = right.swarm.answer_offer_step(offer_lr).await? else {
+                panic!("expected 1-step completion");
+            };
+            wait_until_result("1-step ring edge admitted", || {
+                Ok(left.swarm.is_peer_admitted(right.did())?
+                    && right.swarm.is_peer_admitted(left.did())?)
+            })
+            .await?;
+            wait_for_msgs([&o1, &o2, &o3, &o4]).await;
+        }
+        assert!(unlinked(&o1, o3.did())? && unlinked(&o3, o1.did())?);
+
+        // Now dial `o3` from `o1` over the overlay (`Swarm::connect`): even though `o1`
+        // (`mode_steps == 11`) marks its local channel open inline before `SendFinal` leaves,
+        // `send_connection_offer` routes via `o2` so `o3` receives step 0 and opens its side!
+        o1.swarm.connect(o3.did()).await?;
+        wait_until_result("o3 admits o1 over relayed 1-step offer", || {
+            Ok(o3.swarm.is_peer_admitted(o1.did())? && o1.swarm.is_peer_admitted(o3.did())?)
+        })
+        .await?;
+        o1.swarm.close().await?;
+        o2.swarm.close().await?;
+        o3.swarm.close().await?;
+        o4.swarm.close().await?;
+    }
+
+    // - R3-A2 & R3-B1: Stateless pre-claim header violations (`step_index = 7, final_step = false`
+    //   or `session_id = None`) never abandon a live `Sent(0)` / `Active` slot, and
+    //   `Swarm::prepare_delegatee_key_rotation` holds exclusive rotation lock across commit.
+    {
+        let guard_sb: Switchboard = Arc::new(DashMap::new());
+        let g_key_1 = SecretKey::random();
+        let g_key_2 = SecretKey::random();
+        let g_session_2 = crate::delegation::DelegateeKey::new_with_seckey(&g_key_2)?;
+        let g1 = build_custom_node(g_key_1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &guard_sb)?;
+        let g2 = build_custom_node(g_key_2, 3, MAX_CHANNEL_MESSAGE_SIZE, &guard_sb)?;
+
+        let (g_attempt, Some(_offer0)) = g1.swarm.offer_connection_step(g2.did()).await? else {
+            panic!("expected step-0 offer");
+        };
+        let forged_step7 = g2
+            .swarm
+            .transport
+            .application_egress()
+            .originate(
+                Message::ConnectNodeReport(crate::message::ConnectNodeReport {
+                    step_index: 7,
+                    final_step: false,
+                    session_id: Some([0x77; 16]),
+                    handshake: Bytes::from_static(&[0xff, 0x01, 0x02]),
+                    dht_protocol_mode: g2.swarm.transport.dht_protocol_mode(),
+                    relay_custody: g2.swarm.transport.dht.relay_custody(),
+                }),
+                g1.did(),
+                Some(g2.did()),
+            )
+            .await?;
+        assert!(matches!(
+            g1.swarm
+                .accept_answer_step_for(g_attempt, forged_step7)
+                .await,
+            Err(Error::InvalidMessage(_))
+        ));
+        assert_eq!(
+            g1.swarm.transport.pending_connection_count()?,
+            1,
+            "pre-claim MAX_HANDSHAKE_STEPS violation must not abandon live Sent(0) slot"
+        );
+        g1.swarm.abandon_connection_attempt(g_attempt).await;
+        assert_eq!(g1.swarm.transport.pending_connection_count()?, 0);
+
+        let now_ms = g1.swarm.clock().now_ms();
+        let next_del = crate::delegation::DelegateeKey::new_with_seckey_at(
+            &g_key_1,
+            crate::consts::DEFAULT_DELEGATION_TTL_MS + 60_000,
+            now_ms,
+        )?;
+        let commit_token = g1.swarm.prepare_delegatee_key_rotation(&next_del)?;
+        assert!(
+            g1.swarm
+                .transport
+                .delegatee_rotation_lock
+                .try_lock()
+                .is_err(),
+            "SwarmRotationCommit must hold delegatee_rotation_lock until committed or dropped"
+        );
+        commit_token.commit();
+        assert!(g1
+            .swarm
+            .transport
+            .delegatee_rotation_lock
+            .try_lock()
+            .is_ok());
+        let _ = g_session_2;
+        g1.swarm.close().await?;
+        g2.swarm.close().await?;
+    }
+
+    valid_zero_1.swarm.close().await?;
+    valid_zero_2.swarm.close().await?;
+    n1.swarm.close().await?;
+    n2.swarm.close().await?;
+    n3.swarm.close().await?;
+    n4.swarm.close().await?;
     Ok(())
 }
