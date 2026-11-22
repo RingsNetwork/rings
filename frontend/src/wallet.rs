@@ -200,14 +200,26 @@ where
         .and_then(|nav| js_prop(&nav, "locks").ok())
         .filter(|locks| !locks.is_undefined() && !locks.is_null() && is_callable(locks, "request"));
 
+    with_webcrypto_init_lock_on(maybe_locks, op).await
+}
+
+async fn with_webcrypto_init_lock_on<F, Fut>(
+    maybe_locks: Option<JsValue>,
+    op: F,
+) -> Result<WalletAccount, String>
+where
+    F: FnOnce() -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<WalletAccount, String>> + 'static,
+{
     let Some(locks) = maybe_locks else {
         return op().await;
     };
 
     let (tx, rx) = oneshot::channel::<Result<WalletAccount, String>>();
-    let mut slot = Some((op, tx));
+    let slot = Rc::new(RefCell::new(Some((op, tx))));
+    let callback_slot = Rc::clone(&slot);
     let callback = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |_lock: JsValue| {
-        let Some((task_fn, sender)) = slot.take() else {
+        let Some((task_fn, sender)) = callback_slot.borrow_mut().take() else {
             return js_sys::Promise::resolve(&JsValue::UNDEFINED);
         };
         wasm_bindgen_futures::future_to_promise(async move {
@@ -217,15 +229,24 @@ where
     });
     let options = Object::new();
     let _ = js_set(&options, "mode", &JsValue::from_str("exclusive"));
-    let lock_promise = js_call3(
+    let lock_run = match js_call3(
         &locks,
         "request",
         &JsValue::from_str(WEBCRYPTO_INIT_LOCK_NAME),
         &options.into(),
         callback.as_ref().unchecked_ref(),
-    )?;
-    await_js(lock_promise).await?;
+    ) {
+        Ok(lock_promise) => await_js(lock_promise).await.map(|_| ()),
+        Err(err) => Err(err),
+    };
     drop(callback);
+    if lock_run.is_err() {
+        let fallback_op = slot.borrow_mut().take().map(|(task_fn, _)| task_fn);
+        if let Some(task_fn) = fallback_op {
+            return task_fn().await;
+        }
+    }
+    lock_run?;
     rx.await
         .map_err(|_| "WebCrypto initialization lock released before result".to_string())?
 }
@@ -1260,5 +1281,24 @@ mod wasm_tests {
             return;
         };
         assert_eq!(locked_a.account, locked_b.account);
+
+        // Verify that a `navigator.locks.request()` SecurityError rejection falls back cleanly.
+        let denied_locks = Object::new();
+        let reject_fn =
+            Closure::<dyn FnMut(JsValue, JsValue, JsValue) -> js_sys::Promise>::new(|_, _, _| {
+                js_sys::Promise::reject(&JsValue::from_str("SecurityError"))
+            });
+        let _ = js_set(&denied_locks, "request", reject_fn.as_ref());
+        let fallback_res = with_webcrypto_init_lock_on(Some(denied_locks.into()), move || async {
+            connect_webcrypto()
+                .await
+                .map_err(|e| format!("fallback failed: {e}"))
+        })
+        .await;
+        drop(reject_fn);
+        assert!(fallback_res.is_ok());
+        if let Ok(fallback_acct) = fallback_res {
+            assert_eq!(fallback_acct.account, locked_a.account);
+        }
     }
 }
