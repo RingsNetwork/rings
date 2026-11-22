@@ -106,6 +106,16 @@ pub enum OnionRouteError {
     /// A session's driver has already ended.
     #[error("onion TCP stream is closed")]
     TcpStreamClosed,
+    /// The exit's `udp` world failed at its bound socket or frame stream. The reason stays at the
+    /// exit; the client sees only a failed session.
+    #[error("onion UDP target: {0}")]
+    UdpTarget(String),
+    /// The exit's `udp` socket bind did not complete within its open timeout.
+    #[error("onion UDP open timed out")]
+    UdpOpenTimedOut,
+    /// A `udp` session's driver has already ended.
+    #[error("onion UDP session is closed")]
+    UdpSessionClosed,
     /// The client could not build a loop over its route (a value too wide for its class, or a
     /// key failure of negligible probability).
     #[error("could not build an onion loop: {0}")]

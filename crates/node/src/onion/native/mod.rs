@@ -20,6 +20,8 @@ use crate::onion::session::dial::OnionSessionRequest;
 use crate::onion::signature::OnionBackendName;
 use crate::onion::signature::OnionInvokeShape;
 use crate::onion::tcp::NativeOnionOpenStream;
+use crate::onion::udp::NativeOnionUdpSession;
+use crate::onion::udp::OnionUdpBindMode;
 use crate::onion::OnionLoopClass;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
@@ -163,6 +165,73 @@ impl NativeOnionCircuitHandle {
             })
             .await
             .map(NativeOnionOpenStream::new)
+    }
+
+    /// Select a `udp` route for `mode` from `processor`'s directory and open an unconnected OS UDP
+    /// datagram session at [`OnionLoopClass::DEFAULT`], awaiting the exit's bound endpoint.
+    pub async fn open_udp_target(
+        &self,
+        processor: &Processor,
+        mode: OnionUdpBindMode,
+    ) -> Result<NativeOnionUdpSession> {
+        self.open_udp_target_with_class(processor, mode, OnionLoopClass::DEFAULT)
+            .await
+    }
+
+    /// Select a `udp` route for `mode` from `processor`'s directory and open an unconnected OS UDP
+    /// datagram session of loop class `class` (`b`), awaiting the exit's bound endpoint.
+    pub async fn open_udp_target_with_class(
+        &self,
+        processor: &Processor,
+        mode: OnionUdpBindMode,
+        class: OnionLoopClass,
+    ) -> Result<NativeOnionUdpSession> {
+        let route = processor
+            .build_onion_proxy_route(OnionProxyProtocol::UdpDatagram, mode.to_target())
+            .await?;
+        let resolved_mode = OnionUdpBindMode::from_target(&route.target)?;
+        self.open_udp_session_with_class(route.route, resolved_mode, class)
+            .await
+    }
+
+    /// Open a `udp` session over `route` at [`OnionLoopClass::DEFAULT`] and await the exit's bound
+    /// socket endpoint.
+    pub async fn open_udp_session(
+        &self,
+        route: OnionRoute,
+        mode: OnionUdpBindMode,
+    ) -> Result<NativeOnionUdpSession> {
+        self.open_udp_session_with_class(route, mode, OnionLoopClass::DEFAULT)
+            .await
+    }
+
+    /// Open a `udp` session of loop class `class` (`b`) over `route` and await the exit's bound
+    /// socket endpoint.
+    pub async fn open_udp_session_with_class(
+        &self,
+        route: OnionRoute,
+        mode: OnionUdpBindMode,
+        class: OnionLoopClass,
+    ) -> Result<NativeOnionUdpSession> {
+        if route.service_name() != &OnionServiceName::udp() {
+            return Err(Error::OnionRouteError(
+                OnionRouteError::PayloadServiceMismatch {
+                    payload_service: OnionServiceName::udp().as_str().to_string(),
+                    route_service: route.service().to_string(),
+                },
+            ));
+        }
+        let stream = self
+            .runtime
+            .open(OnionSessionRequest {
+                route,
+                symbol: OnionServiceName::udp(),
+                target: mode.to_target(),
+                class,
+                window: OnionCreditWindow::DEFAULT,
+            })
+            .await?;
+        NativeOnionUdpSession::from_stream(stream).await
     }
 
     /// Send `call` to `route.target` over `route` and wait for the exit's response.

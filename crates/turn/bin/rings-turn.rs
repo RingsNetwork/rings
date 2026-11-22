@@ -207,6 +207,7 @@ impl Cli {
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
             clock: Arc::new(SystemClock),
+            custom_relay_factory: None,
         })
     }
 }

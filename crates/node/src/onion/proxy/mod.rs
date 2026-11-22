@@ -29,6 +29,8 @@ pub enum OnionProxyProtocol {
     TcpConnect,
     /// One HTTPS request/response exchange through an `https` exit.
     HttpsProxy,
+    /// Bound OS UDP datagram socket session. Requires a native `udp` exit.
+    UdpDatagram,
 }
 
 impl OnionProxyProtocol {
@@ -37,6 +39,7 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => OnionServiceName::tcp(),
             Self::HttpsProxy => OnionServiceName::https(),
+            Self::UdpDatagram => OnionServiceName::udp(),
         }
     }
 
@@ -45,15 +48,16 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => "tcp-connect",
             Self::HttpsProxy => "https-proxy",
+            Self::UdpDatagram => "udp-datagram",
         }
     }
 
     /// Whether `descriptor`'s runtime can interpret this protocol's symbol: only native and FFI
-    /// nodes have sockets, so only they serve `tcp`. Route selection has already kept only the
-    /// exits that register the symbol.
+    /// nodes have OS sockets, so only they serve `tcp` and `udp`. Route selection has already kept
+    /// only the exits that register the symbol.
     pub(crate) fn accepts_exit_descriptor(self, descriptor: &OnionExitDescriptor) -> bool {
         match self {
-            Self::TcpConnect => matches!(
+            Self::TcpConnect | Self::UdpDatagram => matches!(
                 descriptor.node_type,
                 OnlineNodeType::Native | OnlineNodeType::Ffi
             ),
@@ -99,6 +103,10 @@ mod tests {
         assert_eq!(
             OnionProxyProtocol::HttpsProxy.exit_service_name(),
             OnionServiceName::https()
+        );
+        assert_eq!(
+            OnionProxyProtocol::UdpDatagram.exit_service_name(),
+            OnionServiceName::udp()
         );
     }
 

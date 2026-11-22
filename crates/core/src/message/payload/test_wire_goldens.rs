@@ -85,8 +85,8 @@ use crate::simulation::SimulationRuntimeGuard;
 /// the rule of `frame` (once per release, relative to the last released version), then set
 /// this pair to the new version and the hash the failure reports, in the same commit.
 const PINNED: (u16, &str) = (
-    4,
-    "e80b0ed3507aa1a26f96a1f45d7a1056459135e2488904f10494111edc2a6c0f",
+    5,
+    "461d2158571621d271268b0634a22ecc0a012b60199066bd553cfe1d9a5dfede",
 );
 
 /// The overlay every golden is signed in.

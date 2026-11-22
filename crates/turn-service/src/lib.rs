@@ -79,8 +79,36 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub mod onion_udp_relay;
+#[cfg(all(
+    test,
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+mod test_bridge_model;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_wire_goldens;
+#[cfg(all(
+    test,
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+mod tests_phase_b;
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub use onion_udp_relay::OnionUdpRelayBackend;
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub use onion_udp_relay::OnionUdpRelayFactory;
 
 /// Global DHT registry topic on which TURN service hosts publish [`TurnServiceDescriptor`]s.
 pub const TURN_SERVICES_TOPIC: &str = "turn_services";
@@ -1371,6 +1399,10 @@ pub struct TurnServiceConfig {
     /// Quota policy for the `turn.ticket` onion `invoke` backend.
     #[serde(default = "default_turn_ticket_invoke_policy")]
     pub ticket_invoke_policy: OnionInvokePolicy,
+    /// Opt-in Phase B multi-hop mode: route each TURN allocation's UDP datagrams through a
+    /// dedicated guard-closed `onion::udp` session (`false` by default).
+    #[serde(default)]
+    pub multi_hop_onion_udp: bool,
 }
 
 #[cfg(all(
@@ -1407,6 +1439,7 @@ impl std::fmt::Debug for TurnServiceConfig {
             .field("ttl_secs", &self.ttl_secs)
             .field("issue_tickets", &self.issue_tickets)
             .field("ticket_invoke_policy", &self.ticket_invoke_policy)
+            .field("multi_hop_onion_udp", &self.multi_hop_onion_udp)
             .finish()
     }
 }
@@ -1522,6 +1555,7 @@ impl Default for TurnServiceConfig {
             ttl_secs: default_turn_ttl_secs(),
             issue_tickets: default_turn_issue_tickets(),
             ticket_invoke_policy: default_turn_ticket_invoke_policy(),
+            multi_hop_onion_udp: false,
         }
     }
 }
@@ -1644,6 +1678,7 @@ impl TurnServiceConfig {
             channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
             admission,
             clock,
+            custom_relay_factory: None,
         })
     }
 
@@ -1755,6 +1790,7 @@ struct TurnDaemonHooks {
     offer: TurnServiceOffer,
     turn_invoke: Option<OnionInvokeOffer>,
     ticket_invoke_policy: OnionInvokePolicy,
+    onion_udp_factory: Option<Arc<OnionUdpRelayFactory>>,
 }
 
 #[cfg(all(
@@ -1774,6 +1810,9 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
     }
 
     async fn configure_provider(&mut self, provider: &Arc<Provider>) -> anyhow::Result<()> {
+        if let Some(ref factory) = self.onion_udp_factory {
+            factory.attach_provider(provider)?;
+        }
         if self.turn_invoke.is_some() {
             let pipeline = provider.onion_pipeline()?;
             register_turn_ticket_invoke_backend(
@@ -1788,6 +1827,7 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
             turn_listen = %self.turn_server.local_addr(),
             turn_advertised = %self.turn_server.advertised_addr(),
             issue_tickets = self.turn_invoke.is_some(),
+            multi_hop_onion_udp = self.onion_udp_factory.is_some(),
             "rings-turn-service attached to native foreground daemon"
         );
         Ok(())
@@ -1821,9 +1861,20 @@ pub async fn run_turn_service_daemon(
         .context("validating turn_service onion invoke configuration")?;
     let pc = rings_node::processor::ProcessorConfig::try_from(options.config.clone())
         .context("validating node configuration")?;
-    let server_cfg = turn_service
+    let mut server_cfg = turn_service
         .to_turn_server_config(pc.clock().clone())
         .context("building TurnServerConfig")?;
+    let onion_udp_factory = if turn_service.multi_hop_onion_udp {
+        let factory = OnionUdpRelayFactory::deferred(
+            rings_node::onion::OnionLoopClass::DEFAULT,
+            server_cfg.peer_policy,
+        );
+        server_cfg.custom_relay_factory =
+            Some(Arc::clone(&factory) as Arc<dyn rings_turn::TurnDatagramRelayFactory>);
+        Some(factory)
+    } else {
+        None
+    };
     let turn_server = Arc::new(
         rings_turn::TurnServer::start(server_cfg)
             .await
@@ -1843,6 +1894,7 @@ pub async fn run_turn_service_daemon(
         offer,
         turn_invoke,
         ticket_invoke_policy: turn_service.ticket_invoke_policy,
+        onion_udp_factory,
     };
     let run_res = rings_node::native::daemon::run_foreground_node(options, hooks).await;
     let close_res = server_cleanup.close().await;
@@ -2247,6 +2299,18 @@ mod tests {
         drop(pending);
     }
 
+    #[cfg(not(feature = "dummy"))]
+    static WEBRTC_TEST_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> =
+        std::sync::OnceLock::new();
+
+    #[cfg(not(feature = "dummy"))]
+    pub(crate) async fn webrtc_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        WEBRTC_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     struct OverlayTestNode {
         processor: Arc<Processor>,
         provider: Arc<Provider>,
@@ -2296,6 +2360,8 @@ mod tests {
     #[tokio::test]
     async fn turn_ticket_onion_invoke_works_over_builtin_rings_node_rpc_and_relays_udp(
     ) -> Result<()> {
+        #[cfg(not(feature = "dummy"))]
+        let _webrtc_serial = webrtc_test_guard().await;
         let t0: u128 = rings_core::utils::get_epoch_ms();
         let turn_clock = Arc::new(ManualClock::new(t0));
 
@@ -2353,10 +2419,49 @@ mod tests {
             }
         }
 
-        turn_node.processor.register_all_once().await?;
-        for r in &relays {
-            r.processor.register_all_once().await?;
-        }
+        with_hang_guard(
+            "await DHT convergence for Phase A turn.ticket test",
+            Duration::from_secs(30),
+            async {
+                let mut last_publish: Option<std::time::Instant> = None;
+                loop {
+                    if last_publish.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
+                        let mut set = tokio::task::JoinSet::new();
+                        let tn = Arc::clone(&turn_node.processor);
+                        set.spawn(async move { tn.register_all_once().await });
+                        for r in &relays {
+                            let rp = Arc::clone(&r.processor);
+                            set.spawn(async move { rp.register_all_once().await });
+                        }
+                        while set.join_next().await.is_some() {}
+                        last_publish = Some(std::time::Instant::now());
+                    }
+                    let online = client
+                        .provider
+                        .lookup_registry_raw("online_nodes")
+                        .await
+                        .map(|r| r.elements.len())
+                        .unwrap_or(0);
+                    let invokes = client
+                        .provider
+                        .lookup_registry_raw("onion_invokes")
+                        .await
+                        .map(|r| r.elements.len())
+                        .unwrap_or(0);
+                    let turns = client
+                        .provider
+                        .lookup_registry_raw(TURN_SERVICES_TOPIC)
+                        .await
+                        .map(|r| r.elements.len())
+                        .unwrap_or(0);
+                    if online >= 5 && invokes >= 1 && turns >= 1 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await;
 
         // 1. Client acquires ticket #1 via `request_turn_ticket` (which uses `lookup_registry_raw` +
         //    `onion_invoke_raw`), requesting 3600s and verifying server clamps to 60s (`DEFAULT_MAX_RESERVATION_TTL`).

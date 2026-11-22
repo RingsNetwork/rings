@@ -199,6 +199,12 @@ impl BackendObserver for CompositeBackendObserver {
             extra.e2e_message(message);
         }
     }
+
+    fn custom_envelope(&self, from: Did, bytes: &[u8]) {
+        if let Some(extra) = self.extra.as_deref() {
+            extra.custom_envelope(from, bytes);
+        }
+    }
 }
 
 fn e2e_event_from_message(message: &ApplicationMessage) -> Result<Option<E2eEvent>> {
@@ -1042,8 +1048,14 @@ impl Provider {
     /// the service is a node task (#1085). Use
     /// [`application_service`](Provider::application_service) for one under a stop of the
     /// caller's.
+    /// Spawn the application-inbox consumer over this provider's protocol registry.
     pub fn set_backend(&self) -> Result<()> {
         self.serve_application(None)
+    }
+
+    /// Spawn the application-inbox consumer with an explicit [`BackendObserver`].
+    pub fn set_backend_with_observer(&self, observer: Arc<dyn BackendObserver>) -> Result<()> {
+        self.serve_application(Some(observer))
     }
 
     /// [`Self::set_backend`] with `observer` handed the peer facts and unrouted E2E messages.

@@ -12,6 +12,7 @@ use rings_core::utils::SystemClock;
 use crate::auth::TurnAdmissionPolicy;
 use crate::error::Result;
 use crate::error::TurnError;
+use crate::relay_backend::TurnDatagramRelayFactory;
 
 /// Default TURN UDP listening port (RFC 5766).
 pub const DEFAULT_TURN_PORT: u16 = 3478;
@@ -296,6 +297,9 @@ pub struct TurnServerConfig {
     pub admission: TurnAdmissionPolicy,
     /// Injectable clock used to validate [`Delegation`](rings_core::delegation::Delegation) windows.
     pub clock: SharedClock,
+    /// Optional pluggable datagram relay factory (e.g. a multi-hop `onion::udp` session bridge).
+    /// When `None`, [`crate::TurnServer`] binds local OS UDP relay sockets according to `relay`.
+    pub custom_relay_factory: Option<Arc<dyn TurnDatagramRelayFactory>>,
 }
 
 impl std::fmt::Debug for TurnServerConfig {
@@ -317,6 +321,10 @@ impl std::fmt::Debug for TurnServerConfig {
             )
             .field("channel_bind_timeout", &self.channel_bind_timeout)
             .field("admission", &self.admission)
+            .field(
+                "has_custom_relay_factory",
+                &self.custom_relay_factory.is_some(),
+            )
             .finish()
     }
 }
@@ -338,6 +346,7 @@ impl Default for TurnServerConfig {
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::default(),
             clock: Arc::new(SystemClock),
+            custom_relay_factory: None,
         }
     }
 }
@@ -365,6 +374,7 @@ impl TurnServerConfig {
             channel_bind_timeout: Duration::ZERO,
             admission: TurnAdmissionPolicy::AllowAnyDelegation,
             clock: Arc::new(SystemClock),
+            custom_relay_factory: None,
         }
     }
 }

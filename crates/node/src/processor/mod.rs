@@ -167,6 +167,8 @@ pub struct Processor {
     onion_role: OnionRole<OnionExitOffer>,
     /// The cover floor of this node's idle onion links (#880).
     onion_idle_floor: OnionIdleFloor,
+    /// Socket binding and peer-IP admission settings for native `onion::udp` exits.
+    onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Whether each registration task is stored at its owners (#866), in task order.
     registration_readiness: Arc<RegistrationReadiness>,
@@ -323,6 +325,11 @@ impl Processor {
     /// Return the cover floor of this node's idle onion links (#880).
     pub(crate) const fn onion_idle_floor(&self) -> OnionIdleFloor {
         self.onion_idle_floor
+    }
+
+    /// Return the socket binding and peer-IP admission settings for native `onion::udp` exits.
+    pub const fn onion_udp_bind_config(&self) -> crate::onion::OnionUdpBindConfig {
+        self.onion_udp_bind_config
     }
 
     /// Return the cell of this process's onion epoch `e_n` (#834 D2), shared with the onion

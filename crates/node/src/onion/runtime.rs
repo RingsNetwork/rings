@@ -70,8 +70,15 @@ impl OnionRuntime {
     pub(crate) fn install(extensions: &Extensions) -> Result<Self> {
         let core = extensions.core();
         let clock = core.clock().clone();
+        let udp_bind_config = core.onion_udp_bind_config();
         Self::install_with(extensions, |accounting, link_sender| {
-            exit_algebra_with_clock(core.onion_role().exit(), accounting, link_sender, clock)
+            exit_algebra_with_clock_and_udp(
+                core.onion_role().exit(),
+                accounting,
+                link_sender,
+                clock,
+                udp_bind_config,
+            )
         })
     }
 
@@ -215,7 +222,8 @@ impl OnionRuntime {
                 | Error::OnionRouteError(
                     OnionRouteError::PipelineTimedOut
                     | OnionRouteError::LinkSendTimedOut
-                    | OnionRouteError::TcpOpenTimedOut,
+                    | OnionRouteError::TcpOpenTimedOut
+                    | OnionRouteError::UdpOpenTimedOut,
                 ),
             ) => Some(true),
             Err(_) => None,
@@ -325,6 +333,23 @@ pub(super) fn exit_algebra_with_clock(
     link_sender: &OnionLinkSender,
     clock: rings_core::utils::SharedClock,
 ) -> OnionAlgebra {
+    exit_algebra_with_clock_and_udp(
+        offer,
+        accounting,
+        link_sender,
+        clock,
+        super::OnionUdpBindConfig::default(),
+    )
+}
+
+/// [`exit_algebra_with_clock`] with explicit `onion::udp` socket-binding configuration.
+pub(super) fn exit_algebra_with_clock_and_udp(
+    offer: Option<&OnionExitOffer>,
+    accounting: &OnionExitAccounting,
+    link_sender: &OnionLinkSender,
+    clock: rings_core::utils::SharedClock,
+    udp_bind_config: super::OnionUdpBindConfig,
+) -> OnionAlgebra {
     let Some(offer) = offer else {
         return OnionAlgebra::default();
     };
@@ -338,6 +363,24 @@ pub(super) fn exit_algebra_with_clock(
                     service.clone(),
                     OnionExitSessions::new_with_clock(
                         OnionHttpsWorld::new(policy.clone(), accounting.clone()),
+                        policy,
+                        accounting.clone(),
+                        link_sender.clone(),
+                        clock.clone(),
+                    ),
+                );
+            }
+            #[cfg(rings_native)]
+            if *service == OnionServiceName::udp() {
+                return algebra.register(
+                    service.clone(),
+                    OnionExitSessions::new_with_clock(
+                        super::udp::OnionUdpWorld::new(
+                            policy.clone(),
+                            accounting.clone(),
+                            udp_bind_config,
+                            clock.clone(),
+                        ),
                         policy,
                         accounting.clone(),
                         link_sender.clone(),
@@ -360,7 +403,7 @@ pub(super) fn exit_algebra_with_clock(
             }
             #[cfg(not(rings_native))]
             {
-                let _ = policy;
+                let _ = (policy, udp_bind_config);
                 algebra
             }
         })
@@ -386,8 +429,13 @@ mod tests {
             OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
         let https_offer = OnionExitOffer::new([OnionServiceName::https()], policy.clone())?;
         let tcp_offer = OnionExitOffer::new([OnionServiceName::tcp()], policy.clone())?;
-        let both_offer = OnionExitOffer::new(
-            [OnionServiceName::tcp(), OnionServiceName::https()],
+        let udp_offer = OnionExitOffer::new([OnionServiceName::udp()], policy.clone())?;
+        let all_offer = OnionExitOffer::new(
+            [
+                OnionServiceName::tcp(),
+                OnionServiceName::https(),
+                OnionServiceName::udp(),
+            ],
             policy.clone(),
         )?;
 
@@ -403,8 +451,16 @@ mod tests {
                 BTreeSet::from([OnionServiceName::tcp()]),
             ),
             (
-                OnionRole::Exit(both_offer),
-                BTreeSet::from([OnionServiceName::https(), OnionServiceName::tcp()]),
+                OnionRole::Exit(udp_offer),
+                BTreeSet::from([OnionServiceName::udp()]),
+            ),
+            (
+                OnionRole::Exit(all_offer),
+                BTreeSet::from([
+                    OnionServiceName::https(),
+                    OnionServiceName::tcp(),
+                    OnionServiceName::udp(),
+                ]),
             ),
         ] {
             let processor = Arc::new(prepare_processor_with_onion_role(role).await);
