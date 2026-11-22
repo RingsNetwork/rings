@@ -414,7 +414,7 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
         .unwrap();
 
     let mut peer_buf = vec![0_u8; 2048];
-    let (pn, observed_by_peer) = with_hang_guard(
+    let (peer_len, observed_by_peer) = with_hang_guard(
         "raw UDP peer receives STUN Binding Request from E_exit",
         Duration::from_secs(10),
         raw_peer.recv_from(&mut peer_buf),
@@ -426,7 +426,7 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
         "remote UDP peer must observe exit's E_exit, never entry's address"
     );
     let mut decoded_stun_at_peer = Message {
-        raw: peer_buf[..pn].to_vec(),
+        raw: peer_buf[..peer_len].to_vec(),
         ..Default::default()
     };
     decoded_stun_at_peer.decode().unwrap();

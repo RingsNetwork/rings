@@ -2528,9 +2528,9 @@ mod tests {
             ])
             .unwrap();
         client_sock.send_to(&perm_req.raw, server_addr).await?;
-        let (pn, _) = client_sock.recv_from(&mut buf).await?;
+        let (pkt_len, _) = client_sock.recv_from(&mut buf).await?;
         let mut perm_resp = Message {
-            raw: buf[..pn].to_vec(),
+            raw: buf[..pkt_len].to_vec(),
             ..Default::default()
         };
         perm_resp.decode().unwrap();
