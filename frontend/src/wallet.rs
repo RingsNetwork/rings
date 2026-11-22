@@ -36,6 +36,7 @@ const WEBCRYPTO_IDB_DATABASE: &str = "rings-frontend-webcrypto";
 const WEBCRYPTO_IDB_STORE: &str = "keys";
 const WEBCRYPTO_IDB_PRIMARY_KEY: &str = "p256-default";
 const WEBCRYPTO_IDB_VERSION: u32 = 1;
+const WEBCRYPTO_INIT_LOCK_NAME: &str = "rings-frontend-webcrypto-init";
 
 /// Account authorization standard selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,13 +187,84 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
         return Err("WebCrypto SubtleCrypto is not available".to_string());
     }
 
-    if let Ok(Some(stored)) = load_persisted_webcrypto_account().await {
-        return Ok(stored);
-    }
+    with_webcrypto_init_lock(move || connect_webcrypto_inner(subtle)).await
+}
 
-    let account = generate_webcrypto_account(&subtle).await?;
-    let _ = persist_webcrypto_account(&account).await;
-    Ok(account)
+async fn with_webcrypto_init_lock<F, Fut>(op: F) -> Result<WalletAccount, String>
+where
+    F: FnOnce() -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<WalletAccount, String>> + 'static,
+{
+    let maybe_locks = js_global_prop("navigator")
+        .ok()
+        .and_then(|nav| js_prop(&nav, "locks").ok())
+        .filter(|locks| !locks.is_undefined() && !locks.is_null() && is_callable(locks, "request"));
+
+    let Some(locks) = maybe_locks else {
+        return op().await;
+    };
+
+    let (tx, rx) = oneshot::channel::<Result<WalletAccount, String>>();
+    let mut slot = Some((op, tx));
+    let callback = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |_lock: JsValue| {
+        let Some((task_fn, sender)) = slot.take() else {
+            return js_sys::Promise::resolve(&JsValue::UNDEFINED);
+        };
+        wasm_bindgen_futures::future_to_promise(async move {
+            let _ = sender.send(task_fn().await);
+            Ok(JsValue::UNDEFINED)
+        })
+    });
+    let options = Object::new();
+    let _ = js_set(&options, "mode", &JsValue::from_str("exclusive"));
+    let lock_promise = js_call3(
+        &locks,
+        "request",
+        &JsValue::from_str(WEBCRYPTO_INIT_LOCK_NAME),
+        &options.into(),
+        callback.as_ref().unchecked_ref(),
+    )?;
+    await_js(lock_promise).await?;
+    drop(callback);
+    rx.await
+        .map_err(|_| "WebCrypto initialization lock released before result".to_string())?
+}
+
+async fn connect_webcrypto_inner(subtle: JsValue) -> Result<WalletAccount, String> {
+    let replace_corrupt_account = match inspect_persisted_webcrypto_account().await {
+        Ok(PersistedWebCryptoState::Valid(stored)) => return Ok(stored),
+        Ok(PersistedWebCryptoState::Absent) => None,
+        Ok(PersistedWebCryptoState::Corrupt { raw_account }) => Some(raw_account),
+        Err(_) => {
+            // IndexedDB itself is unavailable (e.g. restricted sandbox); fall back to ephemeral.
+            return generate_webcrypto_account(&subtle).await;
+        }
+    };
+
+    let candidate = generate_webcrypto_account(&subtle).await?;
+    let expected_corrupt = replace_corrupt_account.as_ref().map(Option::as_deref);
+    match compare_and_init_webcrypto_record(&candidate, expected_corrupt).await? {
+        AtomicWebCryptoInitOutcome::WroteCandidate => Ok(candidate),
+        AtomicWebCryptoInitOutcome::FoundExisting(existing_record) => {
+            match verify_persisted_webcrypto_record(&existing_record).await {
+                Ok(winner) => Ok(winner),
+                Err(_) => {
+                    let existing_account = js_string_field(&existing_record, "account").ok();
+                    match compare_and_init_webcrypto_record(
+                        &candidate,
+                        Some(existing_account.as_deref()),
+                    )
+                    .await?
+                    {
+                        AtomicWebCryptoInitOutcome::WroteCandidate => Ok(candidate),
+                        AtomicWebCryptoInitOutcome::FoundExisting(repaired) => {
+                            verify_persisted_webcrypto_record(&repaired).await
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, String> {
@@ -477,7 +549,40 @@ async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
         .map_err(|_| "IndexedDB request dropped before settling".to_string())?
 }
 
-async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
+enum PersistedWebCryptoState {
+    Valid(WalletAccount),
+    Absent,
+    Corrupt { raw_account: Option<String> },
+}
+
+enum AtomicWebCryptoInitOutcome {
+    WroteCandidate,
+    FoundExisting(JsValue),
+}
+
+async fn verify_persisted_webcrypto_record(record: &JsValue) -> Result<WalletAccount, String> {
+    let account = js_string_field(record, "account")?;
+    let private_key = js_prop(record, "privateKey")?;
+    if account.trim().is_empty() || private_key.is_undefined() || private_key.is_null() {
+        return Err("persisted WebCrypto record missing account or privateKey".to_string());
+    }
+    let candidate = WalletAccount {
+        kind: WalletKind::WebCrypto,
+        account,
+        account_type: "secp256r1".to_string(),
+        handle: private_key,
+    };
+    let verifier = AccountVerifier::from_account_parts(&candidate.account, &candidate.account_type)
+        .map_err(|error| format!("persisted WebCrypto public key invalid: {error}"))?;
+    let probe = "rings-webcrypto-key-check";
+    let sig = candidate.sign_session_proof(probe).await?;
+    if !verifier.verify(probe.as_bytes(), &sig) {
+        return Err("persisted WebCrypto private key does not match public key".to_string());
+    }
+    Ok(candidate)
+}
+
+async fn inspect_persisted_webcrypto_account() -> Result<PersistedWebCryptoState, String> {
     let record = {
         let db = IdbDatabaseGuard {
             db: open_webcrypto_idb().await?,
@@ -497,29 +602,209 @@ async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, Str
         await_idb_request(&get_req).await?
     };
     if record.is_undefined() || record.is_null() {
-        return Ok(None);
+        return Ok(PersistedWebCryptoState::Absent);
     }
-    let account = js_string_field(&record, "account")?;
-    let private_key = js_prop(&record, "privateKey")?;
-    if account.trim().is_empty() || private_key.is_undefined() || private_key.is_null() {
-        return Ok(None);
+    let raw_account = js_string_field(&record, "account").ok();
+    match verify_persisted_webcrypto_record(&record).await {
+        Ok(valid) => Ok(PersistedWebCryptoState::Valid(valid)),
+        Err(_) => Ok(PersistedWebCryptoState::Corrupt { raw_account }),
     }
-    let candidate = WalletAccount {
-        kind: WalletKind::WebCrypto,
-        account,
-        account_type: "secp256r1".to_string(),
-        handle: private_key,
-    };
-    let verifier = AccountVerifier::from_account_parts(&candidate.account, &candidate.account_type)
-        .map_err(|error| format!("persisted WebCrypto public key invalid: {error}"))?;
-    let probe = "rings-webcrypto-key-check";
-    let sig = candidate.sign_session_proof(probe).await?;
-    if !verifier.verify(probe.as_bytes(), &sig) {
-        return Err("persisted WebCrypto private key does not match public key".to_string());
-    }
-    Ok(Some(candidate))
 }
 
+#[cfg(all(test, target_arch = "wasm32"))]
+async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, String> {
+    match inspect_persisted_webcrypto_account().await? {
+        PersistedWebCryptoState::Valid(account) => Ok(Some(account)),
+        PersistedWebCryptoState::Absent => Ok(None),
+        PersistedWebCryptoState::Corrupt { .. } => {
+            Err("persisted WebCrypto private key does not match public key".to_string())
+        }
+    }
+}
+
+type IdbPutHandlerSlot = Rc<RefCell<Option<(JsValue, [Closure<dyn FnMut(Event)>; 2])>>>;
+
+struct IdbAtomicInitWatch {
+    get_req: JsValue,
+    _get_handlers: [Closure<dyn FnMut(Event)>; 2],
+    put_holder: IdbPutHandlerSlot,
+}
+
+impl Drop for IdbAtomicInitWatch {
+    fn drop(&mut self) {
+        let _ = Reflect::set(
+            &self.get_req,
+            &JsValue::from_str("onsuccess"),
+            &JsValue::NULL,
+        );
+        let _ = Reflect::set(&self.get_req, &JsValue::from_str("onerror"), &JsValue::NULL);
+        if let Some((put_req, _handlers)) = self.put_holder.borrow_mut().take() {
+            let _ = Reflect::set(&put_req, &JsValue::from_str("onsuccess"), &JsValue::NULL);
+            let _ = Reflect::set(&put_req, &JsValue::from_str("onerror"), &JsValue::NULL);
+        }
+    }
+}
+
+/// Atomically check `WEBCRYPTO_IDB_PRIMARY_KEY` and insert `candidate` inside a single `readwrite`
+/// IndexedDB transaction without yielding across a JS microtask gap.
+///
+/// The synchronous `get_req.onsuccess` handler writes `candidate` iff the slot is currently absent
+/// (or still holds `replace_corrupt_account`); otherwise it leaves the existing record intact and
+/// returns [`AtomicWebCryptoInitOutcome::FoundExisting`] so the caller adopts the winning identity.
+async fn compare_and_init_webcrypto_record(
+    candidate: &WalletAccount,
+    replace_corrupt_account: Option<Option<&str>>,
+) -> Result<AtomicWebCryptoInitOutcome, String> {
+    let db = IdbDatabaseGuard {
+        db: open_webcrypto_idb().await?,
+    };
+    let transaction = js_call2(
+        &db.db,
+        "transaction",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        &JsValue::from_str("readwrite"),
+    )?;
+    let commit = IdbTransactionWatch::new(&transaction);
+    let store = js_call1(
+        &transaction,
+        "objectStore",
+        &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+    )?;
+    let candidate_record = Object::new();
+    js_set(
+        &candidate_record,
+        "account",
+        &JsValue::from_str(&candidate.account),
+    )?;
+    js_set(&candidate_record, "privateKey", &candidate.handle)?;
+    let candidate_value: JsValue = candidate_record.into();
+
+    let expected_corrupt = replace_corrupt_account.map(|opt| opt.map(str::to_owned));
+    let get_req = js_call1(&store, "get", &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY))?;
+
+    let (outcome_tx, outcome_rx) = oneshot::channel::<Result<AtomicWebCryptoInitOutcome, String>>();
+    let outcome_cell = Rc::new(RefCell::new(Some(outcome_tx)));
+    let put_holder: IdbPutHandlerSlot = Rc::new(RefCell::new(None));
+
+    let on_get_success = {
+        let get_req = get_req.clone();
+        let store = store.clone();
+        let transaction = transaction.clone();
+        let candidate_value = candidate_value.clone();
+        let outcome_cell = outcome_cell.clone();
+        let put_holder = put_holder.clone();
+        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            let current = match js_prop(&get_req, "result") {
+                Ok(val) => val,
+                Err(err) => {
+                    let _ = js_call0(&transaction, "abort");
+                    if let Some(tx) = outcome_cell.borrow_mut().take() {
+                        let _ = tx.send(Err(err));
+                    }
+                    return;
+                }
+            };
+            let should_write = if current.is_undefined() || current.is_null() {
+                true
+            } else if let Some(ref expected) = expected_corrupt {
+                let cur_account = js_string_field(&current, "account").ok();
+                &cur_account == expected
+            } else {
+                false
+            };
+
+            if !should_write {
+                if let Some(tx) = outcome_cell.borrow_mut().take() {
+                    let _ = tx.send(Ok(AtomicWebCryptoInitOutcome::FoundExisting(current)));
+                }
+                return;
+            }
+
+            let put_req = match js_call2(
+                &store,
+                "put",
+                &candidate_value,
+                &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
+            ) {
+                Ok(req) => req,
+                Err(err) => {
+                    let _ = js_call0(&transaction, "abort");
+                    if let Some(tx) = outcome_cell.borrow_mut().take() {
+                        let _ = tx.send(Err(err));
+                    }
+                    return;
+                }
+            };
+            let on_put_ok = {
+                let outcome_cell = outcome_cell.clone();
+                Closure::<dyn FnMut(Event)>::new(move |_ev: Event| {
+                    if let Some(tx) = outcome_cell.borrow_mut().take() {
+                        let _ = tx.send(Ok(AtomicWebCryptoInitOutcome::WroteCandidate));
+                    }
+                })
+            };
+            let on_put_err = {
+                let put_req = put_req.clone();
+                let outcome_cell = outcome_cell.clone();
+                Closure::<dyn FnMut(Event)>::new(move |_ev: Event| {
+                    if let Some(tx) = outcome_cell.borrow_mut().take() {
+                        let err = js_prop(&put_req, "error")
+                            .map(js_error_label)
+                            .unwrap_or_else(|e| e);
+                        let _ = tx.send(Err(err));
+                    }
+                })
+            };
+            let _ = Reflect::set(
+                &put_req,
+                &JsValue::from_str("onsuccess"),
+                on_put_ok.as_ref().unchecked_ref(),
+            );
+            let _ = Reflect::set(
+                &put_req,
+                &JsValue::from_str("onerror"),
+                on_put_err.as_ref().unchecked_ref(),
+            );
+            *put_holder.borrow_mut() = Some((put_req, [on_put_ok, on_put_err]));
+        })
+    };
+    let on_get_err = {
+        let get_req = get_req.clone();
+        let outcome_cell = outcome_cell.clone();
+        Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+            if let Some(tx) = outcome_cell.borrow_mut().take() {
+                let err = js_prop(&get_req, "error")
+                    .map(js_error_label)
+                    .unwrap_or_else(|e| e);
+                let _ = tx.send(Err(err));
+            }
+        })
+    };
+    let _ = Reflect::set(
+        &get_req,
+        &JsValue::from_str("onsuccess"),
+        on_get_success.as_ref().unchecked_ref(),
+    );
+    let _ = Reflect::set(
+        &get_req,
+        &JsValue::from_str("onerror"),
+        on_get_err.as_ref().unchecked_ref(),
+    );
+    let _init_watch = IdbAtomicInitWatch {
+        get_req,
+        _get_handlers: [on_get_success, on_get_err],
+        put_holder,
+    };
+
+    let outcome = outcome_rx
+        .await
+        .map_err(|_| "IndexedDB atomic init dropped before settling".to_string())??;
+    drop(_init_watch);
+    commit.committed().await?;
+    Ok(outcome)
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
 async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String> {
     let db = IdbDatabaseGuard {
         db: open_webcrypto_idb().await?,
@@ -896,5 +1181,84 @@ mod wasm_tests {
             return;
         };
         assert_ne!(recovered.account, mismatched.account);
+    }
+
+    async fn clear_webcrypto_account_for_test() -> Result<(), String> {
+        let db = IdbDatabaseGuard {
+            db: open_webcrypto_idb().await?,
+        };
+        let transaction = js_call2(
+            &db.db,
+            "transaction",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+            &JsValue::from_str("readwrite"),
+        )?;
+        let commit = IdbTransactionWatch::new(&transaction);
+        let store = js_call1(
+            &transaction,
+            "objectStore",
+            &JsValue::from_str(WEBCRYPTO_IDB_STORE),
+        )?;
+        let del_req = js_call1(
+            &store,
+            "delete",
+            &JsValue::from_str(WEBCRYPTO_IDB_PRIMARY_KEY),
+        )?;
+        await_idb_request(&del_req).await?;
+        commit.committed().await
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn test_concurrent_webcrypto_init_converges_on_single_persisted_identity() {
+        assert!(clear_webcrypto_account_for_test().await.is_ok());
+        assert_eq!(
+            load_persisted_webcrypto_account()
+                .await
+                .map(|v| v.is_none()),
+            Ok(true)
+        );
+
+        let crypto = js_global_prop("crypto");
+        assert!(crypto.is_ok());
+        let Ok(crypto) = crypto else {
+            return;
+        };
+        let subtle = js_prop(&crypto, "subtle");
+        assert!(subtle.is_ok());
+        let Ok(subtle) = subtle else {
+            return;
+        };
+
+        // Directly race the lock-free IndexedDB compare-and-init path across two concurrent
+        // initializers so even environments without `navigator.locks` are proven atomic.
+        let (first, second) = futures::future::join(
+            connect_webcrypto_inner(subtle.clone()),
+            connect_webcrypto_inner(subtle),
+        )
+        .await;
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        let (Ok(first), Ok(second)) = (first, second) else {
+            return;
+        };
+        assert_eq!(first.account, second.account);
+
+        let persisted = load_persisted_webcrypto_account().await;
+        assert!(matches!(persisted, Ok(Some(_))));
+        let Ok(Some(persisted)) = persisted else {
+            return;
+        };
+        assert_eq!(persisted.account, first.account);
+
+        // Also verify full `connect_webcrypto` (with `navigator.locks` serialization) from empty DB.
+        assert!(clear_webcrypto_account_for_test().await.is_ok());
+        let (locked_a, locked_b) =
+            futures::future::join(connect_webcrypto(), connect_webcrypto()).await;
+        assert!(locked_a.is_ok());
+        assert!(locked_b.is_ok());
+        let (Ok(locked_a), Ok(locked_b)) = (locked_a, locked_b) else {
+            return;
+        };
+        assert_eq!(locked_a.account, locked_b.account);
     }
 }

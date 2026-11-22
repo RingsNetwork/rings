@@ -418,6 +418,40 @@ impl OnionExitPolicy {
         !self.is_closed() && !self.denies(target) && self.allows(target)
     }
 
+    /// Return whether this policy can admit an unconnected `onion::udp` socket bound under `mode`.
+    ///
+    /// Unlike `tcp` and `https`, an `onion::udp` session opens with a synthetic bind-mode authority
+    /// (`0.0.0.0:1`, `0.0.0.0:2`, `[::]:1`, or `[::]:2`) and enforces [`Self::allows_target`] on
+    /// every inbound and outbound peer datagram. Session open is admitted iff the policy is open
+    /// and at least one allowed pattern can match an IP-literal peer of `mode`'s address family
+    /// without being shadowed by `denied_targets`.
+    pub fn allows_udp_bind(&self, mode: OnionUdpBindMode) -> bool {
+        if self.is_closed()
+            || self
+                .denied_targets
+                .iter()
+                .any(|denied| matches!(denied.0, OnionExitTargetPattern::Any))
+        {
+            return false;
+        }
+        self.allowed_targets.iter().any(|allowed| match &allowed.0 {
+            OnionExitTargetPattern::Any => true,
+            OnionExitTargetPattern::AnyHost(port) => !self.denied_targets.iter().any(|denied| {
+                matches!(
+                    denied.0,
+                    OnionExitTargetPattern::AnyHost(denied_port) if denied_port == *port
+                )
+            }),
+            OnionExitTargetPattern::Authority(authority) => {
+                authority
+                    .host()
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_ipv6() == mode.is_ipv6())
+                    && !self.denies(authority)
+            }
+        })
+    }
+
     /// Whether an allow entry matches `target`.
     fn allows(&self, target: &OnionProxyTarget) -> bool {
         self.allowed_targets

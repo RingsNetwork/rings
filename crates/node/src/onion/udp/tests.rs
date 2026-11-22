@@ -309,3 +309,100 @@ async fn test_native_onion_udp_session_close_wakes_parked_reader_immediately() -
     drop(driver);
     Ok(())
 }
+
+#[cfg(rings_native)]
+#[tokio::test]
+async fn test_onion_udp_world_admits_port_restricted_policy_and_enforces_per_datagram() -> Result<()>
+{
+    let allowed_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let allowed_addr = allowed_peer.local_addr().unwrap();
+    let denied_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let denied_addr = denied_peer.local_addr().unwrap();
+    assert_ne!(allowed_addr.port(), denied_addr.port());
+
+    let policy = OnionExitPolicy::from_target_strings(
+        vec![format!("*:{}", allowed_addr.port())],
+        Vec::new(),
+    )?;
+    let clock: SharedClock = Arc::new(rings_core::utils::SystemClock);
+    let accounting = OnionExitAccounting::new_with_clock(clock.clone());
+    let world = OnionUdpWorld::new(
+        policy.clone(),
+        accounting,
+        OnionUdpBindConfig::loopback_for_test(),
+        clock,
+    );
+
+    // Session-open admission (`admits_open` + `world.open`) must accept `0.0.0.0:1` under `*:port`.
+    let bind_target = OnionUdpBindMode::Ipv4AnyPort.to_target();
+    assert!(world.admits_open(&policy, &bind_target));
+    assert!(!world.admits_open(&policy, &OnionProxyTarget::parse_authority("127.0.0.1:53")?));
+
+    let (mut reader, mut writer) = world.open(&bind_target).await?;
+    let first_chunk = reader.read(1024).await?.expect("initial Bound frame");
+    let mut initial_buf = BytesMut::from(first_chunk.as_ref());
+    let Some(OnionUdpServerFrame::Bound { local_addr }) =
+        decode_next_server_frame(&mut initial_buf)?
+    else {
+        panic!("expected initial Bound frame");
+    };
+
+    writer
+        .write(Bytes::from(encode_client_frame(
+            &OnionUdpClientFrame::AllowPeerIp {
+                peer_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                ttl_ms: 60_000,
+            },
+        )?))
+        .await?;
+
+    // Outbound to disallowed port is dropped by per-datagram policy; outbound to allowed port passes.
+    writer
+        .write(Bytes::from(encode_client_frame(
+            &OnionUdpClientFrame::SendDatagram {
+                peer: denied_addr,
+                payload: b"blocked".to_vec(),
+            },
+        )?))
+        .await?;
+    assert!(tokio::time::timeout(
+        Duration::from_millis(50),
+        denied_peer.recv_from(&mut [0u8; 16])
+    )
+    .await
+    .is_err());
+
+    writer
+        .write(Bytes::from(encode_client_frame(
+            &OnionUdpClientFrame::SendDatagram {
+                peer: allowed_addr,
+                payload: b"allowed".to_vec(),
+            },
+        )?))
+        .await?;
+    let mut rx = [0u8; 16];
+    let (n, _) = allowed_peer.recv_from(&mut rx).await.unwrap();
+    assert_eq!(&rx[..n], b"allowed");
+
+    // Inbound from disallowed port is dropped even though 127.0.0.1 has a pinhole; allowed port passes.
+    denied_peer.send_to(b"denied-in", local_addr).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), reader.read(1024))
+            .await
+            .is_err()
+    );
+    allowed_peer
+        .send_to(b"allowed-in", local_addr)
+        .await
+        .unwrap();
+    let chunk = reader.read(1024).await?.expect("allowed inbound frame");
+    let mut buf = BytesMut::from(chunk.as_ref());
+    assert_eq!(
+        decode_next_server_frame(&mut buf)?,
+        Some(OnionUdpServerFrame::RecvDatagram {
+            peer: allowed_addr,
+            payload: b"allowed-in".to_vec(),
+        })
+    );
+    Ok(())
+}

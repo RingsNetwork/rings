@@ -2548,4 +2548,510 @@ mod tests {
         assert_eq!(closed_count.load(Ordering::SeqCst), 1);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_stalled_relay_backpressure_does_not_block_global_turn_read_loop() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use stun::message::METHOD_REFRESH;
+        use stun::message::METHOD_SEND;
+        use tokio::sync::Notify;
+
+        struct StalledFirstRelay {
+            addr: SocketAddr,
+            stall_sends: bool,
+            closed: Notify,
+            delivered: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelay for StalledFirstRelay {
+            fn relayed_addr(&self) -> SocketAddr {
+                self.addr
+            }
+
+            async fn recv_datagram(&self, _buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+                self.closed.notified().await;
+                Err(std::io::Error::other("closed"))
+            }
+
+            async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> std::io::Result<usize> {
+                if self.stall_sends {
+                    self.closed.notified().await;
+                    return Err(std::io::Error::other("closed"));
+                }
+                self.delivered.fetch_add(1, Ordering::SeqCst);
+                Ok(buf.len())
+            }
+
+            fn begin_close(&self) -> TurnRelayCloseHandle {
+                self.closed.notify_waiters();
+                None
+            }
+
+            async fn finish_close(&self, _handle: TurnRelayCloseHandle) {
+                self.closed.notify_waiters();
+            }
+        }
+
+        struct StalledFirstFactory {
+            calls: AtomicUsize,
+            healthy_delivered: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelayFactory for StalledFirstFactory {
+            fn supports_family(&self, use_ipv4: bool) -> bool {
+                use_ipv4
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::io::Result<Arc<dyn TurnDatagramRelay>> {
+                let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+                let addr = SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(198, 51, 100, 90)),
+                    51_000 + u16::try_from(idx).unwrap(),
+                );
+                Ok(Arc::new(StalledFirstRelay {
+                    addr,
+                    stall_sends: idx == 0,
+                    closed: Notify::new(),
+                    delivered: Arc::clone(&self.healthy_delivered),
+                }))
+            }
+        }
+
+        let healthy_delivered = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(StalledFirstFactory {
+            calls: AtomicUsize::new(0),
+            healthy_delivered: Arc::clone(&healthy_delivered),
+        });
+
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.max_allocations = 4;
+        cfg.custom_relay_factory = Some(Arc::clone(&factory) as Arc<dyn TurnDatagramRelayFactory>);
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        async fn auth_and_allocate(
+            server: &TurnServer,
+            server_addr: SocketAddr,
+        ) -> Result<(UdpSocket, TurnCredentials, String, String, Vec<u8>)> {
+            let eph_key = SecretKey::random();
+            let res = server
+                .reserve_exit_session(eph_key.pubkey(), Duration::from_secs(30))
+                .await?;
+            let creds =
+                TurnCredentials::from_session_ticket(&res.ticket, &eph_key, res.server_pubkey)?;
+            let sock = UdpSocket::bind("127.0.0.1:0").await?;
+            let mut unauth = Message::new();
+            unauth
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                    Box::new(turn::proto::reqtrans::RequestedTransport {
+                        protocol: turn::proto::PROTO_UDP,
+                    }),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            sock.send_to(&unauth.raw, server_addr).await?;
+            let mut buf = vec![0_u8; 1500];
+            let (n, _) = sock.recv_from(&mut buf).await?;
+            let mut challenge = Message {
+                raw: buf[..n].to_vec(),
+                ..Default::default()
+            };
+            challenge.decode().unwrap();
+            let mut nonce = Nonce::new(ATTR_NONCE, String::new());
+            let mut realm = Realm::new(ATTR_REALM, String::new());
+            nonce.get_from(&challenge).unwrap();
+            realm.get_from(&challenge).unwrap();
+            let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+            let mut alloc_req = Message::new();
+            alloc_req
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                    Box::new(turn::proto::reqtrans::RequestedTransport {
+                        protocol: turn::proto::PROTO_UDP,
+                    }),
+                    Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                    Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                    Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                    Box::new(MessageIntegrity(mi_key.clone())),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            sock.send_to(&alloc_req.raw, server_addr).await?;
+            let (an, _) =
+                tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
+                    .await
+                    .expect("Allocate must respond promptly")?;
+            let mut alloc_resp = Message {
+                raw: buf[..an].to_vec(),
+                ..Default::default()
+            };
+            alloc_resp.decode().unwrap();
+            assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+            Ok((sock, creds, realm.text, nonce.text, mi_key))
+        }
+
+        let (c1_sock, c1_creds, c1_realm, c1_nonce, c1_mi) =
+            auth_and_allocate(&server, server_addr).await?;
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 50));
+        let peer_addr = SocketAddr::new(peer_ip, 9999);
+
+        let mut c1_perm = Message::new();
+        c1_perm
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(turn::proto::peeraddr::PeerAddress {
+                    ip: peer_ip,
+                    port: 0,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, c1_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, c1_realm.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, c1_nonce.clone())),
+                Box::new(MessageIntegrity(c1_mi.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        c1_sock.send_to(&c1_perm.raw, server_addr).await?;
+        let mut buf = vec![0_u8; 1500];
+        let _ = c1_sock.recv_from(&mut buf).await?;
+
+        // Flood 128 Send indications on Client 1 whose relay blocks indefinitely in `send_to`.
+        for _ in 0..128 {
+            let mut send_ind = Message::new();
+            send_ind
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(
+                        METHOD_SEND,
+                        stun::message::CLASS_INDICATION,
+                    )),
+                    Box::new(turn::proto::peeraddr::PeerAddress {
+                        ip: peer_addr.ip(),
+                        port: peer_addr.port(),
+                    }),
+                    Box::new(turn::proto::data::Data(b"congested".to_vec())),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            c1_sock.send_to(&send_ind.raw, server_addr).await?;
+        }
+
+        // Client 1's own Refresh AND a brand-new Client 2's Allocate + CreatePermission + Send
+        // must still succeed immediately without stalling on Client 1's relay backpressure.
+        let mut refresh_req = Message::new();
+        refresh_req
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+                Box::new(Username::new(ATTR_USERNAME, c1_creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, c1_realm)),
+                Box::new(Nonce::new(ATTR_NONCE, c1_nonce)),
+                Box::new(MessageIntegrity(c1_mi)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        c1_sock.send_to(&refresh_req.raw, server_addr).await?;
+        let (rn, _) = tokio::time::timeout(Duration::from_millis(300), c1_sock.recv_from(&mut buf))
+            .await
+            .expect("Refresh must not stall behind congested relay sends")?;
+        let mut refresh_resp = Message {
+            raw: buf[..rn].to_vec(),
+            ..Default::default()
+        };
+        refresh_resp.decode().unwrap();
+        assert_eq!(refresh_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        let (c2_sock, c2_creds, c2_realm, c2_nonce, c2_mi) =
+            auth_and_allocate(&server, server_addr).await?;
+        let mut c2_perm = Message::new();
+        c2_perm
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(turn::proto::peeraddr::PeerAddress {
+                    ip: peer_ip,
+                    port: 0,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, c2_creds.username)),
+                Box::new(Realm::new(ATTR_REALM, c2_realm)),
+                Box::new(Nonce::new(ATTR_NONCE, c2_nonce)),
+                Box::new(MessageIntegrity(c2_mi)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        c2_sock.send_to(&c2_perm.raw, server_addr).await?;
+        let _ = tokio::time::timeout(Duration::from_millis(300), c2_sock.recv_from(&mut buf))
+            .await
+            .expect("Client 2 CreatePermission must succeed")?;
+
+        let mut c2_send = Message::new();
+        c2_send
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(
+                    METHOD_SEND,
+                    stun::message::CLASS_INDICATION,
+                )),
+                Box::new(turn::proto::peeraddr::PeerAddress {
+                    ip: peer_addr.ip(),
+                    port: peer_addr.port(),
+                }),
+                Box::new(turn::proto::data::Data(b"healthy".to_vec())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        c2_sock.send_to(&c2_send.raw, server_addr).await?;
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while healthy_delivered.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Client 2 datagram must be forwarded independently");
+
+        tokio::time::timeout(Duration::from_millis(500), server.close())
+            .await
+            .expect("server.close() must finish promptly")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tcp_disconnect_cancels_pending_relay_open_and_caps_concurrency() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+        use tokio::sync::Notify;
+
+        struct InFlightGuard(Arc<AtomicUsize>);
+        impl Drop for InFlightGuard {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        struct ConcurrencyBoundFactory {
+            in_flight: Arc<AtomicUsize>,
+            peak_in_flight: AtomicUsize,
+            started: Notify,
+            release: Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelayFactory for ConcurrencyBoundFactory {
+            fn supports_family(&self, use_ipv4: bool) -> bool {
+                use_ipv4
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::io::Result<Arc<dyn TurnDatagramRelay>> {
+                let cur = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                let _guard = InFlightGuard(Arc::clone(&self.in_flight));
+                self.peak_in_flight.fetch_max(cur, Ordering::SeqCst);
+                self.started.notify_waiters();
+                self.release.notified().await;
+                Ok(Arc::new(DummyClosedRelay {
+                    addr: "198.51.100.88:52000".parse().unwrap(),
+                    closed: Notify::new(),
+                }))
+            }
+        }
+
+        struct DummyClosedRelay {
+            addr: SocketAddr,
+            closed: Notify,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelay for DummyClosedRelay {
+            fn relayed_addr(&self) -> SocketAddr {
+                self.addr
+            }
+
+            async fn recv_datagram(&self, _buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+                self.closed.notified().await;
+                Err(std::io::Error::other("closed"))
+            }
+
+            async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+
+            fn begin_close(&self) -> TurnRelayCloseHandle {
+                self.closed.notify_waiters();
+                None
+            }
+
+            async fn finish_close(&self, _handle: TurnRelayCloseHandle) {}
+        }
+
+        let factory = Arc::new(ConcurrencyBoundFactory {
+            in_flight: Arc::new(AtomicUsize::new(0)),
+            peak_in_flight: AtomicUsize::new(0),
+            started: Notify::new(),
+            release: Notify::new(),
+        });
+
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.max_allocations = 1;
+        cfg.max_reservations = 16;
+        cfg.custom_relay_factory = Some(Arc::clone(&factory) as Arc<dyn TurnDatagramRelayFactory>);
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        for _ in 0..4 {
+            let eph_key = SecretKey::random();
+            let res = server
+                .reserve_exit_session(eph_key.pubkey(), Duration::from_secs(30))
+                .await?;
+            let creds =
+                TurnCredentials::from_session_ticket(&res.ticket, &eph_key, res.server_pubkey)?;
+
+            let mut tcp = TcpStream::connect(server_addr).await?;
+            let mut unauth = Message::new();
+            unauth
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                    Box::new(turn::proto::reqtrans::RequestedTransport {
+                        protocol: turn::proto::PROTO_UDP,
+                    }),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            tcp.write_all(&unauth.raw).await?;
+
+            let mut hdr = [0_u8; 20];
+            tcp.read_exact(&mut hdr).await?;
+            let body_len = usize::from(u16::from_be_bytes([hdr[2], hdr[3]]));
+            let mut raw_chal = Vec::with_capacity(20 + body_len);
+            raw_chal.extend_from_slice(&hdr);
+            raw_chal.resize(20 + body_len, 0);
+            tcp.read_exact(&mut raw_chal[20..]).await?;
+
+            let mut challenge = Message {
+                raw: raw_chal,
+                ..Default::default()
+            };
+            challenge.decode().unwrap();
+            let mut nonce = Nonce::new(ATTR_NONCE, String::new());
+            let mut realm = Realm::new(ATTR_REALM, String::new());
+            nonce.get_from(&challenge).unwrap();
+            realm.get_from(&challenge).unwrap();
+            let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+            let mut auth_alloc = Message::new();
+            auth_alloc
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                    Box::new(turn::proto::reqtrans::RequestedTransport {
+                        protocol: turn::proto::PROTO_UDP,
+                    }),
+                    Box::new(Username::new(ATTR_USERNAME, creds.username)),
+                    Box::new(Realm::new(ATTR_REALM, realm.text)),
+                    Box::new(Nonce::new(ATTR_NONCE, nonce.text)),
+                    Box::new(MessageIntegrity(mi_key)),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+
+            let started_fut = factory.started.notified();
+            tcp.write_all(&auth_alloc.raw).await?;
+            started_fut.await;
+            assert_eq!(factory.in_flight.load(Ordering::SeqCst), 1);
+
+            // Disconnect TCP client mid-open: must cancel the in-flight `allocate_relay` promptly!
+            drop(tcp);
+            tokio::time::timeout(Duration::from_millis(300), async {
+                while factory.in_flight.load(Ordering::SeqCst) != 0 {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("TCP disconnect must cancel in-flight allocate_relay without waiting for server shutdown");
+        }
+
+        assert_eq!(factory.peak_in_flight.load(Ordering::SeqCst), 1);
+
+        // And capacity is cleanly available for a subsequent completing client:
+        let eph_key = SecretKey::random();
+        let res = server
+            .reserve_exit_session(eph_key.pubkey(), Duration::from_secs(30))
+            .await?;
+        let creds = TurnCredentials::from_session_ticket(&res.ticket, &eph_key, res.server_pubkey)?;
+        let sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut unauth = Message::new();
+        unauth
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&unauth.raw, server_addr).await?;
+        let mut buf = vec![0_u8; 1500];
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut challenge = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge.decode().unwrap();
+        let mut nonce = Nonce::new(ATTR_NONCE, String::new());
+        let mut realm = Realm::new(ATTR_REALM, String::new());
+        nonce.get_from(&challenge).unwrap();
+        realm.get_from(&challenge).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+        let mut auth_alloc = Message::new();
+        auth_alloc
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username)),
+                Box::new(Realm::new(ATTR_REALM, realm.text)),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text)),
+                Box::new(MessageIntegrity(mi_key)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        let started_fut = factory.started.notified();
+        sock.send_to(&auth_alloc.raw, server_addr).await?;
+        started_fut.await;
+        factory.release.notify_waiters();
+        let (an, _) = tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
+            .await
+            .expect("subsequent Allocate must succeed")?;
+        let mut alloc_resp = Message {
+            raw: buf[..an].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        server.close().await?;
+        Ok(())
+    }
 }

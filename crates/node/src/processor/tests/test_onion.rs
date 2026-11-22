@@ -414,3 +414,71 @@ async fn test_onion_proxy_route_selects_only_directly_connected_first_hop_guard(
     assert_eq!(route.hops().guard().did, relays[1].did());
     Ok(())
 }
+
+#[tokio::test]
+async fn test_onion_udp_proxy_route_admits_restricted_port_allowlist_for_bind_mode() -> Result<()> {
+    let processor = prepare_processor().await;
+    let dns_exit = prepare_processor().await;
+    let v6_only_exit = prepare_processor().await;
+    let shadowed_exit = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+
+    let dns_descriptor = ExitDescriptorFixture::live(
+        &dns_exit,
+        OnionServiceName::udp(),
+        bounded_policy(&["*:53"], &[])?,
+        now_ms,
+    )
+    .sign()?;
+    let v6_only_descriptor = ExitDescriptorFixture::live(
+        &v6_only_exit,
+        OnionServiceName::udp(),
+        bounded_policy(&["[2606:4700:4700::1111]:53"], &[])?,
+        now_ms,
+    )
+    .sign()?;
+    let shadowed_descriptor = ExitDescriptorFixture::live(
+        &shadowed_exit,
+        OnionServiceName::udp(),
+        bounded_policy(&["*:53"], &["*:53"])?,
+        now_ms,
+    )
+    .sign()?;
+
+    processor
+        .storage_store(Processor::registry_entry(ONION_EXITS_TOPIC, vec![
+            v6_only_descriptor,
+            shadowed_descriptor,
+            dns_descriptor,
+        ])?)
+        .await?;
+    store_onion_relays(&processor, &[&dns_exit, &v6_only_exit, &shadowed_exit], 2).await?;
+
+    let v4_route = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::UdpDatagram,
+        crate::onion::OnionUdpBindMode::Ipv4AnyPort.to_target(),
+        |_| true,
+    )
+    .await?;
+    assert_eq!(v4_route.exit_did(), dns_exit.did());
+
+    // Non-bind target authorities must still be rejected for `UdpDatagram`.
+    let non_bind = OnionProxyTarget::parse_authority("8.8.8.8:53")?;
+    let err = directory::build_onion_proxy_route_with_first_hop(
+        &processor,
+        OnionProxyProtocol::UdpDatagram,
+        non_bind,
+        |_| true,
+    )
+    .await
+    .err()
+    .ok_or_else(|| Error::InvalidConfig("expected non-bind target rejection".to_string()))?;
+    assert!(matches!(
+        err,
+        Error::OnionRouteError(OnionRouteError::NoExitAllowsTarget { service, .. })
+            if service == "udp"
+    ));
+
+    Ok(())
+}

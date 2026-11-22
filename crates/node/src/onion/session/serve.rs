@@ -126,6 +126,11 @@ pub(crate) trait OnionWorld: MaybeSendSync + 'static {
     /// The world's write half.
     type Writer: OnionWorldWriter;
 
+    /// Whether `policy` admits opening a session of this world at `target`.
+    fn admits_open(&self, policy: &OnionExitPolicy, target: &OnionProxyTarget) -> bool {
+        policy.allows_target(target)
+    }
+
     /// Open the world at `target`, already admitted by the exit policy.
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)>;
 }
@@ -800,7 +805,7 @@ async fn open<W: OnionWorld>(
     let target = std::str::from_utf8(target)
         .ok()
         .and_then(|authority| OnionProxyTarget::parse_authority(authority).ok())?;
-    if !shared.policy.allows_target(&target) {
+    if !shared.world.admits_open(&shared.policy, &target) {
         tracing::debug!(target = %target.authority(), "onion exit policy refuses a target");
         return None;
     }

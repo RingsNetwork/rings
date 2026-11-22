@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -73,6 +74,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
@@ -128,6 +130,10 @@ const CHANNEL_DATA_HEADER_BYTES: usize = 4;
 const CHANNEL_NUMBER_MIN: u16 = 0x4000;
 const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const PROTO_TCP: Protocol = Protocol(6);
+const MAX_ALLOCATION_OUTBOUND_QUEUE: usize = 64;
+const MAX_ALLOCATION_CONTROL_QUEUE: usize = 16;
+const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const RELAY_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
 const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
 const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 64;
@@ -410,6 +416,25 @@ pub struct TurnSessionReservation {
     pub server_pubkey: PublicKey<33>,
 }
 
+struct AllocationPinholeJob {
+    conn: Arc<dyn Conn + Send + Sync>,
+    src_addr: SocketAddr,
+    peer_ips: Vec<IpAddr>,
+    req_msg: Message,
+    mi_key: Vec<u8>,
+    success_response: Option<Vec<u8>>,
+}
+
+struct AllocationWorkerReceivers {
+    outbound_data_rx: mpsc::Receiver<(Vec<u8>, SocketAddr)>,
+    control_rx: mpsc::Receiver<AllocationPinholeJob>,
+}
+
+enum PinholeEnqueueError {
+    Full,
+    Closed,
+}
+
 struct ManagedAllocation {
     open_id: u64,
     five_tuple: FiveTuple,
@@ -418,11 +443,16 @@ struct ManagedAllocation {
     relay_addr: SocketAddr,
     relay_conn: Arc<dyn TurnDatagramRelay>,
     channels: SyncMutex<ChannelBindingTable>,
+    outbound_data_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
+    control_tx: mpsc::Sender<AllocationPinholeJob>,
+    closed_tx: watch::Sender<bool>,
     expiry_tx: watch::Sender<Instant>,
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+    relay_permit: SyncMutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl ManagedAllocation {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         open_id: u64,
         five_tuple: FiveTuple,
@@ -431,24 +461,38 @@ impl ManagedAllocation {
         relay_conn: Arc<dyn TurnDatagramRelay>,
         lifetime: Duration,
         tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
-    ) -> Arc<Self> {
+        relay_permit: OwnedSemaphorePermit,
+    ) -> (Arc<Self>, AllocationWorkerReceivers) {
         if let Some(ref tx) = tcp_authenticated_tx {
             let _ = tx.send_replace(Some(open_id));
         }
+        let (outbound_data_tx, outbound_data_rx) = mpsc::channel(MAX_ALLOCATION_OUTBOUND_QUEUE);
+        let (control_tx, control_rx) = mpsc::channel(MAX_ALLOCATION_CONTROL_QUEUE);
+        let (closed_tx, _) = watch::channel(false);
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
-        Arc::new(Self {
-            open_id,
-            five_tuple,
-            tuple_key: TurnFiveTupleKey::from(five_tuple),
-            username,
-            relay_addr,
-            relay_conn,
-            channels: SyncMutex::new(ChannelBindingTable {
-                bindings: HashMap::new(),
+        (
+            Arc::new(Self {
+                open_id,
+                five_tuple,
+                tuple_key: TurnFiveTupleKey::from(five_tuple),
+                username,
+                relay_addr,
+                relay_conn,
+                channels: SyncMutex::new(ChannelBindingTable {
+                    bindings: HashMap::new(),
+                }),
+                outbound_data_tx,
+                control_tx,
+                closed_tx,
+                expiry_tx,
+                tcp_authenticated_tx,
+                relay_permit: SyncMutex::new(Some(relay_permit)),
             }),
-            expiry_tx,
-            tcp_authenticated_tx,
-        })
+            AllocationWorkerReceivers {
+                outbound_data_rx,
+                control_rx,
+            },
+        )
     }
 
     fn info(&self) -> AllocationInfo {
@@ -460,6 +504,7 @@ impl ManagedAllocation {
     }
 
     fn begin_close(&self) -> TurnRelayCloseHandle {
+        let _ = self.closed_tx.send_replace(true);
         if let Some(ref tx) = self.tcp_authenticated_tx {
             let open_id = self.open_id;
             tx.send_if_modified(|current| {
@@ -477,18 +522,29 @@ impl ManagedAllocation {
 
     async fn finish_close(&self, taken: TurnRelayCloseHandle) {
         self.relay_conn.finish_close(taken).await;
+        let _ = self
+            .relay_permit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
     }
 
     async fn recv_payload_from_peer(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         self.relay_conn.recv_datagram(buf).await
     }
 
-    async fn send_payload_to_peer(
+    fn enqueue_payload_to_peer(&self, payload: &[u8], target: SocketAddr) {
+        let _ = self.outbound_data_tx.try_send((payload.to_vec(), target));
+    }
+
+    fn enqueue_pinhole_job(
         &self,
-        payload: &[u8],
-        target: SocketAddr,
-    ) -> std::io::Result<usize> {
-        self.relay_conn.send_to(payload, target).await
+        job: AllocationPinholeJob,
+    ) -> std::result::Result<(), PinholeEnqueueError> {
+        self.control_tx.try_send(job).map_err(|err| match err {
+            mpsc::error::TrySendError::Full(_) => PinholeEnqueueError::Full,
+            mpsc::error::TrySendError::Closed(_) => PinholeEnqueueError::Closed,
+        })
     }
 
     fn has_channel_conflict(&self, channel: ChannelNumber, peer: SocketAddr, now_ms: u128) -> bool {
@@ -536,6 +592,9 @@ struct ServerAllocationBook {
     by_open_id: HashMap<u64, Arc<ManagedAllocation>>,
     by_tuple: HashMap<FiveTuple, Arc<ManagedAllocation>>,
     allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
+    pending_cancels: HashMap<u64, watch::Sender<bool>>,
+    cancelling_open_ids: HashSet<u64>,
+    relay_permits: Arc<Semaphore>,
 }
 
 impl ServerAllocationBook {
@@ -553,6 +612,18 @@ impl ServerAllocationBook {
             by_open_id: HashMap::new(),
             by_tuple: HashMap::new(),
             allocate_responses: HashMap::new(),
+            pending_cancels: HashMap::new(),
+            cancelling_open_ids: HashSet::new(),
+            relay_permits: Arc::new(Semaphore::new(max_allocations)),
+        }
+    }
+
+    fn cancel_pending_open_ids(&mut self, open_ids: &[u64]) {
+        for &open_id in open_ids {
+            if let Some(cancel_tx) = self.pending_cancels.remove(&open_id) {
+                let _ = cancel_tx.send_replace(true);
+                self.cancelling_open_ids.insert(open_id);
+            }
         }
     }
 
@@ -2109,12 +2180,88 @@ async fn relay_packet_handler(
     remove_allocation_if_current(&book, &alloc).await;
 }
 
+async fn allocation_outbound_worker(
+    alloc: Arc<ManagedAllocation>,
+    book: Arc<SyncMutex<ServerAllocationBook>>,
+    mut control_rx: mpsc::Receiver<AllocationPinholeJob>,
+    mut data_rx: mpsc::Receiver<(Vec<u8>, SocketAddr)>,
+) {
+    enum WorkerItem {
+        Closed,
+        Control(AllocationPinholeJob),
+        Data(Vec<u8>, SocketAddr),
+    }
+
+    let mut closed_rx = alloc.closed_tx.subscribe();
+    loop {
+        if *closed_rx.borrow_and_update() {
+            break;
+        }
+        let next = tokio::select! {
+            biased;
+            _ = closed_rx.wait_for(|&closed| closed) => WorkerItem::Closed,
+            maybe_job = control_rx.recv() => match maybe_job {
+                Some(job) => WorkerItem::Control(job),
+                None => WorkerItem::Closed,
+            },
+            maybe_pkt = data_rx.recv() => match maybe_pkt {
+                Some((payload, dst)) => WorkerItem::Data(payload, dst),
+                None => WorkerItem::Closed,
+            },
+        };
+        match next {
+            WorkerItem::Closed => break,
+            WorkerItem::Control(job) => {
+                let pinhole_res = tokio::select! {
+                    _ = closed_rx.wait_for(|&closed| closed) => return,
+                    res = tokio::time::timeout(
+                        RELAY_CONTROL_TIMEOUT,
+                        alloc.relay_conn.allow_peer_ips(&job.peer_ips, PERMISSION_TIMEOUT),
+                    ) => res,
+                };
+                match pinhole_res {
+                    Ok(Ok(())) => {
+                        if let Some(raw) = job.success_response {
+                            let _ = job.conn.send_to(&raw, job.src_addr).await;
+                        }
+                    }
+                    Ok(Err(_)) | Err(_) => {
+                        remove_allocation_if_current(&book, &alloc).await;
+                        send_authenticated_error(
+                            &job.conn,
+                            job.src_addr,
+                            &job.req_msg,
+                            CODE_ALLOC_MISMATCH,
+                            b"Relay Session Closed",
+                            None,
+                            job.mi_key,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            WorkerItem::Data(payload, dst) => {
+                tokio::select! {
+                    _ = closed_rx.wait_for(|&closed| closed) => break,
+                    _ = tokio::time::timeout(
+                        RELAY_SEND_TIMEOUT,
+                        alloc.relay_conn.send_to(&payload, dst),
+                    ) => {}
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn complete_async_allocate_open(
     conn: Arc<dyn Conn + Send + Sync>,
     book: Arc<SyncMutex<ServerAllocationBook>>,
     clock: SharedClock,
     mut shutdown_rx: watch::Receiver<bool>,
+    mut cancel_rx: watch::Receiver<bool>,
+    relay_permit: OwnedSemaphorePermit,
     relay_factory: Arc<dyn TurnDatagramRelayFactory>,
     relay_turn_socket: Arc<dyn Conn + Send + Sync>,
     five_tuple: FiveTuple,
@@ -2129,12 +2276,13 @@ async fn complete_async_allocate_open(
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
     mi_key: Vec<u8>,
 ) {
-    let open_res = if *shutdown_rx.borrow_and_update() {
+    let open_res = if *shutdown_rx.borrow_and_update() || *cancel_rx.borrow_and_update() {
         None
     } else {
         tokio::select! {
             res = relay_factory.allocate_relay(use_ipv4, need_even_port) => Some(res),
             _ = shutdown_rx.wait_for(|&shut| shut) => None,
+            _ = cancel_rx.wait_for(|&cancelled| cancelled) => None,
         }
     };
 
@@ -2149,9 +2297,14 @@ async fn complete_async_allocate_open(
     let now_ms = clock.now_ms();
     let decision = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
-        guard
+        guard.pending_cancels.remove(&open_id);
+        let dec = guard
             .core
-            .complete_allocate(tuple_key, open_id, outcome_addr, now_ms)
+            .complete_allocate(tuple_key, open_id, outcome_addr, now_ms);
+        if maybe_relay.is_none() {
+            guard.cancelling_open_ids.remove(&open_id);
+        }
+        dec
     };
 
     match decision {
@@ -2159,13 +2312,19 @@ async fn complete_async_allocate_open(
             if let Some(relay) = maybe_relay {
                 let handle = relay.begin_close();
                 relay.finish_close(handle).await;
+                let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.cancelling_open_ids.remove(&open_id);
             }
+            drop(relay_permit);
         }
         CompleteAllocateDecision::RespondOpenError { .. } => {
             if let Some(relay) = maybe_relay {
                 let handle = relay.begin_close();
                 relay.finish_close(handle).await;
+                let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.cancelling_open_ids.remove(&open_id);
             }
+            drop(relay_permit);
             send_authenticated_error(
                 &conn,
                 src_addr,
@@ -2183,6 +2342,7 @@ async fn complete_async_allocate_open(
             tx_id,
         } => {
             let Some(relay_conn) = maybe_relay else {
+                drop(relay_permit);
                 return;
             };
             let built = {
@@ -2208,7 +2368,7 @@ async fn complete_async_allocate_open(
                 resp.build(&setters).is_ok().then_some(resp.raw)
             };
 
-            let alloc = ManagedAllocation::new(
+            let (alloc, worker_rxs) = ManagedAllocation::new(
                 open_id,
                 five_tuple,
                 username,
@@ -2216,10 +2376,12 @@ async fn complete_async_allocate_open(
                 relay_conn,
                 lifetime_duration,
                 tcp_authenticated_tx,
+                relay_permit,
             );
 
             let still_live = {
                 let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+                guard.cancelling_open_ids.remove(&open_id);
                 if guard.core.is_shutting_down()
                     || guard
                         .core
@@ -2246,6 +2408,12 @@ async fn complete_async_allocate_open(
                 return;
             }
 
+            tokio::spawn(allocation_outbound_worker(
+                Arc::clone(&alloc),
+                Arc::clone(&book),
+                worker_rxs.control_rx,
+                worker_rxs.outbound_data_rx,
+            ));
             tokio::spawn(relay_packet_handler(
                 Arc::clone(&alloc),
                 Arc::clone(&book),
@@ -2482,16 +2650,52 @@ async fn handle_authenticated_allocate(
     };
 
     let tuple_key = TurnFiveTupleKey::from(five_tuple);
-    let now_ms = clock.now_ms();
-    let (decision, expired_allocs, cached_replay) = {
+    let mut now_ms = clock.now_ms();
+    for _ in 0..2 {
+        let pre_expired = {
+            let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.prune_and_take_expired(now_ms)
+        };
+        if pre_expired.is_empty() {
+            break;
+        }
+        close_allocations(pre_expired).await;
+        now_ms = clock.now_ms();
+    }
+
+    let should_yield_for_cancel = {
+        let guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+        !guard.cancelling_open_ids.is_empty()
+            && guard.relay_permits.available_permits() == 0
+            && !guard.core.active_allocations().contains_key(&tuple_key)
+            && !guard.core.pending_opens().contains_key(&tuple_key)
+    };
+    if should_yield_for_cancel {
+        tokio::task::yield_now().await;
+    }
+
+    let (decision, expired_allocs, cached_replay, pending_ctx) = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
-        let decision = guard.core.begin_allocate(
+        let maybe_permit = if !guard.core.active_allocations().contains_key(&tuple_key)
+            && !guard.core.pending_opens().contains_key(&tuple_key)
+        {
+            Arc::clone(&guard.relay_permits).try_acquire_owned().ok()
+        } else {
+            None
+        };
+        let extra_busy_slots = if maybe_permit.is_some() {
+            0
+        } else {
+            guard.core.max_allocations()
+        };
+        let decision = guard.core.begin_allocate_with_busy_slots(
             tuple_key,
             m.transaction_id.0,
             username_attr.text.clone(),
             ticket_session_id,
             lifetime_duration.as_millis(),
             now_ms,
+            extra_busy_slots,
         );
         let expired = guard.take_open_ids(decision.expired_open_ids());
         let cached = if matches!(decision, BeginAllocateDecision::ReplayActive { .. }) {
@@ -2504,7 +2708,15 @@ async fn handle_authenticated_allocate(
         } else {
             None
         };
-        (decision, expired, cached)
+        let pending_ctx = match (&decision, maybe_permit) {
+            (&BeginAllocateDecision::StartOpen { open_id, .. }, Some(permit)) => {
+                let (cancel_tx, cancel_rx) = watch::channel(false);
+                guard.pending_cancels.insert(open_id, cancel_tx);
+                Some((permit, cancel_rx))
+            }
+            _ => None,
+        };
+        (decision, expired, cached, pending_ctx)
     };
     close_allocations(expired_allocs).await;
 
@@ -2565,11 +2777,32 @@ async fn handle_authenticated_allocate(
             .await;
         }
         BeginAllocateDecision::StartOpen { open_id, .. } => {
+            let Some((relay_permit, cancel_rx)) = pending_ctx else {
+                {
+                    let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = guard
+                        .core
+                        .complete_allocate(tuple_key, open_id, Err(()), now_ms);
+                }
+                send_authenticated_error(
+                    conn,
+                    src_addr,
+                    m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Allocation Capacity Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            };
             open_tasks.spawn(complete_async_allocate_open(
                 Arc::clone(conn),
                 Arc::clone(book),
                 Arc::clone(clock),
                 shutdown_rx.clone(),
+                cancel_rx,
+                relay_permit,
                 Arc::clone(relay_factory),
                 relay_turn_socket,
                 five_tuple,
@@ -2818,26 +3051,6 @@ async fn handle_authenticated_create_permission(
         }
     }
 
-    if alloc
-        .relay_conn
-        .allow_peer_ips(&candidate_ips, PERMISSION_TIMEOUT)
-        .await
-        .is_err()
-    {
-        remove_allocation_if_current(book, alloc).await;
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_ALLOC_MISMATCH,
-            b"Relay Session Closed",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    }
-
     let built = {
         let mut resp = Message::new();
         let setters: Vec<Box<dyn Setter>> = vec![
@@ -2849,13 +3062,45 @@ async fn handle_authenticated_create_permission(
                 METHOD_CREATE_PERMISSION,
                 CLASS_SUCCESS_RESPONSE,
             )),
-            Box::new(MessageIntegrity(mi_key)),
+            Box::new(MessageIntegrity(mi_key.clone())),
             Box::new(FINGERPRINT),
         ];
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    if let Some(raw) = built {
-        let _ = conn.send_to(&raw, src_addr).await;
+    match alloc.enqueue_pinhole_job(AllocationPinholeJob {
+        conn: Arc::clone(conn),
+        src_addr,
+        peer_ips: candidate_ips,
+        req_msg: m.clone(),
+        mi_key: mi_key.clone(),
+        success_response: built,
+    }) {
+        Ok(()) => {}
+        Err(PinholeEnqueueError::Full) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Control Queue Full",
+                None,
+                mi_key,
+            )
+            .await;
+        }
+        Err(PinholeEnqueueError::Closed) => {
+            let _ = book;
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Relay Session Closed",
+                None,
+                mi_key,
+            )
+            .await;
+        }
     }
 }
 
@@ -2934,9 +3179,7 @@ async fn handle_authenticated_channel_bind(
         )
     };
     match perm_res {
-        Ok(()) => {
-            alloc.commit_channel_binding(channel, target_sock, channel_bind_timeout, now_ms);
-        }
+        Ok(()) => {}
         Err(CorePermissionError::AllocationMismatch) => {
             send_authenticated_error(
                 conn,
@@ -2965,26 +3208,6 @@ async fn handle_authenticated_channel_bind(
         }
     }
 
-    if alloc
-        .relay_conn
-        .allow_peer_ips(&[target_sock.ip()], PERMISSION_TIMEOUT)
-        .await
-        .is_err()
-    {
-        remove_allocation_if_current(book, alloc).await;
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_ALLOC_MISMATCH,
-            b"Relay Session Closed",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    }
-
     let built = {
         let mut resp = Message::new();
         let setters: Vec<Box<dyn Setter>> = vec![
@@ -2996,19 +3219,55 @@ async fn handle_authenticated_channel_bind(
                 METHOD_CHANNEL_BIND,
                 CLASS_SUCCESS_RESPONSE,
             )),
-            Box::new(MessageIntegrity(mi_key)),
+            Box::new(MessageIntegrity(mi_key.clone())),
             Box::new(FINGERPRINT),
         ];
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    if let Some(raw) = built {
-        let _ = conn.send_to(&raw, src_addr).await;
+    match alloc.enqueue_pinhole_job(AllocationPinholeJob {
+        conn: Arc::clone(conn),
+        src_addr,
+        peer_ips: vec![target_sock.ip()],
+        req_msg: m.clone(),
+        mi_key: mi_key.clone(),
+        success_response: built,
+    }) {
+        Ok(()) => {
+            alloc.commit_channel_binding(channel, target_sock, channel_bind_timeout, now_ms);
+        }
+        Err(PinholeEnqueueError::Full) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Control Queue Full",
+                None,
+                mi_key,
+            )
+            .await;
+        }
+        Err(PinholeEnqueueError::Closed) => {
+            let _ = book;
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Relay Session Closed",
+                None,
+                mi_key,
+            )
+            .await;
+        }
     }
 }
 
 async fn shutdown_all_allocations(book: &SyncMutex<ServerAllocationBook>) {
     let removed = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
+        let pending_ids: Vec<u64> = guard.pending_cancels.keys().copied().collect();
+        guard.cancel_pending_open_ids(&pending_ids);
         let ids = guard.core.begin_shutdown();
         guard.allocate_responses.clear();
         guard.take_open_ids(&ids)
@@ -3438,15 +3697,27 @@ impl TurnServer {
             };
 
             if payload.is_empty() && recording_conn.protocol == PROTO_TCP {
-                let removed = {
+                let (removed, had_pending_cancel) = {
                     let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
                     let tuple_key = TurnFiveTupleKey::from(five_tuple);
                     guard.allocate_responses.remove(&five_tuple);
-                    match guard.core.disconnect_tuple(&tuple_key) {
+                    let pending_open_id = guard
+                        .core
+                        .pending_opens()
+                        .get(&tuple_key)
+                        .map(|p| p.open_id);
+                    if let Some(pid) = pending_open_id {
+                        guard.cancel_pending_open_ids(&[pid]);
+                    }
+                    let active_removed = match guard.core.disconnect_tuple(&tuple_key) {
                         Some(open_id) => guard.take_open_ids(&[open_id]),
                         None => Vec::new(),
-                    }
+                    };
+                    (active_removed, pending_open_id.is_some())
                 };
+                if had_pending_cancel {
+                    tokio::task::yield_now().await;
+                }
                 close_allocations(removed).await;
                 completed_deletions.lock().await.remove(&five_tuple);
                 nonces
@@ -3474,7 +3745,7 @@ impl TurnServer {
                                     .has_permission(&alloc.tuple_key, peer.ip(), now_ms)
                             };
                             if permitted {
-                                let _ = alloc.send_payload_to_peer(&channel_data.data, peer).await;
+                                alloc.enqueue_payload_to_peer(&channel_data.data, peer);
                             }
                         }
                     }
@@ -3514,7 +3785,7 @@ impl TurnServer {
                                         .has_permission(&alloc.tuple_key, dst.ip(), now_ms)
                                 };
                                 if permitted {
-                                    let _ = alloc.send_payload_to_peer(&data.0, dst).await;
+                                    alloc.enqueue_payload_to_peer(&data.0, dst);
                                 }
                             }
                         }
@@ -3830,11 +4101,23 @@ impl TurnServer {
     /// Delete all active TURN allocations associated with `username`.
     pub async fn delete_allocations_by_username(&self, username: String) -> Result<()> {
         let now_ms = self.clock.now_ms();
-        let removed = {
+        let (removed, had_pending_cancel) = {
             let mut guard = self.book.lock().unwrap_or_else(PoisonError::into_inner);
+            let pending_ids: Vec<u64> = guard
+                .core
+                .pending_opens()
+                .values()
+                .filter(|p| p.username == username)
+                .map(|p| p.open_id)
+                .collect();
+            let had_pending = !pending_ids.is_empty();
+            guard.cancel_pending_open_ids(&pending_ids);
             let ids = guard.core.remove_by_username(&username, now_ms);
-            guard.take_open_ids(&ids)
+            (guard.take_open_ids(&ids), had_pending)
         };
+        if had_pending_cancel {
+            tokio::task::yield_now().await;
+        }
         close_allocations(removed).await;
         Ok(())
     }

@@ -9,9 +9,11 @@
 use rings_core::dht::Did;
 
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitPolicy;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
+use crate::onion::OnionUdpBindMode;
 use crate::online::OnlineNodeType;
 
 #[cfg(rings_native)]
@@ -62,6 +64,16 @@ impl OnionProxyProtocol {
                 OnlineNodeType::Native | OnlineNodeType::Ffi
             ),
             Self::HttpsProxy => true,
+        }
+    }
+
+    /// Whether `policy` admits opening a session of this protocol with open `target`.
+    pub(crate) fn admits_target(self, policy: &OnionExitPolicy, target: &OnionProxyTarget) -> bool {
+        match self {
+            Self::TcpConnect | Self::HttpsProxy => policy.allows_target(target),
+            Self::UdpDatagram => {
+                OnionUdpBindMode::from_target(target).is_ok_and(|mode| policy.allows_udp_bind(mode))
+            }
         }
     }
 }

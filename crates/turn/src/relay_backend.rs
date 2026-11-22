@@ -396,6 +396,30 @@ impl TurnAllocationCore {
         lifetime_ms: u128,
         now_ms: u128,
     ) -> BeginAllocateDecision {
+        self.begin_allocate_with_busy_slots(
+            tuple,
+            tx_id,
+            username,
+            ticket_session_id,
+            lifetime_ms,
+            now_ms,
+            0,
+        )
+    }
+
+    /// Variant of [`Self::begin_allocate`] accounting for `extra_busy_slots` still held by
+    /// cancelling or closing relay sessions in the outer runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_allocate_with_busy_slots(
+        &mut self,
+        tuple: TurnFiveTupleKey,
+        tx_id: [u8; 12],
+        username: String,
+        ticket_session_id: Option<[u8; 16]>,
+        lifetime_ms: u128,
+        now_ms: u128,
+        extra_busy_slots: usize,
+    ) -> BeginAllocateDecision {
         let expired_open_ids = self.prune_expired(now_ms);
         if self.shutting_down {
             return BeginAllocateDecision::RejectShuttingDown { expired_open_ids };
@@ -437,6 +461,7 @@ impl TurnAllocationCore {
             .pending_opens
             .len()
             .saturating_add(self.active_allocations.len())
+            .saturating_add(extra_busy_slots)
             >= self.max_allocations
         {
             if let Some(session_id) = ticket_session_id {

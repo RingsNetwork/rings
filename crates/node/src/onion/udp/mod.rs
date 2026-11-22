@@ -393,6 +393,9 @@ impl OnionUdpWorld {
         target: &OnionProxyTarget,
     ) -> Result<(OnionUdpReader, OnionUdpWriter)> {
         let mode = OnionUdpBindMode::from_target(target)?;
+        if !self.policy.allows_udp_bind(mode) {
+            return Err(Error::NoPermission);
+        }
         let advertised_ip = self.config.resolve_advertised_ip(mode.is_ipv6())?;
         let socket = bind_udp_socket(mode, &self.config).await?;
         let os_local = socket
@@ -490,6 +493,10 @@ pub(crate) struct OnionUdpWriter {
 impl OnionWorld for OnionUdpWorld {
     type Reader = OnionUdpReader;
     type Writer = OnionUdpWriter;
+
+    fn admits_open(&self, policy: &OnionExitPolicy, target: &OnionProxyTarget) -> bool {
+        OnionUdpBindMode::from_target(target).is_ok_and(|mode| policy.allows_udp_bind(mode))
+    }
 
     async fn open(&self, target: &OnionProxyTarget) -> Result<(Self::Reader, Self::Writer)> {
         let opened_at = Instant::now();
