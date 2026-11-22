@@ -526,7 +526,7 @@ fn configure_api_security(
         config.allow_remote_external_api = true;
     }
     let token = load_or_create_api_token(config_path, config.api_token_path.as_deref())?;
-    println!("API authentication token file: {}", token.path().display());
+    println!("API authentication token file initialized.");
     ApiSecurity::new(
         token.into_secret(),
         &config.api_allowed_origins,

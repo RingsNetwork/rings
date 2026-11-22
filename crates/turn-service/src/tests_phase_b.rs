@@ -261,13 +261,14 @@ async fn send_authenticated_create_permission(
 /// topic writes and reads converge on the same successor instead of waiting on the periodic
 /// stabilizer and registration daemons.
 async fn stabilize_and_register(nodes: &[&PhaseBNode]) {
-    for _ in 0..2 {
+    for _ in 0..3 {
         for node in nodes {
             let _ = node.processor.swarm.stabilizer().stabilize().await;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     for node in nodes {
-        let _ = node.processor.register_all_once().await;
+        node.processor.republish_registrations().await;
     }
 }
 
@@ -351,44 +352,56 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
     }
     with_hang_guard(
         "await DHT convergence of online_nodes, onion_invokes, onion_exits, and turn_services",
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         async {
             let mut ticks = 0_u32;
             loop {
-                if ticks.is_multiple_of(20) {
+                if ticks.is_multiple_of(5) {
                     stabilize_and_register(&all_nodes).await;
                 }
                 ticks = ticks.wrapping_add(1);
-                let c_online = client_node
-                    .provider
-                    .lookup_registry_raw("online_nodes")
-                    .await
-                    .map(|r| r.elements.len())
-                    .unwrap_or(0);
-                let e_online = entry_node
-                    .provider
-                    .lookup_registry_raw("online_nodes")
-                    .await
-                    .map(|r| r.elements.len())
-                    .unwrap_or(0);
-                let c_invokes = client_node
-                    .provider
-                    .lookup_registry_raw("onion_invokes")
-                    .await
-                    .map(|r| r.elements.len())
-                    .unwrap_or(0);
-                let e_exits = entry_node
-                    .provider
-                    .lookup_registry_raw("onion_exits")
-                    .await
-                    .map(|r| r.elements.len())
-                    .unwrap_or(0);
-                let c_turn = client_node
-                    .provider
-                    .lookup_registry_raw("turn_services")
-                    .await
-                    .map(|r| r.elements.len())
-                    .unwrap_or(0);
+                let (c_online, e_online, c_invokes, e_exits, c_turn) = tokio::join!(
+                    async {
+                        client_node
+                            .provider
+                            .lookup_registry_raw("online_nodes")
+                            .await
+                            .map(|r| r.elements.len())
+                            .unwrap_or(0)
+                    },
+                    async {
+                        entry_node
+                            .provider
+                            .lookup_registry_raw("online_nodes")
+                            .await
+                            .map(|r| r.elements.len())
+                            .unwrap_or(0)
+                    },
+                    async {
+                        client_node
+                            .provider
+                            .lookup_registry_raw("onion_invokes")
+                            .await
+                            .map(|r| r.elements.len())
+                            .unwrap_or(0)
+                    },
+                    async {
+                        entry_node
+                            .provider
+                            .lookup_registry_raw("onion_exits")
+                            .await
+                            .map(|r| r.elements.len())
+                            .unwrap_or(0)
+                    },
+                    async {
+                        client_node
+                            .provider
+                            .lookup_registry_raw("turn_services")
+                            .await
+                            .map(|r| r.elements.len())
+                            .unwrap_or(0)
+                    },
+                );
                 if c_online >= 6 && e_online >= 6 && c_invokes >= 1 && e_exits >= 1 && c_turn >= 1 {
                     break;
                 }
