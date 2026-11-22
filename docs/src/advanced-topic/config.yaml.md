@@ -89,9 +89,9 @@ always be present in `config.yaml`: `network_id`, `delegatee_key`, `internal_api
 and `measure_storage` (`path` and `capacity`). Every other field is **optional** and defaults to the
 value shown above (or `null` / empty when omitted by `rings init`, such as `ice_servers`,
 `delegator_key`, `remote_rpc_proxy_url`, `api_token_path`, `api_allowed_origins`,
-`onion_http_proxy_addr`, `services`, `dns_relay`, `external_ip`, `udp_port_min` / `udp_port_max`,
-and `network`; note that `ice_servers` / `external_ip` / `udp_port_*` and `network` are mutually
-exclusive).
+`onion_http_proxy_addr`, `onion_udp_exit`, `services`, `dns_relay`, `external_ip`,
+`udp_port_min` / `udp_port_max`, and `network`; note that `ice_servers` / `external_ip` /
+`udp_port_*` and `network` are mutually exclusive).
 
 ## Identity and network
 
@@ -176,12 +176,14 @@ exclusive).
   Every exit is also a relay: `advertise_onion_exit` requires `advertise_onion_relay`, and each
   exit descriptor carries the same process epoch as the relay capability. Clients select an exit
   only while both agree. A browser node interprets `https` only, so a browser exit offering `tcp`
-  is rejected when it starts.
-  Service names form a closed set: `tcp` (byte streams, every tunnel and TLS included) and
-  `https` (one HTTPS request/response fetch; never a tunnel). Any other name, including `relay`
-  (advertised through `advertise_onion_relay` instead), is rejected, so restrict an exit's reach
-  with the policy targets rather than with a custom service name: an exit that should only carry
-  HTTPS registers `tcp` with the allowed target `*:443`.
+  or `udp` is rejected when it starts.
+  Service names form a closed set: `tcp` (byte streams, every tunnel and TLS included),
+  `https` (one HTTPS request/response fetch; never a tunnel), and `udp` (generic multi-peer OS UDP
+  datagram sockets on native exits, enforcing public-IP egress and stateful IP pinholes). Any other
+  name, including `relay` (advertised through `advertise_onion_relay` instead), is rejected, so
+  restrict an exit's reach with the policy targets rather than with a custom service name: an exit
+  that should only carry HTTPS registers `tcp` with the allowed target `*:443` (which also refuses
+  canonical `0.0.0.0:1`/`[::]:1` multi-peer `udp` socket opens unless `*:*` is allowed).
   A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target). An
   empty `allowed_targets` list is a closed policy that admits no target, so advertising an exit
   requires at least one allowed target; deny entries override allows; a `0` limit is
@@ -191,6 +193,11 @@ exclusive).
   entries match the requested authority, not the addresses it resolves to: an IP literal or
   another name for a denied host is not denied by a name entry, so deny by the name the client
   requests, and rely on the exit's public-address floor for private and loopback ranges.
+* `onion_udp_exit` *(optional)*: socket binding and NAT-advertised public IP settings when
+  `onion_exit_services` includes `udp` (`bind_ipv4`, `advertised_ipv4`, `bind_ipv6`,
+  `advertised_ipv6`, `min_port`, `max_port`). Operator YAML configurations always enforce
+  `PublicOnly` peer filtering (`rings_network_policy::is_public_ip`), dropping unsolicited inbound
+  packets before they consume return-loop SURBs or exit byte quota.
 
 ## HTTP CONNECT proxy
 

@@ -13,6 +13,8 @@
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod auth;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub mod bridge;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod config;
 mod credentials;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
@@ -68,9 +70,20 @@ pub use error::Result;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use error::TurnError;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub use server::TurnDatagramRelay;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub use server::TurnDatagramRelayAllocator;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use server::TurnServer;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use server::TurnSessionReservation;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub use turn::Error as TurnAllocateError;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub use webrtc_util::Error as TurnRelayError;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
+/// Result alias returned by [`TurnDatagramRelay`] operations.
+pub type TurnRelayResult<T> = webrtc_util::Result<T>;
 
 #[cfg(all(test, feature = "server", not(target_family = "wasm")))]
 mod tests {
@@ -2269,6 +2282,683 @@ mod tests {
         alloc_conn.close().await?;
         client.close().await?;
         server.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn slow_async_allocator_coalesces_retransmitted_ticket_allocate_and_cancels_on_close(
+    ) -> Result<()> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use tokio::sync::Notify;
+
+        struct MockRelay {
+            closed: AtomicBool,
+            closed_notify: Notify,
+            allowed_ips: std::sync::Mutex<Vec<IpAddr>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::TurnDatagramRelay for MockRelay {
+            async fn allow_peer_ip(&self, peer_ip: IpAddr) -> webrtc_util::Result<()> {
+                self.allowed_ips.lock().unwrap().push(peer_ip);
+                Ok(())
+            }
+
+            async fn send_to(
+                &self,
+                payload: &[u8],
+                _peer: SocketAddr,
+            ) -> webrtc_util::Result<usize> {
+                Ok(payload.len())
+            }
+
+            async fn recv_datagram(
+                &self,
+                _buf: &mut [u8],
+            ) -> webrtc_util::Result<(usize, SocketAddr)> {
+                // Simulate a dead/idle upstream reader that never yields packets until `begin_close`.
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(webrtc_util::Error::Other("closed".to_string()));
+                }
+                self.closed_notify.notified().await;
+                Err(webrtc_util::Error::Other("closed".to_string()))
+            }
+
+            fn begin_close(&self) {
+                self.closed.store(true, Ordering::Release);
+                self.closed_notify.notify_waiters();
+            }
+
+            async fn close(&self) -> webrtc_util::Result<()> {
+                self.begin_close();
+                Ok(())
+            }
+        }
+
+        struct GatedAllocator {
+            calls: AtomicUsize,
+            entered: Notify,
+            release: Notify,
+            e_exit: SocketAddr,
+            last_relay: std::sync::Mutex<Option<Arc<MockRelay>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::TurnDatagramRelayAllocator for GatedAllocator {
+            fn is_ipv4(&self) -> bool {
+                true
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::result::Result<(Arc<dyn crate::TurnDatagramRelay>, SocketAddr), turn::Error>
+            {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                self.entered.notify_waiters();
+                self.release.notified().await;
+                let relay = Arc::new(MockRelay {
+                    closed: AtomicBool::new(false),
+                    closed_notify: Notify::new(),
+                    allowed_ips: std::sync::Mutex::new(Vec::new()),
+                });
+                *self.last_relay.lock().unwrap() = Some(Arc::clone(&relay));
+                Ok((relay, self.e_exit))
+            }
+        }
+
+        let t0: u128 = 1_700_000_000_000;
+        let clock = Arc::new(ManualClock::new(t0));
+        let e_exit: SocketAddr = "198.51.100.42:54320".parse().unwrap();
+        let allocator = Arc::new(GatedAllocator {
+            calls: AtomicUsize::new(0),
+            entered: Notify::new(),
+            release: Notify::new(),
+            e_exit,
+            last_relay: std::sync::Mutex::new(None),
+        });
+
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.clock = clock.clone();
+        cfg.max_allocations = 1;
+        cfg.max_reservations = 2;
+        cfg.relay_allocator =
+            Some(Arc::clone(&allocator) as Arc<dyn crate::TurnDatagramRelayAllocator>);
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        // Issue a single-use SessionTicket with a 10s TTL.
+        let eph_client = SecretKey::random();
+        let reservation = server
+            .reserve_exit_session(eph_client.pubkey(), Duration::from_secs(10))
+            .await?;
+        let creds = TurnCredentials::from_session_ticket(
+            &reservation.ticket,
+            &eph_client,
+            reservation.server_pubkey,
+        )?;
+
+        let sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut recv_buf = vec![0u8; 1500];
+
+        // 1. Obtain 401 nonce challenge.
+        let unauth = {
+            let mut msg = Message::new();
+            msg.build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            msg.raw
+        };
+        sock.send_to(&unauth, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut recv_buf).await?;
+        let mut ch = Message {
+            raw: recv_buf[..n].to_vec(),
+            ..Default::default()
+        };
+        ch.decode().unwrap();
+        let nonce = Nonce::get_from_as(&ch, ATTR_NONCE).unwrap();
+        let realm = Realm::get_from_as(&ch, ATTR_REALM).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+        // 2. Send authenticated Allocate (`tx1`), wait until `allocate_relay` enters its slow open.
+        let tx1 = TransactionId::new();
+        let entered_fut = allocator.entered.notified();
+        let auth_alloc = {
+            let mut msg = Message::new();
+            msg.build(&[
+                Box::new(Message {
+                    transaction_id: tx1,
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            msg.raw
+        };
+        sock.send_to(&auth_alloc, server_addr).await?;
+        tokio::time::timeout(Duration::from_secs(2), entered_fut)
+            .await
+            .expect("allocate_relay entered");
+        assert_eq!(allocator.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(server.used_allocation_slots().await, 1);
+
+        // 3. While `allocate_relay` is blocked, verify `read_loop` is NOT blocked: another client's
+        // STUN Binding request succeeds immediately!
+        let probe_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let binding_req = {
+            let mut msg = Message::new();
+            msg.build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(
+                    stun::message::METHOD_BINDING,
+                    CLASS_REQUEST,
+                )),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            msg.raw
+        };
+        probe_sock.send_to(&binding_req, server_addr).await?;
+        let (bn, _) = tokio::time::timeout(
+            Duration::from_millis(300),
+            probe_sock.recv_from(&mut recv_buf),
+        )
+        .await
+        .expect("read_loop must not block on slow allocate_relay")?;
+        let mut bresp = Message {
+            raw: recv_buf[..bn].to_vec(),
+            ..Default::default()
+        };
+        bresp.decode().unwrap();
+        assert_eq!(bresp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 4. Advance ManualClock PAST the 10s unclaimed ticket TTL while open is still in flight,
+        // and retransmit `auth_alloc` (`tx1`): must coalesce (still 1 call, NEVER 401!), while a
+        // second socket trying to replay the same ticket gets 401!
+        clock.set(t0 + 15_000);
+        sock.send_to(&auth_alloc, server_addr).await?;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(allocator.calls.load(Ordering::SeqCst), 1);
+
+        // Release `allocate_relay` and verify `XOR-RELAYED-ADDRESS == e_exit` (Law 2).
+        allocator.release.notify_waiters();
+        let (an, _) = tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut recv_buf))
+            .await
+            .expect("coalesced Allocate response")?;
+        let mut aresp = Message {
+            raw: recv_buf[..an].to_vec(),
+            ..Default::default()
+        };
+        aresp.decode().unwrap();
+        assert_eq!(
+            aresp.typ.class, CLASS_SUCCESS_RESPONSE,
+            "retransmitted SessionTicket Allocate must succeed, never 401"
+        );
+        let mut relayed = turn::proto::relayaddr::RelayedAddress::default();
+        relayed.get_from(&aresp).unwrap();
+        assert_eq!(SocketAddr::new(relayed.ip, relayed.port), e_exit);
+
+        // 5. Verify `CreatePermission` drives `TurnDatagramRelay::allow_peer_ip`.
+        let target_ip: IpAddr = "198.51.100.99".parse().unwrap();
+        let perm_req = {
+            let mut msg = Message::new();
+            msg.build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: target_ip,
+                    port: 9000,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            msg.raw
+        };
+        sock.send_to(&perm_req, server_addr).await?;
+        let (perm_len, _) =
+            tokio::time::timeout(Duration::from_secs(2), sock.recv_from(&mut recv_buf))
+                .await
+                .expect("CreatePermission response")?;
+        let mut presp = Message {
+            raw: recv_buf[..perm_len].to_vec(),
+            ..Default::default()
+        };
+        presp.decode().unwrap();
+        assert_eq!(presp.typ.class, CLASS_SUCCESS_RESPONSE);
+        assert_eq!(
+            *allocator
+                .last_relay
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .allowed_ips
+                .lock()
+                .unwrap(),
+            vec![target_ip]
+        );
+
+        // 6. `server.close()` must tear down the allocation (even though `MockRelay::recv_datagram`
+        // is parked forever unless `begin_close` wakes it!) and release all slots within 300ms.
+        tokio::time::timeout(Duration::from_millis(300), server.close())
+            .await
+            .expect("server.close() must not block on dead reader")?;
+        assert_eq!(server.used_allocation_slots().await, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stalled_relay_send_and_permission_flood_do_not_block_other_clients_or_server_close(
+    ) -> Result<()> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+
+        struct StalledRelay {
+            allow_first_perm: AtomicBool,
+            closed: tokio::sync::watch::Sender<bool>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelay for StalledRelay {
+            async fn allow_peer_ip(&self, _peer_ip: IpAddr) -> TurnRelayResult<()> {
+                if self.allow_first_perm.swap(false, Ordering::AcqRel) {
+                    return Ok(());
+                }
+                let mut rx = self.closed.subscribe();
+                let _ = rx.wait_for(|&c| c).await;
+                Err(TurnRelayError::Other("closed".to_string()))
+            }
+
+            async fn send_to(&self, _payload: &[u8], _peer: SocketAddr) -> TurnRelayResult<usize> {
+                let mut rx = self.closed.subscribe();
+                let _ = rx.wait_for(|&c| c).await;
+                Err(TurnRelayError::Other("closed".to_string()))
+            }
+
+            async fn recv_datagram(&self, _buf: &mut [u8]) -> TurnRelayResult<(usize, SocketAddr)> {
+                let mut rx = self.closed.subscribe();
+                let _ = rx.wait_for(|&c| c).await;
+                Err(TurnRelayError::Other("closed".to_string()))
+            }
+
+            fn begin_close(&self) {
+                let _ = self.closed.send_replace(true);
+            }
+
+            async fn close(&self) -> TurnRelayResult<()> {
+                self.begin_close();
+                Ok(())
+            }
+        }
+
+        struct StalledAllocator;
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelayAllocator for StalledAllocator {
+            fn is_ipv4(&self) -> bool {
+                true
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::result::Result<(Arc<dyn TurnDatagramRelay>, SocketAddr), TurnAllocateError>
+            {
+                let (closed, _) = tokio::sync::watch::channel(false);
+                Ok((
+                    Arc::new(StalledRelay {
+                        allow_first_perm: AtomicBool::new(true),
+                        closed,
+                    }),
+                    "198.51.100.88:46000".parse().unwrap(),
+                ))
+            }
+        }
+
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.relay_allocator = Some(Arc::new(StalledAllocator));
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        let did_key = SecretKey::random();
+        let creds = did_key.turn_credentials(server.server_pubkey())?;
+        let sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut buf = [0_u8; 1500];
+
+        // 1. Challenge + Allocate.
+        let mut probe = Message::new();
+        probe
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&probe.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut ch = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        ch.decode().unwrap();
+        let nonce = Nonce::get_from_as(&ch, ATTR_NONCE).unwrap();
+        let realm = Realm::get_from_as(&ch, ATTR_REALM).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+        let mut alloc_msg = Message::new();
+        alloc_msg
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&alloc_msg.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut alloc_resp = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 2. First CreatePermission succeeds so Send indications pass permission check.
+        let peer_sock: SocketAddr = "203.0.113.55:9999".parse().unwrap();
+        let mut perm1 = Message::new();
+        perm1
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress {
+                    ip: peer_sock.ip(),
+                    port: peer_sock.port(),
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&perm1.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut p1_resp = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        p1_resp.decode().unwrap();
+        assert_eq!(p1_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 3. Send 10 `Send` indications whose `relay.send_to` blocks forever + 12 `CreatePermission`
+        //    requests whose `relay.allow_peer_ip` blocks forever!
+        for _ in 0..10 {
+            let mut send_ind = Message::new();
+            send_ind
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
+                    Box::new(PeerAddress {
+                        ip: peer_sock.ip(),
+                        port: peer_sock.port(),
+                    }),
+                    Box::new(Data(b"stalled-datagram".to_vec())),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            sock.send_to(&send_ind.raw, server_addr).await?;
+        }
+
+        for _ in 0..12 {
+            let mut perm_flood = Message::new();
+            perm_flood
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                    Box::new(PeerAddress {
+                        ip: peer_sock.ip(),
+                        port: peer_sock.port(),
+                    }),
+                    Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                    Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                    Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                    Box::new(MessageIntegrity(mi_key.clone())),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            sock.send_to(&perm_flood.raw, server_addr).await?;
+        }
+
+        // Requests #9..#12 exceeding `MAX_IN_FLIGHT_CONTROL_OPS_PER_ALLOCATION` (`8`) must fail
+        // immediately with `508 Insufficient Capacity`.
+        let (err_n, _) = tokio::time::timeout(Duration::from_millis(300), sock.recv_from(&mut buf))
+            .await
+            .expect("9th concurrent CreatePermission must return 508 immediately")?;
+        let mut err_resp = Message {
+            raw: buf[..err_n].to_vec(),
+            ..Default::default()
+        };
+        err_resp.decode().unwrap();
+        assert_eq!(err_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&err_resp).unwrap();
+        assert!(err_code.code == CODE_INSUFFICIENT_CAPACITY);
+
+        // 4. Another client's STUN Binding request must STILL be answered in `< 150 ms`!
+        let other_client = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut binding = Message::new();
+        binding
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(
+                    stun::message::METHOD_BINDING,
+                    CLASS_REQUEST,
+                )),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        other_client.send_to(&binding.raw, server_addr).await?;
+        let (bn, _) =
+            tokio::time::timeout(Duration::from_millis(150), other_client.recv_from(&mut buf))
+                .await
+                .expect("stalled allocation must not block other clients on read_loop")?;
+        let mut bresp = Message {
+            raw: buf[..bn].to_vec(),
+            ..Default::default()
+        };
+        bresp.decode().unwrap();
+        assert_eq!(bresp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 5. `server.close()` must complete in `< 300 ms` despite stalled `send_to` + `allow_peer_ip`!
+        tokio::time::timeout(Duration::from_millis(300), server.close())
+            .await
+            .expect("server.close() must cancel stalled outbound worker and control tasks")?;
+        assert_eq!(server.used_allocation_slots().await, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn outbound_channel_data_survives_permission_expiry_and_allocate_replay_releases_expired_slot(
+    ) -> Result<()> {
+        use turn::proto::chandata::ChannelData;
+
+        let t0: u128 = 1_700_000_000_000;
+        let clock = Arc::new(ManualClock::new(t0));
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.clock = clock.clone();
+        cfg.max_allocations = 1;
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        let did_key = SecretKey::random();
+        let creds = did_key.turn_credentials(server.server_pubkey())?;
+        let sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let peer_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let peer_addr = peer_sock.local_addr()?;
+        let mut buf = [0_u8; 1500];
+
+        // 1. Obtain 401 challenge + Allocate (`max_allocations = 1`, default 600s lifetime).
+        let mut probe = Message::new();
+        probe
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&probe.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut ch = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        ch.decode().unwrap();
+        let nonce = Nonce::get_from_as(&ch, ATTR_NONCE).unwrap();
+        let realm = Realm::get_from_as(&ch, ATTR_REALM).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+        let alloc_tx = TransactionId::new();
+        let mut alloc_req = Message::new();
+        alloc_req
+            .build(&[
+                Box::new(Message {
+                    transaction_id: alloc_tx,
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(RequestedTransport {
+                    protocol: PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&alloc_req.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut alloc_resp = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut relayed = RelayedAddress::default();
+        relayed.get_from(&alloc_resp).unwrap();
+        let relay_addr = SocketAddr::new(relayed.ip, relayed.port);
+
+        // 2. Bind channel 0x4000 (`600s` binding + `300s` permission).
+        let mut bind_req = Message::new();
+        bind_req
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CHANNEL_BIND, CLASS_REQUEST)),
+                Box::new(ChannelNumber(0x4000)),
+                Box::new(PeerAddress {
+                    ip: peer_addr.ip(),
+                    port: peer_addr.port(),
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&bind_req.raw, server_addr).await?;
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut bind_resp = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        bind_resp.decode().unwrap();
+        assert_eq!(bind_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        // 3. Advance `ManualClock` by `305s`: the `300s` permission has expired, while the `600s`
+        //    channel binding and `600s` allocation remain valid.
+        clock.set(t0 + 305_000);
+
+        // Inbound peer datagram must be dropped (RFC 5766 §10.3 / §11.7).
+        peer_sock.send_to(b"inbound-blocked", relay_addr).await?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), sock.recv_from(&mut buf))
+                .await
+                .is_err(),
+            "inbound peer traffic must be dropped after 300s permission expiry"
+        );
+
+        // Outbound `ChannelData` on channel `0x4000` must STILL be forwarded (RFC 5766 §11.6).
+        let mut cd = ChannelData {
+            data: b"outbound-after-305s".to_vec(),
+            number: ChannelNumber(0x4000),
+            raw: Vec::new(),
+        };
+        cd.encode();
+        sock.send_to(&cd.raw, server_addr).await?;
+        let (peer_len, from) =
+            tokio::time::timeout(Duration::from_millis(500), peer_sock.recv_from(&mut buf))
+                .await
+                .expect(
+                    "outbound ChannelData must still forward while 600s channel binding is valid",
+                )?;
+        assert_eq!(from, relay_addr);
+        assert_eq!(&buf[..peer_len], b"outbound-after-305s");
+
+        // 4. Advance `ManualClock` past the `600s` allocation expiry (`605s`) and immediately
+        //    retransmit `alloc_req` (same `alloc_tx`) before any background sleep fires:
+        //    `check_existing_allocate` must tear down the expired allocation (freeing the sole
+        //    `max_allocations = 1` slot) and install a fresh allocation without leaking the slot.
+        clock.set(t0 + 605_000);
+        sock.send_to(&alloc_req.raw, server_addr).await?;
+        let (n2, _) = tokio::time::timeout(Duration::from_secs(1), sock.recv_from(&mut buf))
+            .await
+            .expect("post-expiry Allocate must succeed once expired slot is released")?;
+        let mut alloc_resp2 = Message {
+            raw: buf[..n2].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp2.decode().unwrap();
+        assert_eq!(alloc_resp2.typ.class, CLASS_SUCCESS_RESPONSE);
+        assert_eq!(server.used_allocation_slots().await, 1);
+
+        server.close().await?;
+        assert_eq!(server.used_allocation_slots().await, 0);
         Ok(())
     }
 }

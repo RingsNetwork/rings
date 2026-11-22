@@ -181,6 +181,9 @@ pub struct Processor {
     observability: Arc<Observability>,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
+    /// Runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    onion_udp_config: crate::onion::udp::OnionUdpConfig,
 }
 
 impl Drop for Processor {
@@ -636,6 +639,21 @@ impl Processor {
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await
+    }
+
+    /// Build a guard-closed multi-hop `udp` session route to a native/FFI exit registering `udp`
+    /// under a policy admitting `bind_request`.
+    #[cfg(rings_native)]
+    pub async fn build_onion_udp_route(
+        &self,
+        bind_request: crate::onion::udp::OnionUdpBindRequest,
+    ) -> Result<crate::onion::OnionRoute> {
+        directory::build_onion_udp_route(self, bind_request).await
+    }
+
+    #[cfg(rings_native)]
+    pub(crate) const fn onion_udp_config(&self) -> &crate::onion::udp::OnionUdpConfig {
+        &self.onion_udp_config
     }
 
     /// Run stabilization and node registration tasks until this future is dropped or aborted.

@@ -198,6 +198,7 @@ impl Cli {
             realm: self.realm,
             server_key,
             relay,
+            relay_allocator: None,
             peer_policy,
             max_nonces: self.max_nonces.max(1),
             max_allocations: self.max_allocations.max(1),

@@ -133,4 +133,60 @@ turn_service:
 
 Any client node (native Rust `rings_turn_service::request_turn_ticket`, shipped `librings_node` C FFI / `rings-node` browser WASM via `rings-node`'s generic `"lookupRegistry"` + `"onionInvoke"` RPC primitives, or `rings-turn-service` WASM `lookupTurnServices` / `requestTurnTicket`) discovers live `TurnServiceDescriptor` entries from `turn_services`, sends `(ephemeral_client_pubkey, ttl_ms)` through a guard-closed Sphinx `invoke` loop matched to the exact `(did, process_epoch, delegatee_public_key)` stage, verifies the returned `SignedTurnSessionTicket` against the descriptor's `server_pubkey`, and receives a ready `turn://tkt-…:<pass>@host:port` ICE URL.
 
-In this single-hop private TURN mode, the TURN server necessarily observes the client's IP and remote peer's IP when relaying media, **but never learns the client's `Did` or overlay identity**.
+In this single-hop private TURN mode (`relay_mode: local`, the default), the TURN server necessarily observes the client's IP and remote peer's IP when relaying media, **but never learns the client's `Did` or overlay identity**.
+
+## Multi-Hop Private TURN over Generic `onion::udp` (`relay_mode: onion_udp`)
+
+Setting `turn_service.relay_mode: onion_udp` decouples the client-facing RFC 5766 TURN entry (`rings-turn-service`) from the world-facing UDP relay socket (`E_exit`) using `rings-node`'s generic `udp` exit symbol (`Σ_W`, zero TURN/WebRTC primitives in `rings-core` or `rings-node`):
+
+1. **TURN Entry (`rings-turn-service`)**: runs standard RFC 5766 `Allocate`, `CreatePermission`, `ChannelBind`, and `Refresh` via `OnionUdpRelayBackend`:
+   ```yaml
+   node:
+     advertise_onion_relay: true
+   turn_service:
+     listen_addr: 0.0.0.0:3478
+     public_ip: 198.51.100.10
+     turn_url: turn://turn-entry.example.org:3478
+     relay_mode: onion_udp
+     onion_loop_class: KiB16
+     issue_tickets: true
+   ```
+2. **Middle Hops (`rings-node` with `advertise_onion_relay: true`)**: standard stateless Sphinx relay hops carrying fixed-width `16 KiB` cells (`OnionLoopClass::KiB16`).
+3. **Generic `udp` Exit (`rings-node` with `onion_exit_services: [udp]`)**: binds a plain public OS UDP socket `E_exit`, enforces `rings_network_policy::is_public_ip` egress and stateful IP pinholes (so unsolicited internet scan traffic consumes zero return-loop SURBs and zero `OnionExitAccounting` quota), and returns `E_exit` in the session `Bound` frame, which the TURN entry projects as `XOR-RELAYED-ADDRESS`:
+   ```yaml
+   advertise_presence: true
+   advertise_onion_relay: true
+   advertise_onion_exit: true
+   onion_exit_services:
+   - udp
+   onion_exit_policy:
+     allowed_targets:
+     - "*:*"
+     denied_targets: []
+     max_sessions: 512
+     max_bytes_per_minute: 1073741824
+   onion_udp_exit:
+     bind_ipv4: 0.0.0.0
+     advertised_ipv4: 203.0.113.50
+     min_port: 49152
+     max_port: 65535
+   ```
+
+### Multi-Hop Threat Model
+
+| Party | Learns | Does NOT Learn |
+| --- | --- | --- |
+| TURN entry (`rings-turn-service`, `SessionTicket` + `onion_udp`) | Client IP, peer IP (`CreatePermission` / `Send` / `ChannelBind`), `E_exit`, relayed DTLS/SRTP ciphertext | Client `Did`, client `Delegation`, exit operator's overlay path (sealed inside Sphinx return/forward loops) |
+| Middle relay hops (`OnionRole::Relay`) | Preceding hop and next hop on a `16 KiB` fixed-width cell loop | Client IP, client `Did`, peer IP/port, `E_exit`, STUN `TransactionId` / magic cookie, true datagram length |
+| Generic `onion::udp` exit (`OnionRole::Exit([udp])`) | Peer IP/port, `E_exit`, raw UDP payload (DTLS/SRTP ciphertext) | Client IP, client `Did`, TURN `USERNAME` / `SessionTicket`, TURN entry IP |
+| Remote WebRTC peer (relay-only policy) | Exit socket address `E_exit` (`XOR-RELAYED-ADDRESS`) | Client IP, client `Did`, TURN entry IP |
+
+### Ordered Session Semantics & Measured Latency / Head-of-Line (HOL) Profile
+
+Because `onion::udp` rides an ordered, reliable Sphinx session stream (`OnionLoopClass::KiB16` cells over constant-rate link pacing), relayed media experiences TURN-over-TCP-style ordered delivery rather than unordered UDP drop semantics. Reference measurements from `test_multihop_e2e::measure_single_hop_vs_multihop_turn_rtt_and_hol_burst` (`1 KiB` echo datagrams over real WebRTC overlay links + 4-relay/1-exit Sphinx loop on Apple Silicon loopback):
+
+| Mode | `1 KiB` Echo RTT (`p50`) | `1 KiB` Echo RTT (`p95`) | `16 × 1 KiB` Back-to-Back Burst Completion |
+| --- | --- | --- | --- |
+| Single-hop (`relay_mode: local`) | `0.32 ms` (`324 µs`) | `0.45 ms` (`446 µs`) | `1.35 ms` (`1,348 µs`) |
+| Multi-hop (`relay_mode: onion_udp`, `16 KiB` Sphinx cells) | `877.2 ms` (`877,184 µs`) | `942.9 ms` (`942,885 µs`) | `1,719.4 ms` (`1,719,410 µs`, coalesced across ordered session frames) |
+

@@ -74,7 +74,6 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
@@ -101,6 +100,17 @@ use webrtc_util::vnet::net::Net;
 use webrtc_util::Conn;
 
 use crate::auth::DelegationAuthHandler;
+use crate::bridge::BridgeAllocateStart;
+use crate::bridge::BridgeChannelBindError;
+use crate::bridge::BridgeCompleteAllocate;
+use crate::bridge::BridgeExistingAllocate;
+use crate::bridge::BridgeExpireOutcome;
+use crate::bridge::BridgePermissionCheck;
+use crate::bridge::BridgeRefreshOutcome;
+use crate::bridge::BridgeReserveError;
+use crate::bridge::TurnEntryBridge;
+use crate::bridge::BRIDGE_FAILED_ALLOCATE_CACHE_TTL_MS;
+use crate::bridge::BRIDGE_PERMISSION_TTL_MS;
 use crate::config::RelayAddressConfig;
 use crate::config::RelayPeerPolicy;
 use crate::config::TurnServerConfig;
@@ -133,12 +143,56 @@ const TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
 const TCP_IDLE_READ_TIMEOUT: Duration = MAXIMUM_ALLOCATION_LIFETIME;
-const PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
 const MAX_DELETION_TXS_PER_TUPLE: usize = 16;
 
+/// Transport-agnostic UDP datagram relay backing a single TURN allocation (#1292).
+///
+/// The default implementation wraps a local OS UDP socket governed by [`RelayPeerPolicy`].
+/// External crates (such as `rings-turn-service`) can implement this trait over a multi-hop
+/// `rings-node` `onion::udp` session without `rings-turn` depending on `rings-node`.
+#[async_trait]
+pub trait TurnDatagramRelay: Send + Sync + 'static {
+    /// Open or refresh a stateful egress/ingress IP pinhole for `peer_ip` before the allocation
+    /// commits an RFC 5766 permission or channel binding.
+    async fn allow_peer_ip(&self, peer_ip: IpAddr) -> webrtc_util::Result<()> {
+        let _ = peer_ip;
+        Ok(())
+    }
+
+    /// Transmit a single UDP datagram `payload` from the relayed transport address to `peer`.
+    async fn send_to(&self, payload: &[u8], peer: SocketAddr) -> webrtc_util::Result<usize>;
+
+    /// Receive the next inbound UDP datagram addressed to the relayed transport address, returning
+    /// `(bytes_written, source_peer_addr)`.
+    async fn recv_datagram(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)>;
+
+    /// Initiate non-blocking teardown so any concurrent `recv_datagram` wakes up immediately
+    /// without waiting on a dead upstream reader.
+    fn begin_close(&self);
+
+    /// Complete asynchronous teardown and release all underlying sockets or session resources.
+    async fn close(&self) -> webrtc_util::Result<()>;
+}
+
+/// Factory allocating a fresh [`TurnDatagramRelay`] and its public relayed [`SocketAddr`]
+/// (`XOR-RELAYED-ADDRESS`) for each admitted TURN `Allocate` request (#1292).
+#[async_trait]
+pub trait TurnDatagramRelayAllocator: Send + Sync + 'static {
+    /// Return whether this allocator serves IPv4 (`true`) or IPv6 (`false`) relayed addresses.
+    fn is_ipv4(&self) -> bool;
+
+    /// Allocate a fresh datagram relay endpoint, returning `(relay, relayed_socket_addr)`.
+    async fn allocate_relay(
+        &self,
+        use_ipv4: bool,
+        need_even_port: bool,
+    ) -> std::result::Result<(Arc<dyn TurnDatagramRelay>, SocketAddr), turn::Error>;
+}
+
 struct PolicyRelayConn {
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
+    closing_inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
     peer_policy: RelayPeerPolicy,
     closed_notify: Notify,
     recv_lock: Mutex<()>,
@@ -148,6 +202,7 @@ impl PolicyRelayConn {
     fn new(inner: Arc<dyn Conn + Send + Sync>, peer_policy: RelayPeerPolicy) -> Self {
         Self {
             inner: SyncMutex::new(Some(inner)),
+            closing_inner: SyncMutex::new(None),
             peer_policy,
             closed_notify: Notify::new(),
             recv_lock: Mutex::new(()),
@@ -160,6 +215,19 @@ impl PolicyRelayConn {
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
             .ok_or_else(|| webrtc_util::Error::Other("relay socket closed".to_string()))
+    }
+}
+
+#[async_trait]
+impl TurnDatagramRelay for PolicyRelayConn {
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        if !self.peer_policy.is_allowed_addr(target) {
+            return Err(webrtc_util::Error::Other(
+                "relay destination address denied by policy".to_string(),
+            ));
+        }
+        let inner = self.clone_inner()?;
+        inner.send_to(buf, target).await
     }
 
     async fn recv_datagram(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
@@ -187,36 +255,32 @@ impl PolicyRelayConn {
         }
     }
 
-    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
-        if !self.peer_policy.is_allowed_addr(target) {
-            return Err(webrtc_util::Error::Other(
-                "relay destination address denied by policy".to_string(),
-            ));
-        }
-        let inner = self.clone_inner()?;
-        inner.send_to(buf, target).await
-    }
-
-    fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
+    fn begin_close(&self) {
         let taken = self
             .inner
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        self.closed_notify.notify_waiters();
-        taken
-    }
-
-    async fn finish_close(&self, taken: Option<Arc<dyn Conn + Send + Sync>>) {
-        let _guard = self.recv_lock.lock().await;
-        if let Some(inner) = taken {
-            let _ = inner.close().await;
+        if let Some(conn) = taken {
+            *self
+                .closing_inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(conn);
         }
+        self.closed_notify.notify_waiters();
     }
 
     async fn close(&self) -> webrtc_util::Result<()> {
-        let taken = self.begin_close();
-        self.finish_close(taken).await;
+        self.begin_close();
+        let _guard = self.recv_lock.lock().await;
+        let taken = self
+            .closing_inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(inner) = taken {
+            let _ = inner.close().await;
+        }
         Ok(())
     }
 }
@@ -343,24 +407,56 @@ impl PolicyRelayAddressGenerator {
     }
 }
 
-enum ChannelBindError {
-    Conflict,
-    QuotaExceeded,
+#[async_trait]
+impl TurnDatagramRelayAllocator for PolicyRelayAddressGenerator {
+    fn is_ipv4(&self) -> bool {
+        relay_bind_ip_is_ipv4(&self.relay)
+    }
+
+    async fn allocate_relay(
+        &self,
+        use_ipv4: bool,
+        need_even_port: bool,
+    ) -> std::result::Result<(Arc<dyn TurnDatagramRelay>, SocketAddr), turn::Error> {
+        let (conn, addr) = self.allocate_relay_conn(use_ipv4, need_even_port).await?;
+        Ok((conn as Arc<dyn TurnDatagramRelay>, addr))
+    }
 }
 
-struct AllocationState {
-    permissions: HashMap<IpAddr, Instant>,
-    channel_bindings: HashMap<ChannelNumber, (SocketAddr, Instant)>,
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct OrderedFiveTuple {
+    protocol: u8,
+    src_addr: SocketAddr,
+    dst_addr: SocketAddr,
 }
 
-static NEXT_ALLOCATION_ID: AtomicU64 = AtomicU64::new(1);
+impl From<FiveTuple> for OrderedFiveTuple {
+    fn from(ft: FiveTuple) -> Self {
+        Self {
+            protocol: ft.protocol.0,
+            src_addr: ft.src_addr,
+            dst_addr: ft.dst_addr,
+        }
+    }
+}
 
-type AllocateResponseCache = Arc<Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>>;
+impl From<OrderedFiveTuple> for FiveTuple {
+    fn from(oft: OrderedFiveTuple) -> Self {
+        Self {
+            protocol: Protocol(oft.protocol),
+            src_addr: oft.src_addr,
+            dst_addr: oft.dst_addr,
+        }
+    }
+}
+
+type ProductionBridge = TurnEntryBridge<OrderedFiveTuple, TransactionId, Vec<u8>>;
 type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>>;
 
-struct ReservedTurnSession {
-    expires_at_ms: u128,
-    reservation_permit: OwnedSemaphorePermit,
+struct PendingOpenWaiter {
+    conn: Arc<dyn Conn + Send + Sync>,
+    src_addr: SocketAddr,
+    cancel_tx: watch::Sender<bool>,
 }
 
 /// Result of reserving a TURN relay session on a [`TurnServer`] (#1292).
@@ -374,62 +470,116 @@ pub struct TurnSessionReservation {
     pub server_pubkey: PublicKey<33>,
 }
 
+/// Bounded per-allocation outbound datagram queue isolating the shared TURN receive loop from
+/// backpressured asynchronous relay backends (e.g. `onion::udp`).
+const ALLOCATION_OUTBOUND_QUEUE_CAPACITY: usize = 64;
+
+/// Maximum concurrent in-flight `CreatePermission` / `ChannelBind` backend requests per allocation.
+const MAX_IN_FLIGHT_CONTROL_OPS_PER_ALLOCATION: usize = 8;
+
+struct AllocationControlPermit(Arc<AtomicUsize>);
+
+impl Drop for AllocationControlPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 struct ManagedAllocation {
     alloc_id: u64,
     five_tuple: FiveTuple,
+    ord_tuple: OrderedFiveTuple,
     username: String,
     relay_addr: SocketAddr,
-    relay_conn: Arc<PolicyRelayConn>,
-    state: SyncMutex<AllocationState>,
+    relay_conn: Arc<dyn TurnDatagramRelay>,
     expiry_tx: watch::Sender<Instant>,
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
-    capacity_permit: SyncMutex<Option<OwnedSemaphorePermit>>,
+    closed_tx: watch::Sender<bool>,
+    in_flight_control: Arc<AtomicUsize>,
+    control_op_lock: Mutex<()>,
+    outbound_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
+    outbound_worker: SyncMutex<Option<JoinHandle<()>>>,
 }
 
 impl ManagedAllocation {
     fn new(
+        alloc_id: u64,
         five_tuple: FiveTuple,
         username: String,
         relay_addr: SocketAddr,
-        relay_conn: Arc<PolicyRelayConn>,
+        relay_conn: Arc<dyn TurnDatagramRelay>,
         lifetime: Duration,
         tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
-        capacity_permit: OwnedSemaphorePermit,
     ) -> Arc<Self> {
-        let alloc_id = NEXT_ALLOCATION_ID.fetch_add(1, Ordering::Relaxed);
         if let Some(ref tx) = tcp_authenticated_tx {
             let _ = tx.send_replace(Some(alloc_id));
         }
         let (expiry_tx, _) = watch::channel(Instant::now() + lifetime);
+        let (closed_tx, closed_rx) = watch::channel(false);
+        let (outbound_tx, mut outbound_rx) =
+            mpsc::channel::<(Vec<u8>, SocketAddr)>(ALLOCATION_OUTBOUND_QUEUE_CAPACITY);
+        let worker_relay = Arc::clone(&relay_conn);
+        let mut worker_closed_rx = closed_rx;
+        let worker_handle = tokio::spawn(async move {
+            loop {
+                if *worker_closed_rx.borrow() {
+                    break;
+                }
+                let item = tokio::select! {
+                    biased;
+                    _ = worker_closed_rx.wait_for(|&closed| closed) => break,
+                    next = outbound_rx.recv() => next,
+                };
+                let Some((payload, dst)) = item else {
+                    break;
+                };
+                let _ = tokio::select! {
+                    biased;
+                    _ = worker_closed_rx.wait_for(|&closed| closed) => break,
+                    res = worker_relay.send_to(&payload, dst) => res,
+                };
+            }
+        });
+
         Arc::new(Self {
             alloc_id,
             five_tuple,
+            ord_tuple: OrderedFiveTuple::from(five_tuple),
             username,
             relay_addr,
             relay_conn,
-            state: SyncMutex::new(AllocationState {
-                permissions: HashMap::new(),
-                channel_bindings: HashMap::new(),
-            }),
             expiry_tx,
             tcp_authenticated_tx,
-            capacity_permit: SyncMutex::new(Some(capacity_permit)),
+            closed_tx,
+            in_flight_control: Arc::new(AtomicUsize::new(0)),
+            control_op_lock: Mutex::new(()),
+            outbound_tx,
+            outbound_worker: SyncMutex::new(Some(worker_handle)),
         })
     }
 
-    fn info(&self) -> AllocationInfo {
-        AllocationInfo::new(self.five_tuple, self.username.clone(), self.relay_addr)
+    async fn wait_closed(&self) {
+        let mut rx = self.closed_tx.subscribe();
+        let _ = rx.wait_for(|&closed| closed).await;
     }
 
-    fn is_expired(&self) -> bool {
-        *self.expiry_tx.borrow() <= Instant::now()
+    fn try_acquire_control_permit(&self) -> Option<AllocationControlPermit> {
+        if *self.closed_tx.borrow() {
+            return None;
+        }
+        self.in_flight_control
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                (cur < MAX_IN_FLIGHT_CONTROL_OPS_PER_ALLOCATION).then_some(cur + 1)
+            })
+            .ok()
+            .map(|_| AllocationControlPermit(Arc::clone(&self.in_flight_control)))
     }
 
-    fn refresh(&self, lifetime: Duration) {
+    fn refresh_wall_deadline(&self, lifetime: Duration) {
         let _ = self.expiry_tx.send_replace(Instant::now() + lifetime);
     }
 
-    fn begin_close(&self) -> Option<Arc<dyn Conn + Send + Sync>> {
+    fn begin_close(&self) {
         if let Some(ref tx) = self.tcp_authenticated_tx {
             let alloc_id = self.alloc_id;
             tx.send_if_modified(|current| {
@@ -442,16 +592,21 @@ impl ManagedAllocation {
             });
         }
         let _ = self.expiry_tx.send_replace(Instant::now());
-        self.relay_conn.begin_close()
+        let _ = self.closed_tx.send_replace(true);
+        self.relay_conn.begin_close();
     }
 
-    async fn finish_close(&self, taken: Option<Arc<dyn Conn + Send + Sync>>) {
-        self.relay_conn.finish_close(taken).await;
-        let _ = self
-            .capacity_permit
+    async fn finish_close(&self) {
+        self.begin_close();
+        let handle = self
+            .outbound_worker
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        let _ = self.relay_conn.close().await;
     }
 
     async fn recv_payload_from_peer(
@@ -461,96 +616,10 @@ impl ManagedAllocation {
         self.relay_conn.recv_datagram(buf).await
     }
 
-    async fn send_payload_to_peer(
-        &self,
-        payload: &[u8],
-        target: SocketAddr,
-    ) -> webrtc_util::Result<usize> {
-        self.relay_conn.send_to(payload, target).await
-    }
-
-    fn has_permission(&self, ip: IpAddr) -> bool {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        state.permissions.contains_key(&ip)
-    }
-
-    fn try_install_permissions(&self, peer_ips: &[IpAddr], max_permissions: usize) -> bool {
-        let now = Instant::now();
-        let new_exp = now + PERMISSION_TIMEOUT;
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        let mut projected_len = state.permissions.len();
-        let mut seen_new = HashSet::new();
-        for &ip in peer_ips {
-            if !state.permissions.contains_key(&ip) && seen_new.insert(ip) {
-                projected_len += 1;
-            }
+    fn enqueue_payload_to_peer(&self, payload: &[u8], target: SocketAddr) {
+        if !*self.closed_tx.borrow() {
+            let _ = self.outbound_tx.try_send((payload.to_vec(), target));
         }
-        if projected_len > max_permissions {
-            return false;
-        }
-        for &ip in peer_ips {
-            state.permissions.insert(ip, new_exp);
-        }
-        true
-    }
-
-    fn try_bind_channel(
-        &self,
-        channel: ChannelNumber,
-        peer: SocketAddr,
-        channel_timeout: Duration,
-        max_permissions: usize,
-    ) -> std::result::Result<(), ChannelBindError> {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        state.channel_bindings.retain(|_, (_, exp)| *exp > now);
-
-        for (&bound_ch, &(bound_peer, _)) in &state.channel_bindings {
-            if (bound_ch == channel && bound_peer != peer)
-                || (bound_peer == peer && bound_ch != channel)
-            {
-                return Err(ChannelBindError::Conflict);
-            }
-        }
-
-        if !state.permissions.contains_key(&peer.ip()) && state.permissions.len() >= max_permissions
-        {
-            return Err(ChannelBindError::QuotaExceeded);
-        }
-
-        state
-            .permissions
-            .insert(peer.ip(), now + PERMISSION_TIMEOUT);
-        state
-            .channel_bindings
-            .insert(channel, (peer, now + channel_timeout));
-        Ok(())
-    }
-
-    fn inbound_forwarding_channel(&self, peer: SocketAddr) -> Option<Option<ChannelNumber>> {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.permissions.retain(|_, &mut exp| exp > now);
-        state.channel_bindings.retain(|_, (_, exp)| *exp > now);
-        if !state.permissions.contains_key(&peer.ip()) {
-            return None;
-        }
-        let channel = state
-            .channel_bindings
-            .iter()
-            .find_map(|(&ch, &(bound_peer, _))| (bound_peer == peer).then_some(ch));
-        Some(channel)
-    }
-
-    fn outbound_channel_peer(&self, channel: ChannelNumber) -> Option<SocketAddr> {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.channel_bindings.retain(|_, (_, exp)| *exp > now);
-        state.channel_bindings.get(&channel).map(|&(peer, _)| peer)
     }
 }
 
@@ -1764,23 +1833,64 @@ fn clamp_allocation_lifetime(requested: Duration) -> Duration {
         .max(DEFAULT_LIFETIME)
 }
 
-async fn close_allocations(removed: Vec<Arc<ManagedAllocation>>) {
-    if removed.is_empty() {
+async fn close_alloc_ids(
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    ids: Vec<u64>,
+) {
+    if ids.is_empty() {
         return;
     }
-    let closing: Vec<_> = removed
-        .into_iter()
-        .map(|alloc| {
-            let taken = alloc.begin_close();
-            (alloc, taken)
-        })
-        .collect();
+    let mut closing = Vec::with_capacity(ids.len());
+    {
+        let mut guard = handles.lock().await;
+        for id in ids {
+            let maybe_alloc = guard.remove(&id);
+            if let Some(ref alloc) = maybe_alloc {
+                alloc.begin_close();
+            }
+            closing.push((id, maybe_alloc));
+        }
+    }
+    let bridge = Arc::clone(bridge);
     let _ = tokio::spawn(async move {
-        for (alloc, taken) in closing {
-            alloc.finish_close(taken).await;
+        for (id, maybe_alloc) in closing {
+            if let Some(alloc) = maybe_alloc {
+                alloc.finish_close().await;
+            }
+            bridge.lock().await.finish_teardown(id);
         }
     })
     .await;
+}
+
+fn build_authenticated_error_raw(
+    m: &Message,
+    code: ErrorCode,
+    reason: &[u8],
+    unknown_attrs: Option<Vec<AttrType>>,
+    mi_key: Vec<u8>,
+) -> Option<Vec<u8>> {
+    let mut err_msg = Message::new();
+    let msg_type = MessageType::new(m.typ.method, CLASS_ERROR_RESPONSE);
+    let err_attr = ErrorCodeAttribute {
+        code,
+        reason: reason.to_vec(),
+    };
+    let mut setters: Vec<Box<dyn Setter>> = vec![
+        Box::new(Message {
+            transaction_id: m.transaction_id,
+            ..Default::default()
+        }),
+        Box::new(msg_type),
+        Box::new(err_attr),
+    ];
+    if let Some(unknown) = unknown_attrs {
+        setters.push(Box::new(UnknownAttributes(unknown)));
+    }
+    setters.push(Box::new(MessageIntegrity(mi_key)));
+    setters.push(Box::new(FINGERPRINT));
+    err_msg.build(&setters).is_ok().then_some(err_msg.raw)
 }
 
 struct CompletedDeletionEntry {
@@ -1904,131 +2014,67 @@ fn is_zero_lifetime_refresh(msg: &Message) -> bool {
     lt.get_from(msg).is_ok() && lt.0.is_zero()
 }
 
-async fn remove_allocation_if_current(
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
-    alloc: &Arc<ManagedAllocation>,
-) {
-    let removed = {
-        let mut guard = allocations.lock().await;
-        if guard
-            .get(&alloc.five_tuple)
-            .is_some_and(|current| Arc::ptr_eq(current, alloc))
-        {
-            guard.remove(&alloc.five_tuple)
-        } else {
-            None
-        }
-    };
-    if let Some(removed) = removed {
-        close_allocations(vec![removed]).await;
+async fn get_active_allocation(
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    clock: &SharedClock,
+    five_tuple: &FiveTuple,
+) -> Option<Arc<ManagedAllocation>> {
+    let now_ms = clock.now_ms();
+    let ord_tuple = OrderedFiveTuple::from(*five_tuple);
+    let (expired_id, live_id) = bridge.lock().await.active_allocation_id(&ord_tuple, now_ms);
+    if let Some(exp_id) = expired_id {
+        close_alloc_ids(bridge, handles, vec![exp_id]).await;
     }
+    let alloc_id = live_id?;
+    handles.lock().await.get(&alloc_id).cloned()
 }
 
 async fn try_expire_allocation_if_current(
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    clock: &SharedClock,
     alloc: &Arc<ManagedAllocation>,
 ) -> bool {
-    let removed = {
-        let mut guard = allocations.lock().await;
-        match guard.get(&alloc.five_tuple) {
-            Some(current) if Arc::ptr_eq(current, alloc) => {
-                if !current.is_expired() {
-                    return false;
-                }
-                guard.remove(&alloc.five_tuple)
-            }
-            _ => return true,
+    let outcome =
+        bridge
+            .lock()
+            .await
+            .expire_if_due(&alloc.ord_tuple, alloc.alloc_id, clock.now_ms());
+    match outcome {
+        BridgeExpireOutcome::AlreadyRemoved => true,
+        BridgeExpireOutcome::StillLive { expires_at_ms } => {
+            let now_ms = clock.now_ms();
+            let rem_ms = u64::try_from(expires_at_ms.saturating_sub(now_ms)).unwrap_or(u64::MAX);
+            alloc.refresh_wall_deadline(Duration::from_millis(rem_ms.max(2)));
+            false
         }
-    };
-    if let Some(removed) = removed {
-        close_allocations(vec![removed]).await;
+        BridgeExpireOutcome::Expired { close_alloc_id } => {
+            close_alloc_ids(bridge, handles, vec![close_alloc_id]).await;
+            true
+        }
     }
-    true
 }
 
-async fn try_refresh_allocation(
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+async fn remove_allocation_if_current(
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
     alloc: &Arc<ManagedAllocation>,
-    lifetime: Duration,
-) -> bool {
-    let expired_to_close = {
-        let mut guard = allocations.lock().await;
-        match guard.get(&alloc.five_tuple) {
-            Some(current) if Arc::ptr_eq(current, alloc) => {
-                if !current.is_expired() {
-                    current.refresh(lifetime);
-                    return true;
-                }
-                guard.remove(&alloc.five_tuple)
-            }
-            _ => None,
-        }
-    };
-    if let Some(expired) = expired_to_close {
-        close_allocations(vec![expired]).await;
+) {
+    let removed_id = bridge
+        .lock()
+        .await
+        .remove_if_current(&alloc.ord_tuple, alloc.alloc_id);
+    if let Some(id) = removed_id {
+        close_alloc_ids(bridge, handles, vec![id]).await;
     }
-    false
-}
-
-async fn get_active_allocation(
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
-    five_tuple: &FiveTuple,
-) -> Option<Arc<ManagedAllocation>> {
-    let expired = {
-        let mut guard = allocations.lock().await;
-        let current = guard.get(five_tuple).cloned()?;
-        if !current.is_expired() {
-            return Some(current);
-        }
-        guard.remove(five_tuple)
-    };
-    if let Some(alloc) = expired {
-        close_allocations(vec![alloc]).await;
-    }
-    None
-}
-
-async fn active_allocation_count(
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
-) -> usize {
-    let expired: Vec<Arc<ManagedAllocation>>;
-    let count = {
-        let mut guard = allocations.lock().await;
-        let expired_tuples: Vec<FiveTuple> = guard
-            .iter()
-            .filter(|(_, alloc)| alloc.is_expired())
-            .map(|(k, _)| *k)
-            .collect();
-        expired = expired_tuples
-            .into_iter()
-            .filter_map(|k| guard.remove(&k))
-            .collect();
-        guard.len()
-    };
-    close_allocations(expired).await;
-    count
-}
-
-async fn prune_expired_reserved_sessions_map(
-    reserved_sessions: &Mutex<HashMap<[u8; 16], ReservedTurnSession>>,
-    now_ms: u128,
-) -> usize {
-    let (_expired, remaining): (Vec<ReservedTurnSession>, usize) = {
-        let mut guard = reserved_sessions.lock().await;
-        let keys: Vec<[u8; 16]> = guard
-            .iter()
-            .filter(|(_, s)| now_ms > s.expires_at_ms)
-            .map(|(k, _)| *k)
-            .collect();
-        let removed = keys.into_iter().filter_map(|k| guard.remove(&k)).collect();
-        (removed, guard.len())
-    };
-    remaining
 }
 
 async fn relay_packet_handler(
     alloc: Arc<ManagedAllocation>,
-    allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
+    bridge: Arc<Mutex<ProductionBridge>>,
+    handles: Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    clock: SharedClock,
     turn_socket: Arc<dyn Conn + Send + Sync>,
     client_addr: SocketAddr,
 ) {
@@ -2037,17 +2083,17 @@ async fn relay_packet_handler(
     loop {
         let deadline = *expiry_rx.borrow_and_update();
         if deadline <= Instant::now() {
-            if try_expire_allocation_if_current(&allocations, &alloc).await {
+            if try_expire_allocation_if_current(&bridge, &handles, &clock, &alloc).await {
                 return;
             }
             continue;
         }
-        let sleep = tokio::time::sleep_until(deadline);
+        let sleep = tokio::time::sleep_until(deadline + Duration::from_millis(2));
         tokio::pin!(sleep);
 
         tokio::select! {
             _ = &mut sleep => {
-                if try_expire_allocation_if_current(&allocations, &alloc).await {
+                if try_expire_allocation_if_current(&bridge, &handles, &clock, &alloc).await {
                     return;
                 }
             }
@@ -2060,24 +2106,40 @@ async fn relay_packet_handler(
                 let Ok((n, src_addr)) = recv_res else {
                     break;
                 };
-                if *expiry_rx.borrow() <= Instant::now() {
-                    if try_expire_allocation_if_current(&allocations, &alloc).await {
+                let now_ms = clock.now_ms();
+                let forwarding_decision = {
+                    let mut guard = bridge.lock().await;
+                    match guard.expire_if_due(&alloc.ord_tuple, alloc.alloc_id, now_ms) {
+                        BridgeExpireOutcome::AlreadyRemoved => Err(None),
+                        BridgeExpireOutcome::Expired { close_alloc_id } => Err(Some(close_alloc_id)),
+                        BridgeExpireOutcome::StillLive { .. } => {
+                            // RFC 5766 Section 10.3: verify that an active permission exists for
+                            // the peer's IP before forwarding via ChannelData or DataIndication.
+                            Ok(guard.inbound_forwarding_channel(
+                                &alloc.ord_tuple,
+                                alloc.alloc_id,
+                                src_addr,
+                                now_ms,
+                            ))
+                        }
+                    }
+                };
+                let maybe_channel = match forwarding_decision {
+                    Err(Some(close_id)) => {
+                        close_alloc_ids(&bridge, &handles, vec![close_id]).await;
                         return;
                     }
-                    continue;
-                }
-                let Some(payload) = buffer.get(..n) else {
-                    continue;
+                    Err(None) => return,
+                    Ok(None) => continue,
+                    Ok(Some(ch)) => ch,
                 };
-                // RFC 5766 Section 10.3: verify that an active permission exists for the peer's IP
-                // before forwarding via either ChannelData or DataIndication.
-                let Some(maybe_channel) = alloc.inbound_forwarding_channel(src_addr) else {
+                let Some(payload) = buffer.get(..n) else {
                     continue;
                 };
                 if let Some(number) = maybe_channel {
                     let mut channel_data = ChannelData {
                         data: payload.to_vec(),
-                        number,
+                        number: ChannelNumber(number),
                         raw: Vec::new(),
                     };
                     channel_data.encode();
@@ -2104,109 +2166,225 @@ async fn relay_packet_handler(
             }
         }
     }
-    remove_allocation_if_current(&allocations, &alloc).await;
+    remove_allocation_if_current(&bridge, &handles, &alloc).await;
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn finalize_allocate_install(
-    conn: Arc<dyn Conn + Send + Sync>,
-    allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-    allocate_responses: AllocateResponseCache,
-    shutdown_rx: Option<watch::Receiver<bool>>,
-    relay_turn_socket: Arc<dyn Conn + Send + Sync>,
+async fn run_pending_allocate_open(
+    open_id: u64,
     five_tuple: FiveTuple,
-    src_addr: SocketAddr,
+    ord_tuple: OrderedFiveTuple,
     tx_id: TransactionId,
     username: String,
-    relay_addr: SocketAddr,
-    relay_conn: Arc<PolicyRelayConn>,
+    use_ipv4: bool,
+    need_even_port: bool,
     lifetime_duration: Duration,
-    tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
-    capacity_permit: OwnedSemaphorePermit,
     mi_key: Vec<u8>,
+    relay_turn_socket: Arc<dyn Conn + Send + Sync>,
+    tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+    had_ticket: bool,
+    m_for_err: Message,
+    relay_allocator: Arc<dyn TurnDatagramRelayAllocator>,
+    bridge: Arc<Mutex<ProductionBridge>>,
+    handles: Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    pending_waiters: Arc<Mutex<HashMap<u64, PendingOpenWaiter>>>,
+    clock: SharedClock,
+    mut shutdown_rx: watch::Receiver<bool>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
-    let built = {
-        let mut resp = Message::new();
-        let setters: Vec<Box<dyn Setter>> = vec![
-            Box::new(Message {
-                transaction_id: tx_id,
-                ..Default::default()
-            }),
-            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_SUCCESS_RESPONSE)),
-            Box::new(RelayedAddress {
-                ip: relay_addr.ip(),
-                port: relay_addr.port(),
-            }),
-            Box::new(Lifetime(lifetime_duration)),
-            Box::new(XorMappedAddress {
-                ip: src_addr.ip(),
-                port: src_addr.port(),
-            }),
-            Box::new(MessageIntegrity(mi_key)),
-            Box::new(FINGERPRINT),
-        ];
-        resp.build(&setters).is_ok().then_some(resp.raw)
+    let alloc_res = tokio::select! {
+        res = relay_allocator.allocate_relay(use_ipv4, need_even_port) => Some(res),
+        _ = shutdown_rx.changed() => None,
+        _ = cancel_rx.changed() => None,
     };
 
-    let alloc = ManagedAllocation::new(
-        five_tuple,
-        username,
-        relay_addr,
-        relay_conn,
-        lifetime_duration,
-        tcp_authenticated_tx,
-        capacity_permit,
-    );
-    let installed = {
-        let mut guard = allocations.lock().await;
-        if shutdown_rx.as_ref().is_some_and(|rx| *rx.borrow()) {
-            false
-        } else {
-            let live_tuples: HashSet<FiveTuple> = guard.keys().copied().collect();
-            if let Some(ref raw) = built {
-                let mut resp_guard = allocate_responses.lock().await;
-                resp_guard.retain(|tuple, _| live_tuples.contains(tuple));
-                resp_guard.insert(five_tuple, (tx_id, raw.clone()));
-            }
-            guard.insert(five_tuple, Arc::clone(&alloc));
-            true
-        }
-    };
-    if !installed {
-        let taken = alloc.begin_close();
-        alloc.finish_close(taken).await;
+    let Some(alloc_res) = alloc_res else {
+        pending_waiters.lock().await.remove(&open_id);
+        let _ = bridge
+            .lock()
+            .await
+            .complete_allocate_err(ord_tuple, open_id, None, clock.now_ms());
         return;
-    }
+    };
 
-    tokio::spawn(relay_packet_handler(
-        Arc::clone(&alloc),
-        Arc::clone(&allocations),
-        relay_turn_socket,
-        src_addr,
-    ));
+    match alloc_res {
+        Err(_) => {
+            let err_raw = build_authenticated_error_raw(
+                &m_for_err,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Insufficient Capacity",
+                None,
+                mi_key,
+            );
+            let cache_entry = if had_ticket {
+                err_raw
+                    .as_ref()
+                    .map(|raw| (raw.clone(), BRIDGE_FAILED_ALLOCATE_CACHE_TTL_MS))
+            } else {
+                None
+            };
+            let should_send = bridge.lock().await.complete_allocate_err(
+                ord_tuple,
+                open_id,
+                cache_entry,
+                clock.now_ms(),
+            );
+            let waiter = pending_waiters.lock().await.remove(&open_id);
+            if should_send {
+                if let (Some(raw), Some(w)) = (err_raw, waiter) {
+                    let _ = w.conn.send_to(&raw, w.src_addr).await;
+                }
+            }
+        }
+        Ok((relay_conn, relay_addr)) => {
+            let waiter = pending_waiters.lock().await.remove(&open_id);
+            let Some(waiter) = waiter else {
+                relay_conn.begin_close();
+                let _ = relay_conn.close().await;
+                bridge.lock().await.finish_teardown(open_id);
+                return;
+            };
+            let src_addr = waiter.src_addr;
+            let built = {
+                let mut resp = Message::new();
+                let setters: Vec<Box<dyn Setter>> = vec![
+                    Box::new(Message {
+                        transaction_id: tx_id,
+                        ..Default::default()
+                    }),
+                    Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_SUCCESS_RESPONSE)),
+                    Box::new(RelayedAddress {
+                        ip: relay_addr.ip(),
+                        port: relay_addr.port(),
+                    }),
+                    Box::new(Lifetime(lifetime_duration)),
+                    Box::new(XorMappedAddress {
+                        ip: src_addr.ip(),
+                        port: src_addr.port(),
+                    }),
+                    Box::new(MessageIntegrity(mi_key)),
+                    Box::new(FINGERPRINT),
+                ];
+                resp.build(&setters).is_ok().then_some(resp.raw)
+            };
+            let Some(resp_raw) = built else {
+                relay_conn.begin_close();
+                let _ = relay_conn.close().await;
+                let _ = bridge.lock().await.complete_allocate_err(
+                    ord_tuple,
+                    open_id,
+                    None,
+                    clock.now_ms(),
+                );
+                return;
+            };
 
-    if let Some(raw) = built {
-        let _ = conn.send_to(&raw, src_addr).await;
+            let decision = {
+                let mut b_guard = bridge.lock().await;
+                if *shutdown_rx.borrow() || *cancel_rx.borrow() {
+                    let _ = b_guard.disconnect_tuple(&ord_tuple);
+                }
+                let decision = b_guard.complete_allocate_ok(
+                    ord_tuple,
+                    open_id,
+                    relay_addr,
+                    resp_raw.clone(),
+                    clock.now_ms(),
+                );
+                if let BridgeCompleteAllocate::Installed { alloc_id } = decision {
+                    let alloc = ManagedAllocation::new(
+                        alloc_id,
+                        five_tuple,
+                        username,
+                        relay_addr,
+                        Arc::clone(&relay_conn),
+                        lifetime_duration,
+                        tcp_authenticated_tx,
+                    );
+                    handles.lock().await.insert(alloc_id, Arc::clone(&alloc));
+                    tokio::spawn(relay_packet_handler(
+                        alloc,
+                        Arc::clone(&bridge),
+                        Arc::clone(&handles),
+                        Arc::clone(&clock),
+                        relay_turn_socket,
+                        src_addr,
+                    ));
+                }
+                decision
+            };
+
+            match decision {
+                BridgeCompleteAllocate::AbortAndCloseRelay { closing_id } => {
+                    relay_conn.begin_close();
+                    let _ = relay_conn.close().await;
+                    bridge.lock().await.finish_teardown(closing_id);
+                }
+                BridgeCompleteAllocate::Installed { .. } => {
+                    let _ = waiter.conn.send_to(&resp_raw, src_addr).await;
+                }
+            }
+        }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
-    allocations: &Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-    reserved_sessions: &Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
-    capacity_sem: &Arc<Semaphore>,
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    pending_waiters: &Arc<Mutex<HashMap<u64, PendingOpenWaiter>>>,
+    pending_tasks: &mut JoinSet<()>,
     clock: &SharedClock,
     shutdown_rx: &watch::Receiver<bool>,
-    relay_generator: &PolicyRelayAddressGenerator,
-    allocate_responses: &AllocateResponseCache,
+    relay_allocator: &Arc<dyn TurnDatagramRelayAllocator>,
     five_tuple: FiveTuple,
     src_addr: SocketAddr,
     m: &Message,
     username_attr: Username,
-    relay_is_ipv4: bool,
     mi_key: Vec<u8>,
 ) {
+    let ord_tuple = OrderedFiveTuple::from(five_tuple);
+
+    // First check whether this request is a retransmission or mismatch on an active, in-flight,
+    // or cached allocation BEFORE validating Allocate-specific attributes or consuming a ticket.
+    let (expired_id, existing) = bridge.lock().await.check_existing_allocate(
+        &ord_tuple,
+        &username_attr.text,
+        &m.transaction_id,
+        clock.now_ms(),
+    );
+    if let Some(exp_id) = expired_id {
+        close_alloc_ids(bridge, handles, vec![exp_id]).await;
+    }
+    match existing {
+        BridgeExistingAllocate::ShuttingDown => return,
+        BridgeExistingAllocate::ReplayCached(cached_raw) => {
+            let _ = conn.send_to(&cached_raw, src_addr).await;
+            return;
+        }
+        BridgeExistingAllocate::CoalescedInFlight { open_id } => {
+            if let Some(waiter) = pending_waiters.lock().await.get_mut(&open_id) {
+                waiter.conn = Arc::clone(conn);
+                waiter.src_addr = src_addr;
+            }
+            return;
+        }
+        BridgeExistingAllocate::AllocationMismatch => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        BridgeExistingAllocate::None => {}
+    }
     let mut requested_transport = RequestedTransport::default();
     if requested_transport.get_from(m).is_err() {
         send_authenticated_error(
@@ -2317,7 +2495,7 @@ async fn handle_authenticated_allocate(
             }
         }
     }
-    if requested_ipv4 != relay_is_ipv4 {
+    if requested_ipv4 != relay_allocator.is_ipv4() {
         send_authenticated_error(
             conn,
             src_addr,
@@ -2383,9 +2561,6 @@ async fn handle_authenticated_allocate(
         lifetime_duration = clamp_allocation_lifetime(lifetime.0);
     }
 
-    let now_ms = clock.now_ms();
-    let _ = prune_expired_reserved_sessions_map(reserved_sessions, now_ms).await;
-    let _ = active_allocation_count(allocations).await;
     let decoded_identity = TurnCredentials::decode_username_parts(&username_attr.text);
 
     let tcp_peer_ctx = conn
@@ -2412,12 +2587,66 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    if let Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) = decoded_identity {
-        let claimed = {
-            let mut guard = reserved_sessions.lock().await;
-            guard.remove(&signed_ticket.ticket.session_id)
-        };
-        let Some(reserved) = claimed else {
+    let ticket_id = match decoded_identity {
+        Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
+            Some(signed_ticket.ticket.session_id)
+        }
+        _ => None,
+    };
+
+    // Complete teardown of any already-expired allocations BEFORE checking capacity so an expired
+    // allocation on another tuple never causes a spurious `508` or consumes a fresh ticket.
+    let admit_now_ms = loop {
+        let candidate_now = clock.now_ms();
+        let pre_expired = bridge.lock().await.sweep_expired_allocations(candidate_now);
+        if pre_expired.is_empty() {
+            break candidate_now;
+        }
+        close_alloc_ids(bridge, handles, pre_expired).await;
+    };
+
+    let (expired_ids, start_decision) = {
+        let mut guard = bridge.lock().await;
+        if *shutdown_rx.borrow() {
+            return;
+        }
+        guard.begin_allocate(
+            ord_tuple,
+            username_attr.text.clone(),
+            m.transaction_id,
+            ticket_id,
+            lifetime_duration.as_millis(),
+            admit_now_ms,
+        )
+    };
+    if !expired_ids.is_empty() {
+        close_alloc_ids(bridge, handles, expired_ids).await;
+    }
+
+    match start_decision {
+        BridgeAllocateStart::ShuttingDown => {}
+        BridgeAllocateStart::ReplayCached(cached_raw) => {
+            let _ = conn.send_to(&cached_raw, src_addr).await;
+        }
+        BridgeAllocateStart::CoalescedInFlight { open_id } => {
+            if let Some(waiter) = pending_waiters.lock().await.get_mut(&open_id) {
+                waiter.conn = Arc::clone(conn);
+                waiter.src_addr = src_addr;
+            }
+        }
+        BridgeAllocateStart::AllocationMismatch => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+        }
+        BridgeAllocateStart::TicketUnknownOrConsumed => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2428,82 +2657,75 @@ async fn handle_authenticated_allocate(
                 mi_key,
             )
             .await;
-            return;
-        };
-        if now_ms > reserved.expires_at_ms {
-            drop(reserved.reservation_permit);
-            send_authenticated_error(
-                conn,
-                src_addr,
+        }
+        BridgeAllocateStart::CapacityReached {
+            cache_for_retransmit,
+        } => {
+            let err_raw = build_authenticated_error_raw(
                 m,
-                CODE_UNAUTHORIZED,
-                b"Session Ticket Expired",
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Allocation Capacity Reached",
                 None,
                 mi_key,
-            )
-            .await;
-            return;
+            );
+            if let Some(raw) = err_raw {
+                if cache_for_retransmit {
+                    let now_after = clock.now_ms();
+                    bridge.lock().await.cache_allocate_response(
+                        ord_tuple,
+                        username_attr.text,
+                        m.transaction_id,
+                        raw.clone(),
+                        now_after.saturating_add(BRIDGE_FAILED_ALLOCATE_CACHE_TTL_MS),
+                        now_after,
+                    );
+                }
+                let _ = conn.send_to(&raw, src_addr).await;
+            }
         }
-        drop(reserved.reservation_permit);
+        BridgeAllocateStart::StartBackendOpen { open_id } => {
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            pending_waiters
+                .lock()
+                .await
+                .insert(open_id, PendingOpenWaiter {
+                    conn: Arc::clone(conn),
+                    src_addr,
+                    cancel_tx,
+                });
+            pending_tasks.spawn(run_pending_allocate_open(
+                open_id,
+                five_tuple,
+                ord_tuple,
+                m.transaction_id,
+                username_attr.text,
+                use_ipv4,
+                need_even_port,
+                lifetime_duration,
+                mi_key,
+                relay_turn_socket,
+                tcp_authenticated_tx,
+                ticket_id.is_some(),
+                m.clone(),
+                Arc::clone(relay_allocator),
+                Arc::clone(bridge),
+                Arc::clone(handles),
+                Arc::clone(pending_waiters),
+                Arc::clone(clock),
+                shutdown_rx.clone(),
+                cancel_rx,
+            ));
+        }
     }
-
-    let Ok(capacity_permit) = Arc::clone(capacity_sem).try_acquire_owned() else {
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Allocation Capacity Reached",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    };
-    let Ok((relay_conn, relay_addr)) = relay_generator
-        .allocate_relay_conn(use_ipv4, need_even_port)
-        .await
-    else {
-        drop(capacity_permit);
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_INSUFFICIENT_CAPACITY,
-            b"Insufficient Capacity",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
-    };
-
-    finalize_allocate_install(
-        Arc::clone(conn),
-        Arc::clone(allocations),
-        Arc::clone(allocate_responses),
-        Some(shutdown_rx.clone()),
-        relay_turn_socket,
-        five_tuple,
-        src_addr,
-        m.transaction_id,
-        username_attr.text,
-        relay_addr,
-        relay_conn,
-        lifetime_duration,
-        tcp_authenticated_tx,
-        capacity_permit,
-        mi_key,
-    )
-    .await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_refresh(
     conn: &Arc<dyn Conn + Send + Sync>,
-    allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>,
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    handles: &Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
+    clock: &SharedClock,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
-    allocate_responses: &Mutex<HashMap<FiveTuple, (TransactionId, Vec<u8>)>>,
     completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     max_allocations: usize,
     alloc: Arc<ManagedAllocation>,
@@ -2534,22 +2756,46 @@ async fn handle_authenticated_refresh(
         };
     }
 
-    if lifetime_duration.is_zero() {
-        allocate_responses.lock().await.remove(&alloc.five_tuple);
-        remove_allocation_if_current(allocations, &alloc).await;
-    } else if !try_refresh_allocation(allocations, &alloc, lifetime_duration).await {
-        allocate_responses.lock().await.remove(&alloc.five_tuple);
-        send_authenticated_error(
-            conn,
-            src_addr,
-            m,
-            CODE_ALLOC_MISMATCH,
-            b"Allocation Mismatch",
-            None,
-            mi_key,
-        )
-        .await;
-        return;
+    let refresh_outcome = bridge.lock().await.refresh(
+        &alloc.ord_tuple,
+        alloc.alloc_id,
+        lifetime_duration.as_millis(),
+        clock.now_ms(),
+    );
+    match refresh_outcome {
+        BridgeRefreshOutcome::Deleted { close_alloc_id } => {
+            close_alloc_ids(bridge, handles, vec![close_alloc_id]).await;
+        }
+        BridgeRefreshOutcome::Expired { close_alloc_id } => {
+            close_alloc_ids(bridge, handles, vec![close_alloc_id]).await;
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        BridgeRefreshOutcome::NotFound => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        BridgeRefreshOutcome::Refreshed { .. } => {
+            alloc.refresh_wall_deadline(lifetime_duration);
+        }
     }
 
     let built = {
@@ -2583,9 +2829,14 @@ async fn handle_authenticated_refresh(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_create_permission(
     conn: &Arc<dyn Conn + Send + Sync>,
-    alloc: &ManagedAllocation,
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    clock: &SharedClock,
+    shutdown_rx: &watch::Receiver<bool>,
+    pending_tasks: &mut JoinSet<()>,
+    alloc: &Arc<ManagedAllocation>,
     m: &Message,
     peer_policy: RelayPeerPolicy,
     max_permissions_per_allocation: usize,
@@ -2631,6 +2882,7 @@ async fn handle_authenticated_create_permission(
     }
 
     let mut candidate_ips = Vec::with_capacity(peer_addrs.len());
+    let mut unique_ips = HashSet::with_capacity(peer_addrs.len());
     for peer_addr in &peer_addrs {
         if peer_addr.ip.is_ipv4() != relay_addr.is_ipv4() {
             send_authenticated_error(
@@ -2649,47 +2901,206 @@ async fn handle_authenticated_create_permission(
             send_forbidden_error(conn, src_addr, m, mi_key).await;
             return;
         }
-        candidate_ips.push(peer_addr.ip);
+        if unique_ips.insert(peer_addr.ip) {
+            candidate_ips.push(peer_addr.ip);
+        }
     }
 
-    if !alloc.try_install_permissions(&candidate_ips, max_permissions_per_allocation) {
+    let precheck = bridge.lock().await.can_install_permissions(
+        &alloc.ord_tuple,
+        alloc.alloc_id,
+        &candidate_ips,
+        max_permissions_per_allocation,
+        clock.now_ms(),
+    );
+    match precheck {
+        BridgePermissionCheck::Permitted => {}
+        BridgePermissionCheck::AllocationGone => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        BridgePermissionCheck::QuotaExceeded => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Permission Quota Reached",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+    }
+
+    let Some(control_permit) = alloc.try_acquire_control_permit() else {
         send_authenticated_error(
             conn,
             src_addr,
             m,
             CODE_INSUFFICIENT_CAPACITY,
-            b"Permission Quota Reached",
+            b"Too Many Pending Control Requests",
             None,
             mi_key,
         )
         .await;
         return;
-    }
-
-    let built = {
-        let mut resp = Message::new();
-        let setters: Vec<Box<dyn Setter>> = vec![
-            Box::new(Message {
-                transaction_id: m.transaction_id,
-                ..Default::default()
-            }),
-            Box::new(MessageType::new(
-                METHOD_CREATE_PERMISSION,
-                CLASS_SUCCESS_RESPONSE,
-            )),
-            Box::new(MessageIntegrity(mi_key)),
-            Box::new(FINGERPRINT),
-        ];
-        resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    if let Some(raw) = built {
-        let _ = conn.send_to(&raw, src_addr).await;
-    }
+
+    let conn = Arc::clone(conn);
+    let bridge = Arc::clone(bridge);
+    let clock = Arc::clone(clock);
+    let alloc = Arc::clone(alloc);
+    let m = m.clone();
+    let mut shutdown_rx = shutdown_rx.clone();
+    pending_tasks.spawn(async move {
+        let _permit = control_permit;
+        let _op_guard = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            _ = alloc.wait_closed() => return,
+            guard = alloc.control_op_lock.lock() => guard,
+        };
+
+        let recheck = bridge.lock().await.can_install_permissions(
+            &alloc.ord_tuple,
+            alloc.alloc_id,
+            &candidate_ips,
+            max_permissions_per_allocation,
+            clock.now_ms(),
+        );
+        match recheck {
+            BridgePermissionCheck::Permitted => {}
+            BridgePermissionCheck::AllocationGone => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_ALLOC_MISMATCH,
+                    b"Allocation Mismatch",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            BridgePermissionCheck::QuotaExceeded => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Permission Quota Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+        }
+
+        for &ip in &candidate_ips {
+            let pinhole_res = tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => None,
+                _ = alloc.wait_closed() => None,
+                res = alloc.relay_conn.allow_peer_ip(ip) => Some(res),
+            };
+            match pinhole_res {
+                Some(Ok(())) => {}
+                Some(Err(_)) => {
+                    send_authenticated_error(
+                        &conn,
+                        src_addr,
+                        &m,
+                        CODE_INSUFFICIENT_CAPACITY,
+                        b"Relay Backend Unavailable",
+                        None,
+                        mi_key,
+                    )
+                    .await;
+                    return;
+                }
+                None => return,
+            }
+        }
+
+        let committed = bridge.lock().await.commit_permissions(
+            &alloc.ord_tuple,
+            alloc.alloc_id,
+            &candidate_ips,
+            BRIDGE_PERMISSION_TTL_MS,
+            max_permissions_per_allocation,
+            clock.now_ms(),
+        );
+        match committed {
+            BridgePermissionCheck::Permitted => {
+                let built = {
+                    let mut resp = Message::new();
+                    let setters: Vec<Box<dyn Setter>> = vec![
+                        Box::new(Message {
+                            transaction_id: m.transaction_id,
+                            ..Default::default()
+                        }),
+                        Box::new(MessageType::new(
+                            METHOD_CREATE_PERMISSION,
+                            CLASS_SUCCESS_RESPONSE,
+                        )),
+                        Box::new(MessageIntegrity(mi_key)),
+                        Box::new(FINGERPRINT),
+                    ];
+                    resp.build(&setters).is_ok().then_some(resp.raw)
+                };
+                if let Some(raw) = built {
+                    let _ = conn.send_to(&raw, src_addr).await;
+                }
+            }
+            BridgePermissionCheck::AllocationGone => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_ALLOC_MISMATCH,
+                    b"Allocation Mismatch",
+                    None,
+                    mi_key,
+                )
+                .await;
+            }
+            BridgePermissionCheck::QuotaExceeded => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Permission Quota Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+            }
+        }
+    });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_channel_bind(
     conn: &Arc<dyn Conn + Send + Sync>,
-    alloc: &ManagedAllocation,
+    bridge: &Arc<Mutex<ProductionBridge>>,
+    clock: &SharedClock,
+    shutdown_rx: &watch::Receiver<bool>,
+    pending_tasks: &mut JoinSet<()>,
+    alloc: &Arc<ManagedAllocation>,
     m: &Message,
     peer_policy: RelayPeerPolicy,
     channel_bind_timeout: Duration,
@@ -2735,14 +3146,30 @@ async fn handle_authenticated_channel_bind(
         return;
     }
 
-    match alloc.try_bind_channel(
-        channel,
+    let precheck = bridge.lock().await.can_bind_channel(
+        &alloc.ord_tuple,
+        alloc.alloc_id,
+        channel.0,
         target_sock,
-        channel_bind_timeout,
         max_permissions_per_allocation,
-    ) {
+        clock.now_ms(),
+    );
+    match precheck {
         Ok(()) => {}
-        Err(ChannelBindError::Conflict) => {
+        Err(BridgeChannelBindError::AllocationGone) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Allocation Mismatch",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        Err(BridgeChannelBindError::Conflict) => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2755,7 +3182,7 @@ async fn handle_authenticated_channel_bind(
             .await;
             return;
         }
-        Err(ChannelBindError::QuotaExceeded) => {
+        Err(BridgeChannelBindError::PermissionQuotaExceeded) => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2770,33 +3197,180 @@ async fn handle_authenticated_channel_bind(
         }
     }
 
-    let built = {
-        let mut resp = Message::new();
-        let setters: Vec<Box<dyn Setter>> = vec![
-            Box::new(Message {
-                transaction_id: m.transaction_id,
-                ..Default::default()
-            }),
-            Box::new(MessageType::new(
-                METHOD_CHANNEL_BIND,
-                CLASS_SUCCESS_RESPONSE,
-            )),
-            Box::new(MessageIntegrity(mi_key)),
-            Box::new(FINGERPRINT),
-        ];
-        resp.build(&setters).is_ok().then_some(resp.raw)
+    let Some(control_permit) = alloc.try_acquire_control_permit() else {
+        send_authenticated_error(
+            conn,
+            src_addr,
+            m,
+            CODE_INSUFFICIENT_CAPACITY,
+            b"Too Many Pending Control Requests",
+            None,
+            mi_key,
+        )
+        .await;
+        return;
     };
-    if let Some(raw) = built {
-        let _ = conn.send_to(&raw, src_addr).await;
-    }
-}
 
-async fn delete_all_allocations(allocations: &Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>) {
-    let removed: Vec<Arc<ManagedAllocation>> = {
-        let mut guard = allocations.lock().await;
-        guard.drain().map(|(_, alloc)| alloc).collect()
-    };
-    close_allocations(removed).await;
+    let conn = Arc::clone(conn);
+    let bridge = Arc::clone(bridge);
+    let clock = Arc::clone(clock);
+    let alloc = Arc::clone(alloc);
+    let m = m.clone();
+    let mut shutdown_rx = shutdown_rx.clone();
+    pending_tasks.spawn(async move {
+        let _permit = control_permit;
+        let _op_guard = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => return,
+            _ = alloc.wait_closed() => return,
+            guard = alloc.control_op_lock.lock() => guard,
+        };
+
+        let recheck = bridge.lock().await.can_bind_channel(
+            &alloc.ord_tuple,
+            alloc.alloc_id,
+            channel.0,
+            target_sock,
+            max_permissions_per_allocation,
+            clock.now_ms(),
+        );
+        match recheck {
+            Ok(()) => {}
+            Err(BridgeChannelBindError::AllocationGone) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_ALLOC_MISMATCH,
+                    b"Allocation Mismatch",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            Err(BridgeChannelBindError::Conflict) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_BAD_REQUEST,
+                    b"ChannelBind Conflict",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            Err(BridgeChannelBindError::PermissionQuotaExceeded) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Permission Quota Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+        }
+
+        let pinhole_res = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => None,
+            _ = alloc.wait_closed() => None,
+            res = alloc.relay_conn.allow_peer_ip(target_sock.ip()) => Some(res),
+        };
+        match pinhole_res {
+            Some(Ok(())) => {}
+            Some(Err(_)) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Relay Backend Unavailable",
+                    None,
+                    mi_key,
+                )
+                .await;
+                return;
+            }
+            None => return,
+        }
+
+        let committed = bridge.lock().await.commit_channel_bind(
+            &alloc.ord_tuple,
+            alloc.alloc_id,
+            channel.0,
+            target_sock,
+            channel_bind_timeout.as_millis(),
+            BRIDGE_PERMISSION_TTL_MS,
+            max_permissions_per_allocation,
+            clock.now_ms(),
+        );
+        match committed {
+            Ok(()) => {
+                let built = {
+                    let mut resp = Message::new();
+                    let setters: Vec<Box<dyn Setter>> = vec![
+                        Box::new(Message {
+                            transaction_id: m.transaction_id,
+                            ..Default::default()
+                        }),
+                        Box::new(MessageType::new(
+                            METHOD_CHANNEL_BIND,
+                            CLASS_SUCCESS_RESPONSE,
+                        )),
+                        Box::new(MessageIntegrity(mi_key)),
+                        Box::new(FINGERPRINT),
+                    ];
+                    resp.build(&setters).is_ok().then_some(resp.raw)
+                };
+                if let Some(raw) = built {
+                    let _ = conn.send_to(&raw, src_addr).await;
+                }
+            }
+            Err(BridgeChannelBindError::AllocationGone) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_ALLOC_MISMATCH,
+                    b"Allocation Mismatch",
+                    None,
+                    mi_key,
+                )
+                .await;
+            }
+            Err(BridgeChannelBindError::Conflict) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_BAD_REQUEST,
+                    b"ChannelBind Conflict",
+                    None,
+                    mi_key,
+                )
+                .await;
+            }
+            Err(BridgeChannelBindError::PermissionQuotaExceeded) => {
+                send_authenticated_error(
+                    &conn,
+                    src_addr,
+                    &m,
+                    CODE_INSUFFICIENT_CAPACITY,
+                    b"Permission Quota Reached",
+                    None,
+                    mi_key,
+                )
+                .await;
+            }
+        }
+    });
 }
 
 fn collect_concrete_listener_candidates(
@@ -3006,11 +3580,9 @@ pub struct TurnServer {
     realm: String,
     auth_handler: Arc<DelegationAuthHandler>,
     clock: SharedClock,
-    max_reservations: usize,
     max_reservation_ttl: Duration,
-    reservation_sem: Arc<Semaphore>,
-    allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-    reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
+    bridge: Arc<Mutex<ProductionBridge>>,
+    handles: Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
     shutdown_tx: watch::Sender<bool>,
     done_rx: watch::Receiver<bool>,
@@ -3019,7 +3591,9 @@ pub struct TurnServer {
 impl TurnServer {
     /// Bind the UDP listener socket and start the TURN server with [`DelegationAuthHandler`].
     pub async fn start(config: TurnServerConfig) -> Result<Self> {
-        config.relay.validate()?;
+        if config.relay_allocator.is_none() {
+            config.relay.validate()?;
+        }
         if let Some(advertised_ip) = config.advertised_ip {
             if advertised_ip.is_ipv4() != config.listen_addr.ip().is_ipv4() {
                 return Err(crate::error::TurnError::ListenerAddressFamilyMismatch {
@@ -3063,13 +3637,22 @@ impl TurnServer {
             config.server_key,
             config.clock,
         ));
-        let relay_is_ipv4 = relay_bind_ip_is_ipv4(&config.relay);
-        let relay_generator = Arc::new(PolicyRelayAddressGenerator::new(
-            config.relay,
-            config.peer_policy,
-        ));
-        let allocations = Arc::new(Mutex::new(HashMap::new()));
-        let reserved_sessions = Arc::new(Mutex::new(HashMap::new()));
+        let relay_allocator: Arc<dyn TurnDatagramRelayAllocator> = match config.relay_allocator {
+            Some(custom) => custom,
+            None => Arc::new(PolicyRelayAddressGenerator::new(
+                config.relay,
+                config.peer_policy,
+            )),
+        };
+        let max_allocations = config.max_allocations.max(1);
+        let max_reservations = config.max_reservations;
+        let max_reservation_ttl = config.max_reservation_ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
+        let bridge = Arc::new(Mutex::new(TurnEntryBridge::new(
+            max_allocations,
+            max_reservations,
+            max_reservation_ttl.as_millis(),
+        )));
+        let handles = Arc::new(Mutex::new(HashMap::new()));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (done_tx, done_rx) = watch::channel(false);
@@ -3079,18 +3662,12 @@ impl TurnServer {
             config.channel_bind_timeout
         };
 
-        let max_allocations = config.max_allocations.max(1);
-        let max_reservations = config.max_reservations;
-        let max_reservation_ttl = config.max_reservation_ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
-        let capacity_sem = Arc::new(Semaphore::new(max_allocations));
-        let reservation_sem = Arc::new(Semaphore::new(max_reservations));
         tokio::spawn(Self::read_loop(
             listeners,
-            Arc::clone(&allocations),
-            Arc::clone(&reserved_sessions),
-            Arc::clone(&capacity_sem),
+            Arc::clone(&bridge),
+            Arc::clone(&handles),
             Arc::clone(&clock),
-            Arc::clone(&relay_generator),
+            relay_allocator,
             Arc::clone(&nonces),
             Arc::clone(&auth_handler),
             config.realm.clone(),
@@ -3099,7 +3676,6 @@ impl TurnServer {
             config.max_nonces.max(1),
             max_allocations,
             config.max_permissions_per_allocation.max(1),
-            relay_is_ipv4,
             shutdown_rx,
             done_tx,
         ));
@@ -3110,11 +3686,9 @@ impl TurnServer {
             realm: config.realm,
             auth_handler,
             clock,
-            max_reservations,
             max_reservation_ttl,
-            reservation_sem,
-            allocations,
-            reserved_sessions,
+            bridge,
+            handles,
             nonces,
             shutdown_tx,
             done_rx,
@@ -3124,11 +3698,10 @@ impl TurnServer {
     #[allow(clippy::too_many_arguments)]
     async fn read_loop(
         listeners: Vec<Arc<RecordingConn>>,
-        allocations: Arc<Mutex<HashMap<FiveTuple, Arc<ManagedAllocation>>>>,
-        reserved_sessions: Arc<Mutex<HashMap<[u8; 16], ReservedTurnSession>>>,
-        capacity_sem: Arc<Semaphore>,
+        bridge: Arc<Mutex<ProductionBridge>>,
+        handles: Arc<Mutex<HashMap<u64, Arc<ManagedAllocation>>>>,
         clock: SharedClock,
-        relay_generator: Arc<PolicyRelayAddressGenerator>,
+        relay_allocator: Arc<dyn TurnDatagramRelayAllocator>,
         nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
         auth_handler: Arc<DelegationAuthHandler>,
         realm: String,
@@ -3137,7 +3710,6 @@ impl TurnServer {
         max_nonces: usize,
         max_allocations: usize,
         max_permissions_per_allocation: usize,
-        relay_is_ipv4: bool,
         mut shutdown_rx: watch::Receiver<bool>,
         done_tx: watch::Sender<bool>,
     ) {
@@ -3195,8 +3767,10 @@ impl TurnServer {
         }
         drop(pkt_tx);
 
-        let allocate_responses: AllocateResponseCache = Arc::new(Mutex::new(HashMap::new()));
         let completed_deletions: CompletedDeletionCache = Arc::new(Mutex::new(HashMap::new()));
+        let pending_waiters: Arc<Mutex<HashMap<u64, PendingOpenWaiter>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let mut pending_tasks = JoinSet::new();
 
         loop {
             if *shutdown_rx.borrow_and_update() {
@@ -3208,6 +3782,9 @@ impl TurnServer {
                         break;
                     };
                     pkt
+                }
+                Some(_) = pending_tasks.join_next(), if !pending_tasks.is_empty() => {
+                    continue;
                 }
                 res = shutdown_rx.changed() => {
                     if res.is_err() || *shutdown_rx.borrow() {
@@ -3224,13 +3801,18 @@ impl TurnServer {
                 dst_addr: local_dst_addr,
                 protocol: recording_conn.protocol,
             };
+            let ord_tuple = OrderedFiveTuple::from(five_tuple);
 
             if payload.is_empty() && recording_conn.protocol == PROTO_TCP {
-                let removed_alloc = allocations.lock().await.remove(&five_tuple);
-                if let Some(alloc) = removed_alloc {
-                    close_allocations(vec![alloc]).await;
+                let outcome = bridge.lock().await.disconnect_tuple(&ord_tuple);
+                if let Some(open_id) = outcome.cancelled_open_id {
+                    if let Some(waiter) = pending_waiters.lock().await.remove(&open_id) {
+                        let _ = waiter.cancel_tx.send_replace(true);
+                    }
                 }
-                allocate_responses.lock().await.remove(&five_tuple);
+                if let Some(alloc_id) = outcome.closed_alloc_id {
+                    close_alloc_ids(&bridge, &handles, vec![alloc_id]).await;
+                }
                 completed_deletions.lock().await.remove(&five_tuple);
                 nonces
                     .lock()
@@ -3246,9 +3828,17 @@ impl TurnServer {
                     ..Default::default()
                 };
                 if channel_data.decode().is_ok() {
-                    if let Some(alloc) = get_active_allocation(&allocations, &five_tuple).await {
-                        if let Some(peer) = alloc.outbound_channel_peer(channel_data.number) {
-                            let _ = alloc.send_payload_to_peer(&channel_data.data, peer).await;
+                    if let Some(alloc) =
+                        get_active_allocation(&bridge, &handles, &clock, &five_tuple).await
+                    {
+                        let peer = bridge.lock().await.outbound_channel_peer(
+                            &alloc.ord_tuple,
+                            alloc.alloc_id,
+                            channel_data.number.0,
+                            clock.now_ms(),
+                        );
+                        if let Some(peer) = peer {
+                            alloc.enqueue_payload_to_peer(&channel_data.data, peer);
                         }
                     }
                 }
@@ -3276,10 +3866,16 @@ impl TurnServer {
                         let dst = SocketAddr::new(peer_address.ip, peer_address.port);
                         if peer_policy.is_allowed_addr(dst) {
                             if let Some(alloc) =
-                                get_active_allocation(&allocations, &five_tuple).await
+                                get_active_allocation(&bridge, &handles, &clock, &five_tuple).await
                             {
-                                if alloc.has_permission(dst.ip()) {
-                                    let _ = alloc.send_payload_to_peer(&data.0, dst).await;
+                                let allowed = bridge.lock().await.has_permission(
+                                    &alloc.ord_tuple,
+                                    alloc.alloc_id,
+                                    dst.ip(),
+                                    clock.now_ms(),
+                                );
+                                if allowed {
+                                    alloc.enqueue_payload_to_peer(&data.0, dst);
                                 }
                             }
                         }
@@ -3331,33 +3927,47 @@ impl TurnServer {
                 continue;
             }
 
-            let existing_alloc = get_active_allocation(&allocations, &five_tuple).await;
-            if existing_alloc.is_none() {
-                allocate_responses.lock().await.remove(&five_tuple);
-            }
-
-            if decoded_msg.typ.method == METHOD_REFRESH
-                || decoded_msg.typ.method == METHOD_CREATE_PERMISSION
-                || decoded_msg.typ.method == METHOD_CHANNEL_BIND
-            {
-                let expected_owner = if is_zero_lifetime_refresh(&decoded_msg) {
-                    completed_deletions
+            let existing_alloc =
+                get_active_allocation(&bridge, &handles, &clock, &five_tuple).await;
+            let now_for_owner = clock.now_ms();
+            let expected_owner = if decoded_msg.typ.method == METHOD_ALLOCATE {
+                bridge
+                    .lock()
+                    .await
+                    .expected_owner_for_allocate(
+                        &ord_tuple,
+                        &decoded_msg.transaction_id,
+                        now_for_owner,
+                    )
+                    .map(str::to_owned)
+            } else if is_zero_lifetime_refresh(&decoded_msg) {
+                let from_del = completed_deletions
+                    .lock()
+                    .await
+                    .get(&five_tuple)
+                    .and_then(|q| {
+                        q.iter()
+                            .rev()
+                            .find(|entry| entry.transaction_id == decoded_msg.transaction_id)
+                            .map(|entry| entry.username.clone())
+                    });
+                match from_del {
+                    Some(owner) => Some(owner),
+                    None => bridge
                         .lock()
                         .await
-                        .get(&five_tuple)
-                        .and_then(|q| {
-                            q.iter()
-                                .rev()
-                                .find(|entry| entry.transaction_id == decoded_msg.transaction_id)
-                                .map(|entry| entry.username.clone())
-                        })
-                        .or_else(|| existing_alloc.as_ref().map(|alloc| alloc.username.clone()))
-                } else {
-                    existing_alloc.as_ref().map(|alloc| alloc.username.clone())
-                };
-                if let Some(owner) = expected_owner {
-                    auth_handler.set_expected_allocation_owner(addr, Some(owner));
+                        .expected_owner_for_established(&ord_tuple, now_for_owner)
+                        .map(str::to_owned),
                 }
+            } else {
+                bridge
+                    .lock()
+                    .await
+                    .expected_owner_for_established(&ord_tuple, now_for_owner)
+                    .map(str::to_owned)
+            };
+            if let Some(owner) = expected_owner {
+                auth_handler.set_expected_allocation_owner(addr, Some(owner));
             }
 
             let auth_res = authenticate_turn_request(
@@ -3378,48 +3988,19 @@ impl TurnServer {
 
             match decoded_msg.typ.method {
                 METHOD_ALLOCATE => {
-                    if let Some(alloc) = &existing_alloc {
-                        if username_attr.text == alloc.username {
-                            let cached_match = {
-                                let guard = allocate_responses.lock().await;
-                                guard
-                                    .get(&five_tuple)
-                                    .and_then(|(saved_tx_id, cached_resp)| {
-                                        (*saved_tx_id == decoded_msg.transaction_id)
-                                            .then(|| cached_resp.clone())
-                                    })
-                            };
-                            if let Some(cached_resp) = cached_match {
-                                let _ = recording_conn.send_to(&cached_resp, addr).await;
-                                continue;
-                            }
-                        }
-                        send_authenticated_error(
-                            &recording_conn_dyn,
-                            addr,
-                            &decoded_msg,
-                            CODE_ALLOC_MISMATCH,
-                            b"Allocation Mismatch",
-                            None,
-                            mi_key,
-                        )
-                        .await;
-                        continue;
-                    }
                     handle_authenticated_allocate(
                         &recording_conn_dyn,
-                        &allocations,
-                        &reserved_sessions,
-                        &capacity_sem,
+                        &bridge,
+                        &handles,
+                        &pending_waiters,
+                        &mut pending_tasks,
                         &clock,
                         &shutdown_rx,
-                        &relay_generator,
-                        &allocate_responses,
+                        &relay_allocator,
                         five_tuple,
                         addr,
                         &decoded_msg,
                         username_attr,
-                        relay_is_ipv4,
                         mi_key,
                     )
                     .await;
@@ -3455,9 +4036,10 @@ impl TurnServer {
                     };
                     handle_authenticated_refresh(
                         &recording_conn_dyn,
-                        &allocations,
+                        &bridge,
+                        &handles,
+                        &clock,
                         &nonces,
-                        &allocate_responses,
                         &completed_deletions,
                         max_allocations,
                         alloc,
@@ -3482,6 +4064,10 @@ impl TurnServer {
                     };
                     handle_authenticated_create_permission(
                         &recording_conn_dyn,
+                        &bridge,
+                        &clock,
+                        &shutdown_rx,
+                        &mut pending_tasks,
                         &alloc,
                         &decoded_msg,
                         peer_policy,
@@ -3506,6 +4092,10 @@ impl TurnServer {
                     };
                     handle_authenticated_channel_bind(
                         &recording_conn_dyn,
+                        &bridge,
+                        &clock,
+                        &shutdown_rx,
+                        &mut pending_tasks,
                         &alloc,
                         &decoded_msg,
                         peer_policy,
@@ -3520,7 +4110,12 @@ impl TurnServer {
         }
 
         drop(pkt_rx);
-        delete_all_allocations(&allocations).await;
+        let live_to_close = bridge.lock().await.begin_shutdown();
+        for (_, waiter) in pending_waiters.lock().await.drain() {
+            let _ = waiter.cancel_tx.send_replace(true);
+        }
+        close_alloc_ids(&bridge, &handles, live_to_close).await;
+        while pending_tasks.join_next().await.is_some() {}
         for listener in &listeners {
             listener.shutdown_listener().await;
         }
@@ -3588,6 +4183,16 @@ impl TurnServer {
         self.nonces.lock().await.len()
     }
 
+    /// Return the current number of allocation capacity slots held (`live + pending + closing`).
+    pub async fn used_allocation_slots(&self) -> usize {
+        let now_ms = self.clock.now_ms();
+        let expired = self.bridge.lock().await.sweep_expired_allocations(now_ms);
+        if !expired.is_empty() {
+            close_alloc_ids(&self.bridge, &self.handles, expired).await;
+        }
+        self.bridge.lock().await.used_allocation_slots()
+    }
+
     /// Query active TURN allocations managed by this server.
     pub async fn allocations_info(
         &self,
@@ -3598,57 +4203,60 @@ impl TurnServer {
                 return Ok(HashMap::new());
             }
         }
-        let expired: Vec<Arc<ManagedAllocation>>;
-        let mut infos = HashMap::new();
-        {
-            let mut guard = self.allocations.lock().await;
-            let expired_tuples: Vec<FiveTuple> = guard
-                .iter()
-                .filter(|(_, alloc)| alloc.is_expired())
-                .map(|(k, _)| *k)
-                .collect();
-            expired = expired_tuples
-                .into_iter()
-                .filter_map(|t| guard.remove(&t))
-                .collect();
-
+        let now_ms = self.clock.now_ms();
+        let (expired_ids, infos) = {
+            let mut guard = self.bridge.lock().await;
+            let expired_ids = guard.sweep_expired_allocations(now_ms);
+            let mut infos = HashMap::new();
             match five_tuples {
                 Some(tuples) => {
                     for tuple in tuples {
-                        if let Some(alloc) = guard.get(&tuple) {
-                            infos.insert(tuple, alloc.info());
+                        let ord = OrderedFiveTuple::from(tuple);
+                        if let Some(alloc) = guard.live_allocations().get(&ord) {
+                            infos.insert(
+                                tuple,
+                                AllocationInfo::new(
+                                    tuple,
+                                    alloc.username.clone(),
+                                    alloc.relay_addr,
+                                ),
+                            );
                         }
                     }
                 }
                 None => {
-                    for (tuple, alloc) in guard.iter() {
-                        infos.insert(*tuple, alloc.info());
+                    for (&ord, alloc) in guard.live_allocations() {
+                        let tuple = FiveTuple::from(ord);
+                        infos.insert(
+                            tuple,
+                            AllocationInfo::new(tuple, alloc.username.clone(), alloc.relay_addr),
+                        );
                     }
                 }
             }
-        }
-        close_allocations(expired).await;
+            (expired_ids, infos)
+        };
+        close_alloc_ids(&self.bridge, &self.handles, expired_ids).await;
         Ok(infos)
     }
 
     /// Delete all active TURN allocations associated with `username`.
     pub async fn delete_allocations_by_username(&self, username: String) -> Result<()> {
-        let removed: Vec<Arc<ManagedAllocation>> = {
-            let mut guard = self.allocations.lock().await;
-            let keys: Vec<FiveTuple> = guard
-                .iter()
-                .filter(|(_, alloc)| alloc.username == username || alloc.is_expired())
-                .map(|(k, _)| *k)
-                .collect();
-            keys.into_iter().filter_map(|k| guard.remove(&k)).collect()
-        };
-        close_allocations(removed).await;
+        let removed_ids = self
+            .bridge
+            .lock()
+            .await
+            .remove_by_username(&username, self.clock.now_ms());
+        close_alloc_ids(&self.bridge, &self.handles, removed_ids).await;
         Ok(())
     }
 
     /// Return the current number of unclaimed live session reservations held in memory.
     pub async fn active_reservation_count(&self) -> usize {
-        prune_expired_reserved_sessions_map(&self.reserved_sessions, self.clock.now_ms()).await
+        self.bridge
+            .lock()
+            .await
+            .prune_expired_tickets(self.clock.now_ms())
     }
 
     /// Reserve a TURN session on this server with an unlinkable [`SignedTurnSessionTicket`] (#1292).
@@ -3670,13 +4278,6 @@ impl TurnServer {
         }
         let clamped_ttl = ttl.min(self.max_reservation_ttl);
         let now_ms = self.clock.now_ms();
-        let _ = prune_expired_reserved_sessions_map(&self.reserved_sessions, now_ms).await;
-        let Ok(reservation_permit) = Arc::clone(&self.reservation_sem).try_acquire_owned() else {
-            return Err(crate::error::TurnError::ReservationCapacityReached {
-                max_reservations: self.max_reservations,
-            });
-        };
-
         let mut session_id = [0u8; 16];
         rand::thread_rng().fill(&mut session_id);
         let expires_at_ms = now_ms.saturating_add(clamped_ttl.as_millis());
@@ -3686,27 +4287,35 @@ impl TurnServer {
             expires_at_ms,
             self.auth_handler.server_key(),
         )?;
+        match self
+            .bridge
+            .lock()
+            .await
+            .reserve_ticket(session_id, clamped_ttl.as_millis(), now_ms)
         {
-            let mut guard = self.reserved_sessions.lock().await;
-            guard.insert(session_id, ReservedTurnSession {
-                expires_at_ms,
-                reservation_permit,
-            });
+            Ok(_) => Ok(TurnSessionReservation {
+                ticket,
+                server_addr: self.advertised_addr,
+                server_pubkey: self.server_pubkey(),
+            }),
+            Err(BridgeReserveError::InvalidTtl) => {
+                Err(crate::error::TurnError::InvalidReservationTtl)
+            }
+            Err(BridgeReserveError::CapacityReached { max_reservations }) => {
+                Err(crate::error::TurnError::ReservationCapacityReached { max_reservations })
+            }
         }
-        Ok(TurnSessionReservation {
-            ticket,
-            server_addr: self.advertised_addr,
-            server_pubkey: self.server_pubkey(),
-        })
     }
 
     /// Gracefully stop the TURN server and close all managed connections and relay allocations.
     pub async fn close(&self) -> Result<()> {
         let _ = self.shutdown_tx.send_replace(true);
+        let initial_to_close = self.bridge.lock().await.begin_shutdown();
+        close_alloc_ids(&self.bridge, &self.handles, initial_to_close).await;
         let mut done_rx = self.done_rx.clone();
         let _ = done_rx.wait_for(|&done| done).await;
-        delete_all_allocations(&self.allocations).await;
-        self.reserved_sessions.lock().await.clear();
+        let remaining = self.bridge.lock().await.begin_shutdown();
+        close_alloc_ids(&self.bridge, &self.handles, remaining).await;
         Ok(())
     }
 }

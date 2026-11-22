@@ -148,6 +148,84 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     Ok(OnionProxyRoute { target, route })
 }
 
+/// Build a guard-closed multi-hop `udp` session route whose first hop is a directly connected peer
+/// and whose native/FFI exit registers `udp` under a policy admitting `bind_request`.
+#[cfg(rings_native)]
+pub(crate) async fn build_onion_udp_route(
+    reader: &impl OnionDirectoryReader,
+    bind_request: crate::onion::udp::OnionUdpBindRequest,
+) -> Result<OnionRoute> {
+    let direct_peers = reader.direct_peer_dids();
+    let allowed_peers = direct_peers.clone();
+    let route = build_onion_udp_route_with_first_hop(reader, bind_request, move |did| {
+        allowed_peers.contains(&did)
+    })
+    .await?;
+    let first_hop = route.hops().guard().did;
+    if first_hop != reader.local_did() && direct_peers.contains(&first_hop) {
+        return Ok(route);
+    }
+    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+}
+
+#[cfg(rings_native)]
+pub(crate) async fn build_onion_udp_route_with_first_hop(
+    reader: &impl OnionDirectoryReader,
+    bind_request: crate::onion::udp::OnionUdpBindRequest,
+    first_hop_permitted: impl Fn(Did) -> bool,
+) -> Result<OnionRoute> {
+    let service_name = crate::onion::OnionServiceName::udp();
+    let service = service_name.as_str().to_string();
+    let target = bind_request.to_proxy_target()?;
+    let now_ms = reader.now_ms();
+    let directory_exits = OnionExitDescriptor::latest_valid_by_service_did(
+        reader.live_onion_exits("").await?,
+        now_ms,
+        reader.dht_protocol_mode().network_id,
+        false,
+    );
+    let service_exits = directory_exits
+        .into_iter()
+        .filter(|exit| exit.service == service_name)
+        .collect::<Vec<_>>();
+    if service_exits.is_empty() {
+        return Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
+            service,
+        }));
+    }
+    let runtime_exits = service_exits
+        .into_iter()
+        .filter(|exit| {
+            matches!(
+                exit.node_type,
+                crate::online::OnlineNodeType::Native | crate::online::OnlineNodeType::Ffi
+            )
+        })
+        .collect::<Vec<_>>();
+    if runtime_exits.is_empty() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::NoExitForProxyProtocol {
+                service,
+                protocol: "udp-session".to_string(),
+            },
+        ));
+    }
+    let policy_exits = runtime_exits
+        .into_iter()
+        .filter(|exit| exit.policy.allows_target(&target))
+        .collect::<Vec<_>>();
+    if policy_exits.is_empty() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::NoExitAllowsTarget {
+                service,
+                target: target.authority(),
+            },
+        ));
+    }
+    let request = OnionRouteRequest::from_service_name(service_name);
+    build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await
+}
+
 /// Build a guard-closed multi-hop route for an intermediate `invoke` Kleisli pipeline
 /// whose first hop is a directly connected peer.
 pub(crate) async fn build_onion_pipeline_route(

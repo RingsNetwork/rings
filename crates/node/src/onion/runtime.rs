@@ -70,8 +70,17 @@ impl OnionRuntime {
     pub(crate) fn install(extensions: &Extensions) -> Result<Self> {
         let core = extensions.core();
         let clock = core.clock().clone();
+        #[cfg(rings_native)]
+        let udp_config = core.onion_udp_config();
         Self::install_with(extensions, |accounting, link_sender| {
-            exit_algebra_with_clock(core.onion_role().exit(), accounting, link_sender, clock)
+            exit_algebra_with_clock(
+                core.onion_role().exit(),
+                accounting,
+                link_sender,
+                clock,
+                #[cfg(rings_native)]
+                &udp_config,
+            )
         })
     }
 
@@ -310,11 +319,15 @@ pub(super) fn exit_algebra(
     accounting: &OnionExitAccounting,
     link_sender: &OnionLinkSender,
 ) -> OnionAlgebra {
+    #[cfg(rings_native)]
+    let default_udp = super::udp::OnionUdpConfig::default();
     exit_algebra_with_clock(
         offer,
         accounting,
         link_sender,
         std::sync::Arc::new(rings_core::utils::SystemClock),
+        #[cfg(rings_native)]
+        &default_udp,
     )
 }
 
@@ -324,6 +337,7 @@ pub(super) fn exit_algebra_with_clock(
     accounting: &OnionExitAccounting,
     link_sender: &OnionLinkSender,
     clock: rings_core::utils::SharedClock,
+    #[cfg(rings_native)] udp_config: &super::udp::OnionUdpConfig,
 ) -> OnionAlgebra {
     let Some(offer) = offer else {
         return OnionAlgebra::default();
@@ -338,6 +352,24 @@ pub(super) fn exit_algebra_with_clock(
                     service.clone(),
                     OnionExitSessions::new_with_clock(
                         OnionHttpsWorld::new(policy.clone(), accounting.clone()),
+                        policy,
+                        accounting.clone(),
+                        link_sender.clone(),
+                        clock.clone(),
+                    ),
+                );
+            }
+            #[cfg(rings_native)]
+            if *service == OnionServiceName::udp() {
+                return algebra.register(
+                    service.clone(),
+                    OnionExitSessions::new_with_clock(
+                        super::udp::OnionUdpWorld::with_config_and_clock(
+                            policy.clone(),
+                            accounting.clone(),
+                            udp_config.clone(),
+                            clock.clone(),
+                        ),
                         policy,
                         accounting.clone(),
                         link_sender.clone(),
@@ -386,8 +418,13 @@ mod tests {
             OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
         let https_offer = OnionExitOffer::new([OnionServiceName::https()], policy.clone())?;
         let tcp_offer = OnionExitOffer::new([OnionServiceName::tcp()], policy.clone())?;
-        let both_offer = OnionExitOffer::new(
-            [OnionServiceName::tcp(), OnionServiceName::https()],
+        let udp_offer = OnionExitOffer::new([OnionServiceName::udp()], policy.clone())?;
+        let all_offer = OnionExitOffer::new(
+            [
+                OnionServiceName::tcp(),
+                OnionServiceName::https(),
+                OnionServiceName::udp(),
+            ],
             policy.clone(),
         )?;
 
@@ -403,8 +440,16 @@ mod tests {
                 BTreeSet::from([OnionServiceName::tcp()]),
             ),
             (
-                OnionRole::Exit(both_offer),
-                BTreeSet::from([OnionServiceName::https(), OnionServiceName::tcp()]),
+                OnionRole::Exit(udp_offer),
+                BTreeSet::from([OnionServiceName::udp()]),
+            ),
+            (
+                OnionRole::Exit(all_offer),
+                BTreeSet::from([
+                    OnionServiceName::https(),
+                    OnionServiceName::tcp(),
+                    OnionServiceName::udp(),
+                ]),
             ),
         ] {
             let processor = Arc::new(prepare_processor_with_onion_role(role).await);

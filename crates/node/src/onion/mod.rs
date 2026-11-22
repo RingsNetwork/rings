@@ -72,6 +72,8 @@ pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
+#[cfg(rings_native)]
+pub mod udp;
 
 pub use circuit::OnionInvokeBackend;
 pub use circuit::OnionInvokeCall;

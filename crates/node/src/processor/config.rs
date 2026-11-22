@@ -489,6 +489,9 @@ pub struct ProcessorConfig {
     pub(in crate::processor) onion_exit_ttl: Duration,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(crate) remote_rpc_proxy: Option<RemoteRpcProxy>,
+    /// Runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    pub(in crate::processor) onion_udp_config: crate::onion::udp::OnionUdpConfig,
     /// Epoch clock capability injected into this node's runtime subsystems.
     pub(in crate::processor) clock: SharedClock,
 }
@@ -525,6 +528,8 @@ impl ProcessorConfig {
             ),
             onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
             remote_rpc_proxy: None,
+            #[cfg(rings_native)]
+            onion_udp_config: crate::onion::udp::OnionUdpConfig::default(),
             clock: Arc::new(SystemClock),
         }
     }
@@ -608,6 +613,13 @@ impl ProcessorConfig {
     /// Sets the onion symbols this process registers (#834 D2).
     pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
         self.onion_role = role;
+        self
+    }
+
+    /// Override the runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    pub fn with_onion_udp_config(mut self, config: crate::onion::udp::OnionUdpConfig) -> Self {
+        self.onion_udp_config = config;
         self
     }
 
@@ -920,6 +932,8 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             onion_exit_heartbeat_interval,
             onion_exit_ttl,
             remote_rpc_proxy,
+            #[cfg(rings_native)]
+            onion_udp_config: crate::onion::udp::OnionUdpConfig::default(),
             clock: Arc::new(SystemClock),
         })
     }

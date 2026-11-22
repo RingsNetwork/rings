@@ -73,8 +73,12 @@ rings-test-support = { workspace = true }
 rings-transport = { workspace = true }
 serde-reflection = "0.6.0"
 sha2 = "0.11.1"
+stateright = "0.31.0"
+stun = "0.17.1"
 tempfile = "3"
 tokio = { version = "1.50.0", features = ["test-util"] }
+turn = "0.17.1"
+webrtc-util = "0.17.1"
 
 [[bin]]
 name = "rings-turn-service"

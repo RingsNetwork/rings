@@ -190,6 +190,15 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         arguments: encoded_args_ipv6,
     }))
     .encode(&mac);
+    let udp_layer_bytes = make_layer(OnionLayerApplication::Apply(OnionApplication {
+        symbol: OnionServiceName::udp().into(),
+        arguments: OnionSessionArguments {
+            session: OnionSessionId::new([0x53; 16]),
+            digest: OnionTargetDigest::of(b"0.0.0.0:1"),
+        }
+        .encode(),
+    }))
+    .encode(&mac);
     let invoke_shape = OnionInvokeShape::new(
         OnionInputType::Fixed(OnionWidthClass::B32),
         OnionWidthClass::B64,
@@ -231,6 +240,10 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
     out.push((
         "onion/layer/Apply_https".to_string(),
         https_layer_bytes.to_vec(),
+    ));
+    out.push((
+        "onion/layer/Apply_udp".to_string(),
+        udp_layer_bytes.to_vec(),
     ));
 
     // Reply block (`OnionSurb`): pure reply cell production and seeded `build_surb` + `Credit`.
@@ -401,6 +414,49 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         let encoded = encode_outcome(&outcome).unwrap();
         assert_eq!(decode_outcome(&encoded).unwrap(), outcome);
         out.push((format!("onion/https/Failure/{name}"), encoded));
+    }
+
+    // UDP datagram exit session frames (`OnionUdpClientFrame` and `OnionUdpExitFrame`).
+    use crate::onion::udp::OnionUdpClientFrame;
+    use crate::onion::udp::OnionUdpExitFrame;
+    let udp_client_frames = [
+        ("AllowPeer_v4", OnionUdpClientFrame::AllowPeer {
+            ip: "1.1.1.1".parse().unwrap(),
+        }),
+        ("AllowPeer_v6", OnionUdpClientFrame::AllowPeer {
+            ip: "2606:4700:4700::1111".parse().unwrap(),
+        }),
+        ("Datagram_v4", OnionUdpClientFrame::Datagram {
+            peer: "8.8.8.8:5353".parse().unwrap(),
+            payload: Bytes::from_static(b"udp-v4-payload"),
+        }),
+        ("Datagram_v6", OnionUdpClientFrame::Datagram {
+            peer: "[2606:4700::1111]:9000".parse().unwrap(),
+            payload: Bytes::from_static(b"udp-v6-payload"),
+        }),
+    ];
+    for (name, frame) in udp_client_frames {
+        let encoded = frame.encode().unwrap();
+        out.push((format!("onion/udp/ClientFrame/{name}"), encoded.to_vec()));
+    }
+    let udp_exit_frames = [
+        ("Bound_v4", OnionUdpExitFrame::Bound {
+            local_addr: "1.1.1.1:49152".parse().unwrap(),
+        }),
+        ("Bound_v6", OnionUdpExitFrame::Bound {
+            local_addr: "[2606:4700::1111]:49152".parse().unwrap(),
+        }),
+        ("Datagram_v4", OnionUdpExitFrame::Datagram {
+            peer: "8.8.8.8:5353".parse().unwrap(),
+            payload: Bytes::from_static(b"udp-exit-payload"),
+        }),
+        ("PeerAllowed_v4", OnionUdpExitFrame::PeerAllowed {
+            ip: "8.8.8.8".parse().unwrap(),
+        }),
+    ];
+    for (name, frame) in udp_exit_frames {
+        let encoded = frame.encode().unwrap();
+        out.push((format!("onion/udp/ExitFrame/{name}"), encoded.to_vec()));
     }
 
     out

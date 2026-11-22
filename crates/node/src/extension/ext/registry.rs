@@ -244,6 +244,15 @@ impl Core {
         &self.rng
     }
 
+    /// Runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    pub(crate) fn onion_udp_config(&self) -> crate::onion::udp::OnionUdpConfig {
+        self.processor
+            .upgrade()
+            .map(|p| p.onion_udp_config().clone())
+            .unwrap_or_default()
+    }
+
     /// Put a message on the overlay to `to` under `namespace`.
     pub async fn send(&self, to: Did, namespace: &str, payload: Bytes) -> Result<()> {
         let processor = self.upgrade_processor()?;

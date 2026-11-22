@@ -20,6 +20,8 @@ use crate::onion::session::dial::OnionSessionRequest;
 use crate::onion::signature::OnionBackendName;
 use crate::onion::signature::OnionInvokeShape;
 use crate::onion::tcp::NativeOnionOpenStream;
+use crate::onion::udp::OnionUdpBindRequest;
+use crate::onion::udp::OnionUdpSession;
 use crate::onion::OnionLoopClass;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
@@ -163,6 +165,69 @@ impl NativeOnionCircuitHandle {
             })
             .await
             .map(NativeOnionOpenStream::new)
+    }
+
+    /// Select a `udp` route for `bind_request` from `processor`'s directory and open a multi-peer
+    /// `onion::udp` session over it at [`OnionLoopClass::DEFAULT`].
+    pub async fn open_udp_session(
+        &self,
+        processor: &Processor,
+        bind_request: OnionUdpBindRequest,
+    ) -> Result<OnionUdpSession> {
+        self.open_udp_session_with_class(processor, bind_request, OnionLoopClass::DEFAULT)
+            .await
+    }
+
+    /// Select a `udp` route for `bind_request` from `processor`'s directory and open a multi-peer
+    /// `onion::udp` session of loop class `class` (`b`) over it.
+    pub async fn open_udp_session_with_class(
+        &self,
+        processor: &Processor,
+        bind_request: OnionUdpBindRequest,
+        class: OnionLoopClass,
+    ) -> Result<OnionUdpSession> {
+        let route = processor.build_onion_udp_route(bind_request).await?;
+        self.open_udp_session_over_route_with_class(route, bind_request, class)
+            .await
+    }
+
+    /// Open a `udp` session over an already-selected `route` at [`OnionLoopClass::DEFAULT`].
+    pub async fn open_udp_session_over_route(
+        &self,
+        route: OnionRoute,
+        bind_request: OnionUdpBindRequest,
+    ) -> Result<OnionUdpSession> {
+        self.open_udp_session_over_route_with_class(route, bind_request, OnionLoopClass::DEFAULT)
+            .await
+    }
+
+    /// Open a `udp` session of loop class `class` (`b`) over `route` and wait until the exit has
+    /// bound `E_exit` and answered with `Bound { local_addr }`.
+    pub async fn open_udp_session_over_route_with_class(
+        &self,
+        route: OnionRoute,
+        bind_request: OnionUdpBindRequest,
+        class: OnionLoopClass,
+    ) -> Result<OnionUdpSession> {
+        if route.service_name() != &OnionServiceName::udp() {
+            return Err(Error::OnionRouteError(
+                OnionRouteError::PayloadServiceMismatch {
+                    payload_service: OnionServiceName::udp().as_str().to_string(),
+                    route_service: route.service().to_string(),
+                },
+            ));
+        }
+        let stream = self
+            .runtime
+            .open(OnionSessionRequest {
+                route,
+                symbol: OnionServiceName::udp(),
+                target: bind_request.to_proxy_target()?,
+                class,
+                window: OnionCreditWindow::DEFAULT,
+            })
+            .await?;
+        OnionUdpSession::from_stream(stream, bind_request).await
     }
 
     /// Send `call` to `route.target` over `route` and wait for the exit's response.

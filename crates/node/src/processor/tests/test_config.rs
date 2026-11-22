@@ -365,8 +365,12 @@ async fn test_https_onion_exit_registers_relay_with_a_fresh_process_epoch() -> R
 #[test]
 fn test_onion_exit_service_must_be_a_world_facing_symbol() {
     assert_eq!(
-        serde_saphyr::from_str::<Vec<OnionServiceName>>("[tcp, https]").ok(),
-        Some(vec![OnionServiceName::tcp(), OnionServiceName::https()])
+        serde_saphyr::from_str::<Vec<OnionServiceName>>("[tcp, https, udp]").ok(),
+        Some(vec![
+            OnionServiceName::tcp(),
+            OnionServiceName::https(),
+            OnionServiceName::udp(),
+        ])
     );
     for outside in ["web", "relay"] {
         assert!(OnionServiceName::parse(outside).is_err());

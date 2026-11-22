@@ -264,6 +264,9 @@ pub struct Config {
     /// Onion-exit target and resource policy.
     #[serde(default = "crate::onion::default_onion_exit_policy")]
     pub onion_exit_policy: OnionExitPolicy,
+    /// Optional socket-binding and public-IP advertisement settings for the `udp` onion exit world.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onion_udp_exit: Option<crate::onion::udp::OnionUdpExitConfig>,
     /// Optional local HTTP CONNECT proxy listener address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onion_http_proxy_addr: Option<String>,
@@ -336,6 +339,9 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 
         let udp_range =
             crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
+        if let Some(ref udp_exit) = config.onion_udp_exit {
+            let _ = udp_exit.to_runtime_config()?;
+        }
         if config.network.is_some()
             && (!config.ice_servers.trim().is_empty()
                 || config.external_ip.is_some()
@@ -377,7 +383,16 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 impl TryFrom<Config> for ProcessorConfig {
     type Error = Error;
     fn try_from(config: Config) -> Result<Self> {
-        ProcessorConfigSerialized::try_from(config).and_then(Self::try_from)
+        let udp_cfg = config
+            .onion_udp_exit
+            .as_ref()
+            .map(crate::onion::udp::OnionUdpExitConfig::to_runtime_config)
+            .transpose()?;
+        let mut pc = ProcessorConfigSerialized::try_from(config).and_then(Self::try_from)?;
+        if let Some(udp_cfg) = udp_cfg {
+            pc = pc.with_onion_udp_config(udp_cfg);
+        }
+        Ok(pc)
     }
 }
 
@@ -411,6 +426,7 @@ impl Config {
             onion_exit_ttl_secs: crate::onion::default_onion_exit_ttl_secs(),
             onion_exit_services: crate::onion::default_onion_exit_services(),
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
+            onion_udp_exit: None,
             onion_http_proxy_addr: None,
             onion_http_proxy_header_timeout_secs:
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),

@@ -12,6 +12,7 @@ use rings_core::utils::SystemClock;
 use crate::auth::TurnAdmissionPolicy;
 use crate::error::Result;
 use crate::error::TurnError;
+use crate::server::TurnDatagramRelayAllocator;
 
 /// Default TURN UDP listening port (RFC 5766).
 pub const DEFAULT_TURN_PORT: u16 = 3478;
@@ -275,8 +276,12 @@ pub struct TurnServerConfig {
     pub realm: String,
     /// Secp256k1 server keypair used for Diffie-Hellman TURN credential derivation.
     pub server_key: SecretKey,
-    /// Relay socket allocation strategy.
+    /// Relay socket allocation strategy (used when `relay_allocator` is `None`).
     pub relay: RelayAddressConfig,
+    /// Optional pluggable datagram relay allocator (#1292, e.g. `OnionUdpRelayBackend`).
+    /// When `None`, [`crate::TurnServer`] binds local OS UDP sockets according to `relay` and
+    /// `peer_policy`.
+    pub relay_allocator: Option<Arc<dyn TurnDatagramRelayAllocator>>,
     /// Destination IP policy enforced on relay sockets (`PublicOnly` by default).
     pub peer_policy: RelayPeerPolicy,
     /// Maximum number of active TURN nonce challenges retained concurrently.
@@ -306,6 +311,7 @@ impl std::fmt::Debug for TurnServerConfig {
             .field("realm", &self.realm)
             .field("server_pubkey", &self.server_key.pubkey())
             .field("relay", &self.relay)
+            .field("custom_relay_allocator", &self.relay_allocator.is_some())
             .field("peer_policy", &self.peer_policy)
             .field("max_nonces", &self.max_nonces)
             .field("max_allocations", &self.max_allocations)
@@ -329,6 +335,7 @@ impl Default for TurnServerConfig {
             realm: DEFAULT_TURN_REALM.to_string(),
             server_key: SecretKey::random(),
             relay: RelayAddressConfig::default(),
+            relay_allocator: None,
             peer_policy: RelayPeerPolicy::PublicOnly,
             max_nonces: DEFAULT_MAX_NONCES,
             max_allocations: DEFAULT_MAX_ALLOCATIONS,
@@ -356,6 +363,7 @@ impl TurnServerConfig {
                 relay_ip: localhost,
                 bind_ip: localhost,
             },
+            relay_allocator: None,
             peer_policy: RelayPeerPolicy::AllowLocalAndPrivate,
             max_nonces: DEFAULT_MAX_NONCES,
             max_allocations: DEFAULT_MAX_ALLOCATIONS,

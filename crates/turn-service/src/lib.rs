@@ -79,8 +79,41 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+mod onion_relay;
+#[cfg(all(
+    test,
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+mod test_bridge_model;
+#[cfg(all(
+    test,
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+mod test_multihop_e2e;
 #[cfg(all(test, not(target_family = "wasm")))]
 mod test_wire_goldens;
+
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub use self::onion_relay::OnionUdpRelay;
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub use self::onion_relay::OnionUdpRelayBackend;
+#[cfg(all(
+    any(feature = "native", feature = "dummy"),
+    not(target_family = "wasm")
+))]
+pub use self::onion_relay::TurnRelayMode;
 
 /// Global DHT registry topic on which TURN service hosts publish [`TurnServiceDescriptor`]s.
 pub const TURN_SERVICES_TOPIC: &str = "turn_services";
@@ -1371,6 +1404,13 @@ pub struct TurnServiceConfig {
     /// Quota policy for the `turn.ticket` onion `invoke` backend.
     #[serde(default = "default_turn_ticket_invoke_policy")]
     pub ticket_invoke_policy: OnionInvokePolicy,
+    /// Datagram relay backend mode (`local` single-hop OS UDP sockets by default, or `onion_udp`
+    /// multi-hop Sphinx `onion::udp` exit sessions).
+    #[serde(default)]
+    pub relay_mode: TurnRelayMode,
+    /// Sphinx loop class used when `relay_mode` is `onion_udp` (`16 KiB` by default).
+    #[serde(default)]
+    pub onion_loop_class: rings_node::onion::OnionLoopClass,
 }
 
 #[cfg(all(
@@ -1407,6 +1447,8 @@ impl std::fmt::Debug for TurnServiceConfig {
             .field("ttl_secs", &self.ttl_secs)
             .field("issue_tickets", &self.issue_tickets)
             .field("ticket_invoke_policy", &self.ticket_invoke_policy)
+            .field("relay_mode", &self.relay_mode)
+            .field("onion_loop_class", &self.onion_loop_class)
             .finish()
     }
 }
@@ -1522,6 +1564,8 @@ impl Default for TurnServiceConfig {
             ttl_secs: default_turn_ttl_secs(),
             issue_tickets: default_turn_issue_tickets(),
             ticket_invoke_policy: default_turn_ticket_invoke_policy(),
+            relay_mode: TurnRelayMode::default(),
+            onion_loop_class: rings_node::onion::OnionLoopClass::DEFAULT,
         }
     }
 }
@@ -1531,12 +1575,35 @@ impl Default for TurnServiceConfig {
     not(target_family = "wasm")
 ))]
 impl TurnServiceConfig {
+    /// Validate `relay_mode`-specific configuration invariants.
+    pub fn validate_relay_mode(&self) -> Result<()> {
+        if self.relay_mode == TurnRelayMode::OnionUdp {
+            if self.relay_bind_ip.is_some() || self.min_port.is_some() || self.max_port.is_some() {
+                return Err(Error::InvalidConfig(
+                    "turn_service.relay_bind_ip, min_port, and max_port apply only to relay_mode: local; in relay_mode: onion_udp, relay sockets are bound by remote onion_udp_exit nodes"
+                        .to_string(),
+                ));
+            }
+            if self.max_permissions_per_allocation.max(1)
+                > rings_node::onion::udp::DEFAULT_MAX_UDP_PINHOLES
+            {
+                return Err(Error::InvalidConfig(format!(
+                    "turn_service.max_permissions_per_allocation ({}) exceeds remote onion_udp_exit pinhole capacity ({})",
+                    self.max_permissions_per_allocation,
+                    rings_node::onion::udp::DEFAULT_MAX_UDP_PINHOLES,
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Return the [`OnionInvokeOffer`] advertised when `self.issue_tickets` is enabled,
     /// validating that `advertise_onion_relay` is enabled on the node.
     pub fn onion_invoke_offer(
         &self,
         advertise_onion_relay: bool,
     ) -> Result<Option<OnionInvokeOffer>> {
+        self.validate_relay_mode()?;
         if !self.issue_tickets {
             return Ok(None);
         }
@@ -1560,14 +1627,20 @@ impl TurnServiceConfig {
         turn_ticket_invoke_offer(self.ticket_invoke_policy).map(Some)
     }
 
-    /// Build a [`rings_turn::TurnServerConfig`] driven by `clock`.
-    pub fn to_turn_server_config(
+    /// Build a [`rings_turn::TurnServerConfig`] driven by `clock` together with its deferred
+    /// [`OnionUdpRelayBackend`] when `self.relay_mode == TurnRelayMode::OnionUdp`.
+    pub fn build_turn_server_config_with_onion_backend(
         &self,
         clock: rings_core::utils::SharedClock,
-    ) -> Result<rings_turn::TurnServerConfig> {
+    ) -> Result<(
+        rings_turn::TurnServerConfig,
+        Option<Arc<OnionUdpRelayBackend>>,
+    )> {
         use std::net::IpAddr;
         use std::net::Ipv4Addr;
         use std::net::Ipv6Addr;
+
+        self.validate_relay_mode()?;
 
         let server_key = match self.server_key.as_deref() {
             Some(raw) => {
@@ -1629,22 +1702,58 @@ impl TurnServiceConfig {
             rings_turn::TurnAdmissionPolicy::allowlist(self.allow_dids.iter().copied())
         };
 
-        Ok(rings_turn::TurnServerConfig {
-            listen_addr: self.listen_addr,
-            advertised_ip,
-            realm: self.realm.clone(),
-            server_key,
-            relay,
-            peer_policy,
-            max_nonces: self.max_nonces.max(1),
-            max_allocations: self.max_allocations.max(1),
-            max_reservations: self.max_reservations,
-            max_reservation_ttl: Duration::from_secs(self.max_reservation_ttl_secs),
-            max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
-            channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
-            admission,
-            clock,
-        })
+        let onion_backend = match self.relay_mode {
+            TurnRelayMode::Local => None,
+            TurnRelayMode::OnionUdp => Some(OnionUdpRelayBackend::deferred(
+                self.listen_addr.is_ipv4(),
+                peer_policy,
+                self.onion_loop_class,
+            )),
+        };
+        let relay_allocator = onion_backend
+            .as_ref()
+            .map(|backend| Arc::clone(backend) as Arc<dyn rings_turn::TurnDatagramRelayAllocator>);
+
+        Ok((
+            rings_turn::TurnServerConfig {
+                listen_addr: self.listen_addr,
+                advertised_ip,
+                realm: self.realm.clone(),
+                server_key,
+                relay,
+                relay_allocator,
+                peer_policy,
+                max_nonces: self.max_nonces.max(1),
+                max_allocations: self.max_allocations.max(1),
+                max_reservations: self.max_reservations,
+                max_reservation_ttl: Duration::from_secs(self.max_reservation_ttl_secs),
+                max_permissions_per_allocation: self.max_permissions_per_allocation.max(1),
+                channel_bind_timeout: Duration::from_secs(self.channel_bind_timeout_secs),
+                admission,
+                clock,
+            },
+            onion_backend,
+        ))
+    }
+
+    /// Build a standalone [`rings_turn::TurnServerConfig`] driven by `clock` for
+    /// [`TurnRelayMode::Local`].
+    ///
+    /// Returns [`Error::InvalidConfig`] when `self.relay_mode == TurnRelayMode::OnionUdp` so the
+    /// deferred [`OnionUdpRelayBackend`] handle is never silently discarded (use
+    /// [`Self::build_turn_server_config_with_onion_backend`] instead).
+    pub fn to_turn_server_config(
+        &self,
+        clock: rings_core::utils::SharedClock,
+    ) -> Result<rings_turn::TurnServerConfig> {
+        if self.relay_mode == TurnRelayMode::OnionUdp {
+            return Err(Error::InvalidConfig(
+                "turn_service.relay_mode: onion_udp requires build_turn_server_config_with_onion_backend so attach_provider can wire the live Provider"
+                    .to_string(),
+            ));
+        }
+        self.build_turn_server_config_with_onion_backend(clock)
+            .map(|(cfg, _)| cfg)
     }
 
     /// Build the validated [`TurnServiceOffer`] for a started [`rings_turn::TurnServer`].
@@ -1755,6 +1864,8 @@ struct TurnDaemonHooks {
     offer: TurnServiceOffer,
     turn_invoke: Option<OnionInvokeOffer>,
     ticket_invoke_policy: OnionInvokePolicy,
+    onion_backend: Option<Arc<OnionUdpRelayBackend>>,
+    relay_mode: TurnRelayMode,
 }
 
 #[cfg(all(
@@ -1774,6 +1885,9 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
     }
 
     async fn configure_provider(&mut self, provider: &Arc<Provider>) -> anyhow::Result<()> {
+        if let Some(ref onion_backend) = self.onion_backend {
+            onion_backend.attach_provider(provider)?;
+        }
         if self.turn_invoke.is_some() {
             let pipeline = provider.onion_pipeline()?;
             register_turn_ticket_invoke_backend(
@@ -1787,6 +1901,7 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
             did = %provider.processor().did(),
             turn_listen = %self.turn_server.local_addr(),
             turn_advertised = %self.turn_server.advertised_addr(),
+            relay_mode = ?self.relay_mode,
             issue_tickets = self.turn_invoke.is_some(),
             "rings-turn-service attached to native foreground daemon"
         );
@@ -1821,8 +1936,8 @@ pub async fn run_turn_service_daemon(
         .context("validating turn_service onion invoke configuration")?;
     let pc = rings_node::processor::ProcessorConfig::try_from(options.config.clone())
         .context("validating node configuration")?;
-    let server_cfg = turn_service
-        .to_turn_server_config(pc.clock().clone())
+    let (server_cfg, onion_backend) = turn_service
+        .build_turn_server_config_with_onion_backend(pc.clock().clone())
         .context("building TurnServerConfig")?;
     let turn_server = Arc::new(
         rings_turn::TurnServer::start(server_cfg)
@@ -1843,6 +1958,8 @@ pub async fn run_turn_service_daemon(
         offer,
         turn_invoke,
         ticket_invoke_policy: turn_service.ticket_invoke_policy,
+        onion_backend,
+        relay_mode: turn_service.relay_mode,
     };
     let run_res = rings_node::native::daemon::run_foreground_node(options, hooks).await;
     let close_res = server_cleanup.close().await;
@@ -2352,6 +2469,12 @@ mod tests {
                 signal_edge(&all_refs[i].processor, &all_refs[j].processor).await?;
             }
         }
+        for _ in 0..2 {
+            for node in &all_refs {
+                let _ = node.processor.swarm.stabilizer().stabilize().await;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
 
         turn_node.processor.register_all_once().await?;
         for r in &relays {
@@ -2360,12 +2483,21 @@ mod tests {
 
         // 1. Client acquires ticket #1 via `request_turn_ticket` (which uses `lookup_registry_raw` +
         //    `onion_invoke_raw`), requesting 3600s and verifying server clamps to 60s (`DEFAULT_MAX_RESERVATION_TTL`).
-        let acquired_1 = with_hang_guard(
-            "acquire turn ticket #1",
-            Duration::from_secs(10),
-            request_turn_ticket(&client.provider, Duration::from_secs(3_600), None),
-        )
-        .await?;
+        let acquired_1 =
+            with_hang_guard("acquire turn ticket #1", Duration::from_secs(10), async {
+                loop {
+                    match request_turn_ticket(&client.provider, Duration::from_secs(3_600), None)
+                        .await
+                    {
+                        Ok(tkt) => break Ok::<_, Error>(tkt),
+                        Err(Error::OnionRouteError(_)) => {
+                            tokio::time::sleep(Duration::from_millis(25)).await;
+                        }
+                        Err(other) => break Err(other),
+                    }
+                }
+            })
+            .await?;
         assert!(acquired_1.ice_url.starts_with("turn://tkt-"));
         assert_eq!(
             acquired_1.expires_at_ms,

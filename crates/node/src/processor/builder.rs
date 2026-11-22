@@ -55,6 +55,9 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) extra_registrations: Vec<Arc<dyn RegistrationTask>>,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(in crate::processor) remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
+    /// Runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    pub(in crate::processor) onion_udp_config: crate::onion::udp::OnionUdpConfig,
 }
 
 impl ProcessorBuilder {
@@ -100,6 +103,8 @@ impl ProcessorBuilder {
             mail_registration: None,
             extra_registrations: Vec::new(),
             remote_rpc_proxy: config.remote_rpc_proxy.clone(),
+            #[cfg(rings_native)]
+            onion_udp_config: config.onion_udp_config.clone(),
         })
     }
 
@@ -124,6 +129,13 @@ impl ProcessorBuilder {
     /// descriptor on every heartbeat and on the first admitted edge (#855, #918).
     pub fn register_task(mut self, task: Arc<dyn RegistrationTask>) -> Self {
         self.extra_registrations.push(task);
+        self
+    }
+
+    /// Override the runtime socket binding and peer-filtering configuration for `onion::udp` exits.
+    #[cfg(rings_native)]
+    pub fn onion_udp_config(mut self, config: crate::onion::udp::OnionUdpConfig) -> Self {
+        self.onion_udp_config = config;
         self
     }
 
@@ -445,6 +457,8 @@ impl ProcessorBuilder {
             registration_tasks,
             observability,
             remote_rpc_proxy: self.remote_rpc_proxy,
+            #[cfg(rings_native)]
+            onion_udp_config: self.onion_udp_config,
         })
     }
 

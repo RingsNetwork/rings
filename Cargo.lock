@@ -4862,13 +4862,17 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "sha2 0.11.1",
+ "stateright",
+ "stun",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "turn",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "webrtc-util",
 ]
 
 [[package]]

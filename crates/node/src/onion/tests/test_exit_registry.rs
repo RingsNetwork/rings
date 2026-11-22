@@ -47,10 +47,11 @@ fn signed_exit_for_session_at(
 }
 
 #[test]
-fn test_default_exit_services_include_native_tcp_and_https() {
+fn test_default_exit_services_include_native_tcp_https_and_udp() {
     assert_eq!(default_onion_exit_services(), vec![
         OnionServiceName::tcp(),
-        OnionServiceName::https()
+        OnionServiceName::https(),
+        OnionServiceName::udp(),
     ]);
     assert_eq!(https_onion_exit_services(), vec![OnionServiceName::https()]);
 }
@@ -60,7 +61,9 @@ fn test_default_exit_services_include_native_tcp_and_https() {
 fn test_reserved_service_names_match_routes() {
     assert!(OnionServiceName::https().matches("https"));
     assert!(OnionServiceName::tcp().matches("tcp"));
+    assert!(OnionServiceName::udp().matches("udp"));
     assert!(OnionServiceName::https().matches("HTTPS"));
+    assert!(OnionServiceName::udp().matches("UDP"));
 }
 
 #[test]

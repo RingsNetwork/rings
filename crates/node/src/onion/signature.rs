@@ -6,7 +6,7 @@
 //! ```text
 //! Σ   = {relay} ⊎ Σ_I ⊎ Σ_W
 //! Σ_I = { invoke⟨In, Out, L⟩ | In ∈ {0} ∪ 𝒲, Out ∈ 𝒲, L ∈ ℒ }      pos = Intermediate (one-shot)
-//! Σ_W = { tcp, https }                                              pos = WorldFacing  (session)
+//! Σ_W = { tcp, https, udp }                                         pos = WorldFacing  (session)
 //! Ω   = { ω ∈ [a-z0-9._-]⁺ | |ω| ≤ 32 }                            open registration/arg data
 //! ```
 //!
@@ -17,16 +17,17 @@
 //!   relay capability, never as a symbol descriptor (#834 D2).
 //! - **Position** (#834 D1′, D4a). Every `invoke` shape is `Intermediate` and one-shot, with
 //!   protocol-fixed input width `In`, output width `W(f) = Out` and latency class `L(f) = L`.
-//!   World-facing symbols (`tcp`, `https`) exchange bytes with the outside world as sessions and
-//!   stand alone (`n = 1`).
+//!   World-facing symbols (`tcp`, `https`, `udp`) exchange bytes with the outside world as sessions
+//!   and stand alone (`n = 1`).
 //! - **Closure** (#834 D1′). Both `Σ_I` ([`OnionInvokeShape`]) and `Σ_W` ([`OnionServiceName`]) are
 //!   finite and statically closed: an unknown shape is rejected at configuration, at descriptor
 //!   decode, at layer decode and at route construction, with no fallback. Open backend names
 //!   ([`OnionBackendName`]) are admitted only paired with an [`OnionInvokeShape`], never as a
 //!   world-facing or session symbol.
 //! - **One interpretation per world-facing symbol** (#834 D1′). `https` is a request/response
-//!   fetch only, and every byte tunnel, TLS included, is `tcp`.
-//! - **Code** (#834 D6″). `Σ = 1 + Σ_I + Σ_W` has `|Σ| = 1 + 120 + 2 = 123` rows, and the `f`
+//!   fetch only, every byte tunnel (TLS included) is `tcp`, and every unconnected datagram socket
+//!   session is `udp`.
+//! - **Code** (#834 D6″). `Σ = 1 + Σ_I + Σ_W` has `|Σ| = 1 + 120 + 3 = 124` rows, and the `f`
 //!   byte of the uniform layer is its position in table order: `0` for `relay`, `1 ..= |Σ_I|` for
 //!   `Σ_I` in lexicographic `(In, Out, L)` order, and `1 + |Σ_I| ..` for `Σ_W`, with
 //!   `from_code ∘ code = Some` and `from_code` undefined past `Σ`.
@@ -470,6 +471,8 @@ onion_signature! {
         Tcp tcp "tcp",
         /// `https`, a world-facing request/response (fetch).
         Https https "https",
+        /// `udp`, a world-facing datagram socket session.
+        Udp udp "udp",
     ],
 }
 
@@ -805,5 +808,6 @@ mod tests {
     #[test]
     fn test_service_names_order_by_name() {
         assert!(OnionServiceName::https() < OnionServiceName::tcp());
+        assert!(OnionServiceName::tcp() < OnionServiceName::udp());
     }
 }
