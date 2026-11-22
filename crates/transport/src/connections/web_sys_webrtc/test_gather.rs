@@ -307,9 +307,10 @@ async fn stalled_gathering_settles_once_candidates_arrive() {
         .create_offer()
         .await
         .expect("offer gathering must settle before the 60 s timeout");
+    let sdp_str = std::str::from_utf8(&sdp).expect("WebRTC SDP must be valid UTF-8");
     assert!(
-        sdp.contains("a=candidate:"),
-        "settled offer SDP must contain at least one gathered candidate: {sdp}"
+        sdp_str.contains("a=candidate:"),
+        "settled offer SDP must contain at least one gathered candidate: {sdp_str}"
     );
     let _ = connection.close().await;
 }

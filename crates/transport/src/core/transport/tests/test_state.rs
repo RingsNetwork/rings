@@ -30,13 +30,13 @@ fn test_connection_state_cell_projects_each_complete_observed_state() {
         ConnectionStateSnapshot::new(TransportConnectionState::New, false)
     );
 
-    state.observe_outbound_data_channels(true);
+    state.observe_channels(true);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::New, true)
     );
 
-    state.observe_webrtc(TransportConnectionState::Connected);
+    state.observe_phase(TransportConnectionState::Connected);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Connected, true)
@@ -47,8 +47,8 @@ fn test_connection_state_cell_projects_each_complete_observed_state() {
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Closed, false)
     );
-    state.observe_outbound_data_channels(true);
-    state.observe_webrtc(TransportConnectionState::Connected);
+    state.observe_channels(true);
+    state.observe_phase(TransportConnectionState::Connected);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Closed, false),
@@ -60,21 +60,21 @@ fn test_connection_state_cell_projects_each_complete_observed_state() {
 #[test]
 fn test_failed_state_rejects_late_open_and_can_only_advance_to_closed() {
     let state = ConnectionStateCell::new();
-    state.observe_outbound_data_channels(true);
-    state.observe_webrtc(TransportConnectionState::Failed);
+    state.observe_channels(true);
+    state.observe_phase(TransportConnectionState::Failed);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Failed, false)
     );
 
-    state.observe_outbound_data_channels(true);
-    state.observe_webrtc(TransportConnectionState::Connected);
+    state.observe_channels(true);
+    state.observe_phase(TransportConnectionState::Connected);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Failed, false)
     );
 
-    state.observe_webrtc(TransportConnectionState::Closed);
+    state.observe_phase(TransportConnectionState::Closed);
     assert_eq!(
         state.snapshot(),
         ConnectionStateSnapshot::new(TransportConnectionState::Closed, false)

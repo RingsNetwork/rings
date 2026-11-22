@@ -10,48 +10,49 @@
     )
 )]
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod auth;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod config;
 mod credentials;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod error;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod relay_backend;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 mod server;
 
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use auth::DelegationAuthHandler;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use auth::TurnAdmissionPolicy;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use auth::DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::RelayAddressConfig;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::RelayPeerPolicy;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::TurnServerConfig;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_MAX_ALLOCATIONS;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_MAX_NONCES;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_MAX_RESERVATIONS;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_MAX_RESERVATION_TTL;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_PORT_RANGE_MAX_RETRIES;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_TURN_PORT;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use config::DEFAULT_TURN_REALM;
 pub use credentials::extract_turn_server_pubkey;
 pub use credentials::format_turn_server_url;
+pub use credentials::has_turn_pubkey_query_param;
 pub use credentials::pack_turn_account_auth;
 pub use credentials::pack_turn_auth;
 pub use credentials::pack_turn_did_auth;
@@ -64,40 +65,40 @@ pub use credentials::VerifiedTurnAuth;
 pub use credentials::MAX_STUN_USERNAME_BYTES;
 pub use credentials::TURN_AUTH_DOMAIN;
 pub use credentials::TURN_SESSION_TICKET_DOMAIN;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use error::Result;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use error::TurnError;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::ActiveAllocationSpec;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::BeginAllocateDecision;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::CompleteAllocateDecision;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::CorePermissionError;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::CoreReserveError;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::PendingAllocateSpec;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::RefreshDecision;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::TurnAllocationCore;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::TurnDatagramRelay;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::TurnDatagramRelayFactory;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::TurnFiveTupleKey;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::TurnRelayCloseHandle;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use server::TurnServer;
-#[cfg(not(target_family = "wasm"))]
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use server::TurnSessionReservation;
 
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(all(test, feature = "server", not(target_family = "wasm")))]
 mod tests {
     use std::net::IpAddr;
     use std::net::Ipv4Addr;

@@ -153,11 +153,11 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
 #[test]
 fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = TransportSpec::default().build()?;
-    let matching = ConnectNodeSend {
-        handshake: String::new(),
-        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
-        relay_custody: RelayCustody::Holds,
-    };
+    let matching = ConnectNodeSend::initial_offer(
+        bytes::Bytes::new(),
+        DhtProtocolMode::new(0, 1, 0),
+        RelayCustody::Holds,
+    );
     let mismatched_redundancy = ConnectNodeSend {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()
@@ -171,11 +171,11 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
 #[test]
 fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = TransportSpec::default().build()?;
-    let matching = ConnectNodeReport {
-        handshake: String::new(),
-        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
-        relay_custody: RelayCustody::Holds,
-    };
+    let matching = ConnectNodeReport::final_answer(
+        bytes::Bytes::new(),
+        DhtProtocolMode::new(0, 1, 0),
+        RelayCustody::Holds,
+    );
     let mismatched_redundancy = ConnectNodeReport {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()

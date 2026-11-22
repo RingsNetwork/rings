@@ -17,12 +17,16 @@ pub(crate) use capacity::inbound_frame_exceeds_protocol_ceiling;
 pub use capacity::AdmittedInboundFrame;
 pub use capacity::InboundFrameAdmission;
 pub use capacity::INBOUND_PEER_FRAME_CAPACITY;
+pub use inner::CreditFrame;
+pub use inner::IdleLaneChecker;
 pub use inner::InnerTransportCallback;
+pub use inner::CREDIT_RESEND_PAUSE;
 #[cfg(all(test, not(target_family = "wasm")))]
 use invalid_report::INVALID_FRAME_REPORT_BACKLOG_CAPACITY;
 #[cfg(all(test, not(target_family = "wasm")))]
 use invalid_report::INVALID_FRAME_REPORT_QUANTUM;
 pub use link_credit::NodeFramePool;
+pub use link_credit::LANE_IDLE_PERIOD;
 
 #[cfg(test)]
 mod tests;

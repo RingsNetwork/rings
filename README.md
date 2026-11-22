@@ -44,8 +44,8 @@ communicate over direct WebRTC datachannels with no application server in the da
 ## Status
 
 Active public overlay at the seed `node.rings.rs`, with deterministic wire-versioned framing
-(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 4`) across every frame and handshake. 1.0 stabilizes
-`WIRE_VERSION = 4` and the public runtime contracts across `1.0.x`, while 2.0 extends the overlay
+(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 5`) across every frame and handshake. 1.0 stabilizes
+`WIRE_VERSION = 5` and the public runtime contracts across `1.0.x`, while 2.0 extends the overlay
 with epoch-randomized ring placement ([#780](https://github.com/RingsNetwork/rings/issues/780)) and
 decentralized trust ranking (DRanking). See [UPGRADING.md](./UPGRADING.md),
 [ROADMAP.md](./ROADMAP.md), and [SECURITY.md](./SECURITY.md).

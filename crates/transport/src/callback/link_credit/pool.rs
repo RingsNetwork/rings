@@ -233,6 +233,12 @@ impl NodeFramePool {
         Self::with_capacity(NODE_FRAME_POOL)
     }
 
+    /// Return `Σ p_e`, the pooled frames currently lent or still counted beyond lane floors across
+    /// all edges registered with this pool.
+    pub fn used_frames(&self) -> u64 {
+        self.lock().used
+    }
+
     /// An empty pool of `capacity` frames.
     pub(crate) fn with_capacity(capacity: u64) -> Self {
         Self(Arc::new(Mutex::new(PoolState {

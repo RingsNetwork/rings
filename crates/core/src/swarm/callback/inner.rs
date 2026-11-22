@@ -161,13 +161,39 @@ impl BoundCallback {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(());
         };
-        if !self
+        match self
             .processor
             .logical
             .transport
-            .begin_ready_connection_admission(attempt)?
+            .begin_ready_connection_admission(attempt)
         {
-            return Ok(());
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    crate::error::Error::Transport(
+                        rings_transport::error::Error::RemoteMaxMessageSizeTooSmall { .. }
+                    )
+                ) {
+                    if let Err(cleanup_error) = self
+                        .processor
+                        .logical
+                        .transport
+                        .cancel_unadmitted_connection(attempt)
+                        .await
+                    {
+                        tracing::warn!(
+                            peer = %did,
+                            generation = attempt.generation(),
+                            error = ?cleanup_error,
+                            "failed to close connection after max_message_size admission rejection"
+                        );
+                    }
+                    self.processor.discard_pre_admission_hold();
+                }
+                return Err(error);
+            }
         }
 
         match self

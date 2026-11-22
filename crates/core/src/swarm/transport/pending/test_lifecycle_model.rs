@@ -62,7 +62,7 @@ fn test_finger_candidate_admission_is_total_over_lifecycle_and_routability() {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 enum PeerLifecycle {
     #[default]
     Absent,
@@ -445,20 +445,37 @@ fn explore(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ModelSignaling {
     Creating(OfferOwner),
-    Sent(OfferOwner),
+    Sent { owner: OfferOwner, final_step: bool },
+    ClaimedReply { owner: OfferOwner, next_step: u8 },
+    SentContinuation { owner: OfferOwner, step: u8 },
     Answered(OfferOwner),
-    Answering,
+    Answering(bool),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProductAction {
     ReserveOffering(OfferOwner),
     ReserveAnswering,
-    MarkSent(CallbackGeneration),
-    MarkAnswered(CallbackGeneration),
+    MarkZeroStepCompleted(CallbackGeneration),
+    MarkSent {
+        cb: CallbackGeneration,
+        final_step: bool,
+    },
+    ClaimOfferReply {
+        cb: CallbackGeneration,
+        report_step: u8,
+        final_step: bool,
+    },
+    MarkContinuationSent {
+        cb: CallbackGeneration,
+        step: u8,
+        final_step: bool,
+    },
+    AwaitAnsweringContinuation(CallbackGeneration),
+    ClaimAnsweringContinuation,
     CrossingOffer {
         carrier: OfferOwner,
         local_smaller: bool,
@@ -476,7 +493,7 @@ struct ProductView {
     superseded_by_peer: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 struct ProductModel {
     peer: PeerLifecycle,
     signaling: Option<ModelSignaling>,
@@ -501,11 +518,11 @@ impl ProductModel {
                     if let Some(next) = self.next_generation.checked_add(1) {
                         self.next_generation = next;
                         self.peer = PeerLifecycle::Pending(next);
-                        self.signaling = Some(ModelSignaling::Answering);
+                        self.signaling = Some(ModelSignaling::Answering(false));
                     }
                 }
             }
-            ProductAction::MarkSent(cb) => {
+            ProductAction::MarkZeroStepCompleted(cb) => {
                 if let (
                     Some(gen),
                     PeerLifecycle::Pending(cur),
@@ -513,20 +530,99 @@ impl ProductModel {
                 ) = (self.callback_gen(cb), self.peer, self.signaling)
                 {
                     if gen == cur {
-                        self.signaling = Some(ModelSignaling::Sent(owner));
+                        self.signaling = Some(ModelSignaling::Answered(owner));
                     }
                 }
             }
-            ProductAction::MarkAnswered(cb) => {
+            ProductAction::MarkSent { cb, final_step } => {
                 if let (
                     Some(gen),
                     PeerLifecycle::Pending(cur),
-                    Some(ModelSignaling::Creating(owner) | ModelSignaling::Sent(owner)),
+                    Some(ModelSignaling::Creating(owner)),
                 ) = (self.callback_gen(cb), self.peer, self.signaling)
                 {
                     if gen == cur {
-                        self.signaling = Some(ModelSignaling::Answered(owner));
+                        self.signaling = Some(ModelSignaling::Sent { owner, final_step });
                     }
+                }
+            }
+            ProductAction::ClaimOfferReply {
+                cb,
+                report_step,
+                final_step,
+            } => {
+                if let (Some(gen), PeerLifecycle::Pending(cur), Some(sig)) =
+                    (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        let matched_owner = match sig {
+                            ModelSignaling::Sent {
+                                owner,
+                                final_step: false,
+                            } if report_step == 1 => Some(owner),
+                            ModelSignaling::SentContinuation { owner, step }
+                                if report_step == step.saturating_add(1) =>
+                            {
+                                Some(owner)
+                            }
+                            _ => None,
+                        };
+                        if let Some(owner) = matched_owner {
+                            if final_step {
+                                self.signaling = Some(ModelSignaling::Answered(owner));
+                            } else if report_step.saturating_add(1)
+                                < rings_transport::core::transport::MAX_HANDSHAKE_STEPS
+                            {
+                                self.signaling = Some(ModelSignaling::ClaimedReply {
+                                    owner,
+                                    next_step: report_step.saturating_add(1),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            ProductAction::MarkContinuationSent {
+                cb,
+                step,
+                final_step,
+            } => {
+                if let (
+                    Some(gen),
+                    PeerLifecycle::Pending(cur),
+                    Some(ModelSignaling::ClaimedReply { owner, next_step }),
+                ) = (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur
+                        && step == next_step
+                        && step.is_multiple_of(2)
+                        && step < rings_transport::core::transport::MAX_HANDSHAKE_STEPS
+                    {
+                        self.signaling = Some(if final_step {
+                            ModelSignaling::Answered(owner)
+                        } else {
+                            ModelSignaling::SentContinuation { owner, step }
+                        });
+                    }
+                }
+            }
+            ProductAction::AwaitAnsweringContinuation(cb) => {
+                if let (
+                    Some(gen),
+                    PeerLifecycle::Pending(cur),
+                    Some(ModelSignaling::Answering(false)),
+                ) = (self.callback_gen(cb), self.peer, self.signaling)
+                {
+                    if gen == cur {
+                        self.signaling = Some(ModelSignaling::Answering(true));
+                    }
+                }
+            }
+            ProductAction::ClaimAnsweringContinuation => {
+                if let (PeerLifecycle::Pending(_), Some(ModelSignaling::Answering(true))) =
+                    (self.peer, self.signaling)
+                {
+                    self.signaling = Some(ModelSignaling::Answering(false));
                 }
             }
             ProductAction::CrossingOffer {
@@ -536,25 +632,26 @@ impl ProductModel {
                 if let (PeerLifecycle::Pending(cur), Some(sig)) = (self.peer, self.signaling) {
                     let yields = match sig {
                         ModelSignaling::Creating(_) => true,
-                        ModelSignaling::Sent(OfferOwner::Overlay)
-                            if carrier == OfferOwner::External =>
-                        {
-                            true
-                        }
-                        ModelSignaling::Sent(OfferOwner::External)
-                            if carrier == OfferOwner::Overlay =>
-                        {
-                            false
-                        }
-                        ModelSignaling::Sent(_) => !local_smaller,
-                        ModelSignaling::Answered(_) | ModelSignaling::Answering => false,
+                        ModelSignaling::Sent {
+                            owner: OfferOwner::Overlay,
+                            ..
+                        } if carrier == OfferOwner::External => true,
+                        ModelSignaling::Sent {
+                            owner: OfferOwner::External,
+                            ..
+                        } if carrier == OfferOwner::Overlay => false,
+                        ModelSignaling::Sent { .. } => !local_smaller,
+                        ModelSignaling::ClaimedReply { .. }
+                        | ModelSignaling::SentContinuation { .. }
+                        | ModelSignaling::Answered(_)
+                        | ModelSignaling::Answering(_) => false,
                     };
                     if yields {
                         if let Some(next) = self.next_generation.checked_add(1) {
                             self.previous_generation = Some(cur);
                             self.next_generation = next;
                             self.peer = PeerLifecycle::Pending(next);
-                            self.signaling = Some(ModelSignaling::Answering);
+                            self.signaling = Some(ModelSignaling::Answering(false));
                         }
                     }
                 }
@@ -621,7 +718,7 @@ impl ProductModel {
             .previous_generation
             .is_some_and(|prev| match self.peer {
                 PeerLifecycle::Pending(cur) => {
-                    cur != prev && self.signaling == Some(ModelSignaling::Answering)
+                    cur != prev && matches!(self.signaling, Some(ModelSignaling::Answering(_)))
                 }
                 PeerLifecycle::Admitting(cur) | PeerLifecycle::Active(cur) => cur != prev,
                 PeerLifecycle::Absent => false,
@@ -681,23 +778,71 @@ impl ProductImpl {
             ProductAction::ReserveAnswering => {
                 if self
                     .lifecycles
-                    .reserve_for(self.peer, self.now_ms, Handshake::Answering)
+                    .reserve_for(self.peer, self.now_ms, Handshake::answering())
                     .is_ok()
                 {
                     self.now_ms += 1;
                 }
             }
-            ProductAction::MarkSent(cb) => {
+            ProductAction::MarkZeroStepCompleted(cb) => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.mark_zero_step_completed(attempt);
+                }
+            }
+            ProductAction::MarkSent { cb, final_step } => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.mark_offer_sent(
+                        attempt,
+                        0,
+                        final_step,
+                        bytes::Bytes::from_static(b"hs0"),
+                        self.tx_id,
+                        None,
+                    );
+                }
+            }
+            ProductAction::ClaimOfferReply {
+                cb,
+                report_step,
+                final_step,
+            } => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.claim_offer_reply(
+                        attempt,
+                        Some(self.tx_id),
+                        report_step,
+                        final_step,
+                        Some([9u8; 16]),
+                    );
+                }
+            }
+            ProductAction::MarkContinuationSent {
+                cb,
+                step,
+                final_step,
+            } => {
+                if let Some(attempt) = self.callback_attempt(cb) {
+                    let _ = self.lifecycles.mark_offer_sent(
+                        attempt,
+                        step,
+                        final_step,
+                        bytes::Bytes::from_static(b"hsk"),
+                        self.tx_id,
+                        Some([9u8; 16]),
+                    );
+                }
+            }
+            ProductAction::AwaitAnsweringContinuation(cb) => {
                 if let Some(attempt) = self.callback_attempt(cb) {
                     let _ = self
                         .lifecycles
-                        .mark_offer_sent(attempt, "sdp".to_string(), self.tx_id);
+                        .set_answering_awaiting_step(attempt, 2, [9u8; 16]);
                 }
             }
-            ProductAction::MarkAnswered(cb) => {
-                if let Some(attempt) = self.callback_attempt(cb) {
-                    let _ = self.lifecycles.mark_offer_answered(attempt, None);
-                }
+            ProductAction::ClaimAnsweringContinuation => {
+                let _ = self
+                    .lifecycles
+                    .claim_answering_continuation(self.peer, 2, [9u8; 16]);
             }
             ProductAction::CrossingOffer {
                 carrier,
@@ -781,13 +926,40 @@ impl ProductImpl {
                 } => ModelSignaling::Creating(*owner),
                 Handshake::Offering {
                     owner,
-                    phase: handshake::OfferPhase::Sent { .. },
-                } => ModelSignaling::Sent(*owner),
+                    phase:
+                        handshake::OfferPhase::Sent {
+                            step_index: 0,
+                            final_step,
+                            ..
+                        },
+                } => ModelSignaling::Sent {
+                    owner: *owner,
+                    final_step: *final_step,
+                },
+                Handshake::Offering {
+                    owner,
+                    phase:
+                        handshake::OfferPhase::ClaimedReply {
+                            next_step_index, ..
+                        },
+                } => ModelSignaling::ClaimedReply {
+                    owner: *owner,
+                    next_step: *next_step_index,
+                },
+                Handshake::Offering {
+                    owner,
+                    phase: handshake::OfferPhase::Sent { step_index, .. },
+                } => ModelSignaling::SentContinuation {
+                    owner: *owner,
+                    step: *step_index,
+                },
                 Handshake::Offering {
                     owner,
                     phase: handshake::OfferPhase::Answered,
                 } => ModelSignaling::Answered(*owner),
-                Handshake::Answering => ModelSignaling::Answering,
+                Handshake::Answering { awaiting_step } => {
+                    ModelSignaling::Answering(awaiting_step.is_some())
+                }
             });
         let superseded_by_peer = self
             .previous_attempt
@@ -802,13 +974,55 @@ impl ProductImpl {
 
 #[test]
 fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
-    const MAX_DEPTH: usize = 4;
+    use std::collections::HashSet;
+    use std::collections::VecDeque;
+
+    const MAX_DEPTH: usize = 8;
     let actions = [
         ProductAction::ReserveOffering(OfferOwner::Overlay),
         ProductAction::ReserveOffering(OfferOwner::External),
         ProductAction::ReserveAnswering,
-        ProductAction::MarkSent(CallbackGeneration::Current),
-        ProductAction::MarkAnswered(CallbackGeneration::Current),
+        ProductAction::MarkZeroStepCompleted(CallbackGeneration::Current),
+        ProductAction::MarkSent {
+            cb: CallbackGeneration::Current,
+            final_step: false,
+        },
+        ProductAction::MarkSent {
+            cb: CallbackGeneration::Current,
+            final_step: true,
+        },
+        ProductAction::ClaimOfferReply {
+            cb: CallbackGeneration::Current,
+            report_step: 1,
+            final_step: false,
+        },
+        ProductAction::ClaimOfferReply {
+            cb: CallbackGeneration::Current,
+            report_step: 1,
+            final_step: true,
+        },
+        ProductAction::MarkContinuationSent {
+            cb: CallbackGeneration::Current,
+            step: 2,
+            final_step: false,
+        },
+        ProductAction::MarkContinuationSent {
+            cb: CallbackGeneration::Current,
+            step: 2,
+            final_step: true,
+        },
+        ProductAction::ClaimOfferReply {
+            cb: CallbackGeneration::Current,
+            report_step: 3,
+            final_step: false,
+        },
+        ProductAction::MarkContinuationSent {
+            cb: CallbackGeneration::Current,
+            step: 4,
+            final_step: true,
+        },
+        ProductAction::AwaitAnsweringContinuation(CallbackGeneration::Current),
+        ProductAction::ClaimAnsweringContinuation,
         ProductAction::CrossingOffer {
             carrier: OfferOwner::Overlay,
             local_smaller: true,
@@ -833,37 +1047,61 @@ fn test_signaling_and_lifecycle_product_model_preserves_invariants() {
         ProductAction::Timeout,
     ];
 
-    fn explore_product(
-        model: ProductModel,
-        implementation: ProductImpl,
-        actions: &[ProductAction],
-        remaining_depth: usize,
-    ) {
+    let mut visited = HashSet::new();
+    let mut queue = VecDeque::new();
+    let mut saw_step4_claimed = false;
+    let mut saw_step4_answered = false;
+
+    let init_model = ProductModel::default();
+    let init_impl = ProductImpl::new();
+    visited.insert(init_model);
+    queue.push_back((init_model, init_impl, 0usize));
+
+    while let Some((model, implementation, depth)) = queue.pop_front() {
         let model_view = model.view();
         let impl_view = implementation.view();
         assert_eq!(model_view, impl_view);
-        // Invariant (Signaling): signaling state exists iff the peer is in `Pending`.
         assert_eq!(
             model_view.signaling.is_some(),
             matches!(model_view.peer, PeerLifecycle::Pending(_))
         );
-        if remaining_depth == 0 {
-            return;
+        if matches!(
+            model_view.signaling,
+            Some(ModelSignaling::ClaimedReply { next_step: 4, .. })
+        ) {
+            saw_step4_claimed = true;
         }
-        for &action in actions {
-            explore_product(
-                model.apply(action),
-                implementation.clone().apply(action),
-                actions,
-                remaining_depth - 1,
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        for &action in &actions {
+            let next_model = model.apply(action);
+            let next_impl = implementation.clone().apply(action);
+            let next_view = next_model.view();
+            assert_eq!(next_view, next_impl.view());
+            assert_eq!(
+                next_view.signaling.is_some(),
+                matches!(next_view.peer, PeerLifecycle::Pending(_))
             );
+            if matches!(action, ProductAction::MarkContinuationSent {
+                step: 4,
+                final_step: true,
+                ..
+            }) && matches!(
+                model_view.signaling,
+                Some(ModelSignaling::ClaimedReply { next_step: 4, .. })
+            ) && matches!(next_view.signaling, Some(ModelSignaling::Answered(_)))
+            {
+                saw_step4_answered = true;
+            }
+            if visited.insert(next_model) {
+                queue.push_back((next_model, next_impl, depth + 1));
+            }
         }
     }
 
-    explore_product(
-        ProductModel::default(),
-        ProductImpl::new(),
-        &actions,
-        MAX_DEPTH,
+    assert!(
+        saw_step4_claimed && saw_step4_answered,
+        "5-step continuation states (ClaimedReply(4) -> Answered) must be explored"
     );
 }

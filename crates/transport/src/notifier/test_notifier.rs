@@ -158,7 +158,7 @@ async fn test_wait_for_data_channel_open_reports_unavailable_on_terminal_wake() 
     });
 
     tokio::task::yield_now().await;
-    state.observe_webrtc(TransportConnectionState::Failed);
+    state.observe_phase(TransportConnectionState::Failed);
     notifier.wake();
 
     let err = wait

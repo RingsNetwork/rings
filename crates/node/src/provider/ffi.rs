@@ -41,6 +41,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::future::IntoFuture;
 use std::ptr;
+use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -519,6 +520,97 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     }
 }
 
+/// Create a new [`ProviderHandle`] from a serialized YAML or JSON [`ProcessorConfig`] document
+/// (including optional `network: { kind, params }` transport configuration, `udp_port_min` /
+/// `udp_port_max`, onion policy, and origin quotas) and a durable `storage_path` (#1291).
+///
+/// Provides full C-ABI parity with browser WASM `Provider::new_provider_with_serialized_config`
+/// and native `Config::read_fs`.
+///
+/// # Safety
+///
+/// `serialized_config` and `storage_path` must be valid null-terminated UTF-8 strings. Returns
+/// NULL when configuration parsing or provider creation fails. The returned handle must be
+/// released exactly once with [`rings_node_provider_destroy`].
+#[no_mangle]
+pub unsafe extern "C" fn rings_node_new_provider_with_serialized_config(
+    serialized_config: *const c_char,
+    storage_path: *const c_char,
+) -> *mut ProviderHandle {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<*mut ProviderHandle> {
+            let config_text = zeroize::Zeroizing::new(c_char_to_string(serialized_config)?);
+            let storage_root = std::path::PathBuf::from(c_char_to_string(storage_path)?);
+            let parsed_config = ProcessorConfig::from_str(&config_text);
+            // Zeroize the raw serialized config buffer immediately after parsing so session
+            // secret key material does not linger on the heap.
+            drop(config_text);
+            let config = parsed_config?.online_node_type(OnlineNodeType::Ffi);
+
+            let creation = std::thread::Builder::new()
+                .name("rings-ffi-provider-init".to_owned())
+                .spawn(move || -> Result<(Provider, Arc<Runtime>)> {
+                    let runtime = Arc::new(Runtime::new().map_err(|error| {
+                        Error::ExtensionError(format!("failed to create runtime: {error}"))
+                    })?);
+                    let provider = runtime.block_on(async {
+                        let stores = NodeStores::open_under(&storage_root).await?;
+                        Provider::new_provider_with_storage_internal(config, ProviderStores {
+                            entry: Some(stores.data),
+                            relay: Some(stores.relay),
+                            removals: Some(stores.removals),
+                            measure: Some(stores.measure),
+                            evidence: Some(stores.evidence),
+                            guards: Some(stores.guards),
+                            replay: Some(stores.replay),
+                            released: stores.released,
+                        })
+                        .await
+                    })?;
+                    Ok((provider, runtime))
+                })
+                .map_err(|error| {
+                    Error::ExtensionError(format!("failed to start FFI provider runtime: {error}"))
+                })?;
+            let (provider, runtime) = creation.join().map_err(|_| {
+                Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
+            })??;
+            let provider = Arc::new(provider);
+            let handle = ProviderHandle::new(provider, runtime);
+            if let Err(error) = handle.spawn_application() {
+                handle.shutdown();
+                return Err(error);
+            }
+            Ok(Box::into_raw(Box::new(handle)))
+        },
+    )) {
+        Ok(Ok(provider_ptr)) => provider_ptr,
+        Ok(Err(error)) => {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &error {
+                Error::SerdeYamlError(_) => {
+                    tracing::error!(
+                        code = error.code(),
+                        "FFI serialized provider creation failed: invalid YAML/JSON configuration syntax or schema"
+                    );
+                }
+                _ => {
+                    tracing::error!(
+                        code = error.code(),
+                        "FFI serialized provider creation failed: {error}"
+                    );
+                }
+            }));
+            ptr::null_mut()
+        }
+        Err(_) => {
+            let _ = std::panic::catch_unwind(|| {
+                tracing::error!("FFI serialized provider creation panicked across C ABI boundary");
+            });
+            ptr::null_mut()
+        }
+    }
+}
+
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
     if ptr.is_null() {
         return Err(Error::FFINulPtrError);
@@ -925,5 +1017,34 @@ mod tests {
             .record(&peer)
             .expect("authenticated test measurement must be retained");
         assert_eq!(record.reliability().stored_evidence().connected, 1);
+    }
+
+    #[test]
+    fn test_ffi_new_provider_with_serialized_config_supports_tagged_network_descriptor() {
+        let delegatee_key =
+            DelegateeKey::new_with_seckey(&SecretKey::random()).expect("valid delegatee key");
+        let serialized_yaml = format!(
+            "network_id: 0\n\
+             delegatee_key: \"{}\"\n\
+             stabilize_interval: 1\n\
+             network:\n  \
+               kind: webrtc\n  \
+               params:\n    \
+                 ice_servers: stun://stun.l.google.com:19302\n    \
+                 udp_port_min: 52000\n    \
+                 udp_port_max: 52010\n",
+            delegatee_key.dump().expect("dump delegatee key")
+        );
+        let cfg_cstr = c_string(&serialized_yaml);
+        let (root, storage_path) = storage_root();
+        let handle = unsafe {
+            rings_node_new_provider_with_serialized_config(cfg_cstr.as_ptr(), storage_path.as_ptr())
+        };
+        assert!(
+            !handle.is_null(),
+            "rings_node_new_provider_with_serialized_config must accept tagged network config"
+        );
+        unsafe { rings_node_provider_destroy(handle) };
+        let _ = std::fs::remove_dir_all(root);
     }
 }

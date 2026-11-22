@@ -61,7 +61,7 @@ pub struct ProcessorBuilder {
 impl ProcessorBuilder {
     /// initialize a [ProcessorBuilder] with a serialized [ProcessorConfig].
     pub fn from_serialized(config: &str) -> Result<Self> {
-        let config = serde_saphyr::from_str::<ProcessorConfig>(config)?;
+        let config = ProcessorConfig::from_str(config)?;
         Self::from_config(&config)
     }
 
