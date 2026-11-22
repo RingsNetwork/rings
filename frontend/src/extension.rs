@@ -102,10 +102,17 @@ struct HeadlessNodeState {
     wallet_account: Option<WalletAccount>,
     peers: Vec<PeerView>,
     starting: bool,
-    stopping: bool,
+    building_storage_count: usize,
+    closing_storage_count: usize,
     start_error: Option<String>,
     message: String,
     generation: GenerationClock,
+}
+
+impl HeadlessNodeState {
+    fn is_releasing_storage(&self) -> bool {
+        self.closing_storage_count > 0 || (!self.starting && self.building_storage_count > 0)
+    }
 }
 
 struct HeadlessDemoNode {
@@ -131,7 +138,8 @@ pub fn headless_node() -> Html {
         wallet_account: None,
         peers: Vec::new(),
         starting: false,
-        stopping: false,
+        building_storage_count: 0,
+        closing_storage_count: 0,
         start_error: None,
         message: "background node offline".to_string(),
         generation: GenerationClock::default(),
@@ -263,12 +271,12 @@ async fn start_headless_node(
     message: &JsValue,
 ) -> Result<JsValue, String> {
     for _ in 0..200 {
-        if !state.borrow().stopping {
+        if !state.borrow().is_releasing_storage() {
             break;
         }
         sleep(Duration::from_millis(25)).await;
     }
-    if state.borrow().stopping {
+    if state.borrow().is_releasing_storage() {
         return Err("previous background node is still releasing storage".to_string());
     }
     if state.borrow().starting || state.borrow().starting_node.is_some() {
@@ -341,34 +349,40 @@ async fn run_headless_node_start(
             );
         }
     }
-    if !generation.is_current()
-        && state.borrow().node.is_none()
-        && state.borrow().starting_node.is_none()
-    {
-        state.borrow_mut().stopping = false;
+}
+
+async fn race_with_cancel<T, F>(cancel_rx: &mut oneshot::Receiver<()>, fut: F) -> Option<T>
+where F: Future<Output = T> {
+    let fut = fut.fuse();
+    let cancel_fut = cancel_rx.fuse();
+    futures::pin_mut!(fut, cancel_fut);
+    futures::select! {
+        res = fut => Some(res),
+        _ = cancel_fut => None,
     }
 }
 
 async fn close_uninstalled_starting_node(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
-    fallback: DemoNode,
 ) {
     let taken = {
         let mut guard = state.borrow_mut();
         if generation.is_current() {
             guard.start_cancel_tx = None;
-            guard.starting_node.take()
+            let node = guard.starting_node.take();
+            if node.is_some() {
+                guard.closing_storage_count = guard.closing_storage_count.saturating_add(1);
+            }
+            node
         } else {
             None
         }
     };
     if let Some(node) = taken {
         let _ = node.close().await;
-    } else if !generation.is_current() {
-        // `stop_headless_node` already took `starting_node` (if it had been stored) and closed it;
-        // only close `fallback` if `stop_headless_node` bumped generation before `starting_node` was set.
-        let _ = fallback;
+        let mut guard = state.borrow_mut();
+        guard.closing_storage_count = guard.closing_storage_count.saturating_sub(1);
     }
 }
 
@@ -380,7 +394,12 @@ async fn start_headless_node_inner(
     settings: ExtensionStartSettings,
 ) -> Result<String, String> {
     let node_settings = headless_node_settings(&settings)?;
-    let account = authorize_headless_account(wallet_kind).await?;
+    let Some(account_res) =
+        race_with_cancel(&mut cancel_rx, authorize_headless_account(wallet_kind)).await
+    else {
+        return Ok("background node start cancelled".to_string());
+    };
+    let account = account_res?;
     if !generation.is_current() {
         return Ok("background node start cancelled".to_string());
     }
@@ -391,15 +410,43 @@ async fn start_headless_node_inner(
         None,
         true,
     );
-    let built = build_headless_node(&account, node_settings).await?;
+    let Some(delegatee_res) =
+        race_with_cancel(&mut cancel_rx, authorize_headless_delegatee(&account)).await
+    else {
+        return Ok("background node start cancelled".to_string());
+    };
+    let delegatee_key = delegatee_res?;
+    if !generation.is_current() {
+        return Ok("background node start cancelled".to_string());
+    }
     {
         let mut guard = state.borrow_mut();
-        if !generation.is_current() {
-            drop(guard);
-            let _ = built.close().await;
-            return Ok("background node start cancelled".to_string());
+        guard.building_storage_count = guard.building_storage_count.saturating_add(1);
+    }
+    let built = match open_headless_node(delegatee_key, node_settings).await {
+        Ok(node) => node,
+        Err(error) => {
+            let mut guard = state.borrow_mut();
+            guard.building_storage_count = guard.building_storage_count.saturating_sub(1);
+            return Err(error);
         }
-        guard.starting_node = Some(built.clone());
+    };
+    let cancelled = {
+        let mut guard = state.borrow_mut();
+        guard.building_storage_count = guard.building_storage_count.saturating_sub(1);
+        if generation.is_current() {
+            guard.starting_node = Some(built.clone());
+            false
+        } else {
+            guard.closing_storage_count = guard.closing_storage_count.saturating_add(1);
+            true
+        }
+    };
+    if cancelled {
+        let _ = built.close().await;
+        let mut guard = state.borrow_mut();
+        guard.closing_storage_count = guard.closing_storage_count.saturating_sub(1);
+        return Ok("background node start cancelled".to_string());
     }
     set_headless_starting_for_generation(
         &state,
@@ -410,11 +457,13 @@ async fn start_headless_node_inner(
     );
     let my_did = built.provider.address();
     if let Err(error) = register_headless_protocols(&built, &my_did) {
-        close_uninstalled_starting_node(&state, &generation, built).await;
+        drop(built);
+        close_uninstalled_starting_node(&state, &generation).await;
         return Err(error);
     }
     if !generation.is_current() {
-        close_uninstalled_starting_node(&state, &generation, built).await;
+        drop(built);
+        close_uninstalled_starting_node(&state, &generation).await;
         return Ok("background node start cancelled".to_string());
     }
 
@@ -429,16 +478,19 @@ async fn start_headless_node_inner(
     {
         Ok(Some(result)) => result,
         Ok(None) => {
-            close_uninstalled_starting_node(&state, &generation, built).await;
+            drop(built);
+            close_uninstalled_starting_node(&state, &generation).await;
             return Ok("background node start cancelled".to_string());
         }
         Err(error) => {
-            close_uninstalled_starting_node(&state, &generation, built).await;
+            drop(built);
+            close_uninstalled_starting_node(&state, &generation).await;
             return Err(error);
         }
     };
     if !generation.is_current() {
-        close_uninstalled_starting_node(&state, &generation, built).await;
+        drop(built);
+        close_uninstalled_starting_node(&state, &generation).await;
         return Ok("background node start cancelled".to_string());
     }
     install_headless_node(&state, &generation, account, &built, peers);
@@ -464,14 +516,25 @@ async fn authorize_headless_account(wallet_kind: WalletKind) -> Result<WalletAcc
     .await
 }
 
-async fn build_headless_node(
+async fn authorize_headless_delegatee(
     account: &WalletAccount,
-    node_settings: NodeSettings,
-) -> Result<DemoNode, String> {
+) -> Result<rings_node::prelude::rings_core::delegation::DelegateeKey, String> {
     operation_timeout(
         "session authorization",
         SESSION_AUTH_TIMEOUT,
-        node::build_node(account, node_settings, node::WebviewHost::Extension),
+        node::authorize_delegatee_key(account),
+    )
+    .await
+}
+
+async fn open_headless_node(
+    delegatee_key: rings_node::prelude::rings_core::delegation::DelegateeKey,
+    node_settings: NodeSettings,
+) -> Result<DemoNode, String> {
+    operation_timeout(
+        "storage initialization",
+        SESSION_AUTH_TIMEOUT,
+        node::open_node(delegatee_key, node_settings, node::WebviewHost::Extension),
     )
     .await
 }
@@ -531,41 +594,32 @@ async fn connect_headless_seed(
         None,
         true,
     );
-    let seed_outcome = {
-        let connect_fut = node::connect_http(&built.provider, seed_url).fuse();
-        let cancel_fut = cancel_rx.fuse();
-        futures::pin_mut!(connect_fut, cancel_fut);
-        futures::select! {
-            res = connect_fut => Some(res),
-            _ = cancel_fut => None,
-        }
-    };
-    let Some(seed_outcome) = seed_outcome else {
-        return Ok(None);
-    };
-    match seed_outcome {
-        Ok(seed_did) => {
-            if seed_did.trim().is_empty() {
-                return Ok(Some((
-                    "background node ready; seed returned an empty DID".to_string(),
+    let seed_future = async {
+        match node::connect_http(&built.provider, seed_url).await {
+            Ok(seed_did) => {
+                if seed_did.trim().is_empty() {
+                    return (
+                        "background node ready; seed returned an empty DID".to_string(),
+                        Vec::new(),
+                    );
+                }
+                let (peers, message) = settle_headless_peers(
+                    built,
                     Vec::new(),
-                )));
+                    "seed URL connected",
+                    true,
+                    Some(generation),
+                )
+                .await;
+                (message, peers)
             }
-            let (peers, message) = settle_headless_peers(
-                built,
+            Err(error) => (
+                format!("background node ready; seed connect failed: {error}"),
                 Vec::new(),
-                "seed URL connected",
-                true,
-                Some(generation),
-            )
-            .await;
-            Ok(Some((message, peers)))
+            ),
         }
-        Err(error) => Ok(Some((
-            format!("background node ready; seed connect failed: {error}"),
-            Vec::new(),
-        ))),
-    }
+    };
+    Ok(race_with_cancel(cancel_rx, seed_future).await)
 }
 
 async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsValue, String> {
@@ -580,7 +634,9 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
         state.start_error = None;
         state.message = "stopping background node".to_string();
         let node = state.node.take().or_else(|| state.starting_node.take());
-        state.stopping = node.is_some() || was_starting;
+        if node.is_some() {
+            state.closing_storage_count = state.closing_storage_count.saturating_add(1);
+        }
         (node, was_starting, cancel_tx, stop_generation)
     };
     if let Some(tx) = cancel_tx {
@@ -620,7 +676,7 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
     };
     {
         let mut state = state.borrow_mut();
-        state.stopping = false;
+        state.closing_storage_count = state.closing_storage_count.saturating_sub(1);
         if stop_generation.is_current() {
             state.message = message.clone();
         }
@@ -1105,7 +1161,8 @@ mod tests {
             wallet_account: None,
             peers: Vec::new(),
             starting: true,
-            stopping: false,
+            building_storage_count: 0,
+            closing_storage_count: 0,
             start_error: None,
             message: "connecting WebCrypto P-256".to_string(),
             generation: GenerationClock::default(),
@@ -1140,7 +1197,8 @@ mod tests {
             wallet_account: None,
             peers: Vec::new(),
             starting: false,
-            stopping: false,
+            building_storage_count: 0,
+            closing_storage_count: 0,
             start_error: None,
             message: "background node offline".to_string(),
             generation: GenerationClock::default(),
@@ -1154,6 +1212,7 @@ mod tests {
             return;
         };
         assert!(!start_gen.is_current());
+        assert!(!state.borrow().is_releasing_storage());
         assert_eq!(cancel_rx.try_recv(), Ok(Some(())));
         assert_eq!(
             crate::browser_api::js_string_field(&snapshot, "message"),

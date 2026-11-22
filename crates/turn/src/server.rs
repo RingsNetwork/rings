@@ -537,13 +537,12 @@ impl ManagedAllocation {
         let _ = self.outbound_data_tx.try_send((payload.to_vec(), target));
     }
 
-    fn enqueue_pinhole_job(
+    fn try_reserve_pinhole_slot(
         &self,
-        job: AllocationPinholeJob,
-    ) -> std::result::Result<(), PinholeEnqueueError> {
-        self.control_tx.try_send(job).map_err(|err| match err {
-            mpsc::error::TrySendError::Full(_) => PinholeEnqueueError::Full,
-            mpsc::error::TrySendError::Closed(_) => PinholeEnqueueError::Closed,
+    ) -> std::result::Result<mpsc::Permit<'_, AllocationPinholeJob>, PinholeEnqueueError> {
+        self.control_tx.try_reserve().map_err(|err| match err {
+            mpsc::error::TrySendError::Full(()) => PinholeEnqueueError::Full,
+            mpsc::error::TrySendError::Closed(()) => PinholeEnqueueError::Closed,
         })
     }
 
@@ -3011,6 +3010,36 @@ async fn handle_authenticated_create_permission(
         candidate_ips.push(peer_addr.ip);
     }
 
+    let pinhole_permit = match alloc.try_reserve_pinhole_slot() {
+        Ok(permit) => permit,
+        Err(PinholeEnqueueError::Full) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Control Queue Full",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        Err(PinholeEnqueueError::Closed) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Relay Session Closed",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+    };
+
     let now_ms = clock.now_ms();
     let (perm_res, to_close) = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3051,6 +3080,7 @@ async fn handle_authenticated_create_permission(
     match perm_res {
         Ok(()) => {}
         Err(CorePermissionError::AllocationMismatch { .. }) => {
+            drop(pinhole_permit);
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3064,6 +3094,7 @@ async fn handle_authenticated_create_permission(
             return;
         }
         Err(CorePermissionError::QuotaExceeded) => {
+            drop(pinhole_permit);
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3094,41 +3125,14 @@ async fn handle_authenticated_create_permission(
         ];
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    match alloc.enqueue_pinhole_job(AllocationPinholeJob {
+    pinhole_permit.send(AllocationPinholeJob {
         conn: Arc::clone(conn),
         src_addr,
         peer_ips: candidate_ips,
         req_msg: m.clone(),
-        mi_key: mi_key.clone(),
+        mi_key,
         success_response: built,
-    }) {
-        Ok(()) => {}
-        Err(PinholeEnqueueError::Full) => {
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_INSUFFICIENT_CAPACITY,
-                b"Control Queue Full",
-                None,
-                mi_key,
-            )
-            .await;
-        }
-        Err(PinholeEnqueueError::Closed) => {
-            let _ = book;
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_ALLOC_MISMATCH,
-                b"Relay Session Closed",
-                None,
-                mi_key,
-            )
-            .await;
-        }
-    }
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3196,6 +3200,36 @@ async fn handle_authenticated_channel_bind(
         return;
     }
 
+    let pinhole_permit = match alloc.try_reserve_pinhole_slot() {
+        Ok(permit) => permit,
+        Err(PinholeEnqueueError::Full) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_INSUFFICIENT_CAPACITY,
+                b"Control Queue Full",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+        Err(PinholeEnqueueError::Closed) => {
+            send_authenticated_error(
+                conn,
+                src_addr,
+                m,
+                CODE_ALLOC_MISMATCH,
+                b"Relay Session Closed",
+                None,
+                mi_key,
+            )
+            .await;
+            return;
+        }
+    };
+
     let (perm_res, to_close) = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
         let is_current = guard
@@ -3235,6 +3269,7 @@ async fn handle_authenticated_channel_bind(
     match perm_res {
         Ok(()) => {}
         Err(CorePermissionError::AllocationMismatch { .. }) => {
+            drop(pinhole_permit);
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3248,6 +3283,7 @@ async fn handle_authenticated_channel_bind(
             return;
         }
         Err(CorePermissionError::QuotaExceeded) => {
+            drop(pinhole_permit);
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3278,43 +3314,15 @@ async fn handle_authenticated_channel_bind(
         ];
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
-    match alloc.enqueue_pinhole_job(AllocationPinholeJob {
+    alloc.commit_channel_binding(channel, target_sock, channel_bind_timeout, now_ms);
+    pinhole_permit.send(AllocationPinholeJob {
         conn: Arc::clone(conn),
         src_addr,
         peer_ips: vec![target_sock.ip()],
         req_msg: m.clone(),
-        mi_key: mi_key.clone(),
+        mi_key,
         success_response: built,
-    }) {
-        Ok(()) => {
-            alloc.commit_channel_binding(channel, target_sock, channel_bind_timeout, now_ms);
-        }
-        Err(PinholeEnqueueError::Full) => {
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_INSUFFICIENT_CAPACITY,
-                b"Control Queue Full",
-                None,
-                mi_key,
-            )
-            .await;
-        }
-        Err(PinholeEnqueueError::Closed) => {
-            let _ = book;
-            send_authenticated_error(
-                conn,
-                src_addr,
-                m,
-                CODE_ALLOC_MISMATCH,
-                b"Relay Session Closed",
-                None,
-                mi_key,
-            )
-            .await;
-        }
-    }
+    });
 }
 
 async fn shutdown_all_allocations(book: &SyncMutex<ServerAllocationBook>) {

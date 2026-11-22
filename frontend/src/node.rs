@@ -6,6 +6,7 @@ use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
+use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::delegation::DelegationBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::browser::ProviderListener;
@@ -151,24 +152,28 @@ fn scoped_storage_name(base: &str, did: rings_node::prelude::rings_core::dht::Di
     }
 }
 
-/// Build a browser provider from a wallet-authorized delegatee key.
+/// Authorize a session [`DelegateeKey`] with the connected wallet without opening storage.
+pub async fn authorize_delegatee_key(wallet: &WalletAccount) -> Result<DelegateeKey, String> {
+    let mut builder = DelegationBuilder::new(wallet.account.clone(), wallet.account_type.clone());
+    let proof = builder.unsigned_proof();
+    let signature = wallet.sign_session_proof(&proof).await?;
+    builder = builder.set_delegator_signature(signature);
+    builder
+        .build()
+        .map_err(|error| format!("delegatee key rejected: {error}"))
+}
+
+/// Open a browser provider and attach its host WebView adapter from an authorized [`DelegateeKey`].
 ///
 /// The browser provider is used only on the single-threaded wasm event loop, but
 /// the upstream `Provider` handle is exposed behind `Arc`; keep that shape at
 /// this adapter boundary instead of introducing a parallel wasm-only provider.
 #[allow(clippy::arc_with_non_send_sync)]
-pub async fn build_node(
-    wallet: &WalletAccount,
+pub async fn open_node(
+    delegatee_key: DelegateeKey,
     settings: NodeSettings,
     webview_host: WebviewHost,
 ) -> Result<DemoNode, String> {
-    let mut builder = DelegationBuilder::new(wallet.account.clone(), wallet.account_type.clone());
-    let proof = builder.unsigned_proof();
-    let signature = wallet.sign_session_proof(&proof).await?;
-    builder = builder.set_delegator_signature(signature);
-    let delegatee_key = builder
-        .build()
-        .map_err(|error| format!("delegatee key rejected: {error}"))?;
     let storage_name = scoped_storage_name(&settings.storage_name, delegatee_key.delegator_did());
     let config = ProcessorConfig::new(
         settings.network_id,
@@ -200,6 +205,16 @@ pub async fn build_node(
         webview,
         listener,
     })
+}
+
+/// Build a browser provider from a wallet-authorized delegatee key.
+pub async fn build_node(
+    wallet: &WalletAccount,
+    settings: NodeSettings,
+    webview_host: WebviewHost,
+) -> Result<DemoNode, String> {
+    let delegatee_key = authorize_delegatee_key(wallet).await?;
+    open_node(delegatee_key, settings, webview_host).await
 }
 
 /// Connect to a seed node through its HTTP JSON-RPC endpoint.

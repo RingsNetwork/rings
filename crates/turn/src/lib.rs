@@ -3108,4 +3108,247 @@ mod tests {
             })
         );
     }
+
+    #[tokio::test]
+    async fn test_full_control_queue_rejects_create_permission_without_authorizing_peer(
+    ) -> Result<()> {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering;
+
+        use stun::error_code::ErrorCodeAttribute;
+        use stun::error_code::CODE_INSUFFICIENT_CAPACITY;
+        use tokio::sync::Notify;
+
+        struct StalledPinholeRelay {
+            addr: SocketAddr,
+            closed: Notify,
+            entered_pinhole: Notify,
+            release_pinhole: Notify,
+            stall: AtomicBool,
+            sent_targets: std::sync::Mutex<Vec<SocketAddr>>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelay for StalledPinholeRelay {
+            fn relayed_addr(&self) -> SocketAddr {
+                self.addr
+            }
+
+            async fn recv_datagram(&self, _buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+                self.closed.notified().await;
+                Err(std::io::Error::other("closed"))
+            }
+
+            async fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+                self.sent_targets.lock().unwrap().push(target);
+                Ok(buf.len())
+            }
+
+            async fn allow_peer_ips(
+                &self,
+                _peer_ips: &[IpAddr],
+                _ttl: Duration,
+            ) -> std::io::Result<()> {
+                if self.stall.load(Ordering::SeqCst) {
+                    self.entered_pinhole.notify_waiters();
+                    self.release_pinhole.notified().await;
+                }
+                Ok(())
+            }
+
+            fn begin_close(&self) -> TurnRelayCloseHandle {
+                self.closed.notify_waiters();
+                None
+            }
+
+            async fn finish_close(&self, _handle: TurnRelayCloseHandle) {}
+        }
+
+        struct SingleRelayFactory(Arc<StalledPinholeRelay>);
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelayFactory for SingleRelayFactory {
+            fn supports_family(&self, use_ipv4: bool) -> bool {
+                use_ipv4
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::io::Result<Arc<dyn TurnDatagramRelay>> {
+                Ok(Arc::clone(&self.0) as Arc<dyn TurnDatagramRelay>)
+            }
+        }
+
+        let relay = Arc::new(StalledPinholeRelay {
+            addr: "198.51.100.77:53000".parse().unwrap(),
+            closed: Notify::new(),
+            entered_pinhole: Notify::new(),
+            release_pinhole: Notify::new(),
+            stall: AtomicBool::new(true),
+            sent_targets: std::sync::Mutex::new(Vec::new()),
+        });
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.custom_relay_factory =
+            Some(Arc::new(SingleRelayFactory(Arc::clone(&relay)))
+                as Arc<dyn TurnDatagramRelayFactory>);
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        let eph_key = SecretKey::random();
+        let res = server
+            .reserve_exit_session(eph_key.pubkey(), Duration::from_secs(30))
+            .await?;
+        let creds = TurnCredentials::from_session_ticket(&res.ticket, &eph_key, res.server_pubkey)?;
+
+        let sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut unauth = Message::new();
+        unauth
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&unauth.raw, server_addr).await?;
+        let mut buf = vec![0_u8; 1500];
+        let (n, _) = sock.recv_from(&mut buf).await?;
+        let mut challenge = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge.decode().unwrap();
+        let mut nonce = Nonce::new(ATTR_NONCE, String::new());
+        let mut realm = Realm::new(ATTR_REALM, String::new());
+        nonce.get_from(&challenge).unwrap();
+        realm.get_from(&challenge).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+        let mut auth_alloc = Message::new();
+        auth_alloc
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&auth_alloc.raw, server_addr).await?;
+        let (an, _) = sock.recv_from(&mut buf).await?;
+        let mut alloc_resp = Message {
+            raw: buf[..an].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        let build_perm = |ip: IpAddr| {
+            let mut msg = Message::new();
+            msg.build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(PeerAddress { ip, port: 0 }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+            msg.raw
+        };
+
+        // First CreatePermission enters `allow_peer_ips` and stalls the allocation worker.
+        let entered = relay.entered_pinhole.notified();
+        sock.send_to(
+            &build_perm(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))),
+            server_addr,
+        )
+        .await?;
+        entered.await;
+
+        // Fill all 16 queued slots (`MAX_ALLOCATION_CONTROL_QUEUE = 16`).
+        for idx in 2_u8..=17_u8 {
+            sock.send_to(
+                &build_perm(IpAddr::V4(Ipv4Addr::new(198, 51, 100, idx))),
+                server_addr,
+            )
+            .await?;
+        }
+        // Give `read_loop` a brief moment to enqueue all 16 before sending the 18th.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        let rejected_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
+        sock.send_to(&build_perm(rejected_ip), server_addr).await?;
+        let (rn, _) = tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
+            .await
+            .expect("overflow CreatePermission must immediately return 508")?;
+        let mut err_resp = Message {
+            raw: buf[..rn].to_vec(),
+            ..Default::default()
+        };
+        err_resp.decode().unwrap();
+        assert_eq!(err_resp.typ.class, CLASS_ERROR_RESPONSE);
+        let mut err_code = ErrorCodeAttribute::default();
+        err_code.get_from(&err_resp).unwrap();
+        assert_eq!(err_code.code.0, CODE_INSUFFICIENT_CAPACITY.0);
+
+        // Unblock the worker and drain the 17 queued 200 responses.
+        relay.stall.store(false, Ordering::SeqCst);
+        relay.release_pinhole.notify_waiters();
+        for _ in 0..17 {
+            let (sn, _) =
+                tokio::time::timeout(Duration::from_millis(500), sock.recv_from(&mut buf))
+                    .await
+                    .expect("queued CreatePermission must complete")?;
+            let mut ok_resp = Message {
+                raw: buf[..sn].to_vec(),
+                ..Default::default()
+            };
+            ok_resp.decode().unwrap();
+            assert_eq!(ok_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        }
+
+        // Send indications to `rejected_ip` (must NOT be authorized) and `198.51.100.1` (authorized).
+        for ip in [rejected_ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))] {
+            let mut send_ind = Message::new();
+            send_ind
+                .build(&[
+                    Box::new(TransactionId::new()),
+                    Box::new(MessageType::new(
+                        METHOD_SEND,
+                        stun::message::CLASS_INDICATION,
+                    )),
+                    Box::new(PeerAddress { ip, port: 9000 }),
+                    Box::new(turn::proto::data::Data(b"probe".to_vec())),
+                    Box::new(FINGERPRINT),
+                ])
+                .unwrap();
+            sock.send_to(&send_ind.raw, server_addr).await?;
+        }
+        tokio::time::timeout(Duration::from_millis(300), async {
+            while relay.sent_targets.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("authorized Send indication must reach relay");
+        assert_eq!(*relay.sent_targets.lock().unwrap(), vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
+            9000
+        )]);
+
+        server.close().await?;
+        Ok(())
+    }
 }
