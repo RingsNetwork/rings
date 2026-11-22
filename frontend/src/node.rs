@@ -2,9 +2,6 @@
 
 use std::sync::Arc;
 
-use js_sys::Array;
-use js_sys::Object;
-use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::delegation::DelegationBuilder;
@@ -13,7 +10,8 @@ use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_webview::Result as WebviewResult;
 use rings_webview::WebviewError;
-use wasm_bindgen::JsValue;
+use serde_json::json;
+use serde_json::Value;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
@@ -284,15 +282,15 @@ pub async fn send_message(
 
 /// Refresh connected peers.
 pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, String> {
-    let response = request(provider, "listPeers", Object::new().into()).await?;
-    let peers = Reflect::get(&response, &JsValue::from_str("peers"))
-        .map_err(|error| format!("read peers failed: {error:?}"))?;
-    let peers = Array::from(&peers);
+    let response = request(provider, "listPeers", json!({})).await?;
+    let peers = response
+        .get("peers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "read peers failed: missing peers array".to_string())?;
     let mut out = Vec::new();
-    for index in 0..peers.length() {
-        let peer = peers.get(index);
-        let did = get_string(&peer, "did").unwrap_or_default();
-        let state = get_string(&peer, "state").unwrap_or_else(|_| "Unknown".to_string());
+    for peer in peers {
+        let did = get_string(peer, "did").unwrap_or_default();
+        let state = get_string(peer, "state").unwrap_or_else(|_| "Unknown".to_string());
         if let Some(peer) = PeerView::from_fields(did, state) {
             out.push(peer);
         }
@@ -300,28 +298,26 @@ pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, Strin
     Ok(out)
 }
 
-async fn request(
-    provider: &Arc<Provider>,
-    method: &str,
-    params: JsValue,
-) -> Result<JsValue, String> {
-    JsFuture::from(provider.request(method.to_string(), params))
+async fn request(provider: &Arc<Provider>, method: &str, params: Value) -> Result<Value, String> {
+    provider
+        .request_internal(method.to_string(), params)
         .await
-        .map_err(|error| format!("rpc {method} failed: {error:?}"))
+        .map_err(|error| format!("rpc {method} failed: {error}"))
 }
 
-fn obj(fields: &[(&str, &str)]) -> JsValue {
-    let object = Object::new();
-    for (key, value) in fields {
-        let _set = Reflect::set(&object, &JsValue::from_str(key), &JsValue::from_str(value));
+fn obj(fields: &[(&str, &str)]) -> Value {
+    let mut map = serde_json::Map::with_capacity(fields.len());
+    for &(key, value) in fields {
+        map.insert(key.to_string(), Value::String(value.to_string()));
     }
-    object.into()
+    Value::Object(map)
 }
 
-fn get_string(value: &JsValue, field: &str) -> Result<String, String> {
-    Reflect::get(value, &JsValue::from_str(field))
-        .map_err(|error| format!("read {field} failed: {error:?}"))?
-        .as_string()
+fn get_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
         .ok_or_else(|| format!("missing string field {field}"))
 }
 
@@ -334,6 +330,7 @@ mod tests {
     use rings_node::prelude::rings_core::delegation::DelegateeKey;
     use rings_node::prelude::rings_core::ecc::SecretKey;
     use rings_node::prelude::uuid;
+    use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::*;
