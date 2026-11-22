@@ -31,3 +31,13 @@ version = "0.4.5"
 [[allow.exact]]
 crate = "lz4_flex"
 version = "0.14.2"
+
+# RUSTSEC-2026-0592: stack overflow fix in Url::origin() on nested blob: URLs.
+[[allow.exact]]
+crate = "url"
+version = "2.5.9"
+
+# RUSTSEC-2026-0592: companion release required by url 2.5.9.
+[[allow.exact]]
+crate = "form_urlencoded"
+version = "1.2.3"

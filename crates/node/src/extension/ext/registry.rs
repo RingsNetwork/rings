@@ -133,6 +133,7 @@ pub(crate) struct Core {
     slot_roster: Arc<rings_core::message::SlotRoster>,
     onion_role: crate::onion::OnionRole<crate::onion::OnionExitOffer>,
     onion_idle_floor: crate::onion::circuit::OnionIdleFloor,
+    onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
     onion_process_epoch: crate::onion::OnionProcessEpochCell,
     clock: rings_core::utils::SharedClock,
     rng: rings_core::utils::SharedRng,
@@ -217,6 +218,11 @@ impl Core {
     /// The cover floor of this node's idle onion links (#880).
     pub(crate) fn onion_idle_floor(&self) -> crate::onion::circuit::OnionIdleFloor {
         self.onion_idle_floor
+    }
+
+    /// Socket binding and peer-IP admission settings for native `onion::udp` exits.
+    pub(crate) fn onion_udp_bind_config(&self) -> crate::onion::OnionUdpBindConfig {
+        self.onion_udp_bind_config
     }
 
     /// The onion process epoch cell of this node (#834 D2).
@@ -673,6 +679,7 @@ impl Extensions {
         let slot_roster = Arc::clone(processor.swarm.dht().edges());
         let onion_role = processor.onion_role().clone();
         let onion_idle_floor = processor.onion_idle_floor();
+        let onion_udp_bind_config = processor.onion_udp_bind_config();
         let onion_process_epoch = processor.onion_process_epoch();
         let clock = processor.clock().clone();
         let rng = processor.rng().clone();
@@ -686,6 +693,7 @@ impl Extensions {
                 slot_roster,
                 onion_role,
                 onion_idle_floor,
+                onion_udp_bind_config,
                 onion_process_epoch,
                 clock,
                 rng,

@@ -72,6 +72,7 @@ pub(crate) mod sphinx;
 pub mod target;
 #[cfg(rings_native)]
 pub mod tcp;
+pub mod udp;
 
 pub use circuit::OnionInvokeBackend;
 pub use circuit::OnionInvokeCall;
@@ -126,6 +127,13 @@ pub use signature::ONION_BACKEND_NAME_MAX_BYTES;
 pub use sphinx::class::OnionLoopClass;
 pub use target::OnionProxyTarget;
 pub use target::OnionProxyTargetError;
+#[cfg(rings_native)]
+pub use udp::NativeOnionUdpSession;
+pub use udp::OnionUdpBindConfig;
+pub use udp::OnionUdpBindMode;
+pub use udp::OnionUdpClientFrame;
+pub use udp::OnionUdpPinholeTable;
+pub use udp::OnionUdpServerFrame;
 
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";

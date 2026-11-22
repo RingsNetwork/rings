@@ -18,6 +18,8 @@ mod credentials;
 #[cfg(not(target_family = "wasm"))]
 mod error;
 #[cfg(not(target_family = "wasm"))]
+mod relay_backend;
+#[cfg(not(target_family = "wasm"))]
 mod server;
 
 #[cfg(not(target_family = "wasm"))]
@@ -66,6 +68,30 @@ pub use credentials::TURN_SESSION_TICKET_DOMAIN;
 pub use error::Result;
 #[cfg(not(target_family = "wasm"))]
 pub use error::TurnError;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::ActiveAllocationSpec;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::BeginAllocateDecision;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::CompleteAllocateDecision;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::CorePermissionError;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::CoreReserveError;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::PendingAllocateSpec;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::RefreshDecision;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::TurnAllocationCore;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::TurnDatagramRelay;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::TurnDatagramRelayFactory;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::TurnFiveTupleKey;
+#[cfg(not(target_family = "wasm"))]
+pub use relay_backend::TurnRelayCloseHandle;
 #[cfg(not(target_family = "wasm"))]
 pub use server::TurnServer;
 #[cfg(not(target_family = "wasm"))]
@@ -2268,6 +2294,257 @@ mod tests {
         alloc_conn.close().await?;
         client.close().await?;
         server.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_server_coalesces_inflight_async_allocate_and_aborts_on_shutdown() -> Result<()> {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+
+        use stun::message::METHOD_BINDING;
+        use stun::xoraddr::XorMappedAddress;
+        use tokio::sync::Notify;
+        use turn::proto::relayaddr::RelayedAddress;
+
+        struct GatedRelay {
+            addr: SocketAddr,
+            closed: Notify,
+            closed_count: Arc<AtomicUsize>,
+            permitted_ips: std::sync::Mutex<Vec<IpAddr>>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelay for GatedRelay {
+            fn relayed_addr(&self) -> SocketAddr {
+                self.addr
+            }
+
+            async fn recv_datagram(&self, _buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+                self.closed.notified().await;
+                Err(std::io::Error::other("closed"))
+            }
+
+            async fn send_to(&self, buf: &[u8], _target: SocketAddr) -> std::io::Result<usize> {
+                Ok(buf.len())
+            }
+
+            async fn allow_peer_ips(
+                &self,
+                peer_ips: &[IpAddr],
+                _ttl: Duration,
+            ) -> std::io::Result<()> {
+                self.permitted_ips
+                    .lock()
+                    .unwrap()
+                    .extend_from_slice(peer_ips);
+                Ok(())
+            }
+
+            fn begin_close(&self) -> TurnRelayCloseHandle {
+                self.closed.notify_waiters();
+                None
+            }
+
+            async fn finish_close(&self, _handle: TurnRelayCloseHandle) {
+                self.closed_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        struct GatedRelayFactory {
+            started: Notify,
+            release: Notify,
+            calls: AtomicUsize,
+            closed_count: Arc<AtomicUsize>,
+            last_relay: std::sync::Mutex<Option<Arc<GatedRelay>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl TurnDatagramRelayFactory for GatedRelayFactory {
+            fn supports_family(&self, use_ipv4: bool) -> bool {
+                use_ipv4
+            }
+
+            async fn allocate_relay(
+                &self,
+                _use_ipv4: bool,
+                _need_even_port: bool,
+            ) -> std::io::Result<Arc<dyn TurnDatagramRelay>> {
+                let idx = self.calls.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_waiters();
+                self.release.notified().await;
+                let addr = SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(198, 51, 100, 99)),
+                    50_000 + u16::try_from(idx).unwrap(),
+                );
+                let relay = Arc::new(GatedRelay {
+                    addr,
+                    closed: Notify::new(),
+                    closed_count: Arc::clone(&self.closed_count),
+                    permitted_ips: std::sync::Mutex::new(Vec::new()),
+                });
+                *self.last_relay.lock().unwrap() = Some(Arc::clone(&relay));
+                Ok(relay)
+            }
+        }
+
+        let closed_count = Arc::new(AtomicUsize::new(0));
+        let factory = Arc::new(GatedRelayFactory {
+            started: Notify::new(),
+            release: Notify::new(),
+            calls: AtomicUsize::new(0),
+            closed_count: Arc::clone(&closed_count),
+            last_relay: std::sync::Mutex::new(None),
+        });
+
+        let mut cfg = TurnServerConfig::loopback_ephemeral();
+        cfg.max_allocations = 1;
+        cfg.custom_relay_factory = Some(Arc::clone(&factory) as Arc<dyn TurnDatagramRelayFactory>);
+        let server = TurnServer::start(cfg).await?;
+        let server_addr = server.local_addr();
+
+        // Issue a single-use session ticket and get a nonce challenge.
+        let eph_key = SecretKey::random();
+        let res = server
+            .reserve_exit_session(eph_key.pubkey(), Duration::from_secs(30))
+            .await?;
+        let creds = TurnCredentials::from_session_ticket(&res.ticket, &eph_key, res.server_pubkey)?;
+
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut unauth = Message::new();
+        unauth
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        client_sock.send_to(&unauth.raw, server_addr).await?;
+        let mut buf = vec![0_u8; 1500];
+        let (n, _) = client_sock.recv_from(&mut buf).await?;
+        let mut challenge = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        challenge.decode().unwrap();
+        let mut nonce = Nonce::new(ATTR_NONCE, String::new());
+        let mut realm = Realm::new(ATTR_REALM, String::new());
+        nonce.get_from(&challenge).unwrap();
+        realm.get_from(&challenge).unwrap();
+        let mi_key = generate_auth_key(&creds.username, &realm.text, &creds.credential);
+
+        let tx_id = TransactionId::new();
+        let mut auth_alloc = Message::new();
+        auth_alloc
+            .build(&[
+                Box::new(Message {
+                    transaction_id: tx_id,
+                    ..Default::default()
+                }),
+                Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+                Box::new(turn::proto::reqtrans::RequestedTransport {
+                    protocol: turn::proto::PROTO_UDP,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key.clone())),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+
+        let started_fut = factory.started.notified();
+        client_sock.send_to(&auth_alloc.raw, server_addr).await?;
+        started_fut.await;
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+
+        // Retransmit the exact same single-use ticket Allocate while the first open is suspended:
+        // must coalesce (no 401 error, no second factory call), AND read_loop must remain
+        // non-blocking for unrelated STUN Binding requests!
+        client_sock.send_to(&auth_alloc.raw, server_addr).await?;
+        let observer_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut binding_req = Message::new();
+        binding_req
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_BINDING, CLASS_REQUEST)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        observer_sock.send_to(&binding_req.raw, server_addr).await?;
+        let (bn, _) = tokio::time::timeout(
+            Duration::from_millis(200),
+            observer_sock.recv_from(&mut buf),
+        )
+        .await
+        .expect("read_loop must not block on slow async Allocate")?;
+        let mut binding_resp = Message {
+            raw: buf[..bn].to_vec(),
+            ..Default::default()
+        };
+        binding_resp.decode().unwrap();
+        assert_eq!(binding_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut xma = XorMappedAddress::default();
+        xma.get_from(&binding_resp).unwrap();
+        assert_eq!(factory.calls.load(Ordering::SeqCst), 1);
+
+        // Release the open: client receives 200 Allocate Success with exact E_exit relayed_addr.
+        factory.release.notify_waiters();
+        let (an, _) =
+            tokio::time::timeout(Duration::from_millis(500), client_sock.recv_from(&mut buf))
+                .await
+                .expect("coalesced Allocate must succeed")?;
+        let mut alloc_resp = Message {
+            raw: buf[..an].to_vec(),
+            ..Default::default()
+        };
+        alloc_resp.decode().unwrap();
+        assert_eq!(alloc_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let mut relayed = RelayedAddress::default();
+        relayed.get_from(&alloc_resp).unwrap();
+        assert_eq!(
+            SocketAddr::new(relayed.ip, relayed.port),
+            "198.51.100.99:50000".parse::<SocketAddr>().unwrap()
+        );
+
+        // CreatePermission must synchronize peer IP to TurnDatagramRelay::allow_peer_ips before 200.
+        let mut perm_req = Message::new();
+        perm_req
+            .build(&[
+                Box::new(TransactionId::new()),
+                Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+                Box::new(turn::proto::peeraddr::PeerAddress {
+                    ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77)),
+                    port: 0,
+                }),
+                Box::new(Username::new(ATTR_USERNAME, creds.username.clone())),
+                Box::new(Realm::new(ATTR_REALM, realm.text.clone())),
+                Box::new(Nonce::new(ATTR_NONCE, nonce.text.clone())),
+                Box::new(MessageIntegrity(mi_key)),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        client_sock.send_to(&perm_req.raw, server_addr).await?;
+        let (pkt_len, _) = client_sock.recv_from(&mut buf).await?;
+        let mut perm_resp = Message {
+            raw: buf[..pkt_len].to_vec(),
+            ..Default::default()
+        };
+        perm_resp.decode().unwrap();
+        assert_eq!(perm_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+        let installed_relay = factory.last_relay.lock().unwrap().clone().unwrap();
+        assert_eq!(*installed_relay.permitted_ips.lock().unwrap(), vec![
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 77))
+        ]);
+
+        // Closing server must tear down the active relay cleanly without blocking on recv_datagram.
+        tokio::time::timeout(Duration::from_millis(500), server.close())
+            .await
+            .expect("server.close() must finish promptly")?;
+        assert_eq!(closed_count.load(Ordering::SeqCst), 1);
         Ok(())
     }
 }

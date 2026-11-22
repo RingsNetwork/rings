@@ -102,6 +102,8 @@ use crate::onion::https::OnionHttpsRequest;
 use crate::onion::https::OnionHttpsResponse;
 use crate::onion::signature::OnionServiceName;
 use crate::onion::tests::fixture::fixture_secret;
+use crate::onion::udp::OnionUdpClientFrame;
+use crate::onion::udp::OnionUdpServerFrame;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitFailure;
@@ -127,8 +129,8 @@ use crate::online::ONLINE_NODES_TOPIC;
 ///
 /// Both parts are one literal so a diff shows the version and the hash moving together.
 const PINNED: (u16, &str) = (
-    4,
-    "bb304e05f88d43d9adc9adf1df962a5883890ba94376b98ef5f0e003334b049c",
+    5,
+    "e315b57fd8f8d9c72149d7a040a1864baa45c2cccb430ad5239a1f7da50028b3",
 );
 
 const GOLDEN_EPOCH_MS: u128 = 1_700_000_000_000;
@@ -449,11 +451,14 @@ fn format_goldens() -> (String, Vec<u8>) {
     tracer.trace_type::<OnionHttpsRequest>(&samples).unwrap();
     tracer.trace_type::<OnionHttpsResponse>(&samples).unwrap();
     tracer.trace_type::<OnionHttpsOutcome>(&samples).unwrap();
+    tracer.trace_type::<OnionUdpClientFrame>(&samples).unwrap();
+    tracer.trace_type::<OnionUdpServerFrame>(&samples).unwrap();
 
     // Nested enums without custom deserializers: `trace_type` visits every variant.
     tracer.trace_type::<OnlineNodeType>(&samples).unwrap();
     tracer.trace_type::<ProxyProtocol>(&samples).unwrap();
     tracer.trace_type::<Initiator>(&samples).unwrap();
+    tracer.trace_type::<std::net::IpAddr>(&samples).unwrap();
     tracer.trace_type::<SocketAddr>(&samples).unwrap();
     tracer.trace_type::<OnionExitFailure>(&samples).unwrap();
 

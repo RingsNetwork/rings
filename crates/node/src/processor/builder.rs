@@ -42,6 +42,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     pub(in crate::processor) onion_exit_ttl: Duration,
     pub(in crate::processor) onion_idle_floor: OnionIdleFloor,
+    pub(in crate::processor) onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
@@ -92,6 +93,7 @@ impl ProcessorBuilder {
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
             onion_exit_ttl: config.onion_exit_ttl,
             onion_idle_floor: OnionIdleFloor::DEFAULT,
+            onion_udp_bind_config: crate::onion::OnionUdpBindConfig::default(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
             observer: None,
@@ -256,6 +258,12 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Configure OS UDP socket binding and peer-IP admission for `onion::udp` exit sessions.
+    pub fn onion_udp_bind_config(mut self, config: crate::onion::OnionUdpBindConfig) -> Self {
+        self.onion_udp_bind_config = config;
+        self
+    }
+
     /// Set the onion symbols this process registers (#834 D2).
     pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
         self.onion_role = role;
@@ -320,6 +328,9 @@ impl ProcessorBuilder {
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.network_parameters.endpoint_hint().map(str::to_owned);
+        let onion_udp_bind_config = self
+            .onion_udp_bind_config
+            .with_endpoint_hint_fallback(endpoint_hint.as_deref());
         let initial_epoch = self
             .onion_process_epoch
             .unwrap_or_else(|| OnionProcessEpoch::from_rng(&mut self.rng.lock_rng()));
@@ -441,6 +452,7 @@ impl ProcessorBuilder {
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
             onion_idle_floor: self.onion_idle_floor,
+            onion_udp_bind_config,
             registration_readiness: Arc::new(RegistrationReadiness::new(registration_tasks.len())),
             registration_tasks,
             observability,

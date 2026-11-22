@@ -45,6 +45,13 @@ use crate::onion::sphinx::seed::OnionSegmentSeed;
 use crate::onion::tests::fixture::fixture_secret;
 use crate::onion::tests::fixture::grid_expiry;
 use crate::onion::tests::fixture::session_loop;
+use crate::onion::udp::decode_next_client_frame;
+use crate::onion::udp::decode_next_server_frame;
+use crate::onion::udp::encode_client_frame;
+use crate::onion::udp::encode_server_frame;
+use crate::onion::udp::OnionUdpBindMode;
+use crate::onion::udp::OnionUdpClientFrame;
+use crate::onion::udp::OnionUdpServerFrame;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionLoop;
 use crate::onion::OnionProcessEpoch;
@@ -190,6 +197,20 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         arguments: encoded_args_ipv6,
     }))
     .encode(&mac);
+    let args_udp = OnionSessionArguments {
+        session: OnionSessionId::new([0x53; 16]),
+        digest: OnionTargetDigest::of(
+            OnionUdpBindMode::Ipv4AnyPort
+                .to_target()
+                .authority()
+                .as_bytes(),
+        ),
+    };
+    let udp_layer_bytes = make_layer(OnionLayerApplication::Apply(OnionApplication {
+        symbol: OnionServiceName::udp().into(),
+        arguments: args_udp.encode(),
+    }))
+    .encode(&mac);
     let invoke_shape = OnionInvokeShape::new(
         OnionInputType::Fixed(OnionWidthClass::B32),
         OnionWidthClass::B64,
@@ -231,6 +252,10 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
     out.push((
         "onion/layer/Apply_https".to_string(),
         https_layer_bytes.to_vec(),
+    ));
+    out.push((
+        "onion/layer/Apply_udp".to_string(),
+        udp_layer_bytes.to_vec(),
     ));
 
     // Reply block (`OnionSurb`): pure reply cell production and seeded `build_surb` + `Credit`.
@@ -401,6 +426,60 @@ pub(super) fn onion_goldens() -> Vec<(String, Vec<u8>)> {
         let encoded = encode_outcome(&outcome).unwrap();
         assert_eq!(decode_outcome(&encoded).unwrap(), outcome);
         out.push((format!("onion/https/Failure/{name}"), encoded));
+    }
+
+    // UDP datagram session frames, checked against declared variants.
+    let udp_client_frames = vec![
+        ("AllowPeerIp", OnionUdpClientFrame::AllowPeerIp {
+            peer_ip: "198.51.100.42".parse().unwrap(),
+            ttl_ms: 300_000,
+        }),
+        ("SendDatagram", OnionUdpClientFrame::SendDatagram {
+            peer: "198.51.100.42:54321".parse().unwrap(),
+            payload: b"udp-client-payload".to_vec(),
+        }),
+    ];
+    let declared_udp_client = declared_variants::<OnionUdpClientFrame>();
+    assert_eq!(
+        udp_client_frames
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        declared_udp_client,
+        "OnionUdpClientFrame goldens must cover every declared variant"
+    );
+    for (name, frame) in udp_client_frames {
+        let encoded = encode_client_frame(&frame).unwrap();
+        let mut buf = bytes::BytesMut::from(encoded.as_slice());
+        assert_eq!(decode_next_client_frame(&mut buf).unwrap(), Some(frame));
+        assert!(buf.is_empty());
+        out.push((format!("onion/udp/ClientFrame/{name}"), encoded));
+    }
+
+    let udp_server_frames = vec![
+        ("Bound", OnionUdpServerFrame::Bound {
+            local_addr: "203.0.113.10:49152".parse().unwrap(),
+        }),
+        ("RecvDatagram", OnionUdpServerFrame::RecvDatagram {
+            peer: "198.51.100.42:54321".parse().unwrap(),
+            payload: b"udp-server-payload".to_vec(),
+        }),
+    ];
+    let declared_udp_server = declared_variants::<OnionUdpServerFrame>();
+    assert_eq!(
+        udp_server_frames
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        declared_udp_server,
+        "OnionUdpServerFrame goldens must cover every declared variant"
+    );
+    for (name, frame) in udp_server_frames {
+        let encoded = encode_server_frame(&frame).unwrap();
+        let mut buf = bytes::BytesMut::from(encoded.as_slice());
+        assert_eq!(decode_next_server_frame(&mut buf).unwrap(), Some(frame));
+        assert!(buf.is_empty());
+        out.push((format!("onion/udp/ServerFrame/{name}"), encoded));
     }
 
     out
