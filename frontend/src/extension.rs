@@ -102,6 +102,7 @@ struct HeadlessNodeState {
     wallet_account: Option<WalletAccount>,
     peers: Vec<PeerView>,
     starting: bool,
+    waiting_start_count: usize,
     building_storage_count: usize,
     closing_storage_count: usize,
     start_error: Option<String>,
@@ -138,6 +139,7 @@ pub fn headless_node() -> Html {
         wallet_account: None,
         peers: Vec::new(),
         starting: false,
+        waiting_start_count: 0,
         building_storage_count: 0,
         closing_storage_count: 0,
         start_error: None,
@@ -270,15 +272,6 @@ async fn start_headless_node(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    for _ in 0..200 {
-        if !state.borrow().is_releasing_storage() {
-            break;
-        }
-        sleep(Duration::from_millis(25)).await;
-    }
-    if state.borrow().is_releasing_storage() {
-        return Err("previous background node is still releasing storage".to_string());
-    }
     if state.borrow().starting || state.borrow().starting_node.is_some() {
         return headless_node_snapshot(state, "background node starting".to_string(), false, None)
             .await;
@@ -294,6 +287,48 @@ async fn start_headless_node(
     }
 
     let settings_value = js_prop(message, "settings")?;
+    if state.borrow().is_releasing_storage() {
+        let wait_generation = {
+            let mut guard = state.borrow_mut();
+            guard.waiting_start_count = guard.waiting_start_count.saturating_add(1);
+            guard.generation.token()
+        };
+        for _ in 0..200 {
+            if !state.borrow().is_releasing_storage() || !wait_generation.is_current() {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+        {
+            let mut guard = state.borrow_mut();
+            guard.waiting_start_count = guard.waiting_start_count.saturating_sub(1);
+        }
+        if state.borrow().starting || state.borrow().starting_node.is_some() {
+            return headless_node_snapshot(
+                state,
+                "background node starting".to_string(),
+                false,
+                None,
+            )
+            .await;
+        }
+        if state.borrow().node.is_some() {
+            return headless_node_snapshot(
+                state,
+                "background node already active".to_string(),
+                false,
+                None,
+            )
+            .await;
+        }
+        if !wait_generation.is_current() {
+            return retained_live_headless_snapshot_js(&state.borrow());
+        }
+        if state.borrow().is_releasing_storage() {
+            return Err("previous background node is still releasing storage".to_string());
+        }
+    }
+
     let wallet_kind = js_string_field(&settings_value, "walletKind")
         .map(|value| WalletKind::from_value(&value))
         .unwrap_or(WalletKind::WebCrypto);
@@ -626,7 +661,7 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
     let (node, was_starting, cancel_tx, stop_generation) = {
         let mut state = state.borrow_mut();
         let stop_generation = state.generation.bump();
-        let was_starting = state.starting;
+        let was_starting = state.starting || state.waiting_start_count > 0;
         let cancel_tx = state.start_cancel_tx.take();
         state.wallet_account = None;
         state.peers = Vec::new();
@@ -1161,6 +1196,7 @@ mod tests {
             wallet_account: None,
             peers: Vec::new(),
             starting: true,
+            waiting_start_count: 0,
             building_storage_count: 0,
             closing_storage_count: 0,
             start_error: None,
@@ -1197,6 +1233,7 @@ mod tests {
             wallet_account: None,
             peers: Vec::new(),
             starting: false,
+            waiting_start_count: 0,
             building_storage_count: 0,
             closing_storage_count: 0,
             start_error: None,
@@ -1214,6 +1251,56 @@ mod tests {
         assert!(!start_gen.is_current());
         assert!(!state.borrow().is_releasing_storage());
         assert_eq!(cancel_rx.try_recv(), Ok(Some(())));
+        assert_eq!(
+            crate::browser_api::js_string_field(&snapshot, "message"),
+            Ok("background node start cancelled".to_string())
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    async fn test_stop_cancels_start_waiting_on_storage_release() {
+        let state = Rc::new(RefCell::new(HeadlessNodeState {
+            node: None,
+            starting_node: None,
+            start_cancel_tx: None,
+            wallet_account: None,
+            peers: Vec::new(),
+            starting: false,
+            waiting_start_count: 0,
+            building_storage_count: 0,
+            closing_storage_count: 1,
+            start_error: None,
+            message: "stopping background node".to_string(),
+            generation: GenerationClock::default(),
+        }));
+        let msg = Object::new();
+        let settings = Object::new();
+        let _ = js_set(&msg, "settings", &settings.into());
+        let msg_val: JsValue = msg.into();
+
+        let start_state = state.clone();
+        let start_fut = start_headless_node(start_state, &msg_val);
+        let control_fut = async {
+            sleep(Duration::from_millis(10)).await;
+            let stop_snap = stop_headless_node(state.clone()).await;
+            assert!(stop_snap.is_ok());
+            state.borrow_mut().closing_storage_count = 0;
+        };
+        let (start_res, ()) = futures::future::join(start_fut, control_fut).await;
+        assert!(start_res.is_ok());
+        let Ok(snapshot) = start_res else {
+            return;
+        };
+        assert!(!state.borrow().starting);
+        assert_eq!(
+            crate::browser_api::js_bool_field(&snapshot, "online"),
+            Ok(false)
+        );
+        assert_eq!(
+            crate::browser_api::js_bool_field(&snapshot, "starting"),
+            Ok(false)
+        );
         assert_eq!(
             crate::browser_api::js_string_field(&snapshot, "message"),
             Ok("background node start cancelled".to_string())
