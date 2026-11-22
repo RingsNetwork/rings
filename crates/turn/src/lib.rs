@@ -3054,4 +3054,58 @@ mod tests {
         server.close().await?;
         Ok(())
     }
+
+    #[test]
+    fn turn_allocation_core_install_permissions_returns_expired_open_id() {
+        use crate::relay_backend::BeginAllocateDecision;
+        use crate::relay_backend::CompleteAllocateDecision;
+        use crate::relay_backend::CorePermissionError;
+        use crate::relay_backend::TurnFiveTupleKey;
+
+        let mut core = TurnAllocationCore::new(2, 4, 4);
+        let tuple = TurnFiveTupleKey {
+            src_addr: "127.0.0.1:41000".parse().unwrap(),
+            dst_addr: "127.0.0.1:3478".parse().unwrap(),
+            protocol: 17,
+        };
+        let BeginAllocateDecision::StartOpen { open_id, .. } =
+            core.begin_allocate(tuple, [7u8; 12], "u".to_string(), None, 1_000, 100)
+        else {
+            panic!("expected StartOpen");
+        };
+        assert!(matches!(
+            core.complete_allocate(
+                tuple,
+                open_id,
+                Ok("198.51.100.10:50000".parse().unwrap()),
+                100
+            ),
+            CompleteAllocateDecision::Installed { .. }
+        ));
+
+        // At t = 1_100 (expiry boundary), install_permissions must surface `Some(open_id)` for cleanup.
+        assert_eq!(
+            core.install_permissions(
+                &tuple,
+                &[IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20))],
+                300_000,
+                1_100
+            ),
+            Err(CorePermissionError::AllocationMismatch {
+                expired_open_id: Some(open_id),
+            })
+        );
+        // Subsequent call on already-evicted tuple reports `None`.
+        assert_eq!(
+            core.install_permissions(
+                &tuple,
+                &[IpAddr::V4(Ipv4Addr::new(198, 51, 100, 20))],
+                300_000,
+                1_100
+            ),
+            Err(CorePermissionError::AllocationMismatch {
+                expired_open_id: None,
+            })
+        );
+    }
 }

@@ -5,6 +5,8 @@
 use std::fs;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
@@ -70,6 +72,25 @@ enum Commands {
     },
 }
 
+fn build_init_daemon_config(delegatee_key: PathBuf, public_ip: IpAddr) -> TurnServiceDaemonConfig {
+    let mut node = NodeConfig::new(delegatee_key);
+    node.advertise_onion_relay = true;
+    let listen_ip = match public_ip {
+        IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+    };
+    TurnServiceDaemonConfig {
+        node,
+        turn_service: TurnServiceConfig {
+            listen_addr: SocketAddr::new(listen_ip, rings_turn::DEFAULT_TURN_PORT),
+            public_ip: Some(public_ip),
+            advertised_ip: Some(public_ip),
+            relay_bind_ip: Some(listen_ip),
+            ..TurnServiceConfig::default()
+        },
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -85,19 +106,7 @@ async fn main() -> anyhow::Result<()> {
             delegatee_key,
             public_ip,
         } => {
-            let mut node = NodeConfig::new(delegatee_key);
-            node.advertise_onion_relay = true;
-            let daemon_cfg = TurnServiceDaemonConfig {
-                node,
-                turn_service: TurnServiceConfig {
-                    public_ip: Some(public_ip),
-                    advertised_ip: Some(match public_ip {
-                        IpAddr::V4(v4) => IpAddr::V4(v4),
-                        IpAddr::V6(_) => IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
-                    }),
-                    ..TurnServiceConfig::default()
-                },
-            };
+            let daemon_cfg = build_init_daemon_config(delegatee_key, public_ip);
             let yaml = serde_saphyr::to_string(&daemon_cfg)
                 .context("serializing TurnServiceDaemonConfig to YAML")?;
             fs::write(&output, yaml)
@@ -136,6 +145,40 @@ async fn main() -> anyhow::Result<()> {
             options.api_allowed_origins_override = api_allowed_origins;
             options.allow_remote_external_api_override = allow_remote_external_api;
             run_turn_service_daemon(options, daemon_cfg.turn_service).await
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn init_generates_valid_matching_ipv4_and_ipv6_turn_configs() {
+        let clock: rings_core::utils::SharedClock = Arc::new(rings_core::utils::SystemClock);
+
+        for public_ip in [
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111)),
+        ] {
+            let cfg = build_init_daemon_config(PathBuf::from("~/.rings/delegatee_key"), public_ip);
+            let yaml = serde_saphyr::to_string(&cfg).expect("serialize init config");
+            let parsed: TurnServiceDaemonConfig =
+                serde_saphyr::from_str(&yaml).expect("parse init config");
+            assert_eq!(parsed.turn_service.public_ip, Some(public_ip));
+            assert_eq!(parsed.turn_service.advertised_ip, Some(public_ip));
+            assert_eq!(
+                parsed.turn_service.listen_addr.ip().is_ipv4(),
+                public_ip.is_ipv4()
+            );
+            let server_cfg = parsed
+                .turn_service
+                .to_turn_server_config(Arc::clone(&clock))
+                .expect("generated config must pass TurnServerConfig validation");
+            assert_eq!(server_cfg.advertised_ip, Some(public_ip));
         }
     }
 }

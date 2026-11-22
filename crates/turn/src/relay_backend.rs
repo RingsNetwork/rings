@@ -96,8 +96,12 @@ pub enum CoreReserveError {
 /// Error returned when installing peer-IP permissions on an allocation in [`TurnAllocationCore`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CorePermissionError {
-    /// No live allocation exists for the 5-tuple.
-    AllocationMismatch,
+    /// No live allocation exists for the 5-tuple; `expired_open_id` carries any lazily evicted
+    /// expired allocation whose relay must be closed.
+    AllocationMismatch {
+        /// Expired `open_id` evicted during lookup, if any.
+        expired_open_id: Option<u64>,
+    },
     /// Adding the requested peer IPs would exceed `max_permissions_per_allocation`.
     QuotaExceeded,
 }
@@ -545,11 +549,13 @@ impl TurnAllocationCore {
             .get(tuple)
             .is_some_and(|alloc| alloc.expires_at_ms <= now_ms);
         if is_expired {
-            self.active_allocations.remove(tuple);
-            return Err(CorePermissionError::AllocationMismatch);
+            let expired_open_id = self.active_allocations.remove(tuple).map(|a| a.open_id);
+            return Err(CorePermissionError::AllocationMismatch { expired_open_id });
         }
         let Some(alloc) = self.active_allocations.get_mut(tuple) else {
-            return Err(CorePermissionError::AllocationMismatch);
+            return Err(CorePermissionError::AllocationMismatch {
+                expired_open_id: None,
+            });
         };
         alloc.permissions.retain(|_, &mut exp| exp > now_ms);
         let mut projected_len = alloc.permissions.len();

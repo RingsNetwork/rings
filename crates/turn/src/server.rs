@@ -3012,18 +3012,45 @@ async fn handle_authenticated_create_permission(
     }
 
     let now_ms = clock.now_ms();
-    let perm_res = {
+    let (perm_res, to_close) = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.core.install_permissions(
-            &alloc.tuple_key,
-            &candidate_ips,
-            PERMISSION_TIMEOUT.as_millis(),
-            now_ms,
-        )
+        let is_current = guard
+            .by_tuple
+            .get(&alloc.five_tuple)
+            .is_some_and(|cur| cur.open_id == alloc.open_id);
+        if !is_current {
+            (
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: None,
+                }),
+                Vec::new(),
+            )
+        } else {
+            let res = guard.core.install_permissions(
+                &alloc.tuple_key,
+                &candidate_ips,
+                PERMISSION_TIMEOUT.as_millis(),
+                now_ms,
+            );
+            let removed = match res {
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: Some(open_id),
+                }) => guard.take_open_ids(&[open_id]),
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: None,
+                }) => {
+                    guard.allocate_responses.remove(&alloc.five_tuple);
+                    Vec::new()
+                }
+                Ok(()) | Err(CorePermissionError::QuotaExceeded) => Vec::new(),
+            };
+            (res, removed)
+        }
     };
+    close_allocations(to_close).await;
     match perm_res {
         Ok(()) => {}
-        Err(CorePermissionError::AllocationMismatch) => {
+        Err(CorePermissionError::AllocationMismatch { .. }) => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3169,18 +3196,45 @@ async fn handle_authenticated_channel_bind(
         return;
     }
 
-    let perm_res = {
+    let (perm_res, to_close) = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.core.install_permissions(
-            &alloc.tuple_key,
-            &[target_sock.ip()],
-            PERMISSION_TIMEOUT.as_millis(),
-            now_ms,
-        )
+        let is_current = guard
+            .by_tuple
+            .get(&alloc.five_tuple)
+            .is_some_and(|cur| cur.open_id == alloc.open_id);
+        if !is_current {
+            (
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: None,
+                }),
+                Vec::new(),
+            )
+        } else {
+            let res = guard.core.install_permissions(
+                &alloc.tuple_key,
+                &[target_sock.ip()],
+                PERMISSION_TIMEOUT.as_millis(),
+                now_ms,
+            );
+            let removed = match res {
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: Some(open_id),
+                }) => guard.take_open_ids(&[open_id]),
+                Err(CorePermissionError::AllocationMismatch {
+                    expired_open_id: None,
+                }) => {
+                    guard.allocate_responses.remove(&alloc.five_tuple);
+                    Vec::new()
+                }
+                Ok(()) | Err(CorePermissionError::QuotaExceeded) => Vec::new(),
+            };
+            (res, removed)
+        }
     };
+    close_allocations(to_close).await;
     match perm_res {
         Ok(()) => {}
-        Err(CorePermissionError::AllocationMismatch) => {
+        Err(CorePermissionError::AllocationMismatch { .. }) => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -3269,8 +3323,11 @@ async fn shutdown_all_allocations(book: &SyncMutex<ServerAllocationBook>) {
         let pending_ids: Vec<u64> = guard.pending_cancels.keys().copied().collect();
         guard.cancel_pending_open_ids(&pending_ids);
         let ids = guard.core.begin_shutdown();
+        let mut out = guard.take_open_ids(&ids);
+        guard.by_tuple.clear();
         guard.allocate_responses.clear();
-        guard.take_open_ids(&ids)
+        out.extend(guard.by_open_id.drain().map(|(_, alloc)| alloc));
+        out
     };
     close_allocations(removed).await;
 }
