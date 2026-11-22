@@ -75,6 +75,16 @@ Two long-term identity signing modes and one unlinkable ephemeral ticket mode ar
 | Passive UDP observer | Cleartext STUN `USERNAME` (`tkt-…` or identity claim) and packet sizes/timing | TURN `credential` password; client `Did` in `SessionTicket` mode |
 <!-- ANCHOR_END: model -->
 
+## Cargo Features
+
+| Feature | Default | Provides |
+| --- | --- | --- |
+| `credentials` | always compiled | TURN credential signing and verification (`TurnCredentials`, `TurnCredentialSigner`, `SignedTurnSessionTicket`, `format_turn_server_url`, `extract_turn_server_pubkey`). No `turn`/`stun`/`webrtc-util` server dependencies; builds for `wasm32`. This is the feature `rings-node` depends on. |
+| `server` | yes | Native RFC 5766 TURN server runtime: `TurnServer`, `TurnServerConfig`, `DelegationAuthHandler`, and the transport-agnostic relay backend API (`TurnDatagramRelay`, `TurnDatagramRelayFactory`, `TurnAllocationCore`) used by `rings-turn-service`'s `onion::udp` bridge. Native targets only. |
+| `cli` | yes | The standalone `rings-turn` binary (implies `server`). |
+
+Credential-only consumers should depend on `rings-turn` with `default-features = false, features = ["credentials"]`.
+
 ## Standalone Binary (`rings-turn`)
 
 `rings-turn` ships as a standalone CLI binary in `crates/turn/bin/rings-turn.rs`.
