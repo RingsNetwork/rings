@@ -417,7 +417,6 @@ pub struct TurnSessionReservation {
 }
 
 struct AllocationPinholeJob {
-    conn: Arc<dyn Conn + Send + Sync>,
     src_addr: SocketAddr,
     peer_ips: Vec<IpAddr>,
     req_msg: Message,
@@ -441,6 +440,7 @@ struct ManagedAllocation {
     tuple_key: TurnFiveTupleKey,
     username: String,
     relay_addr: SocketAddr,
+    client_conn: Arc<dyn Conn + Send + Sync>,
     relay_conn: Arc<dyn TurnDatagramRelay>,
     channels: SyncMutex<ChannelBindingTable>,
     outbound_data_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
@@ -458,6 +458,7 @@ impl ManagedAllocation {
         five_tuple: FiveTuple,
         username: String,
         relay_addr: SocketAddr,
+        client_conn: Arc<dyn Conn + Send + Sync>,
         relay_conn: Arc<dyn TurnDatagramRelay>,
         lifetime: Duration,
         tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
@@ -477,6 +478,7 @@ impl ManagedAllocation {
                 tuple_key: TurnFiveTupleKey::from(five_tuple),
                 username,
                 relay_addr,
+                client_conn,
                 relay_conn,
                 channels: SyncMutex::new(ChannelBindingTable {
                     bindings: HashMap::new(),
@@ -2221,13 +2223,13 @@ async fn allocation_outbound_worker(
                 match pinhole_res {
                     Ok(Ok(())) => {
                         if let Some(raw) = job.success_response {
-                            let _ = job.conn.send_to(&raw, job.src_addr).await;
+                            let _ = alloc.client_conn.send_to(&raw, job.src_addr).await;
                         }
                     }
                     Ok(Err(_)) | Err(_) => {
                         remove_allocation_if_current(&book, &alloc).await;
                         send_authenticated_error(
-                            &job.conn,
+                            &alloc.client_conn,
                             job.src_addr,
                             &job.req_msg,
                             CODE_ALLOC_MISMATCH,
@@ -2255,7 +2257,6 @@ async fn allocation_outbound_worker(
 
 #[allow(clippy::too_many_arguments)]
 async fn complete_async_allocate_open(
-    conn: Arc<dyn Conn + Send + Sync>,
     book: Arc<SyncMutex<ServerAllocationBook>>,
     clock: SharedClock,
     mut shutdown_rx: watch::Receiver<bool>,
@@ -2325,7 +2326,7 @@ async fn complete_async_allocate_open(
             }
             drop(relay_permit);
             send_authenticated_error(
-                &conn,
+                &relay_turn_socket,
                 src_addr,
                 &req_msg,
                 CODE_INSUFFICIENT_CAPACITY,
@@ -2372,6 +2373,7 @@ async fn complete_async_allocate_open(
                 five_tuple,
                 username,
                 relayed_addr,
+                Arc::clone(&relay_turn_socket),
                 relay_conn,
                 lifetime_duration,
                 tcp_authenticated_tx,
@@ -2417,12 +2419,12 @@ async fn complete_async_allocate_open(
                 Arc::clone(&alloc),
                 Arc::clone(&book),
                 clock,
-                relay_turn_socket,
+                Arc::clone(&relay_turn_socket),
                 src_addr,
             ));
 
             if let Some(raw) = built {
-                let _ = conn.send_to(&raw, src_addr).await;
+                let _ = relay_turn_socket.send_to(&raw, src_addr).await;
             }
         }
     }
@@ -2796,7 +2798,6 @@ async fn handle_authenticated_allocate(
                 return;
             };
             open_tasks.spawn(complete_async_allocate_open(
-                Arc::clone(conn),
                 Arc::clone(book),
                 Arc::clone(clock),
                 shutdown_rx.clone(),
@@ -3126,7 +3127,6 @@ async fn handle_authenticated_create_permission(
         resp.build(&setters).is_ok().then_some(resp.raw)
     };
     pinhole_permit.send(AllocationPinholeJob {
-        conn: Arc::clone(conn),
         src_addr,
         peer_ips: candidate_ips,
         req_msg: m.clone(),
@@ -3316,7 +3316,6 @@ async fn handle_authenticated_channel_bind(
     };
     alloc.commit_channel_binding(channel, target_sock, channel_bind_timeout, now_ms);
     pinhole_permit.send(AllocationPinholeJob {
-        conn: Arc::clone(conn),
         src_addr,
         peer_ips: vec![target_sock.ip()],
         req_msg: m.clone(),
