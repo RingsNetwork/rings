@@ -4,8 +4,11 @@
 deploy-pages.yml runs this on the Pages artifact once Trunk has built the frontend, mdBook the
 book under `docs/`, and the shell has been copied to `404.html`; QACI runs it on the book alone.
 
-- Each chapter of the book names its own address as canonical, and describes itself by its
-  first paragraph instead of the book's one description, so each can be found on its own.
+- Each chapter of the book names its own address as canonical, describes itself by its first
+  paragraph instead of the book's one description, and carries a connected TechArticle +
+  BreadcrumbList JSON-LD @graph so each chapter can be found and cited on its own.
+- `llms-full.txt` and `index.md` are composed directly from `llms.txt` and `docs/src/README.md`
+  with zero duplicate source files in the repository.
 - The pages kept out of indexes say so: the book's own 404.html, and the site's 404.html, the
   shell copy that boots the WebView gateway on a cold load of a path-routed URL.
 - sitemap.xml lists the landing page and every chapter, for robots.txt to point at.
@@ -14,6 +17,7 @@ book under `docs/`, and the shell has been copied to `404.html`; QACI runs it on
 from __future__ import annotations
 
 import html
+import json
 import re
 import sys
 from pathlib import Path
@@ -21,6 +25,7 @@ from xml.sax.saxutils import escape
 
 SITE_URL = "https://rings.rs/"
 BOOK_DIR = "docs"
+REPO_ROOT = Path(__file__).resolve().parents[2]
 # The most characters search engines show of a description before cutting it.
 DESCRIPTION_LIMIT = 160
 NOINDEX = '<meta name="robots" content="noindex">'
@@ -30,6 +35,7 @@ DESCRIPTION_META = re.compile(
     r'(<meta (?:name|property)="(?:description|og:description|twitter:description)" content=")[^"]*(")'
 )
 CHARSET = re.compile(r"<meta charset=[^>]*>", re.I)
+TITLE = re.compile(r"<title>(.*?)</title>", re.S | re.I)
 MAIN = re.compile(r"<main>(.*?)</main>", re.S)
 PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.S)
 TAG = re.compile(r"<[^>]+>")
@@ -89,6 +95,61 @@ def chapter_description(document: str) -> str | None:
     return None
 
 
+def chapter_title(document: str) -> str:
+    """Return the plain title text of a book chapter."""
+
+    match = TITLE.search(document)
+    if not match:
+        return "Rings Network Documentation"
+    return " ".join(html.unescape(TAG.sub("", match.group(1))).split()) or "Rings Network Documentation"
+
+
+def chapter_schema(url: str, title: str, description: str | None) -> str:
+    """Return a compact connected BreadcrumbList + TechArticle JSON-LD script for a book page."""
+
+    docs_root = f"{SITE_URL}{BOOK_DIR}/"
+    breadcrumbs = [
+        {"@type": "ListItem", "position": 1, "name": "Rings Network", "item": SITE_URL},
+        {"@type": "ListItem", "position": 2, "name": "Docs", "item": docs_root},
+    ]
+    if url != docs_root:
+        breadcrumbs.append({"@type": "ListItem", "position": 3, "name": title, "item": url})
+    article: dict[str, object] = {
+        "@type": "TechArticle",
+        "@id": f"{url}#article",
+        "url": url,
+        "headline": title,
+        "name": title,
+        "inLanguage": "en",
+        "isPartOf": {"@id": f"{SITE_URL}#website"},
+        "publisher": {
+            "@type": "Organization",
+            "@id": f"{SITE_URL}#organization",
+            "name": "Rings Network",
+            "url": SITE_URL,
+        },
+        "breadcrumb": {"@id": f"{url}#breadcrumb"},
+    }
+    if description:
+        article["description"] = description
+    payload = json.dumps(
+        {
+            "@context": "https://schema.org",
+            "@graph": [
+                {
+                    "@type": "BreadcrumbList",
+                    "@id": f"{url}#breadcrumb",
+                    "itemListElement": breadcrumbs,
+                },
+                article,
+            ],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).replace("<", "\\u003c")
+    return f'<script type="application/ld+json">{payload}</script>'
+
+
 def chapter_url(relative: Path) -> str:
     """Return the address of the book's page at `relative`, a path under the book."""
 
@@ -97,7 +158,7 @@ def chapter_url(relative: Path) -> str:
 
 
 def finish_chapter(document: str, url: str) -> str:
-    """Return a chapter naming `url` as canonical and described by its first paragraph."""
+    """Return a chapter naming `url` as canonical, described by its first paragraph, with JSON-LD."""
 
     marker = "</head>"
     if marker not in document:
@@ -106,12 +167,15 @@ def finish_chapter(document: str, url: str) -> str:
     if description:
         quoted = html.escape(description, quote=True)
         document = DESCRIPTION_META.sub(lambda match: f"{match.group(1)}{quoted}{match.group(2)}", document)
+    additions: list[str] = []
     if 'rel="canonical"' not in document:
-        link = (
-            f'    <link rel="canonical" href="{html.escape(url)}">\n'
-            f'        <meta property="og:url" content="{html.escape(url)}">\n    '
-        )
-        document = document.replace(marker, f"{link}{marker}", 1)
+        additions.append(f'    <link rel="canonical" href="{html.escape(url)}">')
+        additions.append(f'        <meta property="og:url" content="{html.escape(url)}">')
+    if 'type="application/ld+json"' not in document:
+        additions.append(f"        {chapter_schema(url, chapter_title(document), description)}")
+    if additions:
+        joined = "\n".join(additions)
+        document = document.replace(marker, f"{joined}\n    {marker}", 1)
     return document
 
 
@@ -134,6 +198,23 @@ def finish_book(book: Path) -> list[str]:
     return sorted(urls, key=lambda url: (url != f"{SITE_URL}{BOOK_DIR}/", url))
 
 
+def emit_agent_artifacts(site: Path) -> None:
+    """Compose `index.md` and `llms-full.txt` from `llms.txt` and `docs/src/README.md`."""
+
+    book_readme = REPO_ROOT / "docs" / "src" / "README.md"
+    if not (site / "index.html").is_file() or not book_readme.is_file():
+        return
+    clean_readme = re.sub(r"^<img\b[^>]*>\n+", "", book_readme.read_text(encoding="utf-8"), flags=re.M)
+    markdown_home = clean_readme.replace("# Start Here", "# Rings Network", 1)
+    (site / "index.md").write_text(markdown_home, encoding="utf-8")
+    llms_path = site / "llms.txt"
+    if not llms_path.is_file():
+        llms_path = REPO_ROOT / "llms.txt"
+    if llms_path.is_file():
+        llms_text = llms_path.read_text(encoding="utf-8").rstrip()
+        (site / "llms-full.txt").write_text(f"{llms_text}\n\n---\n\n{markdown_home}", encoding="utf-8")
+
+
 def sitemap(urls: list[str]) -> str:
     """Return the site's map of `urls`."""
 
@@ -154,6 +235,7 @@ def finish_site(site: Path) -> list[str]:
     not_found = site / "404.html"
     if not_found.is_file():
         not_found.write_text(mark_noindex(not_found.read_text(encoding="utf-8")), encoding="utf-8")
+    emit_agent_artifacts(site)
     urls = [SITE_URL, *finish_book(book)]
     (site / "sitemap.xml").write_text(sitemap(urls), encoding="utf-8")
     return urls

@@ -20,11 +20,17 @@ REQUIRED_LINKS = {
     "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf",
     "https://rings.rs/llms.txt",
 }
+REQUIRED_HREFLANGS = {
+    "en": CANONICAL_URL,
+    "x-default": CANONICAL_URL,
+}
 REQUIRED_PROJECT_CONTENT = {"name", "tagline", "introduction"}
 ORGANIZATION_ID = "https://rings.rs/#organization"
 ORGANIZATION_PROFILES = {"https://github.com/RingsNetwork", "https://x.com/RingsNetworkio"}
+REQUIRED_GRAPH_TYPES = {"Organization", "WebSite", "SoftwareApplication", "BreadcrumbList", "WebPage"}
 # The most characters search engines show of a title and of a description before cutting them.
 TITLE_LIMIT = 60
+DESCRIPTION_MIN = 25
 DESCRIPTION_LIMIT = 160
 VOID_ELEMENTS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
 
@@ -44,6 +50,7 @@ class Inspection:
     project_content_markers: list[str] = field(default_factory=list)
     static_text: list[str] = field(default_factory=list)
     static_links: set[str] = field(default_factory=set)
+    hreflangs: dict[str, str] = field(default_factory=dict)
     title: list[str] = field(default_factory=list)
     description: str | None = None
     canonical: str | None = None
@@ -79,6 +86,11 @@ class InitialHtmlParser(HTMLParser):
             self.inspection.description = attributes.get("content")
         elif tag == "link" and attributes.get("rel") == "canonical":
             self.inspection.canonical = attributes.get("href")
+        elif tag == "link" and attributes.get("rel") == "alternate":
+            hreflang = attributes.get("hreflang")
+            href = attributes.get("href")
+            if hreflang and href:
+                self.inspection.hreflangs[hreflang.lower()] = href
 
         if attributes.get("id") == STATIC_ROOT_ID:
             self.inspection.static_roots += 1
@@ -159,19 +171,22 @@ def validate(inspection: Inspection) -> list[str]:
         errors.append(f"title is {len(title)} characters, past the {TITLE_LIMIT} search engines show")
     if not inspection.description:
         errors.append("document lacks a meta description")
-    elif len(inspection.description) > DESCRIPTION_LIMIT:
+    elif len(inspection.description) < DESCRIPTION_MIN or len(inspection.description) > DESCRIPTION_LIMIT:
         errors.append(
             f"meta description is {len(inspection.description)} characters, "
-            f"past the {DESCRIPTION_LIMIT} search engines show"
+            f"outside [{DESCRIPTION_MIN}, {DESCRIPTION_LIMIT}]"
         )
     if inspection.canonical != CANONICAL_URL:
         errors.append(f"document canonical URL must be {CANONICAL_URL}")
+    for lang, expected_href in REQUIRED_HREFLANGS.items():
+        if inspection.hreflangs.get(lang) != expected_href:
+            errors.append(f"hreflang={lang} must point to {expected_href}")
     errors.extend(validate_structured_data(inspection.json_ld))
     return errors
 
 
 def validate_structured_data(documents: list[str]) -> list[str]:
-    """Validate the project-level SoftwareSourceCode JSON-LD record."""
+    """Validate the project-level SoftwareSourceCode JSON-LD record and @graph."""
 
     records: list[Any] = []
     for document in documents:
@@ -196,21 +211,31 @@ def validate_structured_data(documents: list[str]) -> list[str]:
         errors.append(f"SoftwareSourceCode JSON-LD URL must be {CANONICAL_URL}")
     if source.get("codeRepository") != REPOSITORY_URL:
         errors.append(f"SoftwareSourceCode codeRepository must be {REPOSITORY_URL}")
-    errors.extend(validate_organization(records, source))
+    errors.extend(validate_entity_graph(records, source))
     return errors
 
 
-def validate_organization(records: list[Any], source: dict[str, Any]) -> list[str]:
-    """Validate that one Organization node, named by id, carries the project's accounts."""
+def validate_entity_graph(records: list[Any], source: dict[str, Any]) -> list[str]:
+    """Validate Organization, connected @graph types, and SpeakableSpecification."""
 
     nodes = [record for record in records if isinstance(record, dict)]
     for record in records:
         if isinstance(record, dict) and isinstance(record.get("@graph"), list):
             nodes.extend(node for node in record["@graph"] if isinstance(node, dict))
+    errors: list[str] = []
+    seen_types = {
+        node_type
+        for node in nodes
+        for node_type in ([node.get("@type")] if isinstance(node.get("@type"), str) else node.get("@type", []))
+        if isinstance(node_type, str)
+    }
+    missing_types = sorted(REQUIRED_GRAPH_TYPES - seen_types)
+    if missing_types:
+        errors.append(f"JSON-LD @graph lacks required types: {missing_types}")
+
     organizations = [
         node for node in nodes if node.get("@type") == "Organization" and node.get("@id") == ORGANIZATION_ID
     ]
-    errors: list[str] = []
     if not any("sameAs" in organization for organization in organizations):
         errors.append(f"JSON-LD lacks the Organization {ORGANIZATION_ID} with its sameAs accounts")
     for organization in organizations:
@@ -219,6 +244,10 @@ def validate_organization(records: list[Any], source: dict[str, Any]) -> list[st
     publisher = source.get("publisher")
     if not isinstance(publisher, dict) or publisher.get("@id") != ORGANIZATION_ID:
         errors.append(f"SoftwareSourceCode publisher must name {ORGANIZATION_ID}")
+
+    webpages = [node for node in nodes if node.get("@type") == "WebPage"]
+    if len(webpages) != 1 or not isinstance(webpages[0].get("speakable"), dict):
+        errors.append("WebPage JSON-LD must declare a SpeakableSpecification")
     return errors
 
 
