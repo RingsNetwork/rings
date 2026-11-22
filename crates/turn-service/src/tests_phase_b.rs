@@ -257,7 +257,21 @@ async fn send_authenticated_create_permission(
     assert_eq!(resp.typ.class, CLASS_SUCCESS_RESPONSE);
 }
 
-#[tokio::test]
+/// Drive Chord stabilization across `nodes` and publish every node's registrations once, so DHT
+/// topic writes and reads converge on the same successor instead of waiting on the periodic
+/// stabilizer and registration daemons.
+async fn stabilize_and_register(nodes: &[&PhaseBNode]) {
+    for _ in 0..2 {
+        for node in nodes {
+            let _ = node.processor.swarm.stabilizer().stabilize().await;
+        }
+    }
+    for node in nodes {
+        let _ = node.processor.register_all_once().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_down_cleanly(
 ) -> Result<()> {
     #[cfg(not(feature = "dummy"))]
@@ -339,7 +353,12 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
         "await DHT convergence of online_nodes, onion_invokes, onion_exits, and turn_services",
         Duration::from_secs(30),
         async {
+            let mut ticks = 0_u32;
             loop {
+                if ticks.is_multiple_of(20) {
+                    stabilize_and_register(&all_nodes).await;
+                }
+                ticks = ticks.wrapping_add(1);
                 let c_online = client_node
                     .provider
                     .lookup_registry_raw("online_nodes")

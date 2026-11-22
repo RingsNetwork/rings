@@ -16,7 +16,9 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
   legacy disk-format or text-SDP shims: under the `RecordAuthority` decode law, non-authoritative
   local stores (`Disposable`, `DurableCache`, and `Retained`, including `dht-removals` and
   `relay-inbox`) intentionally retire undecodable records from pre-`WIRE_VERSION = 5` schemas on
-  read.
+  read. `WIRE_VERSION = 5` also adds the world-facing onion service symbol `udp` and its
+  length-prefixed session codec (`OnionUdpClientFrame` / `OnionUdpServerFrame`), so `udp` exit
+  registrations and `onion::udp` sessions interoperate only between `WIRE_VERSION = 5` nodes.
 - **Delegation verification and key binding.**
   - `DelegateeKey` deserialization and `FromStr` verify that `delegatee_secret_key` derives
     `delegation.delegatee_did()` and that the delegator signature over `delegation` is valid.
