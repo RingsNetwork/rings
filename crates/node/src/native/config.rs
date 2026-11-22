@@ -464,6 +464,26 @@ impl Config {
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
     }
 
+    /// Normalize relative file paths in this configuration (such as `delegator_key`) against the
+    /// parent directory of `config_path`.
+    pub fn resolve_paths_relative_to<P>(&mut self, config_path: P) -> Result<()>
+    where P: AsRef<std::path::Path> {
+        let path = expand_home(config_path)?;
+        if let Some(delegator_key) = self.delegator_key.as_deref() {
+            let expanded = expand_home(delegator_key)?;
+            let resolved = if expanded.is_relative() {
+                match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => parent.join(expanded),
+                    _ => expanded,
+                }
+            } else {
+                expanded
+            };
+            self.delegator_key = Some(resolved.to_string_lossy().into_owned());
+        }
+        Ok(())
+    }
+
     /// Reads a native-node configuration from a YAML file.
     pub fn read_fs<P>(path: P) -> Result<Config>
     where P: AsRef<std::path::Path> {
@@ -476,18 +496,7 @@ impl Config {
                 path: path.clone(),
                 source: Box::new(source),
             })?;
-        if let Some(delegator_key) = config.delegator_key.as_deref() {
-            let expanded = expand_home(delegator_key)?;
-            let resolved = if expanded.is_relative() {
-                match path.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => parent.join(expanded),
-                    _ => expanded,
-                }
-            } else {
-                expanded
-            };
-            config.delegator_key = Some(resolved.to_string_lossy().into_owned());
-        }
+        config.resolve_paths_relative_to(&path)?;
         Ok(config)
     }
 }

@@ -1017,6 +1017,20 @@ pub async fn acquire_turn_ticket_over_route(
     ttl: Duration,
     now_ms: u128,
 ) -> Result<AcquiredTurnTicket> {
+    acquire_turn_ticket_over_route_with_now(pipeline_handle, route, turn_descriptor, ttl, {
+        let started_ms = rings_core::utils::get_epoch_ms();
+        move || now_ms.saturating_add(rings_core::utils::get_epoch_ms().saturating_sub(started_ms))
+    })
+    .await
+}
+
+async fn acquire_turn_ticket_over_route_with_now(
+    pipeline_handle: &OnionPipelineHandle,
+    route: &OnionPipelineRoute,
+    turn_descriptor: &TurnServiceDescriptor,
+    ttl: Duration,
+    sample_now_ms: impl FnOnce() -> u128,
+) -> Result<AcquiredTurnTicket> {
     let _ = validate_turn_service_endpoint(
         &turn_descriptor.body.turn_url,
         turn_descriptor.body.server_pubkey,
@@ -1039,7 +1053,13 @@ pub async fn acquire_turn_ticket_over_route(
         .invoke_pipeline_over_route(route, &pipeline, &input_bytes)
         .await?;
     let outcome = decode_turn_ticket_outcome(&output_bytes)?;
-    verify_and_build_acquired_ticket(&ephemeral_client_key, turn_descriptor, outcome, now_ms)
+    let arrived_at_ms = sample_now_ms();
+    verify_and_build_acquired_ticket(
+        &ephemeral_client_key,
+        turn_descriptor,
+        outcome,
+        arrived_at_ms,
+    )
 }
 
 /// Discover a live TURN service from the DHT (optionally pinned to `target_did`), build a
@@ -1090,12 +1110,13 @@ pub async fn acquire_turn_ticket(
             )
         })?;
 
-    acquire_turn_ticket_over_route(
+    let clock = processor.clock();
+    acquire_turn_ticket_over_route_with_now(
         pipeline_handle,
         &route,
         turn_descriptor,
         ttl,
-        processor.clock().now_ms(),
+        move || clock.now_ms(),
     )
     .await
 }
@@ -2551,6 +2572,27 @@ mod tests {
             .map_err(|e| Error::InvalidConfig(format!("invalid ICE URL: {e}")))?;
         assert!(parsed_ice.username.starts_with("tkt-"));
         assert!(!parsed_ice.credential.is_empty());
+
+        // 5. Synchronize `turn_clock` to wall-clock `now_ms`, then request a 100ms TTL ticket over
+        //    the 500ms `L(f)` onion invoke quantum: it arrives already expired, and
+        //    `acquire_turn_ticket` (sampling `processor.clock().now_ms()` after invocation) must
+        //    reject it rather than returning a dead ICE URL.
+        turn_clock.set(rings_core::utils::get_epoch_ms());
+        let sub_quantum_res = with_hang_guard(
+            "sub-quantum TTL acquire_turn_ticket",
+            Duration::from_secs(10),
+            acquire_turn_ticket(
+                &client.processor,
+                &client.provider.onion_pipeline()?,
+                Duration::from_millis(100),
+                None,
+            ),
+        )
+        .await;
+        assert!(
+            sub_quantum_res.is_err(),
+            "ticket whose TTL elapsed during 500ms onion invoke must be rejected on arrival"
+        );
 
         turn_server.close().await.unwrap();
         client.shutdown().await?;

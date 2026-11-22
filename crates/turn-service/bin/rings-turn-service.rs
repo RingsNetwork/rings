@@ -16,6 +16,7 @@ use rings_node::native::api_auth::load_or_create_api_token;
 use rings_node::native::config::Config as NodeConfig;
 use rings_node::native::daemon::NativeNodeRunOptions;
 use rings_node::seed::Seed;
+use rings_node::util::expand_home;
 use rings_node::util::loader::ResourceLoader;
 use rings_turn_service::run_turn_service_daemon;
 use rings_turn_service::TurnServiceConfig;
@@ -127,11 +128,22 @@ async fn main() -> anyhow::Result<()> {
             api_allowed_origins,
             allow_remote_external_api,
         } => {
-            let config_path_str = config.to_string_lossy().to_string();
-            let raw = fs::read_to_string(&config)
-                .with_context(|| format!("reading config from {}", config.display()))?;
+            let expanded_config = expand_home(&config)
+                .with_context(|| format!("expanding config path {}", config.display()))?;
+            let config_path_str = expanded_config.to_string_lossy().to_string();
+            let raw = fs::read_to_string(&expanded_config)
+                .with_context(|| format!("reading config from {}", expanded_config.display()))?;
             let mut daemon_cfg: TurnServiceDaemonConfig = serde_saphyr::from_str(&raw)
-                .with_context(|| format!("parsing YAML config {}", config.display()))?;
+                .with_context(|| format!("parsing YAML config {}", expanded_config.display()))?;
+            daemon_cfg
+                .node
+                .resolve_paths_relative_to(&expanded_config)
+                .with_context(|| {
+                    format!(
+                        "resolving config-relative paths in {}",
+                        expanded_config.display()
+                    )
+                })?;
             if let Some(source) = bootstrap_seed {
                 let seed = Seed::load(source.as_str())
                     .await
@@ -180,5 +192,21 @@ mod tests {
                 .expect("generated config must pass TurnServerConfig validation");
             assert_eq!(server_cfg.advertised_ip, Some(public_ip));
         }
+    }
+
+    #[test]
+    fn run_config_resolves_relative_delegator_key_against_config_parent() {
+        let mut cfg = build_init_daemon_config(
+            PathBuf::from("~/.rings/delegatee_key"),
+            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+        );
+        cfg.node.delegator_key = Some("secrets/delegator.key".to_string());
+        cfg.node
+            .resolve_paths_relative_to("/etc/rings/rings-turn-service.yaml")
+            .expect("resolve relative delegator_key");
+        assert_eq!(
+            cfg.node.delegator_key.as_deref(),
+            Some("/etc/rings/secrets/delegator.key")
+        );
     }
 }

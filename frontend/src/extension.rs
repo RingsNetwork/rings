@@ -7,6 +7,7 @@ use std::num::ParseIntError;
 use std::rc::Rc;
 use std::time::Duration;
 
+use futures::channel::oneshot;
 use futures::FutureExt;
 use gloo_timers::future::sleep;
 use js_sys::Array;
@@ -96,9 +97,12 @@ pub(crate) fn load_setting_with_legacy(key: &str, legacy_key: &str) -> Option<St
 
 struct HeadlessNodeState {
     node: Option<DemoNode>,
+    starting_node: Option<DemoNode>,
+    start_cancel_tx: Option<oneshot::Sender<()>>,
     wallet_account: Option<WalletAccount>,
     peers: Vec<PeerView>,
     starting: bool,
+    stopping: bool,
     start_error: Option<String>,
     message: String,
     generation: GenerationClock,
@@ -122,9 +126,12 @@ pub fn is_offscreen_document() -> bool {
 pub fn headless_node() -> Html {
     let state = use_mut_ref(|| HeadlessNodeState {
         node: None,
+        starting_node: None,
+        start_cancel_tx: None,
         wallet_account: None,
         peers: Vec::new(),
         starting: false,
+        stopping: false,
         start_error: None,
         message: "background node offline".to_string(),
         generation: GenerationClock::default(),
@@ -255,7 +262,16 @@ async fn start_headless_node(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    if state.borrow().starting {
+    for _ in 0..200 {
+        if !state.borrow().stopping {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    if state.borrow().stopping {
+        return Err("previous background node is still releasing storage".to_string());
+    }
+    if state.borrow().starting || state.borrow().starting_node.is_some() {
         return headless_node_snapshot(state, "background node starting".to_string(), false, None)
             .await;
     }
@@ -274,10 +290,16 @@ async fn start_headless_node(
         .map(|value| WalletKind::from_value(&value))
         .unwrap_or(WalletKind::WebCrypto);
     let settings = extension_start_settings_from_js(&settings_value);
-    let generation = begin_headless_start(&state, format!("connecting {}", wallet_kind.label()));
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let generation = begin_headless_start(
+        &state,
+        format!("connecting {}", wallet_kind.label()),
+        cancel_tx,
+    );
     wasm_bindgen_futures::spawn_local(run_headless_node_start(
         state.clone(),
         generation.clone(),
+        cancel_rx,
         wallet_kind,
         settings,
     ));
@@ -293,10 +315,18 @@ async fn start_headless_node(
 async fn run_headless_node_start(
     state: Rc<RefCell<HeadlessNodeState>>,
     generation: GenerationToken,
+    cancel_rx: oneshot::Receiver<()>,
     wallet_kind: WalletKind,
     settings: ExtensionStartSettings,
 ) {
-    match start_headless_node_inner(state.clone(), generation.clone(), wallet_kind, settings).await
+    match start_headless_node_inner(
+        state.clone(),
+        generation.clone(),
+        cancel_rx,
+        wallet_kind,
+        settings,
+    )
+    .await
     {
         Ok(message) => {
             set_headless_starting_for_generation(&state, &generation, message, None, false);
@@ -311,11 +341,41 @@ async fn run_headless_node_start(
             );
         }
     }
+    if !generation.is_current()
+        && state.borrow().node.is_none()
+        && state.borrow().starting_node.is_none()
+    {
+        state.borrow_mut().stopping = false;
+    }
+}
+
+async fn close_uninstalled_starting_node(
+    state: &Rc<RefCell<HeadlessNodeState>>,
+    generation: &GenerationToken,
+    fallback: DemoNode,
+) {
+    let taken = {
+        let mut guard = state.borrow_mut();
+        if generation.is_current() {
+            guard.start_cancel_tx = None;
+            guard.starting_node.take()
+        } else {
+            None
+        }
+    };
+    if let Some(node) = taken {
+        let _ = node.close().await;
+    } else if !generation.is_current() {
+        // `stop_headless_node` already took `starting_node` (if it had been stored) and closed it;
+        // only close `fallback` if `stop_headless_node` bumped generation before `starting_node` was set.
+        let _ = fallback;
+    }
 }
 
 async fn start_headless_node_inner(
     state: Rc<RefCell<HeadlessNodeState>>,
     generation: GenerationToken,
+    mut cancel_rx: oneshot::Receiver<()>,
     wallet_kind: WalletKind,
     settings: ExtensionStartSettings,
 ) -> Result<String, String> {
@@ -332,9 +392,14 @@ async fn start_headless_node_inner(
         true,
     );
     let built = build_headless_node(&account, node_settings).await?;
-    if !generation.is_current() {
-        let _ = built.close().await;
-        return Ok("background node start cancelled".to_string());
+    {
+        let mut guard = state.borrow_mut();
+        if !generation.is_current() {
+            drop(guard);
+            let _ = built.close().await;
+            return Ok("background node start cancelled".to_string());
+        }
+        guard.starting_node = Some(built.clone());
     }
     set_headless_starting_for_generation(
         &state,
@@ -345,24 +410,35 @@ async fn start_headless_node_inner(
     );
     let my_did = built.provider.address();
     if let Err(error) = register_headless_protocols(&built, &my_did) {
-        let _ = built.close().await;
+        close_uninstalled_starting_node(&state, &generation, built).await;
         return Err(error);
     }
     if !generation.is_current() {
-        let _ = built.close().await;
+        close_uninstalled_starting_node(&state, &generation, built).await;
         return Ok("background node start cancelled".to_string());
     }
 
-    let (message, peers) =
-        match connect_headless_seed(&state, &generation, &built, settings.seed_url).await {
-            Ok(result) => result,
-            Err(error) => {
-                let _ = built.close().await;
-                return Err(error);
-            }
-        };
+    let (message, peers) = match connect_headless_seed(
+        &state,
+        &generation,
+        &mut cancel_rx,
+        &built,
+        settings.seed_url,
+    )
+    .await
+    {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            close_uninstalled_starting_node(&state, &generation, built).await;
+            return Ok("background node start cancelled".to_string());
+        }
+        Err(error) => {
+            close_uninstalled_starting_node(&state, &generation, built).await;
+            return Err(error);
+        }
+    };
     if !generation.is_current() {
-        let _ = built.close().await;
+        close_uninstalled_starting_node(&state, &generation, built).await;
         return Ok("background node start cancelled".to_string());
     }
     install_headless_node(&state, &generation, account, &built, peers);
@@ -429,6 +505,8 @@ fn install_headless_node(
     if !generation.is_current() {
         return;
     }
+    state.starting_node = None;
+    state.start_cancel_tx = None;
     state.wallet_account = Some(account);
     state.peers = peers;
     state.node = Some(built.clone());
@@ -437,12 +515,13 @@ fn install_headless_node(
 async fn connect_headless_seed(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
+    cancel_rx: &mut oneshot::Receiver<()>,
     built: &DemoNode,
     seed_url: String,
-) -> Result<(String, Vec<PeerView>), String> {
+) -> Result<Option<(String, Vec<PeerView>)>, String> {
     let seed_url = seed_url.trim().to_string();
     if seed_url.is_empty() {
-        return Ok(("background node ready".to_string(), Vec::new()));
+        return Ok(Some(("background node ready".to_string(), Vec::new())));
     }
 
     set_headless_starting_for_generation(
@@ -452,13 +531,25 @@ async fn connect_headless_seed(
         None,
         true,
     );
-    match node::connect_http(&built.provider, seed_url).await {
+    let seed_outcome = {
+        let connect_fut = node::connect_http(&built.provider, seed_url).fuse();
+        let cancel_fut = cancel_rx.fuse();
+        futures::pin_mut!(connect_fut, cancel_fut);
+        futures::select! {
+            res = connect_fut => Some(res),
+            _ = cancel_fut => None,
+        }
+    };
+    let Some(seed_outcome) = seed_outcome else {
+        return Ok(None);
+    };
+    match seed_outcome {
         Ok(seed_did) => {
             if seed_did.trim().is_empty() {
-                return Ok((
+                return Ok(Some((
                     "background node ready; seed returned an empty DID".to_string(),
                     Vec::new(),
-                ));
+                )));
             }
             let (peers, message) = settle_headless_peers(
                 built,
@@ -468,30 +559,45 @@ async fn connect_headless_seed(
                 Some(generation),
             )
             .await;
-            Ok((message, peers))
+            Ok(Some((message, peers)))
         }
-        Err(error) => Ok((
+        Err(error) => Ok(Some((
             format!("background node ready; seed connect failed: {error}"),
             Vec::new(),
-        )),
+        ))),
     }
 }
 
 async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsValue, String> {
-    let (node, stop_generation) = {
+    let (node, was_starting, cancel_tx, stop_generation) = {
         let mut state = state.borrow_mut();
         let stop_generation = state.generation.bump();
+        let was_starting = state.starting;
+        let cancel_tx = state.start_cancel_tx.take();
         state.wallet_account = None;
         state.peers = Vec::new();
         state.starting = false;
         state.start_error = None;
         state.message = "stopping background node".to_string();
-        let node = state.node.take();
-        (node, stop_generation)
+        let node = state.node.take().or_else(|| state.starting_node.take());
+        state.stopping = node.is_some() || was_starting;
+        (node, was_starting, cancel_tx, stop_generation)
     };
+    if let Some(tx) = cancel_tx {
+        let _ = tx.send(());
+    }
     let Some(node) = node else {
-        let message = "background node already offline".to_string();
-        state.borrow_mut().message = message.clone();
+        let message = if was_starting {
+            "background node start cancelled".to_string()
+        } else {
+            "background node already offline".to_string()
+        };
+        {
+            let mut state = state.borrow_mut();
+            if stop_generation.is_current() {
+                state.message = message.clone();
+            }
+        }
         return headless_snapshot_js(false, String::new(), &[], None, message, false, None);
     };
 
@@ -514,6 +620,7 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
     };
     {
         let mut state = state.borrow_mut();
+        state.stopping = false;
         if stop_generation.is_current() {
             state.message = message.clone();
         }
@@ -648,10 +755,12 @@ fn required_message_field(
 fn begin_headless_start(
     state: &Rc<RefCell<HeadlessNodeState>>,
     message: String,
+    cancel_tx: oneshot::Sender<()>,
 ) -> GenerationToken {
     let mut state = state.borrow_mut();
     let generation = state.generation.bump();
     state.starting = true;
+    state.start_cancel_tx = Some(cancel_tx);
     state.start_error = None;
     state.message = message;
     state.peers = Vec::new();
@@ -991,9 +1100,12 @@ mod tests {
     fn test_retained_headless_snapshot_stays_offline_while_starting() {
         let state = HeadlessNodeState {
             node: None,
+            starting_node: None,
+            start_cancel_tx: None,
             wallet_account: None,
             peers: Vec::new(),
             starting: true,
+            stopping: false,
             start_error: None,
             message: "connecting WebCrypto P-256".to_string(),
             generation: GenerationClock::default(),
@@ -1014,6 +1126,38 @@ mod tests {
         assert_eq!(
             crate::browser_api::js_string_field(&snapshot, "message"),
             Ok("connecting WebCrypto P-256".to_string())
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test(async)]
+    async fn test_stop_headless_node_cancels_in_flight_start_signal() {
+        let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
+        let state = Rc::new(RefCell::new(HeadlessNodeState {
+            node: None,
+            starting_node: None,
+            start_cancel_tx: None,
+            wallet_account: None,
+            peers: Vec::new(),
+            starting: false,
+            stopping: false,
+            start_error: None,
+            message: "background node offline".to_string(),
+            generation: GenerationClock::default(),
+        }));
+        let start_gen = begin_headless_start(&state, "connecting seed".to_string(), cancel_tx);
+        assert!(start_gen.is_current());
+
+        let snapshot = stop_headless_node(state.clone()).await;
+        assert!(snapshot.is_ok());
+        let Ok(snapshot) = snapshot else {
+            return;
+        };
+        assert!(!start_gen.is_current());
+        assert_eq!(cancel_rx.try_recv(), Ok(Some(())));
+        assert_eq!(
+            crate::browser_api::js_string_field(&snapshot, "message"),
+            Ok("background node start cancelled".to_string())
         );
     }
 }
