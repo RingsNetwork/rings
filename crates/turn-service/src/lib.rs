@@ -2314,6 +2314,8 @@ mod tests {
     struct OverlayTestNode {
         processor: Arc<Processor>,
         provider: Arc<Provider>,
+        stop: rings_core::lifecycle::StopSource,
+        listen_task: tokio::task::JoinHandle<Result<()>>,
     }
 
     impl OverlayTestNode {
@@ -2324,7 +2326,7 @@ mod tests {
         ) -> Result<Self> {
             let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
             let advertise_presence = role.registers_relay();
-            let config = ProcessorConfig::new(1, "".to_string(), key, 3_600).onion_role(role);
+            let config = ProcessorConfig::new(1, "".to_string(), key, 1).onion_role(role);
             let mut builder = ProcessorBuilder::from_config(&config)?
                 .advertise_presence(advertise_presence)
                 .storage(Box::new(rings_core::storage::MemStorage::new()))
@@ -2339,9 +2341,16 @@ mod tests {
             if install_custom_rpc {
                 install_turn_client_rpc(&provider)?;
             }
+            let stop = rings_core::lifecycle::StopSource::new();
+            let stop_token = stop.token();
+            let listen_provider = Arc::clone(&provider);
+            let listen_task =
+                tokio::spawn(async move { listen_provider.listen_with(stop_token).await });
             Ok(Self {
                 processor,
                 provider,
+                stop,
+                listen_task,
             })
         }
 
@@ -2353,6 +2362,8 @@ mod tests {
         }
 
         async fn shutdown(self) -> Result<()> {
+            self.stop.request_stop();
+            let _ = self.listen_task.await;
             self.processor.close().await
         }
     }
@@ -2423,19 +2434,7 @@ mod tests {
             "await DHT convergence for Phase A turn.ticket test",
             Duration::from_secs(30),
             async {
-                let mut last_publish: Option<std::time::Instant> = None;
                 loop {
-                    if last_publish.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
-                        let mut set = tokio::task::JoinSet::new();
-                        let tn = Arc::clone(&turn_node.processor);
-                        set.spawn(async move { tn.register_all_once().await });
-                        for r in &relays {
-                            let rp = Arc::clone(&r.processor);
-                            set.spawn(async move { rp.register_all_once().await });
-                        }
-                        while set.join_next().await.is_some() {}
-                        last_publish = Some(std::time::Instant::now());
-                    }
                     let online = client
                         .provider
                         .lookup_registry_raw("online_nodes")
@@ -2457,7 +2456,7 @@ mod tests {
                     if online >= 5 && invokes >= 1 && turns >= 1 {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             },
         )

@@ -13,6 +13,7 @@ use std::time::Instant;
 use rings_core::delegation::DelegateeKey;
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::swarm::OfferReply;
 use rings_node::error::Error;
 use rings_node::error::Result;
@@ -93,6 +94,8 @@ impl BackendObserver for RelayEnvelopeTap {
 struct PhaseBNode {
     processor: Arc<Processor>,
     provider: Arc<Provider>,
+    stop: StopSource,
+    listen_task: tokio::task::JoinHandle<Result<()>>,
 }
 
 impl PhaseBNode {
@@ -104,7 +107,7 @@ impl PhaseBNode {
     ) -> Result<Self> {
         let key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
         let advertise_presence = role.registers_relay();
-        let config = ProcessorConfig::new(1, String::new(), key, 3_600).onion_role(role);
+        let config = ProcessorConfig::new(1, String::new(), key, 1).onion_role(role);
         let mut builder = ProcessorBuilder::from_config(&config)?
             .advertise_presence(advertise_presence)
             .storage(Box::new(rings_core::storage::MemStorage::new()))
@@ -124,13 +127,22 @@ impl PhaseBNode {
             Some(obs) => provider.set_backend_with_observer(obs)?,
             None => provider.set_backend()?,
         }
+        let stop = StopSource::new();
+        let stop_token = stop.token();
+        let listen_provider = Arc::clone(&provider);
+        let listen_task =
+            tokio::spawn(async move { listen_provider.listen_with(stop_token).await });
         Ok(Self {
             processor,
             provider,
+            stop,
+            listen_task,
         })
     }
 
     async fn shutdown(self) -> Result<()> {
+        self.stop.request_stop();
+        let _ = self.listen_task.await;
         self.processor.close().await
     }
 }
@@ -259,21 +271,7 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
         "await DHT convergence of online_nodes, onion_invokes, onion_exits, and turn_services",
         Duration::from_secs(30),
         async {
-            let mut last_publish: Option<Instant> = None;
             loop {
-                if last_publish.is_none_or(|t| t.elapsed() >= Duration::from_secs(2)) {
-                    let mut set = tokio::task::JoinSet::new();
-                    let en = Arc::clone(&entry_node.processor);
-                    set.spawn(async move { en.register_all_once().await });
-                    let ex = Arc::clone(&exit_node.processor);
-                    set.spawn(async move { ex.register_all_once().await });
-                    for r in &relays {
-                        let rp = Arc::clone(&r.processor);
-                        set.spawn(async move { rp.register_all_once().await });
-                    }
-                    while set.join_next().await.is_some() {}
-                    last_publish = Some(Instant::now());
-                }
                 let c_online = client_node
                     .provider
                     .lookup_registry_raw("online_nodes")
@@ -307,7 +305,7 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
                 if c_online >= 6 && e_online >= 6 && c_invokes >= 1 && e_exits >= 1 && c_turn >= 1 {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
         },
     )
