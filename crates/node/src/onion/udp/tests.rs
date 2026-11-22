@@ -190,6 +190,94 @@ async fn test_onion_udp_world_pinhole_gate_and_even_port_bind() -> Result<()> {
     Ok(())
 }
 
+/// Law (Cancel safety): dropping a pending `recv_from` or `send_to` future (as a `select!` arm
+/// that lost its race does) loses neither stream half nor partially buffered frame bytes.
+#[cfg(rings_native)]
+#[tokio::test]
+async fn test_native_onion_udp_session_recv_from_is_cancel_safe() -> Result<()> {
+    let (stream, mut driver) = OnionClientStream::driven_by_test();
+    let expected_addr: SocketAddr = "203.0.113.10:44444".parse().unwrap();
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::from(encode_server_frame(
+            &OnionUdpServerFrame::Bound {
+                local_addr: expected_addr,
+            },
+        )?)))
+        .await;
+    let session = NativeOnionUdpSession::from_stream(stream).await?;
+
+    // 1. Cancel `recv_from` on an empty buffer.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), session.recv_from())
+            .await
+            .is_err()
+    );
+
+    // 2. Cancel `recv_from` after consuming the first half of a chunked frame into `state.buffer`.
+    let peer: SocketAddr = "198.51.100.7:5000".parse().unwrap();
+    let full_frame = encode_server_frame(&OnionUdpServerFrame::RecvDatagram {
+        peer,
+        payload: b"after-partial-cancel".to_vec(),
+    })?;
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::copy_from_slice(
+            &full_frame[..6],
+        )))
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), session.recv_from())
+            .await
+            .is_err()
+    );
+    driver
+        .emit(OnionStreamEvent::Data(Bytes::copy_from_slice(
+            &full_frame[6..],
+        )))
+        .await;
+    let next = tokio::time::timeout(Duration::from_millis(500), session.recv_from())
+        .await
+        .expect("recv_from must reassemble partial frame across cancellation")?;
+    assert_eq!(
+        next,
+        Some((Bytes::from_static(b"after-partial-cancel"), peer))
+    );
+
+    // 3. Fill the outbound command queue until `send_to` parks on backpressure, cancel `send_to`,
+    //    drain one command, and verify `send_to` remains live without corrupting framing.
+    let mut filled = 0_usize;
+    loop {
+        if tokio::time::timeout(Duration::from_millis(15), session.send_to(b"fill", peer))
+            .await
+            .is_err()
+        {
+            break;
+        }
+        filled += 1;
+        assert!(filled <= 256, "command channel must be bounded");
+    }
+    assert!(driver.next_data().await.is_some());
+    let sent = tokio::time::timeout(
+        Duration::from_millis(500),
+        session.send_to(b"resumed", peer),
+    )
+    .await
+    .expect("send_to must remain live after cancelled backpressure wait")?;
+    assert_eq!(sent, b"resumed".len());
+    Ok(())
+}
+
+#[cfg(rings_native)]
+#[test]
+fn test_outbound_datagram_rate_window_caps_per_second_and_resets_next_second() {
+    let mut window = OutboundDatagramWindow::default();
+    for _ in 0..MAX_OUTBOUND_DATAGRAMS_PER_SEC {
+        assert!(window.try_admit(5_250));
+    }
+    assert!(!window.try_admit(5_999));
+    // Advancing into the next 1-second bucket resets the counter.
+    assert!(window.try_admit(6_000));
+}
+
 #[cfg(rings_native)]
 #[tokio::test]
 async fn test_native_onion_udp_session_close_wakes_parked_reader_immediately() -> Result<()> {

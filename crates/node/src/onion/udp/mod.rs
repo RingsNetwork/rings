@@ -262,6 +262,11 @@ fn parse_ip_from_endpoint_hint(raw: &str) -> Option<IpAddr> {
     host.parse::<IpAddr>().ok()
 }
 
+/// Maximum outbound UDP datagrams one `onion::udp` exit session may transmit per 1-second clock
+/// window (`2,048` pps), preventing small-frame cell packing from turning an exit into a packet-rate
+/// amplifier while leaving headroom for bidirectional real-time media bursts.
+pub const MAX_OUTBOUND_DATAGRAMS_PER_SEC: u32 = 2_048;
+
 #[cfg(rings_native)]
 const UDP_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -422,8 +427,32 @@ impl OnionUdpWorld {
                 clock: self.clock.clone(),
                 pinholes,
                 buffer: BytesMut::new(),
+                rate_window: OutboundDatagramWindow::default(),
             },
         ))
+    }
+}
+
+#[cfg(rings_native)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct OutboundDatagramWindow {
+    second: u128,
+    count: u32,
+}
+
+#[cfg(rings_native)]
+impl OutboundDatagramWindow {
+    fn try_admit(&mut self, now_ms: u128) -> bool {
+        let sec = now_ms / 1_000;
+        if self.second != sec {
+            self.second = sec;
+            self.count = 0;
+        }
+        if self.count >= MAX_OUTBOUND_DATAGRAMS_PER_SEC {
+            return false;
+        }
+        self.count = self.count.saturating_add(1);
+        true
     }
 }
 
@@ -453,6 +482,7 @@ pub(crate) struct OnionUdpWriter {
     clock: SharedClock,
     pinholes: Arc<SyncMutex<OnionUdpPinholeTable>>,
     buffer: BytesMut,
+    rate_window: OutboundDatagramWindow,
 }
 
 #[cfg(rings_native)]
@@ -493,14 +523,14 @@ impl OnionWorldReader for OnionUdpReader {
             {
                 continue;
             }
+            let now_ms = self.clock.now_ms();
+            if !lock(&self.pinholes)?.allows(peer.ip(), now_ms) {
+                continue;
+            }
             let Some(peer_target) = socket_addr_target(peer) else {
                 continue;
             };
             if !self.policy.allows_target(&peer_target) {
-                continue;
-            }
-            let now_ms = self.clock.now_ms();
-            if !lock(&self.pinholes)?.allows(peer.ip(), now_ms) {
                 continue;
             }
             let Some(payload) = self.recv_buf.get(..len).map(<[u8]>::to_vec) else {
@@ -560,6 +590,14 @@ impl OnionWorldWriter for OnionUdpWriter {
                         );
                         continue;
                     }
+                    if !self.rate_window.try_admit(self.clock.now_ms()) {
+                        tracing::debug!(
+                            %peer,
+                            max_pps = MAX_OUTBOUND_DATAGRAMS_PER_SEC,
+                            "onion udp exit dropped outbound datagram exceeding per-second rate cap"
+                        );
+                        continue;
+                    }
                     self.socket
                         .send_to(&payload, peer)
                         .await
@@ -579,6 +617,63 @@ impl OnionWorldWriter for OnionUdpWriter {
 struct UdpSessionReaderState {
     receiver: OnionStreamReceiver,
     buffer: BytesMut,
+}
+
+/// Cancel-safe RAII lease over a synchronous `Option<T>` slot.
+///
+/// If the owning async operation (`recv_from` or `send_framed`) returns a live outcome or is
+/// cancelled while awaiting an event or queue slot, `Drop` restores `T` into `slot` unless
+/// [`NativeOnionUdpSession::close`] has set `closed`. Terminal stream states (`Fin`, `Failed`, or
+/// framing error) call [`Self::retire`] so dead stream halves are dropped immediately.
+#[cfg(rings_native)]
+struct SlotLease<'a, T> {
+    slot: &'a SyncMutex<Option<T>>,
+    closed: &'a AtomicBool,
+    value: Option<T>,
+}
+
+#[cfg(rings_native)]
+impl<'a, T> SlotLease<'a, T> {
+    fn acquire(slot: &'a SyncMutex<Option<T>>, closed: &'a AtomicBool) -> Result<Option<Self>> {
+        if closed.load(Ordering::SeqCst) {
+            if let Ok(mut guard) = lock(slot) {
+                let _ = guard.take();
+            }
+            return Ok(None);
+        }
+        let Some(val) = lock(slot)?.take() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            slot,
+            closed,
+            value: Some(val),
+        }))
+    }
+
+    fn retire(&mut self) {
+        let _ = self.value.take();
+    }
+}
+
+#[cfg(rings_native)]
+impl<T> Drop for SlotLease<'_, T> {
+    fn drop(&mut self) {
+        let Some(val) = self.value.take() else {
+            return;
+        };
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Ok(mut guard) = lock(self.slot) {
+            *guard = Some(val);
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            if let Ok(mut guard) = lock(self.slot) {
+                let _ = guard.take();
+            }
+        }
+    }
 }
 
 /// Client handle to an opened `onion::udp` datagram session whose exit has bound an OS UDP socket.
@@ -668,30 +763,38 @@ impl NativeOnionUdpSession {
 
     /// Receive the next inbound UDP datagram `(payload, peer)` from the exit's bound socket, or
     /// `Ok(None)` when the session closes cleanly or via [`Self::close`].
+    ///
+    /// Cancel-safe: dropping a pending `recv_from` future (for example inside a losing
+    /// `tokio::select!` branch) preserves both the underlying stream receiver and any partially
+    /// buffered frame bytes for the next call.
     pub async fn recv_from(&self) -> Result<Option<(Bytes, SocketAddr)>> {
         let _guard = self.recv_gate.lock().await;
-        if self.closed.load(Ordering::SeqCst) {
-            self.drop_receiver_slot();
-            return Ok(None);
-        }
-        let Some(mut state) = lock(&self.receiver_slot)?.take() else {
+        let Some(mut lease) = SlotLease::acquire(&self.receiver_slot, &self.closed)? else {
             return Ok(None);
         };
-        let outcome = loop {
+        loop {
+            let Some(state) = lease.value.as_mut() else {
+                return Ok(None);
+            };
             match decode_next_server_frame(&mut state.buffer) {
                 Ok(Some(OnionUdpServerFrame::RecvDatagram { peer, payload })) => {
-                    break Ok(Some((Bytes::from(payload), peer)));
+                    return Ok(Some((Bytes::from(payload), peer)));
                 }
                 Ok(Some(OnionUdpServerFrame::Bound { .. })) => {
-                    break Err(Error::InvalidData);
+                    lease.retire();
+                    return Err(Error::InvalidData);
                 }
                 Ok(None) => {}
-                Err(err) => break Err(err),
+                Err(err) => {
+                    lease.retire();
+                    return Err(err);
+                }
             }
             let notified = self.closed_notify.notified();
             tokio::pin!(notified);
             if self.closed.load(Ordering::SeqCst) {
-                break Ok(None);
+                lease.retire();
+                return Ok(None);
             }
             let event = tokio::select! {
                 () = &mut notified => None,
@@ -701,25 +804,21 @@ impl NativeOnionUdpSession {
                 Some(OnionStreamEvent::Data(chunk)) => {
                     if state.buffer.len().saturating_add(chunk.len()) > MAX_READER_REASSEMBLY_BYTES
                     {
-                        break Err(Error::InvalidData);
+                        lease.retire();
+                        return Err(Error::InvalidData);
                     }
                     state.buffer.extend_from_slice(&chunk);
                 }
-                Some(OnionStreamEvent::Fin) | None => break Ok(None),
+                Some(OnionStreamEvent::Fin) | None => {
+                    lease.retire();
+                    return Ok(None);
+                }
                 Some(OnionStreamEvent::Failed) => {
-                    break Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
+                    lease.retire();
+                    return Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
                 }
             }
-        };
-        if matches!(outcome, Ok(Some(_))) && !self.closed.load(Ordering::SeqCst) {
-            if let Ok(mut slot) = lock(&self.receiver_slot) {
-                *slot = Some(state);
-            }
-            if self.closed.load(Ordering::SeqCst) {
-                self.drop_receiver_slot();
-            }
         }
-        outcome
     }
 
     /// Synchronously signal closure, drop idle stream halves immediately, and wake any parked
@@ -733,31 +832,31 @@ impl NativeOnionUdpSession {
 
     async fn send_framed(&self, framed: Bytes) -> Result<()> {
         let _guard = self.send_gate.lock().await;
-        if self.closed.load(Ordering::SeqCst) {
-            self.drop_sender_slot();
+        let Some(mut lease) = SlotLease::acquire(&self.sender_slot, &self.closed)? else {
             return Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
-        }
-        let Some(mut sender) = lock(&self.sender_slot)?.take() else {
+        };
+        let Some(sender) = lease.value.as_mut() else {
             return Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
         };
         let notified = self.closed_notify.notified();
         tokio::pin!(notified);
         if self.closed.load(Ordering::SeqCst) {
+            lease.retire();
             return Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
         }
-        let res = tokio::select! {
+        let ready = tokio::select! {
             () = &mut notified => Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed)),
-            sent = sender.send(framed) => sent.map_err(|_| Error::OnionRouteError(OnionRouteError::UdpSessionClosed)),
+            res = sender.ready() => res.map_err(|_| Error::OnionRouteError(OnionRouteError::UdpSessionClosed)),
         };
-        if res.is_ok() && !self.closed.load(Ordering::SeqCst) {
-            if let Ok(mut slot) = lock(&self.sender_slot) {
-                *slot = Some(sender);
-            }
-            if self.closed.load(Ordering::SeqCst) {
-                self.drop_sender_slot();
-            }
+        if let Err(err) = ready {
+            lease.retire();
+            return Err(err);
         }
-        res
+        if sender.start_send(framed).is_err() {
+            lease.retire();
+            return Err(Error::OnionRouteError(OnionRouteError::UdpSessionClosed));
+        }
+        Ok(())
     }
 
     fn drop_sender_slot(&self) {

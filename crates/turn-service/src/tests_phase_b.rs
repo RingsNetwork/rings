@@ -15,6 +15,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::swarm::OfferReply;
+use rings_core::utils::ManualClock;
 use rings_node::error::Error;
 use rings_node::error::Result;
 use rings_node::extension::ext::Envelope;
@@ -38,17 +39,38 @@ use rings_turn::TurnDatagramRelayFactory;
 use rings_turn::TurnServer;
 use rings_turn::TurnServerConfig;
 use stun::agent::TransactionId;
+use stun::attributes::ATTR_NONCE;
+use stun::attributes::ATTR_REALM;
+use stun::attributes::ATTR_USERNAME;
 use stun::fingerprint::FINGERPRINT;
+use stun::integrity::MessageIntegrity;
 use stun::message::Getter;
 use stun::message::Message;
 use stun::message::MessageType;
+use stun::message::CLASS_ERROR_RESPONSE;
+use stun::message::CLASS_INDICATION;
 use stun::message::CLASS_REQUEST;
 use stun::message::CLASS_SUCCESS_RESPONSE;
+use stun::message::METHOD_ALLOCATE;
 use stun::message::METHOD_BINDING;
+use stun::message::METHOD_CREATE_PERMISSION;
+use stun::message::METHOD_DATA;
+use stun::message::METHOD_REFRESH;
+use stun::message::METHOD_SEND;
+use stun::textattrs::Nonce;
+use stun::textattrs::Realm;
+use stun::textattrs::Username;
 use stun::xoraddr::XorMappedAddress;
 use tokio::net::UdpSocket;
+use turn::auth::generate_auth_key;
 use turn::client::Client as TurnClient;
 use turn::client::ClientConfig as TurnClientConfig;
+use turn::proto::data::Data;
+use turn::proto::lifetime::Lifetime;
+use turn::proto::peeraddr::PeerAddress;
+use turn::proto::relayaddr::RelayedAddress;
+use turn::proto::reqtrans::RequestedTransport;
+use turn::proto::PROTO_UDP;
 use webrtc_util::Conn;
 
 use crate::announce_turn_service;
@@ -191,6 +213,50 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
 }
 
+async fn send_authenticated_create_permission(
+    sock: &UdpSocket,
+    entry_listen_addr: SocketAddr,
+    peer_addr: SocketAddr,
+    username: &str,
+    realm: &str,
+    nonce: &str,
+    mi_key: &[u8],
+) {
+    let mut perm_msg = Message::new();
+    perm_msg
+        .build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_CREATE_PERMISSION, CLASS_REQUEST)),
+            Box::new(PeerAddress {
+                ip: peer_addr.ip(),
+                port: peer_addr.port(),
+            }),
+            Box::new(Username::new(ATTR_USERNAME, username.to_string())),
+            Box::new(Realm::new(ATTR_REALM, realm.to_string())),
+            Box::new(Nonce::new(ATTR_NONCE, nonce.to_string())),
+            Box::new(MessageIntegrity(mi_key.to_vec())),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    sock.send_to(&perm_msg.raw, entry_listen_addr)
+        .await
+        .unwrap();
+    let mut resp_buf = vec![0_u8; 512];
+    let (resp_len, _) = with_hang_guard(
+        "receive 200 CreatePermission response",
+        Duration::from_secs(10),
+        sock.recv_from(&mut resp_buf),
+    )
+    .await
+    .unwrap();
+    let mut resp = Message {
+        raw: resp_buf[..resp_len].to_vec(),
+        ..Default::default()
+    };
+    resp.decode().unwrap();
+    assert_eq!(resp.typ.class, CLASS_SUCCESS_RESPONSE);
+}
+
 #[tokio::test]
 async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_down_cleanly(
 ) -> Result<()> {
@@ -208,11 +274,13 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
     let exit_policy = OnionExitPolicy::from_target_strings(vec!["*:*".to_string()], Vec::new())?;
     let exit_offer = OnionExitOffer::new([OnionServiceName::udp()], exit_policy)?;
 
+    let turn_clock = Arc::new(ManualClock::new(rings_core::utils::get_epoch_ms()));
     let deferred_factory = OnionUdpRelayFactory::deferred(
         OnionLoopClass::DEFAULT,
         RelayPeerPolicy::AllowLocalAndPrivate,
     );
     let mut turn_cfg = TurnServerConfig::loopback_ephemeral();
+    turn_cfg.clock = turn_clock.clone();
     turn_cfg.admission = TurnAdmissionPolicy::allowlist(std::iter::empty());
     turn_cfg.max_allocations = 4;
     turn_cfg.max_reservations = 4;
@@ -312,6 +380,7 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
     .await;
 
     // 2. Acquire an unlinkable `tkt-…` session ticket over the Sphinx `invoke` loop.
+    turn_clock.set(rings_core::utils::get_epoch_ms());
     let acquired = with_hang_guard(
         "acquire turn ticket for multi-hop TURN",
         Duration::from_secs(15),
@@ -528,8 +597,15 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
     }
     let burst_hol_ms = burst_t0.elapsed().as_secs_f64() * 1_000.0;
 
-    // 6. Law 5 (Middle-hop blindness): inspect every `onion_circuit` cell observed on the
+    // 6. Law 5 (Middle-hop blindness): inspect every `onion-circuit` cell observed on the
     //    intermediate `relay` hops during the STUN + application datagram + 1 KiB burst exchange!
+    //    Note: a bare 4-byte pattern across ~20 MiB of uniform AEZ ciphertext has ~0.5% random
+    //    collision probability (`N / 2^32`), so we assert over the 16-byte STUN header slice
+    //    (`magic_cookie || transaction_id`, `2^-128`), the 12-byte `transaction_id` (`2^-96`),
+    //    the 31-byte markers (`2^-248`), and the 6-byte `(IPv4, port)` tuple (`2^-48`).
+    let mut stun_cookie_and_tx_id = [0_u8; 16];
+    stun_cookie_and_tx_id[..4].copy_from_slice(&STUN_MAGIC_COOKIE_BYTES);
+    stun_cookie_and_tx_id[4..16].copy_from_slice(&stun_tx_id.0);
     let captured_cells = relay_tap.take_cells();
     assert!(
         captured_cells.len() >= 8,
@@ -545,8 +621,8 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
             cell.len()
         );
         assert!(
-            !contains_subslice(cell, &STUN_MAGIC_COOKIE_BYTES),
-            "Law 5 violated at cell #{idx}: STUN magic cookie 0x2112A442 leaked in wire cell"
+            !contains_subslice(cell, &stun_cookie_and_tx_id),
+            "Law 5 violated at cell #{idx}: STUN cookie+TransactionId header leaked in wire cell"
         );
         assert!(
             !contains_subslice(cell, &stun_tx_id.0),
@@ -604,6 +680,261 @@ async fn multi_hop_turn_over_onion_udp_preserves_middle_hop_blindness_and_tears_
         captured_cells.len(),
         expected_cell_width,
     );
+
+    // 8. Multi-hop `Refresh` cancel-safety, permission expiry/renewal, and allocation expiry:
+    //    Exercises a live `Refresh(Lifetime=600)` while `relay_packet_handler` is parked in
+    //    `tokio::select! { changed = expiry_rx.changed(), recv_res = alloc.recv_payload_from_peer() }`,
+    //    verifying inbound traffic survives `Refresh`, stops on 5-minute permission expiry, resumes
+    //    after `CreatePermission` renewal, and releases the remote exit socket on allocation expiry.
+    turn_clock.set(rings_core::utils::get_epoch_ms());
+    let acquired_2 = with_hang_guard(
+        "acquire second turn ticket for Refresh/expiry regression",
+        Duration::from_secs(15),
+        request_turn_ticket(&client_node.provider, Duration::from_secs(60), None),
+    )
+    .await?;
+    let parsed_ice_2: rings_transport::ice_server::IceServer = acquired_2
+        .ice_url
+        .parse()
+        .map_err(|e| Error::InvalidConfig(format!("invalid ICE URL #2: {e}")))?;
+    let raw_turn_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let mut ctrl_buf = vec![0_u8; 2048];
+
+    // 8a. Obtain realm + nonce challenge, then `Allocate` over the 5-hop `onion::udp` loop.
+    let mut unauth_alloc = Message::new();
+    unauth_alloc
+        .build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+            Box::new(RequestedTransport {
+                protocol: PROTO_UDP,
+            }),
+        ])
+        .unwrap();
+    raw_turn_sock
+        .send_to(&unauth_alloc.raw, entry_listen_addr)
+        .await
+        .unwrap();
+    let (chal_len, _) = raw_turn_sock.recv_from(&mut ctrl_buf).await.unwrap();
+    let mut chal_msg = Message {
+        raw: ctrl_buf[..chal_len].to_vec(),
+        ..Default::default()
+    };
+    chal_msg.decode().unwrap();
+    assert_eq!(chal_msg.typ.class, CLASS_ERROR_RESPONSE);
+    let mut nonce_attr = Nonce::new(ATTR_NONCE, String::new());
+    nonce_attr.get_from(&chal_msg).unwrap();
+    let mut realm_attr = Realm::new(ATTR_REALM, String::new());
+    realm_attr.get_from(&chal_msg).unwrap();
+    let mi_key = generate_auth_key(
+        &parsed_ice_2.username,
+        &realm_attr.text,
+        &parsed_ice_2.credential,
+    );
+
+    let mut auth_alloc = Message::new();
+    auth_alloc
+        .build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_ALLOCATE, CLASS_REQUEST)),
+            Box::new(RequestedTransport {
+                protocol: PROTO_UDP,
+            }),
+            Box::new(Lifetime(Duration::from_secs(600))),
+            Box::new(Username::new(ATTR_USERNAME, parsed_ice_2.username.clone())),
+            Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+            Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+            Box::new(MessageIntegrity(mi_key.clone())),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    raw_turn_sock
+        .send_to(&auth_alloc.raw, entry_listen_addr)
+        .await
+        .unwrap();
+    let (alloc2_len, _) = with_hang_guard(
+        "receive 200 Allocate Success #2",
+        Duration::from_secs(15),
+        raw_turn_sock.recv_from(&mut ctrl_buf),
+    )
+    .await
+    .unwrap();
+    let mut alloc2_resp = Message {
+        raw: ctrl_buf[..alloc2_len].to_vec(),
+        ..Default::default()
+    };
+    alloc2_resp.decode().unwrap();
+    assert_eq!(alloc2_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+    let mut relayed_attr_2 = RelayedAddress::default();
+    relayed_attr_2.get_from(&alloc2_resp).unwrap();
+    let exit_relayed_addr_2 = SocketAddr::new(relayed_attr_2.ip, relayed_attr_2.port);
+
+    // 8b. Install initial `CreatePermission(raw_peer_addr)` and send one outbound `SendIndication`
+    //     barrier so `AllowPeerIp` (which precedes `SendDatagram` in the ordered 5-hop session
+    //     stream) is confirmed committed at `exit_node` before `raw_peer` transmits inbound UDP.
+    send_authenticated_create_permission(
+        &raw_turn_sock,
+        entry_listen_addr,
+        raw_peer_addr,
+        &parsed_ice_2.username,
+        &realm_attr.text,
+        &nonce_attr.text,
+        &mi_key,
+    )
+    .await;
+    let mut barrier_send = Message::new();
+    barrier_send
+        .build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_SEND, CLASS_INDICATION)),
+            Box::new(PeerAddress {
+                ip: raw_peer_addr.ip(),
+                port: raw_peer_addr.port(),
+            }),
+            Box::new(Data(b"sync-pinhole-barrier".to_vec())),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    raw_turn_sock
+        .send_to(&barrier_send.raw, entry_listen_addr)
+        .await
+        .unwrap();
+    let (bar_len, bar_src) = with_hang_guard(
+        "raw UDP peer receives pinhole-sync barrier from E_exit_2",
+        Duration::from_secs(10),
+        raw_peer.recv_from(&mut peer_buf),
+    )
+    .await
+    .unwrap();
+    assert_eq!(bar_src, exit_relayed_addr_2);
+    assert_eq!(&peer_buf[..bar_len], b"sync-pinhole-barrier");
+
+    // 8c. Issue a live `Refresh(Lifetime=600)` while `relay_packet_handler` is parked awaiting
+    //     `NativeOnionUdpSession::recv_from()`, then verify inbound UDP datagrams still arrive!
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let mut refresh_msg = Message::new();
+    refresh_msg
+        .build(&[
+            Box::new(TransactionId::new()),
+            Box::new(MessageType::new(METHOD_REFRESH, CLASS_REQUEST)),
+            Box::new(Lifetime(Duration::from_secs(600))),
+            Box::new(Username::new(ATTR_USERNAME, parsed_ice_2.username.clone())),
+            Box::new(Realm::new(ATTR_REALM, realm_attr.text.clone())),
+            Box::new(Nonce::new(ATTR_NONCE, nonce_attr.text.clone())),
+            Box::new(MessageIntegrity(mi_key.clone())),
+            Box::new(FINGERPRINT),
+        ])
+        .unwrap();
+    raw_turn_sock
+        .send_to(&refresh_msg.raw, entry_listen_addr)
+        .await
+        .unwrap();
+    let (ref_len, _) = with_hang_guard(
+        "receive 200 Refresh Success",
+        Duration::from_secs(10),
+        raw_turn_sock.recv_from(&mut ctrl_buf),
+    )
+    .await
+    .unwrap();
+    let mut ref_resp = Message {
+        raw: ctrl_buf[..ref_len].to_vec(),
+        ..Default::default()
+    };
+    ref_resp.decode().unwrap();
+    assert_eq!(ref_resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+    raw_peer
+        .send_to(b"post-refresh-inbound-ok", exit_relayed_addr_2)
+        .await
+        .unwrap();
+    let (ind1_len, _) = with_hang_guard(
+        "receive DataIndication after live Refresh",
+        Duration::from_secs(10),
+        raw_turn_sock.recv_from(&mut ctrl_buf),
+    )
+    .await
+    .unwrap();
+    let mut ind1 = Message {
+        raw: ctrl_buf[..ind1_len].to_vec(),
+        ..Default::default()
+    };
+    ind1.decode().unwrap();
+    assert_eq!(ind1.typ.class, CLASS_INDICATION);
+    assert_eq!(ind1.typ.method, METHOD_DATA);
+    let mut ind1_data = Data::default();
+    ind1_data.get_from(&ind1).unwrap();
+    assert_eq!(ind1_data.0.as_slice(), b"post-refresh-inbound-ok");
+
+    // 8d. Advance `turn_clock` by 301s: the 5-minute permission expires while the 600s allocation
+    //     stays live, so inbound datagrams are dropped until `CreatePermission` renews it.
+    //     Wait longer than one full 5-hop return transit (`steady_rtt_ms + 800 ms`) so the
+    //     in-flight return cell reaches `entry_node` and is dropped before we renew the permission.
+    turn_clock.advance(301_000);
+    raw_peer
+        .send_to(b"dropped-after-perm-expiry", exit_relayed_addr_2)
+        .await
+        .unwrap();
+    let expiry_drain_wait =
+        Duration::from_secs_f64((steady_rtt_ms / 1_000.0 + 0.8).clamp(1.5, 4.0));
+    assert!(
+        tokio::time::timeout(expiry_drain_wait, raw_turn_sock.recv_from(&mut ctrl_buf))
+            .await
+            .is_err(),
+        "inbound datagram after 300s permission expiry must be dropped"
+    );
+
+    // Renew permission via `CreatePermission` and verify inbound delivery resumes immediately.
+    send_authenticated_create_permission(
+        &raw_turn_sock,
+        entry_listen_addr,
+        raw_peer_addr,
+        &parsed_ice_2.username,
+        &realm_attr.text,
+        &nonce_attr.text,
+        &mi_key,
+    )
+    .await;
+    raw_peer
+        .send_to(b"post-perm-renewal-ok", exit_relayed_addr_2)
+        .await
+        .unwrap();
+    let (ind2_len, _) = with_hang_guard(
+        "receive DataIndication after CreatePermission renewal",
+        Duration::from_secs(10),
+        raw_turn_sock.recv_from(&mut ctrl_buf),
+    )
+    .await
+    .unwrap();
+    let mut ind2 = Message {
+        raw: ctrl_buf[..ind2_len].to_vec(),
+        ..Default::default()
+    };
+    ind2.decode().unwrap();
+    let mut ind2_data = Data::default();
+    ind2_data.get_from(&ind2).unwrap();
+    assert_eq!(ind2_data.0.as_slice(), b"post-perm-renewal-ok");
+
+    // 8e. Advance `turn_clock` past the 600s allocation lifetime: entry prunes the expired
+    //     allocation and the remote exit releases `E_exit_2`.
+    turn_clock.advance(305_000);
+    assert!(
+        turn_server.allocations_info(None).await.unwrap().is_empty(),
+        "expired multi-hop allocation must be pruned and closed"
+    );
+    with_hang_guard(
+        "verify remote exit released E_exit_2 after allocation expiry",
+        Duration::from_secs(3),
+        async {
+            loop {
+                if let Ok(rebound) = UdpSocket::bind(exit_relayed_addr_2).await {
+                    drop(rebound);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+        },
+    )
+    .await;
 
     turn_server.close().await.unwrap();
     client_node.shutdown().await?;
