@@ -604,6 +604,7 @@ impl ServerAllocationBook {
         max_reservations: usize,
         max_permissions_per_allocation: usize,
     ) -> Self {
+        let max_allocations = max_allocations.clamp(1, Semaphore::MAX_PERMITS);
         Self {
             core: TurnAllocationCore::new(
                 max_allocations,
@@ -3608,7 +3609,7 @@ impl TurnServer {
                 config.peer_policy,
             )),
         };
-        let max_allocations = config.max_allocations.max(1);
+        let max_allocations = config.max_allocations.clamp(1, Semaphore::MAX_PERMITS);
         let max_reservations = config.max_reservations;
         let max_reservation_ttl = config.max_reservation_ttl.min(MAXIMUM_ALLOCATION_LIFETIME);
         let max_permissions = config.max_permissions_per_allocation.max(1);

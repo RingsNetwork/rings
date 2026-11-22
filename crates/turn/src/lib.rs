@@ -3349,6 +3349,12 @@ mod tests {
         )]);
 
         server.close().await?;
+
+        // `max_allocations = usize::MAX` must clamp to `Semaphore::MAX_PERMITS` without panicking.
+        let mut unbounded_cfg = TurnServerConfig::loopback_ephemeral();
+        unbounded_cfg.max_allocations = usize::MAX;
+        let unbounded_server = TurnServer::start(unbounded_cfg).await?;
+        unbounded_server.close().await?;
         Ok(())
     }
 }
