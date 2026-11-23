@@ -93,6 +93,7 @@ const COLUMNS: [Column; 3] = [
     Column {
         title: "Project",
         links: &[
+            SiteLink::Project(ProjectLink::Blog),
             SiteLink::Project(ProjectLink::Whitepaper),
             SiteLink::Project(ProjectLink::Security),
             SiteLink::Project(ProjectLink::Roadmap),
