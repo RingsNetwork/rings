@@ -14,7 +14,7 @@ body {
   min-height: 100vh;
   background: #f3ead8;
   color: #344054;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
 }
 
 .static-site h1,
@@ -32,7 +32,7 @@ body {
 
 .static-site a {
   color: #344054;
-  font-weight: 800;
+  font-weight: 700;
   text-decoration: none;
 }
 
@@ -107,7 +107,7 @@ body {
   margin-bottom: 0;
   color: #b42318;
   font-size: 0.78rem;
-  font-weight: 900;
+  font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }

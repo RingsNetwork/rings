@@ -2,7 +2,9 @@ use super::border;
 use super::rule;
 use super::themed_nav;
 use super::Theme;
+use super::SERIF_FONT;
 
+/// Appends console shell, header, stage, and control theme rules.
 pub(super) fn append(css: &mut String, theme: Theme) {
     append_console_shell(css, theme);
     append_console_header(css, theme);
@@ -10,18 +12,15 @@ pub(super) fn append(css: &mut String, theme: Theme) {
     append_console_controls(css, theme);
 }
 
+/// Appends background, overlay gradient, and typography rules for `.topology-shell`.
 fn append_console_shell(css: &mut String, theme: Theme) {
-    rule(
-        css,
-        ".topology-shell",
-        &[
-            ("position", "relative"),
-            ("z-index", "10"),
-            ("background", theme.page),
-            ("color", "#111827"),
-            ("font-family", "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"),
-        ],
-    );
+    rule(css, ".topology-shell", &[
+        ("position", "relative"),
+        ("z-index", "10"),
+        ("background", theme.page),
+        ("color", "#111827"),
+        ("font-family", SERIF_FONT),
+    ]);
     rule(css, ".topology-shell::before", &[
         ("content", "\"\""),
         ("position", "absolute"),
@@ -57,6 +56,7 @@ fn append_console_shell(css: &mut String, theme: Theme) {
     );
 }
 
+/// Appends header and navigation styling within the console shell.
 fn append_console_header(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .landing-header", &[
         ("width", "calc(100% + 24px)"),
@@ -90,6 +90,7 @@ fn append_console_header(css: &mut String, theme: Theme) {
     themed_nav(css, ".topology-shell", theme);
 }
 
+/// Appends network stage, node band, and extension-mode stage rules.
 fn append_console_stage(css: &mut String) {
     rule(css, ".topology-shell .node-band", &[("background", "linear-gradient(90deg, rgba(180, 35, 24, 0.06), transparent 42%, rgba(15, 118, 110, 0.05)), rgba(255, 250, 240, 0.9)")]);
     rule(css, ".topology-shell .network-stage", &[("background", "linear-gradient(90deg, rgba(243, 234, 216, 0.44) 0%, rgba(243, 234, 216, 0.28) 46%, rgba(243, 234, 216, 0.08) 100%), linear-gradient(180deg, rgba(255, 250, 240, 0.3), rgba(255, 246, 230, 0.18)), url(\"assets/images/rings-market-hero.png\") center / cover no-repeat"), ("backdrop-filter", "blur(2px)")]);
@@ -110,6 +111,7 @@ fn append_console_stage(css: &mut String) {
     )]);
 }
 
+/// Appends console form, surface, workspace, and extension-tab control rules.
 fn append_console_controls(css: &mut String, theme: Theme) {
     append_form_controls(css, theme);
     append_surface_controls(css, theme);
@@ -117,6 +119,7 @@ fn append_console_controls(css: &mut String, theme: Theme) {
     append_extension_tabs(css, theme);
 }
 
+/// Appends themed button and form-input rules for the console shell.
 fn append_form_controls(css: &mut String, theme: Theme) {
     rule(
         css,
@@ -168,6 +171,7 @@ fn append_form_controls(css: &mut String, theme: Theme) {
     );
 }
 
+/// Appends sidebar, card, and status text color rules for console surfaces.
 fn append_surface_controls(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .surface,.topology-shell .metric,.topology-shell .tool-block,.topology-shell .advanced-settings,.topology-shell .control-sidebar,.topology-shell .sidebar-command-panel,.topology-shell .rail-card,.topology-shell .sidebar-section,.topology-shell .empty-state,.topology-shell .list-item,.topology-shell .segmented,.topology-shell .sdp-step", &[("border-color", theme.line), ("background", theme.panel), ("box-shadow", "none")]);
     rule(css, ".topology-shell .control-sidebar", &[(
@@ -195,6 +199,7 @@ fn append_surface_controls(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .metric strong,.topology-shell .identity-value code,.topology-shell .link-meta strong,.topology-shell .rail-row strong,.topology-shell .rail-did,.topology-shell .signal-card p", &[("color", "#111827")]);
 }
 
+/// Appends workspace tab, segmented control, and topology add-button rules.
 fn append_workspace_controls(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .workspace-tab", &[
         ("border-color", theme.line_strong),
@@ -237,6 +242,7 @@ fn append_workspace_controls(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .topology-add-button:hover", &[("border-color", theme.accent), ("background", "radial-gradient(circle at 50% 42%, rgba(180, 35, 24, 0.16), rgba(15, 118, 110, 0.1) 58%, rgba(255, 250, 240, 0.94)), #fff6e6"), ("color", theme.accent)]);
 }
 
+/// Appends fixed bottom action-tab bar rules for extension mode.
 fn append_extension_tabs(css: &mut String, theme: Theme) {
     rule(css, ".topology-shell .extension-action-tabs", &[
         ("position", "fixed"),
@@ -258,6 +264,7 @@ fn append_extension_tabs(css: &mut String, theme: Theme) {
     append_extension_tab_content(css);
 }
 
+/// Appends full-viewport modal layout overrides for extension mode.
 fn append_extension_modal(css: &mut String) {
     rule(css, ".topology-shell.extension-mode .modal-shell", &[
         ("position", "fixed"),
@@ -285,6 +292,7 @@ fn append_extension_modal(css: &mut String) {
     );
 }
 
+/// Appends command-grid layout rules inside the extension action-tab bar.
 fn append_extension_tab_content(css: &mut String) {
     rule(
         css,

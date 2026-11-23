@@ -1,6 +1,7 @@
 use super::border;
 use super::rule;
 use super::Theme;
+use super::MONO_FONT;
 
 /// The guide page: its heading, the runtime cards, and the first-step cards. Cards share the
 /// document card surface defined with the landing cards (`landing::append_feature_cards`);
@@ -11,6 +12,7 @@ pub(super) fn append(css: &mut String, theme: Theme) {
     append_steps(css, theme);
 }
 
+/// Appends guide page heading container and title rules.
 fn append_heading(css: &mut String, theme: Theme) {
     rule(css, ".guide-heading", &[
         ("display", "grid"),
@@ -22,12 +24,14 @@ fn append_heading(css: &mut String, theme: Theme) {
         ("margin", "0"),
         ("color", theme.ink),
         ("font-size", "3rem"),
-        ("letter-spacing", "0"),
-        ("line-height", "1.06"),
+        ("font-weight", "700"),
+        ("letter-spacing", "-0.015em"),
+        ("line-height", "1.08"),
         ("text-transform", "none"),
     ]);
 }
 
+/// Appends runtime card grid, label, and link button rules on the guide page.
 fn append_runtime_cards(css: &mut String, theme: Theme) {
     rule(css, ".guide-runtime-grid", &[
         ("display", "grid"),
@@ -41,8 +45,8 @@ fn append_runtime_cards(css: &mut String, theme: Theme) {
     rule(css, ".guide-card .guide-card-label", &[
         ("margin", "0"),
         ("color", theme.accent),
-        ("font-size", "0.72rem"),
-        ("font-weight", "900"),
+        ("font-size", "0.74rem"),
+        ("font-weight", "700"),
         ("letter-spacing", "0.08em"),
         ("text-transform", "uppercase"),
     ]);
@@ -58,12 +62,13 @@ fn append_runtime_cards(css: &mut String, theme: Theme) {
         ("align-items", "center"),
         ("border", border(theme.line_strong)),
         ("border-radius", "6px"),
-        ("padding", "0 10px"),
+        ("padding", "0 11px"),
         ("background", theme.panel_alt),
         ("color", theme.ink_soft),
         ("font-family", "inherit"),
         ("font-size", "0.76rem"),
-        ("font-weight", "800"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.05em"),
         ("line-height", "1"),
         ("text-decoration", "none"),
         ("text-transform", "uppercase"),
@@ -77,6 +82,7 @@ fn append_runtime_cards(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends step-by-step guide row and command column rules.
 fn append_steps(css: &mut String, theme: Theme) {
     rule(css, ".guide-step-grid", &[
         ("display", "grid"),
@@ -111,12 +117,9 @@ fn append_steps(css: &mut String, theme: Theme) {
     ]);
     rule(css, ".guide-step-index", &[
         ("color", theme.accent),
-        (
-            "font-family",
-            "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-        ),
+        ("font-family", MONO_FONT),
         ("font-size", "0.8rem"),
-        ("font-weight", "900"),
+        ("font-weight", "700"),
     ]);
     rule(css, ".guide-step .landing-code", &[
         ("padding", "14px"),

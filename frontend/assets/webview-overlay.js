@@ -445,23 +445,23 @@
     root.innerHTML = `
       <style>
         :host { all: initial; }
-        #toolbar { position: fixed; inset: 0 0 auto 0; z-index: 2147483647; display: grid; min-width: 0; min-height: 46px; box-sizing: border-box; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 6px 8px; border-bottom: 1px solid #ddccb0; background: #fffaf0; color: #111827; box-shadow: 0 1px 4px rgba(17, 24, 39, 0.16); font: 12px/1 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        #toolbar { position: fixed; inset: 0 0 auto 0; z-index: 2147483647; display: grid; min-width: 0; min-height: 46px; box-sizing: border-box; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 6px 8px; border-bottom: 1px solid #ddccb0; background: #fffaf0; color: #111827; box-shadow: 0 1px 4px rgba(17, 24, 39, 0.16); font: 12px/1 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif; }
         #controls { display: flex; min-width: 0; gap: 5px; }
         #address-form { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-        #address { grid-column: 1; grid-row: 1; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 5px 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffdf8; color: #111827; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+        #address { grid-column: 1; grid-row: 1; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 5px 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffdf8; color: #111827; font: 12px/1.2 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
         #address:focus { border-color: #b42318; outline: 3px solid rgba(180, 35, 24, 0.12); }
         #address-form[data-loading=true] #address { border-color: #8ab4f8; box-shadow: inset 0 -2px 0 rgba(26, 115, 232, 0.18); }
         #loading-track { position: relative; z-index: 2; grid-column: 1; grid-row: 1; align-self: end; height: 2px; margin: 0 2px 2px; overflow: hidden; border-radius: 999px; pointer-events: none; }
         #loading-track[hidden] { display: none; }
         #loading-bar { position: absolute; inset: 0 auto 0 0; width: 42%; border-radius: inherit; background: linear-gradient(90deg, #1a73e8, #34a853); transform: translateX(-120%); animation: rings-webview-loading 1.15s cubic-bezier(.4, 0, .2, 1) infinite; }
         @keyframes rings-webview-loading { 0% { transform: translateX(-120%) scaleX(.65); } 45% { transform: translateX(72%) scaleX(1); } 100% { transform: translateX(250%) scaleX(.75); } }
-        #toolbar button { display: grid; min-width: 34px; height: 32px; min-height: 32px; box-sizing: border-box; place-items: center; padding: 0 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffaf0; color: #374151; font: 800 12px/1 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor: pointer; }
+        #toolbar button { display: grid; min-width: 34px; height: 32px; min-height: 32px; box-sizing: border-box; place-items: center; padding: 0 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffaf0; color: #374151; font: 700 12px/1 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif; cursor: pointer; }
         #toolbar button:hover, #toolbar button[data-active=true] { border-color: #111827; background: #111827; color: #fff; }
         #go { grid-column: 2; grid-row: 1; min-width: 38px; }
         #toggle { min-width: 34px; padding: 0; }
-        #panel { position: fixed; inset: auto 0 0 0; z-index: 2147483647; display: grid; width: 100vw; height: 300px; max-height: 45vh; box-sizing: border-box; grid-template-rows: auto minmax(0, 1fr); border-top: 1px solid #dadce0; background: #fff; color: #202124; box-shadow: 0 -1px 3px rgba(60, 64, 67, 0.22); overflow: hidden; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
+        #panel { position: fixed; inset: auto 0 0 0; z-index: 2147483647; display: grid; width: 100vw; height: 300px; max-height: 45vh; box-sizing: border-box; grid-template-rows: auto minmax(0, 1fr); border-top: 1px solid #dadce0; background: #fff; color: #202124; box-shadow: 0 -1px 3px rgba(60, 64, 67, 0.22); overflow: hidden; font: 12px/1.35 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace; }
         #panel[hidden] { display: none; }
-        #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-height: 34px; padding: 0 8px; border-bottom: 1px solid #dadce0; background: #f1f3f4; font: 12px/1.35 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-height: 34px; padding: 0 8px; border-bottom: 1px solid #dadce0; background: #f1f3f4; font: 12px/1.35 "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif; }
         #tabs { display: flex; align-self: stretch; gap: 0; }
         #filters { display: flex; min-width: min(520px, 100%); flex: 1 1 360px; gap: 6px; align-items: center; }
         #bar button, #bar select, #bar input { min-height: 24px; box-sizing: border-box; border: 1px solid #dadce0; border-radius: 3px; background: #fff; color: #3c4043; font: inherit; font-weight: 500; }
@@ -482,7 +482,7 @@
         .onion-row { grid-template-columns: 84px 76px minmax(250px, 1fr) 126px 76px minmax(260px, 1fr); }
         .network-row.error, .onion-row.error { color: #b42318; }
         .network-row.warning, .onion-row.warning { color: #8a4b00; }
-        .network-row.heading, .onion-row.heading { position: sticky; top: 0; z-index: 1; background: #fff; color: #5f6368; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-weight: 700; }
+        .network-row.heading, .onion-row.heading { position: sticky; top: 0; z-index: 1; background: #fff; color: #5f6368; font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif; font-weight: 700; }
         .toolbar-icon { display: block; width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
         @media (max-width: 640px) {
           #toolbar { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "controls toggle" "address address"; }
