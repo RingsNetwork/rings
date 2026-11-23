@@ -2,7 +2,9 @@ use super::border;
 use super::rule;
 use super::themed_nav;
 use super::Theme;
+use super::SERIF_FONT;
 
+/// Appends navigation bar, landing header, and header brand theme rules.
 pub(super) fn append(css: &mut String, theme: Theme) {
     append_base_nav(css);
     append_landing_header(css, theme);
@@ -10,6 +12,7 @@ pub(super) fn append(css: &mut String, theme: Theme) {
     append_header_nav(css, theme);
 }
 
+/// Appends shared base layout and interactive state rules for `.header-nav`.
 fn append_base_nav(css: &mut String) {
     rule(css, ".header-nav", &[
         ("display", "flex"),
@@ -30,7 +33,8 @@ fn append_base_nav(css: &mut String) {
         ("background", "rgba(255, 255, 255, 0.03)"),
         ("color", "var(--muted)"),
         ("font-size", "0.76rem"),
-        ("font-weight", "800"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.05em"),
         ("text-decoration", "none"),
         ("text-transform", "uppercase"),
         ("white-space", "nowrap"),
@@ -46,6 +50,7 @@ fn append_base_nav(css: &mut String) {
     );
 }
 
+/// Appends outer layout and surface rules for `.landing-header`.
 fn append_landing_header(css: &mut String, theme: Theme) {
     rule(css, ".landing-header", &[
         ("display", "grid"),
@@ -61,35 +66,34 @@ fn append_landing_header(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends brand logo mark and title styling for `.landing-header-brand`.
 fn append_header_brand(css: &mut String, theme: Theme) {
-    rule(
-        css,
-        ".landing-header-brand",
-        &[
-            ("display", "inline-flex"),
-            ("min-width", "0"),
-            ("align-items", "center"),
-            ("gap", "10px"),
-            ("color", theme.ink),
-            ("font-family", "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"),
-        ],
-    );
+    rule(css, ".landing-header-brand", &[
+        ("display", "inline-flex"),
+        ("min-width", "0"),
+        ("align-items", "center"),
+        ("gap", "10px"),
+        ("color", theme.ink),
+        ("font-family", SERIF_FONT),
+    ]);
     rule(css, ".landing-header-brand>div", &[
         ("display", "grid"),
-        ("gap", "1px"),
+        ("gap", "2px"),
         ("min-width", "0"),
     ]);
     rule(css, ".landing-header-brand strong", &[
         ("overflow", "hidden"),
-        ("font-size", "0.92rem"),
+        ("font-size", "0.96rem"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.01em"),
         ("line-height", "1.1"),
         ("text-overflow", "ellipsis"),
         ("white-space", "nowrap"),
     ]);
     rule(css, ".landing-header-brand span:last-child", &[
         ("color", "#667085"),
-        ("font-size", "0.72rem"),
-        ("line-height", "1.1"),
+        ("font-size", "0.75rem"),
+        ("line-height", "1.15"),
     ]);
     rule(css, ".landing-header-mark", &[
         ("display", "grid"),
@@ -127,15 +131,12 @@ fn append_header_nav(css: &mut String, theme: Theme) {
             ("box-sizing", "border-box"),
             ("height", "34px"),
             ("min-height", "34px"),
-            ("padding", "0 10px"),
-            (
-                "font-family",
-                "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-            ),
+            ("padding", "0 11px"),
+            ("font-family", SERIF_FONT),
             ("font-size", "12px"),
-            ("font-weight", "800"),
+            ("font-weight", "700"),
             ("line-height", "1"),
-            ("letter-spacing", "0"),
+            ("letter-spacing", "0.06em"),
             ("text-transform", "uppercase"),
         ],
     );
