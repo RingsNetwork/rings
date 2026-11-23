@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from build_blog import finish_blog
+
 SITE_URL = "https://rings.rs/"
 BOOK_DIR = "docs"
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -236,7 +238,7 @@ def finish_site(site: Path) -> list[str]:
     if not_found.is_file():
         not_found.write_text(mark_noindex(not_found.read_text(encoding="utf-8")), encoding="utf-8")
     emit_agent_artifacts(site)
-    urls = [SITE_URL, *finish_book(book)]
+    urls = [SITE_URL, *finish_blog(site), *finish_book(book)]
     (site / "sitemap.xml").write_text(sitemap(urls), encoding="utf-8")
     return urls
 

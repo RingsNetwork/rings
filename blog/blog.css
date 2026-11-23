@@ -1,0 +1,333 @@
+:root {
+  color-scheme: light;
+  --rings-page: #f3ead8;
+  --rings-bg: #fbf4e6;
+  --rings-panel: #fffaf0;
+  --rings-panel-alt: #fff6e6;
+  --rings-line: #dfd0b7;
+  --rings-line-strong: #d7c6aa;
+  --rings-ink: #101828;
+  --rings-ink-soft: #344054;
+  --rings-muted: #736453;
+  --rings-body: #344054;
+  --rings-accent: #b42318;
+  --rings-dark: #111827;
+  --rings-radius: 8px;
+  --rings-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --rings-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--rings-page);
+  color: var(--rings-body);
+  font-family: var(--rings-font);
+  line-height: 1.72;
+}
+a { color: var(--rings-accent); text-decoration: none; font-weight: 600; }
+a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 0.2em; }
+.rings-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 10vw;
+  border-bottom: 1px solid var(--rings-line);
+  background: rgba(251, 244, 230, 0.96);
+  backdrop-filter: blur(8px);
+}
+.rings-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--rings-ink);
+  text-decoration: none;
+}
+.rings-brand:hover { text-decoration: none; }
+.rings-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: var(--rings-radius);
+  background: var(--rings-dark);
+}
+.rings-mark img { display: block; width: 23px; height: 23px; object-fit: contain; }
+.rings-brand-text { display: grid; gap: 1px; line-height: 1.1; }
+.rings-brand-text strong { font-size: 0.94rem; color: var(--rings-ink); }
+.rings-brand-text span { font-size: 0.74rem; color: var(--rings-muted); font-weight: 500; }
+.rings-nav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rings-nav a {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--rings-line-strong);
+  border-radius: var(--rings-radius);
+  background: var(--rings-panel);
+  color: var(--rings-ink-soft);
+  font-family: var(--rings-mono);
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+.rings-nav a.active, .rings-nav a:hover {
+  border-color: var(--rings-dark);
+  background: var(--rings-dark);
+  color: #ffffff;
+  text-decoration: none;
+}
+.blog-shell { max-width: 1080px; margin: 0 auto; padding: 48px 24px 72px; }
+.blog-hero {
+  display: grid;
+  gap: 14px;
+  padding-bottom: 32px;
+  border-bottom: 1px solid var(--rings-line);
+  margin-bottom: 36px;
+}
+.blog-kicker {
+  margin: 0;
+  color: var(--rings-accent);
+  font-family: var(--rings-mono);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.blog-hero h1 {
+  margin: 0;
+  color: var(--rings-ink);
+  font-size: clamp(2.1rem, 4.5vw, 3.1rem);
+  line-height: 1.08;
+  font-weight: 800;
+}
+.blog-hero p { margin: 0; max-width: 760px; color: var(--rings-ink-soft); font-size: 1.06rem; }
+.blog-hero-links { display: flex; flex-wrap: wrap; gap: 12px; font-size: 0.88rem; }
+.blog-grid { display: grid; gap: 28px; }
+.blog-card {
+  display: grid;
+  grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+  gap: 28px;
+  padding: 24px;
+  border: 1px solid var(--rings-line-strong);
+  border-radius: 12px;
+  background: var(--rings-panel);
+  align-items: center;
+}
+.blog-card-media {
+  display: block;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--rings-line);
+  background: var(--rings-dark);
+  aspect-ratio: 16 / 9;
+}
+.blog-card-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.blog-card-body { display: grid; gap: 12px; }
+.blog-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  color: var(--rings-muted);
+  font-family: var(--rings-mono);
+  font-size: 0.78rem;
+}
+.blog-card h2 { margin: 0; font-size: 1.48rem; line-height: 1.22; }
+.blog-card h2 a { color: var(--rings-ink); font-weight: 800; }
+.blog-card h2 a:hover { color: var(--rings-accent); }
+.blog-card p { margin: 0; color: var(--rings-ink-soft); }
+.blog-tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0; margin: 0; list-style: none; }
+.blog-tags li {
+  padding: 2px 8px;
+  border: 1px solid var(--rings-line);
+  border-radius: 4px;
+  background: var(--rings-panel-alt);
+  color: var(--rings-muted);
+  font-family: var(--rings-mono);
+  font-size: 0.73rem;
+  font-weight: 700;
+}
+.blog-article-shell {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 40px 24px 72px;
+}
+.blog-breadcrumb {
+  margin-bottom: 18px;
+  font-family: var(--rings-mono);
+  font-size: 0.8rem;
+  color: var(--rings-muted);
+}
+.blog-article-header {
+  display: grid;
+  gap: 16px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rings-line);
+  margin-bottom: 28px;
+}
+.blog-article-header h1 {
+  margin: 0;
+  color: var(--rings-ink);
+  font-size: clamp(2rem, 4.2vw, 2.85rem);
+  line-height: 1.1;
+  font-weight: 800;
+}
+.blog-article-cover {
+  margin: 0 0 32px;
+  overflow: hidden;
+  border-radius: 10px;
+  border: 1px solid var(--rings-line-strong);
+  background: var(--rings-dark);
+}
+.blog-article-cover img { display: block; width: 100%; height: auto; }
+.blog-prose {
+  background: var(--rings-panel);
+  border: 1px solid var(--rings-line);
+  border-radius: 12px;
+  padding: 36px 40px;
+  color: var(--rings-body);
+  font-size: 1.06rem;
+}
+.blog-prose h2 {
+  margin: 2.1em 0 0.7em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--rings-line);
+  color: var(--rings-ink);
+  font-size: 1.55rem;
+  line-height: 1.22;
+}
+.blog-prose h3 {
+  margin: 1.8em 0 0.6em;
+  color: var(--rings-ink);
+  font-size: 1.25rem;
+}
+.blog-prose p, .blog-prose ul, .blog-prose ol { margin: 0 0 1.25em; }
+.blog-prose li { margin-bottom: 0.45em; }
+.blog-prose :not(pre) > code {
+  padding: 0.12em 0.4em;
+  border: 1px solid var(--rings-line);
+  border-radius: 4px;
+  background: var(--rings-panel-alt);
+  color: #8a5a12;
+  font-family: var(--rings-mono);
+  font-size: 0.88em;
+}
+.blog-prose pre {
+  margin: 0 0 1.4em;
+  padding: 18px 20px;
+  overflow-x: auto;
+  border-radius: 8px;
+  border: 1px solid #1f2937;
+  background: #101828;
+  color: #f2f4f7;
+  font-family: var(--rings-mono);
+  font-size: 0.88rem;
+  line-height: 1.65;
+}
+.blog-prose blockquote {
+  margin: 0 0 1.4em;
+  padding: 14px 20px;
+  border: 1px solid var(--rings-line);
+  border-left: 3px solid var(--rings-accent);
+  border-radius: 8px;
+  background: var(--rings-panel-alt);
+}
+.blog-prose blockquote p:last-child { margin-bottom: 0; }
+.blog-figure {
+  margin: 1.8em 0;
+  border: 1px solid var(--rings-line);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--rings-panel-alt);
+}
+.blog-figure img { display: block; width: 100%; height: auto; }
+.blog-figure figcaption {
+  padding: 10px 14px;
+  color: var(--rings-muted);
+  font-size: 0.84rem;
+  text-align: center;
+}
+.blog-post-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rings-line);
+}
+.rings-footer {
+  display: grid;
+  gap: 36px;
+  padding: 56px 10vw 36px;
+  border-top: 1px solid var(--rings-line);
+  background: #101828;
+  color: #d0d5dd;
+  font-size: 0.92rem;
+}
+.rings-footer-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) repeat(3, minmax(0, 1fr));
+  gap: 32px;
+}
+.rings-footer-brand { display: grid; max-width: 380px; align-content: start; gap: 10px; }
+.rings-footer-brand strong { color: #ffffff; font-size: 1.05rem; }
+.rings-footer-brand p { margin: 0; color: #98a2b3; line-height: 1.6; }
+.rings-footer-column { display: grid; align-content: start; gap: 12px; }
+.rings-footer-column h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.rings-footer-column ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.rings-footer-column a { color: #d0d5dd; font-weight: 500; }
+.rings-footer-column a:hover { color: #ffffff; }
+.rings-footer-notices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 20px 28px;
+  margin: 0;
+  padding-top: 28px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+.rings-footer-notices > div { display: grid; gap: 6px; }
+.rings-footer-notices dt {
+  color: #ffffff;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.rings-footer-notices dd { margin: 0; color: #98a2b3; font-size: 0.84rem; line-height: 1.6; }
+.rings-footer-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  color: #667085;
+  font-size: 0.82rem;
+}
+@media (max-width: 820px) {
+  .rings-header { padding: 12px 6vw; flex-wrap: wrap; }
+  .blog-card { grid-template-columns: 1fr; }
+  .blog-prose { padding: 24px 20px; }
+  .rings-footer { padding: 44px 6vw 28px; }
+  .rings-footer-grid { grid-template-columns: 1fr; }
+}
