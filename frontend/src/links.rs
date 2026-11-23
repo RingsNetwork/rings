@@ -19,6 +19,7 @@ macro_rules! docs_url {
 /// Project resources outside the book.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProjectLink {
+    Blog,
     Docs,
     Repository,
     Whitepaper,
@@ -38,12 +39,13 @@ impl ProjectLink {
     pub(crate) const HERO: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
 
     /// The links the header presents after the page buttons. The repository and the node
-    /// console are entered from the landing page, so the header carries only the two
+    /// console are entered from the landing page, so the header carries only the external
     /// destinations the landing page does not lead to on its own.
-    pub(crate) const HEADER: [Self; 2] = [Self::Docs, Self::Whitepaper];
+    pub(crate) const HEADER: [Self; 3] = [Self::Blog, Self::Docs, Self::Whitepaper];
 
     fn label(self) -> &'static str {
         match self {
+            Self::Blog => "Blog",
             Self::Docs => "Docs",
             Self::Repository => "GitHub",
             Self::Whitepaper => "Whitepaper",
@@ -61,6 +63,7 @@ impl ProjectLink {
 
     pub(crate) fn href(self) -> &'static str {
         match self {
+            Self::Blog => "https://rings.rs/blog/",
             Self::Docs => docs_url!(""),
             Self::Repository => "https://github.com/RingsNetwork/rings",
             Self::Whitepaper => {

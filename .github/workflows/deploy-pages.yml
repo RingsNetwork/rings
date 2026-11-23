@@ -27,6 +27,7 @@ on:
       - "master"
     paths:
       - "frontend/**"
+      - "blog/**"
       - "crates/**"
       - "docs/**"
       - "llms.txt"

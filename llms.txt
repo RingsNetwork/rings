@@ -22,6 +22,7 @@ This file follows https://llmstxt.org/. It is for agents that evaluate Rings, bu
 ## Documentation
 
 - [Documentation book](https://rings.rs/docs/): the reference, including the comparison of Rings with Tor, I2P, Nym, libp2p, Nostr, and WebTorrent; source in `docs/src`, built with mdBook and published from master.
+- [Engineering Blog](https://rings.rs/blog/): deep-dive essays on decentralized TURN over onion circuits, Onion OP, Chord finger-table convergence, and algebraic correctness (`blog/`, Atom feed at `https://rings.rs/blog/feed.xml`).
 - [Guide](https://rings.rs/#guide): the abridged version: one card per runtime and the first commands; the book is authoritative.
 - [README](https://github.com/RingsNetwork/rings/blob/master/README.md): overview, architecture table, examples, whitepaper citation.
 - [UPGRADING.md](https://github.com/RingsNetwork/rings/blob/master/UPGRADING.md): 1.0 frozen contracts (`WIRE_VERSION = 4`, delegation verification, C FFI ABI, control API) and operator upgrade checklist.
