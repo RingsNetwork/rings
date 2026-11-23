@@ -335,7 +335,7 @@ def blog_index_schema(posts: list[BlogPost]) -> str:
                     "@id": f"{BLOG_URL}#blog",
                     "url": BLOG_URL,
                     "name": "Rings Network Engineering Blog",
-                    "description": "Engineering essays on decentralized WebRTC P2P, Sphinx/AEZ onion routing, stateless cryptographic TURN, Chord DHT convergence, and algebraic correctness.",
+                    "description": "Engineering essays on browser P2P, WebRTC P2P, pure P2P architecture, Sphinx/AEZ onion routing, stateless cryptographic TURN, Chord DHT convergence, and algebraic correctness.",
                     "inLanguage": "en",
                     "isPartOf": {"@id": f"{SITE_URL}#website"},
                     "publisher": {
@@ -423,10 +423,10 @@ def blog_post_schema(post: BlogPost) -> str:
 def render_blog_index_html(posts: list[BlogPost]) -> str:
     """Render `https://rings.rs/blog/index.html`."""
 
-    title = "Rings Network Blog — P2P, Onion Routing & Distributed Systems"
+    title = "Rings Network Blog — Browser P2P, WebRTC P2P & Onion Routing"
     description = (
-        "Engineering articles from Rings Network on browser-native WebRTC P2P, "
-        "multi-hop onion TURN relays, Chord DHT convergence, and algebraic correctness."
+        "Engineering articles from Rings Network on browser P2P, WebRTC P2P, pure P2P "
+        "architecture, multi-hop onion TURN relays, and Chord DHT convergence."
     )
     cards: list[str] = []
     for post in posts:

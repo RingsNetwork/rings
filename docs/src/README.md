@@ -2,10 +2,11 @@
 
 <img class="rings-mark" src="assets/rings.svg" alt="" width="56" height="56">
 
-**Rings is a peer-to-peer network for the sovereign age.** Browser tabs and native daemons join
-a unified Chord DHT overlay, address each other by DIDs, and communicate over direct WebRTC
-datachannels with no application server in the data path. Bootstrap and signaling establish the
-initial peer links, with optional TURN relay support when configured.
+**Rings is a pure P2P, browser P2P, and WebRTC P2P network for the sovereign age.** Browser tabs
+and native daemons join a unified Chord DHT overlay, address each other by DIDs, and communicate
+over direct WebRTC P2P datachannels with no application or relay server in the data path.
+Bootstrap and signaling establish the initial peer links, with optional stateless TURN relay
+support when configured.
 
 The overlay layer provides authenticated DID routing and end-to-end ElGamal stream encryption
 after a peer handshake, while the privacy layer provides anonymous Sphinx onion circuits that

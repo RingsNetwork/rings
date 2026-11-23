@@ -2,7 +2,7 @@
 # (see `.github/workflows/deploy-pages.yml`); `mdbook serve docs` previews it locally.
 [book]
 title = "Rings Network"
-description = "Documentation for Rings, a peer-to-peer network in browsers and native nodes"
+description = "Documentation for Rings, a browser P2P, WebRTC P2P, and pure P2P Sphinx onion network in browsers and native nodes"
 authors = ["Rings Network"]
 language = "en"
 src = "src"

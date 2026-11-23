@@ -13,14 +13,16 @@
 
 **A peer-to-peer network for the sovereign age.**
 
-Rings is a structured peer-to-peer network that runs natively and in the browser. Browser
-tabs and native daemons join a unified Chord DHT overlay, address each other by DIDs, and
-communicate over direct WebRTC datachannels with no application server in the data path.
+Rings is a structured, pure P2P and Sphinx onion network that runs natively and in the browser
+(browser P2P). Browser tabs and native daemons join a unified Chord DHT overlay, address each
+other by DIDs, and communicate over direct WebRTC P2P datachannels with no application or relay
+server in the data path.
 
 ## Why Rings
 
-- **A browser tab is a full peer.** It joins the DHT, routes and stores for others, and
-  connects browser to browser, with no light client or gateway in between.
+- **A browser tab is a full browser P2P peer.** Compiled to WebAssembly, it joins the Chord DHT,
+  routes and stores for others, and connects browser-to-browser over direct WebRTC P2P, with no
+  light client, central relay, or gateway in between.
 - **Privacy is built in.** Onion loops with constant-rate cover and entry guards run natively
   and in the browser; the [hosted console](https://rings.rs/#node) browses the web through
   them from a tab.

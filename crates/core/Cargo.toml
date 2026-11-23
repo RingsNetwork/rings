@@ -1,8 +1,8 @@
 [package]
 name = "rings-core"
-description = "Chord DHT and overlay routing core"
+description = "Chord DHT and overlay routing core for Rings: pure P2P, browser P2P, and WebRTC P2P networking with DID authentication"
 readme = "README.md"
-keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
+keywords = ["webrtc", "p2p", "chord", "dht", "wasm"]
 categories = ["network-programming", "cryptography", "wasm"]
 version.workspace = true
 edition.workspace = true

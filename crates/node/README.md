@@ -12,7 +12,7 @@ Rings Node (The node service of Rings Network)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 
-Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
+Rings is a structured pure P2P, browser P2P, and WebRTC P2P network implementation using direct WebRTC datachannels, a Chord DHT algorithm, Sphinx onion routing, and full WebAssembly (WASM) support.
 
 For protocol details, see the repository-owned [Rings Whitepaper](../../papers/rings.pdf).
 For security assumptions, supported deployment models, and the Sybil-resistance

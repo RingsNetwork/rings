@@ -25,6 +25,7 @@ REQUIRED_HREFLANGS = {
     "x-default": CANONICAL_URL,
 }
 REQUIRED_PROJECT_CONTENT = {"name", "tagline", "introduction"}
+REQUIRED_SEARCH_PHRASES = ("browser p2p", "webrtc p2p", "pure p2p")
 ORGANIZATION_ID = "https://rings.rs/#organization"
 ORGANIZATION_PROFILES = {"https://github.com/RingsNetwork", "https://x.com/RingsNetworkio"}
 REQUIRED_GRAPH_TYPES = {"Organization", "WebSite", "SoftwareApplication", "BreadcrumbList", "WebPage"}
@@ -157,6 +158,10 @@ def validate(inspection: Inspection) -> list[str]:
         errors.append("static project content must contain at least four h3 feature headings")
     if len(text.split()) < 120:
         errors.append("static project content must contain at least 120 words")
+    lowered_text = text.lower()
+    for phrase in REQUIRED_SEARCH_PHRASES:
+        if phrase not in lowered_text:
+            errors.append(f"static project content lacks required search phrase: {phrase}")
     project_content_markers = inspection.project_content_markers
     if len(project_content_markers) != len(REQUIRED_PROJECT_CONTENT):
         errors.append("static project content must contain exactly three canonical copy markers")

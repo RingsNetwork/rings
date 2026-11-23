@@ -1,6 +1,8 @@
 # Build for Wasm
 
-We offer several ways to use Wasm Rings, including:
+Rings compiles to WebAssembly (`wasm32-unknown-unknown`) so any web application can embed a pure
+P2P, browser P2P, and WebRTC P2P node over a Chord DHT. We offer several ways to use Wasm Rings,
+including:
 
 1. Using Rings SDK
 2. Using Rings Browser Extension

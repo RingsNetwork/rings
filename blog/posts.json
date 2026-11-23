@@ -8,7 +8,7 @@
     "medium_url": "https://medium.com/@ryankung/we-removed-the-last-dark-cloud-over-rings-network-2ad3ed7c4685",
     "cover": "/assets/blog/we-removed-the-last-dark-cloud-over-rings-network/cover.png",
     "summary": "When a user is on a symmetric NAT or mobile network where direct P2P hole-punching is impossible, Rings routes stateless cryptographic TURN allocations over multi-hop onion circuits—so the worst case degrades to Tor, never an ordinary relay network.",
-    "tags": ["TURN", "Onion Routing", "WebRTC", "NAT Traversal", "Cryptography"]
+    "tags": ["Pure P2P", "WebRTC P2P", "TURN", "Onion Routing", "NAT Traversal", "Cryptography"]
   },
   {
     "slug": "from-onion-routing-to-onion-op-the-evolution-of-privacy-in-rings",
@@ -52,7 +52,7 @@
     "medium_url": "https://medium.com/@ryankung/the-only-way-to-save-the-internet-9b8f6e372fe1",
     "cover": "/assets/blog/the-only-way-to-save-the-internet/figure-1.jpeg",
     "summary": "Tackling the Waist of the Internet by connecting web browsers directly over WebRTC, WebAssembly, Chord DHT routing, and multi-chain DIDs.",
-    "tags": ["Web3", "Decentralization", "WebRTC", "WebAssembly", "DID"]
+    "tags": ["Browser P2P", "WebRTC P2P", "Pure P2P", "Web3", "Decentralization", "WebAssembly", "DID"]
   },
   {
     "slug": "annual-update-from-rings-network",

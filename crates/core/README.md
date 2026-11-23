@@ -14,7 +14,7 @@ Rings Core
 
 # Architecture
 
-The Rings Network architecture is streamlined into five distinct layers.
+Rings Core implements the structured pure P2P, browser P2P, and WebRTC P2P overlay of the Rings Network across five distinct layers.
 
 #### Runtime Layer
 

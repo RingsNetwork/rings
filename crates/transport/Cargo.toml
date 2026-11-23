@@ -1,8 +1,8 @@
 [package]
 name = "rings-transport"
-description = "Transport layer implementation for Rings Core"
+description = "Pure P2P, browser P2P, and WebRTC P2P transport layer for Rings Network (native webrtc-rs and browser WebAssembly web-sys)"
 readme = "README.md"
-keywords = ["webrtc", "p2p", "wasm"]
+keywords = ["webrtc", "p2p", "browser-p2p", "pure-p2p", "wasm"]
 categories = ["network-programming", "cryptography", "wasm"]
 version.workspace = true
 edition.workspace = true

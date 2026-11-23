@@ -12,7 +12,7 @@
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 
-This crate encompasses the transport layer implementations for the Rings Network, specifically designed for seamless integration in various computing environments. It is integral for enabling effective network communication within both native and browser contexts. The crate includes two primary Rust-based implementations:
+This crate encompasses the pure P2P, browser P2P, and WebRTC P2P transport layer implementations for the Rings Network, specifically designed for direct peer-to-peer datachannel connectivity across native and browser (WebAssembly) contexts. The crate includes two primary Rust-based implementations:
 
 ## Implementations
 

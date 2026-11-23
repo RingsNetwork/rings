@@ -55,7 +55,7 @@ fn features_section() -> Html {
                 <p>{ "Features" }</p>
             </div>
             <div class="landing-feature-grid">
-                { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.", "assets/images/feature-network-background.png") }
+                { landing_feature("Browser P2P and WebRTC P2P peers", "Runs as a pure P2P node in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC P2P datachannels carry browser-to-browser and daemon traffic without an application server in the data path.", "assets/images/feature-network-background.png") }
                 { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.", "assets/images/feature-did-identity.png") }
                 { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.", "assets/images/feature-peer-routing.png") }
                 { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.", "assets/images/feature-protocol-runtime.png") }

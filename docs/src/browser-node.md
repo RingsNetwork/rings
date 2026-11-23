@@ -1,9 +1,9 @@
 # Browser Node and Extension
 
-The frontend at [rings.rs](https://rings.rs) is the same node compiled to WebAssembly and
-wrapped in a Rust/Yew application. It runs as a web app, and the same build packages as a
-Chrome extension. Its source is the repository's
-[`frontend`](https://github.com/RingsNetwork/rings/tree/master/frontend) workspace.
+The frontend at [rings.rs](https://rings.rs) is a full browser P2P and WebRTC P2P node compiled
+to WebAssembly and wrapped in a Rust/Yew application. It joins the pure P2P Chord DHT directly
+from a web tab and packages from the same build as a Chrome extension. Its source is the
+repository's [`frontend`](https://github.com/RingsNetwork/rings/tree/master/frontend) workspace.
 
 ## The hosted console
 

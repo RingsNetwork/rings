@@ -2,10 +2,10 @@
 name = "rings-node"
 default-run = "rings"
 description = """
-Rings is a browser-native, structured peer-to-peer network: browser tabs and native daemons find each other by DID and talk over WebRTC, routed by a Chord DHT.
+Rings is a browser-native pure P2P, browser P2P, and WebRTC P2P network: browser tabs and native daemons find each other by DID, talk over direct WebRTC datachannels routed by a Chord DHT, and route anonymous traffic over Sphinx onion circuits.
 """
 readme = "README.md"
-keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
+keywords = ["webrtc", "p2p", "browser-p2p", "dht", "wasm"]
 categories = ["network-programming", "cryptography", "wasm"]
 version.workspace = true
 edition.workspace = true
