@@ -200,11 +200,11 @@ async function sendNodeMessageWithRetry<T>(message: NodeBridgeRuntimeMessage): P
  * Converts a node snapshot into the corresponding action icon state.
  */
 function iconStateFromSnapshot(snapshot: NodeSnapshot | undefined): NodeBridgeIconState {
-  if (snapshot?.online) {
-    return "connected";
-  }
   if (snapshot?.starting) {
     return "connecting";
+  }
+  if (snapshot?.online) {
+    return "connected";
   }
   return "disconnected";
 }

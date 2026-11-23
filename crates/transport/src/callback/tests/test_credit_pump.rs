@@ -24,8 +24,8 @@ use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::LaneCreditView;
 use crate::core::transport::SendPermit;
+use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportMessage;
-use crate::core::transport::WebrtcConnectionState;
 use crate::delivery::DeliveryFuture;
 use crate::delivery::SendCreditWait;
 use crate::error::Error;
@@ -51,7 +51,7 @@ impl FrameSink for FlakyCreditConnection {
         _: SendPermit,
     ) -> Result<DeliveryFuture> {
         let TransportMessage::Signal(LaneSignal::Credit { limit: credit, .. }) = frame else {
-            return Err(Error::DataChannelOpen("only credit frames are sent".into()));
+            return Err(Error::ChannelOpen("only credit frames are sent".into()));
         };
         let failed = self
             .failures
@@ -60,9 +60,7 @@ impl FrameSink for FlakyCreditConnection {
             })
             .is_ok();
         if failed {
-            return Err(Error::DataChannelOpen(
-                "an outbound channel is closed".into(),
-            ));
+            return Err(Error::ChannelOpen("an outbound channel is closed".into()));
         }
         self.sent
             .lock()
@@ -77,8 +75,11 @@ impl FrameSink for FlakyCreditConnection {
 /// unreachable here.
 #[async_trait]
 impl ConnectionInterface for FlakyCreditConnection {
-    type Sdp = String;
     type Error = Error;
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 
     async fn send_message_with_permit(
         &self,
@@ -86,11 +87,11 @@ impl ConnectionInterface for FlakyCreditConnection {
         _: ChannelLane,
         _: SendPermit,
     ) -> Result<DeliveryFuture> {
-        Err(Error::DataChannelOpen("only credit frames are sent".into()))
+        Err(Error::ChannelOpen("only credit frames are sent".into()))
     }
 
     fn reserve_send_credit(&self, _: ChannelLane) -> SendCreditWait<Error> {
-        Box::pin(std::future::ready(Err(Error::DataChannelOpen(
+        Box::pin(std::future::ready(Err(Error::ChannelOpen(
             "the test connection sends credit frames only".into(),
         ))))
     }
@@ -100,26 +101,21 @@ impl ConnectionInterface for FlakyCreditConnection {
     }
 
     fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-        ConnectionStateSnapshot::new(WebrtcConnectionState::Connected, true)
+        ConnectionStateSnapshot::new(TransportConnectionState::Connected, true)
     }
 
     fn max_message_size(&self) -> usize {
-        crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE
+        crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE
     }
 
-    async fn webrtc_create_offer(&self) -> Result<String> {
-        Err(Error::DataChannelOpen("no signalling in this test".into()))
+    async fn handshake_step(
+        &self,
+        _: Option<Bytes>,
+    ) -> Result<crate::core::transport::HandshakeStep> {
+        Err(Error::ChannelOpen("no signalling in this test".into()))
     }
 
-    async fn webrtc_answer_offer(&self, _: String) -> Result<String> {
-        Err(Error::DataChannelOpen("no signalling in this test".into()))
-    }
-
-    async fn webrtc_accept_answer(&self, _: String) -> Result<()> {
-        Err(Error::DataChannelOpen("no signalling in this test".into()))
-    }
-
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+    async fn wait_for_channel_open(&self) -> Result<()> {
         Ok(())
     }
 

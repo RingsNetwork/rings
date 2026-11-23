@@ -9,9 +9,11 @@
 use rings_core::dht::Did;
 
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitPolicy;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
+use crate::onion::OnionUdpBindMode;
 use crate::online::OnlineNodeType;
 
 #[cfg(rings_native)]
@@ -29,6 +31,8 @@ pub enum OnionProxyProtocol {
     TcpConnect,
     /// One HTTPS request/response exchange through an `https` exit.
     HttpsProxy,
+    /// Bound OS UDP datagram socket session. Requires a native `udp` exit.
+    UdpDatagram,
 }
 
 impl OnionProxyProtocol {
@@ -37,6 +41,7 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => OnionServiceName::tcp(),
             Self::HttpsProxy => OnionServiceName::https(),
+            Self::UdpDatagram => OnionServiceName::udp(),
         }
     }
 
@@ -45,19 +50,30 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => "tcp-connect",
             Self::HttpsProxy => "https-proxy",
+            Self::UdpDatagram => "udp-datagram",
         }
     }
 
     /// Whether `descriptor`'s runtime can interpret this protocol's symbol: only native and FFI
-    /// nodes have sockets, so only they serve `tcp`. Route selection has already kept only the
-    /// exits that register the symbol.
+    /// nodes have OS sockets, so only they serve `tcp` and `udp`. Route selection has already kept
+    /// only the exits that register the symbol.
     pub(crate) fn accepts_exit_descriptor(self, descriptor: &OnionExitDescriptor) -> bool {
         match self {
-            Self::TcpConnect => matches!(
+            Self::TcpConnect | Self::UdpDatagram => matches!(
                 descriptor.node_type,
                 OnlineNodeType::Native | OnlineNodeType::Ffi
             ),
             Self::HttpsProxy => true,
+        }
+    }
+
+    /// Whether `policy` admits opening a session of this protocol with open `target`.
+    pub(crate) fn admits_target(self, policy: &OnionExitPolicy, target: &OnionProxyTarget) -> bool {
+        match self {
+            Self::TcpConnect | Self::HttpsProxy => policy.allows_target(target),
+            Self::UdpDatagram => {
+                OnionUdpBindMode::from_target(target).is_ok_and(|mode| policy.allows_udp_bind(mode))
+            }
         }
     }
 }
@@ -99,6 +115,10 @@ mod tests {
         assert_eq!(
             OnionProxyProtocol::HttpsProxy.exit_service_name(),
             OnionServiceName::https()
+        );
+        assert_eq!(
+            OnionProxyProtocol::UdpDatagram.exit_service_name(),
+            OnionServiceName::udp()
         );
     }
 

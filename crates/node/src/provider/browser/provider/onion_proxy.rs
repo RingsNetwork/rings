@@ -187,6 +187,31 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     fn onion_entry_guards(&self) -> &crate::onion::OnionEntryGuards {
         self.processor.onion_entry_guards()
     }
+
+    async fn live_onion_invokes(&self) -> NodeResult<Vec<crate::onion::OnionInvokeDescriptor>> {
+        self.processor.lookup_onion_invokes(None, "", false).await
+    }
+
+    fn now_ms(&self) -> u128 {
+        self.processor.clock().now_ms()
+    }
+
+    fn route_rng(&self) -> rings_core::utils::SharedRng {
+        self.processor.rng().clone()
+    }
+}
+
+pub(crate) async fn build_browser_onion_pipeline_route_filtered(
+    processor: Arc<Processor>,
+    directory_endpoint: Option<BrowserDirectoryEndpoint>,
+    pipeline: &crate::onion::OnionInvokePipeline,
+    predicate: impl Fn(&crate::onion::OnionInvokeDescriptor) -> bool,
+) -> NodeResult<crate::onion::OnionPipelineRoute> {
+    let reader = BrowserOnionDirectoryReader {
+        processor,
+        endpoint: directory_endpoint,
+    };
+    directory::build_onion_pipeline_route_filtered(&reader, pipeline, predicate).await
 }
 
 /// Build an HTTPS proxy route through `reader` whose first hop is a direct peer.

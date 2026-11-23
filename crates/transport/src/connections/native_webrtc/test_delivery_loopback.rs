@@ -52,10 +52,10 @@ async fn connect_loopback() -> Result<Loopback> {
     let receiver = answerer
         .new_connection("offerer", Box::new(NoopCallback))
         .await?;
-    let offer = sender.webrtc_create_offer().await?;
-    let answer = receiver.webrtc_answer_offer(offer).await?;
-    sender.webrtc_accept_answer(answer).await?;
-    sender.webrtc_wait_for_data_channel_open().await?;
+    let offer = sender.create_offer().await?;
+    let answer = receiver.answer_offer(offer).await?;
+    sender.accept_answer(answer).await?;
+    sender.wait_for_channel_open().await?;
     Ok(Loopback {
         _offerer: offerer,
         _answerer: answerer,

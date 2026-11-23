@@ -214,11 +214,11 @@ fn generated_payload(generator: &mut DecodeBoundaryGenerator) -> Option<MessageP
     let session = DelegateeKey::new_with_seckey(&generator.secret_key()).ok()?;
     let peer: Did = generator.secret_key().address().into();
     let message = match generator.usize(3) {
-        0 => Message::ConnectNodeSend(crate::message::ConnectNodeSend {
-            sdp: String::from_utf8_lossy(&generator.bytes(256)).into_owned(),
-            dht_protocol_mode: crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
-            relay_custody: crate::dht::RelayCustody::Holds,
-        }),
+        0 => Message::ConnectNodeSend(crate::message::ConnectNodeSend::initial_offer(
+            bytes::Bytes::from(generator.bytes(256)),
+            crate::message::DhtProtocolMode::new(TEST_NETWORK_ID, 3, 4),
+            crate::dht::RelayCustody::Holds,
+        )),
         1 => Message::SearchEntry(crate::message::SearchEntry {
             placement: peer,
             resource: peer,

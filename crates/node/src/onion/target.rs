@@ -89,6 +89,14 @@ impl OnionProxyTarget {
         Self::new(host, port)
     }
 
+    /// Construct a target from an already canonicalized host literal and non-zero port.
+    pub(crate) fn from_canonical_literal(host: &'static str, port: u16) -> Self {
+        Self {
+            host: host.to_string(),
+            port,
+        }
+    }
+
     /// Return the normalized host.
     pub fn host(&self) -> &str {
         &self.host

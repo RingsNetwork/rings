@@ -72,23 +72,23 @@ pub(crate) fn closed_before_flush() -> crate::error::Error {
 ///
 /// It is `Send` on native targets (so it can be spawned on a multi-threaded
 /// runtime) and `!Send` on wasm, matching the rest of the transport.
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+#[cfg(target_family = "wasm")]
 pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
 /// A future resolving to the eventual fate of a sent message.
-#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
 
 /// A wait for one lane credit (see
 /// [`ConnectionInterface::reserve_send_credit`](crate::core::transport::ConnectionInterface)),
 /// owning what it waits on: `Send` on native targets and `!Send` on wasm, as
 /// [`DeliveryFuture`].
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+#[cfg(target_family = "wasm")]
 pub type SendCreditWait<E> =
     Pin<Box<dyn Future<Output = std::result::Result<LaneCreditReservation, E>>>>;
 
 /// A wait for one lane credit, owning what it waits on.
-#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 pub type SendCreditWait<E> =
     Pin<Box<dyn Future<Output = std::result::Result<LaneCreditReservation, E>> + Send>>;
 

@@ -27,7 +27,7 @@ use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
 use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
 use super::SwarmTransport;
-use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+use super::CHANNEL_SEND_ACCEPT_BUDGET;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::Chunk;
 use crate::chunk::Framing;
@@ -317,7 +317,7 @@ impl SwarmTransport {
     /// local backpressure when it is full (the inbound-locality law of the `egress` module);
     /// one under [`QueueAdmission::Bounded`] takes none while its bound admits it (a probe or a
     /// probe's answer), and takes the shared capacity as an immediate send otherwise. One under
-    /// [`QueueAdmission::Waiting`] waits up to [`DATA_CHANNEL_SEND_ACCEPT_BUDGET`]; a tracked
+    /// [`QueueAdmission::Waiting`] waits up to [`CHANNEL_SEND_ACCEPT_BUDGET`]; a tracked
     /// one waits as long as its own deadline.
     async fn reserve_outbound_capacity(
         &self,
@@ -342,13 +342,13 @@ impl SwarmTransport {
             }
             QueueAdmission::Waiting => self.outbound_schedulers.reserve(peer, demand).fuse(),
         };
-        let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_BUDGET).fuse();
+        let timeout = sleep(CHANNEL_SEND_ACCEPT_BUDGET).fuse();
         pin_mut!(reserve, timeout);
         select! {
             result = reserve => result,
             _ = timeout => Err(Error::OutboundTransferAdmissionTimeout {
                 peer,
-                timeout_ms: DATA_CHANNEL_SEND_ACCEPT_BUDGET.as_millis(),
+                timeout_ms: CHANNEL_SEND_ACCEPT_BUDGET.as_millis(),
             }),
         }
     }

@@ -112,7 +112,7 @@ async fn test_handler_ctx_clock_drives_probe_tolerance_and_storage_hold_expiry_w
 
     let swarm = SwarmBuilder::new(
         TEST_NETWORK_ID,
-        "",
+        crate::tests::test_transport(""),
         Box::new(MemStorage::new()),
         local_del.clone(),
     )

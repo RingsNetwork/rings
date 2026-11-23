@@ -85,8 +85,8 @@ use crate::simulation::SimulationRuntimeGuard;
 /// the rule of `frame` (once per release, relative to the last released version), then set
 /// this pair to the new version and the hash the failure reports, in the same commit.
 const PINNED: (u16, &str) = (
-    4,
-    "32749e0aba8ab24f840fbefc044dfc549fe200f847323a58a4d3577488a35879",
+    5,
+    "471469710cd060c26773a2e3d029e1f23b0699164ec7528792df271256ca3f10",
 );
 
 /// The overlay every golden is signed in.
@@ -153,7 +153,10 @@ fn message_goldens(session: &DelegateeKey) -> Result<Vec<Golden>> {
 /// A connect offer with no signaling.
 fn connect_offer() -> Message {
     Message::ConnectNodeSend(ConnectNodeSend {
-        sdp: "v=0".to_owned(),
+        step_index: 0,
+        final_step: false,
+        session_id: None,
+        handshake: bytes::Bytes::from_static(b"v=0"),
         dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
         relay_custody: crate::dht::RelayCustody::Holds,
     })

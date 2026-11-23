@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use rings_transport::core::callback::AdmittedInboundMessage;
 use rings_transport::core::callback::TransportCallback;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::inbound::InboundMailbox;
 use super::inbound::InboundSubmission;
@@ -161,13 +161,39 @@ impl BoundCallback {
         let Some(attempt) = self.pending_attempt() else {
             return Ok(());
         };
-        if !self
+        match self
             .processor
             .logical
             .transport
-            .begin_ready_connection_admission(attempt)?
+            .begin_ready_connection_admission(attempt)
         {
-            return Ok(());
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => {
+                if matches!(
+                    error,
+                    crate::error::Error::Transport(
+                        rings_transport::error::Error::RemoteMaxMessageSizeTooSmall { .. }
+                    )
+                ) {
+                    if let Err(cleanup_error) = self
+                        .processor
+                        .logical
+                        .transport
+                        .cancel_unadmitted_connection(attempt)
+                        .await
+                    {
+                        tracing::warn!(
+                            peer = %did,
+                            generation = attempt.generation(),
+                            error = ?cleanup_error,
+                            "failed to close connection after max_message_size admission rejection"
+                        );
+                    }
+                    self.processor.discard_pre_admission_hold();
+                }
+                return Err(error);
+            }
         }
 
         match self
@@ -540,20 +566,20 @@ impl TransportCallback for SwarmTransportCallback {
         on_bound!(self, on_invalid_inbound_frame(cid))
     }
 
-    async fn on_peer_connection_state_change(
+    async fn on_connection_state_change(
         &self,
         cid: &str,
-        s: WebrtcConnectionState,
+        s: TransportConnectionState,
     ) -> Result<(), TransportCallbackError> {
-        on_bound!(self, on_peer_connection_state_change(cid, s))
+        on_bound!(self, on_connection_state_change(cid, s))
     }
 
-    async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        on_bound!(self, on_data_channel_open(cid))
+    async fn on_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_channel_open(cid))
     }
 
-    async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
-        on_bound!(self, on_data_channel_close(cid))
+    async fn on_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        on_bound!(self, on_channel_close(cid))
     }
 }
 
@@ -581,10 +607,10 @@ impl BoundCallback {
         Ok(())
     }
 
-    async fn on_peer_connection_state_change(
+    async fn on_connection_state_change(
         &self,
         cid: &str,
-        s: WebrtcConnectionState,
+        s: TransportConnectionState,
     ) -> Result<(), TransportCallbackError> {
         self.processor.logical.transport.signal_link_transition();
         let Some(did) = self
@@ -600,12 +626,12 @@ impl BoundCallback {
             // Peer-state progress may complete admission, but only when the
             // product snapshot also observes an open data channel. This makes
             // either browser callback order converge on the same transition.
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
+            TransportConnectionState::Connecting | TransportConnectionState::Connected => {
                 self.admit_pending_connection(did).await?;
             }
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
+            TransportConnectionState::Failed | TransportConnectionState::Closed => {
                 self.retire_on_terminal(did, "connection terminal state")
                     .await?;
             }
@@ -615,7 +641,7 @@ impl BoundCallback {
             // link that WebRTC could have healed, and drop the peer from the DHT
             // with no reconnect path. We leave it alone: it will either recover,
             // or degrade to `Failed`, which is handled above.
-            WebrtcConnectionState::Disconnected => {
+            TransportConnectionState::Disconnected => {
                 if self.pending_disconnected_before_admission(did) {
                     tracing::debug!(
                         "ignoring pre-admission disconnected state for pending connection {did}"
@@ -638,7 +664,7 @@ impl BoundCallback {
         Ok(())
     }
 
-    async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
+    async fn on_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
         self.processor.logical.transport.signal_link_transition();
         let Some(did) = self.connection_event_peer(cid, "data-channel open").await? else {
             return Ok(());
@@ -656,7 +682,7 @@ impl BoundCallback {
         Ok(())
     }
 
-    async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
+    async fn on_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let Some(did) = self
             .connection_event_peer(cid, "data-channel close")
             .await?

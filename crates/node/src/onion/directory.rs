@@ -128,7 +128,7 @@ pub(crate) async fn build_onion_proxy_route_with_first_hop(
     let policy_exits = protocol_exits
         .into_iter()
         .filter(|exit| {
-            exit.policy.allows_target(&target)
+            proxy.admits_target(&exit.policy, &target)
                 && (exit.node_type != crate::online::OnlineNodeType::Browser
                     || super::target::validate_public_ip_literal(&target).is_ok())
         })
@@ -154,11 +154,24 @@ pub(crate) async fn build_onion_pipeline_route(
     reader: &impl OnionDirectoryReader,
     pipeline: &OnionInvokePipeline,
 ) -> Result<OnionPipelineRoute> {
+    build_onion_pipeline_route_filtered(reader, pipeline, |_| true).await
+}
+
+/// Build a guard-closed multi-hop route for `pipeline` whose candidate `OnionInvokeDescriptor`s
+/// satisfy `invoke_filter`.
+pub(crate) async fn build_onion_pipeline_route_filtered(
+    reader: &impl OnionDirectoryReader,
+    pipeline: &OnionInvokePipeline,
+    invoke_filter: impl Fn(&OnionInvokeDescriptor) -> bool,
+) -> Result<OnionPipelineRoute> {
     let direct_peers = reader.direct_peer_dids();
     let allowed_peers = direct_peers.clone();
-    let route = build_onion_pipeline_route_with_first_hop(reader, pipeline, move |did| {
-        allowed_peers.contains(&did)
-    })
+    let route = build_onion_pipeline_route_with_first_hop_and_filter(
+        reader,
+        pipeline,
+        move |did| allowed_peers.contains(&did),
+        invoke_filter,
+    )
     .await?;
     let first_hop = route.hops().guard().did;
     if first_hop != reader.local_did() && direct_peers.contains(&first_hop) {
@@ -167,14 +180,20 @@ pub(crate) async fn build_onion_pipeline_route(
     Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
-pub(crate) async fn build_onion_pipeline_route_with_first_hop(
+pub(crate) async fn build_onion_pipeline_route_with_first_hop_and_filter(
     reader: &impl OnionDirectoryReader,
     pipeline: &OnionInvokePipeline,
     first_hop_permitted: impl Fn(Did) -> bool,
+    invoke_filter: impl Fn(&OnionInvokeDescriptor) -> bool,
 ) -> Result<OnionPipelineRoute> {
     let request = OnionPipelineRouteRequest::from_pipeline(pipeline);
     let online_nodes = reader.live_online_nodes().await?;
-    let invokes = reader.live_onion_invokes().await?;
+    let invokes: Vec<_> = reader
+        .live_onion_invokes()
+        .await?
+        .into_iter()
+        .filter(invoke_filter)
+        .collect();
     let now_ms = reader.now_ms();
     let candidates = OnionPipelineRouteCandidates::from_validated_descriptors(
         reader.local_did(),

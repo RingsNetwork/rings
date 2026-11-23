@@ -40,30 +40,36 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 /// The signed fields of one descriptor kind.
-pub(crate) trait SignedDescriptorBody: Sized {
+pub trait SignedDescriptorBody: Sized {
+    /// Concrete signed descriptor type produced from `Self`.
     type Descriptor;
 
     /// Message family of this descriptor kind.
     const DOMAIN_TAG: DomainTag;
 
+    /// Return the signer's account DID stated in the body.
     fn body_did(&self) -> Did;
+    /// Return the signer's account verification public key stated in the body.
     fn body_public_key(&self) -> &VerificationPublicKey;
+    /// Return the overlay network identifier stated in the body.
     fn body_network_id(&self) -> u32;
+    /// Canonical byte serialization covered by the descriptor signature.
     fn body_signing_data(&self) -> Result<Vec<u8>>;
+    /// Assemble the signed descriptor from `self` and `signature`.
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor;
 }
 
 /// The registry lease `Λ`: the data default lifetime `L`, so a replayed descriptor outlives its
 /// registrant by at most `L` (removal-stability paper, Def. 7), and the bound a reader puts on
 /// every signed lease and freshness window.
-pub(crate) const fn registry_lease() -> Duration {
+pub const fn registry_lease() -> Duration {
     Duration::from_millis(DEFAULT_TTL_MS)
 }
 
 /// Sign `body` with the node's authority.
 ///
 /// Pre: the body names the signer's account and public key, and states the signer's overlay.
-pub(crate) fn sign_descriptor_body<B>(
+pub fn sign_descriptor_body<B>(
     body: B,
     signer: MessageSigner<impl Borrow<DelegateeKey>>,
     mismatch_message: &'static str,
@@ -86,14 +92,17 @@ where
 }
 
 /// A published descriptor: its body plus the signature over it.
-pub(crate) trait SignedDescriptor: Sized {
+pub trait SignedDescriptor: Sized {
     /// The body this descriptor was signed from; fixes the message family.
     type Body: SignedDescriptorBody<Descriptor = Self>;
 
+    /// Return the signer's account DID stated in the descriptor.
     fn descriptor_did(&self) -> Did;
+    /// Return the signer's account verification public key stated in the descriptor.
     fn descriptor_public_key(&self) -> &VerificationPublicKey;
     /// The overlay the body states.
     fn descriptor_network_id(&self) -> u32;
+    /// Return the signature envelope attached to this descriptor.
     fn descriptor_signature(&self) -> &MessageVerification;
     /// When a reader last heard this descriptor, `τ*`: unsigned (see the lease law).
     fn descriptor_heartbeat_at_ms(&self) -> u128;
@@ -101,6 +110,7 @@ pub(crate) trait SignedDescriptor: Sized {
     fn descriptor_expires_at_ms(&self) -> u128;
     /// The signed freshness window `T`.
     fn descriptor_fresh_for_ms(&self) -> u64;
+    /// Canonical byte serialization covered by the descriptor signature.
     fn descriptor_signing_data(&self) -> Result<Vec<u8>>;
     /// This descriptor as heard at `heartbeat_at_ms`, its element's dot: the one unsigned field.
     fn heard_at(self, heartbeat_at_ms: u128) -> Self;
@@ -200,7 +210,7 @@ pub(crate) trait SignedDescriptor: Sized {
 }
 
 /// Select the newest descriptor per DID that verifies under the receiver's overlay.
-pub(crate) fn latest_valid_by_did<D>(
+pub fn latest_valid_by_did<D>(
     descriptors: impl IntoIterator<Item = D>,
     now_ms: u128,
     network_id: u32,
@@ -224,7 +234,7 @@ where
 /// `now_ms` unless `include_expired`: the join `⊔` of the descriptors under
 /// [`SignedDescriptor::supersedes`] within each key, a total order, so the selection does not
 /// depend on the input order.
-pub(crate) fn latest_valid_by_key<K, D>(
+pub fn latest_valid_by_key<K, D>(
     descriptors: impl IntoIterator<Item = D>,
     key: impl Fn(&D) -> K,
     now_ms: u128,
@@ -262,7 +272,7 @@ where
 /// encoding, carried as is.
 ///
 /// Law (round trip): `from_element(to_element(d)) = Ok(d)`.
-pub(crate) trait RegistryElement: Serialize + DeserializeOwned {
+pub trait RegistryElement: Serialize + DeserializeOwned {
     /// This descriptor as a registry element.
     fn to_element(&self) -> Result<Bytes> {
         rings_codec::serialize(self)
@@ -281,7 +291,7 @@ pub(crate) trait RegistryElement: Serialize + DeserializeOwned {
 ///
 /// Law: a served carrier is normalized, so its dots align with its elements; an element without
 /// a dot (none in a normalized carrier) is not heard and is skipped.
-pub(crate) fn heard_elements(entry: &DhtEntry) -> impl Iterator<Item = (&Bytes, u128)> {
+pub fn heard_elements(entry: &DhtEntry) -> impl Iterator<Item = (&Bytes, u128)> {
     entry.data.iter().zip(
         entry
             .crdt
@@ -293,7 +303,7 @@ pub(crate) fn heard_elements(entry: &DhtEntry) -> impl Iterator<Item = (&Bytes, 
 
 /// Decode every element of `entry` as `D`, heard at its dot; elements that do not decode are
 /// skipped.
-pub(crate) fn heard_descriptors<D>(entry: &DhtEntry) -> Vec<D>
+pub fn heard_descriptors<D>(entry: &DhtEntry) -> Vec<D>
 where D: SignedDescriptor + RegistryElement {
     heard_elements(entry)
         .filter_map(|(element, heard_at_ms)| {

@@ -34,7 +34,7 @@ use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 use super::WITHHELD_CREDIT;
 use crate::callback::link_credit::LANE_IDLE_PERIOD;
 use crate::core::pool::ChannelLane;
-use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::TransportConnectionState;
 
 /// Atomic observation of the current thread's controlled delivery queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,11 +116,11 @@ impl QueuedDelivery {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueuedDeliveryKind {
     /// A WebRTC state transition.
-    PeerConnectionStateChange(WebrtcConnectionState),
+    ConnectionStateChange(TransportConnectionState),
     /// The data channel became writable.
-    DataChannelOpen,
+    ChannelOpen,
     /// The data channel closed.
-    DataChannelClose,
+    ChannelClose,
     /// One exact callback payload, before core decoding and dispatch, and the lane it travels
     /// on: a schedule that keeps the transport's lane law delivers one lane's messages in
     /// their enqueue order.
@@ -215,8 +215,8 @@ fn set_next_callback_cid(cid: impl Into<String>) {
     });
 }
 
-/// Test hook: force `webrtc_wait_for_data_channel_open` on this thread to never complete.
-pub fn set_wait_for_data_channel_open_pending(on: bool) {
+/// Test hook: force `wait_for_channel_open` on this thread to never complete.
+pub fn set_wait_for_channel_open_pending(on: bool) {
     WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(on));
 }
 
@@ -492,13 +492,13 @@ async fn deliver_entry(entry: Option<super::ControlledDeliveryEntry>) -> bool {
 }
 
 /// Deliver the next queued data-channel-open event with a rewritten callback cid.
-pub async fn deliver_next_data_channel_open_with_cid(cid: impl Into<String>) -> bool {
+pub async fn deliver_next_channel_open_with_cid(cid: impl Into<String>) -> bool {
     let index = DELIVERY.with(|state| {
         state
             .borrow()
             .queue
             .values()
-            .position(|entry| matches!(entry.event, super::Event::DataChannelOpen(_)))
+            .position(|entry| matches!(entry.event, super::Event::ChannelOpen(_)))
     });
     let Some(index) = index else {
         return false;

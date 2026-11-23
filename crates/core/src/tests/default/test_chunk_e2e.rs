@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use tokio::sync::watch;
 use tokio::time::Duration;
 
@@ -243,10 +243,10 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     let node1 = prepare_node_with_measure(key1, sender_impl).unwrap();
     let node2 = prepare_node_with_measure(key2, receiver_impl).unwrap();
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
-    wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node2, node1.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
 
@@ -416,14 +416,14 @@ async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness()
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             node2.did(),
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Disconnected,
         )?;
     node1
         .swarm
         .transport
-        .force_peer_data_channel_open_without_callback(node2.did(), Some(true))?;
+        .force_peer_channel_open_without_callback(node2.did(), Some(true))?;
     await_tail_retired(&node1, node2.did()).await?;
 
     assert_eq!(
@@ -506,7 +506,7 @@ async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Res
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_msgs([&node1, &node2]).await;
 
     let dispatched = DispatchedFrames::from_now(&node1.swarm.transport);
@@ -618,7 +618,7 @@ async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readi
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
+        .force_connection_state_without_callback(peer, TransportConnectionState::Disconnected)?;
     drop(dispatch);
 
     let outcome = tokio::time::timeout(Duration::from_secs(1), send)
@@ -654,7 +654,7 @@ async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_
     node1
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Closed)?;
+        .force_connection_state_without_callback(peer, TransportConnectionState::Closed)?;
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
         destination: StorageSyncDestination::PhysicalOwner(peer),
@@ -778,10 +778,10 @@ async fn test_send_queue_backpressure_returns_transport_timeout() {
     let node1 = prepare_node_with_measure(key1, measure_impl).unwrap();
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
-    wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node2, node1.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
 
@@ -796,9 +796,9 @@ async fn test_send_queue_backpressure_returns_transport_timeout() {
     assert!(
         matches!(
             err,
-            crate::error::Error::DataChannelSendQueueTimeout { peer, .. } if peer == node2.did()
+            crate::error::Error::ChannelSendQueueTimeout { peer, .. } if peer == node2.did()
         ),
-        "expected DataChannelSendQueueTimeout, got {err:?}"
+        "expected ChannelSendQueueTimeout, got {err:?}"
     );
     assert_eq!(
         measure.count(node2.did(), MeasurementEvent::FailedToSend),
@@ -814,10 +814,10 @@ async fn test_negotiated_size_too_small_errors_without_partial_send() {
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
-    wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
+    wait_for_connection_state(&node2, node1.did(), TransportConnectionState::Connected)
         .await
         .unwrap();
     // Count from quiescence: the join traffic the connection started is no send of this test's.

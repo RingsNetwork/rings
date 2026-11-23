@@ -5,14 +5,6 @@
 #[cfg(all(feature = "dummy", not(test)))]
 compile_error!("the `dummy` test transport cannot run a node; build `rings` without it");
 
-use std::future::Future;
-use std::net::SocketAddr;
-use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::Poll;
-use std::time::Duration;
-
 use anyhow::Context;
 use clap::Parser;
 use cli::payload_arg_or_stdin;
@@ -26,186 +18,34 @@ use cli::SendCommand;
 use cli::ServiceCommand;
 use futures::pin_mut;
 use futures::StreamExt;
-use rings_gateway::GatewayStatusHandle;
-use rings_node::dns_relay;
-use rings_node::dns_relay::ServiceOffer;
-use rings_node::dns_relay::ServicesConfig;
-use rings_node::extension::protocols::relay::RelayHandle;
 use rings_node::logging::init_logging;
-use rings_node::measure::EvidenceCollectorIdentity;
-use rings_node::measure::PeriodicMeasure;
 use rings_node::native::api_auth::load_api_token_file;
 use rings_node::native::api_auth::load_or_create_api_token;
-use rings_node::native::api_auth::ApiSecurity;
-use rings_node::native::bootstrap::BootstrapSupervisor;
-use rings_node::native::bootstrap::BootstrapTargets;
 use rings_node::native::config;
-use rings_node::native::endpoint::run_external_api;
-use rings_node::native::endpoint::run_internal_api_with_gateway;
-use rings_node::native::gateway::NativeGatewayRunner;
-use rings_node::native::horizon::run_signing_horizon;
-use rings_node::native::horizon::DelegationRenewalPaths;
-use rings_node::native::stores::NodeStores;
-use rings_node::onion::proxy::http::run_onion_http_proxy;
-use rings_node::onion::proxy::http::OnionHttpProxyOptions;
+use rings_node::native::daemon::run_foreground_node;
+use rings_node::native::daemon::NativeNodeRunOptions;
 use rings_node::onion::OnionExitTarget;
-use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
-use rings_node::prelude::rings_core::utils::get_epoch_ms;
-use rings_node::prelude::StopSource;
-use rings_node::prelude::StopToken;
-use rings_node::processor::Processor;
-use rings_node::processor::ProcessorBuilder;
-use rings_node::processor::ProcessorConfig;
-use rings_node::provider::Provider;
 use rings_node::seed::Seed;
 use rings_node::util::loader::ResourceLoader;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
-use tokio::task::JoinError;
-use tokio::task::JoinSet;
 
-const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 /// The command line: the top-level parser, its subcommands and their arguments.
 mod cli;
-
-/// Run `service`, the application inbox's server stopping on `stop`, to completion; the swarm
-/// going away first, which no running node reaches, is an error.
-async fn serve_application(
-    service: impl Future<Output = ()>,
-    stop: StopToken,
-) -> anyhow::Result<()> {
-    service.await;
-    if stop.should_stop() {
-        Ok(())
-    } else {
-        anyhow::bail!("application inbox closed unexpectedly")
-    }
-}
 
 /// Run the node in the foreground until a signal or a service stops it.
 async fn foreground_run(mut args: RunCommand) -> anyhow::Result<()> {
     let config_path = args.config_args.config.clone();
     let mut c = config::Config::read_fs(&config_path)?;
     apply_run_overrides(&mut c, &mut args, &config_path).await?;
-    let pc = ProcessorConfig::try_from(c.clone())?;
-    let api_security = configure_api_security(
-        &config_path,
-        &mut c,
-        args.api_token_path,
-        args.api_allowed_origins,
-        args.allow_remote_external_api,
-    )?;
-    let onion_http_proxy = onion_http_proxy_options(&c)?;
-    let (data_storage, measure_storage) =
-        run_storage_configs(args.storage_path, args.storage_capacity, &c);
-    let service_offer = c.services.as_ref().map(ServicesConfig::offer).transpose()?;
-    let processor = build_processor(
-        &pc,
-        data_storage,
-        measure_storage,
-        args.reassembly_profile.limits(),
-        service_offer,
-    )
-    .await?;
-    println!("Did: {}", processor.swarm.did());
-    let provider = Arc::new(Provider::from_processor(processor.clone()));
-    // The relay is an opt-in extension owning its own engine: it serves TCP/UDP tunnels, the
-    // ports this node serves through DNS relays, and the ingress of a DNS relay it runs.
-    let relay = RelayHandle::install(&provider.extensions())?;
-    let (services, relaying) = (c.services.as_ref(), c.dns_relay.as_ref());
-    let dns_relay = dns_relay::open(services, relaying, &processor, &relay).await?;
-    let needs_onion_runtime = processor.onion_role().registers_relay()
-        || c.enabled_gateway().is_some()
-        || onion_http_proxy.is_some();
-    let onion = needs_onion_runtime
-        .then(|| provider.onion_circuit())
-        .transpose()?;
-    let gateway_runner = match (c.enabled_gateway().cloned(), onion.as_ref()) {
-        (Some(config), Some(onion)) => Some(NativeGatewayRunner::new(
-            processor.clone(),
-            onion.clone(),
-            config,
-        )?),
-        _ => None,
-    };
-    let gateway_status = gateway_runner
-        .as_ref()
-        .map(NativeGatewayRunner::status_handle);
-    // Managed bootstrap targets fail fast on invalid configuration; their supervisor is spawned
-    // with the other run-owned tasks below and its evidence is the backend's observer.
-    let renewal = DelegationRenewalPaths::from_config(&c)?;
-    let bootstrap_targets = BootstrapTargets::from_config(c.bootstrap, processor.did())?;
-    let bootstrap = BootstrapSupervisor::over_processor(bootstrap_targets, processor.clone());
-    let stop = StopSource::new();
-    // The Backend decodes inbound custom messages as namespaced envelopes and routes them to
-    // the protocol registry. Its inbox is claimed here, before the processor listens, so no
-    // application data is discarded unclaimed.
-    let application = provider.application_service(
-        bootstrap.as_ref().map(BootstrapSupervisor::observer),
-        stop.token(),
-    )?;
-    let gateway_configured = gateway_runner.is_some();
-    let gateway_task = start_gateway(gateway_runner, stop.token()).await?;
-
-    let mut tasks = JoinSet::new();
-    tasks.spawn(serve_application(application, stop.token()));
-    // Renew the delegation in process before its signing horizon when `delegator_key` is
-    // configured (#1153), and end at the horizon otherwise (#1063).
-    let horizon_processor = processor.clone();
-    tasks.spawn(async move {
-        Err(
-            run_signing_horizon(horizon_processor, renewal, get_epoch_ms)
-                .await
-                .into(),
-        )
-    });
-    let processor_task = spawn_processor(processor.clone(), stop.token());
-    spawn_apis(
-        &mut tasks,
-        c.internal_api_port,
-        c.external_api_addr,
-        processor.clone(),
-        gateway_status,
-        api_security,
-    );
-    if let Some(supervisor) = bootstrap {
-        let bootstrap_stop = stop.token();
-        tasks.spawn(async move {
-            // Returns only on stop, which the select below requests before aborting the set.
-            supervisor.run(bootstrap_stop).await;
-            Ok(())
-        });
-    }
-    if let Some(dns_relay) = dns_relay {
-        let dns_relay_stop = stop.token();
-        tasks.spawn(async move {
-            dns_relay
-                .run(dns_relay_stop.stopped())
-                .await
-                .context("DNS relay stopped")
-        });
-    }
-    match (onion_http_proxy, onion) {
-        (Some(proxy_options), Some(onion)) => {
-            let proxy_processor = processor.clone();
-            tasks.spawn(async move {
-                run_onion_http_proxy(proxy_options, proxy_processor, onion)
-                    .await
-                    .context("Onion HTTP proxy stopped")
-            });
-        }
-        (_, onion) => drop(onion),
-    }
-    drop((relay, provider));
-    await_foreground_exit(
-        stop,
-        tasks,
-        gateway_task,
-        processor_task,
-        processor,
-        gateway_configured,
-    )
-    .await
+    let mut options = NativeNodeRunOptions::new(config_path, c);
+    options.storage_path = args.storage_path;
+    options.storage_capacity = args.storage_capacity;
+    options.reassembly_limits = args.reassembly_profile.limits();
+    options.api_token_path_override = args.api_token_path;
+    options.api_allowed_origins_override = args.api_allowed_origins;
+    options.allow_remote_external_api_override = args.allow_remote_external_api;
+    run_foreground_node(options, ()).await
 }
 
 /// Apply the run's command-line overrides to the configuration read from `config_path`.
@@ -220,11 +60,11 @@ async fn apply_run_overrides(
     if let Some(external_ip) = args.external_ip.take() {
         c.external_ip = Some(external_ip);
     }
-    if args.webrtc_udp_port_min.is_some() {
-        c.webrtc_udp_port_min = args.webrtc_udp_port_min;
+    if args.udp_port_min.is_some() {
+        c.udp_port_min = args.udp_port_min;
     }
-    if args.webrtc_udp_port_max.is_some() {
-        c.webrtc_udp_port_max = args.webrtc_udp_port_max;
+    if args.udp_port_max.is_some() {
+        c.udp_port_max = args.udp_port_max;
     }
     if let Some(stabilize_interval) = args.stabilize_interval.take() {
         c.stabilize_interval = stabilize_interval;
@@ -292,364 +132,6 @@ async fn apply_run_overrides(
         };
         gateway.enabled = true;
     }
-    Ok(())
-}
-
-/// The data and measure storage of the run: under `storage_path` when given, else as configured.
-fn run_storage_configs(
-    storage_path: Option<String>,
-    storage_capacity: Option<u32>,
-    c: &config::Config,
-) -> (config::StorageConfig, config::StorageConfig) {
-    let Some(storage_path) = storage_path else {
-        return (c.data_storage.clone(), c.measure_storage.clone());
-    };
-    let storage_path = Path::new(&storage_path);
-    let data_path = storage_path.join("data").to_string_lossy().to_string();
-    let measure_path = storage_path.join("measure").to_string_lossy().to_string();
-    let capacity = storage_capacity.unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
-    (
-        config::StorageConfig::new(&data_path, capacity),
-        config::StorageConfig::new(&measure_path, capacity),
-    )
-}
-
-/// Open the run's stores and build its processor over them, announcing `service_offer` through
-/// DNS relays when there is one.
-async fn build_processor(
-    pc: &ProcessorConfig,
-    data_storage: config::StorageConfig,
-    measure_storage: config::StorageConfig,
-    reassembly_limits: ReassemblyLimits,
-    service_offer: Option<ServiceOffer>,
-) -> anyhow::Result<Arc<Processor>> {
-    let stores = NodeStores::open(&data_storage, &measure_storage).await?;
-    let collector =
-        EvidenceCollectorIdentity::new(pc.network_id(), pc.delegatee_key().delegator_did());
-    let measure = PeriodicMeasure::new_with_evidence_storage_and_clock(
-        stores.measure,
-        stores.evidence,
-        collector,
-        pc.clock().clone(),
-    )
-    .await?;
-
-    let builder = ProcessorBuilder::from_config(pc)?
-        .storage(stores.data)
-        .relay_storage(stores.relay)
-        .removal_storage(stores.removals)
-        .onion_entry_guard_storage(stores.guards)
-        .replay_storage(stores.replay)
-        .measure(measure)
-        .stores_released(stores.released)
-        .reassembly_limits(reassembly_limits);
-    let builder = match service_offer {
-        Some(offer) => builder.announce_services(offer),
-        None => builder,
-    };
-    Ok(Arc::new(builder.build()?))
-}
-
-/// The onion HTTP proxy the configuration asks for, if any.
-fn onion_http_proxy_options(c: &config::Config) -> anyhow::Result<Option<OnionHttpProxyOptions>> {
-    let Some(addr) = c.onion_http_proxy_addr.as_deref() else {
-        return Ok(None);
-    };
-    Ok(Some(OnionHttpProxyOptions {
-        listen_addr: addr.parse::<SocketAddr>()?,
-        max_connections: c.onion_http_proxy_max_connections,
-        header_timeout: Duration::from_secs(c.onion_http_proxy_header_timeout_secs),
-    }))
-}
-
-/// One task the run owns, awaited or aborted by its owner: a [`JoinSet`] of that one task, so
-/// the run spawns nothing detached (the node crate forbids detached spawns, `clippy.toml`).
-struct OwnedTask<T>(JoinSet<T>);
-
-impl<T: Send + 'static> OwnedTask<T> {
-    /// Run `task` on the current runtime, owned by the returned handle; dropping the handle
-    /// aborts it.
-    fn spawn(task: impl Future<Output = T> + Send + 'static) -> Self {
-        let mut set = JoinSet::new();
-        set.spawn(task);
-        Self(set)
-    }
-
-    /// Abort the task; awaiting it then yields a cancelled [`JoinError`], unless it had ended.
-    fn abort(&mut self) {
-        self.0.abort_all();
-    }
-}
-
-impl<T: 'static> Future for OwnedTask<T> {
-    type Output = Result<T, JoinError>;
-
-    /// The task's result, once; a handle whose result was taken never yields again.
-    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
-        match self.0.poll_join_next(cx) {
-            Poll::Ready(Some(result)) => Poll::Ready(result),
-            Poll::Ready(None) | Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-/// Start the gateway task, if one is configured, and wait for its startup barrier.
-async fn start_gateway(
-    runner: Option<NativeGatewayRunner>,
-    stop: StopToken,
-) -> anyhow::Result<OwnedTask<anyhow::Result<()>>> {
-    let configured = runner.is_some();
-    let (started, startup) = tokio::sync::oneshot::channel();
-    let mut task = OwnedTask::spawn(async move {
-        match runner {
-            Some(runner) => runner.run_with_startup_barrier(stop, started).await,
-            None => std::future::pending::<anyhow::Result<()>>().await,
-        }
-    });
-    await_gateway_startup(configured, startup, &mut task).await?;
-    Ok(task)
-}
-
-/// Serve the internal API on port `internal` and the external API at `external`.
-fn spawn_apis(
-    tasks: &mut JoinSet<anyhow::Result<()>>,
-    internal: u16,
-    external: String,
-    processor: Arc<Processor>,
-    gateway_status: Option<GatewayStatusHandle>,
-    api_security: Arc<ApiSecurity>,
-) {
-    let internal_processor = processor.clone();
-    let internal_security = api_security.clone();
-    tasks.spawn(async move {
-        run_internal_api_with_gateway(
-            internal,
-            internal_processor,
-            gateway_status,
-            internal_security,
-        )
-        .await
-        .context("internal API stopped")
-    });
-    tasks.spawn(async move {
-        run_external_api(external, processor, api_security)
-            .await
-            .context("external API stopped")
-    });
-}
-
-/// Run the processor's listener until `stop`; stopping before it is an error.
-fn spawn_processor(processor: Arc<Processor>, stop: StopToken) -> OwnedTask<anyhow::Result<()>> {
-    OwnedTask::spawn(async move {
-        processor.listen_with(stop.clone()).await;
-        if stop.should_stop() {
-            Ok(())
-        } else {
-            anyhow::bail!("node processor listener stopped unexpectedly")
-        }
-    })
-}
-
-/// Wait for a signal or the first service to exit, then stop everything: the services at once,
-/// the gateway, the processor listener, and finally `Processor::close` (`leave`, `swarm.close`,
-/// and measurement flush).
-async fn await_foreground_exit(
-    stop: StopSource,
-    tasks: JoinSet<anyhow::Result<()>>,
-    gateway_task: OwnedTask<anyhow::Result<()>>,
-    processor_task: OwnedTask<anyhow::Result<()>>,
-    processor: Arc<Processor>,
-    gateway_configured: bool,
-) -> anyhow::Result<()> {
-    await_foreground_exit_with_signal(
-        shutdown_signal(),
-        stop,
-        tasks,
-        gateway_task,
-        processor_task,
-        processor,
-        gateway_configured,
-    )
-    .await
-}
-
-async fn await_foreground_exit_with_signal(
-    shutdown: impl Future<Output = anyhow::Result<()>>,
-    stop: StopSource,
-    mut tasks: JoinSet<anyhow::Result<()>>,
-    mut gateway_task: OwnedTask<anyhow::Result<()>>,
-    mut processor_task: OwnedTask<anyhow::Result<()>>,
-    processor: Arc<Processor>,
-    gateway_configured: bool,
-) -> anyhow::Result<()> {
-    enum ForegroundExit {
-        Signal(anyhow::Result<()>),
-        Service(Option<Result<anyhow::Result<()>, JoinError>>),
-        Gateway(Result<anyhow::Result<()>, JoinError>),
-        Processor(Result<anyhow::Result<()>, JoinError>),
-    }
-    let exit = tokio::select! {
-        signal = shutdown => ForegroundExit::Signal(signal),
-        service = tasks.join_next() => ForegroundExit::Service(service),
-        gateway = &mut gateway_task => ForegroundExit::Gateway(gateway),
-        processor = &mut processor_task => ForegroundExit::Processor(processor),
-    };
-    stop.request_stop();
-    // Stop request-serving tasks immediately, but keep the processor task separate so it can
-    // flush measurements through its cooperative `listen_with` shutdown path.
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
-
-    let (primary, gateway_finished, processor_finished) = match exit {
-        ForegroundExit::Signal(result) => (result, false, false),
-        ForegroundExit::Service(result) => (joined_service_result(result), false, false),
-        ForegroundExit::Gateway(result) => (joined_task_result(result, "gateway"), true, false),
-        ForegroundExit::Processor(result) => {
-            (joined_task_result(result, "node processor"), false, true)
-        }
-    };
-    let gateway_cleanup = if gateway_configured && !gateway_finished {
-        await_task_cleanup(&mut gateway_task, "gateway route cleanup").await
-    } else {
-        if !gateway_finished {
-            gateway_task.abort();
-        }
-        Ok(())
-    };
-    let processor_cleanup = if processor_finished {
-        Ok(())
-    } else {
-        await_task_cleanup(&mut processor_task, "node processor shutdown").await
-    };
-    let processor_close = await_processor_close(&processor).await;
-    combine_foreground_results(primary, gateway_cleanup, processor_cleanup, processor_close)
-}
-
-fn configure_api_security(
-    config_path: &str,
-    config: &mut config::Config,
-    token_path_override: Option<String>,
-    allowed_origin_overrides: Vec<String>,
-    allow_remote_override: bool,
-) -> anyhow::Result<Arc<ApiSecurity>> {
-    if let Some(token_path) = token_path_override {
-        config.api_token_path = Some(token_path);
-    }
-    if !allowed_origin_overrides.is_empty() {
-        config.api_allowed_origins = allowed_origin_overrides;
-    }
-    if allow_remote_override {
-        config.allow_remote_external_api = true;
-    }
-    let token = load_or_create_api_token(config_path, config.api_token_path.as_deref())?;
-    println!("API authentication token file: {}", token.path().display());
-    ApiSecurity::new(
-        token.into_secret(),
-        &config.api_allowed_origins,
-        config.allow_remote_external_api,
-    )
-    .map(Arc::new)
-    .map_err(Into::into)
-}
-
-fn joined_service_result(
-    result: Option<Result<anyhow::Result<()>, JoinError>>,
-) -> anyhow::Result<()> {
-    match result {
-        Some(Ok(result)) => result,
-        Some(Err(error)) => Err(anyhow::anyhow!("foreground service task failed: {error}")),
-        None => Err(anyhow::anyhow!("all foreground service tasks stopped")),
-    }
-}
-
-fn joined_task_result(
-    result: Result<anyhow::Result<()>, JoinError>,
-    task: &'static str,
-) -> anyhow::Result<()> {
-    match result {
-        Ok(result) => result,
-        Err(error) => Err(anyhow::anyhow!("{task} task failed: {error}")),
-    }
-}
-
-async fn await_gateway_startup(
-    configured: bool,
-    startup: tokio::sync::oneshot::Receiver<()>,
-    gateway_task: &mut OwnedTask<anyhow::Result<()>>,
-) -> anyhow::Result<()> {
-    if !configured {
-        return Ok(());
-    }
-    match startup.await {
-        Ok(()) => Ok(()),
-        Err(_) => joined_task_result(gateway_task.await, "gateway startup"),
-    }
-}
-
-async fn await_task_cleanup(
-    task: &mut OwnedTask<anyhow::Result<()>>,
-    operation: &'static str,
-) -> anyhow::Result<()> {
-    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, &mut *task).await {
-        Ok(result) => joined_task_result(result, operation),
-        Err(_) => {
-            task.abort();
-            Err(anyhow::anyhow!(
-                "{operation} did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
-            ))
-        }
-    }
-}
-
-async fn await_processor_close(processor: &Processor) -> anyhow::Result<()> {
-    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, processor.close()).await {
-        Ok(result) => result.context("node processor close failed"),
-        Err(_) => Err(anyhow::anyhow!(
-            "node processor close did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
-        )),
-    }
-}
-
-fn combine_foreground_results(
-    primary: anyhow::Result<()>,
-    gateway_cleanup: anyhow::Result<()>,
-    processor_cleanup: anyhow::Result<()>,
-    processor_close: anyhow::Result<()>,
-) -> anyhow::Result<()> {
-    let failures = [
-        primary.err().map(|error| format!("foreground: {error}")),
-        gateway_cleanup
-            .err()
-            .map(|error| format!("gateway cleanup: {error}")),
-        processor_cleanup
-            .err()
-            .map(|error| format!("processor cleanup: {error}")),
-        processor_close
-            .err()
-            .map(|error| format!("processor close: {error}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(failures.join("; ")))
-    }
-}
-
-async fn shutdown_signal() -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => result?,
-            _ = terminate.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 
@@ -846,11 +328,17 @@ mod tests {
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
+    use rings_node::native::daemon::await_foreground_exit_with_signal;
+    use rings_node::native::daemon::await_gateway_startup;
+    use rings_node::native::daemon::await_task_cleanup;
+    use rings_node::native::daemon::spawn_processor;
+    use rings_node::native::daemon::start_gateway;
+    use rings_node::native::daemon::OwnedTask;
+    use rings_node::processor::ProcessorBuilder;
+    use rings_node::processor::ProcessorConfig;
+    use tokio::task::JoinSet;
 
-    use super::await_gateway_startup;
-    use super::await_task_cleanup;
     use super::Cli;
-    use super::OwnedTask;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
         let matches = Cli::command()
@@ -918,25 +406,25 @@ mod tests {
         let delegatee_key =
             rings_node::prelude::rings_core::delegation::DelegateeKey::new_with_seckey(&key)?;
         let processor_config =
-            super::ProcessorConfig::new(0, "stun://127.0.0.1:3478".to_string(), delegatee_key, 200)
+            ProcessorConfig::new(0, "stun://127.0.0.1:3478".to_string(), delegatee_key, 200)
                 .dht_virtual_nodes(0);
         let replay = Box::new(rings_node::prelude::rings_core::storage::MemStorage::new());
         let processor = Arc::new(
-            super::ProcessorBuilder::from_config(&processor_config)?
+            ProcessorBuilder::from_config(&processor_config)?
                 .replay_storage(replay)
                 .build()?,
         );
         let stop = rings_node::prelude::StopSource::new();
-        let mut tasks = super::JoinSet::new();
+        let mut tasks = JoinSet::new();
         let task_stop = stop.token();
         tasks.spawn(async move {
             task_stop.stopped().await;
             Ok(())
         });
-        let gateway_task = super::start_gateway(None, stop.token()).await?;
-        let processor_task = super::spawn_processor(Arc::clone(&processor), stop.token());
+        let gateway_task = start_gateway(None, stop.token()).await?;
+        let processor_task = spawn_processor(Arc::clone(&processor), stop.token());
 
-        super::await_foreground_exit_with_signal(
+        await_foreground_exit_with_signal(
             async { Ok(()) },
             stop,
             tasks,
@@ -944,6 +432,7 @@ mod tests {
             processor_task,
             Arc::clone(&processor),
             false,
+            &mut (),
         )
         .await?;
 

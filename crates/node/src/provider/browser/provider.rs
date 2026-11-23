@@ -60,7 +60,7 @@ pub(crate) mod lock;
 /// Browser mail construction, retained inbox access, and filing notifications.
 pub(crate) mod mail;
 /// Browser onion-proxy helpers exposed by the provider API.
-mod onion_proxy;
+pub(crate) mod onion_proxy;
 pub use listener::ProviderListener;
 pub use mail::BrowserMailError;
 pub use mail::BrowserMailOptions;
@@ -393,7 +393,7 @@ impl Provider {
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(config: String) -> js_sys::Promise {
         future_to_promise(async move {
-            let cfg: ProcessorConfig = serde_saphyr::from_str(&config).map_err(JsError::from)?;
+            let cfg = ProcessorConfig::from_str(&config).map_err(JsError::from)?;
             JsFuture::from(Self::new_provider_with_config(cfg)).await
         })
     }
@@ -641,6 +641,34 @@ impl Provider {
             processor: self.processor.clone(),
             client: OnionHttpsClient::new(runtime),
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
+        })
+    }
+
+    /// Fetch raw normalized elements of DHT registry `topic` together with CRDT dot timestamps.
+    pub fn lookup_registry(&self, topic: String) -> js_sys::Promise {
+        let provider = self.clone();
+        future_to_promise(async move {
+            let resp = provider
+                .lookup_registry_raw(topic.as_str())
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&resp).map_err(JsError::from)?)
+        })
+    }
+
+    /// Evaluate a generic 1-stage Kleisli `invoke` pipeline over a guard-closed Sphinx loop.
+    pub fn onion_invoke(&self, request: JsValue) -> js_sys::Promise {
+        let provider = self.clone();
+        future_to_promise(async move {
+            let json =
+                js_value::json_value(request).map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let parsed: crate::provider::OnionInvokeRpcRequest =
+                serde_json::from_value(json).map_err(|e| JsError::new(e.to_string().as_str()))?;
+            let resp = provider
+                .onion_invoke_raw(parsed)
+                .await
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&resp).map_err(JsError::from)?)
         })
     }
 

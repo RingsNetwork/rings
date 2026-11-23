@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use rings_transport::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
 use serde::Serialize;
 
 use super::StorageSyncDestination;
@@ -26,7 +26,7 @@ use crate::message::types::SyncEntriesWithSuccessor;
 /// This stays below one interoperable WebRTC data-channel frame so storage
 /// anti-entropy cannot monopolize the chunk sender. The batch cost also
 /// reserves the payload/chunk envelope bytes below.
-pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4;
+pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_CHANNEL_MESSAGE_SIZE / 4;
 
 /// The envelope a batch is sent whole in: the payload envelope and the transport wrapper.
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =

@@ -1,5 +1,6 @@
 //! General Provider, this module provide Provider implementation for FFI and WASM
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
@@ -8,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use rings_core::delegation::DelegateeKey;
 use rings_core::delegation::DelegationBuilder;
 use rings_core::dht::Did;
@@ -25,6 +27,7 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::application::ApplicationData;
 use rings_core::swarm::application::ApplicationMessage;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
+use rings_runtime::MaybeSendSync;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -196,6 +199,12 @@ impl BackendObserver for CompositeBackendObserver {
             extra.e2e_message(message);
         }
     }
+
+    fn custom_envelope(&self, from: Did, bytes: &[u8]) {
+        if let Some(extra) = self.extra.as_deref() {
+            extra.custom_envelope(from, bytes);
+        }
+    }
 }
 
 fn e2e_event_from_message(message: &ApplicationMessage) -> Result<Option<E2eEvent>> {
@@ -243,6 +252,128 @@ fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
     value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
 }
 
+mod u128_decimal_string {
+    use serde::de::Error as _;
+    use serde::Deserialize;
+    use serde::Deserializer;
+    use serde::Serializer;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrU64 {
+        Str(String),
+        Num(u64),
+    }
+
+    pub(super) fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<u128, D::Error> {
+        match StringOrU64::deserialize(deserializer)? {
+            StringOrU64::Str(raw) => raw.parse::<u128>().map_err(D::Error::custom),
+            StringOrU64::Num(num) => Ok(u128::from(num)),
+        }
+    }
+}
+
+/// One raw element observed in a DHT registry carrier (`lookupRegistry`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryElementSnapshot {
+    /// Base64-encoded `rings_codec` element bytes.
+    pub data_base64: String,
+    /// CRDT dot logical timestamp `τ*` in Unix epoch milliseconds (decimal string in JSON).
+    #[serde(with = "u128_decimal_string")]
+    pub heartbeat_at_ms: u128,
+}
+
+/// Response returned by the generic `lookupRegistry` local RPC primitive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LookupRegistryResponse {
+    /// Queried DHT registry topic string.
+    pub topic: String,
+    /// Local overlay network identifier.
+    pub network_id: u32,
+    /// Local processor clock timestamp in Unix epoch milliseconds when read (decimal string in JSON).
+    #[serde(with = "u128_decimal_string")]
+    pub now_ms: u128,
+    /// Normalized elements currently carried in the registry entry.
+    pub elements: Vec<RegistryElementSnapshot>,
+}
+
+/// Optional concrete stage filter `(did, process_epoch, delegatee_public_key)` for `onionInvoke`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnionEligibleStage {
+    /// Candidate stage node account [`Did`].
+    pub did: Did,
+    /// Optional concrete [`crate::onion::OnionProcessEpoch`] of the target process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_epoch: Option<crate::onion::OnionProcessEpoch>,
+    /// Optional concrete session [`PublicKey<33>`] of the target process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegatee_public_key: Option<PublicKey<33>>,
+}
+
+/// Request payload for the generic 1-stage `onionInvoke` local RPC primitive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnionInvokeRpcRequest {
+    /// Closed `invoke<In, Out, L>` shape symbol.
+    pub shape: crate::onion::OnionInvokeShape,
+    /// Canonical open backend name `ω`.
+    pub backend: crate::onion::OnionBackendName,
+    /// Optional base64-encoded inline constants `ā′`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constants_base64: Option<String>,
+    /// Base64-encoded fixed-width input frame (`0` bytes for `Unit`).
+    #[serde(default)]
+    pub input_base64: String,
+    /// Optional eligible stage DID allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_dids: Option<Vec<Did>>,
+    /// Optional eligible concrete `(did, process_epoch)` stage allowlist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligible_stages: Option<Vec<OnionEligibleStage>>,
+    /// Optional caller timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Response payload returned by the generic `onionInvoke` local RPC primitive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnionInvokeRpcResponse {
+    /// Account [`Did`] of the selected stage host.
+    pub stage_did: Did,
+    /// Process epoch (`OnionProcessEpoch`) of the selected stage host.
+    pub stage_process_epoch: crate::onion::OnionProcessEpoch,
+    /// Session delegatee public key (`PublicKey<33>`) of the selected stage host.
+    pub stage_delegatee_public_key: PublicKey<33>,
+    /// Base64-encoded fixed-width output frame returned by the stage.
+    pub output_base64: String,
+}
+
+fn is_builtin_local_rpc_method(method: &str) -> bool {
+    matches!(
+        method,
+        "takeE2eEvents"
+            | "dispatchDropCounters"
+            | "signingHorizon"
+            | "renewDelegateeKey"
+            | "lookupRegistry"
+            | "onionInvoke"
+            | "ConnectPeerViaHttp"
+    ) || rings_rpc::method::Method::try_from(method).is_ok()
+}
+
+/// Asynchronous local RPC handler registered on a [`Provider`] by external service crates.
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
+pub trait LocalRpcMethod: MaybeSendSync {
+    /// Handle one JSON-RPC call invoked via [`Provider::request_internal`].
+    async fn call(&self, params: serde_json::Value) -> Result<serde_json::Value>;
+}
+
 /// General Provider holding the node processor, RPC dispatcher, and extension registry.
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -253,6 +384,8 @@ pub struct Provider {
     extensions: crate::extension::ext::Extensions,
     dispatch_drops: Arc<DispatchDrops>,
     e2e_inbox: Arc<E2eInbox>,
+    /// External local RPC methods installed on this provider.
+    custom_rpc: Arc<Mutex<BTreeMap<String, Arc<dyn LocalRpcMethod>>>>,
     /// The onion runtime installed in this provider's registry, shared by its clones; its lock
     /// serializes the check-and-install, so the runtime is installed at most once.
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
@@ -327,6 +460,7 @@ impl Provider {
             extensions,
             dispatch_drops: Arc::default(),
             e2e_inbox: Arc::default(),
+            custom_rpc: Arc::new(Mutex::new(BTreeMap::new())),
             onion_runtime: Arc::new(Mutex::new(None)),
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
@@ -335,6 +469,154 @@ impl Provider {
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             pagehide,
         }
+    }
+
+    /// Return a reference to the underlying [`Processor`] driving this provider.
+    pub const fn processor(&self) -> &Arc<Processor> {
+        &self.processor
+    }
+
+    /// Register an external [`LocalRpcMethod`] reachable through [`Self::request_internal`] (and
+    /// C FFI / browser RPC dispatch).
+    ///
+    /// Rejects empty method names, any built-in node/JSON-RPC method name, and duplicate
+    /// registrations on the same [`Provider`].
+    pub fn register_local_rpc_method(
+        &self,
+        method: impl Into<String>,
+        handler: impl LocalRpcMethod + 'static,
+    ) -> Result<()> {
+        let name = method.into();
+        let trimmed = name.trim();
+        if trimmed.is_empty() || trimmed != name {
+            return Err(Error::InvalidConfig(format!(
+                "invalid local RPC method name {name:?}"
+            )));
+        }
+        if is_builtin_local_rpc_method(&name) {
+            return Err(Error::InvalidConfig(format!(
+                "cannot override built-in RPC method {name:?}"
+            )));
+        }
+        let mut table = self.custom_rpc.lock().map_err(|_| Error::Lock)?;
+        if table.contains_key(&name) {
+            return Err(Error::InvalidConfig(format!(
+                "local RPC method {name:?} is already registered"
+            )));
+        }
+        table.insert(name, Arc::new(handler));
+        Ok(())
+    }
+
+    /// Fetch raw normalized elements of DHT registry `topic` together with CRDT dot timestamps,
+    /// local `network_id`, and local clock `now_ms`.
+    pub async fn lookup_registry_raw(&self, topic: &str) -> Result<LookupRegistryResponse> {
+        let trimmed = topic.trim();
+        if trimmed.is_empty() {
+            return Err(Error::InvalidConfig(
+                "registry topic must be non-empty".to_string(),
+            ));
+        }
+        let now_ms = self.processor.clock().now_ms();
+        let network_id = self.processor.swarm.network_id();
+        let elements = match self.processor.fetch_topic_entry(trimmed).await? {
+            Some(entry) => crate::descriptor::heard_elements(&entry)
+                .map(|(bytes, heartbeat_at_ms)| RegistryElementSnapshot {
+                    data_base64: base64::encode(bytes.as_ref()),
+                    heartbeat_at_ms,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        Ok(LookupRegistryResponse {
+            topic: trimmed.to_string(),
+            network_id,
+            now_ms,
+            elements,
+        })
+    }
+
+    /// Evaluate a generic 1-stage Kleisli `invoke` pipeline over a guard-closed Sphinx loop,
+    /// optionally restricted to `eligible_dids` and/or concrete `(did, process_epoch)`
+    /// `eligible_stages`.
+    pub async fn onion_invoke_raw(
+        &self,
+        request: OnionInvokeRpcRequest,
+    ) -> Result<OnionInvokeRpcResponse> {
+        let constants = match request.constants_base64.as_deref() {
+            Some(raw) if !raw.is_empty() => base64::decode(raw)
+                .map_err(|e| Error::InvalidConfig(format!("invalid constants_base64: {e}")))?,
+            _ => Vec::new(),
+        };
+        let input = if request.input_base64.is_empty() {
+            Vec::new()
+        } else {
+            base64::decode(request.input_base64.as_str())
+                .map_err(|e| Error::InvalidConfig(format!("invalid input_base64: {e}")))?
+        };
+        let stage = crate::onion::OnionInvokeStage::new(request.shape, request.backend, constants)?;
+        let pipeline = stage.into_pipeline();
+
+        let did_filter: Option<std::collections::BTreeSet<Did>> =
+            request.eligible_dids.map(|dids| dids.into_iter().collect());
+        let stage_filter = request.eligible_stages;
+        let predicate = |desc: &crate::onion::OnionInvokeDescriptor| {
+            let did_ok = did_filter
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&desc.did));
+            let stage_ok = stage_filter.as_ref().is_none_or(|allowed| {
+                allowed.iter().any(|cand| {
+                    cand.did == desc.did
+                        && cand
+                            .process_epoch
+                            .is_none_or(|epoch| epoch == desc.process_epoch)
+                        && cand
+                            .delegatee_public_key
+                            .is_none_or(|pk| pk == desc.delegatee_public_key)
+                })
+            });
+            did_ok && stage_ok
+        };
+
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
+        let route = browser::provider::onion_proxy::build_browser_onion_pipeline_route_filtered(
+            Arc::clone(&self.processor),
+            self.onion_directory_endpoint()?,
+            &pipeline,
+            predicate,
+        )
+        .await?;
+
+        #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+        let route = self
+            .processor
+            .build_onion_pipeline_route_filtered(&pipeline, predicate)
+            .await?;
+
+        let stage_desc = route.descriptors().first().ok_or_else(|| {
+            Error::InvalidConfig("selected onion invoke route had no stage descriptor".to_string())
+        })?;
+        let stage_did = stage_desc.did;
+        let stage_process_epoch = stage_desc.process_epoch;
+        let stage_delegatee_public_key = stage_desc.delegatee_public_key;
+
+        let handle = self.onion_pipeline()?;
+        let timeout = request.timeout_ms.map(std::time::Duration::from_millis);
+        let output = handle
+            .invoke_pipeline_over_route_with_options(
+                &route,
+                &pipeline,
+                pipeline.loop_class(),
+                &input,
+                timeout,
+            )
+            .await?;
+        Ok(OnionInvokeRpcResponse {
+            stage_did,
+            stage_process_epoch,
+            stage_delegatee_public_key,
+            output_base64: base64::encode(&output),
+        })
     }
 
     /// The shared protocol registry. The [`Backend`] serving core's application inbox clones
@@ -576,6 +858,7 @@ impl Provider {
             extensions,
             dispatch_drops,
             e2e_inbox,
+            custom_rpc,
             onion_runtime,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint,
@@ -589,6 +872,7 @@ impl Provider {
             extensions,
             dispatch_drops,
             e2e_inbox,
+            custom_rpc,
             onion_runtime,
         ));
         #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -764,8 +1048,14 @@ impl Provider {
     /// the service is a node task (#1085). Use
     /// [`application_service`](Provider::application_service) for one under a stop of the
     /// caller's.
+    /// Spawn the application-inbox consumer over this provider's protocol registry.
     pub fn set_backend(&self) -> Result<()> {
         self.serve_application(None)
+    }
+
+    /// Spawn the application-inbox consumer with an explicit [`BackendObserver`].
+    pub fn set_backend_with_observer(&self, observer: Arc<dyn BackendObserver>) -> Result<()> {
+        self.serve_application(Some(observer))
     }
 
     /// [`Self::set_backend`] with `observer` handed the peer facts and unrouted E2E messages.
@@ -845,7 +1135,37 @@ impl Provider {
                     .renew_delegatee_key(next, self.processor.clock().now_ms())?;
                 return Ok(serde_json::to_value(self.signing_horizon_snapshot())?);
             }
+            "lookupRegistry" => {
+                let topic = params
+                    .get("topic")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        Error::InternalRpcError(jsonrpc_core::Error::invalid_params(
+                            "missing string field `topic`",
+                        ))
+                    })?;
+                let resp = self.lookup_registry_raw(topic).await?;
+                return Ok(serde_json::to_value(resp)?);
+            }
+            "onionInvoke" => {
+                let req: OnionInvokeRpcRequest = serde_json::from_value(params).map_err(|e| {
+                    Error::InternalRpcError(jsonrpc_core::Error::invalid_params(format!(
+                        "invalid onionInvoke params: {e}"
+                    )))
+                })?;
+                let resp = self.onion_invoke_raw(req).await?;
+                return Ok(serde_json::to_value(resp)?);
+            }
             _ => {}
+        }
+        if !is_builtin_local_rpc_method(method.as_str()) {
+            let custom_handler = {
+                let table = self.custom_rpc.lock().map_err(|_| Error::Lock)?;
+                table.get(method.as_str()).cloned()
+            };
+            if let Some(handler) = custom_handler {
+                return handler.call(params).await;
+            }
         }
         #[cfg(all(feature = "browser", target_family = "wasm"))]
         let onion_directory_endpoint = onion_directory_endpoint_from_rpc(method.as_str(), &params);
@@ -955,5 +1275,87 @@ impl Provider {
             .lock()
             .map(|slot| slot.clone())
             .map_err(|_| Error::Lock)
+    }
+}
+
+#[cfg(all(test, feature = "node", not(target_family = "wasm")))]
+mod local_rpc_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use rings_core::delegation::DelegateeKey;
+    use rings_core::ecc::SecretKey;
+    use rings_core::storage::MemStorage;
+    use serde_json::json;
+
+    use super::LocalRpcMethod;
+    use super::Provider;
+    use crate::processor::ProcessorBuilder;
+    use crate::processor::ProcessorConfig;
+
+    struct EchoMethod;
+
+    #[async_trait]
+    impl LocalRpcMethod for EchoMethod {
+        async fn call(&self, params: serde_json::Value) -> crate::error::Result<serde_json::Value> {
+            Ok(params)
+        }
+    }
+
+    fn test_provider() -> crate::error::Result<Provider> {
+        let key = SecretKey::random();
+        let delegatee_key = DelegateeKey::new_with_seckey(&key)?;
+        let config =
+            ProcessorConfig::new(1, String::new(), delegatee_key, 200).dht_virtual_nodes(0);
+        let replay = Box::new(MemStorage::new());
+        let processor = Arc::new(
+            ProcessorBuilder::from_config(&config)?
+                .advertise_presence(false)
+                .replay_storage(replay)
+                .build()?,
+        );
+        Ok(Provider::from_processor(processor))
+    }
+
+    #[tokio::test]
+    async fn register_local_rpc_method_rejects_builtins_whitespace_and_duplicates(
+    ) -> crate::error::Result<()> {
+        let provider = test_provider()?;
+        for invalid in [
+            "",
+            "   ",
+            " customMethod",
+            "customMethod ",
+            "nodeDid",
+            "connectPeerViaHttp",
+            "ConnectPeerViaHttp",
+            "takeE2eEvents",
+            "dispatchDropCounters",
+            "signingHorizon",
+            "renewDelegateeKey",
+            "lookupRegistry",
+            "onionInvoke",
+        ] {
+            assert!(
+                provider
+                    .register_local_rpc_method(invalid, EchoMethod)
+                    .is_err(),
+                "expected {invalid:?} to be rejected"
+            );
+        }
+
+        provider.register_local_rpc_method("ext.echo", EchoMethod)?;
+        assert!(
+            provider
+                .register_local_rpc_method("ext.echo", EchoMethod)
+                .is_err(),
+            "duplicate custom RPC method must be rejected"
+        );
+        let echoed = provider
+            .request_internal("ext.echo".to_string(), json!({"hello": "world"}))
+            .await?;
+        assert_eq!(echoed, json!({"hello": "world"}));
+        provider.close().await?;
+        Ok(())
     }
 }

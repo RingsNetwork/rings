@@ -9,18 +9,17 @@ use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 use crate::tests::activity::ActivityObserver;
 
-mod test_ice_servers;
 mod test_utils;
 mod test_wasm_transport;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-/// ICE servers of every browser fixture: none, so peers gather host candidates only.
+/// Traversal servers of every browser fixture: none, so peers gather local host candidates only.
 ///
-/// Every peer of these tests lives in the same page. An external STUN server would put its
-/// latency inside `create_offer`/`answer_offer`, which wait for ICE gathering to complete
-/// (up to the transport's 60 s gather bound), and make a test's hang guard load-bearing.
-pub(crate) const TEST_ICE_SERVERS: &str = "";
+/// Every peer of these tests lives in the same page. An external traversal server would put its
+/// latency inside `create_offer`/`answer_offer` (up to the transport's 60 s gather bound), and
+/// make a test's hang guard load-bearing.
+pub(crate) const TEST_TRAVERSAL_SERVERS: &str = "";
 
 enum TestStorageMode {
     Default,
@@ -37,9 +36,14 @@ async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -
             .unwrap(),
     );
 
-    let builder = SwarmBuilder::new(0, TEST_ICE_SERVERS, storage, delegatee_key)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .observer(Arc::new(ActivityObserver));
+    let builder = SwarmBuilder::new(
+        0,
+        crate::tests::test_transport(TEST_TRAVERSAL_SERVERS),
+        storage,
+        delegatee_key,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .observer(Arc::new(ActivityObserver));
     let builder = match mode {
         TestStorageMode::Default => builder,
         TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),

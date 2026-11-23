@@ -2,17 +2,16 @@
 
 use std::sync::Arc;
 
-use js_sys::Array;
-use js_sys::Object;
-use js_sys::Reflect;
 use js_sys::Uint8Array;
+use rings_node::prelude::rings_core::delegation::DelegateeKey;
 use rings_node::prelude::rings_core::delegation::DelegationBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_webview::Result as WebviewResult;
 use rings_webview::WebviewError;
-use wasm_bindgen::JsValue;
+use serde_json::json;
+use serde_json::Value;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
@@ -101,6 +100,7 @@ impl PeerView {
     }
 
     /// Build a connected peer row from an RPC-returned DID.
+    #[cfg(test)]
     pub fn connected(did: String) -> Option<Self> {
         Self::from_fields(did, "Connected".to_string())
     }
@@ -113,11 +113,6 @@ impl PeerView {
     /// Transport state reported by `listPeers`.
     pub fn state(&self) -> &str {
         &self.state
-    }
-
-    /// True when this row can be used as a peer operation target.
-    pub fn is_addressable(&self) -> bool {
-        !self.did.trim().is_empty()
     }
 }
 
@@ -155,24 +150,28 @@ fn scoped_storage_name(base: &str, did: rings_node::prelude::rings_core::dht::Di
     }
 }
 
-/// Build a browser provider from a wallet-authorized delegatee key.
+/// Authorize a session [`DelegateeKey`] with the connected wallet without opening storage.
+pub async fn authorize_delegatee_key(wallet: &WalletAccount) -> Result<DelegateeKey, String> {
+    let mut builder = DelegationBuilder::new(wallet.account.clone(), wallet.account_type.clone());
+    let proof = builder.unsigned_proof();
+    let signature = wallet.sign_session_proof(&proof).await?;
+    builder = builder.set_delegator_signature(signature);
+    builder
+        .build()
+        .map_err(|error| format!("delegatee key rejected: {error}"))
+}
+
+/// Open a browser provider and attach its host WebView adapter from an authorized [`DelegateeKey`].
 ///
 /// The browser provider is used only on the single-threaded wasm event loop, but
 /// the upstream `Provider` handle is exposed behind `Arc`; keep that shape at
 /// this adapter boundary instead of introducing a parallel wasm-only provider.
 #[allow(clippy::arc_with_non_send_sync)]
-pub async fn build_node(
-    wallet: &WalletAccount,
+pub async fn open_node(
+    delegatee_key: DelegateeKey,
     settings: NodeSettings,
     webview_host: WebviewHost,
 ) -> Result<DemoNode, String> {
-    let mut builder = DelegationBuilder::new(wallet.account.clone(), wallet.account_type.clone());
-    let proof = builder.unsigned_proof();
-    let signature = wallet.sign_session_proof(&proof).await?;
-    builder = builder.set_delegator_signature(signature);
-    let delegatee_key = builder
-        .build()
-        .map_err(|error| format!("delegatee key rejected: {error}"))?;
     let storage_name = scoped_storage_name(&settings.storage_name, delegatee_key.delegator_did());
     let config = ProcessorConfig::new(
         settings.network_id,
@@ -204,6 +203,16 @@ pub async fn build_node(
         webview,
         listener,
     })
+}
+
+/// Build a browser provider from a wallet-authorized delegatee key.
+pub async fn build_node(
+    wallet: &WalletAccount,
+    settings: NodeSettings,
+    webview_host: WebviewHost,
+) -> Result<DemoNode, String> {
+    let delegatee_key = authorize_delegatee_key(wallet).await?;
+    open_node(delegatee_key, settings, webview_host).await
 }
 
 /// Connect to a seed node through its HTTP JSON-RPC endpoint.
@@ -273,15 +282,15 @@ pub async fn send_message(
 
 /// Refresh connected peers.
 pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, String> {
-    let response = request(provider, "listPeers", Object::new().into()).await?;
-    let peers = Reflect::get(&response, &JsValue::from_str("peers"))
-        .map_err(|error| format!("read peers failed: {error:?}"))?;
-    let peers = Array::from(&peers);
+    let response = request(provider, "listPeers", json!({})).await?;
+    let peers = response
+        .get("peers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "read peers failed: missing peers array".to_string())?;
     let mut out = Vec::new();
-    for index in 0..peers.length() {
-        let peer = peers.get(index);
-        let did = get_string(&peer, "did").unwrap_or_default();
-        let state = get_string(&peer, "state").unwrap_or_else(|_| "Unknown".to_string());
+    for peer in peers {
+        let did = get_string(peer, "did").unwrap_or_default();
+        let state = get_string(peer, "state").unwrap_or_else(|_| "Unknown".to_string());
         if let Some(peer) = PeerView::from_fields(did, state) {
             out.push(peer);
         }
@@ -289,28 +298,26 @@ pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, Strin
     Ok(out)
 }
 
-async fn request(
-    provider: &Arc<Provider>,
-    method: &str,
-    params: JsValue,
-) -> Result<JsValue, String> {
-    JsFuture::from(provider.request(method.to_string(), params))
+async fn request(provider: &Arc<Provider>, method: &str, params: Value) -> Result<Value, String> {
+    provider
+        .request_internal(method.to_string(), params)
         .await
-        .map_err(|error| format!("rpc {method} failed: {error:?}"))
+        .map_err(|error| format!("rpc {method} failed: {error}"))
 }
 
-fn obj(fields: &[(&str, &str)]) -> JsValue {
-    let object = Object::new();
-    for (key, value) in fields {
-        let _set = Reflect::set(&object, &JsValue::from_str(key), &JsValue::from_str(value));
+fn obj(fields: &[(&str, &str)]) -> Value {
+    let mut map = serde_json::Map::with_capacity(fields.len());
+    for &(key, value) in fields {
+        map.insert(key.to_string(), Value::String(value.to_string()));
     }
-    object.into()
+    Value::Object(map)
 }
 
-fn get_string(value: &JsValue, field: &str) -> Result<String, String> {
-    Reflect::get(value, &JsValue::from_str(field))
-        .map_err(|error| format!("read {field} failed: {error:?}"))?
-        .as_string()
+fn get_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
         .ok_or_else(|| format!("missing string field {field}"))
 }
 
@@ -323,6 +330,7 @@ mod tests {
     use rings_node::prelude::rings_core::delegation::DelegateeKey;
     use rings_node::prelude::rings_core::ecc::SecretKey;
     use rings_node::prelude::uuid;
+    use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::*;

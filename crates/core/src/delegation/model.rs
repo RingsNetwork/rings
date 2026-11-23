@@ -202,6 +202,29 @@ impl Delegation {
             .ok_or(Error::VerifySignatureFailed)
     }
 
+    /// Verify both the delegator authorization (and validity window at `at_ms`) and the delegatee
+    /// signature `sig` over `msg`, returning the recovered delegatee secp256k1 [`PublicKey<33>`].
+    pub fn recover_signer_at(
+        &self,
+        msg: &[u8],
+        sig: impl AsRef<[u8]>,
+        at_ms: u128,
+    ) -> Result<PublicKey<33>> {
+        self.signer_under(msg, sig, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// Verify the delegation validity window at `at_ms` (assuming delegator authorization was
+    /// already verified and cached) and the delegatee signature `sig` over `msg`, returning the
+    /// recovered delegatee secp256k1 [`PublicKey<33>`].
+    pub fn recover_established_signer_at(
+        &self,
+        msg: &[u8],
+        sig: impl AsRef<[u8]>,
+        at_ms: u128,
+    ) -> Result<PublicKey<33>> {
+        self.signer_under(msg, sig, at_ms, DelegatorAuthorization::Established)
+    }
+
     /// Get the legacy secp256k1-compatible delegator public key.
     ///
     /// Use [`Delegation::delegator_verification_pubkey`] for typed delegator verification keys.
@@ -226,6 +249,11 @@ impl Delegation {
     /// Get the typed account verifier.
     pub fn delegator_verifier(&self) -> AccountVerifier {
         self.delegator.account_verifier()
+    }
+
+    /// Borrow the authorizing [`Account`].
+    pub const fn delegator(&self) -> &Account {
+        &self.delegator
     }
 
     /// Get the DID of the delegator that authorized this delegation.

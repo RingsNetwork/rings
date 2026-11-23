@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use rings_transport::core::transport::TransportInterface;
 /// Cancellation and expiry of unadmitted generations.
 mod cancellation;
 /// Finger-table proof admission at the pending/active transport boundary.
@@ -20,12 +19,11 @@ pub(super) use handshake::crossing_offer_verdict;
 pub(super) use handshake::CrossingOfferVerdict;
 pub(super) use handshake::Handshake;
 pub(crate) use handshake::OfferOwner;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(super) use handshake::OfferPhase;
 pub(super) use registry::ActiveConnectionSet;
 pub(super) use registry::ConnectionLifecycleRegistry;
 pub(super) use registry::LifecycleBounds;
-use registry::PeerConnectionLifecycle;
+use registry::PeerSlotLifecycle;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(super) use registry::ReservationVerdict;
 pub(super) use registry::RetirementOutcome;
@@ -306,14 +304,14 @@ impl SwarmTransport {
     /// returns whether it was.
     pub(super) async fn close_if_current(&self, connection: &SwarmConnection) -> Result<bool> {
         self.transport
-            .close_connection_if_current(&connection.connection)
+            .close_dyn_connection_if_current(&connection.connection)
             .await
             .map_err(Error::Transport)
     }
 
     pub(super) fn get_raw_connection(&self, peer: Did) -> Option<SwarmConnection> {
         self.transport
-            .connection(&peer.to_string())
+            .dyn_connection(&peer.to_string())
             .map(|conn| SwarmConnection {
                 peer,
                 connection: conn,
@@ -325,12 +323,12 @@ impl SwarmTransport {
 
     pub(super) fn raw_connection_owner(&self, peer: Did) -> Result<RawConnectionOwner> {
         Ok(match self.peer_lifecycles()?.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                 RawConnectionOwner::Pending(attempt)
             }
-            Some(
-                PeerConnectionLifecycle::Admitting { .. } | PeerConnectionLifecycle::Active { .. },
-            ) => RawConnectionOwner::Owned,
+            Some(PeerSlotLifecycle::Admitting { .. } | PeerSlotLifecycle::Active { .. }) => {
+                RawConnectionOwner::Owned
+            }
             None => RawConnectionOwner::Orphan,
         })
     }
@@ -477,7 +475,7 @@ impl SwarmTransport {
         self.with_connection_lifecycle(|| {
             Ok(match self.peer_lifecycles()?.state(peer) {
                 None => AnswerSlot::Vacant,
-                Some(PeerConnectionLifecycle::Pending { attempt, .. }) => {
+                Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
                     match self.get_raw_connection(peer) {
                         Some(connection) => AnswerSlot::Pending(attempt, connection),
                         None => AnswerSlot::Owned(attempt),
@@ -517,7 +515,7 @@ impl SwarmTransport {
     /// Start admission only after the coherent transport product state can make progress.
     ///
     /// Data-channel and peer-connection callbacks are independent inputs. Browsers may therefore
-    /// report `data_channel_open = true` while the peer-connection state still reads `New`. That
+    /// report `channel_open = true` while the peer-connection state still reads `New`. That
     /// observation is transient, not a failed handshake: leave the attempt in `Pending` so the
     /// later peer-connection callback can retry the same transition.
     ///
@@ -540,6 +538,15 @@ impl SwarmTransport {
                     .ok_or(Error::SwarmMissTransport(attempt.peer))?;
                 let readiness = connection.readiness();
                 if readiness.can_make_progress() {
+                    let advertised = connection.max_message_size();
+                    if advertised < rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE {
+                        return Err(Error::Transport(
+                            rings_transport::error::Error::RemoteMaxMessageSizeTooSmall {
+                                advertised,
+                                minimum: rings_transport::core::transport::MIN_MAX_MESSAGE_SIZE,
+                            },
+                        ));
+                    }
                     return Ok(true);
                 }
                 if readiness.is_terminal() {
@@ -552,7 +559,7 @@ impl SwarmTransport {
                     generation = attempt.generation,
                     readiness = readiness.as_str(),
                     state = ?readiness.state(),
-                    data_channel_open = readiness.data_channel_open(),
+                    channel_open = readiness.channel_open(),
                     "connection admission deferred until transport state converges"
                 );
                 Ok(false)
@@ -844,7 +851,7 @@ impl SwarmTransport {
         );
         let connection = match self
             .transport
-            .new_connection(&cid, Box::new(callback))
+            .new_dyn_connection(&cid, Box::new(callback))
             .await
         {
             Ok(connection) => PendingTransportConnection {

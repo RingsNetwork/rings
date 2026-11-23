@@ -2532,7 +2532,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "aes",
  "subtle",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "postcard",
  "serde",
@@ -2550,7 +2550,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2564,6 +2564,7 @@ dependencies = [
  "base58-monero",
  "bytes",
  "chacha20poly1305",
+ "curve25519-dalek",
  "ecdsa",
  "ed25519-dalek",
  "elliptic-curve",
@@ -2594,6 +2595,7 @@ dependencies = [
  "subtle",
  "thiserror 1.0.69",
  "tiny-keccak",
+ "tokio",
  "tracing",
  "uuid",
  "wasm-bindgen",
@@ -2606,7 +2608,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2632,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "serde",
  "thiserror 1.0.69",
@@ -2640,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -2648,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2677,6 +2679,7 @@ dependencies = [
  "rings-rpc",
  "rings-runtime",
  "rings-transport",
+ "rings-turn",
  "serde",
  "serde-saphyr",
  "serde-wasm-bindgen 0.6.5",
@@ -2699,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -2719,12 +2722,13 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "futures",
  "futures-timer",
  "js-sys",
  "thiserror 1.0.69",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -2732,7 +2736,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "futures",
  "rings-core",
@@ -2741,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2759,6 +2763,18 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "rings-turn"
+version = "1.0.0-pre.7"
+dependencies = [
+ "base58-monero",
+ "hex",
+ "rings-codec",
+ "rings-core",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 use rings_transport::core::transport::ConnectionInterface;
 use rings_transport::core::transport::ConnectionStateSnapshot;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::SwarmConnection;
 use crate::error::Error;
@@ -23,7 +23,7 @@ pub(crate) struct TransportReadiness(TransportReadinessState);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransportReadinessState {
     Ready(ConnectionStateSnapshot),
-    AwaitingDataChannel(ConnectionStateSnapshot),
+    AwaitingChannel(ConnectionStateSnapshot),
     Recovering(ConnectionStateSnapshot),
     Terminal(ConnectionStateSnapshot),
 }
@@ -31,19 +31,21 @@ enum TransportReadinessState {
 impl TransportReadiness {
     /// Classify one coherent WebRTC/data-channel product-state observation.
     const fn from_snapshot(snapshot: ConnectionStateSnapshot) -> Self {
-        Self(match snapshot.webrtc() {
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected
-                if snapshot.data_channel_open() =>
+        Self(match snapshot.state() {
+            TransportConnectionState::Connecting | TransportConnectionState::Connected
+                if snapshot.channel_open() =>
             {
                 TransportReadinessState::Ready(snapshot)
             }
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
-                TransportReadinessState::AwaitingDataChannel(snapshot)
+            TransportConnectionState::Connecting | TransportConnectionState::Connected => {
+                TransportReadinessState::AwaitingChannel(snapshot)
             }
-            WebrtcConnectionState::Unspecified
-            | WebrtcConnectionState::New
-            | WebrtcConnectionState::Disconnected => TransportReadinessState::Recovering(snapshot),
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
+            TransportConnectionState::Unspecified
+            | TransportConnectionState::New
+            | TransportConnectionState::Disconnected => {
+                TransportReadinessState::Recovering(snapshot)
+            }
+            TransportConnectionState::Failed | TransportConnectionState::Closed => {
                 TransportReadinessState::Terminal(snapshot)
             }
         })
@@ -60,24 +62,24 @@ impl TransportReadiness {
     const fn snapshot(self) -> ConnectionStateSnapshot {
         match self.0 {
             TransportReadinessState::Ready(snapshot)
-            | TransportReadinessState::AwaitingDataChannel(snapshot)
+            | TransportReadinessState::AwaitingChannel(snapshot)
             | TransportReadinessState::Recovering(snapshot)
             | TransportReadinessState::Terminal(snapshot) => snapshot,
         }
     }
 
-    pub(crate) const fn state(self) -> WebrtcConnectionState {
-        self.snapshot().webrtc()
+    pub(crate) const fn state(self) -> TransportConnectionState {
+        self.snapshot().state()
     }
 
-    pub(crate) const fn data_channel_open(self) -> bool {
-        self.snapshot().data_channel_open()
+    pub(crate) const fn channel_open(self) -> bool {
+        self.snapshot().channel_open()
     }
 
     pub(crate) const fn as_str(self) -> &'static str {
         match self.0 {
             TransportReadinessState::Ready(_) => "ready",
-            TransportReadinessState::AwaitingDataChannel(_) => "awaiting_data_channel",
+            TransportReadinessState::AwaitingChannel(_) => "awaiting_channel",
             TransportReadinessState::Recovering(_) => "recovering",
             TransportReadinessState::Terminal(_) => "terminal",
         }
@@ -89,7 +91,7 @@ impl TransportReadiness {
         }
         Err(Error::TransportNotReady {
             state: self.state(),
-            data_channel_open: self.data_channel_open(),
+            channel_open: self.channel_open(),
         })
     }
 }
@@ -105,21 +107,21 @@ mod tests {
     use super::*;
 
     const fn snapshot(
-        state: WebrtcConnectionState,
-        data_channel_open: bool,
+        state: TransportConnectionState,
+        channel_open: bool,
     ) -> ConnectionStateSnapshot {
-        ConnectionStateSnapshot::new(state, data_channel_open)
+        ConnectionStateSnapshot::new(state, channel_open)
     }
 
     #[test]
     fn test_transport_readiness_classifies_the_complete_product_state() {
         for state in [
-            WebrtcConnectionState::Unspecified,
-            WebrtcConnectionState::New,
-            WebrtcConnectionState::Disconnected,
+            TransportConnectionState::Unspecified,
+            TransportConnectionState::New,
+            TransportConnectionState::Disconnected,
         ] {
-            for data_channel_open in [false, true] {
-                let snapshot = snapshot(state, data_channel_open);
+            for channel_open in [false, true] {
+                let snapshot = snapshot(state, channel_open);
                 assert_eq!(
                     TransportReadiness::from_snapshot(snapshot),
                     TransportReadiness(TransportReadinessState::Recovering(snapshot))
@@ -128,13 +130,13 @@ mod tests {
         }
 
         for state in [
-            WebrtcConnectionState::Connecting,
-            WebrtcConnectionState::Connected,
+            TransportConnectionState::Connecting,
+            TransportConnectionState::Connected,
         ] {
             let closed = snapshot(state, false);
             assert_eq!(
                 TransportReadiness::from_snapshot(closed),
-                TransportReadiness(TransportReadinessState::AwaitingDataChannel(closed))
+                TransportReadiness(TransportReadinessState::AwaitingChannel(closed))
             );
             let open = snapshot(state, true);
             assert_eq!(
@@ -143,9 +145,12 @@ mod tests {
             );
         }
 
-        for state in [WebrtcConnectionState::Failed, WebrtcConnectionState::Closed] {
-            for data_channel_open in [false, true] {
-                let snapshot = snapshot(state, data_channel_open);
+        for state in [
+            TransportConnectionState::Failed,
+            TransportConnectionState::Closed,
+        ] {
+            for channel_open in [false, true] {
+                let snapshot = snapshot(state, channel_open);
                 assert_eq!(
                     TransportReadiness::from_snapshot(snapshot),
                     TransportReadiness(TransportReadinessState::Terminal(snapshot))
@@ -157,11 +162,11 @@ mod tests {
     #[test]
     fn test_only_ready_transport_can_make_progress() {
         for state in [
-            WebrtcConnectionState::Unspecified,
-            WebrtcConnectionState::New,
-            WebrtcConnectionState::Disconnected,
-            WebrtcConnectionState::Failed,
-            WebrtcConnectionState::Closed,
+            TransportConnectionState::Unspecified,
+            TransportConnectionState::New,
+            TransportConnectionState::Disconnected,
+            TransportConnectionState::Failed,
+            TransportConnectionState::Closed,
         ] {
             assert!(
                 !TransportReadiness::from_snapshot(snapshot(state, true)).can_make_progress(),
@@ -169,8 +174,8 @@ mod tests {
             );
         }
         for state in [
-            WebrtcConnectionState::Connecting,
-            WebrtcConnectionState::Connected,
+            TransportConnectionState::Connecting,
+            TransportConnectionState::Connected,
         ] {
             assert!(
                 TransportReadiness::from_snapshot(snapshot(state, true)).can_make_progress(),
@@ -186,13 +191,13 @@ mod tests {
     #[test]
     fn test_only_terminal_readiness_errors_degrade_peer_quality() {
         assert!(!Error::TransportNotReady {
-            state: WebrtcConnectionState::Disconnected,
-            data_channel_open: true,
+            state: TransportConnectionState::Disconnected,
+            channel_open: true,
         }
         .records_peer_send_failure());
         assert!(Error::TransportNotReady {
-            state: WebrtcConnectionState::Failed,
-            data_channel_open: true,
+            state: TransportConnectionState::Failed,
+            channel_open: true,
         }
         .records_peer_send_failure());
         assert!(!Error::ConnectionAttemptSuperseded {
@@ -213,7 +218,7 @@ mod tests {
     fn test_pre_acceptance_backpressure_is_deferrable_and_never_degrades_peer_quality() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let backpressure = [
-            Error::DataChannelSendQueueTimeout {
+            Error::ChannelSendQueueTimeout {
                 peer,
                 timeout_ms: 1,
                 bytes: 1,
@@ -246,13 +251,13 @@ mod tests {
     fn test_post_acceptance_timeouts_are_ambiguous_and_not_retryable() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let ambiguous = [
-            Error::DataChannelSendCompletionTimeout {
+            Error::ChannelSendCompletionTimeout {
                 peer,
                 timeout_ms: 1,
                 bytes: 1,
                 context: "test",
             },
-            Error::DataChannelDeliveryTimeout {
+            Error::ChannelDeliveryTimeout {
                 peer,
                 timeout_ms: 1,
                 context: "test",
@@ -278,7 +283,7 @@ mod tests {
     fn test_data_plane_deferral_errors_require_fresh_topology() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let deferrals = [
-            Error::DataChannelSendQueueTimeout {
+            Error::ChannelSendQueueTimeout {
                 peer,
                 timeout_ms: 1,
                 bytes: 1,
@@ -289,8 +294,8 @@ mod tests {
                 generation: 1,
             },
             Error::TransportNotReady {
-                state: WebrtcConnectionState::Disconnected,
-                data_channel_open: true,
+                state: TransportConnectionState::Disconnected,
+                channel_open: true,
             },
             Error::SwarmMissDidInTable(peer),
             Error::Transport(rings_transport::error::Error::SendPermitRevoked),

@@ -11,14 +11,14 @@ use crate::dht::finger::finger_lookup_backoff_ms;
 use crate::dht::finger::FingerConvergencePhase;
 use crate::dht::finger::FingerConvergenceStatus;
 use crate::lifecycle::StopToken;
-use crate::swarm::transport::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+use crate::swarm::transport::CHANNEL_SEND_ACCEPT_BUDGET;
 use crate::utils::try_sleep;
 use crate::utils::Instant;
 
 /// The quiet phase reserved for topology stabilization before periodic repair.
 const STORAGE_REPAIR_PHASE_OFFSET: Duration = Duration::from_secs(5);
 /// The uninterrupted first-frame admission window for one storage repair delivery.
-const STORAGE_REPAIR_ADMISSION_BUDGET: Duration = DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+const STORAGE_REPAIR_ADMISSION_BUDGET: Duration = CHANNEL_SEND_ACCEPT_BUDGET;
 /// Separate completed maintenance phases by at least one cooperative poll.
 const MAINTENANCE_QUIET_GAP: Duration = STABILIZATION_STOP_POLL_INTERVAL;
 /// Fleet-start phase window before the first independently paced finger attempt.

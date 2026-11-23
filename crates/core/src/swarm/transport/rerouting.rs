@@ -503,7 +503,7 @@ mod tests {
 
         let drain = awaiting(
             hop,
-            deferral(Error::DataChannelSendQueueTimeout {
+            deferral(Error::ChannelSendQueueTimeout {
                 peer: hop,
                 timeout_ms: 1,
                 bytes: 1,

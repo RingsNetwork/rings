@@ -122,8 +122,8 @@ fn test_connection_wide_fence_serializes_cross_channel_admission_with_retirement
     assert!(second_acceptance.try_cancel());
     assert!(first_acceptance.is_accepted());
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(cancellation.is_cancelled());
 }
@@ -147,8 +147,8 @@ async fn test_cancellation_at_native_final_gate_does_not_retire_the_connection()
     drop(retirement);
 
     assert_ne!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(!cancellation.is_cancelled());
 }
@@ -177,8 +177,8 @@ async fn test_panic_before_native_permit_claim_does_not_retire_the_connection() 
     assert!(outcome.is_err());
     assert!(acceptance.try_cancel());
     assert_ne!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(!cancellation.is_cancelled());
 }
@@ -220,8 +220,8 @@ async fn test_first_poll_panic_releases_admission_before_retirement() {
     assert!(acceptance.is_irrevocable());
     assert!(!acceptance.is_accepted());
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(cancellation.is_cancelled());
 }
@@ -575,8 +575,8 @@ async fn test_panicking_irrevocable_native_send_retires_connection() {
 
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(cancellation.is_cancelled());
     assert!(matches!(
@@ -619,8 +619,8 @@ async fn test_panicking_revocable_native_send_does_not_retire_connection() {
 
     assert!(!retired.load(Ordering::Acquire));
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::New
+        connection_state.snapshot().state(),
+        TransportConnectionState::New
     );
     assert!(!cancellation.is_cancelled());
     assert!(matches!(
@@ -687,8 +687,8 @@ async fn test_failed_irrevocable_send_retires_before_preserving_its_error() {
 
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
     assert!(cancellation.is_cancelled());
     assert!(matches!(

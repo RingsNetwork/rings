@@ -18,7 +18,7 @@ compile_error!("the `dummy` test transport cannot back the FFI library; build `f
 
 /// Shared protocol constants used by the node runtime.
 pub mod consts;
-mod descriptor;
+pub mod descriptor;
 #[cfg(rings_native)]
 pub mod dns_relay;
 pub mod error;

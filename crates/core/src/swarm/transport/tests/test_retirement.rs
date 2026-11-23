@@ -222,7 +222,7 @@ async fn test_stale_pending_close_cannot_remove_replacement_transport() -> Resul
         .new_pending_connection(old_attempt, old_callback)
         .await?
         .into_connection();
-    transport.force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Failed)?;
+    transport.force_connection_state_without_callback(peer, TransportConnectionState::Failed)?;
     assert!(transport.retire_pending_connection(old_attempt)?);
 
     let replacement = transport.reserve_pending_connection(peer).await?;
@@ -256,7 +256,7 @@ async fn test_stale_terminal_callback_cannot_retire_replacement() -> Result<()> 
     let terminal = tokio::spawn(async move {
         SwarmTransportCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
-            .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
+            .on_connection_state_change(&peer.to_string(), TransportConnectionState::Closed)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
@@ -305,7 +305,7 @@ async fn test_pending_replacement_does_not_suppress_retired_generation_announcem
     let terminal = tokio::spawn(async move {
         SwarmTransportCallback::new(terminal_transport)
             .with_pending_connection_attempt(old_attempt)
-            .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
+            .on_connection_state_change(&peer.to_string(), TransportConnectionState::Closed)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });

@@ -13,10 +13,11 @@
 //! ```
 //!
 //! Two contexts drive it. The application boundary ([`SwarmTransport::connect`]) creates the
-//! offer, waiting on ICE gathering, and sends it under the application discipline. The protocol
-//! context ([`SwarmTransport::connect_detached`], [`SwarmTransport::answer_signaled_offer`])
-//! reserves the generation and decides the slot at once, so a finger proof waiting for it has an
-//! owner, and creates and sends the description on a detached task through the protocol egress.
+//! initial handshake step, waiting on local transport preparation, and sends it under the
+//! application discipline. The protocol context ([`SwarmTransport::connect_detached`],
+//! [`SwarmTransport::answer_signaled_offer`]) reserves the generation and decides the slot at
+//! once, so a finger proof waiting for it has an owner, and creates and sends the handshake step on
+//! a detached task through the protocol egress.
 //!
 //! Law (inbound locality): nothing the protocol context runs inline waits on a remote party; a
 //! failure of the detached half abandons the generation it reserved.
@@ -26,11 +27,15 @@ use std::sync::Arc;
 
 use super::super::SwarmTransport;
 use super::CounterOffer;
+use super::CreatedAnswer;
 use super::Handshake;
+use super::InitialOfferStep;
+use super::InitiatorReplyOutcome;
 use super::OfferOwner;
 use super::OfferReply;
 use super::PendingConnectionAttempt;
 use super::PendingTransportConnection;
+use super::ResponderStepOutcome;
 use crate::dht::Did;
 use crate::error::DetachedWork;
 use crate::error::Error;
@@ -50,10 +55,10 @@ impl SwarmTransport {
     /// Connect a given Did. If the did is already connected, return Err,
     /// else try prepare offer and establish connection by dht.
     ///
-    /// The application boundary: the offer is created here, waiting on ICE gathering, and sent
-    /// under the application discipline, so this returns once the offer's first frame is
-    /// admitted. Only the peer's own handshake taking the slot (`ConnectionAttemptSuperseded`)
-    /// or an admitted connection satisfies the request.
+    /// The application boundary: the initial handshake step is created here, waiting on local
+    /// transport preparation, and sent under the application discipline, so this returns once the
+    /// offer's first frame is admitted. Only the peer's own handshake taking the slot
+    /// (`ConnectionAttemptSuperseded`) or an admitted connection satisfies the request.
     pub(in crate::swarm) async fn connect(
         &self,
         peer: Did,
@@ -64,23 +69,23 @@ impl SwarmTransport {
             return Ok(());
         };
         let attempt = pending.attempt();
-        let sent = match self.create_offer(&pending).await {
-            Ok(offer) => {
-                self.send_connection_offer(attempt, offer, &self.application_egress())
-                    .await
-            }
+        let sent = match self.create_initial_step(&pending).await {
+            Ok(InitialOfferStep::Completed) => Ok(()),
+            Ok(InitialOfferStep::Send(offer)) => self
+                .send_connection_offer(attempt, offer, &self.application_egress())
+                .await
+                .map(|_| ()),
             Err(error) => Err(error),
         };
         match sent {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(error) => self.connect_failed(peer, error).await,
         }
     }
 
     /// Connect from the protocol context: the generation is reserved and its connection created
-    /// now, so a finger proof waiting for it has an owner at once; the offer, whose ICE
-    /// gathering waits on STUN or TURN servers, is created and queued through the protocol
-    /// egress on a detached task (`Law (inbound locality)`).
+    /// now, so a finger proof waiting for it has an owner at once; the initial handshake step is
+    /// created and queued through the protocol egress on a detached task (`Law (inbound locality)`).
     pub(crate) async fn connect_detached(
         self: &Arc<Self>,
         peer: Did,
@@ -92,18 +97,20 @@ impl SwarmTransport {
         let attempt = pending.attempt();
         let transport = Arc::clone(self);
         self.negotiate_detached(attempt, "offer", async move {
-            let offer = transport.create_offer(&pending).await?;
-            transport
-                .send_connection_offer(attempt, offer, &transport.protocol_egress())
-                .await
-                .map(|_| ())
+            match transport.create_initial_step(&pending).await? {
+                InitialOfferStep::Completed => Ok(()),
+                InitialOfferStep::Send(offer) => transport
+                    .send_connection_offer(attempt, offer, &transport.protocol_egress())
+                    .await
+                    .map(|_| ()),
+            }
         })
         .await
     }
 
-    /// Run the `side` (offer or answer) of `attempt`'s handshake, which waits on ICE gathering
-    /// and the next hop, on a detached task, so its caller never waits on a remote party. A
-    /// failure there is logged; the runtime refusing the task abandons the generation.
+    /// Run the `side` (offer, answer, or continuation) of `attempt`'s handshake on a detached
+    /// task, so its caller never waits on local transport gathering or a remote party. A failure
+    /// there is logged; the runtime refusing the task abandons the generation.
     async fn negotiate_detached(
         &self,
         attempt: PendingConnectionAttempt,
@@ -208,11 +215,40 @@ impl SwarmTransport {
             local = %self.dht.did,
             peer = %peer,
             generation = attempt.generation,
-            sdp_bytes = offer.sdp.len(),
+            handshake_bytes = offer.handshake.len(),
             "connection offer send start"
         );
+        // Exclude `peer` itself when choosing the overlay hop for an initial `ConnectNodeSend`:
+        // if an optimistic 1-step (`SendFinal`) backend reported channel readiness before
+        // returning step 0, `attempt` may already appear in `sender.is_connected(peer)` even
+        // though the remote peer has not yet received step 0 or allocated its connection.
+        let origination = match self
+            .dht
+            .origination(peer, |cand| cand != peer && sender.is_connected(cand))
+        {
+            Ok(origination) => origination,
+            Err(error) => {
+                return Err(self
+                    .classify_step_failure(attempt, error, "originating connection offer")
+                    .await?);
+            }
+        };
+        let Some(hop) = origination.hop else {
+            return Err(self
+                .classify_step_failure(
+                    attempt,
+                    Error::RelayDestinationUnreachable { destination: peer },
+                    "originating connection offer",
+                )
+                .await?);
+        };
         let mut payload = match sender
-            .originate(Message::ConnectNodeSend(offer.clone()), peer, None)
+            .originate_through(
+                Message::ConnectNodeSend(offer.clone()),
+                hop,
+                peer,
+                origination.reply_via,
+            )
             .await
         {
             Ok(payload) => payload,
@@ -269,40 +305,166 @@ impl SwarmTransport {
         }
     }
 
-    /// Reply, from the protocol context, to the offer carried by `request`: answer it, or send
-    /// back this node's prevailing offer, retracing the request's path.
-    ///
-    /// The reply carrier is decided, and the slot reconciled and the answering generation
-    /// opened, before anything waits; so an offer whose path cannot be retraced reserves
-    /// nothing. The answer, which waits on ICE gathering, is created and sent through the
-    /// protocol egress on a detached task (`Law (inbound locality)`). An answer that cannot be
-    /// handed to its carrier abandons its generation, so the peer's next offer is not refused
-    /// for the pending timeout.
+    /// Reply, from the protocol context, to a `ConnectNodeSend` carried by `request`:
+    /// - for `step_index == 0`: answer it (or complete 1-step without reply), or send back this
+    ///   node's prevailing offer, retracing the request's path;
+    /// - for even `step_index >= 2`: route the continuation step to the matching `Answering`
+    ///   generation and send any further odd reply along the retraced path.
     pub(crate) async fn answer_signaled_offer(
         self: &Arc<Self>,
         callback: SwarmTransportCallback,
         request: &MessagePayload,
         offer: &ConnectNodeSend,
     ) -> Result<()> {
-        let carrier = self.signaling_reply_carrier(request)?;
         let peer = request.transaction.origin();
+        if offer.step_index > 0 {
+            if !offer.step_index.is_multiple_of(2) {
+                return Err(Error::InvalidMessage(format!(
+                    "ConnectNodeSend continuation step_index must be even, got {}",
+                    offer.step_index
+                )));
+            }
+            let Some(sid) = offer.session_id else {
+                return Err(Error::InvalidMessage(
+                    "ConnectNodeSend continuation missing session_id".to_string(),
+                ));
+            };
+            let claimed = self.with_connection_lifecycle(|| {
+                let Some(attempt) = self.peer_lifecycles()?.claim_answering_continuation(
+                    peer,
+                    offer.step_index,
+                    sid,
+                ) else {
+                    return Ok(None);
+                };
+                Ok(Some((attempt, self.get_raw_connection(peer))))
+            })?;
+            let Some((attempt, maybe_conn)) = claimed else {
+                tracing::debug!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    step_index = offer.step_index,
+                    "CONNECT_NODE continuation for no matching answering generation dropped"
+                );
+                return Ok(());
+            };
+            let Some(conn) = maybe_conn else {
+                self.abandon_pending_connection(attempt, "missing raw connection for continuation")
+                    .await;
+                return Ok(());
+            };
+            if let Err(err) =
+                self.validate_inbound_handshake_step(offer.step_index, &offer.handshake)
+            {
+                return Err(self
+                    .classify_step_failure(attempt, err, "validating continuation offer")
+                    .await?);
+            }
+            let maybe_carrier = if offer.final_step {
+                None
+            } else {
+                match self.signaling_reply_carrier(request) {
+                    Ok(carrier) => Some(carrier),
+                    Err(err) => {
+                        return Err(self
+                            .classify_step_failure(
+                                attempt,
+                                err,
+                                "resolving continuation reply carrier",
+                            )
+                            .await?);
+                    }
+                }
+            };
+            self.dht.observe_relay_custody(peer, offer.relay_custody)?;
+            let (transport, request, step_index, final_step, handshake) = (
+                Arc::clone(self),
+                request.clone(),
+                offer.step_index,
+                offer.final_step,
+                offer.handshake.clone(),
+            );
+            return self
+                .negotiate_detached(attempt, "continuation", async move {
+                    match transport
+                        .advance_responder_step(
+                            attempt,
+                            &conn,
+                            step_index,
+                            final_step,
+                            Some(sid),
+                            handshake,
+                        )
+                        .await?
+                    {
+                        ResponderStepOutcome::Completed => Ok(()),
+                        ResponderStepOutcome::Reply(CreatedAnswer { attempt, report }) => {
+                            let carrier = match maybe_carrier {
+                                Some(carrier) => carrier,
+                                None => transport.signaling_reply_carrier(&request)?,
+                            };
+                            transport
+                                .send_signaled_answer(attempt, &request, carrier, report)
+                                .await
+                        }
+                    }
+                })
+                .await;
+        }
+
+        let maybe_carrier = if offer.final_step {
+            // Even for a 1-step offer, if a crossing local offer prevails we may still send a
+            // counter-offer back along the recorded path, so validate the return carrier when the
+            // request carries a non-empty return hop or resolve lazily on reply.
+            self.signaling_reply_carrier(request).ok()
+        } else {
+            Some(self.signaling_reply_carrier(request)?)
+        };
         match self
             .open_answer(peer, OfferOwner::Overlay, callback, offer)
             .await?
         {
             OfferReply::CounterOffer(CounterOffer { offer, tx_id }) => {
+                let carrier = match maybe_carrier {
+                    Some(carrier) => carrier,
+                    None => self.signaling_reply_carrier(request)?,
+                };
                 self.protocol_egress()
                     .send_reply(request, carrier, tx_id, Message::ConnectNodeSend(offer))
                     .await
             }
-            OfferReply::Answer((pending, offer)) => {
+            OfferReply::Answer((pending, offer_bytes)) => {
                 let attempt = pending.attempt();
-                let (transport, request) = (Arc::clone(self), request.clone());
+                let (transport, request, final_step, session_id) = (
+                    Arc::clone(self),
+                    request.clone(),
+                    offer.final_step,
+                    offer.session_id,
+                );
                 self.negotiate_detached(attempt, "answer", async move {
-                    let report = transport.create_answer(&pending, offer).await?;
-                    transport
-                        .send_signaled_answer(attempt, &request, carrier, report)
-                        .await
+                    match transport
+                        .advance_responder_step(
+                            attempt,
+                            pending.connection(),
+                            0,
+                            final_step,
+                            session_id,
+                            offer_bytes,
+                        )
+                        .await?
+                    {
+                        ResponderStepOutcome::Completed => Ok(()),
+                        ResponderStepOutcome::Reply(CreatedAnswer { attempt, report }) => {
+                            let carrier = match maybe_carrier {
+                                Some(carrier) => carrier,
+                                None => transport.signaling_reply_carrier(&request)?,
+                            };
+                            transport
+                                .send_signaled_answer(attempt, &request, carrier, report)
+                                .await
+                        }
+                    }
                 })
                 .await
             }
@@ -329,10 +491,137 @@ impl SwarmTransport {
         .await
     }
 
-    /// Accept the answer `answer` from `peer` received over the DHT under transaction `tx_id`.
-    /// It applies only to the generation whose sent offer left under `tx_id`; `false` when no
-    /// such generation is pending (the offer expired, was cancelled or was already answered),
-    /// in which case nothing is touched.
+    /// Handle an inbound `ConnectNodeReport` (`request`) over the DHT, completing a final answer
+    /// inline or detaching an initiator continuation step (`>= 3`-step handshake) along the
+    /// retraced signaling path.
+    pub(crate) async fn handle_signaled_report(
+        self: &Arc<Self>,
+        request: &MessagePayload,
+        answer: &ConnectNodeReport,
+    ) -> Result<bool> {
+        let peer = request.transaction.origin();
+        let tx_id = request.transaction.tx_id;
+        let bound = self.with_connection_lifecycle(|| {
+            Ok(self.peer_lifecycles()?.offer_sent_under(peer, tx_id))
+        })?;
+        let Some((attempt, sent_step, sent_sid)) = bound else {
+            return Ok(false);
+        };
+        if answer.step_index != sent_step.saturating_add(1)
+            || sent_sid.is_some_and(|sid| answer.session_id != Some(sid))
+        {
+            return Ok(false);
+        }
+        if answer.final_step {
+            return self
+                .accept_remote_connection(peer, answer, Some(attempt), Some(tx_id))
+                .await
+                .map(|_| true);
+        }
+
+        if !self.accepts_connection_answer(answer) {
+            return Err(Error::InvalidMessage(
+                "connection answer DHT protocol mismatch".to_string(),
+            ));
+        }
+        let Some(sid) = answer.session_id else {
+            return Err(Error::InvalidMessage(
+                "non-final ConnectNodeReport missing session_id".to_string(),
+            ));
+        };
+        if answer.step_index.saturating_add(1)
+            >= rings_transport::core::transport::MAX_HANDSHAKE_STEPS
+        {
+            return Err(Error::InvalidMessage(format!(
+                "handshake step {} exceeds MAX_HANDSHAKE_STEPS ({})",
+                answer.step_index.saturating_add(1),
+                rings_transport::core::transport::MAX_HANDSHAKE_STEPS
+            )));
+        }
+
+        // Atomically transition `Sent -> ClaimedReply` under the lifecycle lock before detaching
+        // so duplicate step-1 reports under the same `tx_id` cannot both invoke `handshake_step`.
+        let claimed_conn = self.with_connection_lifecycle(|| {
+            if !self.peer_lifecycles()?.claim_offer_reply(
+                attempt,
+                Some(tx_id),
+                answer.step_index,
+                false,
+                Some(sid),
+            ) {
+                return Ok(None);
+            }
+            Ok(Some(self.get_raw_connection(peer)))
+        })?;
+        let Some(maybe_conn) = claimed_conn else {
+            return Ok(false);
+        };
+        let Some(conn) = maybe_conn else {
+            self.abandon_pending_connection(
+                attempt,
+                "missing raw connection for initiator continuation",
+            )
+            .await;
+            return Ok(false);
+        };
+        if let Err(err) = self.validate_inbound_handshake_step(answer.step_index, &answer.handshake)
+        {
+            return Err(self
+                .classify_step_failure(attempt, err, "validating continuation answer")
+                .await?);
+        }
+        let carrier = match self.signaling_reply_carrier(request) {
+            Ok(carrier) => carrier,
+            Err(err) => {
+                return Err(self
+                    .classify_step_failure(attempt, err, "resolving initiator continuation carrier")
+                    .await?);
+            }
+        };
+        let (transport, request, answer) = (Arc::clone(self), request.clone(), answer.clone());
+        self.negotiate_detached(attempt, "initiator-continuation", async move {
+            match transport
+                .advance_claimed_initiator_continuation(attempt, &conn, &answer, sid)
+                .await?
+            {
+                InitiatorReplyOutcome::Completed => Ok(()),
+                InitiatorReplyOutcome::Continue {
+                    attempt,
+                    offer: next_offer,
+                } => {
+                    let next_tx_id = transport.rng.next_uuid();
+                    if let Err(error) = transport.mark_offer_sent(attempt, &next_offer, next_tx_id)
+                    {
+                        return Err(transport
+                            .classify_step_failure(
+                                attempt,
+                                error,
+                                "marking continuation offer sent",
+                            )
+                            .await?);
+                    }
+                    transport
+                        .settle_handshake_step(
+                            attempt,
+                            "sending continuation offer",
+                            transport.protocol_egress().send_reply(
+                                &request,
+                                carrier,
+                                next_tx_id,
+                                Message::ConnectNodeSend(next_offer),
+                            ),
+                        )
+                        .await
+                }
+            }
+        })
+        .await
+        .map(|()| true)
+    }
+
+    /// Accept a final answer `answer` from `peer` received under transaction `tx_id`.
+    /// Returns `false` when no matching generation is pending under `tx_id`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn accept_signaled_answer(
         &self,
         peer: Did,
@@ -342,11 +631,16 @@ impl SwarmTransport {
         let bound = self.with_connection_lifecycle(|| {
             Ok(self.peer_lifecycles()?.offer_sent_under(peer, tx_id))
         })?;
-        let Some(attempt) = bound else {
+        let Some((attempt, sent_step, sent_sid)) = bound else {
             return Ok(false);
         };
+        if answer.step_index != sent_step.saturating_add(1)
+            || sent_sid.is_some_and(|sid| answer.session_id != Some(sid))
+        {
+            return Ok(false);
+        }
         self.accept_remote_connection(peer, answer, Some(attempt), Some(tx_id))
             .await
-            .map(|()| true)
+            .map(|_| true)
     }
 }

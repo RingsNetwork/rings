@@ -9,7 +9,7 @@
 #[cfg(feature = "dummy")]
 use rings_transport::core::callback::TransportCallback;
 #[cfg(feature = "dummy")]
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 #[cfg(feature = "dummy")]
 use super::default_transport;
@@ -170,7 +170,7 @@ async fn test_retirement_is_announced_after_the_read_admission() -> Result<()> {
 
     pending
         .callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Failed)
+        .on_connection_state_change(&peer.to_string(), TransportConnectionState::Failed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(!transport.is_active_connection_attempt(attempt));

@@ -10,10 +10,15 @@ async fn quota_is_shared_across_relays_but_isolated_between_origins() -> Result<
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
 
@@ -89,10 +94,15 @@ async fn normal_and_reassembled_messages_each_consume_one_logical_byte_cost() ->
     let lane = OriginQuotaLaneConfig::new(10, 10, 1, byte_burst, 8)
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
     let relay = pending_peer(&transport).await?;
@@ -142,9 +152,14 @@ async fn spoofed_transaction_destination_with_local_relay_destination_is_rejecte
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let local_did = local.delegator_did();
     let dummy_destination: Did = SecretKey::random().address().into();
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let application = ApplicationRecorder::attach(&transport)?;
     let relay = pending_peer(&transport).await?;
@@ -216,12 +231,17 @@ async fn redirected_frames_enforce_replay_and_origin_quota_at_terminating_node()
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let local_did = local.delegator_did();
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .dht_virtual_nodes(0)
-        .dht_storage_redundancy(1)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .dht_virtual_nodes(0)
+    .dht_storage_redundancy(1)
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.admit(&transport).await?;
@@ -370,15 +390,20 @@ async fn offline_inbox_hold_enforces_final_admission_at_intercepting_holder() ->
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let local_did = local.delegator_did();
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .relay_storage(Box::new(MemStorage::new()))
-        .relay_replication(crate::dht::RelayReplication {
-            replicas: 1,
-            age_gate_ms: 0,
-        })
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .relay_storage(Box::new(MemStorage::new()))
+    .relay_replication(crate::dht::RelayReplication {
+        replicas: 1,
+        age_gate_ms: 0,
+    })
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -466,15 +491,20 @@ async fn test_queued_forward_becomes_offline_hold_enforces_final_admission() -> 
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let local_did = local.delegator_did();
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .relay_storage(Box::new(MemStorage::new()))
-        .relay_replication(crate::dht::RelayReplication {
-            replicas: 1,
-            age_gate_ms: 0,
-        })
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .relay_storage(Box::new(MemStorage::new()))
+    .relay_replication(crate::dht::RelayReplication {
+        replicas: 1,
+        age_gate_ms: 0,
+    })
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -570,12 +600,17 @@ async fn intermediate_redirecting_hop_does_not_charge_local_admission() -> Resul
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
     let local = DelegateeKey::new_with_seckey(&SecretKey::random())?;
     let local_did = local.delegator_did();
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .dht_virtual_nodes(0)
-        .dht_storage_redundancy(1)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .dht_virtual_nodes(0)
+    .dht_storage_redundancy(1)
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;
@@ -723,10 +758,15 @@ async fn compressed_storage_frames_charge_decompressed_bytes_and_reject_invalid_
     let lane = OriginQuotaLaneConfig::new(10, 10, 1, byte_burst, 8)
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     let quota = OriginQuotaConfig::new(lane, lane, lane, lane);
-    let swarm = SwarmBuilder::new(TEST_NETWORK_ID, "", Box::new(MemStorage::new()), local)
-        .replay_storage(crate::tests::volatile_replay_storage())
-        .origin_quota(quota)
-        .build();
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        local,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .origin_quota(quota)
+    .build();
     let transport = Arc::clone(&swarm.transport);
     let relay = pending_peer(&transport).await?;
     relay.activate(&transport)?;

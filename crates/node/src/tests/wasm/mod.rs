@@ -22,7 +22,7 @@ use rings_rpc::protos::rings_node::CreateOfferResponse;
 use rings_rpc::protos::rings_node::ListPeersRequest;
 use rings_rpc::protos::rings_node::ListPeersResponse;
 use rings_rpc::protos::rings_node::PeerInfo;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
@@ -37,7 +37,7 @@ use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
 use crate::tests::test_processor_builder;
-use crate::tests::TEST_ICE_SERVERS;
+use crate::tests::TEST_TRAVERSAL_SERVERS;
 
 /// Per-test hang guard of the connection tests; see [`with_hang_guard`].
 ///
@@ -185,7 +185,7 @@ pub async fn prepare_processor() -> Processor {
 /// Prepare a browser test processor registering the onion symbols of `role`.
 pub async fn prepare_processor_with_onion_role(role: OnionRole<OnionExitOffer>) -> Processor {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).unwrap();
-    let config = ProcessorConfig::new(0, TEST_ICE_SERVERS.to_string(), delegatee_key, 200);
+    let config = ProcessorConfig::new(0, TEST_TRAVERSAL_SERVERS.to_string(), delegatee_key, 200);
 
     let storage_name = uuid::Uuid::new_v4().to_simple().to_string();
     let storage = Box::new(
@@ -245,17 +245,17 @@ pub async fn get_peers(provider: &Provider) -> Vec<PeerInfo> {
 /// in which an admitted connection is routable.
 ///
 /// ```text
-/// Ready(c) ⟺ webrtc(c) ∈ {Connecting, Connected} ∧ data_channel_open(c)   (core readiness)
+/// Ready(c) ⟺ webrtc(c) ∈ {Connecting, Connected} ∧ channel_open(c)   (core readiness)
 /// Listed(c) ⟹ Ready(c) ⟹ webrtc(c) ∈ {Connecting, Connected}
 /// ```
 ///
 /// The listing reports the raw WebRTC state, and the browser may fire the data channel's
 /// `open` before the `connectionstatechange` to `connected`. An admitted, listed peer may
 /// therefore still read `Connecting`; only `Connected` is not guaranteed (#962).
-pub fn is_routable_webrtc_state(state: &str) -> bool {
+pub fn is_routable_transport_state(state: &str) -> bool {
     [
-        WebrtcConnectionState::Connecting,
-        WebrtcConnectionState::Connected,
+        TransportConnectionState::Connecting,
+        TransportConnectionState::Connected,
     ]
     .iter()
     .any(|routable| format!("{routable:?}") == state)

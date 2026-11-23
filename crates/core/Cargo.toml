@@ -1,6 +1,6 @@
 [package]
 name = "rings-core"
-description = "Chord DHT implementation with ICE"
+description = "Chord DHT and overlay routing core"
 readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]
@@ -29,7 +29,6 @@ std = [
     "uuid/v4",
     "uuid/serde",
     "rings-derive/default",
-    "rings-transport/native-webrtc",
 ]
 dummy = ["std", "tokio", "tokio/test-util", "rings-transport/dummy"]
 wasm = [
@@ -43,7 +42,6 @@ wasm = [
     "uuid/serde",
     "rings-derive/wasm",
     "rings-runtime/browser",
-    "rings-transport/web-sys-webrtc",
 ]
 browser_chrome_test = ["wasm"]
 
@@ -118,14 +116,12 @@ web-sys = { version = "0.3.56", optional = true, features = [
     "IdbRequest",
     "IdbTransaction",
     "IdbTransactionMode",
-    "MediaDevices",
     "MessageChannel",
     "MessageEvent",
     "MessagePort",
     "Navigator",
     "ServiceWorkerGlobalScope",
     "Window",
-    "MediaStreamConstraints",
     "WorkerGlobalScope",
 ] }
 
@@ -145,10 +141,18 @@ tracing-test = "0.2.4"
 tracing-wasm = "0.2.1"
 wasm-bindgen-test = { workspace = true }
 
+[target.'cfg(target_family="wasm")'.dev-dependencies]
+rings-transport = { workspace = true, features = ["web-sys-webrtc"] }
+web-sys = { version = "0.3.56", features = [
+    "MediaDevices",
+    "MediaStreamConstraints",
+] }
+
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 # Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
 # it (and the test_dht_stateright module that uses it) is non-wasm only.
 # Format reflection for the wire golden vectors (#1107).
+rings-transport = { workspace = true, features = ["dummy"] }
 serde-reflection = "0.6.0"
 stateright = "0.31.0"
 tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "test-util", "time"] }

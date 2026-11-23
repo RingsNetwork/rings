@@ -12,7 +12,7 @@ use wasm_bindgen_test::*;
 use crate::prelude::*;
 use crate::processor::*;
 use crate::tests::wasm::await_mutual_admission;
-use crate::tests::wasm::is_routable_webrtc_state;
+use crate::tests::wasm::is_routable_transport_state;
 use crate::tests::wasm::peer_transitions;
 use crate::tests::wasm::prepare_processor;
 use crate::tests::wasm::with_hang_guard;
@@ -22,9 +22,9 @@ use crate::tests::wasm::TEST_HANG_GUARD;
 
 /// Whether `states`, a processor's `peers()` entries for one peer, are exactly one entry in a
 /// routable WebRTC state: what an admitted, current generation guarantees. The state may still
-/// read `Connecting` ([`is_routable_webrtc_state`], #962).
+/// read `Connecting` ([`is_routable_transport_state`], #962).
 fn lists_one_routable_entry(states: &[String]) -> bool {
-    matches!(states, [state] if is_routable_webrtc_state(state))
+    matches!(states, [state] if is_routable_transport_state(state))
 }
 
 async fn close_all_connections(p: &Processor) {

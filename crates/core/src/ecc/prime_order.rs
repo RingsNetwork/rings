@@ -174,7 +174,7 @@ impl NonZeroScalar<Secp256k1> {
 
     /// The secret scalar of a secp256k1 key, non-zero by the key's invariant. The key's accessor
     /// returns a copy; this value, not that transient, is the one zeroized on drop.
-    pub(crate) fn from_secret_key(key: &SecretKey) -> Self {
+    pub fn from_secret_key(key: &SecretKey) -> Self {
         Self(Scalar::new(key.secp256k1_scalar()))
     }
 }

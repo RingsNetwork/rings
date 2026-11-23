@@ -38,7 +38,6 @@ use rings_core::utils::SharedClock;
 use rings_core::utils::SharedRng;
 use rings_rpc::protos::rings_node::*;
 use rings_runtime::sleep;
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -112,9 +111,20 @@ mod registration_daemon;
 
 pub use builder::ProcessorBuilder;
 #[cfg(feature = "node")]
-pub(crate) use config::parse_webrtc_udp_port_range;
+pub(crate) use config::parse_udp_port_range;
+pub use config::register_network_transport_factory;
+pub use config::resolve_network_config_descriptor;
+pub use config::NetworkConfigDescriptor;
+pub use config::NetworkParametersFactory;
+pub use config::NodeNetworkParameters;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+pub use config::SessionRotationCommit;
+pub use config::TransportNetworkConfig;
+pub use config::TurnCredentialMode;
+pub use config::UdpPortRange;
+pub use config::UdpPortRangeError;
+pub use config::WebrtcNetworkParameters;
 pub(crate) use handshake::HandshakeFailure;
 pub(crate) use handshake::HandshakePeer;
 pub use handshake::OfferReplyKind;
@@ -144,6 +154,8 @@ pub struct Processor {
     pub swarm: Arc<Swarm>,
     /// Live delegatee key and retained unexpired previous keys, shared across clones (#1153).
     session_keys: Arc<SessionKeyRing>,
+    /// Abstract network parameters customizing this node's transport (#1291).
+    network_parameters: Arc<dyn NodeNetworkParameters>,
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
@@ -162,6 +174,8 @@ pub struct Processor {
     onion_role: OnionRole<OnionExitOffer>,
     /// The cover floor of this node's idle onion links (#880).
     onion_idle_floor: OnionIdleFloor,
+    /// Socket binding and peer-IP admission settings for native `onion::udp` exits.
+    onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Whether each registration task is stored at its owners (#866), in task order.
     registration_readiness: Arc<RegistrationReadiness>,
@@ -214,7 +228,26 @@ impl Processor {
     }
 
     /// Mint, validate, persist, and install a replacement session key at `now_ms` through
-    /// [`SessionKeyRing::renew_with`], updating the swarm transport on success (#1153).
+    /// [`SessionKeyRing::renew_with`], updating the swarm transport and session-bound transport
+    /// credentials via a strict two-phase commit (#1153, #1291).
+    ///
+    /// # Invariant (Four-Component Two-Phase Transactional Lockstep)
+    ///
+    /// Across every renewal outcome (`MintErr`, `RingValidateErr`, `SwarmValidateErr`,
+    /// `TransportPrepareErr`, `PersistErr`, and `CommitOk`), `(k_ring, k_disk, k_swarm,
+    /// k_transport)` never diverge and **zero compensating rollback** is ever required:
+    /// 1. **Phase 1 (pure validation & preparation, zero side effects)**:
+    ///    - `SessionKeyRing::renew_with` validates delegator DID equality, cryptographic signature,
+    ///      and monotone horizon advancement (`h' > h`).
+    ///    - `Swarm::validate_next_delegatee_key` validates swarm DID and strict horizon monotonicity
+    ///      without mutating swarm state.
+    ///    - `NodeNetworkParameters::prepare_session_key_rotation` derives and strictly parses
+    ///      session-bound transport credentials without mutating live transport state.
+    /// 2. **Single Commit Point**: `persist(next)` writes the validated replacement key to durable
+    ///    storage. If `persist(next)` fails, no in-memory component has been mutated.
+    /// 3. **Phase 2 (infallible in-memory commit)**: `Swarm::commit_delegatee_key_unchecked`,
+    ///    `commit_transport()`, and `SessionKeyRing` state replacement execute infallibly under the
+    ///    session key-ring write lock.
     pub(crate) fn renew_delegatee_key_with<M, P>(
         &self,
         now_ms: u128,
@@ -225,13 +258,33 @@ impl Processor {
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
         P: FnOnce(&DelegateeKey) -> Result<()>,
     {
-        let (_next, horizon) = self.session_keys.renew_with(now_ms, mint, |next| {
-            persist(next)?;
-            self.swarm
-                .set_delegatee_key(next.clone())
-                .map_err(Error::CoreError)
-        })?;
+        let (_next, horizon) = self
+            .session_keys
+            .renew_with(now_ms, mint, |_current, next| {
+                let commit_swarm = self
+                    .swarm
+                    .prepare_delegatee_key_rotation(next)
+                    .map_err(Error::CoreError)?;
+                let commit_transport = self
+                    .network_parameters
+                    .prepare_session_key_rotation(self.swarm.transport(), next)?;
+                persist(next)?;
+                commit_swarm.commit();
+                commit_transport();
+                Ok(())
+            })?;
         Ok(horizon)
+    }
+
+    /// Return the currently installed session-bound transport credential string on a built-in
+    /// ICE-backed transport, or `None` for custom transports that do not carry ICE credentials.
+    pub fn session_transport_credentials(&self) -> Option<String> {
+        TransportNetworkConfig::session_credentials_of(self.swarm.transport())
+    }
+
+    /// Return the [`NodeNetworkParameters`] customizing this processor's transport.
+    pub fn network_parameters(&self) -> &Arc<dyn NodeNetworkParameters> {
+        &self.network_parameters
     }
 
     /// Replace this node's active session key in process at `now_ms`, retaining the previous key
@@ -285,6 +338,11 @@ impl Processor {
     /// Return the cover floor of this node's idle onion links (#880).
     pub(crate) const fn onion_idle_floor(&self) -> OnionIdleFloor {
         self.onion_idle_floor
+    }
+
+    /// Return the socket binding and peer-IP admission settings for native `onion::udp` exits.
+    pub const fn onion_udp_bind_config(&self) -> crate::onion::OnionUdpBindConfig {
+        self.onion_udp_bind_config
     }
 
     /// Return the cell of this process's onion epoch `e_n` (#834 D2), shared with the onion
@@ -416,6 +474,70 @@ impl Processor {
         pipeline: &crate::onion::OnionInvokePipeline,
     ) -> Result<crate::onion::OnionPipelineRoute> {
         crate::onion::directory::build_onion_pipeline_route(self, pipeline).await
+    }
+
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s belong to `eligible_stage_dids`.
+    pub async fn build_onion_pipeline_route_for_dids(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+        eligible_stage_dids: &std::collections::BTreeSet<Did>,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, |desc| {
+            eligible_stage_dids.contains(&desc.did)
+        })
+        .await
+    }
+
+    /// Build a guard-closed multi-hop route for `pipeline` whose candidate stage
+    /// [`crate::onion::OnionInvokeDescriptor`]s satisfy `predicate`.
+    pub async fn build_onion_pipeline_route_filtered(
+        &self,
+        pipeline: &crate::onion::OnionInvokePipeline,
+        predicate: impl Fn(&crate::onion::OnionInvokeDescriptor) -> bool,
+    ) -> Result<crate::onion::OnionPipelineRoute> {
+        crate::onion::directory::build_onion_pipeline_route_filtered(self, pipeline, predicate)
+            .await
+    }
+
+    /// Fetch a DHT registry `topic` and return the newest valid [`crate::descriptor::SignedDescriptor`]
+    /// per DID at the processor's current clock (#918).
+    pub async fn lookup_registry_descriptors<D>(
+        &self,
+        topic: &str,
+        include_expired: bool,
+    ) -> Result<Vec<D>>
+    where
+        D: crate::descriptor::SignedDescriptor + crate::descriptor::RegistryElement,
+    {
+        let Some(entry) = self.fetch_topic_entry(topic).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(crate::descriptor::latest_valid_by_did(
+            crate::descriptor::heard_descriptors::<D>(&entry),
+            self.clock().now_ms(),
+            self.swarm.network_id(),
+            include_expired,
+        ))
+    }
+
+    /// Fetch the raw normalized DHT [`entry::Entry`] stored under `topic`, if any.
+    pub async fn fetch_topic_entry(&self, topic: &str) -> Result<Option<entry::Entry>> {
+        let entry_key = entry::Entry::gen_did(topic)?;
+        self.fetch_storage_entry(entry_key).await
+    }
+
+    /// Execute one registration pass for every configured [`RegistrationTask`] on this processor.
+    ///
+    /// Hidden test/simulation helper: production nodes publish registrations exclusively through
+    /// the cooperative daemon started by [`Self::listen`] / [`Self::listen_with`].
+    #[doc(hidden)]
+    pub async fn register_all_once(&self) -> Result<()> {
+        let context = self.registration_context();
+        for task in &self.registration_tasks {
+            task.register_once(&context).await?;
+        }
+        Ok(())
     }
 
     /// Select the newest live exit registration per `(DID, service)` of `entry` offering

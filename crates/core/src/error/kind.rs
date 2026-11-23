@@ -485,8 +485,8 @@ pub enum Error {
     #[error("Found existing transport when answer offer from remote node")]
     AlreadyConnected,
 
-    /// Pending WebRTC connection capacity {capacity} is exhausted
-    #[error("Pending WebRTC connection capacity {capacity} is exhausted")]
+    /// Pending transport connection capacity {capacity} is exhausted
+    #[error("Pending transport connection capacity {capacity} is exhausted")]
     PendingConnectionCapacityExceeded {
         /// Maximum number of concurrent pending peers.
         capacity: usize,
@@ -499,8 +499,8 @@ pub enum Error {
         capacity: usize,
     },
 
-    /// Pending WebRTC connection generation id space is exhausted.
-    #[error("Pending WebRTC connection generation is exhausted")]
+    /// Pending transport connection generation id space is exhausted.
+    #[error("Pending transport connection generation is exhausted")]
     PendingConnectionGenerationExhausted,
 
     /// Connection attempt {generation} for {peer} was released (expired, cancelled or
@@ -705,12 +705,12 @@ pub enum Error {
     SwarmMissTransport(crate::dht::Did),
 
     /// The observed WebRTC/data-channel product state cannot make progress.
-    #[error("Transport not ready: state {state:?}, data channel open: {data_channel_open}")]
+    #[error("Transport not ready: state {state:?}, data channel open: {channel_open}")]
     TransportNotReady {
         /// Observed WebRTC peer-connection state.
-        state: rings_transport::core::transport::WebrtcConnectionState,
+        state: rings_transport::core::transport::TransportConnectionState,
         /// Whether every transport data channel reported open.
-        data_channel_open: bool,
+        channel_open: bool,
     },
 
     /// Connection not Found
@@ -880,15 +880,15 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
-    /// A connect-signaling SDP has {0} bytes, above `MAX_SDP_BYTES`.
-    #[error("Connect signaling SDP has {0} bytes, above the maximum")]
-    SdpAboveMax(usize),
+    /// A connect-signaling handshake payload has {0} bytes, above `MAX_HANDSHAKE_BYTES`.
+    #[error("Connect signaling handshake has {0} bytes, above the maximum")]
+    HandshakeAboveMax(usize),
 
     /// Timed out while waiting for the data-channel send queue to accept bytes
     #[error(
         "Timed out after {timeout_ms}ms waiting for data-channel send queue to accept {bytes} bytes for {peer} during {context}"
     )]
-    DataChannelSendQueueTimeout {
+    ChannelSendQueueTimeout {
         /// Peer whose data-channel send queue did not accept the bytes.
         peer: crate::dht::Did,
         /// Timeout budget in milliseconds.
@@ -902,7 +902,7 @@ pub enum Error {
     #[error(
         "Timed out after {timeout_ms}ms completing an irrevocable {bytes}-byte data-channel send to {peer} during {context}"
     )]
-    DataChannelSendCompletionTimeout {
+    ChannelSendCompletionTimeout {
         /// Peer whose irrevocable backend send did not complete.
         peer: crate::dht::Did,
         /// Completion timeout budget in milliseconds.
@@ -917,7 +917,7 @@ pub enum Error {
     #[error(
         "Timed out after {timeout_ms}ms waiting for data-channel delivery to {peer} during {context}"
     )]
-    DataChannelDeliveryTimeout {
+    ChannelDeliveryTimeout {
         /// Peer whose accepted bytes did not leave the local send buffer.
         peer: crate::dht::Did,
         /// Delivery timeout budget in milliseconds.

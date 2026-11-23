@@ -1,7 +1,7 @@
 use super::*;
 
-fn valid_test_range() -> WebrtcUdpPortRange {
-    match WebrtcUdpPortRange::new(49160, 49200) {
+fn valid_test_range() -> UdpPortRange {
+    match UdpPortRange::new(49160, 49200) {
         Ok(range) => range,
         Err(error) => panic!("valid range rejected: {error}"),
     }
@@ -104,7 +104,7 @@ a=end-of-candidates\r\n";
 }
 
 /// Regression witness for #1290 Item 1:
-/// 1. When `webrtc_answer_offer` returns its local Answer SDP, the responder must not yet have
+/// 1. When `answer_offer` returns its local Answer SDP, the responder must not yet have
 ///    fired outbound UDP STUN connectivity checks at the offerer's candidate port (preventing
 ///    pre-answer NAT port collisions while the HTTP `answerOffer` response is still in flight).
 /// 2. Once `WEBRTC_ANSWER_CHECK_START_DELAY` elapses on a live connection, the deferred remote
@@ -112,8 +112,7 @@ a=end-of-candidates\r\n";
 /// 3. If the responder connection is closed before `WEBRTC_ANSWER_CHECK_START_DELAY` elapses,
 ///    the deferred injection task cancels cleanly and sends zero UDP packets.
 #[tokio::test]
-async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer_returns(
-) -> Result<()> {
+async fn test_answer_offer_defers_outbound_stun_checks_until_after_answer_returns() -> Result<()> {
     struct NoopCallback;
     impl crate::core::callback::TransportCallback for NoopCallback {}
 
@@ -121,7 +120,8 @@ async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer
     let offerer = offerer_transport
         .new_connection("responder", Box::new(NoopCallback))
         .await?;
-    let real_offer_sdp = offerer.webrtc_create_offer().await?;
+    let real_offer_bytes = offerer.create_offer().await?;
+    let real_offer_sdp = String::from_utf8(real_offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     let (stripped_base_offer, _) = split_sdp_remote_candidates(&real_offer_sdp);
     let _ = offerer.close().await;
 
@@ -139,9 +139,10 @@ async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer
     let responder = responder_transport
         .new_connection("offerer_live", Box::new(NoopCallback))
         .await?;
-    let answer_sdp = responder
-        .webrtc_answer_offer(synthetic_offer.clone())
+    let answer_bytes = responder
+        .answer_offer(Bytes::from(synthetic_offer.clone()))
         .await?;
+    let answer_sdp = String::from_utf8(answer_bytes.to_vec()).expect("UTF-8 answer SDP");
     assert!(
         answer_sdp.contains("a=candidate:"),
         "responder answer SDP must contain gathered local candidates"
@@ -153,7 +154,7 @@ async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer
             probe_socket.try_recv(&mut buf),
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
         ),
-        "responder must not send any UDP STUN packet to the offerer's port before webrtc_answer_offer returns"
+        "responder must not send any UDP STUN packet to the offerer's port before answer_offer returns"
     );
 
     // After WEBRTC_ANSWER_CHECK_START_DELAY (450 ms), the deferred candidate is added and a STUN
@@ -168,7 +169,7 @@ async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer
     );
     let _ = responder.close().await;
 
-    // Case B: Responder closed immediately after webrtc_answer_offer returns must cancel the
+    // Case B: Responder closed immediately after answer_offer returns must cancel the
     // deferred candidate injection and send zero packets.
     let cancelled_probe = tokio::net::UdpSocket::bind("127.0.0.1:0")
         .await
@@ -182,7 +183,7 @@ async fn test_webrtc_answer_offer_defers_outbound_stun_checks_until_after_answer
         .new_connection("offerer_cancelled", Box::new(NoopCallback))
         .await?;
     let _ = responder_cancelled
-        .webrtc_answer_offer(cancelled_offer)
+        .answer_offer(Bytes::from(cancelled_offer))
         .await?;
     responder_cancelled.close().await?;
     tokio::time::sleep(WEBRTC_ANSWER_CHECK_START_DELAY + Duration::from_millis(150)).await;
@@ -298,17 +299,17 @@ struct OrderedStateCallback {
     entered_first_connecting: Option<Arc<tokio::sync::Notify>>,
     active_callbacks: AtomicUsize,
     max_concurrent: AtomicUsize,
-    observed: std::sync::Mutex<Vec<WebrtcConnectionState>>,
+    observed: std::sync::Mutex<Vec<TransportConnectionState>>,
     on_failed_close: std::sync::Mutex<Option<ConnectionRef<WebrtcConnection>>>,
     closed_notified: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
 impl crate::core::callback::TransportCallback for OrderedStateCallback {
-    async fn on_peer_connection_state_change(
+    async fn on_connection_state_change(
         &self,
         _cid: &str,
-        state: WebrtcConnectionState,
+        state: TransportConnectionState,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let concurrent = self.active_callbacks.fetch_add(1, Ordering::AcqRel) + 1;
         self.max_concurrent.fetch_max(concurrent, Ordering::AcqRel);
@@ -320,7 +321,7 @@ impl crate::core::callback::TransportCallback for OrderedStateCallback {
             is_first
         };
 
-        if is_first && state == WebrtcConnectionState::Connecting {
+        if is_first && state == TransportConnectionState::Connecting {
             if let Some(entered) = &self.entered_first_connecting {
                 entered.notify_one();
             }
@@ -329,12 +330,13 @@ impl crate::core::callback::TransportCallback for OrderedStateCallback {
             }
         }
 
-        if state == WebrtcConnectionState::Failed {
+        if state == TransportConnectionState::Failed {
             let conn = lock_recover(&self.on_failed_close).take();
             if let Some(conn) = conn {
                 let witness = conn
-                    .physical_close_witness()
-                    .expect("live connection exposes physical close witness");
+                    .upgrade()
+                    .expect("live connection exposes physical close witness")
+                    .physical_close_witness();
                 conn.close().await.map_err(Box::new)?;
                 assert!(
                     witness.is_complete(),
@@ -343,7 +345,7 @@ impl crate::core::callback::TransportCallback for OrderedStateCallback {
             }
         }
 
-        if state == WebrtcConnectionState::Closed {
+        if state == TransportConnectionState::Closed {
             self.closed_notified.notify_waiters();
         }
 
@@ -370,12 +372,12 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
     struct ForwardCallback(Arc<OrderedStateCallback>);
     #[async_trait]
     impl crate::core::callback::TransportCallback for ForwardCallback {
-        async fn on_peer_connection_state_change(
+        async fn on_connection_state_change(
             &self,
             cid: &str,
-            s: WebrtcConnectionState,
+            s: TransportConnectionState,
         ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-            self.0.on_peer_connection_state_change(cid, s).await
+            self.0.on_connection_state_change(cid, s).await
         }
     }
 
@@ -387,15 +389,15 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
     ));
     let connection_state = ConnectionStateCell::new();
     let observe_and_dispatch = |state: RTCPeerConnectionState| {
-        let state_change: WebrtcConnectionState = state.into();
-        connection_state.observe_webrtc(state_change);
+        let state_change: TransportConnectionState = state.into();
+        connection_state.observe_phase(state_change);
         inner_cb.dispatch_peer_connection_state(state_change);
     };
 
     observe_and_dispatch(RTCPeerConnectionState::Connecting);
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Connecting
+        connection_state.snapshot().state(),
+        TransportConnectionState::Connecting
     );
     tokio::time::timeout(Duration::from_secs(1), entered.notified())
         .await
@@ -403,23 +405,23 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
 
     observe_and_dispatch(RTCPeerConnectionState::Connected);
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Connected
+        connection_state.snapshot().state(),
+        TransportConnectionState::Connected
     );
     observe_and_dispatch(RTCPeerConnectionState::Failed);
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Failed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Failed
     );
     observe_and_dispatch(RTCPeerConnectionState::Closed);
     assert_eq!(
-        connection_state.snapshot().webrtc(),
-        WebrtcConnectionState::Closed
+        connection_state.snapshot().state(),
+        TransportConnectionState::Closed
     );
 
     assert_eq!(
         *lock_recover(&observed_callback.observed),
-        vec![WebrtcConnectionState::Connecting],
+        vec![TransportConnectionState::Connecting],
         "queued states must wait for the in-flight state callback to finish"
     );
 
@@ -429,10 +431,10 @@ async fn test_peer_connection_state_dispatch_returns_immediately_and_drains_in_f
         .expect("drainer must process all queued states through Closed");
 
     assert_eq!(*lock_recover(&observed_callback.observed), vec![
-        WebrtcConnectionState::Connecting,
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Failed,
-        WebrtcConnectionState::Closed,
+        TransportConnectionState::Connecting,
+        TransportConnectionState::Connected,
+        TransportConnectionState::Failed,
+        TransportConnectionState::Closed,
     ]);
     assert_eq!(observed_callback.max_concurrent.load(Ordering::Acquire), 1);
 }
@@ -487,12 +489,12 @@ async fn test_failed_callback_closes_connection_without_deadlocking_and_preserve
     struct ForwardCallback(Arc<OrderedStateCallback>);
     #[async_trait]
     impl crate::core::callback::TransportCallback for ForwardCallback {
-        async fn on_peer_connection_state_change(
+        async fn on_connection_state_change(
             &self,
             cid: &str,
-            s: WebrtcConnectionState,
+            s: TransportConnectionState,
         ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-            self.0.on_peer_connection_state_change(cid, s).await
+            self.0.on_connection_state_change(cid, s).await
         }
     }
 
@@ -519,13 +521,14 @@ async fn test_failed_callback_closes_connection_without_deadlocking_and_preserve
         )
         .await?;
 
-    let witness = sender.physical_close_witness()?;
+    let witness = sender.upgrade()?.physical_close_witness();
     *lock_recover(&callback_state.on_failed_close) = Some(sender.clone());
 
-    let offer = sender.webrtc_create_offer().await?;
-    let answer = receiver.webrtc_answer_offer(offer).await?;
-    let tampered_answer = corrupt_sdp_fingerprint(&answer);
-    sender.webrtc_accept_answer(tampered_answer).await?;
+    let offer = sender.create_offer().await?;
+    let answer = receiver.answer_offer(offer).await?;
+    let answer_sdp = String::from_utf8(answer.to_vec()).expect("UTF-8 answer SDP");
+    let tampered_answer = corrupt_sdp_fingerprint(&answer_sdp);
+    sender.accept_answer(Bytes::from(tampered_answer)).await?;
 
     tokio::time::timeout(Duration::from_secs(10), closed_notified.notified())
         .await
@@ -536,11 +539,11 @@ async fn test_failed_callback_closes_connection_without_deadlocking_and_preserve
     let observed = lock_recover(&callback_state.observed).clone();
     let failed_pos = observed
         .iter()
-        .position(|state| *state == WebrtcConnectionState::Failed)
+        .position(|state| *state == TransportConnectionState::Failed)
         .expect("Failed state must be observed");
     let closed_pos = observed
         .iter()
-        .position(|state| *state == WebrtcConnectionState::Closed)
+        .position(|state| *state == TransportConnectionState::Closed)
         .expect("Closed state must be observed");
     assert!(
         failed_pos < closed_pos,
@@ -788,7 +791,8 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         )
         .await?;
 
-    let offer_sdp = sender.webrtc_create_offer().await?;
+    let offer_bytes = sender.create_offer().await?;
+    let offer_sdp = String::from_utf8(offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     assert!(
         offer_sdp.contains("typ relay"),
         "UDP-blocked offerer with ?transport=tcp must gather a relay candidate via TCP TURN: {offer_sdp}"
@@ -802,11 +806,11 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         "offerer must connect to the TURN server over TCP"
     );
 
-    let answer_sdp = receiver.webrtc_answer_offer(offer_sdp).await?;
-    sender.webrtc_accept_answer(answer_sdp).await?;
+    let answer_sdp = receiver.answer_offer(offer_bytes).await?;
+    sender.accept_answer(answer_sdp).await?;
 
-    sender.webrtc_wait_for_data_channel_open().await?;
-    receiver.webrtc_wait_for_data_channel_open().await?;
+    sender.wait_for_channel_open().await?;
+    receiver.wait_for_channel_open().await?;
 
     let payload_a2b = Bytes::from_static(b"hello from udp-blocked node over turn tcp");
     sender.send_message(payload_a2b.clone()).await?.await?;
@@ -847,7 +851,8 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
         )
         .await?;
     let gather_started = std::time::Instant::now();
-    let normal_offer_sdp = normal_sender.webrtc_create_offer().await?;
+    let normal_offer_bytes = normal_sender.create_offer().await?;
+    let normal_offer_sdp = String::from_utf8(normal_offer_bytes.to_vec()).expect("UTF-8 offer SDP");
     assert!(
         gather_started.elapsed() < Duration::from_secs(4),
         "normal UDP offerer with TCP TURN bridge must not stall on a 5 s STUN srflx timeout: {:?}",

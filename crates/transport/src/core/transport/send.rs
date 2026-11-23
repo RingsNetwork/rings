@@ -46,9 +46,13 @@ pub struct IrrevocableSendPermit {
     state: AtomicAdmission,
 }
 
-/// Retires a connection generation when an irrevocable send does not reach acceptance.
-#[cfg(any(feature = "dummy", test))]
-pub(crate) struct IrrevocableSendGuard<F: FnOnce()> {
+/// Linear witness token proving that [`IrrevocableSendPermit::accept`] was called before returning
+/// success from [`crate::callback::InnerTransportCallback::send_custom_wire`].
+pub struct AcceptedSendPermit(());
+
+/// RAII guard that retires a connection generation when an irrevocable send fails or is dropped
+/// before reaching [`Self::mark_accepted`].
+pub struct IrrevocableSendGuard<F: FnOnce()> {
     acceptance: SendAcceptance,
     permit: Option<IrrevocableSendPermit>,
     retire: Option<F>,
@@ -142,7 +146,6 @@ impl SendPermit {
         self
     }
 
-    #[cfg(rings_transport_backend)]
     /// The credit carried by [`Self::with_credit`], taken by the backend that sends under it.
     pub(crate) fn take_credit(&mut self) -> Option<LaneCreditReservation> {
         self.credit.take()
@@ -212,11 +215,20 @@ impl IrrevocableSendPermit {
             "send acceptance requires irrevocable state"
         );
     }
+
+    /// Consume the proof, publish successful backend queue admission, and return the linear
+    /// [`AcceptedSendPermit`] witness required by
+    /// [`crate::callback::InnerTransportCallback::send_custom_wire`].
+    pub fn accept(self) -> AcceptedSendPermit {
+        self.mark_accepted();
+        AcceptedSendPermit(())
+    }
 }
 
-#[cfg(any(feature = "dummy", test))]
 impl<F: FnOnce()> IrrevocableSendGuard<F> {
-    pub(crate) fn new(acceptance: SendAcceptance, retire: F) -> Self {
+    /// Construct an [`IrrevocableSendGuard`] that invokes `retire` on drop if `acceptance` crossed
+    /// the irrevocable boundary without reaching acceptance.
+    pub fn new(acceptance: SendAcceptance, retire: F) -> Self {
         Self {
             acceptance,
             permit: None,
@@ -224,11 +236,13 @@ impl<F: FnOnce()> IrrevocableSendGuard<F> {
         }
     }
 
-    pub(crate) fn bind(&mut self, permit: IrrevocableSendPermit) {
+    /// Bind `permit` into this guard after claiming [`SendPermit::try_mark_irrevocable`].
+    pub fn bind(&mut self, permit: IrrevocableSendPermit) {
         self.permit = Some(permit);
     }
 
-    pub(crate) fn mark_accepted(mut self) {
+    /// Consume the bound permit, mark backend acceptance, and disarm retirement.
+    pub fn mark_accepted(mut self) {
         if let Some(permit) = self.permit.take() {
             permit.mark_accepted();
         }
@@ -236,7 +250,6 @@ impl<F: FnOnce()> IrrevocableSendGuard<F> {
     }
 }
 
-#[cfg(any(feature = "dummy", test))]
 impl<F: FnOnce()> Drop for IrrevocableSendGuard<F> {
     fn drop(&mut self) {
         let must_retire = self.acceptance.failed_after_irrevocable();

@@ -1,0 +1,86 @@
+[package]
+name = "rings-turn-service"
+default-run = "rings-turn-service"
+description = "External overlay service glue connecting rings-turn to rings-node DHT registries and Sphinx invoke loops"
+readme = "README.md"
+keywords = ["turn", "webrtc", "onion", "dht", "rings"]
+categories = ["network-programming", "cryptography"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["native", "cli"]
+native = [
+    "dep:anyhow",
+    "dep:serde-saphyr",
+    "dep:tokio",
+    "rings-core/default",
+    "rings-node/node",
+    "rings-turn/default",
+]
+dummy = [
+    "dep:anyhow",
+    "dep:serde-saphyr",
+    "dep:tokio",
+    "rings-core/dummy",
+    "rings-node/dummy",
+    "rings-turn/default",
+]
+browser = [
+    "dep:js-sys",
+    "dep:serde-wasm-bindgen",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+    "rings-core/wasm",
+    "rings-node/browser",
+]
+cli = ["native", "dep:clap", "dep:tracing-subscriber"]
+
+[dependencies]
+anyhow = { version = "1.0.45", optional = true }
+async-trait = { workspace = true }
+base64 = "0.13.0"
+bytes = { version = "1.2.1", features = ["serde"] }
+js-sys = { workspace = true, optional = true }
+rings-codec = { workspace = true }
+rings-core = { workspace = true }
+rings-network-policy = { workspace = true }
+rings-node = { workspace = true }
+rings-turn = { workspace = true, features = ["credentials"] }
+serde = { version = "1.0.136", features = ["derive"] }
+serde-saphyr = { version = "1.3.0", optional = true }
+serde-wasm-bindgen = { workspace = true, optional = true }
+serde_json = "1.0.70"
+url = "2"
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
+tokio = { version = "1.50.0", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"], optional = true }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.15", features = ["ansi", "env-filter"], optional = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+rings-test-support = { workspace = true }
+rings-transport = { workspace = true }
+serde-reflection = "0.6.0"
+sha2 = "0.11.1"
+stateright = "0.31.0"
+stun = "0.17.1"
+tempfile = "3"
+tokio = { version = "1.50.0", features = ["test-util"] }
+turn = "0.17.1"
+webrtc-util = "0.17.1"
+
+[[bin]]
+name = "rings-turn-service"
+path = "bin/rings-turn-service.rs"
+required-features = ["cli"]

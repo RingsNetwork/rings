@@ -8,13 +8,13 @@ use super::DummyConnectionState;
 use super::CONNS;
 use crate::callback::InnerTransportCallback;
 use crate::core::drop_guard::ArmedDropGuard;
-use crate::core::transport::WebrtcConnectionState;
+use crate::core::transport::TransportConnectionState;
 use crate::sync_utils::lock_recover;
 
 fn mark_connection_state_closed(connection_state: &Arc<Mutex<DummyConnectionState>>) -> bool {
     let mut state = lock_recover(connection_state);
-    let notify = state.webrtc != WebrtcConnectionState::Closed;
-    state.webrtc = WebrtcConnectionState::Closed;
+    let notify = state.webrtc != TransportConnectionState::Closed;
+    state.webrtc = TransportConnectionState::Closed;
     state.data_channel_open_override = Some(false);
     notify
 }
@@ -36,6 +36,7 @@ pub(super) struct DummyRetirementFence {
     remote_rand_id: Arc<Mutex<Option<String>>>,
     connection_state: Arc<Mutex<DummyConnectionState>>,
     accepting_events: Arc<AtomicBool>,
+    physical_close_completed: Arc<tokio::sync::watch::Sender<bool>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -61,6 +62,7 @@ impl DummyRetirementFence {
             remote_rand_id: Arc::clone(&connection.remote_rand_id),
             connection_state: Arc::clone(&connection.connection_state),
             accepting_events: Arc::clone(&connection.accepting_events),
+            physical_close_completed: Arc::clone(&connection.physical_close_completed),
             runtime: connection.retirement_runtime.clone(),
         }
     }
@@ -89,21 +91,22 @@ impl DummyRetirementFence {
         self.accepting_events.store(false, Ordering::Release);
         CONNS.remove(&self.rand_id);
         self.listener.abort();
+        self.physical_close_completed.send_replace(true);
         if !notify {
             return;
         }
         let callback = Arc::clone(&self.callback);
         self.runtime.spawn(async move {
             callback
-                .on_peer_connection_state_change(WebrtcConnectionState::Closed)
+                .on_connection_state_change(TransportConnectionState::Closed)
                 .await;
-            callback.on_data_channel_close().await;
+            callback.on_channel_close().await;
             if let Some(remote) = remote {
                 remote
-                    .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
+                    .set_connection_state(TransportConnectionState::Disconnected)
                     .await;
                 remote
-                    .set_webrtc_connection_state(WebrtcConnectionState::Closed)
+                    .set_connection_state(TransportConnectionState::Closed)
                     .await;
             }
         });

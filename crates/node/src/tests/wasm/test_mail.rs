@@ -50,7 +50,7 @@ use crate::provider::browser::provider::mail::MAIL_STORAGE_ROWS;
 use crate::provider::browser::BrowserMailOptions;
 use crate::provider::browser::ProviderListener;
 use crate::provider::Provider;
-use crate::tests::TEST_ICE_SERVERS;
+use crate::tests::TEST_TRAVERSAL_SERVERS;
 
 /// A raw message whose stable Message-ID identifies every randomized resend in these tests.
 const MESSAGE: &[u8] = b"Message-ID: <browser-mail@example.org>\r\n\r\nBrowser inbox.\r\n";
@@ -99,7 +99,8 @@ impl MailNotifications {
 /// A browser configuration with a fresh delegatee key for the account `identity`.
 fn configuration(identity: &SecretKey) -> ProcessorConfig {
     let delegatee_key = DelegateeKey::new_with_seckey(identity).unwrap();
-    ProcessorConfig::new(0, TEST_ICE_SERVERS.to_owned(), delegatee_key, 200).dht_virtual_nodes(0)
+    ProcessorConfig::new(0, TEST_TRAVERSAL_SERVERS.to_owned(), delegatee_key, 200)
+        .dht_virtual_nodes(0)
 }
 
 /// A storage namespace isolated from every other browser test run.

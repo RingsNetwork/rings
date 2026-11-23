@@ -2,7 +2,7 @@
 
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::pool::ChannelLane;
-use rings_transport::core::pool::DATA_CHANNEL_POOL_SIZE;
+use rings_transport::core::pool::CHANNEL_POOL_SIZE;
 use rings_transport::core::transport::LaneCreditReservation;
 
 use super::Node;
@@ -33,7 +33,7 @@ pub(crate) fn starve_every_lane(
     peer: &Node,
 ) -> Result<Vec<LaneCreditReservation>> {
     let mut held = Vec::new();
-    for lane in 0..DATA_CHANNEL_POOL_SIZE {
+    for lane in 0..CHANNEL_POOL_SIZE {
         held.extend(starve(withholder, peer, ChannelLane::new(lane))?);
     }
     Ok(held)

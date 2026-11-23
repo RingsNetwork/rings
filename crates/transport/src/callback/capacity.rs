@@ -17,13 +17,13 @@ use super::link_credit::CreditPermit;
 use crate::core::credit::LANE_CREDIT_WINDOW;
 #[cfg(any(test, rings_transport_webrtc))]
 use crate::core::pool::ChannelLane;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 
 /// Raw frames one peer may have admitted at this end and not yet taken over by the protocol
-/// callback: one credit window per lane, 64 frames of at most `MAX_DATA_CHANNEL_MESSAGE_SIZE`
+/// callback: one credit window per lane, 64 frames of at most `MAX_CHANNEL_MESSAGE_SIZE`
 /// bytes each, 4 MiB in all.
 pub const INBOUND_PEER_FRAME_CAPACITY: usize =
-    DATA_CHANNEL_POOL_SIZE as usize * LANE_CREDIT_WINDOW as usize;
+    CHANNEL_POOL_SIZE as usize * LANE_CREDIT_WINDOW as usize;
 
 /// The label prefix of a data channel; the lane index follows it.
 #[cfg(any(test, rings_transport_webrtc))]
@@ -36,7 +36,7 @@ pub(crate) fn data_channel_label(lane: ChannelLane) -> String {
 }
 
 pub(crate) const fn inbound_frame_exceeds_protocol_ceiling(bytes: usize) -> bool {
-    bytes > crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE
+    bytes > crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE
 }
 
 /// One decoded transport frame holding its lane's credit until downstream admission.
@@ -81,7 +81,7 @@ pub enum InboundFrameAdmission {
 
 /// Admit a remote-created data channel by its label: the lane its label names, at most once.
 ///
-/// Post: `Some(lane)` for the first channel labelled with `lane`, `lane < DATA_CHANNEL_POOL_SIZE`;
+/// Post: `Some(lane)` for the first channel labelled with `lane`, `lane < CHANNEL_POOL_SIZE`;
 /// `None` for an unknown label or a lane that already has its channel, so a peer cannot open
 /// more channels than the pool, nor two for one lane.
 #[cfg(any(test, rings_transport_webrtc))]
@@ -90,7 +90,7 @@ pub(crate) fn admit_inbound_data_channel(admitted: &AtomicU8, label: &str) -> Op
         .strip_prefix(DATA_CHANNEL_LABEL_PREFIX)?
         .parse::<u8>()
         .ok()
-        .filter(|index| *index < DATA_CHANNEL_POOL_SIZE)?;
+        .filter(|index| *index < CHANNEL_POOL_SIZE)?;
     let bit = 1u8 << index;
     let previous = admitted.fetch_or(bit, Ordering::AcqRel);
     (previous & bit == 0).then(|| ChannelLane::new(index))

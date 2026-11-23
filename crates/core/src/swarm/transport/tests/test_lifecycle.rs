@@ -20,9 +20,8 @@ async fn transport_with_routable_peer(
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
     assert!(transport.activate_connection_for_test(attempt)?);
-    transport
-        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
-    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+    transport.force_connection_state_without_callback(peer, TransportConnectionState::Connected)?;
+    transport.force_peer_channel_open_without_callback(peer, Some(true))?;
     Ok((transport, peer, attempt))
 }
 
@@ -563,11 +562,11 @@ async fn test_incoming_offer_replaces_an_unroutable_admitted_generation() -> Res
         .await?;
     assert!(local.activate_connection_for_test(old)?);
     local.dht.admit_connected(peer_did, None)?;
-    local.force_peer_connection_state_without_callback(
+    local.force_connection_state_without_callback(
         peer_did,
-        WebrtcConnectionState::Disconnected,
+        TransportConnectionState::Disconnected,
     )?;
-    local.force_peer_data_channel_open_without_callback(peer_did, Some(true))?;
+    local.force_peer_channel_open_without_callback(peer_did, Some(true))?;
 
     let offer_callback = SwarmTransportCallback::new(Arc::clone(&peer));
     let (_, offer) = peer
@@ -959,7 +958,9 @@ async fn test_candidate_dial_backoff_ignores_inbound_yielded_and_capacity_refusa
     let answering = transport
         .reserve_pending_connection_for(
             inbound_peer,
-            crate::swarm::transport::pending::Handshake::Answering,
+            crate::swarm::transport::pending::Handshake::Answering {
+                awaiting_step: None,
+            },
         )
         .await?;
     transport
@@ -979,7 +980,9 @@ async fn test_candidate_dial_backoff_ignores_inbound_yielded_and_capacity_refusa
         lifecycles.reserve_for(
             inbound_peer,
             expired_time,
-            crate::swarm::transport::pending::Handshake::Answering,
+            crate::swarm::transport::pending::Handshake::Answering {
+                awaiting_step: None,
+            },
         )?;
     }
     transport.expire_pending_connections().await?;
@@ -1053,7 +1056,7 @@ async fn test_set_delegatee_key_enforces_signature_and_monotone_horizon() -> Res
     let initial = crate::delegation::DelegateeKey::new_with_seckey_at(&key, ttl_ms, t0)?;
     let swarm = crate::swarm::SwarmBuilder::new(
         crate::tests::TEST_NETWORK_ID,
-        crate::tests::default::TEST_ICE_SERVERS,
+        crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
         Box::new(crate::storage::MemStorage::new()),
         initial.clone(),
     )

@@ -6,8 +6,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
 
-use crate::core::sdp::IceCandidateTier;
+use crate::error::Error;
 use crate::error::IceServerError;
+use crate::sdp::IceCandidateTier;
 
 /// WebRTC IceCredentialType enums.
 #[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, Eq)]
@@ -63,6 +64,16 @@ impl IceServer {
     }
 }
 
+/// Strictly parse a semicolon-delimited ICE server specification string, returning `Ok(Vec::new())`
+/// for empty/whitespace input and failing closed with [`Error::IceServer`] on any malformed entry.
+pub fn parse_ice_servers_strict(config: &str) -> crate::error::Result<Vec<IceServer>> {
+    let config = config.trim();
+    if config.is_empty() {
+        return Ok(Vec::new());
+    }
+    IceServer::vec_from_str(config).map_err(Error::IceServer)
+}
+
 /// Parse ICE servers, log invalid configuration, and continue without servers.
 #[cfg(any(
     all(feature = "dummy", not(target_family = "wasm")),
@@ -106,6 +117,9 @@ impl FromStr for IceServer {
     type Err = IceServerError;
     fn from_str(s: &str) -> Result<Self, IceServerError> {
         let trimmed = s.trim();
+        if trimmed.bytes().any(|b| b.is_ascii_control()) {
+            return Err(IceServerError::InvalidControlCharacter);
+        }
         let normalized;
         let to_parse = if !trimmed.contains("://") {
             if let Some((scheme_part, rest)) = trimmed.split_once(':') {

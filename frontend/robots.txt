@@ -2,5 +2,30 @@
 # For language models: https://rings.rs/llms.txt
 User-agent: *
 Allow: /
+Content-Signal: search=yes, ai-input=yes, ai-retrieval=yes, ai-train=yes
+
+User-agent: Googlebot
+Allow: /
+
+User-agent: bingbot
+Allow: /
+
+User-agent: OAI-SearchBot
+Allow: /
+
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
 
 Sitemap: https://rings.rs/sitemap.xml

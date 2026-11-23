@@ -46,8 +46,8 @@ use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
 use crate::tests::default::dummy_hooks::PausedIrrevocableSendGuard;
 use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
+use crate::tests::default::dummy_hooks::PendingChannelOpenGuard;
 use crate::tests::default::dummy_hooks::PendingCloseGuard;
-use crate::tests::default::dummy_hooks::PendingDataChannelOpenGuard;
 use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::prepare_node_with_measure;
@@ -229,7 +229,7 @@ async fn test_irrevocable_send_timeout_releases_scheduler_capacity() -> Result<(
     assert!(
         matches!(
             &error,
-            Error::DataChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
+            Error::ChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
         ),
         "unexpected cancellation result: {error:?}"
     );
@@ -269,7 +269,7 @@ async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission
     assert!(
         matches!(
             &error,
-            Error::DataChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
+            Error::ChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
         ),
         "unexpected cancellation result: {error:?}"
     );

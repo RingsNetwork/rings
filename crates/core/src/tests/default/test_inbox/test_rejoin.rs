@@ -2,7 +2,7 @@
 //! slot makes the returning peer visible only as the queried head's predecessor;
 //! zero finger slots exclude an unrelated lookup from discovering that peer.
 
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use super::*;
 use crate::delegation::DelegateeKey;
@@ -19,7 +19,7 @@ fn head_only_node(key: SecretKey) -> Result<Node> {
     let node = Node::build(
         SwarmBuilder::new(
             crate::tests::TEST_NETWORK_ID,
-            crate::tests::default::TEST_ICE_SERVERS,
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
             Box::new(MemStorage::new()),
             session,
         )
@@ -40,9 +40,9 @@ async fn retire_head(observer: &Node, departed: &Node, surviving: &Node) -> Resu
     observer
         .swarm
         .transport
-        .force_peer_connection_state_without_callback(
+        .force_connection_state_without_callback(
             departed.did(),
-            WebrtcConnectionState::Closed,
+            TransportConnectionState::Closed,
         )?;
     observer
         .swarm

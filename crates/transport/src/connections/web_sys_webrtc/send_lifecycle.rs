@@ -143,7 +143,7 @@ mod tests {
     use crate::core::send::operation::test_queue;
     use crate::core::send::owner::OwnedSend;
     use crate::core::transport::SendPermit;
-    use crate::core::transport::WebrtcConnectionState;
+    use crate::core::transport::TransportConnectionState;
     use crate::error::Error;
 
     /// Yield one microtask turn to the real browser-local actor scheduler.
@@ -171,7 +171,7 @@ mod tests {
             Ok(())
         });
         (0..8).for_each(|_| lifecycle.fail());
-        assert_eq!(state.snapshot().webrtc(), WebrtcConnectionState::Closed);
+        assert_eq!(state.snapshot().state(), TransportConnectionState::Closed);
         assert_eq!(calls.get(), 0, "fencing precedes scheduled physical IO");
         actor_turn().await;
         assert_eq!(status.get(), CloseState::Closing);
@@ -241,7 +241,7 @@ mod tests {
                 if succeeds { 10 } else { 7 }
             );
             assert_eq!(
-                state.snapshot().webrtc() == WebrtcConnectionState::Closed,
+                state.snapshot().state() == TransportConnectionState::Closed,
                 !succeeds
             );
             actor_turn().await;

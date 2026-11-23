@@ -4,7 +4,7 @@ use std::str::FromStr;
 use bytes::Bytes;
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 #[cfg(feature = "dummy")]
 use tokio::time::timeout;
 #[cfg(feature = "dummy")]
@@ -110,7 +110,6 @@ async fn test_handle_join() -> Result<()> {
 #[tokio::test]
 async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<()> {
     dummy_controlled::enable(true);
-    dummy_controlled::set_max_message_size(1);
 
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
@@ -123,11 +122,30 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
         "controlled delivery should prevent automatic DataChannelOpen join"
     );
 
+    // Saturate all of node1's outbound transfer capacity classes toward node2 (and drop inbound
+    // frames from node2 so node2's own convergence queries do not trigger sender-bounded answers)
+    // before delivering ChannelOpen: the real callback admission path (`on_channel_open` ->
+    // `admit_pending_connection`) commits local admission while every follow-up convergence send
+    // from node1 fails with backpressure.
+    dummy_controlled::set_drop_messages(true);
+    let held_capacity = node1
+        .swarm
+        .transport
+        .hold_all_outbound_capacity_for_test(node2.did())?;
+    let node1_dispatched = crate::tests::DispatchedFrames::from_now(&node1.swarm.transport);
+
     drain_controlled_dummy_events().await;
 
+    assert_eq!(
+        node1_dispatched.count(),
+        0,
+        "follow-up convergence send from node1 must fail under saturated outbound capacity"
+    );
+    drop(held_capacity);
+    dummy_controlled::set_drop_messages(false);
     dummy_controlled::enable(false);
-    dummy_controlled::set_max_message_size(0);
 
+    assert!(node1.swarm.is_peer_admitted(node2.did())?);
     assert!(
         node1.dht().successors().list()?.contains(&node2.did()),
         "local join must survive failed follow-up convergence sends"
@@ -339,7 +357,7 @@ async fn test_handle_connect_node() -> Result<()> {
     let node3 = prepare_node(key3).await;
     let _controlled = ControlledDeliveryGuard::new();
     dummy_controlled::set_seed(CONNECT_NODE_DUMMY_SEED);
-    let connected = WebrtcConnectionState::Connected;
+    let connected = TransportConnectionState::Connected;
 
     manually_establish_connection(&node3.swarm, &node2.swarm).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -401,7 +419,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1
@@ -429,7 +447,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1
@@ -481,7 +499,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     wait_for_finger(&node1, node2.did()).await?;
@@ -546,7 +564,7 @@ async fn connected_storage_pair() -> Result<(Node, Node)> {
 
     // node1's successor is node2
     // node2's successor is node1
-    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node1, node2.did(), TransportConnectionState::Connected).await?;
     wait_for_successor(&node1, node2.did()).await?;
     wait_for_successor(&node2, node1.did()).await?;
     node1

@@ -73,8 +73,7 @@ async fn test_prepare_inbound_frame_reports_malformed_oversized_and_over_credit_
         .prepare_inbound_frame(
             Bytes::from(vec![
                 0;
-                crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE
-                    + 1
+                crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE + 1
             ]),
             lane
         )

@@ -1,6 +1,6 @@
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
@@ -103,8 +103,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node1.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected
+            .connection_state(),
+        TransportConnectionState::Connected
     );
     assert_eq!(
         node3
@@ -112,8 +112,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node2.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected
+            .connection_state(),
+        TransportConnectionState::Connected
     );
 
     assert_eq!(
@@ -122,8 +122,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node3.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected
+            .connection_state(),
+        TransportConnectionState::Connected
     );
     assert_eq!(
         node2
@@ -131,8 +131,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node3.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected
+            .connection_state(),
+        TransportConnectionState::Connected
     );
 
     let direct_connection_already_synced =
@@ -170,8 +170,8 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node2.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
+            .connection_state(),
+        TransportConnectionState::Connected,
     );
 
     assert_eq!(
@@ -180,14 +180,14 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .transport
             .get_connection(node1.did())
             .unwrap()
-            .webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
+            .connection_state(),
+        TransportConnectionState::Connected,
     )
 }
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
+async fn test_dummy_mismatched_channel_open_does_not_admit_peer() {
     dummy_controlled::enable(true);
 
     let [key1, key2]: [SecretKey; 2] = gen_ordered_keys::<2>();
@@ -207,9 +207,7 @@ async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
         .expect("node2 holds no offer of its own, so it answers");
     node1.swarm.accept_answer(answer).await.unwrap();
 
-    assert!(
-        dummy_controlled::deliver_next_data_channel_open_with_cid(node1.did().to_string()).await
-    );
+    assert!(dummy_controlled::deliver_next_channel_open_with_cid(node1.did().to_string()).await);
 
     assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 0);
     assert!(node1.swarm.transport.get_connection(node2.did()).is_none());

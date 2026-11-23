@@ -41,6 +41,10 @@ pub trait BackendObserver: Send + Sync {
 
     /// An E2E message (handshake or stream frame) addressed to this node.
     fn e2e_message(&self, _message: &ApplicationMessage) {}
+
+    /// An inbound serialized extension [`Envelope`](ext::Envelope) received from `from` before it
+    /// is queued onto its namespace worker.
+    fn custom_envelope(&self, _from: rings_core::dht::Did, _bytes: &[u8]) {}
 }
 
 /// Backend consumes the swarm's application inbox: it routes each inbound custom message,
@@ -110,7 +114,12 @@ impl Backend {
                 from,
                 data: ApplicationData::Custom(CustomMessage(bytes)),
                 ..
-            }) => namespaces.submit(from, &Bytes::from(bytes)),
+            }) => {
+                if let Some(observer) = self.observer.as_deref() {
+                    observer.custom_envelope(from, &bytes);
+                }
+                namespaces.submit(from, &Bytes::from(bytes));
+            }
             ApplicationDelivery::Message(message) => {
                 if let Some(observer) = self.observer.as_deref() {
                     observer.e2e_message(&message);

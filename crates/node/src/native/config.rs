@@ -229,6 +229,8 @@ pub struct Config {
     #[serde(default)]
     pub allow_remote_external_api: bool,
     /// WebRTC ICE server list, independent from optional gateway ingress.
+    /// Defaults to empty when `network: { kind, params }` selects the transport explicitly.
+    #[serde(default)]
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,
@@ -299,12 +301,25 @@ pub struct Config {
     /// Optional externally reachable IP address hint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
-    /// Optional lower bound for WebRTC UDP port allocation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webrtc_udp_port_min: Option<u16>,
-    /// Optional upper bound for WebRTC UDP port allocation.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webrtc_udp_port_max: Option<u16>,
+    /// Optional lower bound for local UDP port allocation.
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_min",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub udp_port_min: Option<u16>,
+    /// Optional upper bound for local UDP port allocation.
+    #[serde(
+        default,
+        alias = "webrtc_udp_port_max",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub udp_port_max: Option<u16>,
+    /// Optional serde-extensible tagged transport configuration (`{ kind, params }`).
+    /// When present, overrides the default `"webrtc"` transport constructed from `ice_servers`,
+    /// `external_ip`, and `udp_port_min` / `udp_port_max`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<crate::processor::NetworkConfigDescriptor>,
     /// Persistent DHT data storage configuration.
     pub data_storage: StorageConfig,
     /// Peer measurement storage configuration.
@@ -319,33 +334,26 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             Error::OpenFileError(format!("{}: {error}", delegatee_key_path.display()))
         })?;
 
-        let ice_servers = config
-            .delegator_key
-            .as_deref()
-            .and_then(|path| super::horizon::read_delegator_secret_key(path).ok())
-            .filter(|delegator_key| {
-                delegatee_key
-                    .trim()
-                    .parse::<crate::prelude::DelegateeKey>()
-                    .is_ok_and(|parsed| {
-                        crate::prelude::rings_core::dht::Did::from(delegator_key.address())
-                            == parsed.delegator_did()
-                    })
-            })
-            .and_then(|delegator_key| delegator_key.sign_ice_servers(&config.ice_servers).ok())
-            .unwrap_or(config.ice_servers);
-
-        let udp_range = crate::processor::parse_webrtc_udp_port_range(
-            config.webrtc_udp_port_min,
-            config.webrtc_udp_port_max,
-        )?;
+        let udp_range =
+            crate::processor::parse_udp_port_range(config.udp_port_min, config.udp_port_max)?;
+        if config.network.is_some()
+            && (!config.ice_servers.trim().is_empty()
+                || config.external_ip.is_some()
+                || udp_range.is_some())
+        {
+            return Err(Error::InvalidConfig(
+                "cannot specify both `network` and legacy flat WebRTC fields (`ice_servers`, `external_ip`, `udp_port_min`, `udp_port_max`)"
+                    .to_string(),
+            ));
+        }
 
         Ok(Self {
             network_id: config.network_id,
-            ice_servers,
+            ice_servers: config.ice_servers,
             external_address: config.external_ip,
-            webrtc_udp_port_min: udp_range.map(|range| range.min()),
-            webrtc_udp_port_max: udp_range.map(|range| range.max()),
+            udp_port_min: udp_range.map(|range| range.min()),
+            udp_port_max: udp_range.map(|range| range.max()),
+            network: config.network,
             delegatee_key,
             stabilize_interval: config.stabilize_interval,
             online_node_heartbeat_interval_secs: config.online_node_heartbeat_interval_secs,
@@ -415,8 +423,9 @@ impl Config {
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             origin_quota: OriginQuotaConfig::default(),
             external_ip: None,
-            webrtc_udp_port_min: None,
-            webrtc_udp_port_max: None,
+            udp_port_min: None,
+            udp_port_max: None,
+            network: None,
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }
@@ -455,6 +464,26 @@ impl Config {
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
     }
 
+    /// Normalize relative file paths in this configuration (such as `delegator_key`) against the
+    /// parent directory of `config_path`.
+    pub fn resolve_paths_relative_to<P>(&mut self, config_path: P) -> Result<()>
+    where P: AsRef<std::path::Path> {
+        let path = expand_home(config_path)?;
+        if let Some(delegator_key) = self.delegator_key.as_deref() {
+            let expanded = expand_home(delegator_key)?;
+            let resolved = if expanded.is_relative() {
+                match path.parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => parent.join(expanded),
+                    _ => expanded,
+                }
+            } else {
+                expanded
+            };
+            self.delegator_key = Some(resolved.to_string_lossy().into_owned());
+        }
+        Ok(())
+    }
+
     /// Reads a native-node configuration from a YAML file.
     pub fn read_fs<P>(path: P) -> Result<Config>
     where P: AsRef<std::path::Path> {
@@ -467,18 +496,7 @@ impl Config {
                 path: path.clone(),
                 source: Box::new(source),
             })?;
-        if let Some(delegator_key) = config.delegator_key.as_deref() {
-            let expanded = expand_home(delegator_key)?;
-            let resolved = if expanded.is_relative() {
-                match path.parent() {
-                    Some(parent) if !parent.as_os_str().is_empty() => parent.join(expanded),
-                    _ => expanded,
-                }
-            } else {
-                expanded
-            };
-            config.delegator_key = Some(resolved.to_string_lossy().into_owned());
-        }
+        config.resolve_paths_relative_to(&path)?;
         Ok(config)
     }
 }

@@ -209,6 +209,33 @@ pub fn parse_sdp_max_message_size(sdp: &str) -> Option<u32> {
     parse(sdp).data_channel_max_message_size()
 }
 
+/// The effective per-message send limit for a peer whose SDP handshake description is
+/// `remote_handshake`.
+///
+/// An absent attribute defaults to [`MAX_CHANNEL_MESSAGE_SIZE`](crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE)
+/// (`65536`) and a value of `0` means "no limit" (still bounded by our own send cap); any explicit
+/// value at or above [`MIN_MAX_MESSAGE_SIZE`](crate::core::transport::MIN_MAX_MESSAGE_SIZE) is
+/// honoured and capped at [`MAX_CHANNEL_MESSAGE_SIZE`](crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE)
+/// for interop, while any positive value below [`MIN_MAX_MESSAGE_SIZE`](crate::core::transport::MIN_MAX_MESSAGE_SIZE)
+/// is refused with [`Error::RemoteMaxMessageSizeTooSmall`](crate::error::Error::RemoteMaxMessageSizeTooSmall)
+/// so DHT control frames are never chunked (#1130).
+pub fn effective_max_message_size(remote_handshake: &str) -> crate::error::Result<usize> {
+    use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
+    use crate::core::transport::MIN_MAX_MESSAGE_SIZE;
+    use crate::error::Error;
+
+    match parse_sdp_max_message_size(remote_handshake) {
+        None | Some(0) => Ok(MAX_CHANNEL_MESSAGE_SIZE),
+        Some(n) if (n as usize) < MIN_MAX_MESSAGE_SIZE => {
+            Err(Error::RemoteMaxMessageSizeTooSmall {
+                advertised: n as usize,
+                minimum: MIN_MAX_MESSAGE_SIZE,
+            })
+        }
+        Some(n) => Ok((n as usize).min(MAX_CHANNEL_MESSAGE_SIZE)),
+    }
+}
+
 /// The connectivity tier of an ICE candidate or of the ICE server set configured on a peer
 /// connection, ordered as a join-semilattice (`Host < Reflexive < Relay`).
 ///
@@ -402,6 +429,7 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
+    use super::effective_max_message_size;
     use super::lex;
     use super::parse;
     use super::parse_attribute;
@@ -856,6 +884,62 @@ mod tests {
                 .filter_map(|c| parse_candidate_line_tier(c))
                 .max(),
             Some(IceCandidateTier::Reflexive)
+        );
+    }
+
+    #[test]
+    fn test_effective_max_message_size_policy_layers() {
+        use crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE;
+        use crate::core::transport::MIN_MAX_MESSAGE_SIZE;
+        use crate::error::Error;
+
+        let sdp_with = |value: &str| -> String {
+            format!(
+                "v=0\r\n\
+                 m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
+                 a=max-message-size:{value}\r\n"
+            )
+        };
+
+        assert_eq!(
+            effective_max_message_size(
+                "v=0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+            )
+            .unwrap(),
+            MAX_CHANNEL_MESSAGE_SIZE
+        );
+        assert_eq!(
+            effective_max_message_size(&sdp_with("0")).unwrap(),
+            MAX_CHANNEL_MESSAGE_SIZE
+        );
+        for advertised in [1_usize, 2048, MIN_MAX_MESSAGE_SIZE - 1] {
+            let result = effective_max_message_size(&sdp_with(&advertised.to_string()));
+            assert!(
+                matches!(
+                    result,
+                    Err(Error::RemoteMaxMessageSizeTooSmall {
+                        advertised: got,
+                        minimum: MIN_MAX_MESSAGE_SIZE,
+                    }) if got == advertised
+                ),
+                "expected RemoteMaxMessageSizeTooSmall for {advertised}, got {result:?}"
+            );
+        }
+        assert_eq!(
+            effective_max_message_size(&sdp_with(&MIN_MAX_MESSAGE_SIZE.to_string())).unwrap(),
+            MIN_MAX_MESSAGE_SIZE
+        );
+        assert_eq!(
+            effective_max_message_size(&sdp_with("16384")).unwrap(),
+            16384
+        );
+        assert_eq!(
+            effective_max_message_size(&sdp_with("1048576")).unwrap(),
+            MAX_CHANNEL_MESSAGE_SIZE
+        );
+        assert_eq!(
+            effective_max_message_size(&sdp_with("65536")).unwrap(),
+            MAX_CHANNEL_MESSAGE_SIZE
         );
     }
 }

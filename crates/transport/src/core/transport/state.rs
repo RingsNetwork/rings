@@ -1,132 +1,125 @@
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Arc;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Mutex;
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::MutexGuard;
 
-/// The state of the WebRTC connection.
-/// This enum is used to define a same interface for all the platforms.
+/// Lifecycle state of a transport connection.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-pub enum WebrtcConnectionState {
+pub enum TransportConnectionState {
     /// Unspecified
     #[default]
     Unspecified,
 
-    /// WebrtcConnectionState::New indicates that any of the ICETransports or
-    /// DTLSTransports are in the "new" state and none of the transports are
-    /// in the "connecting", "checking", "failed" or "disconnected" state, or
-    /// all transports are in the "closed" state, or there are no transports.
+    /// The connection is newly created and has not begun active negotiation or checking.
     New,
 
-    /// WebrtcConnectionState::Connecting indicates that any of the
-    /// ICETransports or DTLSTransports are in the "connecting" or
-    /// "checking" state and none of them is in the "failed" state.
+    /// The connection is actively negotiating or checking connectivity.
     Connecting,
 
-    /// WebrtcConnectionState::Connected indicates that all ICETransports and
-    /// DTLSTransports are in the "connected", "completed" or "closed" state
-    /// and at least one of them is in the "connected" or "completed" state.
+    /// The connection has established a usable transport path.
     Connected,
 
-    /// WebrtcConnectionState::Disconnected indicates that any of the
-    /// ICETransports or DTLSTransports are in the "disconnected" state
-    /// and none of them are in the "failed" or "connecting" or "checking" state.
+    /// The connection has transiently lost connectivity and may recover or fail.
     Disconnected,
 
-    /// WebrtcConnectionState::Failed indicates that any of the ICETransports
-    /// or DTLSTransports are in a "failed" state.
+    /// The connection has permanently failed.
     Failed,
 
-    /// WebrtcConnectionState::Closed indicates the peer connection is closed
-    /// and the isClosed member variable of PeerConnection is true.
+    /// The connection has been closed.
     Closed,
 }
 
-impl WebrtcConnectionState {
-    pub(crate) const fn occupies_peer_slot(self) -> bool {
+impl TransportConnectionState {
+    /// Return whether a connection in this state occupies its peer slot in the pool.
+    pub const fn occupies_peer_slot(self) -> bool {
         matches!(self, Self::New | Self::Connecting | Self::Connected)
     }
 
     /// Whether the connection generation has ended: it fails or closes, and never reconnects.
-    pub(crate) const fn is_terminal(self) -> bool {
+    pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed | Self::Closed)
     }
 }
 
 /// One coherent observation of the transport state used for routability.
 ///
-/// The WebRTC and data-channel components are updated through one state cell,
+/// The connection phase and channel readiness components are updated through one state cell,
 /// so consumers never need to reconstruct this product from independent reads.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ConnectionStateSnapshot {
-    webrtc: WebrtcConnectionState,
-    data_channel_open: bool,
+    state: TransportConnectionState,
+    channel_open: bool,
 }
 
 impl ConnectionStateSnapshot {
     /// Construct one transport-state observation.
-    pub const fn new(webrtc: WebrtcConnectionState, data_channel_open: bool) -> Self {
+    pub const fn new(state: TransportConnectionState, channel_open: bool) -> Self {
         Self {
-            webrtc,
-            data_channel_open,
+            state,
+            channel_open,
         }
     }
 
-    /// Return the WebRTC peer-connection state.
-    pub const fn webrtc(self) -> WebrtcConnectionState {
-        self.webrtc
+    /// Return the transport connection phase.
+    pub const fn state(self) -> TransportConnectionState {
+        self.state
     }
 
-    /// Return whether every outbound data channel is open.
-    pub const fn data_channel_open(self) -> bool {
-        self.data_channel_open
+    /// Return whether every outbound payload channel is open.
+    pub const fn channel_open(self) -> bool {
+        self.channel_open
     }
 
-    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
     fn apply(self, event: ConnectionStateEvent) -> Self {
         match event {
-            ConnectionStateEvent::Close => Self::new(WebrtcConnectionState::Closed, false),
-            ConnectionStateEvent::OutboundDataChannels(_) if self.webrtc.is_terminal() => self,
-            ConnectionStateEvent::OutboundDataChannels(open) => Self::new(self.webrtc, open),
-            ConnectionStateEvent::Webrtc(_) if self.webrtc == WebrtcConnectionState::Closed => self,
-            ConnectionStateEvent::Webrtc(WebrtcConnectionState::Closed) => {
-                Self::new(WebrtcConnectionState::Closed, false)
+            ConnectionStateEvent::Close => Self::new(TransportConnectionState::Closed, false),
+            ConnectionStateEvent::Channels(_) if self.state.is_terminal() => self,
+            ConnectionStateEvent::Channels(open) => Self::new(self.state, open),
+            ConnectionStateEvent::Phase(_) if self.state == TransportConnectionState::Closed => {
+                self
             }
-            ConnectionStateEvent::Webrtc(_) if self.webrtc == WebrtcConnectionState::Failed => self,
-            ConnectionStateEvent::Webrtc(WebrtcConnectionState::Failed) => {
-                Self::new(WebrtcConnectionState::Failed, false)
+            ConnectionStateEvent::Phase(TransportConnectionState::Closed) => {
+                Self::new(TransportConnectionState::Closed, false)
             }
-            ConnectionStateEvent::Webrtc(next) => Self::new(next, self.data_channel_open),
+            ConnectionStateEvent::Phase(_) if self.state == TransportConnectionState::Failed => {
+                self
+            }
+            ConnectionStateEvent::Phase(TransportConnectionState::Failed) => {
+                Self::new(TransportConnectionState::Failed, false)
+            }
+            ConnectionStateEvent::Phase(next) => Self::new(next, self.channel_open),
         }
     }
 }
 
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 #[derive(Clone, Copy)]
 enum ConnectionStateEvent {
-    Webrtc(WebrtcConnectionState),
-    OutboundDataChannels(bool),
+    Phase(TransportConnectionState),
+    Channels(bool),
     Close,
 }
 
-/// Shared event-maintained transport state for concrete backends.
+/// Shared event-maintained transport product-state cell for concrete connection backends.
 ///
 /// Clone law: every clone references the same state cell; cloning does not
 /// duplicate protocol state. `Closed` is absorbing, and terminal states can
-/// never retain or regain an open data channel.
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
-#[derive(Clone)]
-pub(crate) struct ConnectionStateCell {
+/// never retain or regain open payload channels.
+#[derive(Clone, Debug)]
+pub struct ConnectionStateCell {
     state: Arc<Mutex<ConnectionStateSnapshot>>,
 }
 
-#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+impl Default for ConnectionStateCell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConnectionStateCell {
-    pub(crate) fn new() -> Self {
+    /// Construct a new [`ConnectionStateCell`] in `(New, false)`.
+    pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ConnectionStateSnapshot::new(
-                WebrtcConnectionState::New,
+                TransportConnectionState::New,
                 false,
             ))),
         }
@@ -143,19 +136,23 @@ impl ConnectionStateCell {
         *state = state.apply(event);
     }
 
-    pub(crate) fn observe_webrtc(&self, state: WebrtcConnectionState) {
-        self.apply(ConnectionStateEvent::Webrtc(state));
+    /// Record a connection-phase transition on this cell.
+    pub fn observe_phase(&self, state: TransportConnectionState) {
+        self.apply(ConnectionStateEvent::Phase(state));
     }
 
-    pub(crate) fn observe_outbound_data_channels(&self, open: bool) {
-        self.apply(ConnectionStateEvent::OutboundDataChannels(open));
+    /// Record whether all outbound payload channels are open (`true`) or closed (`false`).
+    pub fn observe_channels(&self, open: bool) {
+        self.apply(ConnectionStateEvent::Channels(open));
     }
 
-    pub(crate) fn close(&self) {
+    /// Permanently transition this cell to `(Closed, false)`.
+    pub fn close(&self) {
         self.apply(ConnectionStateEvent::Close);
     }
 
-    pub(crate) fn snapshot(&self) -> ConnectionStateSnapshot {
+    /// Read one atomic `(state, channel_open)` snapshot.
+    pub fn snapshot(&self) -> ConnectionStateSnapshot {
         *self.lock()
     }
 }

@@ -1906,9 +1906,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.1"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13624c2627564efccf4934284bdd98cbaa14e79b0b5a141218e507b3a823456"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2588,9 +2588,9 @@ checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
 name = "idna"
-version = "1.0.3"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "686f825264d630750a544639377bae737628043f20d38bbc029e8f29ea968a7e"
+checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
  "smallvec",
@@ -3594,9 +3594,9 @@ dependencies = [
 
 [[package]]
 name = "percent-encoding"
-version = "2.3.1"
+version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3148f5046208a5d56bcfc03053e3ca6334e51da8dfb19b6cdc8b306fae3283e"
+checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
@@ -4430,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "aes",
  "subtle",
@@ -4441,7 +4441,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "postcard",
  "serde",
@@ -4449,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "rings-dns-relay"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "hickory-proto",
@@ -4547,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -4566,11 +4566,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 
 [[package]]
 name = "rings-mailbox-example"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4602,7 +4602,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -4635,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -4674,6 +4674,7 @@ dependencies = [
  "rings-runtime",
  "rings-test-support",
  "rings-transport",
+ "rings-turn",
  "serde",
  "serde-reflection",
  "serde-saphyr",
@@ -4705,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -4714,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4738,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4753,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "futures",
  "rings-core",
@@ -4762,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4795,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "rings-tui"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4818,11 +4819,14 @@ dependencies = [
 
 [[package]]
 name = "rings-turn"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
+ "base58-monero",
  "clap",
+ "hex",
  "rand 0.8.6",
+ "rings-codec",
  "rings-core",
  "serde",
  "stun",
@@ -4832,11 +4836,48 @@ dependencies = [
  "tracing-subscriber",
  "turn",
  "webrtc-util",
+ "zeroize",
+]
+
+[[package]]
+name = "rings-turn-service"
+version = "1.0.0-pre.7"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.13.1",
+ "bytes",
+ "clap",
+ "js-sys",
+ "rings-codec",
+ "rings-core",
+ "rings-network-policy",
+ "rings-node",
+ "rings-test-support",
+ "rings-transport",
+ "rings-turn",
+ "serde",
+ "serde-reflection",
+ "serde-saphyr",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2 0.11.1",
+ "stateright",
+ "stun",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "turn",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "webrtc-util",
 ]
 
 [[package]]
 name = "rings-webview"
-version = "1.0.0-pre.6"
+version = "1.0.0-pre.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6216,14 +6257,15 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.4"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32f8b686cadd1473f4bd0117a5d28d36b1ade384ea9b5069a1c40aefed7fda60"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

@@ -190,16 +190,40 @@ impl SwarmTransport {
         }))
     }
 
+    /// Abandon handshake generation `attempt` after `operation` failed.
+    ///
+    /// If `attempt` is still `Pending` or `Admitting`, cancels it as unadmitted; if a `SendFinal`
+    /// backend already opened its channels and promoted `attempt` to `Active` before the final
+    /// signaling message could be wrapped or sent, retires that exact `Active` generation so no
+    /// half-open admitted edge remains when the peer never receives its final handshake step.
     pub(crate) async fn abandon_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
         operation: &str,
     ) {
-        if let Err(error) = self.fail_unadmitted_connection(attempt).await {
-            tracing::warn!(
-                "failed to cancel pending connection to {} after {operation}: {error}",
-                attempt.peer
-            );
+        match self.fail_unadmitted_connection(attempt).await {
+            Ok(true) => {}
+            Ok(false) => match self.disconnect_attempt(attempt).await {
+                Ok(Some(removal)) => {
+                    self.record_candidate_dial_failure(attempt.peer);
+                    if removal.storage_repair_due() {
+                        self.request_storage_repair();
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        "failed to retire prematurely admitted connection to {} after {operation}: {error}",
+                        attempt.peer
+                    );
+                }
+            },
+            Err(error) => {
+                tracing::warn!(
+                    "failed to cancel pending connection to {} after {operation}: {error}",
+                    attempt.peer
+                );
+            }
         }
     }
 
@@ -227,7 +251,7 @@ impl SwarmTransport {
             }
             let state = connection
                 .as_ref()
-                .map(|connection| connection.webrtc_connection_state());
+                .map(|connection| connection.connection_state());
             tracing::warn!(
                 target: "rings_core::swarm::transport::handshake",
                 local = %self.dht.did,

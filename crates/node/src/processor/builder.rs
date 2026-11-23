@@ -17,9 +17,7 @@ use crate::prelude::rings_core::dht::RelayReplication;
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
     pub(in crate::processor) network_id: u32,
-    pub(in crate::processor) ice_servers: String,
-    pub(in crate::processor) external_address: Option<String>,
-    pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
+    pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
     pub(in crate::processor) delegatee_key: DelegateeKey,
     pub(in crate::processor) onion_process_epoch: Option<OnionProcessEpoch>,
     pub(in crate::processor) clock: SharedClock,
@@ -44,6 +42,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
     pub(in crate::processor) onion_exit_ttl: Duration,
     pub(in crate::processor) onion_idle_floor: OnionIdleFloor,
+    pub(in crate::processor) onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
     pub(in crate::processor) dht_finger_table_size: usize,
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
@@ -53,6 +52,8 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) service_registration: Option<Arc<dyn RegistrationTask>>,
     /// The heartbeat of this node's mail descriptor (#1117), if it takes mail.
     pub(in crate::processor) mail_registration: Option<Arc<dyn RegistrationTask>>,
+    /// Custom periodic DHT registration tasks attached by external service crates.
+    pub(in crate::processor) extra_registrations: Vec<Arc<dyn RegistrationTask>>,
     /// Optional HTTP(S) proxy for remote JSON-RPC endpoints on native targets.
     pub(in crate::processor) remote_rpc_proxy: Option<crate::remote_endpoint::RemoteRpcProxy>,
 }
@@ -60,7 +61,7 @@ pub struct ProcessorBuilder {
 impl ProcessorBuilder {
     /// initialize a [ProcessorBuilder] with a serialized [ProcessorConfig].
     pub fn from_serialized(config: &str) -> Result<Self> {
-        let config = serde_saphyr::from_str::<ProcessorConfig>(config)?;
+        let config = ProcessorConfig::from_str(config)?;
         Self::from_config(&config)
     }
 
@@ -68,9 +69,7 @@ impl ProcessorBuilder {
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
         Ok(Self {
             network_id: config.network_id,
-            ice_servers: config.ice_servers.clone(),
-            external_address: config.external_address.clone(),
-            webrtc_udp_port_range: config.webrtc_udp_port_range()?,
+            network_parameters: Arc::clone(&config.network_parameters),
             delegatee_key: config.delegatee_key.clone(),
             onion_process_epoch: None,
             clock: config.clock.clone(),
@@ -94,12 +93,14 @@ impl ProcessorBuilder {
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
             onion_exit_ttl: config.onion_exit_ttl,
             onion_idle_floor: OnionIdleFloor::DEFAULT,
+            onion_udp_bind_config: crate::onion::OnionUdpBindConfig::default(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
             observer: None,
             #[cfg(rings_native)]
             service_registration: None,
             mail_registration: None,
+            extra_registrations: Vec::new(),
             remote_rpc_proxy: config.remote_rpc_proxy.clone(),
         })
     }
@@ -118,6 +119,13 @@ impl ProcessorBuilder {
     pub fn receive_mail(mut self, offer: MailOffer) -> Self {
         let did = self.delegatee_key.delegator_did();
         self.mail_registration = Some(Arc::new(MailRegistration::new(did, offer)));
+        self
+    }
+
+    /// Attach an external periodic DHT [`RegistrationTask`] so the processor publishes its lease
+    /// descriptor on every heartbeat and on the first admitted edge (#855, #918).
+    pub fn register_task(mut self, task: Arc<dyn RegistrationTask>) -> Self {
+        self.extra_registrations.push(task);
         self
     }
 
@@ -250,10 +258,21 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Configure OS UDP socket binding and peer-IP admission for `onion::udp` exit sessions.
+    pub fn onion_udp_bind_config(mut self, config: crate::onion::OnionUdpBindConfig) -> Self {
+        self.onion_udp_bind_config = config;
+        self
+    }
+
     /// Set the onion symbols this process registers (#834 D2).
     pub fn onion_role(mut self, role: OnionRole<OnionExitOffer>) -> Self {
         self.onion_role = role;
         self
+    }
+
+    /// Return the onion symbols currently configured on this builder.
+    pub const fn configured_onion_role(&self) -> &OnionRole<OnionExitOffer> {
+        &self.onion_role
     }
 
     /// Override the initial onion process epoch instead of drawing one from the builder's RNG.
@@ -271,6 +290,13 @@ impl ProcessorBuilder {
     /// Inject a custom [`SharedRng`] capability for deterministic protocol and session randomness.
     pub fn rng(mut self, rng: SharedRng) -> Self {
         self.rng = rng;
+        self
+    }
+
+    /// Inject custom [`NodeNetworkParameters`] to customize the processor's transport (#1291).
+    pub fn network_parameters<P>(mut self, params: P) -> Self
+    where P: NodeNetworkParameters + 'static {
+        self.network_parameters = Arc::new(params);
         self
     }
 
@@ -301,7 +327,10 @@ impl ProcessorBuilder {
         let onion_entry_guard_storage = self
             .onion_entry_guard_storage
             .unwrap_or_else(|| Box::new(MemStorage::new()));
-        let endpoint_hint = self.external_address.clone();
+        let endpoint_hint = self.network_parameters.endpoint_hint().map(str::to_owned);
+        let onion_udp_bind_config = self
+            .onion_udp_bind_config
+            .with_endpoint_hint_fallback(endpoint_hint.as_deref());
         let initial_epoch = self
             .onion_process_epoch
             .unwrap_or_else(|| OnionProcessEpoch::from_rng(&mut self.rng.lock_rng()));
@@ -346,14 +375,19 @@ impl ProcessorBuilder {
         #[cfg(rings_native)]
         registration_tasks.extend(self.service_registration);
         registration_tasks.extend(self.mail_registration);
+        registration_tasks.extend(self.extra_registrations);
 
         // One recorder is shared between core protocol hooks and node-level snapshot assembly.
         let observability = Arc::new(crate::observability::Observability::new_with_clock(
             self.clock.clone(),
         ));
+        let shared_transport = self
+            .network_parameters
+            .build_transport(&self.delegatee_key)?;
+
         let mut swarm_builder = SwarmBuilder::new(
             self.network_id,
-            &self.ice_servers,
+            shared_transport,
             storage,
             self.delegatee_key,
         );
@@ -393,13 +427,6 @@ impl ProcessorBuilder {
         };
         swarm_builder = swarm_builder.observer(observer);
 
-        if let Some(external_address) = self.external_address {
-            swarm_builder = swarm_builder.external_address(external_address);
-        }
-        if let Some(range) = self.webrtc_udp_port_range {
-            swarm_builder = swarm_builder.webrtc_udp_port_range(range);
-        }
-
         let measure = self.measure;
         if let Some(measure) = &measure {
             let implementation: MeasureImpl = measure.clone();
@@ -411,6 +438,7 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             session_keys: Arc::new(SessionKeyRing::new(delegatee_key)),
+            network_parameters: self.network_parameters,
             onion_process_epoch,
             onion_entry_guards: Arc::new(OnionEntryGuards::new_for_did(
                 onion_entry_guard_storage,
@@ -424,6 +452,7 @@ impl ProcessorBuilder {
             listener_lifecycle_lock: Arc::new(futures::lock::Mutex::new(())),
             onion_role: self.onion_role,
             onion_idle_floor: self.onion_idle_floor,
+            onion_udp_bind_config,
             registration_readiness: Arc::new(RegistrationReadiness::new(registration_tasks.len())),
             registration_tasks,
             observability,

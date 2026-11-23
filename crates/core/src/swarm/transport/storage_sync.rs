@@ -678,7 +678,7 @@ impl SwarmTransport {
             .flatten();
         let next_hop_state = next_hop
             .and_then(|did| self.get_connection(did))
-            .map(|conn| conn.webrtc_connection_state());
+            .map(|conn| conn.connection_state());
 
         let outcome = self
             .send_storage_sync_as(msg, StorageSyncSend::Egress(egress))

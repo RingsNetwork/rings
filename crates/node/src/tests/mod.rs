@@ -17,7 +17,7 @@ pub(crate) const TEST_NETWORK_ID: u32 = 1;
 /// An external STUN server would only add a network dependency whose latency no test
 /// controls. In the browser it would also sit inside `createOffer`/`answerOffer`, which wait
 /// for ICE gathering to complete, ahead of every awaited event.
-pub(crate) const TEST_ICE_SERVERS: &str = "";
+pub(crate) const TEST_TRAVERSAL_SERVERS: &str = "";
 
 /// Finger-table slots of every test processor.
 pub(crate) const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
@@ -27,14 +27,14 @@ pub(crate) const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_STABILIZE_INTERVAL: u64 = 3;
 
 /// The config of a native test processor signing with `key` on overlay `network_id`: the
-/// [`TEST_ICE_SERVERS`] and a stabilize interval of [`TEST_STABILIZE_INTERVAL`]. A browser
+/// [`TEST_TRAVERSAL_SERVERS`] and a stabilize interval of [`TEST_STABILIZE_INTERVAL`]. A browser
 /// processor stabilizes less often and builds its own.
 #[cfg(feature = "node")]
 pub(crate) fn test_processor_config(key: &SecretKey, network_id: u32) -> ProcessorConfig {
     let delegatee_key = DelegateeKey::new_with_seckey(key).expect("test delegatee key");
     ProcessorConfig::new(
         network_id,
-        TEST_ICE_SERVERS.to_string(),
+        TEST_TRAVERSAL_SERVERS.to_string(),
         delegatee_key,
         TEST_STABILIZE_INTERVAL,
     )

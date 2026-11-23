@@ -383,13 +383,13 @@ impl StartAction {
     }
 
     async fn sync_seed_peer(self, built: DemoNode, seed_did: String, token: GenerationToken) {
-        let Some(seed_peer) = PeerView::connected(seed_did) else {
+        if seed_did.trim().is_empty() {
             if token.is_current() {
                 self.status
                     .set("node ready; seed returned an empty DID".to_string());
             }
             return;
-        };
+        }
         if !token.is_current() {
             return;
         }
@@ -399,7 +399,6 @@ impl StartAction {
             self.peers,
             self.status,
             "seed URL connected",
-            Some(seed_peer),
             move || seed_token.is_current(),
         )
         .await;

@@ -1,4 +1,4 @@
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::TransportConnectionState;
 use tokio::time::timeout;
 
 use super::prepare_node;
@@ -34,15 +34,15 @@ use crate::tests::multi_frame_storage_sync_entries;
 /// their first exchange.
 async fn connect_native_nodes(node1: &Node, node2: &Node) -> Result<()> {
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
-    wait_for_connection_state(node1, node2.did(), WebrtcConnectionState::Connected).await?;
-    wait_for_connection_state(node2, node1.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(node1, node2.did(), TransportConnectionState::Connected).await?;
+    wait_for_connection_state(node2, node1.did(), TransportConnectionState::Connected).await?;
     wait_for_msgs([node1, node2]).await;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture() -> Result<()>
-{
+async fn test_native_transport_control_interleaves_the_shared_multiframe_storage_fixture(
+) -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     connect_native_nodes(&node1, &node2).await?;

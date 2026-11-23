@@ -43,6 +43,23 @@ use crate::utils::get_epoch_ms;
 /// Overlay every test fixture signs for and verifies against.
 pub(crate) const TEST_NETWORK_ID: u32 = 0;
 
+/// Build the transport fixture used by `rings-core`'s own unit and integration tests via
+/// [`rings_transport::network_config::TransportNetworkConfig`].
+pub(crate) fn test_transport(
+    traversal_servers: &str,
+) -> rings_transport::core::transport::SharedTransport {
+    let cfg =
+        rings_transport::network_config::TransportNetworkConfig::new(traversal_servers, None, None);
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    {
+        cfg.build_dummy_transport(Some(traversal_servers))
+    }
+    #[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+    {
+        cfg.build_shared_transport(Some(traversal_servers))
+    }
+}
+
 /// A delegatee key delegated for `ttl_ms` by a fresh account: with a small `ttl_ms`, a delegation
 /// that expires under a clock advanced past it.
 pub(crate) fn delegatee_key_with_ttl(ttl_ms: u64) -> Result<crate::delegation::DelegateeKey> {

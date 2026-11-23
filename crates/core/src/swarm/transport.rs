@@ -10,32 +10,15 @@ use std::sync::RwLock;
 use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::connection_ref::ConnectionRef;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub use rings_transport::connections::DummyConnection as ConnectionOwner;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-pub use rings_transport::connections::DummyTransport as Transport;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub use rings_transport::connections::WebSysWebrtcConnection as ConnectionOwner;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub use rings_transport::connections::WebSysWebrtcTransport as Transport;
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
-use rings_transport::connections::WebrtcConnection as ConnectionOwner;
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
-use rings_transport::connections::WebrtcTransport as Transport;
 use rings_transport::core::pool::ChannelLane;
 use rings_transport::core::transport::ConnectionInterface;
+use rings_transport::core::transport::DynConnection;
 use rings_transport::core::transport::LaneCreditReservation;
 use rings_transport::core::transport::LaneCreditView;
 use rings_transport::core::transport::SendPermit;
-use rings_transport::core::transport::WebrtcConnectionState;
+use rings_transport::core::transport::SharedTransport;
+use rings_transport::core::transport::TransportConnectionState;
 use rings_transport::delivery::DeliveryFuture;
-use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::ReassemblyLimits;
@@ -103,6 +86,8 @@ use self::frame_ledger::FrameLedger;
 pub(crate) use self::frame_ledger::FrameSample;
 pub(crate) use self::handshake::CounterOffer;
 pub(crate) use self::handshake::CreatedAnswer;
+pub(crate) use self::handshake::InitialOfferStep;
+pub(crate) use self::handshake::InitiatorReplyOutcome;
 pub use self::handshake::OfferReply;
 #[cfg(test)]
 pub(crate) use self::inbound_tap::InboundTap;
@@ -167,7 +152,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::StorageSyncOutcome;
-pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(crate) use self::timeouts::CHANNEL_SEND_ACCEPT_BUDGET;
 pub(crate) use self::timeouts::DELIVERY_BOUND;
 pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
@@ -177,8 +162,8 @@ use super::callback::InboundCapacity;
 pub(crate) struct SwarmTransportParts {
     /// Overlay whose peers this transport admits and signs for.
     pub(crate) network_id: u32,
-    /// WebRTC ICE and address configuration.
-    pub(crate) webrtc: SwarmWebrtcConfig,
+    /// Injected trait-based transport implementation.
+    pub(crate) transport: SharedTransport,
     /// Delegation key that signs every payload.
     pub(crate) delegatee_key: DelegateeKey,
     /// Local DHT the transport keeps in step with its admitted peers.
@@ -199,8 +184,8 @@ pub(crate) struct SwarmTransportParts {
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
-    raw_ice_servers: String,
-    transport: Transport,
+    transport: SharedTransport,
+    delegatee_rotation_lock: Mutex<()>,
     delegatee_key: RwLock<DelegateeKey>,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
@@ -288,32 +273,6 @@ impl SwarmTransportSettings {
     }
 }
 
-/// WebRTC transport configuration used when constructing [`SwarmTransport`].
-pub(crate) struct SwarmWebrtcConfig {
-    ice_servers: String,
-    external_address: Option<String>,
-    udp_port_range: Option<WebrtcUdpPortRange>,
-}
-
-impl SwarmWebrtcConfig {
-    /// Build WebRTC transport configuration.
-    ///
-    /// Invariant: a present `udp_port_range` already proves `1 <= min <= max`.
-    /// Native transports use it to constrain ICE UDP gathering; browser
-    /// transports ignore it because local ICE ports are owned by the browser.
-    pub(crate) fn new(
-        ice_servers: String,
-        external_address: Option<String>,
-        udp_port_range: Option<WebrtcUdpPortRange>,
-    ) -> Self {
-        Self {
-            ice_servers,
-            external_address,
-            udp_port_range,
-        }
-    }
-}
-
 /// Read-only handle to one physical transport connection.
 ///
 /// Clone law: clones observe the same physical connection. A
@@ -322,7 +281,7 @@ impl SwarmWebrtcConfig {
 #[derive(Clone)]
 pub struct SwarmConnection {
     peer: Did,
-    connection: ConnectionRef<ConnectionOwner>,
+    connection: ConnectionRef<DynConnection>,
     /// Test builds: the owning transport's frame counts, charged by [`Self::send_data`].
     #[cfg(test)]
     frames: Arc<FrameLedger>,
@@ -339,7 +298,7 @@ impl SwarmTransport {
     pub(crate) fn new(parts: SwarmTransportParts) -> Self {
         let SwarmTransportParts {
             network_id,
-            webrtc,
+            transport,
             delegatee_key,
             dht,
             measure,
@@ -350,18 +309,10 @@ impl SwarmTransport {
             rng,
         } = parts;
         let lifecycle_bounds = self::retention::lifecycle_bounds(dht.successors().capacity());
-        let raw_ice_servers = webrtc.ice_servers;
-        let signed_ice_servers = delegatee_key
-            .sign_ice_servers(&raw_ice_servers)
-            .unwrap_or_else(|_| raw_ice_servers.clone());
         Self {
             network_id,
-            raw_ice_servers,
-            transport: Transport::new(
-                &signed_ice_servers,
-                webrtc.external_address,
-                webrtc.udp_port_range,
-            ),
+            transport,
+            delegatee_rotation_lock: Mutex::new(()),
             delegatee_key: RwLock::new(delegatee_key),
             dht,
             storage_redundancy: settings.storage_redundancy,
@@ -402,6 +353,11 @@ impl SwarmTransport {
     /// Return the epoch [`SharedClock`] capability bound to this transport.
     pub fn clock(&self) -> &SharedClock {
         &self.clock
+    }
+
+    /// Return the injected trait-based [`SharedTransport`] backing this swarm transport.
+    pub fn transport(&self) -> &SharedTransport {
+        &self.transport
     }
 
     /// Read the current Unix epoch timestamp in milliseconds from this transport's [`SharedClock`].
@@ -564,9 +520,48 @@ impl SwarmTransport {
             .clone()
     }
 
+    /// Validate `delegatee_key` without mutating state: verifies DID ownership, delegator
+    /// authorization signature, and strict signing-horizon advancement relative to the current key.
+    pub(crate) fn validate_next_delegatee_key(&self, delegatee_key: &DelegateeKey) -> Result<()> {
+        if delegatee_key.delegator_did() != self.dht.did {
+            return Err(Error::VerifySignatureFailed);
+        }
+        let delegation = delegatee_key.delegation();
+        delegation.verify_delegator_authorization_at(delegation.created_at_ms())?;
+        let next_horizon = crate::swarm::signing_horizon_ms(delegation.expires_at_ms());
+        let current = self
+            .delegatee_key
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current_horizon =
+            crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
+        if next_horizon <= current_horizon {
+            return Err(Error::DelegationExpiresWithinMargin);
+        }
+        Ok(())
+    }
+
+    /// Infallibly install an already-validated `delegatee_key`.
+    pub(crate) fn commit_delegatee_key_unchecked(&self, delegatee_key: DelegateeKey) {
+        *self
+            .delegatee_key
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = delegatee_key;
+    }
+
+    /// Acquire exclusive session-key rotation right, recovering across poisoned mutex state so
+    /// two-phase preparation and commit remain infallible and serialized against
+    /// [`Self::set_delegatee_key`].
+    pub(crate) fn lock_delegatee_rotation(&self) -> MutexGuard<'_, ()> {
+        self.delegatee_rotation_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Replace the session key this node signs with, when it carries a valid delegator
     /// signature for the same account DID and strictly advances the signing horizon.
     pub(crate) fn set_delegatee_key(&self, delegatee_key: DelegateeKey) -> Result<()> {
+        let _rotation_guard = self.lock_delegatee_rotation();
         if delegatee_key.delegator_did() != self.dht.did {
             return Err(Error::VerifySignatureFailed);
         }
@@ -581,9 +576,6 @@ impl SwarmTransport {
             crate::swarm::signing_horizon_ms(current.delegation().expires_at_ms());
         if next_horizon <= current_horizon {
             return Err(Error::DelegationExpiresWithinMargin);
-        }
-        if let Ok(signed_ice_servers) = delegatee_key.sign_ice_servers(&self.raw_ice_servers) {
-            self.transport.set_ice_servers(&signed_ice_servers);
         }
         *current = delegatee_key;
         Ok(())
@@ -790,7 +782,7 @@ impl SwarmTransport {
 impl SwarmConnection {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn dummy_generation_id(&self) -> Result<String> {
-        self.connection.dummy_generation_id().map_err(Into::into)
+        rings_transport::connections::dummy_generation_id(&self.connection).map_err(Into::into)
     }
 
     /// Wait for one credit to send a frame on `lane`: the receiver's backpressure, untimed (see
@@ -836,8 +828,8 @@ impl SwarmConnection {
         self.connection.close().await.map_err(Into::into)
     }
 
-    pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.connection.webrtc_connection_state()
+    pub fn connection_state(&self) -> TransportConnectionState {
+        self.connection.connection_state()
     }
 
     #[cfg(all(
@@ -848,7 +840,7 @@ impl SwarmConnection {
     pub(crate) fn physical_close_witness(
         &self,
     ) -> Result<rings_transport::connections::NativePhysicalCloseWitness> {
-        self.connection.physical_close_witness().map_err(Into::into)
+        rings_transport::connections::physical_close_witness(&self.connection).map_err(Into::into)
     }
 
     /// The largest single data-channel message this connection can carry — the negotiated

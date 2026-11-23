@@ -88,15 +88,17 @@ macro_rules! sample_message_body {
     };
 }
 
-sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend {
-    sdp: String::new(),
-    dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
-    relay_custody: RelayCustody::Holds,
-});
-sample_message_body!(ConnectNodeReport, |_fixture| ConnectNodeReport {
-    sdp: String::new(),
-    dht_protocol_mode: DhtProtocolMode::new(1, 1, 1),
-    relay_custody: RelayCustody::Holds,
+sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend::initial_offer(
+    Bytes::new(),
+    DhtProtocolMode::new(1, 1, 1),
+    RelayCustody::Holds,
+));
+sample_message_body!(ConnectNodeReport, |_fixture| {
+    ConnectNodeReport::final_answer(
+        Bytes::new(),
+        DhtProtocolMode::new(1, 1, 1),
+        RelayCustody::Holds,
+    )
 });
 sample_message_body!(FindSuccessorSend, |fixture| FindSuccessorSend {
     did: fixture.did,
@@ -433,7 +435,10 @@ fn test_message_metadata_wire_indices_follow_enum_declaration_order() -> Result<
 fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<()> {
     #[derive(Serialize)]
     struct Flattened {
-        sdp: String,
+        step_index: u8,
+        final_step: bool,
+        session_id: Option<[u8; 16]>,
+        handshake: Bytes,
         network_id: u32,
         storage_redundancy: u16,
         dht_virtual_nodes: u16,
@@ -441,7 +446,10 @@ fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<(
     }
 
     let flattened = Flattened {
-        sdp: "v=0".to_string(),
+        step_index: 1,
+        final_step: true,
+        session_id: Some([7u8; 16]),
+        handshake: Bytes::from_static(b"hs-payload"),
         network_id: 7,
         storage_redundancy: 3,
         dht_virtual_nodes: 160,
@@ -449,12 +457,18 @@ fn test_connect_node_advertisement_encodes_as_its_flattened_fields() -> Result<(
     };
     let mode = DhtProtocolMode::new(7, 3, 160);
     let offer = ConnectNodeSend {
-        sdp: "v=0".to_string(),
+        step_index: 1,
+        final_step: true,
+        session_id: Some([7u8; 16]),
+        handshake: Bytes::from_static(b"hs-payload"),
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     };
     let answer = ConnectNodeReport {
-        sdp: "v=0".to_string(),
+        step_index: 1,
+        final_step: true,
+        session_id: Some([7u8; 16]),
+        handshake: Bytes::from_static(b"hs-payload"),
         dht_protocol_mode: mode,
         relay_custody: RelayCustody::HoldsNone,
     };

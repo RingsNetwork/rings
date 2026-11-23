@@ -87,7 +87,7 @@ const _: () = {
 /// expires, an irrevocable send makes its connection generation terminal before
 /// bounded close cleanup; the lane remains occupied for at most one additional
 /// close interval.
-pub(crate) const DATA_CHANNEL_SEND_ACCEPT_BUDGET: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
+pub(crate) const CHANNEL_SEND_ACCEPT_BUDGET: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
 
 /// Cleanup grace after an outbound payload's admission deadline expires.
 ///

@@ -59,15 +59,15 @@ impl Error {
             | Self::SingleAttemptRefused { .. }
             | Self::ReroutingStopped
             | Self::DetachedPayloadCleanupTimeout { .. }
-            | Self::DataChannelSendCompletionTimeout { .. }
-            | Self::DataChannelDeliveryTimeout { .. }
+            | Self::ChannelSendCompletionTimeout { .. }
+            | Self::ChannelDeliveryTimeout { .. }
             | Self::TrackedPayloadCleanupTimeout { .. }
             | Self::DelegationExpiresWithinMargin => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
             Self::TransportNotReady { state, .. } => matches!(
                 state,
-                rings_transport::core::transport::WebrtcConnectionState::Failed
-                    | rings_transport::core::transport::WebrtcConnectionState::Closed
+                rings_transport::core::transport::TransportConnectionState::Failed
+                    | rings_transport::core::transport::TransportConnectionState::Closed
             ),
             _ => true,
         }

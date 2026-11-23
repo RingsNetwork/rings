@@ -1,6 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
+use bytes::Bytes;
+use rings_transport::core::transport::MAX_HANDSHAKE_STEPS;
+
 use super::handshake::Handshake;
 use super::handshake::OfferPhase;
 use super::PendingConnectionAttempt;
@@ -16,7 +19,7 @@ use crate::error::Result;
 /// one state and cannot be pending, admitting, and active at the same time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
-pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
+pub(in crate::swarm::transport) enum PeerSlotLifecycle {
     Pending {
         attempt: PendingConnectionAttempt,
         started_at_ms: i64,
@@ -31,7 +34,7 @@ pub(in crate::swarm::transport) enum PeerConnectionLifecycle {
     Active { attempt: PendingConnectionAttempt },
 }
 
-impl PeerConnectionLifecycle {
+impl PeerSlotLifecycle {
     pub(in crate::swarm::transport) const fn attempt(self) -> PendingConnectionAttempt {
         match self {
             Self::Pending { attempt, .. }
@@ -70,14 +73,14 @@ impl<T> RetirementOutcome<T> {
 }
 
 pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
-    state: &'state mut PeerConnectionLifecycle,
+    state: &'state mut PeerSlotLifecycle,
     attempt: PendingConnectionAttempt,
 }
 
 impl AdmittingConnection<'_> {
     /// Apply `Admitting(attempt) -> Active(attempt)`.
     pub(in crate::swarm::transport) fn activate(self) {
-        *self.state = PeerConnectionLifecycle::Active {
+        *self.state = PeerSlotLifecycle::Active {
             attempt: self.attempt,
         };
     }
@@ -218,7 +221,7 @@ impl ReservationVerdict {
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
     bounds: LifecycleBounds,
     next_generation: u64,
-    peers: BTreeMap<Did, PeerConnectionLifecycle>,
+    peers: BTreeMap<Did, PeerSlotLifecycle>,
     /// The signaling state of every pending record (`Invariant (Signaling)`).
     handshakes: BTreeMap<Did, Handshake>,
     send_terminal: BTreeSet<PendingConnectionAttempt>,
@@ -317,11 +320,10 @@ impl ConnectionLifecycleRegistry {
         handshake: Handshake,
     ) {
         self.handshakes.insert(attempt.peer, handshake);
-        self.peers
-            .insert(attempt.peer, PeerConnectionLifecycle::Pending {
-                attempt,
-                started_at_ms: now_ms,
-            });
+        self.peers.insert(attempt.peer, PeerSlotLifecycle::Pending {
+            attempt,
+            started_at_ms: now_ms,
+        });
     }
 
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
@@ -357,7 +359,7 @@ impl ConnectionLifecycleRegistry {
         self.bounds = bounds;
     }
 
-    pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerConnectionLifecycle> {
+    pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerSlotLifecycle> {
         self.peers.get(&peer).copied()
     }
 
@@ -366,9 +368,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Admitting { .. })
-            | Some(PeerConnectionLifecycle::Active { .. })
+            Some(PeerSlotLifecycle::Pending { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Admitting { .. })
+            | Some(PeerSlotLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -378,9 +380,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Pending { attempt, .. })
-            | Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Active { .. }) | None => None,
+            Some(PeerSlotLifecycle::Pending { attempt, .. })
+            | Some(PeerSlotLifecycle::Admitting { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Active { .. }) | None => None,
         }
     }
 
@@ -390,9 +392,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Admitting { attempt, .. }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Pending { .. })
-            | Some(PeerConnectionLifecycle::Active { .. })
+            Some(PeerSlotLifecycle::Admitting { attempt, .. }) => Some(attempt),
+            Some(PeerSlotLifecycle::Pending { .. })
+            | Some(PeerSlotLifecycle::Active { .. })
             | None => None,
         }
     }
@@ -402,9 +404,9 @@ impl ConnectionLifecycleRegistry {
         peer: Did,
     ) -> Option<PendingConnectionAttempt> {
         match self.state(peer) {
-            Some(PeerConnectionLifecycle::Active { attempt }) => Some(attempt),
-            Some(PeerConnectionLifecycle::Pending { .. })
-            | Some(PeerConnectionLifecycle::Admitting { .. })
+            Some(PeerSlotLifecycle::Active { attempt }) => Some(attempt),
+            Some(PeerSlotLifecycle::Pending { .. })
+            | Some(PeerSlotLifecycle::Admitting { .. })
             | None => None,
         }
     }
@@ -451,14 +453,13 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active { attempt }
+                    PeerSlotLifecycle::Active { attempt }
                         if !self.send_terminal.contains(attempt) =>
                     {
                         Some((*peer, *attempt))
                     }
-                    PeerConnectionLifecycle::Active { .. } => None,
-                    PeerConnectionLifecycle::Pending { .. }
-                    | PeerConnectionLifecycle::Admitting { .. } => None,
+                    PeerSlotLifecycle::Active { .. } => None,
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. } => None,
                 })
                 .collect(),
         }
@@ -470,9 +471,8 @@ impl ConnectionLifecycleRegistry {
                 .peers
                 .iter()
                 .filter_map(|(peer, state)| match state {
-                    PeerConnectionLifecycle::Active { attempt } => Some((*peer, *attempt)),
-                    PeerConnectionLifecycle::Pending { .. }
-                    | PeerConnectionLifecycle::Admitting { .. } => None,
+                    PeerSlotLifecycle::Active { attempt } => Some((*peer, *attempt)),
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. } => None,
                 })
                 .collect(),
         }
@@ -486,7 +486,7 @@ impl ConnectionLifecycleRegistry {
         let Some(state) = self.peers.get_mut(&attempt.peer) else {
             return false;
         };
-        let PeerConnectionLifecycle::Pending {
+        let PeerSlotLifecycle::Pending {
             attempt: current,
             started_at_ms,
         } = *state
@@ -496,7 +496,7 @@ impl ConnectionLifecycleRegistry {
         if current != attempt {
             return false;
         }
-        *state = PeerConnectionLifecycle::Admitting {
+        *state = PeerSlotLifecycle::Admitting {
             attempt,
             started_at_ms,
         };
@@ -511,7 +511,7 @@ impl ConnectionLifecycleRegistry {
         let state = self.peers.get_mut(&attempt.peer)?;
         if !matches!(
             *state,
-            PeerConnectionLifecycle::Admitting {
+            PeerSlotLifecycle::Admitting {
                 attempt: current,
                 ..
             } if current == attempt
@@ -555,7 +555,7 @@ impl ConnectionLifecycleRegistry {
             return Ok(None);
         }
         let answering = self.next_attempt(attempt.peer)?;
-        self.insert_pending(answering, now_ms, Handshake::Answering);
+        self.insert_pending(answering, now_ms, Handshake::answering());
         Ok(Some(answering))
     }
 
@@ -566,7 +566,7 @@ impl ConnectionLifecycleRegistry {
     ) -> bool {
         if !matches!(
             self.state(attempt.peer),
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt: current,
                 ..
             }) if current == attempt
@@ -642,15 +642,15 @@ impl ConnectionLifecycleRegistry {
             .values()
             .filter_map(|state| {
                 let (attempt, started_at_ms, phase) = match state {
-                    PeerConnectionLifecycle::Pending {
+                    PeerSlotLifecycle::Pending {
                         attempt,
                         started_at_ms,
                     } => (attempt, started_at_ms, UnadmittedPhase::Pending),
-                    PeerConnectionLifecycle::Admitting {
+                    PeerSlotLifecycle::Admitting {
                         attempt,
                         started_at_ms,
                     } => (attempt, started_at_ms, UnadmittedPhase::Admitting),
-                    PeerConnectionLifecycle::Active { .. } => return None,
+                    PeerSlotLifecycle::Active { .. } => return None,
                 };
                 let age_ms = now_ms.saturating_sub(*started_at_ms);
                 let was_offering =
@@ -707,12 +707,71 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
-    /// Apply `Offering(o, Creating) -> Offering(o, Sent(sdp, tx_id))`.
+    /// Apply `Offering(o, Creating) -> Offering(o, Sent(0, final_step, bytes, tx_id, sid))` for
+    /// step `0` (including 1-step `final_step == true`, which stays in `Sent(0)` so crossing
+    /// 1-step offers resolve via `Law (Tie-break)`), or advance a claimed multi-round continuation
+    /// `Offering(o, ClaimedReply(2k, sid)) -> Offering(o, Sent(2k, false, ..))` / `Answered`.
     pub(in crate::swarm::transport) fn mark_offer_sent(
         &mut self,
         attempt: PendingConnectionAttempt,
-        sdp: String,
+        step_index: u8,
+        final_step: bool,
+        handshake: Bytes,
         tx_id: uuid::Uuid,
+        session_id: Option<[u8; 16]>,
+    ) -> bool {
+        if step_index >= MAX_HANDSHAKE_STEPS || !step_index.is_multiple_of(2) {
+            return false;
+        }
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Offering {
+                owner,
+                phase: OfferPhase::Creating,
+            } if step_index == 0 => Some(Handshake::Offering {
+                owner: *owner,
+                phase: OfferPhase::Sent {
+                    step_index: 0,
+                    final_step,
+                    handshake,
+                    tx_id,
+                    session_id,
+                },
+            }),
+            Handshake::Offering {
+                owner,
+                phase:
+                    OfferPhase::ClaimedReply {
+                        next_step_index,
+                        session_id: expected_sid,
+                    },
+            } if step_index == *next_step_index && session_id == Some(*expected_sid) => {
+                if final_step {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Answered,
+                    })
+                } else {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Sent {
+                            step_index,
+                            final_step: false,
+                            handshake,
+                            tx_id,
+                            session_id,
+                        },
+                    })
+                }
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Apply `Offering(o, Creating) -> Offering(o, Answered)` when a 0-step initiator completes
+    /// locally with no outbound signaling message.
+    pub(in crate::swarm::transport) fn mark_zero_step_completed(
+        &mut self,
+        attempt: PendingConnectionAttempt,
     ) -> bool {
         self.advance_handshake(attempt, |current| match current {
             Handshake::Offering {
@@ -720,55 +779,138 @@ impl ConnectionLifecycleRegistry {
                 phase: OfferPhase::Creating,
             } => Some(Handshake::Offering {
                 owner: *owner,
-                phase: OfferPhase::Sent { sdp, tx_id },
+                phase: OfferPhase::Answered,
             }),
-            Handshake::Offering { .. } | Handshake::Answering => None,
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
 
-    /// Apply `Offering(o, Sent(_, t)) -> Offering(o, Answered)` for an answer echoing `t`
-    /// (`tx_id = Some(t)`); an answer carried out of band (`tx_id = None`) also accepts an
-    /// offer still `Creating`, whose owner holds it.
-    pub(in crate::swarm::transport) fn mark_offer_answered(
+    /// Atomically validate and claim an inbound `ConnectNodeReport` (`report_step_index`,
+    /// `report_final`, `report_session_id`) on `attempt`:
+    /// - Requires `Handshake::Offering` in `OfferPhase::Sent { final_step: false, .. }` (never
+    ///   matches `Answering`, `ClaimedReply`, `Answered`, or a 1-step `final_step: true` offer);
+    /// - Requires `tx_id` (when `Some`) to match the sent transaction, `report_step_index ==
+    ///   sent_step + 1`, and any established `session_id` to match;
+    /// - Transitions to `OfferPhase::Answered` when `report_final` is `true`, or to
+    ///   `OfferPhase::ClaimedReply { next_step_index: report_step_index + 1, session_id }` when
+    ///   `report_final` is `false`.
+    pub(in crate::swarm::transport) fn claim_offer_reply(
         &mut self,
         attempt: PendingConnectionAttempt,
         tx_id: Option<uuid::Uuid>,
+        report_step_index: u8,
+        report_final: bool,
+        report_session_id: Option<[u8; 16]>,
     ) -> bool {
         self.advance_handshake(attempt, |current| match current {
             Handshake::Offering {
                 owner,
-                phase: OfferPhase::Sent { tx_id: sent, .. },
-            } if tx_id.is_none_or(|tx_id| tx_id == *sent) => Some(Handshake::Offering {
-                owner: *owner,
-                phase: OfferPhase::Answered,
-            }),
-            Handshake::Offering {
-                owner,
-                phase: OfferPhase::Creating,
-            } if tx_id.is_none() => Some(Handshake::Offering {
-                owner: *owner,
-                phase: OfferPhase::Answered,
-            }),
-            Handshake::Offering { .. } | Handshake::Answering => None,
+                phase:
+                    OfferPhase::Sent {
+                        step_index,
+                        final_step: false,
+                        tx_id: sent,
+                        session_id: sent_sid,
+                        ..
+                    },
+            } if tx_id.is_none_or(|expected_tx| expected_tx == *sent)
+                && report_step_index == step_index.saturating_add(1)
+                && sent_sid.is_none_or(|sid| report_session_id == Some(sid)) =>
+            {
+                if report_final {
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::Answered,
+                    })
+                } else {
+                    let sid = report_session_id?;
+                    let next_step_index = report_step_index.saturating_add(1);
+                    if next_step_index >= MAX_HANDSHAKE_STEPS {
+                        return None;
+                    }
+                    Some(Handshake::Offering {
+                        owner: *owner,
+                        phase: OfferPhase::ClaimedReply {
+                            next_step_index,
+                            session_id: sid,
+                        },
+                    })
+                }
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
         })
     }
 
-    /// The pending generation of `peer` whose sent, unanswered offer left under `tx_id`: the
-    /// only generation an answer echoing `tx_id` may be applied to.
+    /// Record that responder generation `attempt` sent a non-final odd step and now awaits even
+    /// initiator continuation `expected_step` under `session_id`.
+    pub(in crate::swarm::transport) fn set_answering_awaiting_step(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+        expected_step: u8,
+        session_id: [u8; 16],
+    ) -> bool {
+        if expected_step == 0
+            || !expected_step.is_multiple_of(2)
+            || expected_step >= MAX_HANDSHAKE_STEPS
+        {
+            return false;
+        }
+        self.advance_handshake(attempt, |current| match current {
+            Handshake::Answering {
+                awaiting_step: None,
+            } => Some(Handshake::Answering {
+                awaiting_step: Some((expected_step, session_id)),
+            }),
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        })
+    }
+
+    /// Atomically claim the responder generation for `peer` awaiting even continuation step
+    /// `step_index` with `session_id`, clearing `awaiting_step` so duplicate continuations cannot
+    /// race.
+    pub(in crate::swarm::transport) fn claim_answering_continuation(
+        &mut self,
+        peer: Did,
+        step_index: u8,
+        session_id: [u8; 16],
+    ) -> Option<PendingConnectionAttempt> {
+        let attempt = self.pending_attempt(peer)?;
+        let claimed = self.advance_handshake(attempt, |current| match current {
+            Handshake::Answering {
+                awaiting_step: Some((expected_step, expected_sid)),
+            } if *expected_step == step_index && *expected_sid == session_id => {
+                Some(Handshake::Answering {
+                    awaiting_step: None,
+                })
+            }
+            Handshake::Offering { .. } | Handshake::Answering { .. } => None,
+        });
+        claimed.then_some(attempt)
+    }
+
+    /// The pending generation of `peer` (along with the outbound `step_index` and optional
+    /// `session_id`) whose sent, unanswered step left under `tx_id`: the only generation a
+    /// `ConnectNodeReport` echoing `tx_id` may be applied to.
     pub(in crate::swarm::transport) fn offer_sent_under(
         &self,
         peer: Did,
         tx_id: uuid::Uuid,
-    ) -> Option<PendingConnectionAttempt> {
+    ) -> Option<(PendingConnectionAttempt, u8, Option<[u8; 16]>)> {
         let attempt = self.pending_attempt(peer)?;
-        matches!(
-            self.handshakes.get(&peer),
+        match self.handshakes.get(&peer) {
             Some(Handshake::Offering {
-                phase: OfferPhase::Sent { tx_id: sent, .. },
+                phase:
+                    OfferPhase::Sent {
+                        step_index,
+                        final_step: false,
+                        tx_id: sent,
+                        session_id,
+                        ..
+                    },
                 ..
-            }) if *sent == tx_id
-        )
-        .then_some(attempt)
+            }) if *sent == tx_id => Some((attempt, *step_index, *session_id)),
+            _ => None,
+        }
     }
 
     /// Whether another handshake took `attempt`'s slot: the slot holds another generation
@@ -781,20 +923,20 @@ impl ConnectionLifecycleRegistry {
         attempt: PendingConnectionAttempt,
     ) -> bool {
         match self.state(attempt.peer) {
-            Some(PeerConnectionLifecycle::Pending {
+            Some(PeerSlotLifecycle::Pending {
                 attempt: current, ..
             }) => {
                 current != attempt
                     && matches!(
                         self.handshakes.get(&attempt.peer),
-                        Some(Handshake::Answering)
+                        Some(Handshake::Answering { .. })
                     )
             }
             Some(
-                PeerConnectionLifecycle::Admitting {
+                PeerSlotLifecycle::Admitting {
                     attempt: current, ..
                 }
-                | PeerConnectionLifecycle::Active {
+                | PeerSlotLifecycle::Active {
                     attempt: current, ..
                 },
             ) => current != attempt,
@@ -809,8 +951,7 @@ impl ConnectionLifecycleRegistry {
             .filter(|state| {
                 matches!(
                     state,
-                    PeerConnectionLifecycle::Pending { .. }
-                        | PeerConnectionLifecycle::Admitting { .. }
+                    PeerSlotLifecycle::Pending { .. } | PeerSlotLifecycle::Admitting { .. }
                 )
             })
             .count()

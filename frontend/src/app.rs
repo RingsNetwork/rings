@@ -42,7 +42,9 @@ use crate::workbench;
 mod actions;
 mod routes;
 
-const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
+pub(crate) const DEFAULT_ICE_SERVERS: &str = "";
+pub(crate) const LEGACY_DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+pub(crate) const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
 const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
 
 #[derive(Clone, PartialEq)]
@@ -160,13 +162,7 @@ fn use_node_state() -> NodeState {
                 "1",
             )
         }),
-        ice_servers: use_state(|| {
-            load_setting_or_default(
-                extension::SETTING_ICE_SERVERS,
-                extension::LEGACY_SETTING_ICE_SERVERS,
-                "stun://stun.l.google.com:19302",
-            )
-        }),
+        ice_servers: use_state(load_ice_servers_setting_or_default),
         stabilize_interval: use_state(load_stabilize_interval_setting_or_default),
         storage_name: use_state(|| {
             load_setting_or_default(
@@ -249,6 +245,20 @@ fn initial_wallet_kind() -> WalletKind {
 
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
+}
+
+fn load_ice_servers_setting_or_default() -> String {
+    match extension::load_setting_with_legacy(
+        extension::SETTING_ICE_SERVERS,
+        extension::LEGACY_SETTING_ICE_SERVERS,
+    ) {
+        Some(value) if value.trim() == LEGACY_DEFAULT_ICE_SERVERS => {
+            extension::save_setting(extension::SETTING_ICE_SERVERS, DEFAULT_ICE_SERVERS);
+            DEFAULT_ICE_SERVERS.to_string()
+        }
+        Some(value) => value,
+        None => DEFAULT_ICE_SERVERS.to_string(),
+    }
 }
 
 fn load_stabilize_interval_setting_or_default() -> String {
@@ -419,6 +429,11 @@ fn refresh_peer_snapshot(
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(next) = node::list_peers(&node.provider).await {
             if refresh_token.is_current() {
+                if let Some(updated) =
+                    crate::peer_sync::refresh_waiting_peer_status(&status, next.len())
+                {
+                    status.set(updated);
+                }
                 peers.set(next);
             }
         }
@@ -793,5 +808,21 @@ mod tests {
     fn test_browser_webview_uses_the_local_gateway_witness() {
         assert!(!webview_gateway_ready(false, "did:ring:online", false));
         assert!(webview_gateway_ready(false, "", true));
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_ice_servers_migrates_legacy_default_and_preserves_custom_values() {
+        extension::save_setting(extension::SETTING_ICE_SERVERS, LEGACY_DEFAULT_ICE_SERVERS);
+        assert_eq!(load_ice_servers_setting_or_default(), DEFAULT_ICE_SERVERS);
+        assert_eq!(
+            extension::load_setting(extension::SETTING_ICE_SERVERS).as_deref(),
+            Some(DEFAULT_ICE_SERVERS)
+        );
+
+        let custom = "turn://turn.example.com:3478";
+        extension::save_setting(extension::SETTING_ICE_SERVERS, custom);
+        assert_eq!(load_ice_servers_setting_or_default(), custom);
+        extension::save_setting(extension::SETTING_ICE_SERVERS, DEFAULT_ICE_SERVERS);
     }
 }

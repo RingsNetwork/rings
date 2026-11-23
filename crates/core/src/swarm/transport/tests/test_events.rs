@@ -9,7 +9,7 @@ use crate::swarm::application::SwarmEvent;
 async fn close(pending: &PendingPeer) -> Result<()> {
     pending
         .callback
-        .on_peer_connection_state_change(&pending.peer.to_string(), WebrtcConnectionState::Closed)
+        .on_connection_state_change(&pending.peer.to_string(), TransportConnectionState::Closed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))
 }
@@ -76,7 +76,7 @@ async fn test_a_callback_holds_its_transport_only_weakly() -> Result<()> {
         "the callback or its inbound actor holds its transport"
     );
     callback
-        .on_data_channel_open(&SecretKey::random().address().to_string())
+        .on_channel_open(&SecretKey::random().address().to_string())
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     Ok(())
@@ -89,15 +89,15 @@ async fn test_local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
     let local_cid = transport.dht.did.to_string();
 
     callback
-        .on_data_channel_open(&local_cid)
+        .on_channel_open(&local_cid)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     callback
-        .on_peer_connection_state_change(&local_cid, WebrtcConnectionState::Closed)
+        .on_connection_state_change(&local_cid, TransportConnectionState::Closed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     callback
-        .on_data_channel_close(&local_cid)
+        .on_channel_close(&local_cid)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -119,7 +119,7 @@ async fn test_mismatched_pending_callback_cancels_attempt_without_admission() ->
     let local_cid = transport.dht.did.to_string();
 
     mismatched_callback
-        .on_data_channel_open(&local_cid)
+        .on_channel_open(&local_cid)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -141,7 +141,7 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
         .with_pending_connection_attempt(old_attempt);
 
     late_callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
+        .on_connection_state_change(&peer.to_string(), TransportConnectionState::Closed)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -153,11 +153,11 @@ async fn test_late_terminal_callback_cannot_remove_replacement_active_slot() -> 
 #[test]
 fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = TransportSpec::default().build()?;
-    let matching = ConnectNodeSend {
-        sdp: String::new(),
-        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
-        relay_custody: RelayCustody::Holds,
-    };
+    let matching = ConnectNodeSend::initial_offer(
+        bytes::Bytes::new(),
+        DhtProtocolMode::new(0, 1, 0),
+        RelayCustody::Holds,
+    );
     let mismatched_redundancy = ConnectNodeSend {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()
@@ -171,11 +171,11 @@ fn test_connection_offer_protocol_mode_includes_storage_redundancy() -> Result<(
 #[test]
 fn test_connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = TransportSpec::default().build()?;
-    let matching = ConnectNodeReport {
-        sdp: String::new(),
-        dht_protocol_mode: DhtProtocolMode::new(0, 1, 0),
-        relay_custody: RelayCustody::Holds,
-    };
+    let matching = ConnectNodeReport::final_answer(
+        bytes::Bytes::new(),
+        DhtProtocolMode::new(0, 1, 0),
+        RelayCustody::Holds,
+    );
     let mismatched_redundancy = ConnectNodeReport {
         dht_protocol_mode: DhtProtocolMode::new(0, 2, 0),
         ..matching.clone()

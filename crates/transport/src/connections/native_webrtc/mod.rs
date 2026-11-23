@@ -1,3 +1,4 @@
+use std::any::Any;
 use std::future::Future;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU8;
@@ -36,23 +37,24 @@ use crate::callback::link_credit::LANE_IDLE_PERIOD;
 use crate::callback::link_send::FrameSink;
 use crate::callback::InnerTransportCallback;
 use crate::callback::NodeFramePool;
+use crate::connection_pool::Pool;
 use crate::connection_ref::ConnectionRef;
+use crate::connections::NativePhysicalCloseWitness;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::credit::CreditIndex;
 use crate::core::pool::ChannelLane;
 use crate::core::pool::ChannelPool;
 use crate::core::pool::LanePool;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
-use crate::core::sdp::split_sdp_remote_candidates;
-use crate::core::transport::effective_max_message_size;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::HandshakeStep;
 use crate::core::transport::SendPermit;
+use crate::core::transport::TransportConnectionState;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
-use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::CONNECTION_RETIRE_TIMEOUT as NATIVE_CONNECTION_RETIRE_TIMEOUT;
 use crate::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT as NATIVE_SEND_COMPLETION_TIMEOUT;
 use crate::delivery::tracker::BufferedChannel;
@@ -62,12 +64,14 @@ use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
+use crate::ice_server::parse_ice_servers_strict;
 use crate::ice_server::IceServer;
+use crate::network_config::UdpPortRange;
 use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
-use crate::pool::Pool;
+use crate::sdp::effective_max_message_size;
+use crate::sdp::split_sdp_remote_candidates;
 use crate::sync_utils::lock_recover;
-use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod close_actor;
 mod host_candidates;
@@ -104,7 +108,7 @@ use turn_tcp::TurnTcpBridgeGuard;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
-/// Delay before the responder starts outbound ICE connectivity checks in [`WebrtcConnection::webrtc_answer_offer`]
+/// Delay before the responder starts outbound ICE connectivity checks in [`WebrtcConnection::answer_offer`]
 /// after local candidate gathering finishes, giving the out-of-band HTTP `answerOffer` response
 /// (~300–350 ms RTT) time to reach the browser and apply `setRemoteDescription(answer)` before the
 /// seed's UDP STUN Binding Requests hit the client router's NAT port (#1290).
@@ -250,15 +254,49 @@ impl ChannelPool<TrackedChannel> {
 #[cfg(test)]
 mod test_send_cancellation;
 
+const HANDSHAKE_ROLE_FRESH: u8 = 0;
+const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
+const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+const HANDSHAKE_ROLE_FAILED: u8 = 4;
+
+struct HandshakeRoleGuard<'a> {
+    role: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> HandshakeRoleGuard<'a> {
+    fn new(role: &'a AtomicU8) -> Self {
+        Self {
+            role,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, next_role: u8) {
+        self.role.store(next_role, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for HandshakeRoleGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.role.store(HANDSHAKE_ROLE_FAILED, Ordering::Release);
+        }
+    }
+}
+
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
     configured_ice_servers: std::sync::RwLock<Vec<IceServer>>,
-    transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
+    transport_ice_state: Arc<std::sync::RwLock<(String, Vec<IceServer>)>>,
     external_address: Option<String>,
-    udp_port_range: Option<WebrtcUdpPortRange>,
+    udp_port_range: Option<UdpPortRange>,
     negotiation_started: AtomicBool,
+    handshake_role: AtomicU8,
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
@@ -356,9 +394,7 @@ impl PhysicalCloseCompletion {
 
     /// Subscribe a read-only witness to this cell.
     fn witness(&self) -> NativePhysicalCloseWitness {
-        NativePhysicalCloseWitness {
-            completed: self.0.completed.subscribe(),
-        }
+        NativePhysicalCloseWitness::new(self.0.completed.subscribe())
     }
 
     /// Run `close` at most once for this connection generation and await the shared outcome.
@@ -418,44 +454,22 @@ impl PhysicalCloseCompletion {
     }
 }
 
-/// Stable observation that the native peer connection's close future completed successfully.
-#[derive(Clone)]
-pub struct NativePhysicalCloseWitness {
-    completed: watch::Receiver<bool>,
-}
-
-impl NativePhysicalCloseWitness {
-    /// Return true only after the underlying `RTCPeerConnection::close()` future succeeds.
-    pub fn is_complete(&self) -> bool {
-        *self.completed.borrow()
-    }
-
-    /// Await the close outcome: `true` once `RTCPeerConnection::close()` has succeeded, `false`
-    /// once every holder of the connection released it without a successful close.
-    ///
-    /// This is supported API: the awaitable form of [`Self::is_complete`] for any caller that
-    /// must act after the physical close, rather than polling for it.
-    ///
-    /// Law (no lost wake-up): `wait_for` tests the stored value before it suspends, and the
-    /// value is monotone (`false → true` only), so a publication that precedes this call is
-    /// observed as readily as one that follows it.
-    pub async fn completed(mut self) -> bool {
-        self.completed
-            .wait_for(|completed| *completed)
-            .await
-            .is_ok()
-    }
-}
-
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
 /// provides methods to create, get and close connections.
+///
+/// Both the raw credential string and its parsed [`IceServer`] list live inside a single
+/// [`std::sync::RwLock`] so concurrent readers never observe torn `(raw, parsed)` state across a
+/// credential rotation.
 pub struct WebrtcTransport {
-    ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
+    ice_state: Arc<std::sync::RwLock<(String, Vec<IceServer>)>>,
     external_address: Option<String>,
-    udp_port_range: Option<WebrtcUdpPortRange>,
+    udp_port_range: Option<UdpPortRange>,
     pool: Pool<WebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
+    /// Captured Tokio runtime handle used when [`Self::commit_prepared_ice_servers`] is called
+    /// from an external non-Tokio thread (such as a synchronous FFI caller).
+    runtime_handle: std::sync::RwLock<Option<tokio::runtime::Handle>>,
 }
 
 impl WebrtcConnection {
@@ -463,9 +477,9 @@ impl WebrtcConnection {
     fn new(
         webrtc_conn: RTCPeerConnection,
         configured_ice_servers: Vec<IceServer>,
-        transport_ice_servers: Arc<std::sync::RwLock<Vec<IceServer>>>,
+        transport_ice_state: Arc<std::sync::RwLock<(String, Vec<IceServer>)>>,
         external_address: Option<String>,
-        udp_port_range: Option<WebrtcUdpPortRange>,
+        udp_port_range: Option<UdpPortRange>,
         webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
@@ -479,10 +493,11 @@ impl WebrtcConnection {
         Self {
             webrtc_conn: Arc::new(std::sync::RwLock::new(Arc::new(webrtc_conn))),
             configured_ice_servers: std::sync::RwLock::new(configured_ice_servers),
-            transport_ice_servers,
+            transport_ice_state,
             external_address,
             udp_port_range,
             negotiation_started: AtomicBool::new(false),
+            handshake_role: AtomicU8::new(HANDSHAKE_ROLE_FRESH),
             reconfigure_lock: Arc::new(Mutex::new(())),
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
@@ -513,15 +528,16 @@ impl WebrtcConnection {
 
     async fn refresh_ice_servers_locked(&self) -> Result<()> {
         if self.cancel_token.is_cancelled()
-            || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
+            || self.connection_state.snapshot().state() == TransportConnectionState::Closed
         {
             return Ok(());
         }
 
         let desired = self
-            .transport_ice_servers
+            .transport_ice_state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1
             .clone();
         let already_configured = *self
             .configured_ice_servers
@@ -536,7 +552,7 @@ impl WebrtcConnection {
         let is_unnegotiated = !self.negotiation_started.load(Ordering::Acquire)
             && current_conn.local_description().await.is_none()
             && current_conn.remote_description().await.is_none()
-            && self.connection_state.snapshot().webrtc() == WebrtcConnectionState::New;
+            && self.connection_state.snapshot().state() == TransportConnectionState::New;
 
         if is_unnegotiated {
             let (new_webrtc_conn, new_extra_host_candidates, new_turn_tcp_bridge) =
@@ -560,7 +576,7 @@ impl WebrtcConnection {
             )
             .await?;
             if self.cancel_token.is_cancelled()
-                || self.connection_state.snapshot().webrtc() == WebrtcConnectionState::Closed
+                || self.connection_state.snapshot().state() == TransportConnectionState::Closed
             {
                 drop(new_turn_tcp_bridge);
                 new_webrtc_conn.on_peer_connection_state_change(Box::new(|_| Box::pin(async {})));
@@ -625,7 +641,9 @@ impl WebrtcConnection {
         Ok(())
     }
 
-    pub(crate) fn physical_close_witness(&self) -> NativePhysicalCloseWitness {
+    /// Subscribe a monotone [`NativePhysicalCloseWitness`] that resolves once the underlying
+    /// `RTCPeerConnection::close()` future succeeds.
+    pub fn physical_close_witness(&self) -> NativePhysicalCloseWitness {
         self.physical_close_completed.witness()
     }
 
@@ -657,11 +675,11 @@ impl WebrtcConnection {
 
         tokio::select! {
             _ = self.cancel_token.cancelled() => {
-                return Err(Error::WebrtcLocalSdpGenerationError("Local connection closed".to_string()))
+                return Err(Error::LocalHandshakeGenerationError("Local connection closed".to_string()))
             }
             result = gathering_complete_promise_with_timeout => {
                 if result.is_err() {
-                    return Err(Error::WebrtcLocalSdpGenerationError(format!(
+                    return Err(Error::LocalHandshakeGenerationError(format!(
                         "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
                     )));
                 }
@@ -672,7 +690,7 @@ impl WebrtcConnection {
             .webrtc_conn()
             .local_description()
             .await
-            .ok_or(Error::WebrtcLocalSdpGenerationError(
+            .ok_or(Error::LocalHandshakeGenerationError(
                 "Failed to get local description".to_string(),
             ))?
             .sdp;
@@ -702,21 +720,45 @@ impl WebrtcConnection {
 }
 
 impl WebrtcTransport {
-    /// Create a new [WebrtcTransport] instance.
+    /// Create a new [WebrtcTransport] instance, logging and ignoring invalid ICE configuration.
     pub fn new(
         ice_servers: &str,
         external_address: Option<String>,
-        udp_port_range: Option<WebrtcUdpPortRange>,
+        udp_port_range: Option<UdpPortRange>,
     ) -> Self {
-        let ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
+        let parsed_ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
 
         Self {
-            ice_servers: Arc::new(std::sync::RwLock::new(ice_servers)),
+            ice_state: Arc::new(std::sync::RwLock::new((
+                ice_servers.to_string(),
+                parsed_ice_servers,
+            ))),
             external_address,
             udp_port_range,
             pool: Pool::new(),
             frame_pool: NodeFramePool::new(),
+            runtime_handle: std::sync::RwLock::new(tokio::runtime::Handle::try_current().ok()),
         }
+    }
+
+    /// Create a new [WebrtcTransport] instance, failing closed when `ice_servers` is malformed.
+    pub fn new_strict(
+        ice_servers: &str,
+        external_address: Option<String>,
+        udp_port_range: Option<UdpPortRange>,
+    ) -> Result<Self> {
+        let parsed_ice_servers = parse_ice_servers_strict(ice_servers)?;
+        Ok(Self {
+            ice_state: Arc::new(std::sync::RwLock::new((
+                ice_servers.to_string(),
+                parsed_ice_servers,
+            ))),
+            external_address,
+            udp_port_range,
+            pool: Pool::new(),
+            frame_pool: NodeFramePool::new(),
+            runtime_handle: std::sync::RwLock::new(tokio::runtime::Handle::try_current().ok()),
+        })
     }
 
     /// Replace the ICE server list used for subsequent peer connections and update active
@@ -724,14 +766,34 @@ impl WebrtcTransport {
     /// pick up renewed credentials, or updating negotiated connections via `set_configuration`).
     pub fn set_ice_servers(&self, ice_servers: &str) {
         let parsed = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+    }
+
+    /// Strictly validate and replace the ICE server list, returning [`Error::IceServer`] without
+    /// mutating state if `ice_servers` is malformed.
+    pub fn try_set_ice_servers(&self, ice_servers: &str) -> Result<()> {
+        let parsed = parse_ice_servers_strict(ice_servers)?;
+        self.commit_prepared_ice_servers(ice_servers.to_string(), parsed);
+        Ok(())
+    }
+
+    /// Atomically commit a pre-validated `(raw_credentials, parsed_ice_servers)` pair under a
+    /// single write lock and trigger asynchronous refresh on active connections.
+    pub fn commit_prepared_ice_servers(&self, raw: String, parsed: Vec<IceServer>) {
         *self
-            .ice_servers
+            .ice_state
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = parsed;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (raw, parsed);
 
         let active_connections = self.pool.connections();
         if !active_connections.is_empty() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let maybe_runtime = tokio::runtime::Handle::try_current().ok().or_else(|| {
+                self.runtime_handle
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            });
+            if let Some(runtime) = maybe_runtime {
                 for conn in active_connections {
                     runtime.spawn(async move {
                         if let Err(error) = conn.refresh_ice_servers().await {
@@ -745,11 +807,20 @@ impl WebrtcTransport {
             }
         }
     }
+
+    /// Return the currently committed raw session credential / ICE server string.
+    pub fn session_credentials(&self) -> String {
+        self.ice_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+            .clone()
+    }
 }
 
-fn ephemeral_udp_for_range(range: WebrtcUdpPortRange) -> Result<EphemeralUDP> {
+fn ephemeral_udp_for_range(range: UdpPortRange) -> Result<EphemeralUDP> {
     EphemeralUDP::new(range.min(), range.max()).map_err(|e| {
-        Error::WebrtcUdpPortRange(format!(
+        Error::UdpPortRange(format!(
             "min={}, max={}, reason={e}",
             range.min(),
             range.max()
@@ -759,7 +830,7 @@ fn ephemeral_udp_for_range(range: WebrtcUdpPortRange) -> Result<EphemeralUDP> {
 
 fn set_udp_network_range(
     setting: &mut webrtc::api::setting_engine::SettingEngine,
-    range: Option<WebrtcUdpPortRange>,
+    range: Option<UdpPortRange>,
 ) -> Result<()> {
     if let Some(range) = range {
         setting.set_udp_network(UDPNetwork::Ephemeral(ephemeral_udp_for_range(range)?));
@@ -776,9 +847,10 @@ async fn create_peer_connection(
     Option<TurnTcpBridgeGuard>,
 )> {
     let ice_servers = transport
-        .ice_servers
+        .ice_state
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .1
         .clone();
     let (connection, sdp_extra_host_candidates, turn_tcp_bridge) =
         create_peer_connection_with_config(
@@ -798,7 +870,7 @@ async fn create_peer_connection(
 async fn create_peer_connection_with_config(
     ice_servers: &[IceServer],
     external_address: Option<&str>,
-    udp_port_range: Option<WebrtcUdpPortRange>,
+    udp_port_range: Option<UdpPortRange>,
 ) -> Result<(RTCPeerConnection, Vec<String>, Option<TurnTcpBridgeGuard>)> {
     let prepared = prepare_native_ice_config(ice_servers).await?;
     let is_relay_only = prepared.vnet.is_some();
@@ -886,22 +958,8 @@ impl FrameSink for WebrtcConnection {
     }
 }
 
-#[async_trait]
-impl ConnectionInterface for WebrtcConnection {
-    type Sdp = String;
-    type Error = Error;
-
-    delegate_to_callback!();
-
-    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
-        self.connection_state.snapshot()
-    }
-
-    fn max_message_size(&self) -> usize {
-        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
-    }
-
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
+impl WebrtcConnection {
+    async fn create_offer_sdp(&self) -> Result<String> {
         let gathering_complete_promise = {
             let _guard = self.reconfigure_lock.lock().await;
             self.refresh_ice_servers_locked().await?;
@@ -918,8 +976,8 @@ impl ConnectionInterface for WebrtcConnection {
         self.webrtc_gather(gathering_complete_promise).await
     }
 
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
-        tracing::debug!("webrtc_answer_offer, offer: {offer:?}");
+    async fn answer_offer_sdp(&self, offer: String) -> Result<String> {
+        tracing::debug!("answer_offer, offer: {offer:?}");
         // Read the negotiated limit from the SDP text, but record it only after the *whole* answer
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
@@ -951,8 +1009,8 @@ impl ConnectionInterface for WebrtcConnection {
         Ok(local_sdp)
     }
 
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
-        tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
+    async fn accept_answer_sdp(&self, answer: String) -> Result<()> {
+        tracing::debug!("accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
         let answer = RTCSessionDescription::answer(answer)?;
         {
@@ -964,8 +1022,105 @@ impl ConnectionInterface for WebrtcConnection {
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
     }
+}
 
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+#[async_trait]
+impl ConnectionInterface for WebrtcConnection {
+    type Error = Error;
+
+    delegate_to_callback!();
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.connection_state.snapshot()
+    }
+
+    fn max_message_size(&self) -> usize {
+        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
+    }
+
+    async fn handshake_step(&self, inbound: Option<Bytes>) -> Result<HandshakeStep> {
+        match inbound {
+            None => {
+                self.handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .map_err(|_| {
+                        Error::LocalHandshakeGenerationError(
+                            "unexpected initial handshake step on active WebRTC connection"
+                                .to_string(),
+                        )
+                    })?;
+                let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                let sdp = self.create_offer_sdp().await?;
+                role_guard.commit(HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER);
+                Ok(HandshakeStep::Send(Bytes::from(sdp.into_bytes())))
+            }
+            Some(inbound_bytes) => {
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_FRESH,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let offer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 SDP offer payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    let local_sdp = self.answer_offer_sdp(offer).await?;
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::SendFinal(Bytes::from(
+                        local_sdp.into_bytes(),
+                    )));
+                }
+
+                if self
+                    .handshake_role
+                    .compare_exchange(
+                        HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER,
+                        HANDSHAKE_ROLE_IN_PROGRESS,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    let role_guard = HandshakeRoleGuard::new(&self.handshake_role);
+                    let answer = std::str::from_utf8(&inbound_bytes)
+                        .map_err(|err| {
+                            Error::RemoteHandshakeApplyError(format!(
+                                "invalid UTF-8 SDP answer payload: {err}"
+                            ))
+                        })?
+                        .to_owned();
+                    self.accept_answer_sdp(answer).await?;
+                    role_guard.commit(HANDSHAKE_ROLE_ESTABLISHED);
+                    return Ok(HandshakeStep::Done);
+                }
+
+                Err(Error::RemoteHandshakeApplyError(
+                    "unexpected inbound handshake step on established WebRTC connection"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+
+    async fn wait_for_channel_open(&self) -> Result<()> {
         wait_for_data_channel_open(
             || self.connection_state.snapshot(),
             &self.webrtc_data_channel_state_notifier,
@@ -1188,8 +1343,8 @@ fn wire_peer_connection_state(
 ) {
     webrtc_conn.on_peer_connection_state_change(Box::new(move |state: RTCPeerConnectionState| {
         tracing::debug!("Peer Connection State has changed: {state:?}");
-        let state_change: WebrtcConnectionState = state.into();
-        connection_state.observe_webrtc(state_change);
+        let state_change: TransportConnectionState = state.into();
+        connection_state.observe_phase(state_change);
         inner_cb.dispatch_peer_connection_state(state_change);
         Box::pin(async {})
     }));
@@ -1223,8 +1378,8 @@ async fn build_outbound_data_channels(
     inner_cb: &Arc<InnerTransportCallback>,
     connection_state: &ConnectionStateCell,
 ) -> Result<Vec<TrackedChannel>> {
-    let mut channels = Vec::with_capacity(usize::from(DATA_CHANNEL_POOL_SIZE));
-    for index in 0..DATA_CHANNEL_POOL_SIZE {
+    let mut channels = Vec::with_capacity(usize::from(CHANNEL_POOL_SIZE));
+    for index in 0..CHANNEL_POOL_SIZE {
         let channel = webrtc_conn
             .create_data_channel(&data_channel_label(ChannelLane::new(index)), None)
             .await?;
@@ -1234,12 +1389,12 @@ async fn build_outbound_data_channels(
         channel.on_open(Box::new(move || {
             let all_ready = matches!(open_pool.all_ready(), Ok(true));
             if all_ready {
-                open_state.observe_outbound_data_channels(true);
+                open_state.observe_channels(true);
             }
             let cb = Arc::clone(&open_cb);
             Box::pin(async move {
                 if all_ready {
-                    cb.on_data_channel_open().await;
+                    cb.on_channel_open().await;
                 }
             })
         }));
@@ -1253,7 +1408,7 @@ async fn build_outbound_data_channels(
         let close_delivery = Arc::clone(&delivery);
         channel.on_close(Box::new(move || {
             close_delivery.close();
-            close_state.observe_outbound_data_channels(false);
+            close_state.observe_channels(false);
             let all_closed = matches!(
                 close_pool.all(|tracked| {
                     tracked.channel.ready_state() == RTCDataChannelState::Closed
@@ -1263,7 +1418,7 @@ async fn build_outbound_data_channels(
             let cb = Arc::clone(&close_cb);
             Box::pin(async move {
                 if all_closed {
-                    cb.on_data_channel_close().await;
+                    cb.on_channel_close().await;
                 }
             })
         }));
@@ -1299,6 +1454,15 @@ impl TransportInterface for WebrtcTransport {
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
+        if let Ok(current) = tokio::runtime::Handle::try_current() {
+            let mut slot = self
+                .runtime_handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slot.is_none() {
+                *slot = Some(current);
+            }
+        }
         self.pool.ensure_peer_slot_available(cid)?;
 
         let (webrtc_conn, sdp_extra_host_candidates, configured_ice_servers, turn_tcp_bridge) =
@@ -1337,7 +1501,7 @@ impl TransportInterface for WebrtcTransport {
         let conn = WebrtcConnection::new(
             webrtc_conn,
             configured_ice_servers,
-            Arc::clone(&self.ice_servers),
+            Arc::clone(&self.ice_state),
             self.external_address.clone(),
             self.udp_port_range,
             channel_pool,
@@ -1378,12 +1542,26 @@ impl TransportInterface for WebrtcTransport {
         self.pool.safely_remove_if_current(connection).await
     }
 
+    async fn close_dyn_connection_if_current(
+        &self,
+        connection: &ConnectionRef<crate::core::transport::DynConnection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
+    }
+
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.connection(cid)
     }
 
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
+    }
+
+    fn validate_inbound_handshake(&self, _step_index: u8, payload: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(payload).map_err(|err| {
+            Error::RemoteHandshakeApplyError(format!("invalid UTF-8 SDP handshake payload: {err}"))
+        })?;
+        effective_max_message_size(text).map(|_| ())
     }
 }
 
@@ -1397,7 +1575,7 @@ impl From<IceServer> for RTCIceServer {
     }
 }
 
-impl From<RTCPeerConnectionState> for WebrtcConnectionState {
+impl From<RTCPeerConnectionState> for TransportConnectionState {
     fn from(s: RTCPeerConnectionState) -> Self {
         match s {
             RTCPeerConnectionState::Unspecified => Self::Unspecified,

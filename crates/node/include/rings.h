@@ -95,4 +95,19 @@ struct ProviderHandle *rings_node_new_provider_with_callback(uint32_t network_id
                                                              const char *storage_path,
                                                              size_t (*signer)(const char *, char *, size_t));
 
+/**
+ * Create a new ProviderHandle from a serialized YAML or JSON ProcessorConfig
+ * document (including optional `network: { kind, params }` transport
+ * configuration) and a durable `storage_path`.
+ *
+ * # Safety
+ *
+ * `serialized_config` and `storage_path` must be valid null-terminated UTF-8
+ * strings. Returns NULL when configuration parsing or provider creation fails.
+ * The returned handle must be released exactly once with
+ * `rings_node_provider_destroy`.
+ */
+struct ProviderHandle *rings_node_new_provider_with_serialized_config(const char *serialized_config,
+                                                                      const char *storage_path);
+
 #endif

@@ -257,6 +257,10 @@ impl SessionKeyRing {
     /// law validation, or `persist` short-circuits, increments `rotation_failed_total`, and leaves
     /// the active key and retained list untouched.
     ///
+    /// `persist` receives `(&current, &next)` **while the write lock is held**, so callers that
+    /// synchronize auxiliary components (such as transport session credentials) always roll back to
+    /// the exact committed `current` key even under concurrent renewal races.
+    ///
     /// Laws:
     /// - **Same delegator**: `next.delegator_did() == current.delegator_did()`.
     /// - **No unsigned gap**: `next`'s delegation verifies at `now_ms` and `now_ms < h'`.
@@ -270,12 +274,14 @@ impl SessionKeyRing {
     ) -> Result<(DelegateeKey, DelegationHorizon)>
     where
         M: FnOnce(&DelegateeKey) -> Result<DelegateeKey>,
-        P: FnOnce(&DelegateeKey) -> Result<()>,
+        P: FnOnce(&DelegateeKey, &DelegateeKey) -> Result<()>,
     {
         let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
         let outcome = mint(&state.current)
             .and_then(|next| validate_delegation_renewal(&state.current, next, now_ms))
-            .and_then(|(next, next_horizon)| persist(&next).map(|()| (next, next_horizon)));
+            .and_then(|(next, next_horizon)| {
+                persist(&state.current, &next).map(|()| (next, next_horizon))
+            });
         match outcome {
             Ok((next, next_horizon)) => {
                 state
@@ -384,7 +390,7 @@ mod tests {
             Err(error) => panic!("non-advancing key mint must succeed: {error}"),
         };
         assert!(matches!(
-            ring.renew_with(renew_ms, |_| Ok(non_advancing), |_| Ok(())),
+            ring.renew_with(renew_ms, |_| Ok(non_advancing), |_, _| Ok(())),
             Err(Error::DelegationHorizonReached { horizon_ms, .. }) if horizon_ms == h0
         ));
         assert_eq!(ring.rotation_counts(), (0, 1));
@@ -397,7 +403,7 @@ mod tests {
                 Err(error) => panic!("wrong-did key mint must succeed: {error}"),
             };
         assert!(matches!(
-            ring.renew_with(renew_ms, |_| Ok(wrong_did_key), |_| Ok(())),
+            ring.renew_with(renew_ms, |_| Ok(wrong_did_key), |_, _| Ok(())),
             Err(Error::VerifyError(_))
         ));
         assert_eq!(ring.rotation_counts(), (0, 2));
@@ -408,7 +414,7 @@ mod tests {
             Err(error) => panic!("renewed key mint must succeed: {error}"),
         };
         let renewed_pubkey = renewed.delegatee_public_key();
-        let h1 = match ring.renew_with(renew_ms, |_| Ok(renewed), |_| Ok(())) {
+        let h1 = match ring.renew_with(renew_ms, |_| Ok(renewed), |_, _| Ok(())) {
             Ok((_, horizon)) => horizon.horizon_ms(),
             Err(error) => panic!("valid renewal must succeed: {error}"),
         };
@@ -454,5 +460,566 @@ mod tests {
         let r_short = short_horizon.renew_at_ms(c);
         assert_eq!(r_short, c + (h_short - c) / 2);
         assert!(r_short > c && r_short < h_short);
+    }
+
+    /// Four-Component Two-Phase Lockstep Integration Test (Issue #1291 §4):
+    /// Exercises the concrete `Processor::renew_delegatee_key_with` two-phase commit pipeline
+    /// across all failure stages (`MintErr`, `RingValidateErr`, `SwarmValidateErr`,
+    /// `TransportPrepareErr`, `PersistErr`, `CommitOk`) and concurrent renewal contention,
+    /// asserting `\square (k_ring == k_disk == k_swarm == k_transport)` without compensating
+    /// rollbacks.
+    #[test]
+    fn test_processor_renew_delegatee_key_preserves_three_component_lockstep_invariant() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::atomic::Ordering;
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        use rings_core::utils::ManualClock;
+        use rings_transport::core::transport::SharedTransport;
+        use rings_turn::format_turn_server_url;
+        use rings_turn::TurnCredentialSigner;
+
+        use crate::processor::NodeNetworkParameters;
+        use crate::processor::ProcessorBuilder;
+        use crate::processor::ProcessorConfig;
+        use crate::processor::SessionRotationCommit;
+        use crate::processor::TransportNetworkConfig;
+
+        /// Fault-injectable [`NodeNetworkParameters`] wrapper around [`TransportNetworkConfig`]
+        /// that counts phase-1 `prepare_session_key_rotation` calls vs phase-2 commit executions
+        /// and allows injecting phase-1 preparation failures.
+        #[derive(Clone, Debug)]
+        struct FaultInjectableNetworkParams {
+            /// Underlying assisted-traversal transport configuration.
+            inner: TransportNetworkConfig,
+            /// When `true`, `prepare_session_key_rotation` fails before mutating the transport.
+            fail_rotation: Arc<AtomicBool>,
+            /// Count of phase-1 preparation calls.
+            prepare_calls: Arc<AtomicUsize>,
+            /// Count of phase-2 commit closure executions.
+            commit_calls: Arc<AtomicUsize>,
+        }
+
+        impl NodeNetworkParameters for FaultInjectableNetworkParams {
+            /// Delegate initial transport construction to the inner [`TransportNetworkConfig`].
+            fn build_transport(
+                &self,
+                delegatee_key: &DelegateeKey,
+            ) -> crate::error::Result<SharedTransport> {
+                NodeNetworkParameters::build_transport(&self.inner, delegatee_key)
+            }
+
+            /// Delegate endpoint hint inspection to the inner [`TransportNetworkConfig`].
+            fn endpoint_hint(&self) -> Option<&str> {
+                NodeNetworkParameters::endpoint_hint(&self.inner)
+            }
+
+            /// Fail in phase 1 when `fail_rotation` is armed; otherwise prepare the inner
+            /// [`TransportNetworkConfig`] rotation without mutating `transport`.
+            fn prepare_session_key_rotation(
+                &self,
+                transport: &SharedTransport,
+                next_key: &DelegateeKey,
+            ) -> crate::error::Result<SessionRotationCommit> {
+                self.prepare_calls.fetch_add(1, Ordering::SeqCst);
+                if self.fail_rotation.load(Ordering::SeqCst) {
+                    return Err(Error::InvalidConfig(
+                        "injected transport session-key rotation prepare failure".to_string(),
+                    ));
+                }
+                let inner_commit = NodeNetworkParameters::prepare_session_key_rotation(
+                    &self.inner,
+                    transport,
+                    next_key,
+                )?;
+                let commits = Arc::clone(&self.commit_calls);
+                Ok(Box::new(move || {
+                    commits.fetch_add(1, Ordering::SeqCst);
+                    inner_commit();
+                }))
+            }
+        }
+
+        let delegator = SecretKey::random();
+        let other_delegator = SecretKey::random();
+        let turn_server_pubkey = SecretKey::random().pubkey();
+        let turn_url =
+            format_turn_server_url("turn://turn.rings.rs:3478", turn_server_pubkey).unwrap();
+        let raw_ice = format!("stun://stun.l.google.com:19302;{turn_url}");
+
+        let t0: u128 = 1_800_000_000_000;
+        let ttl_ms = u64::try_from(4 * SIGNING_HORIZON_LEAD_MS).unwrap_or(u64::MAX);
+        let k0 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
+        let clock = Arc::new(ManualClock::new(t0));
+        let fail_rotation = Arc::new(AtomicBool::new(false));
+        let prepare_calls = Arc::new(AtomicUsize::new(0));
+        let commit_calls = Arc::new(AtomicUsize::new(0));
+        let persisted_disk_key = Arc::new(Mutex::new(k0.clone()));
+
+        let config = ProcessorConfig::new(1, raw_ice.clone(), k0.clone(), 15)
+            .with_clock(clock)
+            .with_network_parameters(FaultInjectableNetworkParams {
+                inner: TransportNetworkConfig::new(raw_ice.clone(), None, None),
+                fail_rotation: Arc::clone(&fail_rotation),
+                prepare_calls: Arc::clone(&prepare_calls),
+                commit_calls: Arc::clone(&commit_calls),
+            });
+        let processor = ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .build_at(t0)
+            .unwrap();
+
+        let assert_lockstep = |expected_key: &DelegateeKey| {
+            let k_ring = processor.delegatee_key();
+            let k_disk = persisted_disk_key.lock().unwrap().clone();
+            let k_swarm = processor.swarm.delegatee_key();
+            let k_transport = processor
+                .session_transport_credentials()
+                .expect("transport must report active session credentials");
+            let expected_credentials = expected_key.sign_ice_servers(&raw_ice).unwrap();
+
+            assert_eq!(
+                k_ring.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_ring diverged from expected key"
+            );
+            assert_eq!(
+                k_disk.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_disk diverged from k_ring"
+            );
+            assert_eq!(
+                k_swarm.delegatee_public_key(),
+                expected_key.delegatee_public_key(),
+                "k_swarm diverged from k_ring"
+            );
+            assert_eq!(
+                k_transport, expected_credentials,
+                "k_transport diverged from k_ring session credentials"
+            );
+        };
+
+        assert_lockstep(&k0);
+
+        let h0 = processor.signing_horizon().horizon_ms();
+        let renew_ms = h0 - SIGNING_HORIZON_LEAD_MS;
+        let k1 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms).unwrap();
+
+        // 1. MintErr: failure at Stage 1 preserves (k0, k0, k0, k0).
+        let mint_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Err(Error::VerifyError("injected mint failure".to_string())),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        assert!(mint_err.is_err());
+        assert_lockstep(&k0);
+
+        // 2. RingValidateErr (non-advancing horizon): failure at Stage 2 preserves (k0, k0, k0, k0).
+        let non_advancing = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, t0).unwrap();
+        let val_err_horizon = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(non_advancing),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        assert!(val_err_horizon.is_err());
+        assert_lockstep(&k0);
+
+        // 3. RingValidateErr (wrong delegator DID): failure at Stage 2 preserves (k0, k0, k0, k0).
+        let wrong_did =
+            DelegateeKey::new_with_seckey_at(&other_delegator, ttl_ms, renew_ms).unwrap();
+        let val_err_did = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(wrong_did),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        assert!(val_err_did.is_err());
+        assert_lockstep(&k0);
+
+        // 4. TransportPrepareErr: failure in phase 1 (`prepare_session_key_rotation`) aborts
+        //    before touching disk, swarm, or key ring, with zero phase-2 commits.
+        fail_rotation.store(true, Ordering::SeqCst);
+        let rot_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(k1.clone()),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        fail_rotation.store(false, Ordering::SeqCst);
+        assert!(rot_err.is_err());
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 0);
+        assert_lockstep(&k0);
+
+        // 5. PersistErr: failure at the single commit point (`persist`) aborts BEFORE any
+        //    in-memory state (`swarm`, `transport`, `ring`) is mutated — `commit_calls` stays 0!
+        let persist_err = processor.renew_delegatee_key_with(
+            renew_ms,
+            |_| Ok(k1.clone()),
+            |_| Err(Error::CreateFileError("injected disk failure".to_string())),
+        );
+        assert!(persist_err.is_err());
+        assert_eq!(
+            commit_calls.load(Ordering::SeqCst),
+            0,
+            "PersistErr must abort before executing phase-2 transport commit"
+        );
+        assert_lockstep(&k0);
+
+        // 6. CommitOk: atomic transition advances all four components to (k1, k1, k1, k1).
+        let h1 = processor
+            .renew_delegatee_key_with(
+                renew_ms,
+                |_| Ok(k1.clone()),
+                |next| {
+                    *persisted_disk_key.lock().unwrap() = next.clone();
+                    Ok(())
+                },
+            )
+            .expect("valid renewal must commit");
+        assert!(h1.horizon_ms() > h0);
+        assert_eq!(commit_calls.load(Ordering::SeqCst), 1);
+        assert_lockstep(&k1);
+
+        // 7. Subsequent TransportPrepareErr from committed state `k1` preserves (k1, k1, k1, k1).
+        let renew_ms_2 = h1.horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+        let k2 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_2).unwrap();
+        fail_rotation.store(true, Ordering::SeqCst);
+        let rot_err_2 = processor.renew_delegatee_key_with(
+            renew_ms_2,
+            |_| Ok(k2.clone()),
+            |next| {
+                *persisted_disk_key.lock().unwrap() = next.clone();
+                Ok(())
+            },
+        );
+        fail_rotation.store(false, Ordering::SeqCst);
+        assert!(rot_err_2.is_err());
+        assert_lockstep(&k1);
+
+        // 8. SwarmValidateErr: on an isolated processor whose swarm horizon was synthetically
+        //    advanced ahead of its ring (`k2` vs `k0`), attempting to renew the ring to `k1`
+        //    fails at `Swarm::validate_next_delegatee_key` BEFORE `prepare_session_key_rotation`
+        //    or `persist(next)` ever runs.
+        {
+            let skew_prepares = Arc::new(AtomicUsize::new(0));
+            let skew_commits = Arc::new(AtomicUsize::new(0));
+            let skew_disk = Arc::new(Mutex::new(k0.clone()));
+            let skew_cfg = ProcessorConfig::new(1, raw_ice.clone(), k0.clone(), 15)
+                .with_network_parameters(FaultInjectableNetworkParams {
+                    inner: TransportNetworkConfig::new(raw_ice.clone(), None, None),
+                    fail_rotation: Arc::new(AtomicBool::new(false)),
+                    prepare_calls: Arc::clone(&skew_prepares),
+                    commit_calls: Arc::clone(&skew_commits),
+                });
+            let skew_proc = ProcessorBuilder::from_config(&skew_cfg)
+                .unwrap()
+                .build_at(t0)
+                .unwrap();
+            skew_proc
+                .swarm
+                .set_delegatee_key(k2.clone())
+                .expect("advancing swarm key to k2 must succeed");
+            let swarm_val_err = skew_proc.renew_delegatee_key_with(
+                renew_ms,
+                |_| Ok(k1.clone()),
+                |next| {
+                    *skew_disk.lock().unwrap() = next.clone();
+                    Ok(())
+                },
+            );
+            assert!(
+                swarm_val_err.is_err(),
+                "SwarmValidateErr must reject renewal when swarm rejects candidate key"
+            );
+            assert_eq!(
+                skew_prepares.load(Ordering::SeqCst),
+                0,
+                "SwarmValidateErr must short-circuit before transport prepare"
+            );
+            assert_eq!(skew_commits.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                skew_disk.lock().unwrap().delegatee_public_key(),
+                k0.delegatee_public_key(),
+                "SwarmValidateErr must never touch disk"
+            );
+            assert_eq!(
+                skew_proc.delegatee_key().delegatee_public_key(),
+                k0.delegatee_public_key(),
+                "SwarmValidateErr must leave key ring untouched"
+            );
+        }
+
+        // 9. Concurrent renewal race (native multi-threaded): Thread A blocks waiting for the
+        //    key-ring write lock while Thread B commits `k1 -> k2`. Thread A then attempts
+        //    `k2 -> k3` whose `persist` fails; because phase 1 never mutated `transport` or
+        //    `swarm`, `(k2, k2, k2, k2)` stays intact without any rollback race.
+        #[cfg(not(target_family = "wasm"))]
+        {
+            let renew_ms_3 =
+                DelegationHorizon::of(&k2.delegation()).horizon_ms() - SIGNING_HORIZON_LEAD_MS;
+            let k3 = DelegateeKey::new_with_seckey_at(&delegator, ttl_ms, renew_ms_3).unwrap();
+            let entered_b = Arc::new(std::sync::Barrier::new(2));
+            let release_b = Arc::new(std::sync::Barrier::new(2));
+
+            let proc_b = processor.clone();
+            let disk_b = Arc::clone(&persisted_disk_key);
+            let k2_for_b = k2.clone();
+            let entered_b_tx = Arc::clone(&entered_b);
+            let release_b_rx = Arc::clone(&release_b);
+            let handle_b = std::thread::spawn(move || {
+                proc_b.renew_delegatee_key_with(
+                    renew_ms_2,
+                    |_| {
+                        entered_b_tx.wait();
+                        release_b_rx.wait();
+                        Ok(k2_for_b)
+                    },
+                    |next| {
+                        *disk_b.lock().unwrap() = next.clone();
+                        Ok(())
+                    },
+                )
+            });
+
+            entered_b.wait();
+            let proc_a = processor.clone();
+            let handle_a = std::thread::spawn(move || {
+                proc_a.renew_delegatee_key_with(
+                    renew_ms_3,
+                    |_| Ok(k3),
+                    |_| {
+                        Err(Error::CreateFileError(
+                            "concurrent persist fail".to_string(),
+                        ))
+                    },
+                )
+            });
+
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            release_b.wait();
+
+            assert!(handle_b.join().unwrap().is_ok());
+            assert!(handle_a.join().unwrap().is_err());
+            assert_lockstep(&k2);
+        }
+    }
+
+    /// Exhaustive Stateright Model Check & Mutant Refutation for Two-Phase Session Rotation
+    /// (Issue #1291 F4 + Impl #1):
+    ///
+    /// Explores every reachable state `(k_ring, k_disk, k_swarm, k_transport, step)` across
+    /// arbitrary sequences of `{MintErr, RingValidateErr, SwarmValidateErr, TransportPrepareErr,
+    /// PersistErr, PersistErrWithRollbackFault, CommitOk}` over up to 3 sequential rotations:
+    /// 1. Proves `ProtocolVariant::TwoPhase` satisfies `\square (k_ring == k_disk == k_swarm ==
+    ///    k_transport)` across 100% of reachable states.
+    /// 2. Refutes `ProtocolVariant::MutantPersistBeforeSwarmValidate` (proving that running
+    ///    `persist` before `Swarm::validate_next_delegatee_key` breaks `k_disk == k_swarm`).
+    /// 3. Refutes `ProtocolVariant::MutantMutateTransportWithFallibleRollback` (proving that
+    ///    mutating `transport` before `persist` with best-effort `let _ = rollback` breaks
+    ///    `k_transport == k_ring` when rollback fails).
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn test_stateright_two_phase_rotation_lockstep_and_mutant_refutation() {
+        use stateright::Checker;
+        use stateright::Model;
+        use stateright::Property;
+
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        enum ProtocolVariant {
+            TwoPhase,
+            MutantPersistBeforeSwarmValidate,
+            MutantMutateTransportWithFallibleRollback,
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        struct RotationState {
+            k_ring: u8,
+            k_disk: u8,
+            k_swarm: u8,
+            k_transport: u8,
+            depth: u8,
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        enum RotationAction {
+            MintErr,
+            RingValidateErr,
+            SwarmValidateErr,
+            TransportPrepareErr,
+            PersistErr,
+            PersistErrWithRollbackFault,
+            CommitOk,
+        }
+
+        struct RotationModel {
+            variant: ProtocolVariant,
+            max_depth: u8,
+        }
+
+        impl Model for RotationModel {
+            type State = RotationState;
+            type Action = RotationAction;
+
+            fn init_states(&self) -> Vec<Self::State> {
+                vec![RotationState {
+                    k_ring: 0,
+                    k_disk: 0,
+                    k_swarm: 0,
+                    k_transport: 0,
+                    depth: 0,
+                }]
+            }
+
+            fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
+                if state.depth >= self.max_depth {
+                    return;
+                }
+                actions.extend([
+                    RotationAction::MintErr,
+                    RotationAction::RingValidateErr,
+                    RotationAction::SwarmValidateErr,
+                    RotationAction::TransportPrepareErr,
+                    RotationAction::PersistErr,
+                    RotationAction::PersistErrWithRollbackFault,
+                    RotationAction::CommitOk,
+                ]);
+            }
+
+            fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
+                let mut next = *last;
+                next.depth = last.depth + 1;
+                let candidate = last.k_ring + 1;
+
+                match self.variant {
+                    ProtocolVariant::TwoPhase => {
+                        // Phase 1 (pure): mint -> ring_validate -> swarm_validate -> transport_prepare
+                        // Single commit point: persist(candidate)
+                        // Phase 2 (infallible): swarm_commit -> transport_commit -> ring_commit
+                        match action {
+                            RotationAction::MintErr
+                            | RotationAction::RingValidateErr
+                            | RotationAction::SwarmValidateErr
+                            | RotationAction::TransportPrepareErr
+                            | RotationAction::PersistErr
+                            | RotationAction::PersistErrWithRollbackFault => Some(next),
+                            RotationAction::CommitOk => {
+                                next.k_disk = candidate;
+                                next.k_swarm = candidate;
+                                next.k_transport = candidate;
+                                next.k_ring = candidate;
+                                Some(next)
+                            }
+                        }
+                    }
+                    ProtocolVariant::MutantPersistBeforeSwarmValidate => match action {
+                        RotationAction::MintErr
+                        | RotationAction::RingValidateErr
+                        | RotationAction::TransportPrepareErr
+                        | RotationAction::PersistErr
+                        | RotationAction::PersistErrWithRollbackFault => Some(next),
+                        RotationAction::SwarmValidateErr => {
+                            // Bug: persisted to disk BEFORE swarm validation rejected the key!
+                            next.k_disk = candidate;
+                            Some(next)
+                        }
+                        RotationAction::CommitOk => {
+                            next.k_disk = candidate;
+                            next.k_swarm = candidate;
+                            next.k_transport = candidate;
+                            next.k_ring = candidate;
+                            Some(next)
+                        }
+                    },
+                    ProtocolVariant::MutantMutateTransportWithFallibleRollback => match action {
+                        RotationAction::MintErr
+                        | RotationAction::RingValidateErr
+                        | RotationAction::SwarmValidateErr
+                        | RotationAction::TransportPrepareErr => Some(next),
+                        RotationAction::PersistErr => {
+                            // Mutated transport, then rolled back successfully.
+                            next.k_transport = last.k_ring;
+                            Some(next)
+                        }
+                        RotationAction::PersistErrWithRollbackFault => {
+                            // Bug: mutated transport before persist, and `let _ = rollback` failed!
+                            next.k_transport = candidate;
+                            Some(next)
+                        }
+                        RotationAction::CommitOk => {
+                            next.k_disk = candidate;
+                            next.k_swarm = candidate;
+                            next.k_transport = candidate;
+                            next.k_ring = candidate;
+                            Some(next)
+                        }
+                    },
+                }
+            }
+
+            fn properties(&self) -> Vec<Property<Self>> {
+                vec![Property::<Self>::always(
+                    "four-component lockstep invariant",
+                    |_, s| {
+                        s.k_ring == s.k_disk && s.k_ring == s.k_swarm && s.k_ring == s.k_transport
+                    },
+                )]
+            }
+        }
+
+        // 1. Two-phase protocol satisfies lockstep across every reachable interleaving.
+        let checker_ok = RotationModel {
+            variant: ProtocolVariant::TwoPhase,
+            max_depth: 3,
+        }
+        .checker()
+        .spawn_bfs()
+        .join();
+        checker_ok.assert_properties();
+        assert!(
+            checker_ok.unique_state_count() > 1,
+            "BFS must explore multi-epoch transitions"
+        );
+
+        // 2. Mutant A (`persist` before `Swarm::validate_next_delegatee_key`) is refuted.
+        let checker_mutant_a = RotationModel {
+            variant: ProtocolVariant::MutantPersistBeforeSwarmValidate,
+            max_depth: 2,
+        }
+        .checker()
+        .spawn_bfs()
+        .join();
+        assert!(
+            checker_mutant_a
+                .discovery("four-component lockstep invariant")
+                .is_some(),
+            "Stateright must refute persist-before-swarm-validate mutant"
+        );
+
+        // 3. Mutant B (`mutate transport before persist` with fallible rollback) is refuted.
+        let checker_mutant_b = RotationModel {
+            variant: ProtocolVariant::MutantMutateTransportWithFallibleRollback,
+            max_depth: 2,
+        }
+        .checker()
+        .spawn_bfs()
+        .join();
+        assert!(
+            checker_mutant_b
+                .discovery("four-component lockstep invariant")
+                .is_some(),
+            "Stateright must refute fallible-rollback mutant"
+        );
     }
 }

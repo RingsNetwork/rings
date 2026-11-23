@@ -15,7 +15,7 @@ use super::NodeFramePool;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::TransportCallback;
 use crate::core::pool::ChannelLane;
-use crate::core::pool::DATA_CHANNEL_POOL_SIZE;
+use crate::core::pool::CHANNEL_POOL_SIZE;
 use crate::core::transport::TransportMessage;
 use crate::notifier::Notifier;
 
@@ -82,7 +82,7 @@ async fn test_a_drainer_ended_mid_dispatch_gives_its_lane_up() {
     panicking.notified().await;
     assert_eq!(
         callback.link_credit().occupancy(),
-        [0; DATA_CHANNEL_POOL_SIZE as usize]
+        [0; CHANNEL_POOL_SIZE as usize]
     );
 
     dispatch(&callback, b"after", lane);

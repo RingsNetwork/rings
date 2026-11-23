@@ -73,6 +73,7 @@ def test_header_loads_from_crate_owned_path():
 
     header = module.read_header()
     assert "rings_node_new_provider_with_callback" in header
+    assert "rings_node_new_provider_with_serialized_config" in header
     assert "char *rings_node_request" in header
     assert "rings_node_string_free" in header
     assert "rings_node_provider_destroy" in header
