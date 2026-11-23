@@ -1135,36 +1135,50 @@ async fn test_strict_bridge_lookup_must_not_return_to_the_same_query_node() -> R
         )
         .await?;
 
-    let mut saw_at_d = false;
-    for _ in 0..8 {
-        if let Some(pkt) = node_d.listen_once().await {
-            if matches!(
-                pkt.transaction.data::<Message>()?,
-                Message::FindSuccessorSend(ref q) if q.strict && q.did == node_b.did()
-            ) {
-                assert_eq!(pkt.relay.destination, node_d.did());
-                assert_eq!(pkt.relay.next_hop, node_d.did());
-                saw_at_d = true;
-                break;
+    let saw_at_d = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match node_d.listen_once().await {
+                Some(pkt) => {
+                    if matches!(
+                        pkt.transaction.data::<Message>(),
+                        Ok(Message::FindSuccessorSend(ref q)) if q.strict && q.did == node_b.did()
+                    ) {
+                        assert_eq!(pkt.relay.destination, node_d.did());
+                        assert_eq!(pkt.relay.next_hop, node_d.did());
+                        return true;
+                    }
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             }
         }
-    }
+    })
+    .await
+    .unwrap_or(false);
     assert!(saw_at_d, "expected strict query to arrive at node_d");
 
-    let mut saw_at_b = false;
-    for _ in 0..8 {
-        if let Some(pkt) = node_b.listen_once().await {
-            if matches!(
-                pkt.transaction.data::<Message>()?,
-                Message::FindSuccessorSend(ref q) if q.strict && q.did == node_b.did()
-            ) {
-                assert_eq!(pkt.relay.destination, node_b.did());
-                assert_eq!(pkt.relay.next_hop, node_b.did());
-                saw_at_b = true;
-                break;
+    let saw_at_b = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match node_b.listen_once().await {
+                Some(pkt) => {
+                    if matches!(
+                        pkt.transaction.data::<Message>(),
+                        Ok(Message::FindSuccessorSend(ref q)) if q.strict && q.did == node_b.did()
+                    ) {
+                        assert_eq!(pkt.relay.destination, node_b.did());
+                        assert_eq!(pkt.relay.next_hop, node_b.did());
+                        return true;
+                    }
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
             }
         }
-    }
+    })
+    .await
+    .unwrap_or(false);
     assert!(saw_at_b, "expected strict query to arrive at node_b");
 
     Ok(())

@@ -8,7 +8,7 @@ Rings Node (The node service of Rings Network)
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
-[![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
+[![docs](https://docs.rs/rings-node/badge.svg?version=1.0.0-pre.8)](https://docs.rs/rings-node/1.0.0-pre.8/rings_node/)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 
