@@ -11,10 +11,10 @@ Chrome extension. Its source is the repository's
 to bottom:
 
 1. **Settings** (`#node/settings`): the network id, ICE servers, stabilization interval, the
-   name of the browser storage the node persists to, the seed URL the node joins through
+   name of the browser storage the node persists to, and the seed URL the node joins through
    (`https://node.rings.rs`, the public seed, by default; a native node's external API such
-   as `http://127.0.0.1:50001` is the other suggestion), and the WebView's onion policy.
-   Settings are kept in the browser's local storage.
+   as `http://127.0.0.1:50001` is the other suggestion). Node stores persist in IndexedDB under an
+   exclusive Web Lock while UI preferences are kept in `localStorage`.
 2. **Account**: the identity the node signs with. WebCrypto P-256 generates a key in the
    browser; MetaMask signs with EIP-191; Phantom signs with Ed25519. The node's DID is derived
    from the chosen account.
@@ -74,6 +74,19 @@ pages with rewritten subresources are supported, and page-driven `fetch` or XHR 
 is not. The
 [frontend README](https://github.com/RingsNetwork/rings/blob/master/frontend/README.md)
 records both in full, with the test suites that pin them.
+
+## Onion WebView & `rings-webview` architecture
+
+Both the web app (`/webview` backed by `rings-webview-service-worker.js`) and the Chrome MV3
+extension (`extension-assets/webview_frame.html`) share the primitives in `crates/webview`:
+
+- **Target validation (`TargetUrl`, `GatewayRoutePolicy`)**: validates target origins and rejects
+  loopback, link-local, RFC 1918, and internal hostnames via `rings-network-policy`.
+- **HTML/CSS rewriting (`lol_html`, `RewriteContext`)**: rewrites links, forms, stylesheets, and
+  subresources so navigation remains inside the gateway prefix.
+- **Virtual cookies & CORS (`CookieJar`, `HeaderPolicy`)**: isolates per-target cookies inside the
+  gateway session and enforces strict CSP `sandbox` without `allow-same-origin` so untrusted
+  remote scripts execute in an opaque origin away from node keys and IndexedDB stores.
 
 ## Embed the node in your own page
 

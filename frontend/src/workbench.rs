@@ -229,9 +229,12 @@ fn spawn_onion_request(
                     .response_headers
                     .set(onion::format_headers(&response.headers));
                 outputs.response_body.set(response.body_text());
-                outputs
-                    .route_result
-                    .set("request completed through onion HTTPS proxy".to_string());
+                let route_summary = response
+                    .route
+                    .as_ref()
+                    .map(onion::OnionProxyRoute::summary)
+                    .unwrap_or_else(|| "request completed through onion HTTPS proxy".to_string());
+                outputs.route_result.set(route_summary);
                 outputs
                     .status
                     .set("onion proxy request completed".to_string());

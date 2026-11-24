@@ -57,6 +57,38 @@ method). The provider handles it in an extension protocol it registered: a Rust 
 node that embeds `rings-node`, or a JS handler `provider.on(namespace, initialState, handler)` in
 the browser.
 
+### Writing custom extension protocols
+
+Every extension runs behind a namespace boundary defined by `Protocol` (a pure state machine)
+and `Interpret` (an async interpreter executing effects over a namespace-scoped `Scope`):
+
+- `Protocol::init` supplies the initial state `S`.
+- `Protocol::decode(wire: Wire<'_>)` turns `(from, me, payload)` into a typed `Event` or `Reject`.
+- `Protocol::step(ctx: Ctx<'_, S>, event: Event) -> Transition<S, Effect>` computes the next
+  state and ordered `Vec<Effect>` synchronously and deterministically without I/O.
+- Optional admission hooks (`delegates_admission`, `delegates_replay`) publish per-namespace
+  policies into `rings-core` when `provider.register_protocol(protocol, shell)` installs the
+  handler.
+- `Interpret::interpret(&self, scope: &Scope, effect: Effect)` performs network sends
+  (`scope.send(did, payload)`) or bounded self-injections confined strictly to that namespace.
+
+In Browser JavaScript/WASM, register the identical model with
+`provider.on(namespace, initialState, (ctx, event) => ({ state, effects }))`, and inspect an
+example implementation in `examples/native` and `examples/dweb`.
+
+### End-to-end (E2E) encrypted streams
+
+After a peer handshake completes, applications can establish end-to-end ECC ElGamal encrypted
+streams between DIDs without revealing plaintext to intermediate Chord relays:
+
+1. Request the recipient's E2E public key via JSON-RPC `sendE2eHandshake` (returns `tx_id`).
+2. Poll local events via `takeE2eEvents` (FFI / local RPC / `provider.take_e2e_events()`) to obtain
+   the peer's public key and receive incoming decrypted stream chunks.
+3. Send encrypted data via `sendE2eMessage` (`destination_did`, `recipient_public_key`, base64
+   `data`), which frames and delivers ciphertext chunks to the destination's bounded E2E inbox.
+
+See [API](../jsonrpc.md#sende2ehandshake) for the full parameter and response schema.
+
 ### TCP and UDP relay
 
 `rings run` installs the built-in relay on the `tcp` and `udp` namespaces. You can expose local

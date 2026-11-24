@@ -96,8 +96,9 @@ JSON-RPC endpoint: http://127.0.0.1:50002
 JSON-RPC endpoint: http://127.0.0.1:50003
 ```
 
-`createOffer` and `acceptAnswer` are internal methods and need the node's Bearer token;
-`answerOffer` is public on the external listener, which is where a remote peer reaches it.
+`createOffer` is an internal method and always requires the node's Bearer token. `answerOffer` and
+`acceptAnswer` are public on the external listener (no Bearer token needed there), and are also
+available on the internal listener with a Bearer token for local CLI workflows.
 
 ### Create Offer
 
@@ -136,12 +137,13 @@ Here we will get answer responses by `Node 2`:
 {"jsonrpc":"2.0","result":{"answer":"<b58 encoded answer>"},"id":1}
 ```
 
-When `Node 2` already holds its own pending overlay offer to `Node 1`, the offer handed to
-`answerOffer` prevails: `Node 2` releases its own and answers. A node of 0.34.2 or earlier returns
-a counter-offer instead when its offer prevails on the DID tie-break (the smaller DID's offer
-prevails). The encoded payload then carries a `ConnectNodeSend` rather than a `ConnectNodeReport`:
-pass it to `Node 1`'s `answerOffer`, and the answer it returns to `Node 2`'s `acceptAnswer`. The
-edge is then `Node 2`'s handshake, and `Node 1`'s own offer is released.
+When `Node 2` already holds its own pending overlay offer to `Node 1`, any compatible offer handed
+to `answerOffer` prevails: `Node 2` releases its own pending overlay offer and answers. If both
+sides simultaneously hold un-answered manual out-of-band offers to each other and `Node 2`'s pending
+external offer prevails on the DID tie-break (the smaller DID prevails), `answerOffer` returns that
+offer as a counter-offer (`ConnectNodeSend` payload rather than `ConnectNodeReport`): pass it to
+`Node 1`'s `answerOffer`, and return the resulting answer to `Node 2`'s `acceptAnswer`. The edge
+is then `Node 2`'s handshake, and `Node 1`'s own offer is released.
 
 ### Accept Answer
 

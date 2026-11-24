@@ -22,9 +22,8 @@ epoch, nonce, units, request digest, and completion digest. Provider and benefic
 use different domains. Roles are account DIDs recovered from delegation proofs, so a
 delegatee-key rotation does not change the account role.
 
-The canonical marker and the signing domains name this field layout, so a signature over it
-cannot be interpreted as another receipt protocol; they carry no version, since the protocol is
-not versioned before 1.0. The release is still a hard cutover: there is no legacy probe/report
+The canonical domain (`rings-service-receipt-v1`) binds this exact field layout so signatures
+cannot be reinterpreted under another receipt protocol, and there is no legacy probe/report
 decoder, negotiation, or dual format.
 
 ## Verification boundaries
@@ -96,6 +95,7 @@ constructors that run without a durable evidence backend keep liveness probing a
 skipping receipt persistence.
 
 In Rings 1.0, local routing and peer quality ordering (`CreditRecord` and
-`order_peers_by_quality`) operate on direct local observations while service receipts accumulate
-cryptographically verifiable evidence. Rings 2.0 builds on this foundation to introduce the
-multi-service DRanking trust algebra and epoch ledger with its own dedicated ledger domain.
+`order_peers_by_quality`) operate purely on local observations and aMule-style byte credit while
+service receipts accumulate cryptographically verifiable evidence locally. Network-wide DRanking
+/ EigenTrust trust algebra and the shared epoch ledger described in `papers/dranking.pdf` are
+research/roadmap work for Rings 2.0 and are not yet active in runtime crates.

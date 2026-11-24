@@ -44,8 +44,8 @@ communicate over direct WebRTC datachannels with no application server in the da
 ## Status
 
 Active public overlay at the seed `node.rings.rs`, with deterministic wire-versioned framing
-(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 5`) across every frame and handshake. 1.0 stabilizes
-`WIRE_VERSION = 5` and the public runtime contracts across `1.0.x`, while 2.0 extends the overlay
+(`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 6`) across every frame and handshake. 1.0 stabilizes
+`WIRE_VERSION = 6` and the public runtime contracts across `1.0.x`, while 2.0 extends the overlay
 with epoch-randomized ring placement ([#780](https://github.com/RingsNetwork/rings/issues/780)) and
 decentralized trust ranking (DRanking). See [UPGRADING.md](./UPGRADING.md),
 [ROADMAP.md](./ROADMAP.md), and [SECURITY.md](./SECURITY.md).
@@ -84,36 +84,43 @@ metadata protection, separate from payload encryption.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Applications   dWeb · relay/tunnel · your own app                     │
+│  Applications   dWeb · rings-tui · mailbox · relay/tunnel · your app │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Protocols      built-ins: relay (tcp/udp tunnels), echo —             │  node::extension::protocols
-│  (namespaced)   plus any user Protocol, addressed by namespace         │
+│  Protocols      built-ins: relay (tcp/udp tunnels), echo, mail,      │  node::extension::protocols
+│  (namespaced)   turn.ticket (onion invoke), custom user namespaces   │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Extension      pure `Protocol::step` → `Effect` → `Interpret` shell   │  node::extension::ext
-│  runtime        over a namespace-scoped `Scope` (send / self-inject)   │
+│  runtime        over `Scope` + Tokio/WASM contracts (`rings-runtime`)│
 ├──────────────────────────────────────────────────────────────────────┤
-│  Privacy        onion loops: Sphinx cells over direct edges,           │  crates/node/src/onion
-│  (loops)        constant-rate cover, paid admission, exit registry     │
+│  Privacy        guard-closed Sphinx/AEZ v5 loops, SURBs, cover pace, │  crates/node/src/onion
+│  (loops)        `tcp`/`https`/`udp` exits, Kleisli `invoke` pipelines│  crates/aez
 ├──────────────────────────────────────────────────────────────────────┤
-│  Overlay        Chord DHT: successor / finger tables, stabilization,   │  crates/core
-│  (routing +     DID addressing, message relay, network_id isolation,   │
-│  encryption)    E2E ElGamal to a DID after its handshake               │
+│  Overlay        Chord DHT: range-proved fingers, non-transitive      │  crates/core
+│  (routing +     gap bridging, voluntary `Leave`, authenticated CRDTs,│
+│  encryption)    E2E ElGamal streams, group-committed replay windows  │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Transport      direct WebRTC datachannels (native + browser/web_sys), │  crates/transport
-│                 STUN / ICE / SDP NAT traversal                         │
+│  Transport      decoupled `TransportInterface`, 0–8 step handshakes, │  crates/transport
+│                 WebRTC (native/browser), UDP/TCP TURN, LZ4 wire v6   │  crates/codec
 ├──────────────────────────────────────────────────────────────────────┤
-│  Identity       DID + secp256k1 / secp256r1 / ed25519 / BLS / bip137   │  crates/core::ecc
+│  Identity       DID + secp256k1 / EIP-191 / BIP-137 / secp256r1 /    │  crates/core::ecc
+│                 Ed25519 / BLS12-381, delegated sessions, TURN auth   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-The overlay layer provides authenticated DID routing and E2E stream encryption, while the
-privacy layer provides anonymous Sphinx onion circuits
-([layer contracts](./SECURITY.md#layer-contracts)). Connections are established peer-to-peer
-over WebRTC with optional TURN relay support (`crates/turn` / `rings-turn` provides a
-stateless signature-authenticated TURN server for Symmetric NAT and strict firewall
-environments with no user/password database). Supporting crates: `rpc` (JSON-RPC), `measure`
-(local peer credit), `gateway` (TUN over onion), `webview` (onion browsing), `network-policy`
-(exit egress policy), `codec`, and `derive`.
+The overlay layer provides authenticated DID routing, authenticated CRDT data topics,
+non-transitive multi-predecessor / gap-bridge routing, voluntary `Leave` handoffs, and E2E stream
+encryption, while the privacy layer provides guard-closed Sphinx/AEZ v5 onion circuits for
+`tcp`, `https`, and `udp` exits as well as composable Kleisli `invoke` pipelines
+([layer contracts](./SECURITY.md#layer-contracts)). Connections run over a decoupled
+`TransportInterface` (`crates/transport`, default WebRTC with 0–8 step binary handshakes and LZ4
+wire compression at `WIRE_VERSION = 6`) with signature-authenticated TURN traversal over both UDP
+and TCP (`crates/turn` / `rings-turn`), plus DHT-discovered TURN service advertisements and
+multi-hop `onion::udp` TURN circuits (`crates/turn-service` / `rings-turn-service`). Supporting
+workspace crates: `tui` (interactive 6-tab terminal dashboard `rings-tui`), `rpc` (JSON-RPC 2.0),
+`measure` (local peer credit & probe receipts), `dns-relay` (`<did>.<zone>` DNS + IPv6 ingress),
+`gateway` (selective IPv4/TCP TUN over onion), `webview` (onion WebView primitives),
+`network-policy` (egress filtering), `runtime`, `codec`, `derive`, `aez`, `logo`, and
+`test-support`.
 
 ## Build on Rings
 
@@ -173,7 +180,10 @@ live under [`contrib/`](./contrib/README.md).
 
 | | |
 |---|---|
-| [rings.rs/docs](https://rings.rs/docs/) | The book: operating nodes, browser and FFI runtimes, protocol internals |
+| [rings.rs/docs](https://rings.rs/docs/) | The book: operating nodes, TUI, onion pipelines, TURN, gateways, browser/FFI runtimes, internals |
+| [rings.rs/blog](https://rings.rs/blog/) | Engineering blog: Onion TURN, Onion OP, Chord convergence, and correctness |
+| [Interactive Terminal UI (`rings-tui`)](./docs/src/tui.md) | 6-tab terminal dashboard for monitoring, storage, registries, and commands |
+| [Onion Routing & Kleisli Pipelines](./docs/src/onion.md) | Sphinx/AEZ loops, `tcp`/`https`/`udp` exits, and composable `invoke` operations |
 | [UPGRADING.md](./UPGRADING.md) | 1.0 frozen contracts and upgrade checklist |
 | [SECURITY.md](./SECURITY.md) | Security architecture, layer contracts, and vulnerability reporting |
 | [ROADMAP.md](./ROADMAP.md) | Milestones and tracks |

@@ -110,11 +110,15 @@ Options:
           [env: RINGS_TURN_LISTEN=] [default: 0.0.0.0:3478]
       --realm <REALM>
           TURN authentication realm advertised in 401/438 challenges
-          [env: RINGS_TURN_REALM=] [default: rings.network]
+          [env: RINGS_TURN_REALM=] [default: rings]
       --public-ip <PUBLIC_IP>
           Public IPv4/IPv6 address advertised in XOR-RELAYED-ADDRESS.
-          Defaults to the listener IP (or 127.0.0.1 when listening on 0.0.0.0)
+          Defaults to the relay bind IP (or localhost of the relay bind IP's family when unspecified)
           [env: RINGS_TURN_PUBLIC_IP=]
+      --advertised-ip <ADVERTISED_IP>
+          Optional public IPv4/IPv6 address advertised for the TURN UDP listener URL.
+          Defaults to --public-ip when its address family matches --listen, or the listener IP
+          [env: RINGS_TURN_ADVERTISED_IP=]
       --relay-bind-ip <RELAY_BIND_IP>
           Local IPv4/IPv6 address bound when allocating relay UDP sockets.
           Defaults to the listener IP
@@ -152,6 +156,9 @@ Options:
       --max-reservation-ttl-secs <MAX_RESERVATION_TTL_SECS>
           Maximum lifetime in seconds of an unclaimed session-ticket reservation
           [env: RINGS_TURN_MAX_RESERVATION_TTL_SECS=] [default: 60]
+      --max-permissions-per-allocation <MAX_PERMISSIONS_PER_ALLOCATION>
+          Maximum number of active peer IP permissions per TURN allocation
+          [env: RINGS_TURN_MAX_PERMISSIONS_PER_ALLOCATION=] [default: 64]
   -h, --help
           Print help
   -V, --version
@@ -161,7 +168,7 @@ Options:
 ### Example Commands
 
 1. **Public TURN server on a cloud VM (with 1:1 public IP `203.0.113.10` and firewall port range `49152..=65535`)**:
-   ```bash
+   ```sh
    rings-turn \
      --listen 0.0.0.0:3478 \
      --public-ip 203.0.113.10 \
@@ -173,7 +180,7 @@ Options:
    On startup, `rings-turn` prints its compressed secp256k1 public key (`pubkey=<base58(server_pubkey)>`) and ready-to-use `turn://...?pubkey=<base58(server_pubkey)>` URL.
 
 2. **Private TURN server restricted to specific DIDs**:
-   ```bash
+   ```sh
    rings-turn \
      --listen 0.0.0.0:3478 \
      --public-ip 203.0.113.10 \
@@ -183,12 +190,12 @@ Options:
 
 ## Configuring Rings Nodes to Use `rings-turn`
 
-In a Rings node's `config.yaml` (or `--ice-servers` CLI flag), add the `turn://` URL with its `?pubkey=<base58(server_pubkey)>` query parameter (and no username or password):
+In a Rings node's `config.yaml` (or `--ice-servers` CLI flag), add the `turn://` or `turns://` URL with its `?pubkey=<base58(server_pubkey)>` query parameter (and no username or password):
 
 ```yaml
 ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?pubkey=249495738f7s7d8f7s8d7f8s7d8f7s8d7f8s7d8f7s8d
 ```
 
-- Nodes sign `turn://...?pubkey=<server_pubkey>` (and RFC 7065 `turn:...?pubkey=<server_pubkey>`) URLs dynamically with their active `DelegateeKey` (`Delegation` + ECDH shared secret), strip `?pubkey=...` before passing the canonical `turn://user:pass@host:port` URI to WebRTC, and rotate TURN credentials automatically in lockstep whenever `DelegateeKey` is renewed in process.
+- Nodes sign `turn://...?pubkey=<server_pubkey>`, TURN-over-TCP (`turn://...?transport=tcp&pubkey=<server_pubkey>`), and TURN-over-TLS (`turns://...?pubkey=<server_pubkey>`) URLs dynamically with their active `DelegateeKey` (`Delegation` + ECDH shared secret), strip `?pubkey=...` before passing the canonical URI to WebRTC, and rotate TURN credentials automatically in lockstep whenever `DelegateeKey` is renewed in process. (`rings-turn` binds both UDP and TCP on `--listen` with up to 512 concurrent TCP clients; terminate TLS in front of `--listen` when advertising `turns://` endpoints.)
 - Non-expiring direct account-level DID credentials are available programmatically via `WebrtcNetworkParameters::with_credential_mode(TurnCredentialMode::Account(...))`.
 - Explicit credentials (`turn://user:pass@other-turn.example.org:3478`) are preserved as-is for compatibility with third-party TURN servers.

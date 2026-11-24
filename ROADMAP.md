@@ -6,7 +6,7 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 ## Milestones
 
 - **1.0: a stable network.** Delivers deterministic wire-versioned framing
-  (`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 5`), range-proved and non-transitive Chord
+  (`"RINGS\0" ‖ wire_version`, `WIRE_VERSION = 6`), range-proved and non-transitive Chord
   stabilization, CRDT removal stability, durable group-committed local stores and chain-replicated
   relay custody, fair slot-isolated admission and load bounds, and client-sealed Sphinx onion
   Kleisli pipelines (#834, #843, #880). Stabilizes the `1.0.x` public runtime contracts across the
@@ -18,25 +18,39 @@ directly. *In progress* and *Planned* items are direction, not commitments.
 ## Shipped
 
 - **Overlay:** Chord DHT with DID addressing, `network_id` isolation, range-proved finger
-  convergence, non-transitive reachability healing, and a path-less relay whose carrier names only
+  convergence, non-transitive multi-predecessor & passive gap-bridge routing, voluntary `Leave`
+  with ack-gated carrier handoff (#1057), and a path-less relay whose carrier names only
   the next hop, destination, and hop budget (`crates/core`); connect signaling records the relays
   it crosses so its answer retraces them directly (#947).
-- **Transport:** WebRTC datachannels across native and browser peers, browser-to-browser included,
-  with 4-lane credit flow control and independent challenge-response liveness probes
+- **Transport:** decoupled `TransportInterface` and `ConnectionInterface` (#1291) with 0–8 step
+  binary `HandshakeStep` negotiation, WebRTC datachannels across native and browser peers
+  (`webrtc = 0.17.3` + `web_sys`), built-in TURN-over-TCP & TURNS bridge (the built-in `turn_tcp` TURN-over-TCP/TLS bridge, #1287),
+  quiet-window ICE settling (`#1288`), bounded static-dictionary LZ4 wire compression and compact
+  `WirePayload` encoding at `WIRE_VERSION = 6` (`#1280`, `#1283`, `#1315`), 4-lane credit flow control, and independent liveness probes
   (`crates/transport`).
-- **Identity:** DIDs over secp256k1, secp256r1, ed25519, BLS, and bip137 keys; receiver-leased
-  delegation references and E2E ElGamal encryption to a DID after its handshake.
+- **TURN & Onion TURN:** standalone stateless signature+ECDH RFC 5766 UDP/TCP TURN server
+  (`rings-turn`) plus `rings-turn-service` publishing `TurnServiceDescriptor` to `turn_services`,
+  issuing unlinkable `SessionTicket` credentials over `turn.ticket` onion `invoke`, and optionally
+  bridging allocations through multi-hop `onion::udp` circuits (`#1278`, `#1292`).
+- **Identity:** DIDs over secp256k1 (EIP-191, bip137), secp256r1, ed25519, and BLS12-381 keys;
+  receiver-leased delegation references, in-process `delegator_key` rotation, and E2E ElGamal
+  encryption to a DID after its handshake.
 - **Admission & storage:** at-most-once delivery through a group-committed per-origin replay
   window, slot-isolated resource accounting (`SlotRoster` / `TableAccounting`), per-origin rate
-  quotas, clock-bounded CRDT removal stability, and chain-replicated relay-inbox custody.
-- **Privacy:** client-sealed Sphinx/AEZ onion Kleisli pipelines (#834, #843, #880) over fixed-width
-  cells, constant-rate link emission with real cells substituted for cover, paid admission, size
-  classes, persisted entry guards, and TCP/HTTPS exits (`crates/node/src/onion`); the TUN gateway
-  (`crates/gateway`) and onion WebView (`crates/webview`).
-- **Runtimes:** native daemon and `rings` CLI, JSON-RPC, C FFI, the browser provider, and the
-  hosted console at [rings.rs](https://rings.rs/#node).
+  quotas, per-writer Merkle-authenticated CRDT data topics (`SignedDataMutation`, `#1179`, `#1220`),
+  clock-bounded removal stability, and chain-replicated relay-inbox custody.
+- **Privacy:** guard-closed Sphinx/AEZ v5 onion Kleisli pipelines (#834, #843, #880) over
+  fixed-width cells, constant-rate link emission with real cells substituted for cover, paid
+  admission, size classes, SURB reply blocks, persisted entry guards, world-facing
+  `tcp`/`https`/`udp` exits, and composable `invoke<In, Out, L>` pipelines (`crates/node/src/onion`);
+  the selective TUN gateway (`crates/gateway`) and onion WebView (`crates/webview`).
+- **Runtimes & tooling:** native daemon and `rings` CLI, `rings-tui` interactive terminal dashboard
+  (`crates/tui`), JSON-RPC + `/status?view=observability`, C FFI (Python/Swift/Kotlin bindings),
+  browser provider (`@ringsnetwork/rings-node`), Chrome MV3 extension, and hosted console at
+  [rings.rs](https://rings.rs/#node).
 - **Protocols:** pure `Protocol` + namespace-scoped `Interpret` shells (RFC #594), with
-  built-in TCP/UDP relay tunnels, DNS relay, and SMTP/IMAP mail gateway.
+  built-in TCP/UDP relay tunnels, echo, authoritative DNS relay (`rings-dns-relay`), and SMTP/IMAP
+  mail gateway (`rings-mail-gateway`).
 
 ## In progress
 

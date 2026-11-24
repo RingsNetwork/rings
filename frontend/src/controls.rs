@@ -536,7 +536,7 @@ fn workspace_tabs(
                 let class = if panel == active { "workspace-tab active" } else { "workspace-tab" };
                 let disabled = extension_mode && panel != Panel::Onion;
                 let title = if disabled {
-                    "Select a preset RPC request above to inspect live node state."
+                    "Custom namespace protocols run in the web console; extension mode exposes Onion Proxy and WebView."
                 } else {
                     panel.label()
                 };

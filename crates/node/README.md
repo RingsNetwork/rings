@@ -18,31 +18,32 @@ For protocol details, see the repository-owned [Rings Whitepaper](../../papers/r
 For security assumptions, supported deployment models, and the Sybil-resistance
 boundary, see the repository [threat model](../../SECURITY.md).
 
+In addition to Chord overlay routing, Storage, and PubSub, `rings-node` exposes Sphinx onion routing (`onion`), generic `onion::udp` exits (`- udp`), Kleisli `invoke` pipelines (`OnionInvokeOffer`, `OnionInvokePipeline`), the DNS relay (`dns_relay`), and the native TUN packet gateway (`rings-gateway`). For an interactive terminal console against a running node, see [`rings-tui`](../tui/README.md); for TURN/onion-ticket services, see [`rings-turn-service`](../turn-service/README.md).
+
 ## Installation
 
-You can install rings-node either from Cargo or from source.
+You can install `rings-node` either from Cargo or from source.
 
-### from cargo
+### From Cargo
 
-To install rings-node from Cargo, build with the Rust release pinned in the repository's
+To install `rings-node` from Cargo, build with the Rust release pinned in the repository's
 `rust-toolchain.toml` (the workspace denies warnings, so a newer compiler can fail the build):
 
 ```sh
 cargo +1.97.0 install --locked rings-node
 ```
 
-### from source
+### From Source
 
-To install rings-node from source, follow these steps:
+To install `rings-node` from source, follow these steps:
 
 ```sh
-git clone git@github.com:RingsNetwork/rings.git
+git clone https://github.com/RingsNetwork/rings.git
 cd ./rings
 cargo install --path crates/node
 ```
 
 ### Build for WebAssembly
-
 
 To build `rings-node` for WebAssembly from the workspace root, run:
 
@@ -54,27 +55,36 @@ wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/
 Or build with `wasm-pack`:
 
 ```sh
-wasm-pack build crates/node --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
+wasm-pack build crates/node --scope ringsnetwork -t web --release --no-default-features --features browser_default
 ```
 
 
 ## Usage
 
 ```sh
-rings <command> [options]
+rings [--log-level <LOG_LEVEL>] [--runtime <multi-thread|current-thread>] <COMMAND>
 ```
 
-### Commands
+### Global Options
 
-- `help`: displays the usage information.
-- `init`: creates a default configuration file, `~/.rings/config.yaml` unless `--location` says otherwise. This file can be edited to customize the behavior of the rings-node daemon. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false` (see [Native gateway](#native-gateway)).
-- `run`: runs the rings-node daemon. By default, the daemon will use `~/.rings/config.yaml` for configuration. Use the "-c" or "--config" option to specify a custom configuration file.
+- `--log-level <LOG_LEVEL>` (env `LOG_LEVEL`): sets tracing log verbosity (default `info`).
+- `--runtime <RUNTIME>` (env `RUNTIME`): chooses the Tokio runtime scheduler (`multi-thread` default or `current-thread`).
+- `-h, --help`: displays usage information.
+- `-V, --version`: displays version information for `rings-node`.
 
-### Options
+### Subcommands
 
-- `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default `~/.rings/config.yaml`. The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
-- `-h, --help`: displays the usage information.
-- `-V, --version`: displays the version information for rings-node.
+- `init`: creates a default configuration file (`~/.rings/config.yaml` unless `--location` says otherwise) and generates key material and an owner-only `api-token` file. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false` (see [Native gateway](#native-gateway)).
+- `new-delegation`: generates or renews a delegated session signing key.
+- `run`: runs the foreground `rings-node` daemon (accepts `-c, --config <FILE>`, defaulting to `~/.rings/config.yaml`, plus `--gateway`, listener, ICE, storage, onion, and DNS overrides).
+- `pubsub`: subscribes to a topic stream over the node's local API.
+- `connect`: connects to peers (`node`, `did`, `seed`) or runs manual 3-step WebRTC handshakes (`offer`, `answer`, `accept`).
+- `peer`: lists connected peers or disconnects a peer (`list`, `disconnect`).
+- `send`: sends a namespaced backend message to a peer (`message`).
+- `service`: registers or looks up named services on the DHT (`register`, `lookup`).
+- `inspect`: shows swarm state including transport table, successors, predecessor, and finger table.
+
+Subcommands that run or talk to a node (`run`, `pubsub`, `connect`, `peer`, `send`, `service`, `inspect`) accept `-c, --config <FILE>` (env `CONFIG`, default `~/.rings/config.yaml`); see the [CLI reference](https://rings.rs/docs/cli.html) for full flags.
 
 ### Control API security
 
@@ -85,19 +95,11 @@ on the JSON-RPC method:
 
 | Listener | Method | Authorization |
 |---|---|---|
-| internal (`internal_api_port`, default 50000) | every method, `/status`, `/gateway/status` | Bearer required |
-| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer` | public |
-| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits`, `/status` | Bearer required |
+| internal (`internal_api_port`, default 50000) | every JSON-RPC method, `/status`, `/gateway/status` | Bearer required |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer`, `acceptAnswer` | public |
+| external (`external_api_addr`, default 127.0.0.1:50001) | all other JSON-RPC methods (e.g. `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits`), `/status` | Bearer required |
 
-The public methods are the two halves of the HTTP handshake, whose offer is already bound to the
-peer DID by its signature, so a seed can admit arbitrary peers without sharing its token.
-`answerOffer` returns the answer: the caller's offer prevails over a pending overlay offer the
-seed holds to the caller, which the seed releases, so the caller never needs the gated
-`acceptAnswer`. Seeds of 0.34.2 and earlier return a counter-offer instead when their own pending
-overlay offer prevails on the DID tie-break; the caller answers it and returns the answer with
-`acceptAnswer`. A batch
-is authorized by its strictest member: a batch that mixes a public and a gated method requires
-the token. Every JSON-RPC request, public or gated, must use `Content-Type: application/json`.
+The public methods cover the HTTP handshake (`nodeDid` identifies the peer DID to dial, `answerOffer` admits a signed offer bound to that peer DID, and `acceptAnswer` is guarded by a live pending `transport_id` and signed answer payload), so a seed can admit arbitrary peers without sharing its bearer token. `answerOffer` resolves crossing offers by returning `answer` when the caller prevails or `counterOffer` when a pending overlay offer from an older peer prevails; in the latter case the caller answers it and submits the reply via `acceptAnswer`. A batch is authorized by its strictest member: a batch that mixes a public and a gated method requires the token. Every JSON-RPC request, public or gated, must use `Content-Type: application/json`.
 
 Browser origins are denied by default. Add exact origins to `api_allowed_origins` in the YAML
 configuration or repeat `--api-allowed-origin` when starting the node. Wildcard origins are not

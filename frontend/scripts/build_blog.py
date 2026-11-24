@@ -24,7 +24,7 @@ BLOG_SOURCE_DIR = REPO_ROOT / "blog"
 
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
-LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+LINK_RE = re.compile(r"\[((?:[^\[\]]|\[[^\]]*\])+)\]\(([^)]+)\)")
 BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
 ITALIC_RE = re.compile(r"\*([^*]+)\*")
 
@@ -303,15 +303,18 @@ def site_footer_html() -> str:
       </div>
       <dl class="rings-footer-notices">
         <div><dt>License</dt><dd>The Rings source code is released under the GNU Affero General Public License, version 3.0 only (AGPL-3.0-only). Works derived from it, including services that offer it over a network, must be released under the same license.</dd></div>
-        <div><dt>Commercial use</dt><dd>Rings is open-source under the GNU General Public License v3.0 (GPL-3.0), giving you full freedom to run, inspect, modify, and self-host nodes and applications.</dd></div>
+        <div><dt>Commercial use</dt><dd>Under AGPL-3.0-only, commercial use is permitted when its copyleft and network source-disclosure obligations are met. Commercial licensing outside AGPL-3.0-only terms is available from Rings Network on request.</dd></div>
         <div><dt>No warranty</dt><dd>The software and this site are provided as is, without warranty of any kind, express or implied, as set out in sections 15 and 16 of the AGPL.</dd></div>
         <div><dt>Security boundary</dt><dd>Rings combines wallet-backed session delegation, end-to-end encrypted peer-to-peer channels, and multi-hop Sphinx onion routing. Review the security model for cryptographic guarantees and deployment best practices.</dd></div>
-        <div><dt>Privacy</dt><dd>rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node settings are kept in your browser's local storage.</dd></div>
+        <div><dt>Privacy</dt><dd>rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.</dd></div>
       </dl>
       <div class="rings-footer-bottom">
-        <span>&copy; 2021&ndash;2026 Rings Network</span>
+        <span>&copy; 2021&ndash;<span class="rings-footer-year">2026</span> Rings Network</span>
         <span>AGPL-3.0-only &middot; Built with Rust, Yew, and WebAssembly</span>
       </div>
+      <script>
+        document.querySelector('.rings-footer-year').textContent = String(new Date().getFullYear());
+      </script>
     </footer>"""
 
 

@@ -9,7 +9,7 @@ batch under its runtime lock, then wakes coalesced persistence.
 
 Each retained `PeerMeasurement` includes a `CreditRecord`. Absence of a peer is
 represented by the outer optional measurement, not by missing credit within an
-existing peer. The protobuf RPC message field retains its generated presence
+existing peer. The JSON-RPC response field retains its `Option<PeerCreditInfo>` presence
 wrapper and is populated for every projected peer. Queries still include retained
 disconnected peers; bounded pagination, `peer_measurements()`, credit scores, and
 measurement RPCs remain available. Reliability classification requires an explicit
@@ -39,10 +39,8 @@ smallest stamps through the `access_stamp` index, so two rows never tie. `clear`
 keeps the counter, so a stamp is never reused within one database. The counter
 stops with an error at `Number.MAX_SAFE_INTEGER` rather than repeat a stamp.
 
-Schema version 2 introduced the counter; the first open of a database writes the
-counter record `0`. A version-1 database (0.31 and earlier), whose rows carry
-wall-clock `last_visit_time` and no stamp, is not migrated: delete the browser's
-IndexedDB data for the site before upgrading from such a release.
+Schema version 2 introduced the monotonic access counter; the first open of a database writes
+the counter record `0`, and each database tracks row recency purely via `access_stamp`.
 
 The constructor requires an explicit database name and nonzero capacity. Raw
 transactions are private to the adapter. Browser tests use unique database names

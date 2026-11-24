@@ -14,8 +14,9 @@ bound what each relay can learn to its immediate predecessor and successor; see 
 
 On top of the overlay, Rings gives applications a namespace-scoped protocol runtime. A
 protocol is a pure state machine; its interpreter shell performs the side effects, and only
-within its own namespace. Built-in protocols cover peer service relay and echo; yours are
-registered under a namespace of their own.
+within its own namespace. Built-in protocols cover TCP/UDP relay, echo, Sphinx/AEZ onion exits
+and composable Kleisli `invoke` pipelines, DID mail, and authoritative `<did>.<zone>` DNS relay;
+custom protocols are registered under a namespace of their own.
 
 Rings is written in Rust and compiles to native binaries and to WebAssembly, so the same node
 runs in a terminal, in a browser tab, and inside a host that speaks C. This book is the
@@ -72,7 +73,8 @@ Sources checked September 22, 2026.
 
 | Runtime | Start with |
 |---|---|
-| Native node | [Install](install-a-native-node.md), then [Host a Native Node](host-a-native-node.md) and [Operate a Node from the CLI](cli.md) |
+| Native node | [Install](install-a-native-node.md), [Host a Native Node](host-a-native-node.md), [CLI](cli.md), and [Interactive Terminal UI (TUI)](tui.md) |
+| Native services & gateways | [TURN & Onion TURN](turn-server.md), [Native Gateway](native-gateway.md), [DNS Relay](dns-relay.md), and [Mail Gateway](mail-gateway.md) |
 | Browser (Wasm) node | [Build for Wasm](build-for-wasm.md) and [Browser Node and Extension](browser-node.md) |
 | Another language | [Embed via C FFI](ffi.md) |
 | An AI coding agent | [llms.txt](llms.md) |
@@ -82,14 +84,17 @@ and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 
 ## How it works
 
-- [Architecture](advanced-topic/architecture.md): the layers, from transport to application.
+- [Architecture](advanced-topic/architecture.md): the layers and all 18 workspace crates.
+- [Transport Abstraction](advanced-topic/transport.md) and [Wire Protocol & LZ4 Compression](advanced-topic/wire-protocol.md): decoupled transports, 0–8 step binary handshakes, and postcard + LZ4 framing (`WIRE_VERSION = 6`).
 - [How handshake works](advanced-topic/handshake.md) and [Exchange SDP](advanced-topic/exchange-sdp.md): how two peers open a datachannel.
-- [DHT - Network Layer](advanced-topic/chord.md): routing and lookup on the Chord ring.
-- [Account Abstraction](advanced-topic/account-abstraction.md): DIDs and the signature schemes behind them.
+- [Onion Routing & Kleisli Pipelines](onion.md): Sphinx/AEZ circuits, `tcp`/`https`/`udp` exits, and composable `invoke` operations.
+- [DHT - Network Layer](advanced-topic/chord.md): routing, authenticated CRDT storage, non-transitive bridging, and voluntary `Leave`.
+- [Account Abstraction & Delegated Signing](advanced-topic/account-abstraction.md): DIDs and the 6 signature schemes behind them.
 - [config.yaml](advanced-topic/config.yaml.md): every section of a native node's configuration.
 
 ## Beyond the book
 
+- [Engineering Blog](https://rings.rs/blog/): deep dives on Onion TURN, Onion OP, Chord convergence, and algebraic correctness.
 - [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the unified protocol specification.
 - [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): cryptographic identity and delegation, deployment models, and the contracts of the communication and privacy layers.
 - [Roadmap](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): where the network layer and the privacy layer are heading.

@@ -60,10 +60,14 @@ In this sense, Onion OP is not only an extension of Rings’ current anonymous c
 
 ## 5. BTW: Try Rings
 
-If you’ve made it this far and want to experience what Rings can already do today, rather than just read about where it is heading, you can download the latest native Rings node from **rings.rs**, or use the WASM node built directly from the latest master branch. The WASM version already provides several basic features, including Onion Browser and direct communication between connected nodes.
+If you’ve made it this far and want to experience what Rings can already do today, rather than just read about where it is heading, you can launch a browser node directly on [**rings.rs**](https://rings.rs/#node) or install the native node from [the documentation](https://rings.rs/docs/install-a-native-node.html).
 
-Keep in mind that Rings is still **pre-1.0**. Until the official 1.0 release, we make no forward-compatibility guarantees. Protocols, APIs, and data formats may change as development continues, so current releases are best suited for experimentation, testing, and contributing to development rather than assuming compatibility with future versions.
+Note: When this essay was originally written ahead of 0.32, composable Onion OP and anonymous TURN were early design work. In Rings `1.0.0-pre.8`, guard-closed Sphinx/AEZ loops (`tcp`, `https`, `udp` exits), typed `invoke<In, Out, L>` Kleisli pipelines, and decentralized Onion TURN (`turn.ticket`) are shipped.
 
-If you find a bug or have a new idea for Rings, feel free to open an Issue directly on GitHub.
+## Further reading
+
+- [Onion Routing & Kleisli Pipelines](https://rings.rs/docs/onion.html)
+- [TURN & Onion TURN Server Guide](https://rings.rs/docs/turn-server.html)
+- [We Removed the Last Dark Cloud Over Rings Network](https://rings.rs/blog/we-removed-the-last-dark-cloud-over-rings-network/)
 
 github: [https://github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings)
