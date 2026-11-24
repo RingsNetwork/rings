@@ -338,9 +338,9 @@ impl OnionCircuitShell {
                 cell,
             )
         };
-        if !matches!(
+        if matches!(
             outcome,
-            OnionHopOutcome::Refused(super::admission::OnionChargeRejection::LinkNotLive)
+            OnionHopOutcome::Stepped(_) | OnionHopOutcome::Returned { .. }
         ) {
             let _ = self.link_sender.activate(OnionLink::new(from));
         }

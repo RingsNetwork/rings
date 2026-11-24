@@ -243,7 +243,7 @@ impl<T> OrderedSendState<T> {
         }
         self.prune_retired(now_us);
         let clock = self.retired.remove(&peer).unwrap_or_default();
-        let participated_before = clock.last_real_us.is_some() || clock.last_start.is_some();
+        let participated_before = clock.last_real_us.is_some();
         match self.lanes.entry(peer) {
             Entry::Occupied(_) => None,
             Entry::Vacant(lane) => {

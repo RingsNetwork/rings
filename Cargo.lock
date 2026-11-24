@@ -4828,6 +4828,7 @@ dependencies = [
  "rand 0.8.6",
  "rings-codec",
  "rings-core",
+ "rings-network-policy",
  "serde",
  "stun",
  "thiserror 1.0.69",

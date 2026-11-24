@@ -999,7 +999,8 @@ pub(crate) fn select_ice_servers_with_cursor_and_udp(
     }
 
     let mut stun_servers = Vec::new();
-    let mut turn_servers = Vec::new();
+    let mut udp_turn_servers = Vec::new();
+    let mut tcp_turn_servers = Vec::new();
     for server in ice_servers {
         let mut stun_urls = Vec::new();
         let mut turn_urls = Vec::new();
@@ -1017,38 +1018,32 @@ pub(crate) fn select_ice_servers_with_cursor_and_udp(
         }
         for turn_url in turn_urls {
             let mut t = server.clone();
-            t.urls = vec![turn_url];
-            turn_servers.push(t);
+            t.urls = vec![turn_url.clone()];
+            if parse_turn_tcp_url(&turn_url).is_some() {
+                tcp_turn_servers.push(t);
+            } else {
+                udp_turn_servers.push(t);
+            }
         }
     }
 
-    if !os_udp_ok {
-        let tcp_only: Vec<IceServer> = turn_servers
-            .iter()
-            .filter(|server| {
-                server
-                    .urls
-                    .iter()
-                    .any(|url| parse_turn_tcp_url(url).is_some())
-            })
-            .cloned()
-            .collect();
-        if !tcp_only.is_empty() {
-            turn_servers = tcp_only;
+    let push_selected = |out: &mut Vec<IceServer>, pool: &[IceServer]| {
+        if pool.len() <= MAX_TURN_SERVERS_PER_CONNECTION {
+            out.extend_from_slice(pool);
+            return;
         }
-    }
-
-    if turn_servers.len() <= MAX_TURN_SERVERS_PER_CONNECTION {
-        stun_servers.extend(turn_servers);
-        return stun_servers;
-    }
-
-    let len = turn_servers.len();
-    for offset in 0..MAX_TURN_SERVERS_PER_CONNECTION {
-        if let Some(chosen) = turn_servers.get((cursor.wrapping_add(offset)) % len) {
-            stun_servers.push(chosen.clone());
+        let len = pool.len();
+        for offset in 0..MAX_TURN_SERVERS_PER_CONNECTION {
+            if let Some(chosen) = pool.get((cursor.wrapping_add(offset)) % len) {
+                out.push(chosen.clone());
+            }
         }
+    };
+
+    if os_udp_ok || tcp_turn_servers.is_empty() {
+        push_selected(&mut stun_servers, &udp_turn_servers);
     }
+    push_selected(&mut stun_servers, &tcp_turn_servers);
     stun_servers
 }
 

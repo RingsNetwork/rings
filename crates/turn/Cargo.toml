@@ -42,6 +42,7 @@ base58-monero = { version = "0.3", default-features = false, features = ["check"
 hex = "0.4.3"
 rings-codec = { workspace = true }
 rings-core = { workspace = true }
+rings-network-policy = { workspace = true }
 serde = { version = "1.0.136", features = ["derive"] }
 thiserror = { version = "1", optional = true }
 zeroize = { workspace = true }

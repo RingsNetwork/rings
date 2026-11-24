@@ -293,7 +293,16 @@ impl MessagePayload {
         signer: MessageSigner<impl Borrow<DelegateeKey>>,
         relay: MessageRelay,
     ) -> Result<Self> {
-        let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &transaction.signed_hash())?;
+        let signed_hash = transaction.signed_hash();
+        let verification = if signer.delegation() == transaction.verification.delegation {
+            signer.sign_at(
+                PAYLOAD_DOMAIN_TAG,
+                &signed_hash,
+                transaction.verification.ts_ms,
+            )?
+        } else {
+            signer.sign(PAYLOAD_DOMAIN_TAG, &signed_hash)?
+        };
         Ok(Self {
             transaction,
             relay,

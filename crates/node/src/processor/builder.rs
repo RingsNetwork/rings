@@ -92,7 +92,7 @@ impl ProcessorBuilder {
             onion_role: config.onion_role.clone(),
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
             onion_exit_ttl: config.onion_exit_ttl,
-            onion_idle_floor: OnionIdleFloor::DEFAULT,
+            onion_idle_floor: OnionIdleFloor::OFF,
             onion_udp_bind_config: crate::onion::OnionUdpBindConfig::default(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),

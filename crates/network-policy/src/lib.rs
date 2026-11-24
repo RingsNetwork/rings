@@ -78,16 +78,34 @@ pub const fn is_public_ip(address: IpAddr) -> bool {
             }
             !matches!(
                 octets,
-                // IETF protocol assignments, including Teredo (2001:0000::/32), Benchmarking
-                // (2001:0002::/48), and ORCHID (2001:0010::/28, 2001:0020::/28).
+                // IETF protocol assignments (2001:0000::/23), including Teredo (2001:0000::/32),
+                // Benchmarking (2001:0002::/48), and ORCHID (2001:0010::/28, 2001:0020::/28).
                 [0x20, 0x01, 0x00..=0x01, ..]
                     // Documentation 2001:db8::/32.
                     | [0x20, 0x01, 0x0d, 0xb8, ..]
-                    // 6to4 can embed a private IPv4 destination.
-                    | [0x20, 0x02, ..]
                     // Documentation 3fff::/20 (RFC 9637).
-                    | [0x3f, 0xf0..=0xff, ..]
+                    | [0x3f, 0xff, 0x00..=0x0f, ..]
             )
+        }
+    }
+}
+
+/// Return whether an IP address is a valid unicast destination when local and private networks are
+/// permitted (i.e. not unspecified, multicast, broadcast, or Class E reserved).
+pub const fn is_valid_local_or_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            let first = address.octets()[0];
+            first != 0 && first < 224
+        }
+        IpAddr::V6(address) => {
+            if address.is_unspecified() || address.is_multicast() {
+                return false;
+            }
+            if let Some([first, ..]) = embedded_ipv4(address.octets()) {
+                return first != 0 && first < 224;
+            }
+            true
         }
     }
 }
@@ -144,6 +162,10 @@ const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
         && octets[11] == 0
     {
         return Some([octets[12], octets[13], octets[14], octets[15]]);
+    }
+    // 6to4 prefix 2002::/16 (RFC 3056) embeds IPv4 in octets 2..6.
+    if octets[0] == 0x20 && octets[1] == 0x02 {
+        return Some([octets[2], octets[3], octets[4], octets[5]]);
     }
     None
 }

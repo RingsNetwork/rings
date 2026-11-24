@@ -627,6 +627,16 @@ async fn test_turn_tcp_url_parsing_and_rfc5766_stream_framing() {
     assert_eq!(udp_blocked_sel[1].urls, vec![
         "turn:turn2.example.com:80?transport=tcp"
     ]);
+    // When OS UDP is available on a mixed UDP+TCP pool, at most 1 UDP TURN and 1 TCP TURN
+    // server are selected so TCP fallback remains available if upstream firewalls block UDP.
+    let udp_ok_mixed_sel = turn_tcp::select_ice_servers_with_cursor_and_udp(&mixed_pool, 0, true);
+    assert_eq!(udp_ok_mixed_sel.len(), 3);
+    assert_eq!(udp_ok_mixed_sel[1].urls, vec![
+        "turn:turn1.example.com:3478"
+    ]);
+    assert_eq!(udp_ok_mixed_sel[2].urls, vec![
+        "turn:turn2.example.com:80?transport=tcp"
+    ]);
 
     // ChannelData with 5-byte payload (unaligned) must be padded to 8 bytes (total 12 bytes) over TCP.
     let unpadded_channel_data = [0x40, 0x01, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];

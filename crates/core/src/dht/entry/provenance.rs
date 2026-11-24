@@ -240,7 +240,12 @@ pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u
     rings_codec::serialize(&WireProofBundle { batches, items }).map_err(Error::CodecSerialize)
 }
 
-/// Encode the longest prefix of `proofs` whose serialized bundle does not exceed `max_bytes`.
+/// Encode the longest actor-consistent subset of `proofs` whose serialized bundle does not exceed
+/// `max_bytes`.
+///
+/// Grouping by `mutation.key.actor()` ensures that a signed actor's proofs are either retained in
+/// full or omitted as a unit, so `DataTopicBuffer::normalize` never classifies an actor as signed
+/// while stripping a suffix of that actor's live mutations.
 pub(super) fn encode_proof_bundle_bounded(
     proofs: &[SignedDataMutation],
     max_bytes: usize,
@@ -253,9 +258,44 @@ pub(super) fn encode_proof_bundle_bounded(
             return Some(encoded);
         }
     }
+
+    let mut actor_groups: Vec<Vec<SignedDataMutation>> = Vec::new();
+    let mut actor_index: BTreeMap<Did, usize> = BTreeMap::new();
+    for mutation in proofs {
+        let actor = mutation.key.actor();
+        if let Some(&idx) = actor_index.get(&actor) {
+            if let Some(group) = actor_groups.get_mut(idx) {
+                group.push(mutation.clone());
+            }
+        } else {
+            let idx = actor_groups.len();
+            actor_index.insert(actor, idx);
+            actor_groups.push(vec![mutation.clone()]);
+        }
+    }
+
+    let mut retained: Vec<SignedDataMutation> = Vec::new();
+    let mut best: Option<Vec<u8>> = None;
+    for group in actor_groups {
+        let prev_len = retained.len();
+        retained.extend(group);
+        match encode_proof_bundle(&retained) {
+            Ok(encoded) if encoded.len() <= max_bytes => {
+                best = Some(encoded);
+            }
+            _ => {
+                retained.truncate(prev_len);
+            }
+        }
+    }
+    if best.is_some() {
+        return best;
+    }
+
+    // Fallback when a single actor's proof group alone exceeds `max_bytes`: binary-search the
+    // longest prefix of `proofs` that fits within `max_bytes`.
     let mut low = 1_usize;
     let mut high = proofs.len().saturating_sub(1);
-    let mut best: Option<Vec<u8>> = None;
     while low <= high {
         let mid = low + (high - low) / 2;
         match proofs.get(..mid).and_then(|s| encode_proof_bundle(s).ok()) {
@@ -264,9 +304,6 @@ pub(super) fn encode_proof_bundle_bounded(
                 low = mid.saturating_add(1);
             }
             _ => {
-                if mid == 0 {
-                    break;
-                }
                 high = mid - 1;
             }
         }
