@@ -4,8 +4,7 @@ Every `MessagePayload` carries two proofs: the origin's, over the transaction, a
 hop's, over the carrier. Both are verified at every hop, not only at the final destination.
 Each proof is a delegatee-key signature plus the `Delegation` that delegates that key to an account:
 about 150 bytes of delegation next to a 65-byte signature. The delegations are the same for the
-lifetime of a connection, so since 0.28.0 a link sends each of them once and references it
-afterwards.
+lifetime of a connection, so a link sends each of them once and references it afterwards.
 
 ## Wire form
 
@@ -26,7 +25,7 @@ inline, so the verification verdict, origin attribution, and the transaction dig
 replay and fork evidence do not depend on how a slot was encoded. Only the work does: a
 referenced slot resolves from the lessor table, whose every entry was leased from a frame that
 verified in full, so its delegator's signature is not checked again; its expiry and the
-delegatee's signature are (#1089).
+delegatee's signature are.
 
 Neither signature covers the delegation slot (both sign the transaction hash), so a forwarding hop
 re-encodes the origin slot for its own next link without touching the origin's signature.
@@ -130,8 +129,8 @@ receiver                                   sender
 
 Nothing is held. A dishonest sender gains nothing by missing: its own frame is dropped. Since no
 frame waits on a repair, the frames of one lane reach the logical stage in their arrival order
-(#908; see [Transaction Replay Protection](transaction-replay.md)). A stale `Unknown` that
-overtakes a newer `Known` costs inline frames until the next lease, never a miss.
+(see [Transaction Replay Protection](transaction-replay.md)). A stale `Unknown` that overtakes a
+newer `Known` costs inline frames until the next lease, never a miss.
 
 Link-control frames (`Known`, `Unknown`) are unsigned and idempotent. They are meaningful only
 on the authenticated connection generation they arrive on, a lease is granted only for a
@@ -183,13 +182,16 @@ link, and is judged as self-contained.
 
 ## Canonical wire framing and signing domains
 
-Payload frames begin with the `RINGS-PAYLOAD` marker and link-control frames with `RINGS-LINK`;
-a frame without a recognized marker is rejected before deserialization. `Known` frames carry the
+Every wire frame opens with the 9-byte header `"RINGS\0" ‖ u16_be(WIRE_VERSION = 6) ‖ FrameKind`,
+where `FrameKind` is `0` (`Payload`), `1` (`LinkControl`), or `2` (`CompressedPayload`, for
+eligible DHT control/storage frames). Unversioned legacy `RINGS-PAYLOAD` and `RINGS-LINK` headers
+are rejected as `BeforeVersioning` before deserialization (see
+[Wire Protocol & LZ4 Compression](wire-protocol.md)). `Known` link-control frames carry the
 remaining duration of a lease (`remaining_ms`) relative to the receiver's clock so lease
-accounting requires no wall-clock synchronization between peers (#908).
+accounting requires no wall-clock synchronization between peers.
 
 Every cryptographic proof uses an explicit, domain-separated signing transcript (`rings-delegation-v1`
 and EIP-712 / account verifiers for delegations, `rings-core:message-verification:transaction` for
 transactions, `rings-core:message-verification:payload` for hop carriers, and dedicated inbox,
-receipt, descriptor, and onion domains), paired with wire-versioned framing (`WIRE_VERSION = 5` in
+receipt, descriptor, and onion domains), paired with wire-versioned framing (`WIRE_VERSION = 6` in
 Rings 1.0).

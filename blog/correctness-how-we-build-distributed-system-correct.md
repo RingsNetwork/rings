@@ -33,3 +33,8 @@ So the 2026Mid correctness work can be summarized as three mathematical paths. T
 Together, these paths change the acceptance bar for Rings. An implementation should explain the algebraic structures it relies on. A state object should explain its invariant. An effect should explain its boundary. A test should witness the property it claims. The goal of Rings 2026Mid correctness is a system that remains explainable, testable, and provable under asynchrony, failure, duplication, reordering, weak resources, and multiple platforms.
 
 Ref: [https://github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings)
+
+## Further reading
+
+- [Chord DHT & CRDT Storage](https://rings.rs/docs/advanced-topic/chord.html)
+- [Rings Architecture](https://rings.rs/docs/advanced-topic/architecture.html)

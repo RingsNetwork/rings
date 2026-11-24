@@ -58,7 +58,9 @@ For Rust changes:
 ```sh
 cargo +nightly-2026-07-02 fmt --all -- --check
 cargo clippy --all --tests -- -D warnings
-cargo test --release --all --all-targets
+cargo test --profile ci --workspace --all-targets
+RUSTDOCFLAGS="-Dwarnings" cargo doc --all --no-deps
+RUSTDOCFLAGS="-Dwarnings" cargo doc -p rings-transport --no-default-features --no-deps
 ```
 
 For browser or extension changes:
@@ -66,12 +68,15 @@ For browser or extension changes:
 ```sh
 npm ci --ignore-scripts
 npm run build:frontend-extension-scripts
+npm run build:frontend-web
+npm run test:frontend-static-shell
 ```
 
-For documentation-book changes:
+For documentation-book or blog changes:
 
 ```sh
-mdbook build docs
+mdbook build docs --dest-dir target/site/docs
+python3 frontend/scripts/finish_site.py target/site
 ```
 
 If a change touches TOML files or prose, also run `taplo format --check` or `typos`

@@ -86,7 +86,7 @@ fn append_mid_breakpoint(css: &mut String) {
                     ("grid-auto-columns", "minmax(0, 1fr)"),
                     ("gap", "0"),
                     ("width", "auto"),
-                    ("padding", "8px 10% calc(8px + env(safe-area-inset-bottom))"),
+                    ("padding", "8px 4% calc(8px + env(safe-area-inset-bottom))"),
                     ("border", "0"),
                     ("border-top", "1px solid #d7c6aa"),
                     ("border-radius", "0"),
@@ -105,11 +105,10 @@ fn append_mid_breakpoint(css: &mut String) {
                     ("border", "0"),
                     ("border-radius", "4px"),
                     ("background", "transparent"),
-                    // Four cells share the bar; on a 360px viewport with 10% side padding each
-                    // is 72px, 64px inside the cell padding, and the ten-character WHITEPAPER
-                    // label advances 0.545em per character in the monospace face, so 11px
-                    // (60px) is the largest size that fits and 12px (65.4px) does not.
-                    ("font-size", "11px"),
+                    // Five cells share the bar (Home, Guide, Blog, Docs, Whitepaper); on a 360px
+                    // viewport with 4% side padding each cell is ~66px (~58px inside padding),
+                    // so 10px fits the ten-character WHITEPAPER label cleanly in serif uppercase.
+                    ("font-size", "10px"),
                 ][..],
             ),
             (
@@ -204,7 +203,7 @@ fn append_mobile_navigation(css: &mut String) {
                     ("grid-auto-columns", "minmax(0, 1fr)"),
                     ("gap", "0"),
                     ("width", "auto"),
-                    ("padding", "8px 10% calc(8px + env(safe-area-inset-bottom))"),
+                    ("padding", "8px 4% calc(8px + env(safe-area-inset-bottom))"),
                     ("border", "0"),
                     ("border-top", "1px solid #d7c6aa"),
                     ("border-radius", "0"),

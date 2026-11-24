@@ -37,6 +37,9 @@ DESCRIPTION_META = re.compile(
     r'(<meta (?:name|property)="(?:description|og:description|twitter:description)" content=")[^"]*(")'
 )
 CHARSET = re.compile(r"<meta charset=[^>]*>", re.I)
+ROBOTS_META = re.compile(r'<meta\b[^>]*name=["\']robots["\'][^>]*>', re.I)
+CANONICAL_LINK = re.compile(r'\s*<link\b[^>]*rel=["\']canonical["\'][^>]*>', re.I)
+RELATIVE_BOOK_MD_LINK = re.compile(r"\]\((?!https?://|mailto:|#|/)([^)#]+)\.md(#[^)]*)?\)")
 TITLE = re.compile(r"<title>(.*?)</title>", re.S | re.I)
 MAIN = re.compile(r"<main>(.*?)</main>", re.S)
 PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.S)
@@ -50,9 +53,11 @@ def is_noindex(document: str) -> bool:
 
 
 def mark_noindex(document: str) -> str:
-    """Return `document` asking to be kept out of indexes, once, after its charset, which stays
-    first in the head."""
+    """Return `document` asking to be kept out of indexes, once, without a canonical URL."""
 
+    document = CANONICAL_LINK.sub("", document)
+    if ROBOTS_META.search(document):
+        return ROBOTS_META.sub(NOINDEX, document, count=1)
     if is_noindex(document):
         return document
     charset = CHARSET.search(document)
@@ -200,6 +205,18 @@ def finish_book(book: Path) -> list[str]:
     return sorted(urls, key=lambda url: (url != f"{SITE_URL}{BOOK_DIR}/", url))
 
 
+def rewrite_book_links(markdown: str) -> str:
+    """Rewrite mdBook-relative `.md` links to canonical `https://rings.rs/docs/*.html` URLs."""
+
+    def replace_link(match: re.Match[str]) -> str:
+        target = match.group(1)
+        fragment = match.group(2) or ""
+        page = "index.html" if target == "README" else f"{target}.html"
+        return f"]({SITE_URL}{BOOK_DIR}/{page}{fragment})"
+
+    return RELATIVE_BOOK_MD_LINK.sub(replace_link, markdown)
+
+
 def emit_agent_artifacts(site: Path) -> None:
     """Compose `index.md` and `llms-full.txt` from `llms.txt` and `docs/src/README.md`."""
 
@@ -207,7 +224,7 @@ def emit_agent_artifacts(site: Path) -> None:
     if not (site / "index.html").is_file() or not book_readme.is_file():
         return
     clean_readme = re.sub(r"^<img\b[^>]*>\n+", "", book_readme.read_text(encoding="utf-8"), flags=re.M)
-    markdown_home = clean_readme.replace("# Start Here", "# Rings Network", 1)
+    markdown_home = rewrite_book_links(clean_readme.replace("# Start Here", "# Rings Network", 1))
     (site / "index.md").write_text(markdown_home, encoding="utf-8")
     llms_path = site / "llms.txt"
     if not llms_path.is_file():

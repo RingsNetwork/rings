@@ -1,12 +1,8 @@
----
-description: The Chord Algorithm
----
-
 # DHT
 
 The Rings Network leverages the Chord algorithm for its DHT implementation. The Chord algorithm is a protocol for lookup in a peer-to-peer distributed system that allows nodes in the network to find the location of data. It enables effective routing of messages and storage of key-value pairs in a peer-to-peer setting, guaranteeing high availability in the Rings Network.
 
-In the Rings Network, the network is organized as a ring topology, where each node is linked to two other nodes. This design maximizes the functionality of the Chord algorithm for quick and effective participant lookup and location.
+In the Rings Network, nodes sit on a 160-bit ring (`Z / 2^160 Z`), where each node maintains a successor list (`K = 4` by default), predecessors, and up to `160` finger-table slots (bounded at `330` admitted connection slots). This design maximizes the functionality of the Chord algorithm for quick and effective participant lookup and location.
 
 ## DHT
 
@@ -25,7 +21,7 @@ Chord provides a fast, distributed lookup method that scales logarithmically wit
 Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses two core principles:
 
 * Chord must be initialized with a ring containing a minimum of `r +1` nodes, where `r` is the length of each node’s list of successors. In fact, to be proven correct, a Chord network must maintain a “stable base” of `r + 1` nodes that remain members of the network throughout its lifetime.
-* The Chord Paper defined the maintenance and use of `ﬁnger tables`, which improve lookup speed by providing pointers that cross the ring like chords of a circle. **Because ﬁnger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.**
+* The Chord Paper defined the maintenance and use of `finger tables`, which improve lookup speed by providing pointers that cross the ring like chords of a circle. **Because finger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.**
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
 
@@ -61,7 +57,7 @@ which hands them over its direct link. Every other report goes straight to the o
 `reply_via` reflects at most one bounded answer per request. A connection answer needs neither:
 it retraces the path its offer recorded, as the next paragraph describes.
 
-Connect signaling does not wait for convergence either (#947). A `ConnectNodeSend` records the
+Connect signaling does not wait for convergence either. A `ConnectNodeSend` records the
 relays it crosses, outside every signature and bounded by the hop budget, and its answer retraces
 them, each hop a link the offer itself just crossed, instead of being routed afresh over a view
 that may have just dead-ended. When two nodes offer to each other at once, an offer still being
@@ -71,12 +67,41 @@ own offer back along the refused offer's path, under the transaction it first le
 answer echoes that transaction and applies only to the offer that left under it. The edge is
 therefore established whenever either overlay offer is delivered.
 
+## Non-transitive connectivity & passive gap-bridge hints
+
+Real overlays include nodes behind heterogeneous NATs or symmetric firewalls where connectivity
+is non-transitive (for instance `A` reaches `B` and `C`, and `C` reaches `D` and `E`, without
+full mutual edges across clusters). Two mechanisms prevent silent routing blackholes:
+
+- **Multi-predecessor retention (`TopologyState::predecessors`)**: alongside the primary
+  predecessor, each node retains bounded secondary sub-ring predecessors ordered by clockwise
+  distance and prunes stale entries immediately when a strictly closer predecessor joins or a
+  two-node ring expands.
+- **Passive 1-hop gap-bridge hints (`TopologyState::bridged`)**: stabilization and admitted
+  neighbor reports record bounded 1-hop bridged peer hints (`2K` per reporter, `2K²` total),
+  which `delivery_step` consults alongside successors, predecessors, and fingers without issuing
+  unnecessary connection churn.
+
+## Voluntary `Leave` & relay carrier handoff
+
+When a node shuts down cleanly (`Swarm::leave`, `Provider::leave()`, `SIGINT`/`SIGTERM` on native
+daemons, or best-effort `pagehide` in browsers), it avoids forcing peers to wait out the 45-second
+liveness timeout:
+
+1. **Relay carrier handoff (`hand_off_relay_carriers_for_leave`)**: if the departing node holds
+   offline relay-inbox carriers, it hands them to its next live holders via
+   `SyncEntriesWithSuccessor` and waits for acknowledgements before removing local state.
+2. **Authenticated `Message::Leave`**: the node transmits `Leave { successor_list }` to its
+   `leave_targets()` (primary predecessor, successor head, and secondary predecessors). Receiving
+   peers remove only the authenticated sender and promote routable successor replacements from the
+   supplied list.
+
 ## Data-topic storage
 
 A data topic is a replicated set of elements (a state-based CRDT): each element carries the
 *dot* of the write that issued it, and replicas and hand-offs merge by join, so a replica's value
 does not depend on the order writes and hand-offs arrive in. A reader's fetch cache merges too:
-it joins every reply it receives (#864), so a late reply from a stale replica cannot replace a
+it joins every reply it receives, so a late reply from a stale replica cannot replace a
 fresher one.
 
 A write returns once it has been applied locally or has left for each of its replicas, not once
@@ -84,16 +109,29 @@ a remote replica has applied it. Which node owns a replica follows each node's v
 and that view changes as peers join and as stabilization runs. An owner hands its replica to a
 new owner only in its next storage repair round, so a lookup made just after a write can reach a
 new owner that does not hold it yet. The writer itself does not depend on that: it applies its
-own write to its fetch cache, as every owner applies it, so it reads its own writes at once
-(#982). It also stamps each write after every write it stamped before and every version it
-read for the key, at most the 3 s clock tolerance ahead of its clock (#1033, #1075), so its
+own write to its fetch cache, as every owner applies it, so it reads its own writes at once.
+It also stamps each write after every write it stamped before and every version it
+read for the key, at most the 3 s clock tolerance ahead of its clock, so its
 successive writes to a topic are listed in the order it issued them, even two in one
 millisecond or across a step back of its clock. Any other node reads the write once its lookup
 reaches an owner that holds it. That
 guarantee is about the writer's own view only, not proof that the write was replicated: an owner
 can still refuse or lose it after the write returned. So a writer must never use its own
-read-back to check that something was published, such as a registry being ready (#866); only
+read-back to check that something was published, such as a registry being ready; only
 another node's read shows that an owner holds the write.
+
+### Authenticated CRDT provenance
+
+Every `EntryKind::Data` mutation is cryptographically bound to its author under
+`crates/core/src/dht/entry/provenance.rs`:
+
+- **`SignedDataMutation` (`rings-core:data-entry:mutation`)**: writes sign a fixed-size Merkle
+  batch claim (`DataMutationClaim`: `Reset | Append | Retract`) binding author `did`, version,
+  `leaf_count`, and `merkle_root`, keyed per-actor via `DataProofKey` (`Register`, `Add`,
+  `Remove`).
+- **`RetractionWitness` & fair per-writer retention**: removals verify against `RetractionWitness`
+  attestations, preventing one writer from forging or retracting another writer's entries, while
+  cap eviction enforces fair per-writer retention so one active writer cannot crowd out others.
 
 - **Every element expires individually.** An element expires at the earlier of two instants:
   100 minutes after its dot was issued (the element horizon `H`, the longest retention one write
@@ -105,7 +143,7 @@ another node's read shows that an owner holds the write.
   keeps it: a sole writer rewrites each value within 10 minutes, and every writer within `H`,
   even while other writes keep the topic alive. The online-node, onion-exit and DNS-relay
   registries re-append their descriptor every heartbeat (30 s by default): a signed 10-minute
-  lease whose bytes stay fixed, so a heartbeat raises its dot and writes no tombstone (#918).
+  lease whose bytes stay fixed, so a heartbeat raises its dot and writes no tombstone.
   Once the topic's bound has
   elapsed, it serves no element; it is kept only while it holds a tombstone or overwrite that
   is not yet collected, and it answers lookups as absent, from a replica and from a reader's
@@ -123,10 +161,10 @@ another node's read shows that an owner holds the write.
   after the dot it covers, where `σ` (3 s) bounds clock skew between nodes, and an overwrite's
   reset `H + σ` after it was issued. By then every copy of every write they shadowed has expired
   on every node, so no stale replica can bring the value back, and a topic that holds either
-  stays stored until it is collected. Tombstones live in a store of their own that never evicts
-  (#920): the data store's byte budget drops the values of a topic, never its tombstones, and
+  stays stored until it is collected. Tombstones live in a store of their own that never evicts:
+  the data store's byte budget drops the values of a topic, never its tombstones, and
   each tombstone is charged to the connection slot of the connection that delivered it, or to
-  the node for its own writes and repairs (#907): each slot has a floor of 128 uncollected, the
+  the node for its own writes and repairs: each slot has a floor of 128 uncollected, the
   rest share a pool of 16384 in fair claims, and the node keeps 7168 of its own. A hand-off of
   the range a node now owns, from the node its view names as the range's previous owner, draws
   on a custody share of 16384 instead, so a busy range is never capped by one neighbour's slot.
@@ -134,7 +172,7 @@ another node's read shows that an owner holds the write.
   operation: a reset stamped by one owner would erase every concurrent write that owner had
   not yet received.
 - **Bounds.** A topic holds at most 1024 elements (the oldest are dropped when the cap binds) and
-  at most 1024 tombstones not yet collected (#921). The tombstone bound refuses, it never
+  at most 1024 tombstones not yet collected. The tombstone bound refuses, it never
   drops: a removal, a replication, or a repair whose result would hold more is refused and
   changes nothing, since a dropped tombstone could still cover a live write somewhere, and a
   delta carrying more is not admitted. This admits about 10 removals a minute per topic,
@@ -153,14 +191,14 @@ expire like any other.
 A message for a peer that has no connection is held for it: the node responsible for the peer's
 position (the first node at or after it) signs the message and writes it into the peer's inbox,
 a relay carrier at the key `peer + 1` in a store of its own. Relay mail is kept only in a
-retained relay store (#1021), so a node built or run without one (a browser whose IndexedDB
+retained relay store, so a node built or run without one (a browser whose IndexedDB
 cannot open, a library node built without one) declares, in every connection handshake and in
 its online-node descriptor (`relay_custody`), that it holds no relay mail. Such a node still
 joins the ring, routes, sends and receives online messages, and owns ordinary DHT data; only
-relay custody moves past it (#1037).
+relay custody moves past it.
 
 A held message expires 7 days (`MAX_RELAY_INBOX_TTL_MS`) after the instant its holder signed,
-however long newer holds keep its inbox alive (#907): every read, join and sync drops it, and a
+however long newer holds keep its inbox alive: every read, join and sync drops it, and a
 recipient never delivers it. The rule reads the signed hold instant alone, so every replica
 drops the same messages and a member cannot extend one by writing it again.
 
@@ -176,7 +214,7 @@ relay path uses it: the hold, the recipient's removal of what it delivered, the 
 its acknowledged cleanup, the repair pass that lists what to hand off, and the recipient's
 drain. So a writer and a reader whose views cover the same nodes always name the same holder.
 
-The carrier is **replicated** to the key's **members** (#777, [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Durable Local Stores & Replicated Custody): the
+The carrier is **replicated** to the key's **members** ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Durable Local Stores & Replicated Custody): the
 first `r` nodes from the key's owner that hold relay mail, the holder first, `r` configurable and
 8 by default (`RelayReplication`). The members form a chain in ring order, and a held message is
 lost only if every member holding it is lost within one repair delay (Propositions 10 and 11), so
@@ -210,7 +248,7 @@ survives.
   two digest messages. So a lost member is replaced within its detection time plus `r` hops; the
   periodic pass is the backstop.
 - **Chain liveness.** A member probes its two chain neighbours every 2.5 s, on the same probe
-  clock as every peer, and suspects one whose probe is 7.5 s unanswered (#1070). A suspect is no
+  clock as every peer, and suspects one whose probe is 7.5 s unanswered. A suspect is no
   chain member until it answers on time twice in a row, and both the suspicion and the clearing
   run the chain exchange at once; suspicion evicts nothing, eviction stays at the 45 s liveness
   deadline. So a silent loss is detected within 10 s, and a slow but live neighbour costs a chain
@@ -224,7 +262,7 @@ survives.
   the next it can reach (`FetchRelayInbox`, answered only to the recipient itself), and removes what it
   delivered at the member it read it from. No report restricts relay custody: a lagging
   member's copy, or a new holder's before its hand-off lands, may miss an element that still
-  exists (#1059).
+  exists.
 
 A view covers the node's predecessor, the node, and its successor list. A holder also needs the
 keys owned on the storage-less runs behind it, whose owners lie behind its predecessor: every node
@@ -253,8 +291,7 @@ then searches round the ring for members.
   view places every neighbour with its declaration. The previous-holder lists settle within
   `r(L + 1)` repair passes after a membership change, `L` the longest storage-less run. Until
   then a hold lands where repair moves it on, or is refused and sent again, so no mail is lost
-  in the window, including when several relay-capable nodes join one long run within it
-  (#1045).
+  in the window, including when several relay-capable nodes join one long run within it.
 - **Who may hold.** The holder admits a hold only from the node responsible for the
   destination as its view places it: its successor head for a destination it owns, itself for a
   destination in `(predecessor, self]`, and otherwise a storage-less node of the run at or after
@@ -265,8 +302,7 @@ then searches round the ring for members.
   relay-capable node joining inside a run takes custody back from the holder after it. Each move is
   an ownership hand-off acknowledged by the new holder before the old one deletes. A carrier whose
   owner the old holder cannot place is offered to both ends of its view and to the holder the key's
-  owner names: the owner always places its own keys, so the old holder asks it (`FindRelayHolder`,
-  #1045). The new holder takes a carrier only for a key its own view makes it hold, from a node
+  owner names: the owner always places its own keys, so the old holder asks it (`FindRelayHolder`). The new holder takes a carrier only for a key its own view makes it hold, from a node
   that holds relay mail: custody can jump between holders that do not know each other, as when a
   holder gives back the keys of a run a relay-capable node joined.
 

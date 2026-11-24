@@ -29,10 +29,11 @@ echoed back.
 cargo test -p rings-relay-example
 ```
 
-Three integration tests:
+Six integration tests in `tests/test_relay.rs`:
 
-- `tcp_relay_round_trip` / `udp_relay_round_trip` — `A → B → local echo` over the overlay;
-- `relay_to_google` — **`A → B → google.com:80`**: the relay node B exposes a service
+- `test_tcp_echo_helper_round_trips_locally` / `test_udp_echo_helper_round_trips_locally` — deterministic local echo helper tests;
+- `test_tcp_relay_round_trip` / `test_tcp_stream_relay_round_trip` / `test_udp_relay_round_trip` — `A → B → local echo` over the overlay;
+- `test_relay_to_google` — **`A → B → google.com:80`**: the relay node B exposes a service
   pointing at a real external host, the client A tunnels to it over rings and does an HTTP
   GET, and the test asserts the bytes that came back are a genuine HTTP response from
   Google (A never touches Google directly). Needs outbound internet on the relay node.

@@ -26,15 +26,24 @@ curl -X POST \
 | Listener | Methods | Authorization |
 |---|---|---|
 | internal (`internal_api_port`, default 50000) | every method | Bearer required |
-| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer` | public |
+| external (`external_api_addr`, default 127.0.0.1:50001) | `nodeDid`, `answerOffer`, `acceptAnswer` | public |
 | external (`external_api_addr`, default 127.0.0.1:50001) | `nodeInfo`, `lookupOnlineNodes`, `lookupOnionExits` | Bearer required |
 
-The external listener refuses every other method. The public methods are the two halves of the
-HTTP handshake: `nodeDid` reveals the DID the caller is about to address, and the offer that
-`answerOffer` admits already carries a signature bound to the peer DID. A batch is authorized by
-its strictest member, so a batch that mixes a public and a gated method requires the token. The
+The external listener refuses every other method. The public methods cover peer discovery and
+both remote halves of an out-of-band handshake: `nodeDid` reveals the DID the caller is about to
+address, `answerOffer` admits a peer-signed offer, and `acceptAnswer` completes an initiator's
+pending offer. A batch is authorized by its strictest member, so a batch mixing a public and a
+gated method requires the token. Batches are bounded: at most `8` unauthenticated public calls per
+batch (`MAX_PUBLIC_BATCH_CALLS`, larger public batches require authentication) and at most `64`
+total calls per batch (`MAX_JSONRPC_BATCH_CALLS`, larger batches fail with HTTP 400). The
 [node README](https://github.com/RingsNetwork/rings/tree/master/crates/node#control-api-security)
 covers browser origins, remote binding and TLS.
+
+In addition to `POST /` JSON-RPC, listeners expose HTTP `GET` routes requiring the Bearer token:
+`GET /status` (full `NodeInfoResponse`), `GET /status?view=observability` (compact
+[operator observability](operator-observability.md) projection), and internal-only
+`GET /gateway/status` (`GatewayStatus` when the [native TUN gateway](native-gateway.md) is
+active). Every HTTP response carries `x-node-version: <crate_version>`.
 
 ### Errors
 
@@ -53,23 +62,24 @@ Errors follow JSON-RPC 2.0:
   `-32603` internal error.
 * A failure inside the node carries the stable positive code of
   `rings_node::error::Error::code()`, whose hundreds name the category: `1xx` remote RPC, `2xx`
-  connection and handshake, `3xx` encoding, `5xx` DID, method and permission, `6xx` connect,
-  send and DHT entries, `8xx` data, storage and configuration, `9xx` files, `10xx`
-  serialization, `11xx` core, `15xx` extensions and runtime, `16xx` onion.
+  connection and handshake, `3xx` encoding, `4xx` Wasm, `5xx` DID, method and permission, `6xx`
+  connect, send and DHT entries, `7xx` JavaScript interop, `8xx` data, storage and configuration,
+  `9xx` files, `10xx` serialization, `11xx` core, `12xx` external signer / FFI, `15xx` extensions
+  and runtime, `16xx` onion.
 * `210` is a handshake with a node of another wire version (see [Wire version](#wire-version)).
-  Its `data` names both: `{"ours": 4, "theirs": 3}`, with `theirs` null for a node from before
+  Its `data` names both: `{"ours": 5, "theirs": 4}`, with `theirs` null for a node from before
   wire versioning. A client matches the code and the data, never the message.
 
 ### Wire version
 
 Every frame a node sends, and so every offer and answer of a handshake, opens with the fixed
-header `"RINGS\0" ‖ wire_version` (`u16` big-endian; `WIRE_VERSION = 5` in 1.0). The wire version
+header `"RINGS\0" ‖ wire_version` (`u16` big-endian; `WIRE_VERSION = 6` in 1.0). The wire version
 goes up by one per release, relative to the last released wire version, when a release changes
 anything on the wire that a node of that version would reject or misread; it is independent of
 the crate version. There is no multi-version negotiation: a node accepts only its own
 `WIRE_VERSION`, so two nodes of different wire versions never connect and each refuses the
 other's offer or answer before decoding its body (error `210` over JSON-RPC). The `1.0.x` release
-line freezes `WIRE_VERSION = 5`; any future wire-version bump is an explicit coordinated network
+line freezes `WIRE_VERSION = 6`; any future wire-version bump is an explicit coordinated network
 cutover. A client learns a node's wire version before joining it from the `wire_version` of its
 public `nodeDid`, and its crate version from the `x-node-version` header of every API response.
 
@@ -117,7 +127,7 @@ The DID of this node. Public on the external listener.
 
 ```json
 {"jsonrpc": "2.0", "id": 1,
- "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 4}}
+ "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 5}}
 ```
 
 ### nodeInfo
@@ -191,14 +201,16 @@ Answer an encoded offer. Public on the external listener.
 
 * Params: `offer`, as returned by `createOffer`. An offer of another wire version is refused
   with error `210`.
-* Result: `answer`, the encoded answer. The offer prevails over this node's own pending overlay
-  offer to the offering peer, which is released. A node of 0.34.2 or earlier returns that offer
-  instead, as a counter-offer, when it prevails on the DID tie-break: the caller answers it with
-  its own `answerOffer` and returns that answer with this node's `acceptAnswer`.
+* Result: `answer`, the encoded answer. Any compatible offer handed to `answerOffer` prevails
+  over this node's own pending overlay offer to the offering peer, which is released. On a
+  simultaneous manual/out-of-band DID tie-break where this node's pending external offer prevails,
+  it returns a counter-offer (`ConnectNodeSend` payload): answer it with `answerOffer` on the
+  other node and return that answer via `acceptAnswer`.
 
 ### acceptAnswer
 
-Accept an encoded answer to an offer this node created, which opens the connection.
+Accept an encoded answer to an offer this node created, which opens the connection. Public on
+the external listener.
 
 * Params: `answer`, as returned by the peer's `answerOffer`.
 * Result: `{}`.
@@ -278,7 +290,7 @@ The signed descriptors of the online-node registry.
   `dht_virtual_nodes`, `capabilities` (`{onion_relay, holds_relay_mail}`: the relay's process
   epoch or `null`, and whether the node keeps a relay store and so holds relay mail),
   `endpoint_hint`, `started_at_ms`, `heartbeat_at_ms`, `fresh_for_ms`, `expires_at_ms`,
-  `version` and `signature`. A descriptor is a signed lease (#918): `expires_at_ms` is the
+  `version` and `signature`. A descriptor is a signed lease: `expires_at_ms` is the
   lease end and `fresh_for_ms` the freshness window, both signed, and `heartbeat_at_ms` is when
   the serving node last heard it (its registry element's dot), which is not signed. A descriptor
   is live while the time is at most the lease end and at most `heartbeat_at_ms + fresh_for_ms`
@@ -290,7 +302,7 @@ The signed descriptors of the online-node registry.
 The signed onion-exit descriptors.
 
 * Params:
-  * `service` (optional): `tcp` or `https`; empty or absent means every service;
+  * `service` (optional): `tcp`, `https`, or `udp`; empty or absent means every service;
   * `include_expired` (optional, default `false`).
 * Result: `exits`, a list of descriptors with `did`, `public_key`, `delegatee_public_key`,
   `process_epoch`, `node_type`, `network_id`, `service`, `policy` (`{allowed_targets,
@@ -319,3 +331,21 @@ One page of this node's peer measurements, in DID order.
   * `cursor` (optional): the `next_cursor` of the previous page.
 * Result: `measurements`, as in [`peerMeasurement`](#peermeasurement), and `next_cursor`,
   `null` at the end.
+
+## Provider-local RPC methods
+
+In addition to the 21 HTTP JSON-RPC methods above, embedded hosts using
+[`rings_node_request`](ffi.md) (C FFI) or `provider.request(method, params)` (Browser WASM) can
+invoke six built-in local methods handled by `Provider::request_internal`:
+
+| Method | Params | Result | Purpose |
+|---|---|---|---|
+| `takeE2eEvents` | `{}` | `{ events, dropped }` | Drain up to 4096 buffered E2E handshake and decrypted stream-frame events (`dropped` counts overflow) |
+| `dispatchDropCounters` | `{}` | drop counters by reason | Inspect `Backend` envelope drop counts per reason |
+| `signingHorizon` | `{}` | `{ expires_at_ms, horizon_ms, remaining_ms, signs_now }` | Inspect active delegation signing horizon (`25 s` before expiry) |
+| `renewDelegateeKey` | `{ delegatee_key }` | same as `signingHorizon` | Hot-swap a newly minted `DelegateeKey` in process without restarting |
+| `lookupRegistry` | `{ topic }` | `{ topic, network_id, now_ms, elements: [{ data_base64, heartbeat_at_ms }] }` | Read raw normalized registry elements with CRDT dots (used by `turn_services`, `onion_invokes`, etc.) |
+| `onionInvoke` | `{ shape, backend, constants_base64?, input_base64, eligible_dids?, eligible_stages?, timeout_ms? }` | `{ stage_did, stage_process_epoch, stage_delegatee_public_key, output_base64 }` | Evaluate a 1-stage Kleisli `invoke` loop over a guard-closed Sphinx circuit |
+
+Crates embedding `Provider` can also attach domain methods via `Provider::register_local_rpc_method`
+(for example `lookupTurnServices` and `requestTurnTicket` installed by `rings-turn-service`).

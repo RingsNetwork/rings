@@ -15,6 +15,7 @@ STATIC_ROOT_ID = "static-project-introduction"
 CANONICAL_URL = "https://rings.rs/"
 REPOSITORY_URL = "https://github.com/RingsNetwork/rings"
 REQUIRED_LINKS = {
+    "https://rings.rs/blog/",
     "https://rings.rs/docs/",
     REPOSITORY_URL,
     "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf",

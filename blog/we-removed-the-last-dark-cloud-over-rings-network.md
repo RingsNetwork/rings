@@ -42,7 +42,7 @@ With that, the last dark cloud hanging over Rings Network is gone.
 
 ## 4. BTW: Try Rings
 
-If you want to try Rings `v1.0.0-pre.8` today, you can install or upgrade the native node from **rings.rs** in one line:
+If you want to try Rings `v1.0.0-pre.8` today, you can install or upgrade the native node from [**rings.rs**](https://rings.rs/) in one line:
 
 ```sh
 curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.8
@@ -53,5 +53,12 @@ Or install the node and the terminal dashboard directly from crates.io:
 ```sh
 cargo install rings-node rings-tui --version 1.0.0-pre.8
 ```
+
+## Further reading
+
+- [TURN & Onion TURN Server Guide](https://rings.rs/docs/turn-server.html) — running `rings-turn` and `rings-turn-service` in single-hop and multi-hop `onion::udp` modes
+- [Onion Routing & Kleisli Pipelines](https://rings.rs/docs/onion.html) — Sphinx/AEZ circuits, entry guards, SURBs, and composable `invoke` shapes
+- [Interactive Terminal UI (`rings-tui`)](https://rings.rs/docs/tui.html) — live monitoring, directory inspection, and command workbench
+- [Install a Native Node](https://rings.rs/docs/install-a-native-node.html) — quickstart binaries and service units
 
 github: [https://github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings)

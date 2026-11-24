@@ -10,9 +10,9 @@ rings init
 
 This command will generate a configuration file named config.yaml for you. The default path is $HOME/.rings/config.yaml. You can also customize the path by using `rings init --location <path>`. Additionally, you can specify the key used by the Rings node by using `rings init -k <your private key>`. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false`, so it is the one place you edit; see [Native Gateway](native-gateway.md).
 
-By default, `rings init` generates a fresh ECDSA account key and issues a bounded-authority session delegation (`delegatee_key`, valid for 30 days by default and configurable via `--ttl-seconds`) with owner-only file permissions (`0600` on Unix). Because the daemon signs day-to-day traffic with `delegatee_key` rather than your root account key, you can keep your primary or asset-holding keys offline and rotate session delegations on your own schedule; see [Delegations and keys](cli.md#delegations-and-keys).
+By default, `rings init` generates a fresh ECDSA account key and issues a bounded-authority session delegation (`delegatee_key`, valid for 30 days by default and configurable via `--ttl`) with owner-only file permissions (`0600` on Unix). Because the daemon signs day-to-day traffic with `delegatee_key` rather than your root account key, you can keep your primary or asset-holding keys offline and rotate session delegations on your own schedule; see [Delegations and keys](cli.md#delegations-and-keys).
 
-More about `config.yaml`you can find at:
+More about `config.yaml` you can find at:
 
 [config.yaml.md](advanced-topic/config.yaml.md)
 
@@ -40,7 +40,7 @@ Options:
       --internal-api-port <INTERNAL_API_PORT>
           Rings node internal api listen port. If not provided, use internal_api_port in config file or 50000
       --api-token-path <API_TOKEN_PATH>
-          API Bearer token file guarding the internal API and the external status and registry reads; the external handshake (nodeDid, answerOffer) is public. Relative paths are resolved next to the node config file [env: API_TOKEN_PATH=]
+          API Bearer token file guarding the internal API and the external status and registry reads; the external handshake (nodeDid, answerOffer, acceptAnswer) is public. Relative paths are resolved next to the node config file [env: API_TOKEN_PATH=]
       --api-allowed-origin <API_ALLOWED_ORIGINS>
           Exact browser origin permitted to call the authenticated API; repeat as needed [env: API_ALLOWED_ORIGINS=]
       --allow-remote-external-api
@@ -70,7 +70,7 @@ Options:
       --advertise-onion-exit
           Publish this node as an onion exit in the application-layer exit registry; requires --advertise-onion-relay [env: ADVERTISE_ONION_EXIT=]
       --onion-exit-service <ONION_EXIT_SERVICE>
-          Onion exit service to serve: tcp or https. May be repeated. [env: ONION_EXIT_SERVICE=]
+          Onion exit service to serve: tcp, https, or udp. May be repeated. [env: ONION_EXIT_SERVICE=]
       --onion-exit-allow-target <ONION_EXIT_ALLOW_TARGET>
           Allow-list target for onion exit policy. May be repeated. [env: ONION_EXIT_ALLOW_TARGET=]
       --onion-exit-deny-target <ONION_EXIT_DENY_TARGET>
@@ -110,3 +110,9 @@ rings run --gateway
 
 To start it on every run, set `enabled: true` in the section. Either way the interface needs
 `CAP_NET_ADMIN` on Linux or the foreground helper; see [Native Gateway](native-gateway.md).
+
+## Operating a hosted node
+
+- **Service supervisors (`systemd` / `launchd`)**: [`contrib/README.md`](https://github.com/RingsNetwork/rings/blob/master/contrib/README.md) provides user-unit and LaunchAgent templates along with guidance for online `delegator_key` rotation vs offline `rings new-delegation` hooks.
+- **Live dashboard & telemetry**: monitor peers, storage, and command execution in [Interactive Terminal UI (`rings-tui`)](tui.md), or poll `GET /status?view=observability` as described in [Operator Observability](operator-observability.md).
+- **Backups**: keep the sibling store directories (`data`, `measure`, `transaction-replay`, `relay-inbox`, `dht-removals`, `onion-entry-guards`, `provisional-evidence`) consistent if backing up or moving a node; see [config.yaml Storage](advanced-topic/config.yaml.md#storage).

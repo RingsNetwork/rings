@@ -13,16 +13,15 @@ extend-ignore-re = ["[wW]s", "WS"]
 [default.extend-words]
 Brin = "Brin"
 Pease = "Pease"
+Ratatui = "Ratatui"
 Tung = "Tung"
 # SMTP's HELO command (RFC 5321 §4.1.1.1), and the names that spell it.
 HELO = "HELO"
 Helo = "Helo"
 helo = "helo"
 
-# JSON-RPC method name as documented in docs/src/jsonrpc.md.
-[default.extend-identifiers]
-listPendings = "listPendings"
 # Single-use reply blocks (Mixminion, Sphinx), plural as used in papers/rings.tex.
+[default.extend-identifiers]
 SURBs = "SURBs"
 # Retransmission timeout field name on `turn::client::ClientConfig`.
 rto_in_ms = "rto_in_ms"

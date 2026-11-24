@@ -56,8 +56,8 @@ References:
 
 [1] [https://www.theguardian.com/technology/2017/nov/15/tim-berners-lee-world-wide-web-net-neutrality](https://www.theguardian.com/technology/2017/nov/15/tim-berners-lee-world-wide-web-net-neutrality)
 
-[2] [https://www.oilshell.org/blog/2022/02/diagrams.html](https://www.oilshell.org/blog/2022/02/diagrams.html) [3] [https://github.com/ethereum/whisper](https://github.com/ethereum/whisper)
+[2] [https://www.oilshell.org/blog/2022/02/diagrams.html](https://www.oilshell.org/blog/2022/02/diagrams.html)
 
 [3] [https://github.com/ethereum/whisper](https://github.com/ethereum/whisper)
 
-[4] [https://github.com/RingsNetwork/rings-node](https://github.com/RingsNetwork/rings-node)
+[4] [https://github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings)

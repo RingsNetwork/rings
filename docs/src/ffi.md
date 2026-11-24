@@ -4,9 +4,9 @@
 Kotlin, or any language with a C foreign-function interface — runs a full node in its own
 process. The ABI is declared in
 [`crates/node/include/rings.h`](https://github.com/RingsNetwork/rings/blob/master/crates/node/include/rings.h),
-the crate-owned C header for the `ffi` feature. It is deliberately narrow: one constructor, one
-request entry point that carries the whole JSON-RPC API, and the ownership calls those two
-need.
+the crate-owned C header for the `ffi` feature. It is deliberately narrow: two provider
+constructors, one request entry point that carries the JSON-RPC and provider-local RPC API, and
+the lifecycle/free helpers those calls need.
 
 ## Build the library
 
@@ -23,8 +23,9 @@ The library lands in `target/debug/` as `librings_node.dylib` (macOS), `librings
 |---|---|
 | `rings_node_init_logging(level)` | Installs the logger once; `level` is `Debug`, `Info`, `Warn`, `Error`, or `Trace`. |
 | `rings_node_new_provider_with_callback(network_id, ice_server, stabilize_interval, account, account_type, storage_path, signer)` | Creates a provider keeping its stores under `storage_path`, and returns its handle, or `NULL` when creation fails. |
+| `rings_node_new_provider_with_serialized_config(serialized_config, storage_path)` | Creates a provider from a YAML or JSON `ProcessorConfig` (including `network: { kind, params }`) and opens its stores under `storage_path`, returning `NULL` on failure. |
 | `rings_node_listen(provider)` | Starts message listening and Chord stabilization. |
-| `rings_node_request(provider, method, params)` | Calls one method of the [JSON-RPC API](jsonrpc.md) with a JSON `params` string; returns the reply as a string, or `NULL` when validation or execution fails. |
+| `rings_node_request(provider, method, params)` | Calls any method of the [JSON-RPC API](jsonrpc.md) or [provider-local RPC extensions](jsonrpc.md#provider-local-rpc-methods) (`takeE2eEvents`, `dispatchDropCounters`, `signingHorizon`, `renewDelegateeKey`, `lookupRegistry`, `onionInvoke`) with a JSON `params` string; returns the reply as a string, or `NULL` when validation or execution fails. |
 | `rings_node_string_free(value)` | Releases a string returned by `rings_node_request`. |
 | `rings_node_provider_destroy(provider)` | Stops the listener and every task of the node, closes its connections, flushes its measurements, and releases every store under its `storage_path`, so a provider created again on that path in this process opens them; then destroys the provider, and the handle is invalid afterwards. |
 
@@ -44,15 +45,16 @@ native node opens beside its data store, each at its authority: `data` (the DHT 
 `dht-removals` (the data topics' uncollected removals, retained), `onion-entry-guards` (a durable
 cache), and `measure` with `provisional-evidence`. Pass the same
 path on every run of the same node: the replay windows must survive a restart, or the node
-would accept replayed transactions and re-sign used sequences (#1022). A fresh path is a fresh
+would accept replayed transactions and re-sign used sequences. A fresh path is a fresh
 node state.
 
 The provider owns its stores exclusively while it lives. Each store takes an exclusive lock on
 its own directory at open (a `.lock` file, `flock` on unix and `LockFileEx` on Windows) and
-holds it until the provider is destroyed (#1039). A second provider, or a native daemon, given a
-store this provider holds fails to open it, so `rings_node_new_provider_with_callback` returns
-`NULL` instead of interleaving its writes with this one's. The lock is per store, so providers
-with distinct roots never conflict. A file system that offers no such lock fails the open.
+holds it until the provider is destroyed. A second provider, or a native daemon, given a
+store this provider holds fails to open it, so both `rings_node_new_provider_with_callback` and
+`rings_node_new_provider_with_serialized_config` return `NULL` instead of interleaving writes.
+The lock is per store, so providers with distinct roots never conflict. A file system that offers
+no such lock fails the open.
 
 ## Lifecycle
 
