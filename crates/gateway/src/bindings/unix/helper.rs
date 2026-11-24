@@ -175,11 +175,12 @@ impl ShutdownSignals {
 
     fn poll_triggered(&mut self, runtime: &tokio::runtime::Runtime) -> bool {
         runtime.block_on(async {
+            tokio::task::yield_now().await;
             tokio::select! {
                 biased;
                 _ = self.sigint.recv() => true,
                 _ = self.sigterm.recv() => true,
-                () = tokio::time::sleep(Duration::from_millis(1)) => false,
+                () = std::future::ready(()) => false,
             }
         })
     }
@@ -249,6 +250,16 @@ fn wait_readable_or_signal(
     }
 }
 
+/// Read bytes from `stream` using ordinary stream `read()`, which takes `msg_control = NULL` in
+/// the kernel and therefore never installs incoming `SCM_RIGHTS` descriptors into the helper's
+/// file-descriptor table.
+fn recv_stream_discarding_fds(
+    stream: &mut UnixStream,
+    target: &mut [u8],
+) -> std::io::Result<usize> {
+    stream.read(target)
+}
+
 fn read_request_with_deadline(
     stream: &mut UnixStream,
     runtime: &tokio::runtime::Runtime,
@@ -269,7 +280,7 @@ fn read_request_with_deadline(
                 operation: "read-helper-request",
                 message: format!("invalid frame prefix offset {prefix_filled}"),
             })?;
-        match stream.read(target) {
+        match recv_stream_discarding_fds(stream, target) {
             Ok(0) if prefix_filled == 0 => return Ok(FrameReadOutcome::Disconnected),
             Ok(0) => {
                 return Err(GatewayError::platform(
@@ -303,7 +314,7 @@ fn read_request_with_deadline(
                 operation: "read-helper-request",
                 message: format!("invalid frame payload offset {payload_filled}"),
             })?;
-        match stream.read(target) {
+        match recv_stream_discarding_fds(stream, target) {
             Ok(0) => {
                 return Err(GatewayError::platform(
                     "read-helper-request",

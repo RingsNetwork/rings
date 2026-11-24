@@ -54,6 +54,11 @@ impl OnionIdleFloor {
         micros_per_unit: 1_000_000,
     };
 
+    /// Disable idle cover traffic outside the active dwell window `[t, t + D)` (#1314).
+    pub const OFF: Self = Self {
+        micros_per_unit: u128::MAX,
+    };
+
     /// The floor of one unit per `period`, or `None` if `period` is shorter than one second:
     /// the floor is configurable downwards only.
     pub fn per_unit(period: Duration) -> Option<Self> {
@@ -63,7 +68,7 @@ impl OnionIdleFloor {
 
     /// The idle slot after `units` units: `units / r_idle`.
     pub(super) const fn slot_micros(self, units: u128) -> u128 {
-        units * self.micros_per_unit
+        units.saturating_mul(self.micros_per_unit)
     }
 }
 
@@ -143,15 +148,19 @@ pub(super) fn plan(
     if !credited {
         return Plan::WaitCredit;
     }
+    let active = is_active(clock, queued, now_us);
+    if !active && floor == OnionIdleFloor::OFF {
+        return Plan::WaitUntil(u128::MAX);
+    }
     let Some((start_us, units)) = clock.last_start else {
         return Plan::Emit;
     };
-    let slot_us = if is_active(clock, queued, now_us) {
+    let slot_us = if active {
         slot_micros(units)
     } else {
         floor.slot_micros(units)
     };
-    let due_us = start_us + slot_us;
+    let due_us = start_us.saturating_add(slot_us);
     if now_us >= due_us {
         Plan::Emit
     } else {

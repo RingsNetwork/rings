@@ -1,8 +1,6 @@
 [package]
 name = "rings-rpc"
-description = """
-Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
-"""
+description = "JSON-RPC 2.0 method catalog, authorization classes, DTOs, and HTTP client for Rings"
 readme = "README.md"
 keywords = ["Chord", "DHT", "Web3", "P2P", "WASM"]
 categories = ["network-programming", "cryptography", "wasm"]

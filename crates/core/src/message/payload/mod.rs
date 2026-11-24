@@ -57,6 +57,8 @@ pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;
 pub(crate) use self::wire::PerSlot;
 pub(crate) use self::wire::SlotEncoding;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::wire::WireHopVerification;
 pub(crate) use self::wire::WirePayload;
 pub(crate) use self::wire::MAX_COMPRESSED_FRAME_WIRE_BYTES;
 #[cfg(test)]
@@ -289,7 +291,16 @@ impl MessagePayload {
         signer: MessageSigner<impl Borrow<DelegateeKey>>,
         relay: MessageRelay,
     ) -> Result<Self> {
-        let verification = signer.sign(PAYLOAD_DOMAIN_TAG, &transaction.signed_hash())?;
+        let signed_hash = transaction.signed_hash();
+        let verification = if signer.delegation() == transaction.verification.delegation {
+            signer.sign_at(
+                PAYLOAD_DOMAIN_TAG,
+                &signed_hash,
+                transaction.verification.ts_ms,
+            )?
+        } else {
+            signer.sign(PAYLOAD_DOMAIN_TAG, &signed_hash)?
+        };
         Ok(Self {
             transaction,
             relay,
@@ -320,7 +331,7 @@ impl MessagePayload {
             signer.by_ref(),
         )?;
         let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
-        Self::new(transaction, signer.by_ref(), relay)
+        Self::new(transaction, signer, relay)
     }
 
     #[cfg(test)]
@@ -375,7 +386,15 @@ impl MessagePayload {
 
     /// [`Self::from_wire`], together with the uncompressed wire frame length in bytes.
     pub(crate) fn from_wire_with_uncompressed_len(data: &[u8]) -> Result<(Self, usize)> {
-        match LinkFrame::from_wire_with_uncompressed_len(data)? {
+        Self::from_wire_with_max_uncompressed_len(data, MAX_COMPRESSED_FRAME_WIRE_BYTES)
+    }
+
+    /// [`Self::from_wire_with_uncompressed_len`] bounded by `max_uncompressed_wire_bytes`.
+    pub(crate) fn from_wire_with_max_uncompressed_len(
+        data: &[u8],
+        max_uncompressed_wire_bytes: usize,
+    ) -> Result<(Self, usize)> {
+        match LinkFrame::from_wire_with_max_uncompressed_len(data, max_uncompressed_wire_bytes)? {
             (LinkFrame::Payload(frame), uncompressed_len) => {
                 Ok((frame.into_self_contained()?, uncompressed_len))
             }

@@ -108,3 +108,8 @@ Do not let a test oracle answer questions the network would not. Every one of th
 And when a Rust test suite hangs with no output and no CPU, go look for an eager then_some before you look anywhere else.
 
 The change ships in Rings 0.26.0. It is a wire-format break, so an overlay upgrades together, and the finger table is finally a thing you can trust.
+
+## Further reading
+
+- [Chord DHT & Network Layer](https://rings.rs/docs/advanced-topic/chord.html)
+- [Rings Architecture](https://rings.rs/docs/advanced-topic/architecture.html)

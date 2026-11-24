@@ -1,7 +1,3 @@
----
-description: Start from using rings-node
----
-
 # Install a native node
 
 ## Installation
@@ -38,21 +34,32 @@ rings --version
 
 For running `rings` persistently under `systemd` or `launchd`, see
 [`contrib/README.md`](https://github.com/RingsNetwork/rings/blob/master/contrib/README.md).
+Both templates configure file-descriptor limits (`LimitNOFILE=65535` on Linux and
+`NumberOfFiles = 10240` on macOS), and `rings run` automatically raises its soft `RLIMIT_NOFILE`
+limit on startup to prevent `EMFILE (Too many open files)` across multi-peer WebRTC meshes.
 
 ### From Cargo
 
 The workspace denies compiler warnings, so build with the Rust release pinned in the
 repository's `rust-toolchain.toml`; a newer compiler can add a warning that fails the build:
 
-```
+```sh
 cargo +1.97.0 install --locked rings-node
+```
+
+Companion native binaries in the workspace can be installed the same way:
+
+```sh
+cargo +1.97.0 install --locked rings-tui           # interactive terminal dashboard
+cargo +1.97.0 install --locked rings-turn          # standalone signature-authenticated TURN server
+cargo +1.97.0 install --locked rings-turn-service  # DHT-discovered TURN + multi-hop Onion TURN daemon
 ```
 
  > Rings Network is written in [Rust](https://www.rust-lang.org/). [Cargo](https://crates.io/) is a package management tool for the Rust language. You can learn about how to install and use Cargo [here](https://doc.rust-lang.org/cargo/getting-started/installation.html).
 
 ### From Source
 
-```
+```sh
 git clone https://github.com/RingsNetwork/rings
 cd rings
 cargo install --path crates/node
@@ -60,18 +67,27 @@ cargo install --path crates/node
 
 ### Usage
 
+```text
+rings [OPTIONS] <COMMAND>
 ```
-rings <command> [options]
-```
+
+#### Top-level options
+
+* `--log-level <LOG_LEVEL>`: set log verbosity (`debug`, `info`, `warn`, `error`, `trace`; env `LOG_LEVEL`, default `error`).
+* `--runtime <RUNTIME>`: Tokio scheduler flavor (`multi-thread` or `current-thread`; env `RUNTIME`, default `multi-thread`).
+* `-h, --help`: display usage information.
+* `-V, --version`: display version information for `rings`.
 
 #### Commands
 
-* `help`: displays the usage information.
-* `init`: creates a default configuration file, `~/.rings/config.yaml` unless `--location` says otherwise. This file can be edited to customize the behavior of the rings-node daemon. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false` (see [Native Gateway](native-gateway.md)).
-* `run`: runs the rings-node daemon. By default, the daemon will use `~/.rings/config.yaml` for configuration. Use the "-c" or "--config" option to specify a custom configuration file.
+* `init`: write a default `~/.rings/config.yaml` (or `--location <PATH>`) with a fresh `delegatee_key` (`0600`) and a disabled `gateway:` section; see [Host a Native Node](host-a-native-node.md).
+* `new-delegation`: create or rotate a delegated signing key (`delegatee_key`).
+* `run`: run the foreground Rings node daemon (accepts `-c, --config <FILE>`, default `~/.rings/config.yaml`, env `CONFIG`).
+* `pubsub`: open an interactive publish/subscribe loop on a DHT data topic.
+* `connect`: connect to a remote peer (`node`, `did`, `seed`, `offer`, `answer`, `accept`).
+* `peer`: manage connected peers (`list`, `disconnect`).
+* `send`: deliver a namespaced payload (`send message <TO_DID> <NAMESPACE> <DATA>`).
+* `service`: register or look up a named service provider (`register`, `lookup`).
+* `inspect`: inspect local swarm peers, successor list, predecessor, and finger table.
 
-#### Options
-
-* `-c, --config <FILE>`: specifies a custom configuration file to use instead of the default `~/.rings/config.yaml`. The configuration file is used to specify the network configuration, account settings, and other parameters that control the behavior of the rings-node daemon.
-* `-h, --help`: displays the usage information.
-* `-V, --version`: displays the version information for rings-node.
+See [Operate a Node from the CLI](cli.md) for the full CLI reference and [Interactive Terminal UI (TUI)](tui.md) for `rings-tui`.

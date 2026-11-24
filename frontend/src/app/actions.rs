@@ -75,6 +75,8 @@ struct DisconnectAction {
     link_dialog_open: UseStateHandle<bool>,
     active_dialog: UseStateHandle<ActiveDialog>,
     webview_ready: UseStateHandle<bool>,
+    custom_registered: UseStateHandle<Vec<String>>,
+    custom_events: UseStateHandle<Vec<custom::CustomEvent>>,
 }
 
 pub(super) fn launch_actions(
@@ -119,6 +121,8 @@ pub(super) fn launch_actions(
         link_dialog_open: link.link_dialog_open.clone(),
         active_dialog: shell.active_dialog.clone(),
         webview_ready: node.webview_ready.clone(),
+        custom_registered: custom_state.registered.clone(),
+        custom_events: custom_state.events.clone(),
     }
     .callback();
     LaunchActions {
@@ -346,10 +350,13 @@ impl StartAction {
             format!("<h1>Rings node {my_did}</h1><p>Served by the Rings browser frontend.</p>"),
         );
         let on_dweb_response = Callback::from(|_: dweb::DwebResponse| {});
-        dweb::register(&built.provider, self.site.clone(), on_dweb_response)?;
+        let dweb_handler = dweb::register(&built.provider, self.site.clone(), on_dweb_response)?;
+        built.retain_protocol_handler(dweb_handler);
         let on_custom = self.custom_event_handler();
         for namespace in custom::DEMO_NAMESPACES {
-            custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+            let handler =
+                custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+            built.retain_protocol_handler(handler);
         }
         Ok(())
     }
@@ -504,6 +511,13 @@ impl DisconnectAction {
         self.generated_answer.set(String::new());
         self.remote_answer.set(String::new());
         self.link_dialog_open.set(false);
+        self.custom_registered.set(
+            custom::DEMO_NAMESPACES
+                .iter()
+                .map(|ns| (*ns).to_string())
+                .collect(),
+        );
+        self.custom_events.set(Vec::new());
         super::routes::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);
     }

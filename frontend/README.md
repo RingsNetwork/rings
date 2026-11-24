@@ -52,20 +52,26 @@ trunk serve --release true
 Then open the Trunk URL. The shell is hash-routed: the landing page is the root, the
 guide is `#guide`, and the node console (`#node`) holds the connection, onion proxy,
 and custom-message workflows. The header navigates between the landing page and the
-guide and links to the documentation and the whitepaper; the node console and GitHub
-are entered from the landing page itself.
+guide and links to the engineering blog (`/blog/`), the documentation (`/docs/`), and
+the whitepaper; the node console and GitHub are entered from the landing page itself.
 
 ## Deploy to rings.rs
 
 The web app is published to GitHub Pages by `.github/workflows/deploy-pages.yml`,
 which serves `https://rings.rs` through the repository's Pages custom domain. It runs
-on every master push that touches `frontend/`, `crates/`, or `docs/` (and on manual
-dispatch), builds with `npm run build:frontend-web` (a release `trunk build` from the
-repository root), renders the documentation book (`docs/`, mdBook) into
-`frontend/dist/docs`, and uploads `frontend/dist`. The shell is hash-routed; the
-path-routed WebView gateway (`/webview`, `/webview/…`) is answered by the service
-worker, and `404.html` is a copy of the shell so a cold load of such a path boots the
-app and registers it.
+on every master push that touches `frontend/`, `blog/`, `crates/`, `docs/`, `llms.txt`,
+`install.sh`, or `.github/workflows/deploy-pages.yml` (and on manual dispatch), builds
+with `npm run build:frontend-web` (a release `trunk build` from the repository root),
+renders the documentation book (`docs/`, mdBook) into `frontend/dist/docs`, copies
+`llms.txt`, `install.sh`, and `404.html`, runs `frontend/scripts/finish_site.py` (which
+invokes `frontend/scripts/build_blog.py` to emit `/blog/`, `/blog/feed.xml`,
+`/blog/index.md`, and `/blog/<slug>.md`, writes `/index.md`, `/llms-full.txt`, and
+`/sitemap.xml`, and annotates book chapters with canonical URLs and JSON-LD), and
+uploads `frontend/dist`. After deploy, `frontend/scripts/indexnow.py` submits updated
+pages from `sitemap.xml` to IndexNow. The shell is hash-routed; the path-routed WebView
+gateway (`/webview`, `/webview/…`) is answered by the service worker, and `404.html`
+(marked `noindex`) is a copy of the shell so a cold load of such a path boots the app
+and registers it.
 
 Link previews (Open Graph and Twitter cards) are the `<meta>` tags in `index.html` and
 the card at `assets/social/rings-card.png`, rendered from `assets/social/card.svg` with

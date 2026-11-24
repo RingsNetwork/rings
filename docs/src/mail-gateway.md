@@ -1,7 +1,7 @@
 # Mail Gateway
 
 A mail gateway lets any Rings node receive internet mail at `did@domain`, a browser node
-included (#1117). The node does not need to listen on a socket, run an SMTP server, or be
+included. The node does not need to listen on a socket, run an SMTP server, or be
 online when the mail is sent. The gateway is a stateless SMTP receiver. It seals each mail to
 its recipient's key and writes it to an ordinary DHT data topic. The recipient's node fetches the
 topic, opens the mail and files it.
@@ -30,7 +30,7 @@ per recipient.
 
 A node takes mail only while it publishes a mail descriptor `μ(d)` on its topic
 `mail_descriptor:<did>`. The descriptor is a signed registry lease, like the DNS relay's service
-descriptor (#918), re-published on every heartbeat. Its signature carries the delegation that
+descriptor, re-published on every heartbeat. Its signature carries the delegation that
 authorizes the node's session key.
 
 Mail is sealed to that session key, the delegatee's secp256k1 public key `ek`, because a wallet
@@ -65,9 +65,9 @@ it is back.
 * A DID with no live descriptor gets `451`, not `550`. A gateway that keeps nothing cannot tell
   a recipient that is away from one that never took mail. The sender's retries reach a
   recipient that comes back, and only a local part that is not a DID is refused.
-* `250` means that an owner reported storing the mail (a store report, #866). One owner is
+* `250` means that an owner reported storing the mail (a store report). One owner is
   enough, since a recipient's fetch can then reach the mail. Waiting for every owner would let
-  one slow or refusing owner turn a held mail into a retry. Read-your-writes (#948, #982)
+  one slow or refusing owner turn a held mail into a retry. Read-your-writes
   answers the writer's reads from its own cache, so a read-back is no such report.
 * A `451` loses nothing. The sender retries, and a copy that an owner did hold is a duplicate
   that the recipient files once.
@@ -136,12 +136,16 @@ The recipient library (`rings_node::mail::recipient`) builds for native and brow
   mailbox example's INBOX).
 * **At least once.** It files a mail before it records it, so a crash between the two files the
   mail again on restart. A crash never loses a mail; at worst it files it twice.
-* **Two keys.** An opened or unreadable verdict belongs to the delegatee key that tried to open
-  the mail. Tabs sharing a store cannot hide mail from a tab that holds its key. Filed
-  `Message-ID` records stay shared, so a resend encrypted to another key is still a duplicate.
-* **Forward-Secret Session Keys:** Mail opens strictly under the node's active delegatee session
-  key, providing forward secrecy across session rotations—ciphertext sealed to a retired session
-  key cannot be decrypted by a later key.
+* **Two keys and in-process rotation.** An opened or unreadable verdict belongs to the delegatee
+  key that tried to open the mail. Filed `Message-ID` records stay shared, so a resend encrypted
+  to another key is still a duplicate. During in-process delegation rotation (`delegator_key` in
+  `config.yaml` or `renew_with_signer`), the node retains the displaced session key in memory
+  (`decryption_keys_at`) until its original expiry `e` so mail already sealed to the retiring
+  descriptor still opens while peers observe the refreshed descriptor.
+* **Forward secrecy across restarts and reloads:** Once a native daemon restarts with a new
+  delegatee key, a browser tab reloads (minting a fresh ephemeral delegatee key), or a retired
+  in-memory key passes its expiry `e`, ciphertext sealed to the retired key can no longer be
+  decrypted by the newer key.
 
 ```rust
 use rings_node::mail::recipient::KvInbox;
@@ -197,15 +201,16 @@ row. Closing and reopening with the same storage name preserves filed mail and d
 records. Removing mail removes only its inbox row; its deduplication record stays until its
 retention expires.
 
-Polls of one recipient are serialized. Separate tabs share the records but do not atomically
-file and remember together: simultaneous polls can both file before seeing the other's record,
-consistent with the recipient's at-least-once behavior.
+Polls of one recipient are serialized, and opening browser stores acquires an exclusive Web Lock
+(`rings-node/<storage_name>` with `ifAvailable: true`), so a second open tab targeting the same
+`storage_name` fails closed with `BrowserStorageLocked` (error code `823`) instead of racing on
+the same IndexedDB databases.
 
 **Forward-Secret Session Keys Across Reloads:** A browser node generates a fresh delegatee key on
 every page load. Already filed mail in IndexedDB remains readable across reloads, while new mail
 is sealed to the active session's descriptor (`TTL + 3 s` freshness window, 93 seconds by
-default). Two open tabs may share the stores: each key's decryption verdict is tracked
-independently while filed `Message-ID` deduplication records remain shared.
+default). Subsequent sequential reloads targeting the same `storage_name` reuse the persisted inbox
+and `Message-ID` deduplication records while tracking each key's decryption verdict independently.
 
 ## Example: a mailbox through gateways
 

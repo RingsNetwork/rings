@@ -14,9 +14,11 @@ new HTTP route and no unauthenticated surface.
 
 ## Why the projection is separate from the default body
 
-Use the pull-based `/status?view=observability` (and `/metrics` / Prometheus-compatible exporters
-built on it) for zero-overhead local health and telemetry, while reserving the default `GET /status`
-endpoint for full on-demand storage and topology inspection.
+Use the pull-based `/status?view=observability` endpoint (or external Prometheus exporters fed
+by it — `rings` does not serve a built-in `/metrics` route) for zero-overhead local health and
+telemetry, while reserving the default `GET /status` endpoint for full on-demand storage and
+topology inspection. [`rings-tui`](tui.md) renders live sparklines and latency histograms directly
+from this projection.
 
 `GET /status` returns a complete node inspection: besides peers and DHT topology, it serializes
 every persistent and cache storage value (up to the configured `data_storage.capacity`, 200 MB by
@@ -53,14 +55,54 @@ Lookup correlation identifiers and mailbox identifiers are never exported.
 
 | Field | Kind | Meaning |
 | --- | --- | --- |
-| `messages` | counters | Successful sent, received, forwarded, and stored operations plus aggregate failures during this process. A send or forward succeeds when its next hop accepts the logical transfer. |
-| `recent_messages` | bounded records | Oldest-first completion records for the last 32 message operations. `message_class` is a protocol variant, not an application-controlled topic. |
-| `session_key` | gauges and counters | Active delegation validity, creation, expiry, remaining time, and process-lifetime rotation counters (`rotation_succeeded_total`, `rotation_failed_total`). When `delegator_key` is configured in `config.yaml`, `rings run` renews the delegation in process before the signing horizon (`expires_at_ms - 25 s`) and increments `rotation_succeeded_total` (or `rotation_failed_total` on a failed attempt); without `delegator_key`, or after a failed renewal, the daemon exits 25 s before `expires_at_ms` so a replacement key can be loaded on restart (see [Delegations and keys](cli.md#delegations-and-keys)). |
-| `mailboxes` | gauges and counter | Live relay-inbox carriers and held messages retained by this node, plus successful offline-message holds during this process. |
-| `dht_lookups` | counters, gauge, histogram | Successor and storage lookup rounds observed locally, split into success, explicit failure, and 30-second timeout, with bounded in-flight state and cumulative latency buckets. |
-| `peer_ratings` | bounded records | Up to 32 DID-sorted local assessments with recent send/receive evidence and local byte-credit score inputs. Use `listPeerMeasurements` for the paginated complete set. These are advisory local assessments, not network-wide reputation. |
-| `health.process_api_healthy` | gauge | The authenticated handler answered and assembled its dependencies. |
-| `health.overlay_ready` | gauge | Conservative overlay readiness: at least one admitted peer and one DHT successor are present, and the node's own delegation is more than 25 s from its expiry, so its frames still leave. It is deliberately distinct from process/API health. |
+| `schema_version`, `generated_at_ms`, `process_started_at_ms`, `counter_scope` | metadata | Envelope compatibility version (`1`), assembly timestamp, process start epoch ms, and scope (`node_local_process_lifetime`). |
+| `messages` | counters | Successful `sent`, `received`, `forwarded`, and `stored` operations plus aggregate `failed` count during this process. A send or forward succeeds when its next hop accepts the logical transfer. |
+| `recent_messages` | bounded records | Oldest-first completion records for the last 32 message operations (`sequence`, `observed_at_ms`, `action`, `category`, `message_class`, `outcome`). `message_class` is a protocol variant, not an application-controlled topic. |
+| `session_key` | gauges and counters | Active delegation `valid`, `created_at_ms`, `expires_at_ms`, `remaining_ms`, `rotation_succeeded_total`, `rotation_failed_total`, and `runtime_rotation_supported`. When `delegator_key` is configured in `config.yaml`, `rings run` renews the delegation in process before the signing horizon (`expires_at_ms - 25 s`) and increments `rotation_succeeded_total` (or `rotation_failed_total` on failure); without `delegator_key`, or after a failed renewal, the daemon exits 25 s before `expires_at_ms` so a replacement key can be loaded on restart (see [Delegations and keys](cli.md#delegations-and-keys)). |
+| `mailboxes` | gauges and counter | Live `registered` relay-inbox carriers and `held_messages` retained by this node, plus `stored_total` offline-message holds during this process. |
+| `dht_lookups` | counters, gauge, histogram | `total`, `succeeded`, `failed`, `timed_out` (30 s bound), and `in_flight` rounds, plus `latency_sum_ms`, `latency_count`, and 12 cumulative `latency_buckets` (`le_ms`: `5`, `10`, `25`, `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `30000`). |
+| `peer_ratings` | bounded records | Up to 32 DID-sorted local assessments (`peer`, `reliability`, `credit_score`, `sent`, `failed_to_send`, `received`, `failed_to_receive`). Use `listPeerMeasurements` for the paginated complete set. These are advisory local assessments, not network-wide reputation. |
+| `health` | gauges | `process_api_healthy` (API handler assembled dependencies), `admitted_peer_count`, `has_admitted_peer`, `has_successor`, `has_predecessor`, and `overlay_ready` (`has_admitted_peer && has_successor &&` delegation before its signing horizon). |
+
+### Sample response
+
+```json
+{
+  "version": "1.0.0-pre.8",
+  "observability": {
+    "schema_version": 1,
+    "generated_at_ms": 1700000060000,
+    "process_started_at_ms": 1700000000000,
+    "counter_scope": "node_local_process_lifetime",
+    "messages": { "sent": 42, "received": 38, "forwarded": 5, "stored": 1, "failed": 0 },
+    "recent_messages": [],
+    "session_key": {
+      "valid": true,
+      "created_at_ms": 1699999000000,
+      "expires_at_ms": 1702591000000,
+      "remaining_ms": 2591940000,
+      "rotation_succeeded_total": 0,
+      "rotation_failed_total": 0,
+      "runtime_rotation_supported": false
+    },
+    "mailboxes": { "registered": 1, "held_messages": 1, "stored_total": 1 },
+    "dht_lookups": {
+      "total": 4, "succeeded": 4, "failed": 0, "timed_out": 0, "in_flight": 0,
+      "latency_sum_ms": 120, "latency_count": 4,
+      "latency_buckets": [{ "le_ms": 5, "count": 0 }, { "le_ms": 50, "count": 4 }]
+    },
+    "peer_ratings": [],
+    "health": {
+      "process_api_healthy": true,
+      "admitted_peer_count": 3,
+      "has_admitted_peer": true,
+      "has_successor": true,
+      "has_predecessor": true,
+      "overlay_ready": true
+    }
+  }
+}
+```
 
 `counter_scope` is `node_local_process_lifetime`, and `process_started_at_ms` makes resets explicit.
 Use deltas or rates over cumulative counters because every process restart resets them. Mailbox

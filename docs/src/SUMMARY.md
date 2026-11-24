@@ -7,6 +7,7 @@
 - [Install a Native Node](install-a-native-node.md)
 - [Host a Native Node](host-a-native-node.md)
 - [Operate a Node from the CLI](cli.md)
+- [Interactive Terminal UI (TUI)](tui.md)
 - [Operator Observability](operator-observability.md)
 - [Native Gateway](native-gateway.md)
 - [DNS Relay](dns-relay.md)
@@ -23,15 +24,17 @@
 
 - [Embed via C FFI](ffi.md)
 
-# Advanced topic
+# Advanced Topics
 
 - [Architecture](advanced-topic/architecture.md)
+- [Transport Abstraction](advanced-topic/transport.md)
+- [Wire Protocol & LZ4 Compression](advanced-topic/wire-protocol.md)
 - [How handshake works](advanced-topic/handshake.md)
 - [Exchange SDP](advanced-topic/exchange-sdp.md)
 - [Transport Flow Control](advanced-topic/transport-flow-control.md)
 - [DHT - Network Layer](advanced-topic/chord.md)
 - [API](jsonrpc.md)
-- [Account Abstraction](advanced-topic/account-abstraction.md)
+- [Account Abstraction & Delegated Signing](advanced-topic/account-abstraction.md)
 - [Transaction Replay Protection](advanced-topic/transaction-replay.md)
 - [Delegation References](advanced-topic/delegation-references.md)
 - [DRanking Service Receipts](advanced-topic/dranking-service-receipts.md)
@@ -40,6 +43,7 @@
 
 # Features
 
+- [Onion Routing & Kleisli Pipelines](onion.md)
 - [Decentralized services](features/decentralized-services.md)
 
 # Examples

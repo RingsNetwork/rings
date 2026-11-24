@@ -4,7 +4,7 @@ A DNS relay names every node of a Rings network on the internet and relays its s
 An operator delegates a DNS zone to a relay node, for example `rings.rs` or a user's
 `p2p.example.com`. Every node then has the name `<did>.<zone>`, and the services it announces
 are reachable at that name by ordinary internet software: a mail server delivering to
-`me@<did>.<zone>`, an SSH client, a browser (#1049).
+`me@<did>.<zone>`, an SSH client, or a browser.
 
 ```text
   mail server ──DNS──▶ relay: <did>.<zone>  AAAA addr(did), MX <did>.<zone>
@@ -114,13 +114,13 @@ services:
   With `proxy_protocol: v2` (default `off`), the relay sends a PROXY protocol v2 header naming
   the client and the relayed address before the client's bytes, for a service that reads one
   (Postfix's `smtpd_upstream_proxy_protocol`, HAProxy, the mailbox example) and so logs, rates
-  and filters by the real client. The header is unauthenticated: see SECURITY.md.
+  and filters by the real client. The header is unauthenticated: see [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md).
 * `txt`: TXT records under the node's name; `name` is relative to it, and empty for the name
   itself. An ACME DNS-01 challenge is published this way, so the node can hold a certificate for
   `<did>.<zone>` and end TLS itself.
 * `heartbeat_interval_secs` (default 30) and `ttl_secs` (default 90): how often the node
   publishes its descriptor, and how long after its last heartbeat a relay still reads it. The
-  descriptor is a signed 10-minute lease that each heartbeat re-appends unchanged (#918); a
+  descriptor is a signed 10-minute lease that each heartbeat re-appends unchanged; a
   change of ports or records signs a new one. The interval must be below the TTL and below
   300 seconds, and the TTL at most 600 seconds.
 

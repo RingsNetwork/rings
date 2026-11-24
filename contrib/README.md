@@ -22,6 +22,16 @@ in `~/.rings/config.yaml` so `rings run` renews its delegation in process before
 refresh `~/.rings/delegatee_key` offline with `rings new-delegation` before the horizon; see
 [Delegations and keys](../docs/src/cli.md#delegations-and-keys).
 
+### File descriptor limits (`RLIMIT_NOFILE`)
+
+Each active WebRTC peer connection binds local UDP sockets across host interfaces and configured
+STUN/TURN servers, alongside file-backed storage directories (`data`, `relay-inbox`,
+`dht-removals`, `measure`, `provisional-evidence`, `onion-entry-guards`, `transaction-replay`).
+On startup, `rings run` automatically raises its soft `RLIMIT_NOFILE` limit toward `65536` (or
+`10240` on macOS), and the service definitions below set `LimitNOFILE=65535` (`systemd`) and
+`SoftResourceLimits.NumberOfFiles = 10240` (`launchd`) so background daemons never hit `EMFILE
+(Too many open files)` under the default macOS `launchd` soft limit of `256`.
+
 ## Linux (`systemd` user unit)
 
 [`contrib/systemd/rings.service`](./systemd/rings.service) runs `rings run -c %h/.rings/config.yaml`

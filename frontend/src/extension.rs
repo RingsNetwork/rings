@@ -580,14 +580,16 @@ fn register_headless_protocols(built: &DemoNode, my_did: &str) -> Result<(), Str
         "/".to_string(),
         format!("<h1>Rings node {my_did}</h1><p>Served by the extension background node.</p>"),
     );
-    dweb::register(
+    let dweb_handler = dweb::register(
         &built.provider,
         site,
         Callback::from(|_: dweb::DwebResponse| {}),
     )?;
+    built.retain_protocol_handler(dweb_handler);
     let on_custom = Callback::from(|_: custom::CustomEvent| {});
     for namespace in custom::DEMO_NAMESPACES {
-        custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+        let handler = custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+        built.retain_protocol_handler(handler);
     }
     Ok(())
 }

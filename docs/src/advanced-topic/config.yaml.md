@@ -25,6 +25,7 @@ onion_exit_ttl_secs: 90
 onion_exit_services:
 - tcp
 - https
+- udp
 onion_exit_policy:
   allowed_targets: []
   denied_targets: []
@@ -52,29 +53,29 @@ bootstrap:
 dht_virtual_nodes: 160
 origin_quota:
   dht_control:
-    message_rate_per_second: 8
-    message_burst: 32
+    message_rate_per_second: 64
+    message_burst: 128
     byte_rate_per_second: 4194304
     byte_burst: 67108864
-    max_records: 1024
+    max_records: 4096
   storage:
-    message_rate_per_second: 8
-    message_burst: 32
+    message_rate_per_second: 64
+    message_burst: 128
     byte_rate_per_second: 4194304
     byte_burst: 67108864
-    max_records: 1024
+    max_records: 4096
   e2e:
-    message_rate_per_second: 8
-    message_burst: 32
+    message_rate_per_second: 64
+    message_burst: 128
     byte_rate_per_second: 4194304
     byte_burst: 67108864
-    max_records: 1024
+    max_records: 4096
   application:
-    message_rate_per_second: 8
-    message_burst: 32
+    message_rate_per_second: 64
+    message_burst: 128
     byte_rate_per_second: 4194304
     byte_burst: 67108864
-    max_records: 1024
+    max_records: 4096
 data_storage:
   path: /home/operator/.rings/data
   capacity: 200000000
@@ -103,7 +104,7 @@ exclusive).
   `session_manager` fields are rejected rather than interpreted as compatibility fallbacks.
 * `delegator_key` *(optional, default `null`)*: path of an owner-only (`0600`) ECDSA secret key file
   (first non-empty, non-`#` line, optional `0x` prefix) used by `rings run` to renew `delegatee_key`
-  in process before its signing horizon (#1153). Relative paths are resolved next to `config.yaml`.
+  in process before its signing horizon. Relative paths are resolved next to `config.yaml`.
   `rings init` leaves this unset so the account private key is not stored unless the operator opts
   into online renewal; see [Delegations and keys](../cli.md#delegations-and-keys).
 * `ice_servers` *(used when `network` is omitted; defaults to empty when `network` is set)*: STUN or TURN servers used by the built-in WebRTC transport, separated by `;`.
@@ -125,7 +126,7 @@ exclusive).
   that originated it, the `application` message limit is skipped, while the `application` byte
   limits and record bound still apply, each such message is charged at least 16 KiB
   (`DELEGATED_MIN_CHARGE`), and it shares the byte bucket with that neighbour's other
-  application traffic. A protocol may also declare delegated replay (#1081): its traffic from
+  application traffic. A protocol may also declare delegated replay: its traffic from
   that same neighbour is then admitted in a volatile replay window of the connection, and the
   protocol guards its own replay. Delegation is not configured here.
 * `external_ip`, `udp_port_min`, `udp_port_max`: optional reachability hints, an
@@ -133,16 +134,26 @@ exclusive).
   port bounds must be given together.
 * `network` *(optional)*: tagged `{ kind, params }` transport descriptor selecting a registered
   `NodeNetworkParameters` backend (defaulting to `"webrtc"` built from `ice_servers`, `external_ip`,
-  and `udp_port_min` / `udp_port_max` when omitted).
+  and `udp_port_min` / `udp_port_max` when omitted; mutually exclusive with top-level `ice_servers`,
+  `external_ip`, and `udp_port_*`):
+
+  ```yaml
+  network:
+    kind: webrtc
+    params:
+      ice_servers: "stun://stun.l.google.com:19302"
+      external_ip: "203.0.113.10"
+      udp_port_range: [40000, 40100]
+  ```
 
 ## Control API
 
 * `internal_api_port` *(required)*: loopback JSON-RPC listener for the `rings` CLI and local tooling; every
   route requires the Bearer token. The existing `/status` route also provides the compact
   [operator observability](../operator-observability.md) projection.
-* `external_api_addr` *(required)*: JSON-RPC listener peers dial for the HTTP handshake. `nodeDid` and
-  `answerOffer` are public; status and registry reads, including the compact observability
-  projection, require the token.
+* `external_api_addr` *(required)*: JSON-RPC listener peers dial for the HTTP handshake. `nodeDid`,
+  `answerOffer`, and `acceptAnswer` are public; status and registry reads, including the compact
+  observability projection, require the token.
 * `endpoint_url` *(required)*: the internal endpoint the CLI connects to.
 * `remote_rpc_proxy_url`: optional HTTP(S) proxy URL used by the running node for remote JSON-RPC
   handshakes (`rings connect node`, `rings connect seed`, and managed `bootstrap.peers`); absent
@@ -161,7 +172,7 @@ exclusive).
 * `online_node_heartbeat_interval_secs`, `online_node_ttl_secs`, `online_node_type`,
   `advertise_presence`: how this node publishes its online-node descriptor.
   A descriptor is a signed lease of 10 minutes whose bytes stay fixed, so each heartbeat
-  re-appends the same descriptor and writes no removal (#918); the TTL is how long after the
+  re-appends the same descriptor and writes no removal; the TTL is how long after the
   last heartbeat a reader still lists it. A heartbeat interval must be below the TTL, and below
   half the lease, 300 seconds, so a lease spans more than two heartbeats; the TTL must be at
   most the lease, since no reader lists a longer freshness window. The same bounds apply to
@@ -176,12 +187,14 @@ exclusive).
   Every exit is also a relay: `advertise_onion_exit` requires `advertise_onion_relay`, and each
   exit descriptor carries the same process epoch as the relay capability. Clients select an exit
   only while both agree. A browser node interprets `https` only, so a browser exit offering `tcp`
-  is rejected when it starts.
-  Service names form a closed set: `tcp` (byte streams, every tunnel and TLS included) and
-  `https` (one HTTPS request/response fetch; never a tunnel). Any other name, including `relay`
-  (advertised through `advertise_onion_relay` instead), is rejected, so restrict an exit's reach
-  with the policy targets rather than with a custom service name: an exit that should only carry
-  HTTPS registers `tcp` with the allowed target `*:443`.
+  or `udp` is rejected when it starts.
+  World-facing exit service names form a closed set: `tcp` (byte streams, every tunnel and TLS
+  included), `https` (one bounded HTTPS request/response fetch; never a tunnel), and `udp`
+  (unconnected UDP datagram sockets with stateful peer-IP pinholes, used by multi-hop Onion TURN).
+  Any other name, including `relay` (advertised through `advertise_onion_relay` instead), is
+  rejected, so restrict an exit's reach with the policy targets rather than with a custom service
+  name: an exit that should only carry HTTPS tunnels registers `tcp` with the allowed target
+  `*:443`. See [Onion Routing & Kleisli Pipelines](../onion.md).
   A policy target is `host:port`, `*:port` (any host on that port) or `*:*` (any target). An
   empty `allowed_targets` list is a closed policy that admits no target, so advertising an exit
   requires at least one allowed target; deny entries override allows; a `0` limit is
@@ -244,7 +257,7 @@ to its default.
 
 ## Services and DNS relay
 
-Two optional sections, absent from the generated file, tie the node to DNS relays (#1049); see
+Two optional sections, absent from the generated file, tie the node to DNS relays; see
 [DNS Relay](../dns-relay.md) for both:
 
 * `services`: the ports the node serves at `<did>.<zone>`, each mapped to a local address and
@@ -293,13 +306,15 @@ How a managed target is supervised:
 * `data_storage` *(required; `path` and `capacity` both required)*: path and capacity in bytes of the DHT data store.
 * `measure_storage` *(required; `path` and `capacity` both required)*: path and capacity in bytes of the peer measurement store.
 
-The daemon keeps four more stores in directories beside the data store, with fixed budgets:
-`transaction-replay` (the replay windows, authoritative), `relay-inbox` (the relay carriers this
-node holds or owns, retained: flushed and never evicted, 64 MiB, #1021), `dht-removals` (the
-removals of the data topics this node stores, retained: flushed and never evicted until they
-are collected, 24 MiB, #920, #907) and `onion-entry-guards` (a durable cache). Back them up and remove
-them together with the data store; removing `relay-inbox` drops the mail held there, and
-removing `dht-removals` makes this node a fresh replica of every topic it stores.
+The daemon keeps five more sibling stores in directories beside `data` and `measure`, with fixed
+budgets (seven exclusive-locked directories in total): `transaction-replay` (the replay windows,
+authoritative), `relay-inbox` (the relay carriers this node holds or owns, retained: flushed and
+never evicted, 64 MiB), `dht-removals` (the uncollected CRDT removals of data topics this node
+stores, retained: flushed and never evicted until collected, 24 MiB), `onion-entry-guards` (a
+durable cache of pinned entry guards, 64 KiB), and `provisional-evidence` (disposable store for
+countersigned DRanking probe receipts). Back them up and remove them together with the data and
+measure stores; removing `relay-inbox` drops the mail held there, and removing `dht-removals`
+makes this node a fresh replica of every topic it stores.
 
 Files written before a field existed still load: an omitted field takes its default, and an
 omitted `gateway` section loads as no gateway at all.

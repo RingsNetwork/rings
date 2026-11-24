@@ -3,6 +3,7 @@
 use yew::prelude::*;
 
 use crate::controls::ShellPage;
+use crate::links::Chapter;
 use crate::links::ProjectLink;
 use crate::project_content::PROJECT_INTRODUCTION;
 use crate::project_content::PROJECT_NAME;
@@ -22,7 +23,9 @@ pub(crate) fn page(
             { features_section() }
             { architecture_section(active_architecture_layer) }
             { runtime_section() }
+            { services_section() }
             { examples_section() }
+            { blog_section() }
             { final_section(open_console) }
         </section>
     }
@@ -55,10 +58,10 @@ fn features_section() -> Html {
                 <p>{ "Features" }</p>
             </div>
             <div class="landing-feature-grid">
-                { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.", "assets/images/feature-network-background.png") }
-                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.", "assets/images/feature-did-identity.png") }
-                { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.", "assets/images/feature-peer-routing.png") }
-                { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.", "assets/images/feature-protocol-runtime.png") }
+                { landing_feature("Browser-native peers and TURN", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels traverse NATs via UDP/TCP TURN and DHT-discovered multi-hop Onion TURN.", "assets/images/feature-network-background.png") }
+                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—across WebCrypto, MetaMask, Phantom, and C FFI signers.", "assets/images/feature-did-identity.png") }
+                { landing_feature("Structured peer routing", "A range-proved Chord DHT provides O(log N) finger convergence, non-transitive gap bridging, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation.", "assets/images/feature-peer-routing.png") }
+                { landing_feature("Protocol and onion runtime", "Application protocols run as pure Protocol::step machines under an Interpret capability shell, alongside Sphinx/AEZ onion loops for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines.", "assets/images/feature-protocol-runtime.png") }
             </div>
         </section>
     }
@@ -143,7 +146,29 @@ fn runtime_section() -> Html {
                 </p>
             </div>
             <div class="landing-runtime-visual">
-                <pre class="landing-code"><code>{ "provider.register_protocol(Echo, EchoShell)?;\nprovider.set_backend()?;\n\nlet relay = RelayHandle::install(&provider.extensions())?;\nrelay\n    .register_tcp_service(\"web\".into(), \"example.com:80\".parse()?)\n    .await?;\nrelay\n    .open_tcp_tunnel(local_addr, peer_did, \"web\".into())\n    .await?;" }</code></pre>
+                <pre class="landing-code"><code>{ "provider.register_protocol(Echo, EchoShell)?;\nprovider.set_backend()?;\n\nlet relay = RelayHandle::install(&provider.extensions())?;\nrelay\n    .register_tcp_service(\"web\".into(), \"127.0.0.1:8080\".parse()?)\n    .await?;\nrelay\n    .open_tcp_tunnel(local_addr, peer_did, \"web\".into())\n    .await?;" }</code></pre>
+            </div>
+        </section>
+    }
+}
+
+fn services_section() -> Html {
+    html! {
+        <section class="landing-section landing-services" aria-labelledby="landing-services-title">
+            <div class="landing-section-heading">
+                <p>{ "Built-in services" }</p>
+                <h2 id="landing-services-title">{ "Operator tooling, decentralized TURN, and gateways." }</h2>
+                <p class="landing-section-lede">
+                    { "Shipped across the 18 workspace crates to run, inspect, and bridge Rings overlays without central infrastructure." }
+                </p>
+            </div>
+            <div class="landing-example-grid">
+                { landing_link_card("rings-tui", "Six-tab terminal dashboard for monitoring peers, sparklines, DHT storage, online/exit registries, and live RPC commands.", Chapter::Tui.href()) }
+                { landing_link_card("TURN & Onion TURN", "Stateless signature-as-password UDP/TCP TURN server (rings-turn) and DHT-discovered multi-hop onion::udp bridge (rings-turn-service).", Chapter::TurnServer.href()) }
+                { landing_link_card("Onion & Kleisli OP", "Guard-closed Sphinx/AEZ loops serving TCP, UDP, and HTTPS exits plus composable typed invoke pipelines such as turn.ticket.", Chapter::Onion.href()) }
+                { landing_link_card("Native TUN gateway", "Selective IPv4/TCP TUN packet gateway bridging captured flows to onion::tcp with privilege separation via gateway-config-unix.", Chapter::NativeGateway.href()) }
+                { landing_link_card("DNS relay", "Authoritative <did>.<zone> AAAA/MX/TXT DNS authority and IPv6 TCP ingress relay with optional PROXY protocol v2.", Chapter::DnsRelay.href()) }
+                { landing_link_card("Mail gateway", "Stateless SMTP-to-DHT mail gateway delivering sealed messages to <did>@<domain> recipients and local IMAP/submission mailboxes.", Chapter::MailGateway.href()) }
             </div>
         </section>
     }
@@ -157,10 +182,34 @@ fn examples_section() -> Html {
                 <h2 id="landing-examples-title">{ "Runnable surfaces from the repository." }</h2>
             </div>
             <div class="landing-example-grid">
-                { landing_link_card("native", "Start here for a minimal native node. Demonstrates wallet setup, node bootstrapping, and registering a custom namespaced protocol in pure Rust.", "https://github.com/RingsNetwork/rings/tree/master/examples/native") }
+                { landing_link_card("native", "Start here for a minimal native node. Demonstrates wallet setup, node bootstrapping, extension protocols, and E2E encrypted streams.", "https://github.com/RingsNetwork/rings/tree/master/examples/native") }
                 { landing_link_card("relay", "Open direct TCP and UDP tunnels through the overlay to expose and consume peer services end-to-end.", "https://github.com/RingsNetwork/rings/tree/master/examples/relay") }
                 { landing_link_card("dweb", "Explore the decentralized-web application shape, serving and addressing web content directly across the Rings peer overlay.", "https://github.com/RingsNetwork/rings/tree/master/examples/dweb") }
-                { landing_link_card("ffi", "Drive a Rings node from Python, Swift, Kotlin, or C through the C FFI to embed peer-to-peer networking in desktop and mobile apps.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
+                { landing_link_card("mailbox", "Run a complete DID mailbox node and stateless SMTP MX gateway delivering sealed mail over the Chord DHT.", "https://github.com/RingsNetwork/rings/tree/master/examples/mailbox") }
+                { landing_link_card("ffi", "Drive a Rings node from Python, Swift, Kotlin, or C through the C ABI in rings.h to embed P2P networking in host apps.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
+                { landing_link_card("frontend & extension", "Inspect the Rust/Yew browser node console, Onion WebView service worker, and Chrome MV3 extension package.", "https://github.com/RingsNetwork/rings/tree/master/frontend") }
+            </div>
+        </section>
+    }
+}
+
+fn blog_section() -> Html {
+    html! {
+        <section class="landing-section landing-blog" aria-labelledby="landing-blog-title">
+            <div class="landing-section-heading">
+                <p>{ "Engineering Blog" }</p>
+                <h2 id="landing-blog-title">{ "Design notes from rings.rs/blog." }</h2>
+                <p class="landing-section-lede">
+                    { "Architecture deep dives on stateless cryptographic TURN, Onion OP pipelines, Chord finger convergence, and algebraic correctness." }
+                </p>
+            </div>
+            <div class="landing-example-grid">
+                { landing_link_card("We Removed the Last Dark Cloud Over Rings Network", "Routing stateless cryptographic TURN allocations and UDP datagrams over multi-hop onion circuits so worst-case traversal degrades to Tor.", "https://rings.rs/blog/we-removed-the-last-dark-cloud-over-rings-network/") }
+                { landing_link_card("From Onion Routing to Onion OP", "Expanding onion privacy from hiding communication endpoints to composing multi-step operations across mutually untrusted nodes.", "https://rings.rs/blog/from-onion-routing-to-onion-op-the-evolution-of-privacy-in-rings/") }
+                { landing_link_card("One Lookup, Many Fingers", "Range-proved finger table convergence for browser meshes and the Stateright finite-state models that verified it.", "https://rings.rs/blog/one-lookup-many-fingers/") }
+            </div>
+            <div class="landing-actions">
+                { ProjectLink::Blog.anchor("landing-secondary-action") }
             </div>
         </section>
     }
@@ -199,20 +248,20 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
         index: "01",
         label: "applications",
         role: "runs user-facing workflows.",
-        title: "dWeb, relay, and custom apps",
+        title: "dWeb, TUI, mail, relay, and custom apps",
         summary: "Apps run directly over the peer-to-peer protocol layer with end-to-end sovereignty.",
-        detail: "Application surfaces are repository examples and browser node panels. They compose wallet login, dWeb content, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer reads as product-facing behavior: it chooses what to ask the network to do, while the lower layers handle addressing, routing, privacy, and transport.",
-        surface: "frontend Node page, examples/dweb, examples/relay, examples/mailbox",
-        contract: "Application code addresses peers and namespaces while lower layers manage overlay routing and transport.",
+        detail: "Application surfaces include the browser console, Chrome MV3 extension, rings-tui terminal workbench, DID mail gateway, and repository examples. They compose wallet login, dWeb content, relay tunnels, and custom protocol messages on top of the same peer runtime.",
+        surface: "frontend, crates/tui, examples/dweb, examples/relay, examples/mailbox, examples/ffi",
+        contract: "Application code addresses peers and namespaces while lower layers manage overlay routing, privacy, and transport.",
     },
     ArchitectureLayer {
         index: "02",
         label: "protocols",
         role: "defines namespaced behavior.",
-        title: "relay, echo, and user namespaces",
-        summary: "Built-ins cover TCP/UDP relay and echo; user protocols are addressed by namespace.",
-        detail: "Protocols are registered behind stable namespaces. Built-in protocols cover relay and echo flows, while external applications can install their own protocol state machines on the shared overlay. This layer is the extension boundary: new behavior is added by registering a protocol and its interpreter.",
-        surface: "protocol registry, relay handles, echo protocol, custom namespaces",
+        title: "relay, echo, mail, TURN ticket, and user namespaces",
+        summary: "Built-ins cover TCP/UDP relay, echo, DID mail, and DHT service registries; user protocols install behind namespaces.",
+        detail: "Protocols register behind stable namespaces alongside built-in DHT registries (online_nodes, onion_exits, onion_invokes, turn_services) and onion-invoked backends such as turn.ticket. New application behavior is added by registering a protocol and its interpreter.",
+        surface: "crates/node/src/extension, crates/turn-service, protocol registry, relay & echo",
         contract: "Every inbound envelope is dispatched by namespace before it reaches application-specific logic.",
     },
     ArchitectureLayer {
@@ -220,50 +269,50 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
         label: "runtime",
         role: "executes protocol state.",
         title: "pure Protocol::step plus Interpret shell",
-        summary: "Protocol logic stays pure while side effects run through namespace-scoped capabilities.",
-        detail: "The runtime keeps deterministic protocol transitions separate from IO. Pure step logic computes the next state and effects; the interpreter shell executes scoped side effects. This makes protocol behavior straightforward to test and reason about, with replayable state transitions cleanly separated from browser APIs, native sockets, storage, and wallet interaction.",
-        surface: "Protocol::step, Interpret shell, provider extension hooks",
-        contract: "State transitions are reproducible; IO passes through explicit provider capabilities.",
+        summary: "Protocol logic stays pure while side effects run through namespace-scoped capabilities and runtime contracts.",
+        detail: "The runtime keeps deterministic protocol transitions separate from I/O. Pure step logic computes the next state and effects; the interpreter shell executes scoped side effects over rings-runtime contracts across Tokio native hosts and browser WebAssembly.",
+        surface: "crates/runtime, Protocol::step, Interpret shell, provider extension hooks",
+        contract: "State transitions are reproducible; I/O passes through explicit provider capabilities.",
     },
     ArchitectureLayer {
         index: "04",
         label: "privacy",
         role: "provides anonymous circuits.",
-        title: "Sphinx onion loops and exits",
-        summary: "Client-sealed Sphinx/AEZ loops with constant-rate cover, pinned entry guards, and TCP/HTTPS exits.",
-        detail: "The privacy layer builds multi-hop onion loops anchored at the client's pinned entry guard. Each relay peels a single Sphinx/AEZ layer and learns only its immediate predecessor and successor, while constant-rate link emission substitutes queued cells for cover traffic and exits serve TCP streams and HTTPS fetches.",
-        surface: "crates/node/src/onion, crates/gateway, crates/webview",
-        contract: "Each hop learns only its immediate neighbors; exit replies return along the client-sealed loop without revealing client identity.",
+        title: "Sphinx/AEZ onion loops, exits, and Onion OP",
+        summary: "Client-sealed Sphinx/AEZ v5 loops with constant-rate cover, pinned entry guards, TCP/UDP/HTTPS exits, and Kleisli invoke pipelines.",
+        detail: "The privacy layer builds guard-closed multi-hop onion loops using rings-aez wide-block enciphering. Each hop peels one layer and learns only its immediate predecessor and successor, while exits serve TCP, UDP, and HTTPS traffic, feed Onion TURN and selective TUN/WebView gateways, and execute composable invoke stages.",
+        surface: "crates/node/src/onion, crates/aez, crates/gateway, crates/webview, crates/network-policy",
+        contract: "Each hop learns only its immediate neighbors; SURB replies return along the guard-closed loop without revealing client identity.",
     },
     ArchitectureLayer {
         index: "05",
         label: "overlay",
         role: "routes peer messages.",
-        title: "Chord DHT routing",
-        summary: "Successor and finger tables route DID-addressed messages with stabilization and network isolation.",
-        detail: "The overlay maps DID identifiers into a Chord ring. Stabilization keeps successor context current, while finger links reduce lookup distance and keep routing fully decentralized. The overlay handles peer discovery, message forwarding, replicated storage, and E2E stream encryption so applications see a unified DID-addressed network.",
-        surface: "Chord identifiers, successor tables, finger routing, network_id isolation",
-        contract: "Routing selects peer paths by cryptographic identifier space with end-to-end origin authentication.",
+        title: "Chord DHT, authenticated CRDTs, and replay",
+        summary: "Range-proved finger convergence, non-transitive gap bridging, voluntary Leave, authenticated CRDT topics, and replay windows.",
+        detail: "The overlay maps DIDs onto a 160-bit Chord ring with K=4 successor lists, 160 finger slots, non-transitive multi-predecessor & bridged-peer hints, and ack-gated carrier handoff on Leave. Replicated CRDT data topics carry per-writer Merkle provenance, bounded by SlotRoster admission, origin quotas, and group-committed replay windows.",
+        surface: "crates/core, crates/measure, crates/dns-relay, crates/rpc",
+        contract: "Routing selects peer paths by cryptographic identifier space with end-to-end DID origin authentication and replay protection.",
     },
     ArchitectureLayer {
         index: "06",
         label: "transport",
         role: "moves data between peers.",
-        title: "WebRTC datachannels",
-        summary: "Native and browser transports use STUN, ICE, and SDP to establish direct peer connections.",
-        detail: "Browser and native peers share the same transport shape. WebRTC handles NAT traversal through ICE and SDP exchange, then carries overlay messages through credit-flow-controlled direct datachannels across four traffic lanes.",
-        surface: "browser WebRTC, native WebRTC, STUN, SDP exchange",
-        contract: "Transport establishes peer connectivity and credit flow control while overlay and protocol layers decide what is carried.",
+        title: "decoupled Transport, WebRTC, and LZ4 wire",
+        summary: "Pluggable TransportInterface with 0–8 step handshakes, UDP/TCP TURN, and LZ4-compressed WIRE_VERSION=6 framing.",
+        detail: "Transport is decoupled from rings-core behind TransportInterface and ConnectionInterface traits (supporting WebRTC 0.17.3, browser RTCPeerConnection, dummy simulation, and custom transports via network: { kind, params }). Messages serialize with rings-codec postcard framing, LZ4 static-dictionary compression, delegation-digest leases, and 4 credit-bounded traffic lanes.",
+        surface: "crates/transport, crates/codec, crates/turn, crates/turn-service, TURN over TCP",
+        contract: "Transport handles connectivity, N-step binary handshakes, and 4-lane credit flow control while higher layers decide what is carried.",
     },
     ArchitectureLayer {
         index: "07",
         label: "identity",
         role: "authenticates peers.",
-        title: "DID plus selectable signatures",
-        summary: "Bridges browser, daemon, and wallet identity workflows across standard signature schemes.",
-        detail: "Identity is represented as DID-addressable cryptographic material with short-lived session delegations. The implementation supports multiple signature families so browser wallets, native daemons, and embedded apps share a unified addressing model across WebCrypto, Ethereum, Solana, and native keys.",
-        surface: "DID documents, wallet account selection, secp256k1, secp256r1, ed25519, BLS, bip137",
-        contract: "Peers authenticate as DIDs through delegated session keys across all supported wallet and key backends.",
+        title: "DID plus 6 selectable signature schemes",
+        summary: "Bridges browser wallets, native daemons, TURN credentials, and C FFI hosts with delegated session keys.",
+        detail: "Identity uses DID-addressable keys and time-bounded DelegateeKey sessions supporting 6 signature schemes (secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, BLS12-381) with in-process rotation, ECDH stateless TURN authentication, and unlinkable TURN session tickets.",
+        surface: "crates/core/src/delegation, WebCrypto P-256, MetaMask, Phantom, C FFI signer callbacks",
+        contract: "Peers authenticate as DIDs through delegated session keys across all supported wallet, TURN, and native backends.",
     },
 ];
 

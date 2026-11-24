@@ -66,7 +66,7 @@ impl HandleRpc<ConnectWithDidRequest, ConnectWithDidResponse> for Processor {
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
-        let seed: Seed = Seed::try_from(req)?;
+        let seed = Seed::from(req);
 
         // The document is validated as a set before any entry is dialed: an invalid or
         // ambiguous document dials nothing, and a peer listed twice is dialed once.

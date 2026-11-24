@@ -49,12 +49,12 @@ enum DwebMsg {
     Res { path: String, body: String },
 }
 
-/// Register the `dweb` namespace on a provider.
+/// Register the `dweb` namespace on a provider and return the owned callback closure.
 pub fn register(
     provider: &Arc<Provider>,
     site: Site,
     on_response: Callback<DwebResponse>,
-) -> Result<(), String> {
+) -> Result<Closure<dyn FnMut(JsValue, JsValue) -> JsValue>, String> {
     let handler = Closure::<dyn FnMut(JsValue, JsValue) -> JsValue>::new(
         move |ctx: JsValue, event: JsValue| handle(&ctx, &event, &site, &on_response),
     );
@@ -62,8 +62,7 @@ pub fn register(
     provider
         .on("dweb".to_string(), JsValue::NULL, function.clone())
         .map_err(|error| format!("register dweb: {error:?}"))?;
-    handler.forget();
-    Ok(())
+    Ok(handler)
 }
 
 fn handle(

@@ -148,24 +148,34 @@ pub mod node {
 
     use super::*;
 
+    /// Build the default `EnvFilter` directive string for `level` when `RINGS_LOG_FILTER` is unset
+    /// (#1316): keeps Rings crates at `level` while clamping noisy third-party `webrtc-rs` / `turn`
+    /// (`target = "log"`, `webrtc*`, `turn`) diagnostics to `off`.
+    pub(crate) fn default_log_filter_spec(level: LogLevel) -> String {
+        let level_filter = filter::LevelFilter::from_level(level.into());
+        format!(
+            "{level_filter},log=off,turn=off,webrtc=off,webrtc_ice=off,webrtc_dtls=off,webrtc_sctp=off,webrtc_mdns=off,webrtc_data=off,webrtc_srtp=off,webrtc_util=off"
+        )
+    }
+
     /// Initializes native tracing and panic logging for the requested level.
     #[no_mangle]
     pub extern "C" fn rings_node_init_logging(level: LogLevel) {
         set_panic_hook();
 
         let subscriber = Registry::default();
-        let level_filter = filter::LevelFilter::from_level(level.into());
+        let default_spec = default_log_filter_spec(level);
         let filter = match std::env::var("RINGS_LOG_FILTER") {
             Ok(spec) if !spec.trim().is_empty() => {
                 EnvFilter::try_new(spec.trim()).unwrap_or_else(|err| {
                     eprintln!(
                         "invalid RINGS_LOG_FILTER '{}': {}; falling back to {}",
-                        spec, err, level_filter
+                        spec, err, default_spec
                     );
-                    EnvFilter::new(level_filter.to_string())
+                    EnvFilter::new(default_spec)
                 })
             }
-            _ => EnvFilter::new(level_filter.to_string()),
+            _ => EnvFilter::new(default_spec),
         };
 
         // Stderr
@@ -222,5 +232,28 @@ mod tests {
     #[test]
     fn test_default_log_level_is_error() {
         assert_eq!(LogLevel::default(), LogLevel::Error);
+    }
+
+    #[cfg(feature = "node")]
+    #[test]
+    fn test_default_log_filter_spec_clamps_third_party_webrtc_and_turn_targets() {
+        use tracing_subscriber::EnvFilter;
+
+        for level in [
+            LogLevel::Error,
+            LogLevel::Warn,
+            LogLevel::Info,
+            LogLevel::Debug,
+            LogLevel::Trace,
+        ] {
+            let spec = super::node::default_log_filter_spec(level);
+            assert!(
+                EnvFilter::try_new(&spec).is_ok(),
+                "default log filter spec must parse: {spec}"
+            );
+            assert!(spec.contains("log=off"));
+            assert!(spec.contains("turn=off"));
+            assert!(spec.contains("webrtc_ice=off"));
+        }
     }
 }

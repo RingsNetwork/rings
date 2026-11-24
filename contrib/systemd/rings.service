@@ -15,6 +15,7 @@ Type=simple
 ExecStart=%h/.local/bin/rings run -c %h/.rings/config.yaml
 Restart=on-failure
 RestartSec=5
+LimitNOFILE=65535
 NoNewPrivileges=true
 PrivateTmp=true
 

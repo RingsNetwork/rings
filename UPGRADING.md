@@ -5,20 +5,22 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
 
 ## 1.0 Frozen Contracts
 
-- **Wire framing (`WIRE_VERSION = 5`).** Every frame and handshake payload opens with the fixed
+- **Wire framing (`WIRE_VERSION = 6`).** Every frame and handshake payload opens with the fixed
   header `"RINGS\0" ‖ wire_version` (`u16` big-endian). Nodes accept only their own `WIRE_VERSION`
-  (`5` across the `1.0.x` line) and refuse any other version before body decode with
+  (`6` across the `1.0.x` line) and refuse any other version before body decode with
   `Error::IncompatibleWireVersion` (JSON-RPC error `210`). There is no multi-version negotiation:
   any future wire-version bump is a coordinated cutover, and `1.0.x` patch/minor releases preserve
-  `WIRE_VERSION = 5`. Binary `postcard` serialization of `Did` (`[u8; 20]`) and `PublicKey<SIZE>`
-  (`[u8; SIZE]`) and generalized multi-step binary handshake frames (`ConnectNodeSend` /
+  `WIRE_VERSION = 6`. Binary `postcard` serialization of `Did` (`[u8; 20]`) and `PublicKey<SIZE>`
+  (`[u8; SIZE]`), compact `WireHopVerification` / `WireRelay` elision in `WirePayload` (eliding
+  duplicate delegation/timestamps on initial/1-hop frames and redundant `destination`/`next_hop`
+  DIDs), and generalized multi-step binary handshake frames (`ConnectNodeSend` /
   `ConnectNodeReport` carrying `(step_index, final_step, session_id, Bytes)`) are cut over without
   legacy disk-format or text-SDP shims: under the `RecordAuthority` decode law, non-authoritative
   local stores (`Disposable`, `DurableCache`, and `Retained`, including `dht-removals` and
-  `relay-inbox`) intentionally retire undecodable records from pre-`WIRE_VERSION = 5` schemas on
-  read. `WIRE_VERSION = 5` also adds the world-facing onion service symbol `udp` and its
+  `relay-inbox`) intentionally retire undecodable records from pre-`WIRE_VERSION = 6` schemas on
+  read. This wire format also carries the world-facing onion service symbol `udp` and its
   length-prefixed session codec (`OnionUdpClientFrame` / `OnionUdpServerFrame`), so `udp` exit
-  registrations and `onion::udp` sessions interoperate only between `WIRE_VERSION = 5` nodes.
+  registrations and `onion::udp` sessions interoperate only between matching `WIRE_VERSION = 6` nodes.
 - **Delegation verification and key binding.**
   - `DelegateeKey` deserialization and `FromStr` verify that `delegatee_secret_key` derives
     `delegation.delegatee_did()` and that the delegator signature over `delegation` is valid.
@@ -44,11 +46,12 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
 
 ## Operator Upgrade Checklist (0.39 / 0.40 → 1.0)
 
-1. **Upgrade all overlay peers to `WIRE_VERSION = 5`.** Verify a remote seed's wire version via
-   `nodeDid` (`"wire_version": 5`) before connecting; pre-`1.0` nodes on earlier wire versions are
-   refused with JSON-RPC error `210`. Because `WIRE_VERSION = 5` cuts over binary `Did` and
-   `PublicKey` encodings and multi-step binary handshake frames without legacy decoders,
-   pre-`WIRE_VERSION = 5` records in `Disposable`, `DurableCache`, and `Retained` stores (`data`,
+1. **Upgrade all overlay peers to `WIRE_VERSION = 6`.** Verify a remote seed's wire version via
+   `nodeDid` (`"wire_version": 6`) before connecting; pre-`1.0` nodes or older `pre.*` builds on
+   earlier wire versions are refused with JSON-RPC error `210`. Because `WIRE_VERSION = 6` cuts
+   over compact binary `WirePayload` (`Did`, `PublicKey`, `WireHopVerification`, `WireRelay`) and
+   multi-step binary handshake frames without legacy decoders, pre-`WIRE_VERSION = 6` records in
+   `Disposable`, `DurableCache`, and `Retained` stores (`data`,
    `dht-removals`, `relay-inbox`, `onion-entry-guards`, `measure`, `provisional-evidence`) are
    retired automatically on read under `RecordAuthority::retires_undecodable()`.
 2. **Verify `config.yaml` fields.**
@@ -74,7 +77,7 @@ from `0.39.x` / `0.40.x` or `1.0.0-pre.*` builds.
    - Update Rust callers binding the return type of `rings_rpc::jsonrpc::Client::connect_with_did`
      to `ConnectWithDidResponse`.
 5. **Published Cargo crates.**
-   All 15 workspace crates (`rings-derive`, `rings-codec`, `rings-measure`, `rings-runtime`,
+   All 16 published workspace crates (`rings-derive`, `rings-codec`, `rings-measure`, `rings-runtime`,
    `rings-aez`, `rings-network-policy`, `rings-dns-relay`, `rings-gateway`, `rings-webview`,
-   `rings-transport`, `rings-core`, `rings-turn`, `rings-rpc`, `rings-node`, `rings-tui`) publish
-   in topological dependency order at matching workspace versions.
+   `rings-transport`, `rings-core`, `rings-turn`, `rings-rpc`, `rings-node`, `rings-turn-service`,
+   `rings-tui`) publish in topological dependency order at matching workspace versions.

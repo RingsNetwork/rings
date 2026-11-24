@@ -7,7 +7,7 @@ issues one request, and prints the reply. The [API chapter](jsonrpc.md) document
 the clients call; this chapter documents the commands.
 
 ```text
-rings <command> [options]
+rings [--log-level <LEVEL>] [--runtime <FLAVOR>] <command> [options]
 
   init          Initializes a node with the given configuration.
   new-delegation   Creates a new delegatee signing key.
@@ -20,21 +20,27 @@ rings <command> [options]
   inspect       Show information of swarm: transport table, successors, predecessor, finger table.
 ```
 
+Top-level options accepted before `<command>`: `--log-level <debug|info|warn|error|trace>`
+(`LOG_LEVEL`, default `error`) and `--runtime <multi-thread|current-thread>` (`RUNTIME`,
+default `multi-thread`).
+
 `rings <command> --help` lists every option of a command; `rings run --help` is reproduced in
-[Host a Native Node](host-a-native-node.md).
+[Host a Native Node](host-a-native-node.md). For an interactive terminal workbench over the
+same API, see [Interactive Terminal UI (`rings-tui`)](tui.md).
 
 ## Addressing the node
 
 The client commands share these options:
 
-| Option | Meaning | Default |
-|---|---|---|
-| `-c, --config <FILE>` | The node configuration to read | `~/.rings/config.yaml` |
-| `-u, --endpoint-url <URL>` | The node's internal JSON-RPC endpoint | `endpoint_url` from the config, `http://127.0.0.1:50000` |
-| `--api-token-path <FILE>` | Bearer token file of the node's internal API; a relative path resolves next to the config file | `api_token_path` from the config |
+| Option | Meaning | Default | Environment variable |
+|---|---|---|---|
+| `-c, --config <FILE>` | The node configuration to read | `~/.rings/config.yaml` | `CONFIG` |
+| `-u, --endpoint-url <URL>` | The node's internal JSON-RPC endpoint | `endpoint_url` from the config, `http://127.0.0.1:50000` | `ENDPOINT_URL` |
+| `--api-token-path <FILE>` | Bearer token file of the node's internal API; a relative path resolves next to the config file | `api_token_path` from the config | `API_TOKEN_PATH` |
 
-Each option is also read from the environment variable of the same name in upper case
-(`ENDPOINT_URL`, `API_TOKEN_PATH`, ...).
+Additional options use explicit `env` bindings shown in `--help` (for instance
+`--remote-api-token-file` reads `RINGS_REMOTE_API_TOKEN_FILE`, while `--internal-api-port` on
+`rings run` has no environment variable binding).
 
 ## Join the overlay
 
@@ -47,10 +53,10 @@ ways to get that first connection.
 rings connect node https://node.rings.rs
 ```
 
-The remote peer's external API answers the handshake (`nodeDid`, `answerOffer`) without
-authentication, so no token is needed by default. A peer that gates its handshake behind its
-token takes `--remote-api-token-file <FILE>`. By default the running node dials remote HTTP(S)
-endpoints directly and ignores ambient `HTTP_PROXY` and `HTTPS_PROXY` variables; to route remote
+The remote peer's external API answers the handshake (`nodeDid`, `answerOffer`, `acceptAnswer`)
+without authentication, so no token is needed by default. A peer that gates its handshake behind
+its token takes `--remote-api-token-file <FILE>` (env `RINGS_REMOTE_API_TOKEN_FILE`). By default
+the running node dials remote HTTP(S) endpoints directly and ignores ambient `HTTP_PROXY` and `HTTPS_PROXY` variables; to route remote
 handshake RPC through an explicit HTTP(S) proxy, start `rings run` with
 `--remote-rpc-proxy-url <URL>` (or set `remote_rpc_proxy_url` in
 [config.yaml](advanced-topic/config.yaml.md#control-api)). Local CLI-to-node RPC always bypasses
@@ -183,7 +189,7 @@ table.
 
 `rings init` writes the configuration and a bounded-authority delegatee signing key
 (`~/.rings/delegatee_key` unless `-s, --delegatee-key` specifies another path), valid for 30 days by
-default (`--ttl-seconds`). `rings new-delegation` mints a fresh delegatee key whenever you rotate
+default (`--ttl`). `rings new-delegation` mints a fresh delegatee key whenever you rotate
 sessions. Those two delegation-creation commands accept `-k` or `--key-file` for the root account
 signer, while `rings run` and the RPC client commands operate solely with the delegated session key
 (`0600` on Unix). This deliberate key-hygiene separation lets you keep root or asset-holding account
@@ -191,12 +197,12 @@ keys completely off the daemon host.
 
 Every frame a node sends carries its own delegation, and from 25 s before the delegation expires
 (the signing horizon `h = e - 25 s`, one delivery bound keeping a frame from expiring in flight)
-every outbound frame is refused (#1063). At startup `rings run` refuses any delegatee key already at
+every outbound frame is refused. At startup `rings run` refuses any delegatee key already at
 or past `h` (`DelegationHorizonReached`, error code `1003`) or whose private scalar does not match
 the authorized delegatee DID. The horizon is checked at least once every 60 s against the wall
 clock, so a host suspended across it still reacts within a minute of resuming.
 
-Operators choose between two rotation modes (#1153):
+Operators choose between two rotation modes:
 
 1. **Online in-process renewal (`delegator_key` configured in `config.yaml`).** Set `delegator_key`
    to an owner-only (`0600`) ECDSA secret key file whose DID matches the node's DID (relative paths

@@ -77,6 +77,7 @@ use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyClock;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use self::ticket::InboundTicket;
 
 macro_rules! inbound_lane_entry {
@@ -307,7 +308,12 @@ impl InboundMailbox {
             authentication,
         }
         .introducer(processor.logical.transport.dht.edges());
-        let charge = arrival_charge(&prepared.message, uncompressed_bytes, (carrier, introducer));
+        let charge = arrival_charge(
+            &prepared.message,
+            uncompressed_bytes,
+            processor.logical.transport.reassembly_limits(),
+            (carrier, introducer),
+        );
         let permit = self.capacity.acquire((peer, lane, carrier), charge).await?;
         let PreparedInboundFrame {
             payload,
@@ -345,25 +351,27 @@ impl InboundMailbox {
                 .await?;
             (payload, admitted_final)
         };
-        let ticket = self.reserve_ticket(lane, lane.category(carrier))?;
-        let sequence = ticket.sequence();
-        ticket.commit(InboundEvent {
-            sequence,
-            peer,
-            authentication,
-            payload,
-            prepared_message: Some(message),
-            lane,
-            admitted_final,
-            carrier,
-            wire_bytes,
-            permit,
-            completion,
-        })?;
+        self.sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .submit_ready(lane.category(carrier), |sequence| InboundEvent {
+                sequence,
+                peer,
+                authentication,
+                payload,
+                prepared_message: Some(message),
+                lane,
+                admitted_final,
+                carrier,
+                wire_bytes,
+                permit,
+                completion,
+            })?;
         Ok(())
     }
 
     /// Reserve the next sequence on `lane`, for an event ordered in `category`.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     fn reserve_ticket(&self, lane: InboundLane, category: InboundLane) -> Result<InboundTicket> {
         self.sender
             .lock()
@@ -453,6 +461,7 @@ impl InboundQueues {
         }
     }
 
+    #[cfg(test)]
     fn push_pending(&mut self, sequence: u64, lane: InboundLane) {
         let queue = inbound_lane_entry!(&mut self.lanes, lane);
         debug_assert!(queue.back().is_none_or(|entry| entry.sequence < sequence));
@@ -479,6 +488,7 @@ impl InboundQueues {
         queue.insert(position, entry);
     }
 
+    #[cfg(test)]
     fn cancel(&mut self, sequence: u64, lane: InboundLane) {
         let queue = inbound_lane_entry!(&mut self.lanes, lane);
         if let Some(index) = queue.iter().position(|entry| entry.sequence == sequence) {
@@ -716,6 +726,7 @@ impl InboundActor {
 
     fn handle_command(&mut self, command: InboundCommand) {
         match command {
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             InboundCommand::Pending {
                 sequence,
                 lane,
@@ -726,7 +737,13 @@ impl InboundActor {
                 }
                 self.queues.push_pending(sequence, lane);
             }
-            InboundCommand::Ready(event) => self.queues.push_ready(*event),
+            InboundCommand::Ready { category, event } => {
+                if event.lane() == InboundLane::Reassembly {
+                    self.unfinished.begin(event.sequence, category);
+                }
+                self.queues.push_ready(*event);
+            }
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
             InboundCommand::Cancel { sequence, lane } => {
                 if lane == InboundLane::Reassembly {
                     self.unfinished.end(sequence);
@@ -771,16 +788,20 @@ impl InboundActor {
 fn arrival_charge(
     message: &crate::message::Message,
     wire_bytes: usize,
+    limits: crate::chunk::ReassemblyLimits,
     (carrier, introducer): (Option<ChannelLane>, Principal),
 ) -> InboundCharge {
     let frame = memory_reservation(wire_bytes);
     match message {
         crate::message::Message::Chunk(chunk) => match chunk.chunk {
-            [0, total] => {
+            [0, total] if limits.admits_first_chunk_shape(chunk) => {
                 let claimed = total.saturating_mul(chunk.data.len());
                 let upper_bound =
                     if crate::message::may_start_compressed_payload(chunk.data.as_ref()) {
-                        claimed.max(crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES)
+                        claimed.max(
+                            crate::message::MAX_COMPRESSED_FRAME_WIRE_BYTES
+                                .min(limits.max_message_bytes),
+                        )
                     } else {
                         claimed
                     };
@@ -790,6 +811,7 @@ fn arrival_charge(
                     introducer,
                 }
             }
+            [0, _] => InboundCharge::Bytes(frame),
             _ => InboundCharge::Covered,
         },
         _ => InboundCharge::Bytes(frame),

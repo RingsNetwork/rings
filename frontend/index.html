@@ -20,15 +20,17 @@
     <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <meta name="robots" content="max-image-preview:large" />
-    <meta name="theme-color" content="#020c10" />
+    <meta name="theme-color" content="#fbf4e6" />
     <!-- Link previews (Open Graph, Twitter cards). Crawlers do not run the app, so the shell is
          described once, as the landing page; every hash route shares the card. The URLs are
          absolute because a preview is fetched from the sharing site, not from this origin. -->
     <meta name="description" content="Rings is a decentralized P2P and Sphinx onion network: browser tabs and daemons connect directly via WebRTC over a Chord DHT—a browser-native Tor alternative." />
-    <meta name="keywords" content="Rings Network, Rings, decentralized network, P2P, peer-to-peer, structured P2P, browser direct connection, browser-to-browser WebRTC, onion network, Sphinx onion routing, Tor alternative, Chord DHT, WebAssembly, DID" />
+    <meta name="keywords" content="Rings Network, Rings, decentralized network, P2P, peer-to-peer, structured P2P, browser direct connection, browser-to-browser WebRTC, onion network, Sphinx onion routing, Onion TURN, Kleisli pipelines, TURN, TUI, DNS relay, mail gateway, TUN gateway, CRDT, Tor alternative, Chord DHT, WebAssembly, DID, C FFI" />
     <link rel="canonical" href="https://rings.rs/" />
     <link rel="alternate" hreflang="en" href="https://rings.rs/" />
     <link rel="alternate" hreflang="x-default" href="https://rings.rs/" />
+    <link rel="alternate" type="text/markdown" href="https://rings.rs/index.md" />
+    <link rel="alternate" type="application/atom+xml" title="Rings Network Blog" href="https://rings.rs/blog/feed.xml" />
     <link rel="llms-txt" href="https://rings.rs/llms.txt" />
     <link rel="llms-full-txt" href="https://rings.rs/llms-full.txt" />
     <link rel="sitemap" type="application/xml" href="https://rings.rs/sitemap.xml" />
@@ -55,14 +57,15 @@
         "@id": "https://rings.rs/#source",
         "name": "Rings Network",
         "alternateName": "Rings",
-        "description": "Rings is a decentralized, browser-native peer-to-peer and Sphinx onion network giving browser tabs and native daemons direct WebRTC connectivity over a Chord DHT.",
+        "softwareVersion": "1.0.0-pre.8",
+        "description": "Rings is a decentralized, browser-native peer-to-peer and Sphinx onion network giving browser tabs and native daemons direct WebRTC connectivity over a Chord DHT, composable onion circuits, and stateless cryptographic TURN.",
         "url": "https://rings.rs/",
         "codeRepository": "https://github.com/RingsNetwork/rings",
         "license": "https://github.com/RingsNetwork/rings/blob/master/LICENSE",
         "programmingLanguage": "Rust",
         "runtimePlatform": ["WebAssembly", "native", "C FFI"],
         "operatingSystem": ["Linux", "macOS", "Windows", "Browser (WebAssembly)"],
-        "keywords": ["decentralized network", "peer-to-peer", "P2P", "browser direct connection", "browser-to-browser WebRTC", "onion network", "Sphinx onion routing", "Tor alternative", "Chord DHT", "WebAssembly", "DID", "AEZ"],
+        "keywords": ["decentralized network", "peer-to-peer", "P2P", "browser direct connection", "browser-to-browser WebRTC", "onion network", "Sphinx onion routing", "Onion TURN", "Kleisli pipelines", "TURN", "TUI", "DNS relay", "mail gateway", "TUN gateway", "CRDT", "Tor alternative", "Chord DHT", "WebAssembly", "DID", "AEZ", "C FFI"],
         "isAccessibleForFree": true,
         "publisher": {
           "@type": "Organization",
@@ -112,15 +115,24 @@
             "@id": "https://rings.rs/#application",
             "name": "Rings Network",
             "alternateName": "Rings",
+            "softwareVersion": "1.0.0-pre.8",
             "applicationCategory": "DeveloperApplication",
             "operatingSystem": "Linux, macOS, Windows, Browser (WebAssembly)",
             "url": "https://rings.rs/",
             "downloadUrl": "https://github.com/RingsNetwork/rings/releases",
             "description": "Rings is a decentralized P2P and Sphinx onion network: browser tabs and daemons connect directly via WebRTC over a Chord DHT—a browser-native Tor alternative.",
+            "featureList": [
+              "Direct browser-to-browser and browser-to-daemon WebRTC datachannels with TURN over TCP",
+              "Range-proved Chord DHT routing with authenticated CRDT data topics and voluntary Leave",
+              "Sphinx and AEZ v5 multi-hop onion circuits for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines",
+              "Stateless cryptographic TURN server (rings-turn) and DHT-discovered multi-hop Onion TURN (rings-turn-service)",
+              "Interactive terminal dashboard (rings-tui), selective IPv4/TCP TUN gateway, DNS relay, and Mail gateway",
+              "C ABI FFI with Python, Swift, and Kotlin bindings plus Chrome MV3 extension and Onion WebView"
+            ],
             "inLanguage": "en",
             "isAccessibleForFree": true,
             "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
-            "keywords": "decentralized network, P2P, browser direct connection, WebRTC, onion network, Sphinx onion routing, Tor alternative, Chord DHT, WebAssembly, DID",
+            "keywords": "decentralized network, P2P, browser direct connection, WebRTC, onion network, Sphinx onion routing, Onion TURN, Kleisli pipelines, TURN, TUI, DNS relay, mail gateway, TUN gateway, CRDT, Tor alternative, Chord DHT, WebAssembly, DID, C FFI",
             "publisher": { "@id": "https://rings.rs/#organization" }
           },
           {
@@ -166,6 +178,8 @@
           <span>Rings Network</span>
         </a>
         <nav class="static-nav" aria-label="Project resources">
+          <a href="https://rings.rs/#guide">Guide</a>
+          <a href="https://rings.rs/#node">Node</a>
           <a href="https://rings.rs/blog/">Blog</a>
           <a href="https://rings.rs/docs/">Docs</a>
           <a href="https://github.com/RingsNetwork/rings">GitHub</a>
@@ -178,9 +192,10 @@
           <div>
             <p class="static-kicker" data-project-content="name">Rings Network</p>
             <h1 id="static-landing-title" data-project-content="tagline">A P2P network for the sovereign age.</h1>
-            <p class="static-lede" data-project-content="introduction">Rings is a decentralized, browser-native peer-to-peer and Sphinx onion network. Browser tabs and native daemons join a unified Chord DHT overlay, authenticate by DID, communicate over 100% direct WebRTC datachannels with 0 bytes stored on central servers, and route anonymous HTTPS or TCP traffic through multi-hop onion circuits as an embeddable alternative to Tor.</p>
+            <p class="static-lede" data-project-content="introduction">Rings is a decentralized, browser-native peer-to-peer and Sphinx onion network. Browser tabs and native daemons join a unified Chord DHT overlay, authenticate by DID, communicate over direct WebRTC datachannels or multi-hop Onion TURN circuits with zero central data storage, and route TCP, UDP, HTTPS, and composable invoke traffic through multi-hop onion loops.</p>
             <div class="static-actions" aria-label="Learn about Rings">
               <a class="static-primary-action" href="https://rings.rs/docs/">Read the docs</a>
+              <a href="https://rings.rs/blog/">Blog</a>
               <a href="https://rings.rs/llms.txt">llms.txt</a>
             </div>
           </div>
@@ -191,29 +206,29 @@
           <h2 id="static-features-title">One network layer across browser and native peers.</h2>
           <div class="static-feature-grid">
             <section>
-              <h3>Browser-native peers</h3>
-              <p>Rings runs natively inside browser tabs via WebAssembly and web_sys, and on Linux, macOS, and Windows hosts via the same Rust node stack. Direct WebRTC datachannels carry 100% peer-to-peer traffic between browsers and daemons without middleman servers.</p>
+              <h3>Browser-native peers and TURN</h3>
+              <p>Rings runs natively inside browser tabs via WebAssembly and web_sys, and on Linux, macOS, and Windows hosts via the same Rust node stack. Direct WebRTC datachannels carry peer traffic across UDP and TCP TURN traversal, including stateless signature-authenticated TURN and multi-hop Onion TURN over onion::udp.</p>
             </section>
             <section>
               <h3>DID identity and cryptography</h3>
-              <p>Rings authenticates peers using decentralized identifiers backed by 5 signature schemes—secp256k1, secp256r1, ed25519, BLS, and bip137—connecting WebCrypto P-256, MetaMask, Phantom, and JSON-RPC daemon workflows with localStorage session persistence.</p>
+              <p>Rings authenticates peers using decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—bridging WebCrypto P-256, MetaMask, Phantom, C FFI signers, and JSON-RPC daemons with IndexedDB store persistence.</p>
             </section>
             <section>
               <h3>Structured peer routing</h3>
-              <p>Rings organizes peers on a structured Chord DHT ring with O(log N) finger-table lookups, successor stabilization, WebRTC SDP signaling relay, replicated CRDT storage, and network_id isolation across 100% independent overlays.</p>
+              <p>Rings organizes peers on a range-proved Chord DHT ring with O(log N) finger-table convergence, non-transitive gap-bridge routing, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation across independent overlays.</p>
             </section>
             <section>
-              <h3>Protocol runtime</h3>
-              <p>Rings isolates application protocols in pure deterministic state machines executed by a capability-scoped interpreter shell, supporting custom JSON or binary namespaces alongside built-in TCP, UDP, and HTTPS Sphinx onion relays.</p>
+              <h3>Protocol and onion runtime</h3>
+              <p>Rings isolates protocols in pure state machines executed by a capability-scoped interpreter shell over a decoupled multi-step transport and LZ4-compressed binary wire protocol, alongside Sphinx/AEZ onion loops serving TCP, UDP, HTTPS, and Kleisli invoke pipelines.</p>
             </section>
           </div>
         </section>
 
         <section class="static-section static-architecture" aria-labelledby="static-architecture-title">
           <p class="static-kicker">Architecture</p>
-          <h2 id="static-architecture-title">Applications over protocols, Sphinx onion privacy, Chord, WebRTC, and DID.</h2>
-          <p>Rings unifies 7 decentralized layers: user applications, namespaced protocols, pure runtime state machines, Sphinx/AEZ onion circuits, Chord DHT routing, direct WebRTC transport, and DID cryptographic identity over HTTPS and TURN traversal.</p>
-          <p>Rings ships an interactive browser node console and Chrome MV3 extension with wallet login, WebRTC SDP and seed HTTP bootstrap, live Chord topology inspection, Onion WebView HTTPS browsing, and localStorage state.</p>
+          <h2 id="static-architecture-title">Applications over protocols, Sphinx onion privacy, Chord, decoupled transport, and DID.</h2>
+          <p>Rings unifies 7 decentralized layers across 18 workspace crates: user applications, namespaced protocols, pure runtime state machines, Sphinx/AEZ onion loops and gateways, Chord DHT routing, decoupled WebRTC/TURN/custom transport with LZ4 wire framing, and DID cryptographic identity.</p>
+          <p>Built-in operator and developer tooling includes the rings-tui interactive terminal dashboard, rings-turn and rings-turn-service decentralized TURN servers, selective IPv4/TCP TUN gateway, authoritative &lt;did&gt;.&lt;zone&gt; DNS relay, stateless DID mail gateway, one-line install.sh deployment, C/Python/Swift/Kotlin FFI bindings, and the browser node console plus Chrome MV3 extension with Onion WebView and IndexedDB persistence.</p>
         </section>
       </article>
 

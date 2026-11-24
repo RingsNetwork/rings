@@ -109,10 +109,11 @@ const RUNTIMES: [Runtime; 4] = [
     Runtime {
         label: "Native",
         title: "Native node",
-        body: "The rings daemon joins the overlay from a terminal, serves a JSON-RPC API on the loopback interface, and can seed other peers. Install it from crates.io or a prebuilt release for macOS and Linux.",
+        body: "The rings daemon joins the overlay from a terminal, serves JSON-RPC on loopback, and can seed peers or act as an onion exit, DNS relay, TURN service, or TUN gateway. Install via install.sh, crates.io, or systemd/launchd, and inspect it with rings-tui.",
         links: &[
             SiteLink::Chapter(Chapter::InstallNativeNode),
             SiteLink::Chapter(Chapter::HostNativeNode),
+            SiteLink::Chapter(Chapter::Tui),
             SiteLink::Project(ProjectLink::Releases),
         ],
     },
@@ -177,15 +178,16 @@ const STEPS: [Step; 3] = [
     Step {
         index: "01",
         title: "Run a native node",
-        summary: "Install the CLI, write the default configuration, and start the daemon. Then join the overlay through a seed node and list the peers it found.",
+        summary: "Install the CLI via install.sh or Cargo, initialize config.yaml, and start the daemon. Join through a seed node and open rings-tui or inspect connected peers.",
         code: concat!(
-            "cargo +1.97.0 install --locked rings-node\n",
+            "curl -fsSL https://rings.rs/install.sh | sh\n",
+            "# or: cargo +1.97.0 install --locked rings-node rings-tui\n",
             "rings init   # writes ~/.rings/config.yaml\n",
             "rings run    # foreground; JSON-RPC on 127.0.0.1:50000\n",
             "\n",
             "# in a second terminal\n",
             "rings connect node ", public_seed_endpoint!(), "\n",
-            "rings peer list",
+            "rings peer list && rings-tui",
         ),
         chapter: Chapter::Cli,
     },
@@ -215,11 +217,21 @@ const STEPS: [Step; 3] = [
     },
 ];
 
-const FURTHER_READING: [SiteLink; 6] = [
+const FURTHER_READING: [SiteLink; 16] = [
+    SiteLink::Chapter(Chapter::Tui),
+    SiteLink::Chapter(Chapter::Onion),
+    SiteLink::Chapter(Chapter::TurnServer),
+    SiteLink::Chapter(Chapter::NativeGateway),
+    SiteLink::Chapter(Chapter::DnsRelay),
+    SiteLink::Chapter(Chapter::MailGateway),
+    SiteLink::Chapter(Chapter::OperatorObservability),
     SiteLink::Chapter(Chapter::JsonRpc),
     SiteLink::Chapter(Chapter::ConfigYaml),
     SiteLink::Chapter(Chapter::Architecture),
+    SiteLink::Chapter(Chapter::Transport),
+    SiteLink::Chapter(Chapter::WireProtocol),
     SiteLink::Project(ProjectLink::Security),
+    SiteLink::Project(ProjectLink::Blog),
     SiteLink::Project(ProjectLink::Whitepaper),
     SiteLink::Chapter(Chapter::ForAgents),
 ];

@@ -19,7 +19,7 @@ delegatee DID and not an intermediate relay. Rotating a delegatee key therefore 
 the same delegator-to-destination stream, while two destinations advance independently.
 
 `class` is the traffic class (DHT control, storage, E2E, application) of the message the
-transaction carries, derived from its signed data on both sides, so it adds no wire field (#898).
+transaction carries, derived from its signed data on both sides, so it adds no wire field.
 The outbound scheduler keeps order within a class lane only, with at most `OUTBOUND_LANE_WINDOW`
 (8, below the 32-slot window) transactions of a lane in flight, and each class lane is pinned to
 one ordered data channel of the connection:
@@ -36,7 +36,7 @@ single stream shared by every class did, once one lane's backlog fell behind ano
 and so would one class spread over several channels, once a stalled channel let later sequences
 of the class overtake it by more than the window.
 
-No frame is held on the way (#908): a frame whose delegation reference misses is dropped, never
+No frame is held on the way: a frame whose delegation reference misses is dropped, never
 delivered late, so the frames of one lane reach admission in arrival order. An honest sender's
 reference resolves whenever its transit stays under two delivery bounds, and a frame that waits
 in its lane at the receiver still resolves however long it waited, so a miss needs a late frame
@@ -45,12 +45,10 @@ and a full table at once (see [Delegation References](delegation-references.md))
 This assumes a class's transactions reach the scheduler in signing order, as they do from one
 sending task.
 
-The per-class streams are stored one record per stream (see [Persistence and
-bounds](#persistence-and-bounds)). A store of 0.32 or earlier, which holds one snapshot of streams
-shared by every class under `rings-core:transaction-replay`, is not converted: the operator deletes
-the replay store while the node is stopped before upgrading, which resets every replay window once.
-An upgraded sender's per-class sequences are stale to a node that has not upgraded, so the upgrade
-is network-wide and mandatory.
+The per-class streams are stored one record per stream under `rings-core:transaction-replay` (see
+[Persistence and bounds](#persistence-and-bounds)). Nodes synchronize sequences strictly under
+the active `WIRE_VERSION` (`5`), so upgrades that introduce wire-format changes are coordinated
+across an overlay.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
 binds the receiver-selected `network_id` through the signing domain and binds `destination`,
@@ -99,7 +97,7 @@ logical lane admission.
 ## Persistence and bounds
 
 The sender never exposes a signature over a sequence its durable record does not cover. It
-persists a lease, not each sequence (#1043): a reservation that outruns the stream's lease writes
+persists a lease, not each sequence: a reservation that outruns the stream's lease writes
 a new one covering at least the next `TRANSACTION_SEQUENCE_LEASE` (64) sequences, and the
 reservations inside it are handed out from memory without a write. A stream reserving one sequence
 per transaction therefore writes once per 64 transactions. A restart resumes past the durable
@@ -119,7 +117,7 @@ crash after persistence but before dispatch may lose the event. This is the deli
 persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
 execution because replay storage and application handlers do not share a transaction.
 
-Link-local transactions are the exception (#1081). A transaction is link-local when all three
+Link-local transactions are the exception. A transaction is link-local when all three
 hold: it is Application traffic, it arrived on the authenticated connection of its own origin,
 and its namespace was registered in advance as delegating its replay (a protocol's
 `delegates_replay`, published with `Swarm::set_replay_delegation`). Core decides this from the
@@ -147,25 +145,25 @@ A transition writes only its own stream's record, at most `TRANSACTION_REPLAY_RE
 bytes and a 23-byte charge, with tag and length prefixes), so the cost of an admission does not grow with the number of
 streams retained. On load, every record must decode and
 sit under its own key, or the stream it is filed as fails closed (see [Bad records](#bad-records)).
-The native daemon opens the replay store as an authoritative file store (#909). On unix each write
+The native daemon opens the replay store as an authoritative file store. On unix each write
 is flushed to stable storage before its rename and the directory after it (`F_FULLFSYNC` on macOS),
 so a crash leaves every record whole at its previous or its new value. Windows cannot flush a
 directory, so there every rename and removal of the store is write-through (`MoveFileExW` with
-`MOVEFILE_WRITE_THROUGH`, #915); on any other target a rename's durability is the file system's
+`MOVEFILE_WRITE_THROUGH`); on any other target a rename's durability is the file system's
 own. A record file that cannot be read, that does not decode whole,
 or that holds a whole record of another key is reported and never deleted. The file I/O runs on the
 tokio blocking pool, so a flush never stalls an asynchronous worker.
 
 Browser providers open the replay store as an authoritative IndexedDB store, which commits every
 read-write transaction with `durability: "strict"` and reports a write only on its `complete`
-event (#912). The default hint does not survive a system crash in any engine: Chromium's default
+event. The default hint does not survive a system crash in any engine: Chromium's default
 is relaxed since version 121, and Gecko and WebKit run SQLite in WAL mode without a flush per
 commit. `"strict"` is each engine's strongest commit; whether it also flushes a drive's write cache
 is the engine's choice. An IndexedDB transaction is atomic, so a crash leaves every record whole at
 its previous or its new value.
 
 One lock serializes all replay transitions, but no record write runs under it: replay commits by
-group commit (#916). A transition locks, applies its effect to the in-memory tables, stages its
+group commit. A transition locks, applies its effect to the in-memory tables, stages its
 stream's record into the open batch, unlocks, and waits until that batch is durable. One writer at a
 time writes the batches, in order, outside the lock. The transitions that run while one batch is
 written gather into the next, and one store batch writes all of them:
@@ -222,28 +220,28 @@ the records in a dedicated 40 MiB authoritative file store, which evicts nothing
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
 providers keep them in a dedicated authoritative IndexedDB store with a row capacity of
 `TRANSACTION_REPLAY_STORE_MAX_RECORDS`, which evicts nothing either: a new record beyond it fails
-with `StorageBudgetExhausted`, and so does an open under a lowered capacity (#923). Both are sized
+with `StorageBudgetExhausted`, and so does an open under a lowered capacity. Both are sized
 never to reach their limits, so the refusal is a bound, not an expected path. A custom
 `SwarmBuilder` or `ProcessorBuilder` must supply an authoritative `ReplayStorage`. Without one,
 the node refuses every reservation and admission with `TransactionReplayStorageUnavailable`, so
-it neither sends nor accepts a transaction (#1022): an in-memory store would lose every stream's
+it neither sends nor accepts a transaction: an in-memory store would lose every stream's
 window at each restart, reopening replay on the receiver and re-signing used sequences on the
 sender.
 
-Deleting or replacing the replay store deletes the guarantee for its streams. There is no safe
-incarnation/reset protocol in 0.24.0, so operators must retain the store across restarts and fail
-closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, persistence failures,
-unrestorable records and the calls refused on their streams.
+Deleting or replacing the replay store deletes the guarantee for its streams. There is no
+automatic sequence-incarnation/reset protocol, so operators must retain the store across restarts
+and fail closed on storage errors. Counters expose `Replay`, `Fork`, `Stale`, persistence
+failures, unrestorable records and the calls refused on their streams.
 
 ## Receiver streams by connection slot
 
-An origin is a key pair, free to mint, so a bound per origin bounds nothing: before #907 anyone could
-fill the receiver table with one transaction from each of 16,384 fresh origins and refuse every new
-origin for good. The receiver table is now accounted by connection slot ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf),
-Fair Admission & Load Bounds, Law 2). A node has `R = 2(160 + s + 1)` slots, 328 at the default three successors; an admitted
-connection takes the cleanest free slot (the one whose items use the least of their floor) and
-frees it when it is retired. A new stream is charged to
-its introducer:
+An origin is a key pair, free to mint, so a bound per origin bounds nothing: bounding per origin
+alone would let an adversary fill the receiver table with one transaction from each of 16,384
+fresh origins and refuse every new origin for good. The receiver table is accounted by connection
+slot ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf),
+Fair Admission & Load Bounds, Law 2). A node has `R = 2(160 + s + 1)` slots, `330` at the default
+four successors; an admitted connection takes the cleanest free slot (the one whose items use the
+least of their floor) and frees it when it is retired. A new stream is charged to its introducer:
 
 - the slot of the handshake-authenticated connection that delivered its first transaction;
 - the inbox, for mail out of this node's own relay inbox;
@@ -252,9 +250,9 @@ its introducer:
 Each slot has a floor of 32 new streams. Slots past their floors share a pool of 3328, each up to
 its fair claim `⌈3328 / n⌉`, where `n` counts the over-floor slots. The inbox has a share of 768
 and this node a share of 1024, so a flood of mail never refuses the node's own signaling. At the
-default three successors the table holds at most `328 x 32 + 3328 + 1024 + 768 = 15,616`
+default four successors the table holds at most `330 × 32 + 3328 + 1024 + 768 = 15,680`
 streams, and 64 more per extra successor: the shares stay within the table's hard capacity of
-16,384 up to 15 successors, and past that the hard capacity refuses first. A new stream past its introducer's share fails with
+16,384 up to 14 successors (or 15 with clamping), and past that the hard capacity refuses first. A new stream past its introducer's share fails with
 `TransactionReplayStreamCapacityExceeded`, naming the introducer and the bound. A party with many
 origins and `k` slots can be refused only on those `k` slots.
 
@@ -262,7 +260,7 @@ A stream stays charged to its slot after its connection leaves, so rotating conn
 grows the table past its bound. The cost is that a connection admitted into a slot inherits what
 the slot still holds. Because a newcomer takes the cleanest free slot, a party that rotates
 connections reaches it only by charging every free slot, which leaves the newcomer with only its
-fair claim until those streams are spent (the paper's rotation residual, #1094). A connection
+fair claim until those streams are spent (the paper's rotation residual). A connection
 that keeps its slot is never affected.
 
 A stream leaves the table once it is spent: every transaction it admitted can no longer be
@@ -281,7 +279,7 @@ A relay custody entry (sequence, digest, spent instant) leaves custody only when
 takes its mail, or once its transaction is spent and no carrier can deliver it again. A drain pass
 that reads no carrier, or a carrier without the element, removes nothing: the read may come from a
 holder that a membership change just named, before its hand-off landed, and dropping custody on
-its word would refuse the hand-off's redelivery after a restart as a replay (#1059).
+its word would refuse the hand-off's redelivery after a restart as a replay.
 
 The cost is liveness. An entry whose mail was admitted, not taken, and then lost at every member of
 its chain (a chain that churned out without a hand-off) stays until its transaction is spent, up to
@@ -291,10 +289,10 @@ store, so with 64 such entries every new relay delivery to the node, from every 
 A relay inbox that stays undelivered while mail is held for the node points to this stall. It ends
 by itself at that instant; removing the `transaction-replay` store ends it at once, at the cost of
 the replay guarantee (see [Bad records](#bad-records) for that reset). No read of the chain can free
-a lost entry earlier (#1139): even unanimous absence across all `r` members of an agreed, repaired
+a lost entry earlier: even unanimous absence across all `r` members of an agreed, repaired
 chain cannot exclude a writer still resending an unacknowledged hold or a displaced keeper whose
 hand-off has not yet landed, with no tombstone before a take to refuse its join, and freeing custody
-on that absence would retire the later arrival as a replay (#1059).
+on that absence would retire the later arrival as a replay.
 Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
 spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
 accounting.
@@ -304,10 +302,10 @@ accounting.
 The first replay operation restores the store from one scan and caches the result; no later call
 reads the store again. Every record is written under the record key of the stream it carries, and
 a record restores its stream iff it decodes and holds a valid window. Any other record is kept and
-joins the set `U` of unrestorable records (#910): torn, corrupt, unreadable (any read error but the
+joins the set `U` of unrestorable records: torn, corrupt, unreadable (any read error but the
 absence of the entry, such as a permission or an I/O error), holding another key's record (which
 only something outside the store can put there), or holding an invalid window. A record the native
-store marked present and no longer holds joins `U` too, as missing (#915). Its name is the
+store marked present and no longer holds joins `U` too, as missing. Its name is the
 storage's record name: the native file name, or the browser row key.
 
 ```text
@@ -329,7 +327,7 @@ A scan fails as a whole only when the store itself cannot be listed, for example
 lock is poisoned. Such a scan restores nothing: it is counted as a persistence failure, the call
 fails closed, and the next call scans again.
 
-The law covers the records the store witnesses (#915). The native store keeps an empty presence
+The law covers the records the store witnesses. The native store keeps an empty presence
 marker `<name>.p` beside every record it made durable: it creates the marker only after the
 record's rename is flushed, removes it before the record, and marks any unmarked record at open (a
 crash between a rename and its marker). A marker whose record is gone is a record removed, renamed
@@ -337,7 +335,7 @@ or lost outside the store, and its stream fails closed as missing instead of res
 `First`. A file renamed to upper case is never a record name: on a case-sensitive volume its
 stream is missing, and on a case-insensitive one (default APFS) the store still reads the file
 under its own name. The browser store needs no marker: an IndexedDB database loses no proper
-subset of its rows, and the store evicts nothing (#923).
+subset of its rows, and the store evicts nothing.
 
 A store lost whole (the native `transaction-replay` directory, or the browser database or origin)
 is indistinguishable from a store never written, since its markers go with it. That is the reset
@@ -374,13 +372,14 @@ This resets that stream's replay window alone, and no other stream's state chang
 
 ## Canonical signing domains and wire markers
 
-Rings 1.0 uses explicit, domain-separated signing transcripts and wire markers across all
+Rings 1.0 uses explicit, domain-separated signing transcripts and versioned wire framing across all
 connections: the transaction signing domain is `rings-core:message-verification:transaction`,
 session delegations bind under canonical delegation signing domains (`rings-delegation-v1` /
-EIP-712 and account-specific verifiers), the payload wire encoding begins with the
-`RINGS-PAYLOAD` marker, and per-class replay streams persist under
-`rings-core:transaction-replay:stream:` (see [Delegation References](delegation-references.md)).
-Payloads without the canonical marker are rejected before deserialization.
+EIP-712 and account-specific verifiers), frames open with `"RINGS\0" ‖ u16_be(WIRE_VERSION = 6) ‖ FrameKind (0 | 1 | 2)`
+(rejecting unversioned legacy `RINGS-PAYLOAD` / `RINGS-LINK` headers before decoding; see
+[Wire Protocol & LZ4 Compression](wire-protocol.md) and
+[Delegation References](delegation-references.md)), and per-class replay streams persist under
+`rings-core:transaction-replay:stream:`.
 
 ## Scope and layering
 

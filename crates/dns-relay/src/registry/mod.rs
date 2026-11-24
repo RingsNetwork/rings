@@ -130,7 +130,7 @@ where O: Owner
     pub async fn owner_at(&self, address: &Ipv6Addr) -> Option<O> {
         let mut persisted = self.persisted.lock().await;
         if let Err(error) = persisted.journal.settle_pending_truncate().await {
-            tracing::warn!("dns relay: address book not settled: {error}");
+            tracing::warn!("dns relay: address book journal tail not settled: {error}");
         }
         persisted.book.owner_at(address)
     }

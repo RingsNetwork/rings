@@ -423,6 +423,8 @@ mod tests {
         });
         let gateway_task = start_gateway(None, stop.token()).await?;
         let processor_task = spawn_processor(Arc::clone(&processor), stop.token());
+        let swarm = Arc::clone(&processor.swarm);
+        let provider = rings_node::provider::Provider::from_processor(processor);
 
         await_foreground_exit_with_signal(
             async { Ok(()) },
@@ -430,7 +432,7 @@ mod tests {
             tasks,
             gateway_task,
             processor_task,
-            Arc::clone(&processor),
+            provider,
             false,
             &mut (),
         )
@@ -440,7 +442,7 @@ mod tests {
             .address()
             .into();
         assert!(matches!(
-            processor.swarm.create_offer(peer).await,
+            swarm.create_offer(peer).await,
             Err(rings_node::prelude::rings_core::error::Error::SwarmClosed)
         ));
         Ok(())
@@ -521,6 +523,25 @@ mod tests {
                 accept_help.contains("connect answer"),
                 "connect accept help should point to connect answer: {accept_help}"
             );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_raise_nofile_soft_limit_reaches_recommended_minimum() {
+        use rings_node::native::daemon::raise_nofile_soft_limit;
+        use rings_node::native::daemon::MIN_RECOMMENDED_NOFILE_SOFT_LIMIT;
+
+        let limits = raise_nofile_soft_limit();
+        assert!(limits.is_some());
+        if let Some((soft, hard)) = limits {
+            assert!(soft <= hard);
+            if hard >= MIN_RECOMMENDED_NOFILE_SOFT_LIMIT {
+                assert!(
+                    soft >= MIN_RECOMMENDED_NOFILE_SOFT_LIMIT,
+                    "expected soft RLIMIT_NOFILE ({soft}) >= {MIN_RECOMMENDED_NOFILE_SOFT_LIMIT} when hard limit is {hard}"
+                );
+            }
         }
     }
 

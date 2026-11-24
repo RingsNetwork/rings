@@ -36,7 +36,7 @@ pub(crate) enum ProjectLink {
 
 impl ProjectLink {
     /// The links the landing hero presents beside its call to action.
-    pub(crate) const HERO: [Self; 3] = [Self::Docs, Self::Repository, Self::Whitepaper];
+    pub(crate) const HERO: [Self; 4] = [Self::Docs, Self::Blog, Self::Repository, Self::Whitepaper];
 
     /// The links the header presents after the page buttons. The repository and the node
     /// console are entered from the landing page, so the header carries only the external
@@ -95,12 +95,21 @@ pub(crate) enum Chapter {
     InstallNativeNode,
     HostNativeNode,
     Cli,
+    Tui,
+    OperatorObservability,
+    NativeGateway,
+    DnsRelay,
+    TurnServer,
+    MailGateway,
     BuildForWasm,
     BrowserNode,
     Ffi,
     JsonRpc,
     ConfigYaml,
     Architecture,
+    Onion,
+    WireProtocol,
+    Transport,
     ForAgents,
 }
 
@@ -110,12 +119,21 @@ impl Chapter {
             Self::InstallNativeNode => "Install",
             Self::HostNativeNode => "Host a node",
             Self::Cli => "CLI operations",
+            Self::Tui => "Terminal UI (TUI)",
+            Self::OperatorObservability => "Observability",
+            Self::NativeGateway => "Native TUN gateway",
+            Self::DnsRelay => "DNS relay",
+            Self::TurnServer => "TURN & Onion TURN",
+            Self::MailGateway => "Mail gateway",
             Self::BuildForWasm => "Build for Wasm",
             Self::BrowserNode => "Browser node & extension",
             Self::Ffi => "Embed via FFI",
             Self::JsonRpc => "JSON-RPC API",
             Self::ConfigYaml => "config.yaml",
             Self::Architecture => "Architecture",
+            Self::Onion => "Onion & Kleisli pipelines",
+            Self::WireProtocol => "Wire protocol",
+            Self::Transport => "Transport abstraction",
             Self::ForAgents => "For AI agents",
         }
     }
@@ -125,12 +143,21 @@ impl Chapter {
             Self::InstallNativeNode => docs_url!("install-a-native-node.html"),
             Self::HostNativeNode => docs_url!("host-a-native-node.html"),
             Self::Cli => docs_url!("cli.html"),
+            Self::Tui => docs_url!("tui.html"),
+            Self::OperatorObservability => docs_url!("operator-observability.html"),
+            Self::NativeGateway => docs_url!("native-gateway.html"),
+            Self::DnsRelay => docs_url!("dns-relay.html"),
+            Self::TurnServer => docs_url!("turn-server.html"),
+            Self::MailGateway => docs_url!("mail-gateway.html"),
             Self::BuildForWasm => docs_url!("build-for-wasm.html"),
             Self::BrowserNode => docs_url!("browser-node.html"),
             Self::Ffi => docs_url!("ffi.html"),
             Self::JsonRpc => docs_url!("jsonrpc.html"),
             Self::ConfigYaml => docs_url!("advanced-topic/config.yaml.html"),
             Self::Architecture => docs_url!("advanced-topic/architecture.html"),
+            Self::Onion => docs_url!("onion.html"),
+            Self::WireProtocol => docs_url!("advanced-topic/wire-protocol.html"),
+            Self::Transport => docs_url!("advanced-topic/transport.html"),
             Self::ForAgents => docs_url!("llms.html"),
         }
     }

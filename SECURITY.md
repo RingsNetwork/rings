@@ -71,8 +71,11 @@ Chord routing, and authenticated encryption for E2E streams.
   immediate predecessor and successor on the loop, and retains no per-session state. Only the
   selected exit opens the payload, and only the client knows the complete route and matches
   the return tag. Exit replies carry no exit signature and remain deniable.
-- **Explicit exit capabilities:** exit descriptors sign a closed capability set (`tcp` stream
-  or `https` fetch) so clients and exits negotiate exact service semantics.
+- **Explicit exit and invoke capabilities:** world-facing exit descriptors sign the closed
+  capability set `{tcp, https, udp}` (`tcp` byte stream, bounded `https` fetch, or pinhole-scoped
+  `udp` datagram relay), while one-shot intermediate operations advertise typed
+  `invoke<In, Out, L>` shapes (`Σ_I`) paired with backend names `ω ∈ Ω` (such as `turn.ticket`) so
+  clients and stages negotiate exact service semantics and width/latency bounds.
 - **Traffic shaping and paid admission:** links emit fixed-size-class cells at bounded active
   or idle rates, substituting queued real cells for cover traffic under link credit
   ([details](docs/src/advanced-topic/architecture.md)). Relays charge per-window admission
@@ -104,18 +107,28 @@ Chord routing, and authenticated encryption for E2E streams.
 - **Verified delegation leases.** Links cache verified session delegations under bounded,
   receiver-granted duration leases and automatically fall back to inline verification when
   unleased ([details](docs/src/advanced-topic/delegation-references.md)).
-- **Durable DHT storage and replicated relay custody.** Storage carriers enforce bounded
-  sizes, counts, TTLs, and clock-skew tolerances. Offline relay inboxes reside in a dedicated
-  retained store, validate routing authority on write, and replicate across a chain of
+- **Durable DHT storage, authenticated CRDT provenance, and replicated relay custody.** Storage
+  carriers enforce bounded sizes, counts, TTLs, and clock-skew tolerances; `EntryKind::Data`
+  mutations verify per-writer Merkle-batched `SignedDataMutation` proofs (`rings-core:data-entry:mutation`)
+  and `RetractionWitness` checks with fair per-writer retention. Offline relay inboxes reside in a
+  dedicated retained store, validate routing authority on write, and replicate across a chain of
   age-gated custody nodes to preserve messages across peer churn
   ([data storage](docs/src/advanced-topic/chord.md#data-topic-storage),
   [relay inbox](docs/src/advanced-topic/chord.md#relay-inbox)).
-- **Local control, gateway, and DNS relay boundaries.**
+- **Local control, TURN, gateway, egress, and DNS relay boundaries.**
   - **Control API:** protected by an owner Bearer token while exposing the public WebRTC
-    handshake methods (`nodeDid`, `answerOffer`) for seamless peer onboarding; remote binding
-    and CORS origins are explicit operator opt-ins.
-  - **Native TUN gateway:** opt-in transparent TCP routing over onion circuits for
-    operator-configured destination prefixes.
+    handshake methods (`nodeDid`, `answerOffer`, `acceptAnswer`) for seamless peer onboarding;
+    remote binding and CORS origins are explicit operator opt-ins.
+  - **TURN & Onion TURN (`rings-turn`, `rings-turn-service`):** authenticate allocations without a
+    shared password table via time-bounded `Delegation`, direct DID, or unlinkable `SessionTicket`
+    (issued over `turn.ticket` onion `invoke`) paired with secp256k1 ECDH-derived credentials;
+    `RelayPeerPolicy::PublicOnly` blocks loopback, link-local, RFC 1918, CGNAT, and local-use IPv6
+    egress by default, and `multi_hop_onion_udp` enforces per-peer IP pinholes (`OnionUdpPinholeTable`).
+  - **Shared egress admission (`rings-network-policy`):** onion exits, `rings-turn`, and
+    `rings-webview` share strict public-IP and public-host predicates preventing SSRF against
+    local or private networks.
+  - **Native TUN gateway:** opt-in selective IPv4/TCP routing over `onion::tcp` circuits for
+    operator-configured destination prefixes (rejecting default full-tunnel `0.0.0.0/0` capture).
   - **DNS relay:** serves owner-signed descriptors, forwards traffic to owner-registered
     `dns-relay/<port>` services, keys IPv6 mapping with a relay-local secret, and bounds
     concurrent lookups and owners ([details](docs/src/dns-relay.md)).

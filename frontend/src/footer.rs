@@ -5,9 +5,9 @@
 //! the mobile breakpoint the fixed bottom navigation bar owns the same space, so the stylesheet
 //! hides it there (`styles::theme::responsive`).
 //!
-//! The documentation book renders the same footer from `docs/theme/index.hbs`. The two are
-//! written in different languages, so they are two copies; the test at the bottom of this
-//! module holds them equal.
+//! The documentation book renders the same footer from `docs/theme/index.hbs`, and the
+//! engineering blog renders it from `frontend/scripts/build_blog.py`. The three copies are
+//! written in different languages, so the test at the bottom of this module holds them equal.
 
 use yew::prelude::*;
 
@@ -128,7 +128,7 @@ const NOTICES: [Notice; 5] = [
     },
     Notice {
         title: "Commercial use",
-        body: "Rings is open-source under the GNU General Public License v3.0 (GPL-3.0), giving you full freedom to run, inspect, modify, and self-host nodes and applications.",
+        body: "Under AGPL-3.0-only, commercial use is permitted when its copyleft and network source-disclosure obligations are met. Commercial licensing outside AGPL-3.0-only terms is available from Rings Network on request.",
     },
     Notice {
         title: "No warranty",
@@ -140,7 +140,7 @@ const NOTICES: [Notice; 5] = [
     },
     Notice {
         title: "Privacy",
-        body: "rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node settings are kept in your browser's local storage.",
+        body: "rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.",
     },
 ];
 
@@ -151,35 +151,47 @@ mod tests {
     /// The book's page template, which carries this footer in Handlebars.
     const BOOK_TEMPLATE: &str = include_str!("../../docs/theme/index.hbs");
 
-    /// Law: every statement and every destination of this footer appears verbatim in the
-    /// book's footer, so the two copies cannot drift apart unnoticed.
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn test_book_footer_carries_the_same_statements_and_destinations() {
-        assert!(BOOK_TEMPLATE.contains(BRAND_STATEMENT));
+    /// The blog renderer script, which carries this footer in HTML template strings.
+    const BLOG_SCRIPT: &str = include_str!("../scripts/build_blog.py");
+
+    fn assert_footer_parity(template: &str, name: &str) {
+        assert!(
+            template.contains(BRAND_STATEMENT),
+            "the {name} footer lacks the brand statement"
+        );
         for notice in NOTICES.iter() {
             assert!(
-                BOOK_TEMPLATE.contains(notice.title) && BOOK_TEMPLATE.contains(notice.body),
-                "the book footer lacks the {} notice",
+                template.contains(notice.title) && template.contains(notice.body),
+                "the {name} footer lacks the {} notice",
                 notice.title
             );
         }
         for column in COLUMNS.iter() {
-            assert!(BOOK_TEMPLATE.contains(column.title));
+            assert!(
+                template.contains(column.title),
+                "the {name} footer lacks the {} column",
+                column.title
+            );
             for link in column.links.iter() {
                 let href = match link {
                     SiteLink::Project(project) => project.href().to_string(),
                     SiteLink::Chapter(chapter) => chapter.href().to_string(),
-                    // A page is reached from the book through the site's hash route, the
+                    // A page is reached from static sub-sites through the site's hash route, the
                     // landing page through the site root.
                     SiteLink::Page(ShellPage::Home) => "https://rings.rs/\"".to_string(),
                     SiteLink::Page(page) => format!("https://rings.rs/#{}", page.slug()),
                 };
-                assert!(
-                    BOOK_TEMPLATE.contains(&href),
-                    "the book footer lacks {href}"
-                );
+                assert!(template.contains(&href), "the {name} footer lacks {href}");
             }
         }
+    }
+
+    /// Law: every statement and every destination of this footer appears verbatim in the
+    /// book's footer and the blog's footer, so the three copies cannot drift apart unnoticed.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn test_book_footer_carries_the_same_statements_and_destinations() {
+        assert_footer_parity(BOOK_TEMPLATE, "book");
+        assert_footer_parity(BLOG_SCRIPT, "blog");
     }
 }

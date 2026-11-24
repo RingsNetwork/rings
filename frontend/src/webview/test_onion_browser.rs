@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::iter;
-use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -100,13 +99,13 @@ async fn test_webview_node_fetches_page_resources_through_browser_onion_exit() {
 /// nodes stop before the next test of this page runs.
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let onion_loop = browser_onion_loop().await?;
-    let flow = browser_onion_webview_flow(Rc::clone(&onion_loop.client)).await;
+    let flow = browser_onion_webview_flow(Arc::clone(&onion_loop.client)).await;
     let shutdown = onion_loop.shutdown().await;
     flow.and(shutdown)
 }
 
 /// The WebView flow through the loop whose client is `client`.
-async fn browser_onion_webview_flow(client: Rc<Provider>) -> WebviewResult<()> {
+async fn browser_onion_webview_flow(client: Arc<Provider>) -> WebviewResult<()> {
     let fixture_index = fixture_url("/index.html");
     let fixture_css = fixture_url("/site.css");
     let fixture_api = fixture_url("/api/data");
@@ -229,12 +228,12 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
         .map(|node| node.provider.listen())
         .collect::<Vec<_>>();
     let onion_loop = BrowserOnionLoop {
-        client: Rc::clone(&client.provider),
+        client: Arc::clone(&client.provider),
         nodes: iter::once(&client)
             .chain(iter::once(&guard))
             .chain(middle.iter())
             .chain(iter::once(&exit))
-            .map(|node| Rc::clone(&node.provider))
+            .map(|node| Arc::clone(&node.provider))
             .collect(),
         listeners,
     };
@@ -276,9 +275,9 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
 /// A running browser onion loop: its client, every node, and their listeners.
 struct BrowserOnionLoop {
     /// The loop's client.
-    client: Rc<Provider>,
+    client: Arc<Provider>,
     /// Every node of the loop, the client included.
-    nodes: Vec<Rc<Provider>>,
+    nodes: Vec<Arc<Provider>>,
     /// The listener of every node.
     listeners: Vec<ProviderListener>,
 }
@@ -340,7 +339,7 @@ async fn listed_peers(provider: &Provider) -> WebviewResult<Vec<String>> {
 /// One fixture node: its provider and the peers its backend has admitted.
 struct FixtureNode {
     /// The node's provider.
-    provider: Rc<Provider>,
+    provider: Arc<Provider>,
     /// Admission events of the node's backend.
     admitted: Arc<AdmittedPeers>,
     /// The heartbeat `I` of the node's registries: the pause before it publishes them again.
@@ -452,6 +451,10 @@ async fn authoritative_replay_storage(storage_name: &str) -> WebviewResult<Repla
     Ok(Box::new(storage))
 }
 
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "WebviewNode takes an Arc<Provider> on single-threaded wasm32"
+)]
 async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewResult<FixtureNode> {
     let delegatee_key = DelegateeKey::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::transport(format!("build browser delegatee key: {error:?}"))
@@ -487,7 +490,7 @@ async fn browser_provider(storage_name: &str, role: OnionRole<&str>) -> WebviewR
     let admitted = Arc::new(AdmittedPeers::default());
     let provider = observed_provider(processor, Arc::clone(&admitted))?;
     Ok(FixtureNode {
-        provider: Rc::new(provider),
+        provider: Arc::new(provider),
         admitted,
         registry_heartbeat,
     })

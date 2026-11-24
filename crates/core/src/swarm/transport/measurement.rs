@@ -52,7 +52,7 @@ impl SwarmTransport {
         };
         let report = measure.admit_provisional_evidence(record).await?;
         for eviction in report.evictions() {
-            tracing::warn!(
+            tracing::debug!(
                 receipt_digest = ?eviction.digest(),
                 bytes = eviction.bytes(),
                 "provisional evidence evicted to preserve a hard bound"

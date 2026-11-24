@@ -150,6 +150,13 @@ impl OnionUdpRelayFactory {
         *guard = Some((weak, circuit));
         Ok(())
     }
+
+    /// Release the stored [`NativeOnionCircuitHandle`] so [`Provider::close`] can drain and release
+    /// its stores cleanly during daemon shutdown.
+    pub fn detach_provider(&self) {
+        let mut guard = self.runtime.lock().unwrap_or_else(PoisonError::into_inner);
+        *guard = None;
+    }
 }
 
 #[async_trait]

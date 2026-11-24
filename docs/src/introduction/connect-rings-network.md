@@ -8,7 +8,7 @@ Two peers can open a direct WebRTC datachannel without any intermediary by excha
 
 ### 2. HTTP Seed Endpoint
 
-Native nodes and Browser nodes are full peers on the same overlay. Native nodes can expose a public HTTP seed endpoint (`nodeDid` and `answerOffer`) so joining nodes—including browser tabs and nodes behind firewalls—can bootstrap into the network with a single request.
+Native nodes and Browser nodes are full peers on the same overlay. Native nodes can expose a public HTTP seed endpoint (`nodeDid`, `answerOffer`, and `acceptAnswer`) so joining nodes—including browser tabs and nodes behind firewalls—can bootstrap into the network cleanly.
 
 From a Native node CLI:
 

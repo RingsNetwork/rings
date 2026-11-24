@@ -805,3 +805,50 @@ fn test_dropped_endpoint_waiter_neither_double_decrements_nor_loses_wakeup() {
         .is_ok());
     assert_eq!(state.lock().unwrap().waiting.get(&peer), None);
 }
+
+/// Regression (#1314): `OnionIdleFloor::OFF` emits nothing when idle and parks at `u128::MAX`
+/// once the dwell window `[t, t + D)` expires.
+#[test]
+fn test_idle_floor_off_emits_only_during_dwell_and_then_parks() {
+    let floor = OnionIdleFloor::OFF;
+    assert_eq!(
+        plan(LinkClock::default(), false, true, floor, 0),
+        Plan::WaitUntil(u128::MAX)
+    );
+    let t = 5_000_000;
+    let starts = schedule(&[t], floor, t + ONION_LINK_DWELL_US + 5_000_000);
+    assert!(starts.contains(&(t, true)));
+    assert!(
+        starts
+            .iter()
+            .all(|(start_us, _)| *start_us < t + ONION_LINK_DWELL_US),
+        "no cover cells are emitted after the dwell window when the idle floor is OFF"
+    );
+}
+
+/// Regression (#1314): a newly admitted link opened via `open_dormant` does not emit unsolicited
+/// cover cells until either an outbound onion cell is enqueued or an inbound onion cell activates
+/// the peer lane.
+#[test]
+fn test_dormant_lane_holds_cover_until_peer_participates() {
+    let peer = Did::from(99_u32);
+    let floor = OnionIdleFloor::DEFAULT;
+    let mut state = OrderedSendState::<u32>::default();
+    let epoch = state.open_dormant(peer, 0).expect("a new dormant lane");
+
+    let EmitterStep::Wait(due, mut woken) = state.next(peer, epoch, floor, true, 0) else {
+        panic!("a dormant lane parks without emitting cover");
+    };
+    assert_eq!(due, u128::MAX);
+    assert!(!state.activate_peer(Did::from(100_u32)));
+    assert!(state.activate_peer(peer));
+    assert_eq!(woken.try_recv(), Ok(Some(())));
+    assert!(
+        !state.activate_peer(peer),
+        "activating an already active lane is a no-op"
+    );
+    assert!(matches!(
+        state.next(peer, epoch, floor, true, 0),
+        EmitterStep::Emit(Emission::Cover(_))
+    ));
+}
