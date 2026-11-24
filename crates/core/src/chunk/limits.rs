@@ -110,6 +110,18 @@ impl ReassemblyLimits {
             grace_chunks: self.grace_chunks,
         }
     }
+
+    /// Whether a first chunk `[0, total]` satisfies the shape and per-message size bounds
+    /// needed to reserve a whole-message charge on the inbound ledger.
+    pub(crate) fn admits_first_chunk_shape(self, chunk: &super::Chunk) -> bool {
+        let limits = self.normalized();
+        let [position, total] = chunk.chunk;
+        position == 0
+            && total > 0
+            && total <= limits.max_chunks_per_message
+            && chunk.data.len() <= limits.max_chunk_data_len
+            && (total - 1).saturating_mul(chunk.data.len()) < limits.max_message_bytes
+    }
 }
 
 impl Default for ReassemblyLimits {

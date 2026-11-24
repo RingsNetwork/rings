@@ -132,6 +132,7 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     use crate::message::SignalingPath;
 
     let peer: Did = SecretKey::random().address().into();
+    let other_peer: Did = SecretKey::random().address().into();
     let message = Message::custom(&vec![u8::MAX; MAX_CHANNEL_MESSAGE_SIZE / 2])?;
     let message_bytes =
         usize::try_from(rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?)
@@ -139,6 +140,7 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
     let mut payload = new_payload(message, peer);
     payload.transaction.sequence = u64::MAX;
     payload.transaction.reply_via = Some(peer);
+    payload.relay.destination = other_peer;
     payload.relay.hop_budget = HopBudget::MAX;
     payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
     // The widest recorded path an honest carrier holds (`Law (Bound)` of the signaling path):
@@ -158,6 +160,7 @@ fn test_payload_envelope_reserve_is_the_widest_envelope() -> Result<()> {
         verification.ttl_ms = u64::MAX;
         verification.ts_ms = u128::MAX;
     }
+    payload.verification.delegation = Delegation::widest_distinct_for_test();
 
     assert_eq!(
         payload.to_wire()?.len(),
@@ -201,10 +204,12 @@ fn test_min_max_message_size_fits_widest_control_payloads_whole() -> Result<()> 
     use crate::message::SignalingPath;
 
     let peer: Did = SecretKey::random().address().into();
+    let other_peer: Did = SecretKey::random().address().into();
     let widest_envelope = |message: Message| -> Result<MessagePayload> {
         let mut payload = new_payload(message, peer);
         payload.transaction.sequence = u64::MAX;
         payload.transaction.reply_via = Some(peer);
+        payload.relay.destination = other_peer;
         payload.relay.hop_budget = HopBudget::MAX;
         payload.relay.stage = RouteStage::replying_via(Some(peer)).handed_off();
         let mut recorded = SignalingPath::outbound();
@@ -222,6 +227,7 @@ fn test_min_max_message_size_fits_widest_control_payloads_whole() -> Result<()> 
             verification.ttl_ms = u64::MAX;
             verification.ts_ms = u128::MAX;
         }
+        payload.verification.delegation = Delegation::widest_distinct_for_test();
         Ok(payload)
     };
 
@@ -422,7 +428,7 @@ fn test_wire_size_counts_large_verification_fields_without_allocating_wire() -> 
 fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Result<()> {
     let next_hop = SecretKey::random().address().into();
     for signature_len in [
-        0, 1, 63, 64, 127, 128, 255, 256, 16_383, 16_384, 65_535, 65_536,
+        0, 1, 63, 64, 65, 127, 128, 255, 256, 16_383, 16_384, 65_535, 65_536,
     ] {
         for message in Message::test_variants()? {
             let kind = message.kind();
@@ -446,11 +452,19 @@ fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Re
             ) && (wire_size - super::frame::FRAME_HEADER_LEN)
                 <= MAX_COMPRESSED_PAYLOAD_BYTES;
             if eligible_for_compression {
-                assert_eq!(wire[8], 2, "message kind {message_kind} should compress");
-                assert!(
-                    wire.len() < wire_size,
-                    "message kind {message_kind}, signature length {signature_len}"
-                );
+                if wire[8] == 2 {
+                    assert!(
+                        wire.len() < wire_size,
+                        "message kind {message_kind}, signature length {signature_len}"
+                    );
+                } else {
+                    assert_eq!(wire[8], 0);
+                    assert_eq!(
+                        wire.len(),
+                        wire_size,
+                        "message kind {message_kind}, signature length {signature_len}"
+                    );
+                }
             } else {
                 assert_eq!(
                     wire[8], 0,

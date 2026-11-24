@@ -280,6 +280,15 @@ impl Delegation {
         }
     }
 
+    /// A second widest delegation distinct from [`Self::widest_for_test`], so non-diagonal
+    /// (`origin != hop`) envelope supremum tests exercise `WireHopVerification::Distinct`.
+    pub(crate) fn widest_distinct_for_test() -> Self {
+        Self {
+            delegatee_did: Did::from(u32::MAX - 1),
+            ..Self::widest_for_test()
+        }
+    }
+
     /// A delegatee key that signs under [`Self::widest_for_test`].
     pub(crate) fn widest_key_for_test() -> super::DelegateeKey {
         super::DelegateeKey::from_parts(Self::widest_for_test(), crate::ecc::SecretKey::random())

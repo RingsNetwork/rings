@@ -216,7 +216,8 @@ impl OnionLinkSender {
         Ok(lock(&self.state)?.has_lane(link.peer))
     }
 
-    /// The link to `link` is up: it emits at least the floor from now on.
+    /// The link to `link` is up: open its lane in dormant mode until `link` participates in
+    /// `onion-circuit` (#1314).
     ///
     /// # Errors
     ///
@@ -224,9 +225,15 @@ impl OnionLinkSender {
     pub(crate) fn open(&self, scope: Scope, link: OnionLink) -> Result<()> {
         let spawner = scope.tasks().spawner()?;
         let now_us = self.now_us();
-        if let Some(epoch) = lock(&self.state)?.open(link.peer, now_us) {
+        if let Some(epoch) = lock(&self.state)?.open_dormant(link.peer, now_us) {
             spawner.spawn(emit(self.clone(), link.peer, epoch, scope));
         }
+        Ok(())
+    }
+
+    /// Record that `link` actively participates in `onion-circuit`, waking a dormant emitter.
+    pub(crate) fn activate(&self, link: OnionLink) -> Result<()> {
+        lock(&self.state)?.activate_peer(link.peer);
         Ok(())
     }
 
@@ -472,6 +479,9 @@ async fn emit(sender: OnionLinkSender, peer: Did, epoch: u64, scope: Scope) {
                         let _ = woken.await;
                     }
                 }
+            }
+            EmitterStep::Wait(u128::MAX, woken) => {
+                let _ = woken.await;
             }
             EmitterStep::Wait(due_us, woken) => {
                 let delay = Duration::from_micros(

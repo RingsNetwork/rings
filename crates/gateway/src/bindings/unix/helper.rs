@@ -1,11 +1,13 @@
 //! Foreground privileged helper for Unix TUN/utun and route configuration.
 
 use std::fs::FileType;
-use std::io::Read;
+use std::io::IoSliceMut;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
+use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
+use std::os::fd::RawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -20,6 +22,9 @@ use nix::poll::poll;
 use nix::poll::PollFd;
 use nix::poll::PollFlags;
 use nix::poll::PollTimeout;
+use nix::sys::socket::recvmsg;
+use nix::sys::socket::ControlMessageOwned;
+use nix::sys::socket::MsgFlags;
 use nix::unistd::chown;
 use nix::unistd::dup;
 use nix::unistd::Uid;
@@ -179,7 +184,7 @@ impl ShutdownSignals {
                 biased;
                 _ = self.sigint.recv() => true,
                 _ = self.sigterm.recv() => true,
-                () = tokio::time::sleep(Duration::from_millis(1)) => false,
+                () = std::future::ready(()) => false,
             }
         })
     }
@@ -249,6 +254,32 @@ fn wait_readable_or_signal(
     }
 }
 
+/// Read bytes from `stream` while draining and immediately closing any unexpected `SCM_RIGHTS`
+/// file descriptors so an unprivileged peer cannot exhaust the helper's file-descriptor table.
+fn recv_stream_discarding_fds(stream: &UnixStream, target: &mut [u8]) -> std::io::Result<usize> {
+    let mut control = nix::cmsg_space!([RawFd; 16]);
+    let mut slices = [IoSliceMut::new(target)];
+    let message = recvmsg::<()>(
+        stream.as_raw_fd(),
+        &mut slices,
+        Some(&mut control),
+        MsgFlags::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    if let Ok(cmsgs) = message.cmsgs() {
+        for cmsg in cmsgs {
+            if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                for fd in fds {
+                    // SAFETY: `fd` was newly installed into our FD table by `recvmsg`; wrapping
+                    // and immediately dropping `OwnedFd` closes it cleanly.
+                    drop(unsafe { OwnedFd::from_raw_fd(fd) });
+                }
+            }
+        }
+    }
+    Ok(message.bytes)
+}
+
 fn read_request_with_deadline(
     stream: &mut UnixStream,
     runtime: &tokio::runtime::Runtime,
@@ -269,7 +300,7 @@ fn read_request_with_deadline(
                 operation: "read-helper-request",
                 message: format!("invalid frame prefix offset {prefix_filled}"),
             })?;
-        match stream.read(target) {
+        match recv_stream_discarding_fds(stream, target) {
             Ok(0) if prefix_filled == 0 => return Ok(FrameReadOutcome::Disconnected),
             Ok(0) => {
                 return Err(GatewayError::platform(
@@ -303,7 +334,7 @@ fn read_request_with_deadline(
                 operation: "read-helper-request",
                 message: format!("invalid frame payload offset {payload_filled}"),
             })?;
-        match stream.read(target) {
+        match recv_stream_discarding_fds(stream, target) {
             Ok(0) => {
                 return Err(GatewayError::platform(
                     "read-helper-request",

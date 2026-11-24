@@ -71,7 +71,7 @@ struct OrderSummary {
 
 fn replay_order(history: &[OrderAction], mutant: Option<OrderMutant>) -> OrderSummary {
     let mut reorder = OnionReorder::<u32>::default();
-    let witness = OnionSessionWitness::default();
+    let mut witness = OnionSessionWitness::default();
     let mut now_ms = BASE_MS;
     let mut released = Vec::new();
     let mut failed_missing: Option<u32> = None;
@@ -87,16 +87,18 @@ fn replay_order(history: &[OrderAction], mutant: Option<OrderMutant>) -> OrderSu
     for &step in history {
         match step {
             OrderAction::Accept(seq) => {
+                let res = reorder.accept(now_ms, OnionSequence::new(seq), seq);
                 if mutant == Some(OrderMutant::DeliverOutOfOrder) {
                     released.push(seq);
-                    continue;
                 }
-                match reorder.accept(now_ms, OnionSequence::new(seq), seq) {
+                match res {
                     Ok(batch) => {
                         if failed_missing.is_some() {
                             fail_closed_ok = false;
                         }
-                        released.extend(batch);
+                        if mutant != Some(OrderMutant::DeliverOutOfOrder) {
+                            released.extend(batch);
+                        }
                         witness.record_stalled(reorder.is_stalled());
                     }
                     Err(gap) => {
@@ -114,11 +116,9 @@ fn replay_order(history: &[OrderAction], mutant: Option<OrderMutant>) -> OrderSu
                         }
                         witness.record_failed();
                         if mutant == Some(OrderMutant::NonAbsorbingWitness) {
-                            // Simulate a non-absorbing witness bug by reading a fresh Live witness.
-                            witness_consistent_ok = false;
-                        } else {
-                            witness.record_stalled(false);
+                            witness = OnionSessionWitness::default();
                         }
+                        witness.record_stalled(false);
                     }
                 }
             }

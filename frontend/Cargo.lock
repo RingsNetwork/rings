@@ -2851,6 +2851,7 @@ dependencies = [
  "js-sys",
  "jsonrpc-core",
  "lazy_static",
+ "libc",
  "log",
  "rand",
  "reqwest",

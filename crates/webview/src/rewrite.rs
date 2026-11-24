@@ -482,10 +482,60 @@ fn rewrite_url_list_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<S
     Ok(rewritten.finish())
 }
 
+fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) -> Option<usize> {
+    let pattern = pattern.as_bytes();
+    (!pattern.is_empty()).then_some(())?;
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let b = bytes.get(i).copied()?;
+        if escaped {
+            escaped = false;
+            i += 1;
+            continue;
+        }
+        if let Some(q) = quote {
+            if b == b'\\' {
+                escaped = true;
+            } else if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            i += 2;
+            while i < bytes.len() {
+                if bytes.get(i) == Some(&b'*') && bytes.get(i + 1) == Some(&b'/') {
+                    i += 2;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes
+            .get(i..i.saturating_add(pattern.len()))
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pattern))
+        {
+            return Some(i);
+        }
+        if matches!(b, b'\'' | b'"') {
+            quote = Some(b);
+        } else if b == b'\\' {
+            escaped = true;
+        }
+        i += 1;
+    }
+    None
+}
+
 fn rewrite_css_urls(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
     let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
-    while let Some(index) = find_ascii_case_insensitive(rest, "url(") {
+    while let Some(index) = find_ascii_case_insensitive_outside_css_comments(rest, "url(") {
         let (before, after_url) = split_at_checked(rest, index)?;
         let (url_token, after_open) = split_at_checked(after_url, "url(".len())?;
         output.push_str(before)?;
@@ -577,7 +627,7 @@ fn trim_css_url(raw_value: &str) -> (Option<char>, &str) {
 fn rewrite_css_imports(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
     let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
-    while let Some(index) = find_ascii_case_insensitive(rest, "@import") {
+    while let Some(index) = find_ascii_case_insensitive_outside_css_comments(rest, "@import") {
         let (before, after_import) = split_at_checked(rest, index)?;
         let (import_token, after_token) = split_at_checked(after_import, "@import".len())?;
         output.push_str(before)?;
@@ -1075,6 +1125,19 @@ mod tests {
         assert_absent(&rewritten, "onclick=");
         assert_absent(&rewritten, "javascript:");
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fok%2Epng"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_css_rewrite_ignores_urls_and_imports_inside_comments() -> Result<()> {
+        let ctx = context()?;
+        let css = r#"/* @import "commented.css"; background: url(/commented.png); */ body { background: url(/live.png); }"#;
+
+        let rewritten = ctx.rewrite_css(css)?;
+
+        assert!(rewritten
+            .contains(r#"/* @import "commented.css"; background: url(/commented.png); */"#));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flive%2Epng"));
         Ok(())
     }
 

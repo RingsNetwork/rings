@@ -85,8 +85,8 @@ use crate::simulation::SimulationRuntimeGuard;
 /// the rule of `frame` (once per release, relative to the last released version), then set
 /// this pair to the new version and the hash the failure reports, in the same commit.
 const PINNED: (u16, &str) = (
-    5,
-    "471469710cd060c26773a2e3d029e1f23b0699164ec7528792df271256ca3f10",
+    6,
+    "63ead742f70969438f0fbaf4bf0ef4977868a802267cdbbdba715e9e6dc917e9",
 );
 
 /// The overlay every golden is signed in.
@@ -307,6 +307,8 @@ fn format_goldens(session: &DelegateeKey) -> Result<Vec<Golden>> {
         Message,
         ProbeCompletion,
         super::DelegationRef<'_>,
+        super::WireHopVerification<'_>,
+        super::WireSignature<'_>,
         crate::dht::entry::EntryKind,
         crate::dht::entry::EntryOperation,
         crate::message::FindSuccessorReportHandler,

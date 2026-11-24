@@ -101,7 +101,9 @@ impl RelayPeerPolicy {
                     return false;
                 }
                 // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET documentation, RFC 5737)
+                // and 192.88.99.0/24 (deprecated 6to4 relay anycast, RFC 7526).
                 if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+                    || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
                     || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
                     || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
                 {
@@ -163,7 +165,11 @@ impl RelayPeerPolicy {
                 }
                 // 2001:0000::/32 (Teredo, RFC 4380), 2001:0002::/48 (Benchmarking, RFC 5180),
                 // 2001:0010::/28 & 2001:0020::/28 (ORCHID, RFC 4843 / RFC 7343),
-                // 2001:0db8::/32 (Documentation, RFC 3849).
+                // 2001:0db8::/32 (Documentation, RFC 3849),
+                // 3fff::/20 (Documentation, RFC 9637).
+                if (segments[0] & 0xfff0) == 0x3ff0 {
+                    return false;
+                }
                 if segments[0] == 0x2001
                     && (segments[1] == 0x0000
                         || (segments[1] == 0x0002 && segments[2] == 0)

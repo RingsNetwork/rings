@@ -203,16 +203,31 @@ struct WireProofItem {
 
 pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u8>> {
     let mut batches: Vec<(DataMutationClaim, Option<MessageVerification>)> = Vec::new();
+    let mut batch_indices: BTreeMap<(DataMutationClaim, [u8; 32]), usize> = BTreeMap::new();
     let mut items = Vec::with_capacity(proofs.len());
     for mutation in proofs {
-        let batch_pos = batches
-            .iter()
-            .position(|(c, p)| *c == mutation.claim && *p == mutation.proof)
-            .unwrap_or_else(|| {
+        let proof_digest = mutation
+            .proof
+            .as_ref()
+            .and_then(|p| rings_codec::serialize(p).ok())
+            .map(|bytes| keccak256(&bytes))
+            .unwrap_or([0u8; 32]);
+        let key = (mutation.claim, proof_digest);
+        let batch_pos = match batch_indices.get(&key).copied() {
+            Some(existing)
+                if batches
+                    .get(existing)
+                    .is_some_and(|(c, p)| *c == mutation.claim && *p == mutation.proof) =>
+            {
+                existing
+            }
+            _ => {
                 let idx = batches.len();
                 batches.push((mutation.claim, mutation.proof.clone()));
+                batch_indices.insert(key, idx);
                 idx
-            });
+            }
+        };
         let batch_index = u32::try_from(batch_pos).unwrap_or(u32::MAX);
         items.push(WireProofItem {
             key: mutation.key,
@@ -223,6 +238,40 @@ pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u
         });
     }
     rings_codec::serialize(&WireProofBundle { batches, items }).map_err(Error::CodecSerialize)
+}
+
+/// Encode the longest prefix of `proofs` whose serialized bundle does not exceed `max_bytes`.
+pub(super) fn encode_proof_bundle_bounded(
+    proofs: &[SignedDataMutation],
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    if proofs.is_empty() {
+        return None;
+    }
+    if let Ok(encoded) = encode_proof_bundle(proofs) {
+        if encoded.len() <= max_bytes {
+            return Some(encoded);
+        }
+    }
+    let mut low = 1_usize;
+    let mut high = proofs.len().saturating_sub(1);
+    let mut best: Option<Vec<u8>> = None;
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        match proofs.get(..mid).and_then(|s| encode_proof_bundle(s).ok()) {
+            Some(encoded) if encoded.len() <= max_bytes => {
+                best = Some(encoded);
+                low = mid.saturating_add(1);
+            }
+            _ => {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
+            }
+        }
+    }
+    best
 }
 
 pub(super) fn decode_proof_bundle(raw: &[u8]) -> Result<Vec<SignedDataMutation>> {

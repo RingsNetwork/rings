@@ -16,16 +16,18 @@ use crate::error::Result;
 pub(super) enum InboundCommand {
     /// The sequence of an event of `lane` ordered in `category` (`swarm::callback::inbound`'s
     /// per-category barrier), reserved before the event is ready.
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     Pending {
         sequence: u64,
         lane: InboundLane,
         category: InboundLane,
     },
-    Ready(Box<InboundEvent>),
-    Cancel {
-        sequence: u64,
-        lane: InboundLane,
+    Ready {
+        category: InboundLane,
+        event: Box<InboundEvent>,
     },
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    Cancel { sequence: u64, lane: InboundLane },
 }
 
 pub(super) struct InboundSender {
@@ -41,6 +43,27 @@ impl InboundSender {
         }
     }
 
+    pub(super) fn submit_ready(
+        &mut self,
+        category: InboundLane,
+        build_event: impl FnOnce(u64) -> InboundEvent,
+    ) -> Result<()> {
+        let sequence = self.next_sequence;
+        let next_sequence = sequence
+            .checked_add(1)
+            .ok_or(Error::InboundActorInvariantViolation)?;
+        let event = build_event(sequence);
+        self.sender
+            .unbounded_send(InboundCommand::Ready {
+                category,
+                event: Box::new(event),
+            })
+            .map_err(|_| Error::InboundMailboxClosed)?;
+        self.next_sequence = next_sequence;
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn reserve(
         &mut self,
         lane: InboundLane,
@@ -77,6 +100,7 @@ impl InboundSender {
     }
 }
 
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(super) struct InboundTicket {
     sender: mpsc::UnboundedSender<InboundCommand>,
     sequence: u64,
@@ -84,20 +108,7 @@ pub(super) struct InboundTicket {
     active: bool,
 }
 
-impl InboundTicket {
-    pub(super) const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    pub(super) fn commit(mut self, event: InboundEvent) -> Result<()> {
-        self.sender
-            .unbounded_send(InboundCommand::Ready(Box::new(event)))
-            .map_err(|_| Error::InboundMailboxClosed)?;
-        self.active = false;
-        Ok(())
-    }
-}
-
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 impl Drop for InboundTicket {
     fn drop(&mut self) {
         if self.active {

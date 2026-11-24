@@ -52,6 +52,80 @@ use crate::provider::Provider;
 /// listener drain, and [`Processor::close`]).
 pub const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Desired soft file-descriptor limit (`RLIMIT_NOFILE`) for a native Rings daemon (#1317).
+pub const TARGET_NOFILE_SOFT_LIMIT: u64 = 65_536;
+
+/// macOS / BSD fallback soft file-descriptor limit (`OPEN_MAX` / `kern.maxfilesperproc`, #1317).
+pub const FALLBACK_NOFILE_SOFT_LIMIT: u64 = 10_240;
+
+/// Minimum recommended soft file-descriptor limit before logging a startup warning (#1317).
+pub const MIN_RECOMMENDED_NOFILE_SOFT_LIMIT: u64 = 4_096;
+
+/// Raise the process soft `RLIMIT_NOFILE` limit toward [`TARGET_NOFILE_SOFT_LIMIT`] (capped by
+/// `rlim_max` and falling back to [`FALLBACK_NOFILE_SOFT_LIMIT`] on macOS where `setrlimit` rejects
+/// values above `OPEN_MAX = 10240`) so native daemons spawned under `launchd` (`256`) or low shell
+/// ulimits do not fail with `EMFILE (Too many open files)` (#1317).
+///
+/// Returns the effective `(soft, hard)` file-descriptor limits after attempting any raise.
+pub fn raise_nofile_soft_limit() -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: `lim` is a valid mutable `libc::rlimit` struct on the stack.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+            return None;
+        }
+        let target: libc::rlim_t = TARGET_NOFILE_SOFT_LIMIT as libc::rlim_t;
+        let fallback: libc::rlim_t = FALLBACK_NOFILE_SOFT_LIMIT as libc::rlim_t;
+        let cap = |wanted: libc::rlim_t, max: libc::rlim_t| -> libc::rlim_t {
+            if max == libc::RLIM_INFINITY {
+                wanted
+            } else {
+                wanted.min(max)
+            }
+        };
+        for candidate in [cap(target, lim.rlim_max), cap(fallback, lim.rlim_max)] {
+            if candidate > lim.rlim_cur {
+                let desired = libc::rlimit {
+                    rlim_cur: candidate,
+                    rlim_max: lim.rlim_max,
+                };
+                // SAFETY: `desired` is a valid `libc::rlimit` with `rlim_cur <= rlim_max`.
+                if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &desired) } == 0 {
+                    lim.rlim_cur = candidate;
+                    break;
+                }
+            }
+        }
+        #[allow(clippy::unnecessary_cast)]
+        let soft = lim.rlim_cur as u64;
+        #[allow(clippy::unnecessary_cast)]
+        let hard = lim.rlim_max as u64;
+        if soft < MIN_RECOMMENDED_NOFILE_SOFT_LIMIT {
+            tracing::warn!(
+                soft_limit = soft,
+                hard_limit = hard,
+                recommended_min = MIN_RECOMMENDED_NOFILE_SOFT_LIMIT,
+                "process file-descriptor soft limit (RLIMIT_NOFILE) is low; raise ulimit -n or service LimitNOFILE/NumberOfFiles to prevent EMFILE"
+            );
+        } else {
+            tracing::debug!(
+                soft_limit = soft,
+                hard_limit = hard,
+                "configured process file-descriptor soft limit (RLIMIT_NOFILE)"
+            );
+        }
+        Some((soft, hard))
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// Runtime options for [`run_foreground_node`].
 #[derive(Clone, Debug)]
 pub struct NativeNodeRunOptions {
@@ -120,6 +194,7 @@ pub async fn run_foreground_node<H: NativeDaemonHooks>(
     options: NativeNodeRunOptions,
     mut hooks: H,
 ) -> anyhow::Result<()> {
+    let _ = raise_nofile_soft_limit();
     let mut c = options.config;
     let pc = ProcessorConfig::try_from(c.clone())?;
     let api_security = configure_api_security(
@@ -232,13 +307,14 @@ pub async fn run_foreground_node<H: NativeDaemonHooks>(
         }
         (_, onion) => drop(onion),
     }
-    drop((relay, provider));
+    drop((relay, processor));
+    let provider = Arc::unwrap_or_clone(provider);
     await_foreground_exit(
         stop,
         tasks,
         gateway_task,
         processor_task,
-        processor,
+        provider,
         gateway_configured,
         &mut hooks,
     )
@@ -422,14 +498,14 @@ pub fn spawn_processor(
 }
 
 /// Wait for a signal or the first service to exit, then stop everything: the services at once,
-/// the gateway, the processor listener, `Processor::close` (`leave`, `swarm.close`, and
-/// measurement flush), and finally [`NativeDaemonHooks::shutdown`].
+/// the gateway, the processor listener, `Provider::close` (`leave`, `swarm.close`, measurement
+/// flush, and store release), and finally [`NativeDaemonHooks::shutdown`].
 async fn await_foreground_exit<H: NativeDaemonHooks>(
     stop: StopSource,
     tasks: JoinSet<anyhow::Result<()>>,
     gateway_task: OwnedTask<anyhow::Result<()>>,
     processor_task: OwnedTask<anyhow::Result<()>>,
-    processor: Arc<Processor>,
+    provider: Provider,
     gateway_configured: bool,
     hooks: &mut H,
 ) -> anyhow::Result<()> {
@@ -439,7 +515,7 @@ async fn await_foreground_exit<H: NativeDaemonHooks>(
         tasks,
         gateway_task,
         processor_task,
-        processor,
+        provider,
         gateway_configured,
         hooks,
     )
@@ -455,7 +531,7 @@ pub async fn await_foreground_exit_with_signal<H: NativeDaemonHooks>(
     mut tasks: JoinSet<anyhow::Result<()>>,
     mut gateway_task: OwnedTask<anyhow::Result<()>>,
     mut processor_task: OwnedTask<anyhow::Result<()>>,
-    processor: Arc<Processor>,
+    provider: Provider,
     gateway_configured: bool,
     hooks: &mut H,
 ) -> anyhow::Result<()> {
@@ -498,7 +574,11 @@ pub async fn await_foreground_exit_with_signal<H: NativeDaemonHooks>(
     } else {
         await_task_cleanup(&mut processor_task, "node processor shutdown").await
     };
-    let processor_close = await_processor_close(&processor).await;
+    drop((gateway_task, processor_task));
+    let processor_close = provider
+        .close_with_drain_timeout(FOREGROUND_CLEANUP_TIMEOUT)
+        .await
+        .context("node provider close failed");
     let hooks_cleanup = hooks.shutdown().await;
     combine_foreground_results(
         primary,
@@ -586,15 +666,6 @@ pub async fn await_task_cleanup(
                 "{operation} did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
             ))
         }
-    }
-}
-
-async fn await_processor_close(processor: &Processor) -> anyhow::Result<()> {
-    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, processor.close()).await {
-        Ok(result) => result.context("node processor close failed"),
-        Err(_) => Err(anyhow::anyhow!(
-            "node processor close did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
-        )),
     }
 }
 

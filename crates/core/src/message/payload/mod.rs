@@ -57,7 +57,11 @@ pub(crate) use self::wire::LinkControl;
 pub(crate) use self::wire::LinkFrame;
 pub(crate) use self::wire::PerSlot;
 pub(crate) use self::wire::SlotEncoding;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::wire::WireHopVerification;
 pub(crate) use self::wire::WirePayload;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::wire::WireSignature;
 pub(crate) use self::wire::MAX_COMPRESSED_FRAME_WIRE_BYTES;
 #[cfg(test)]
 pub(crate) use self::wire::MAX_COMPRESSED_PAYLOAD_BYTES;
@@ -320,7 +324,16 @@ impl MessagePayload {
             signer.by_ref(),
         )?;
         let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
-        Self::new(transaction, signer.by_ref(), relay)
+        let verification = signer.sign_at(
+            PAYLOAD_DOMAIN_TAG,
+            &transaction.signed_hash(),
+            transaction.verification.ts_ms,
+        )?;
+        Ok(Self {
+            transaction,
+            relay,
+            verification,
+        })
     }
 
     #[cfg(test)]
@@ -659,7 +672,16 @@ pub trait PayloadSender {
         let signer = self.message_signer();
         let sequence = self.next_sequence(origin, &msg).await?;
         let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer.by_ref())?;
-        let payload = MessagePayload::new(transaction, signer.by_ref(), relay)?;
+        let verification = signer.sign_at(
+            PAYLOAD_DOMAIN_TAG,
+            &transaction.signed_hash(),
+            transaction.verification.ts_ms,
+        )?;
+        let payload = MessagePayload {
+            transaction,
+            relay,
+            verification,
+        };
         self.send_payload(payload).await
     }
 

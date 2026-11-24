@@ -1,5 +1,7 @@
 //! Browser node construction and local RPC helpers.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use js_sys::Uint8Array;
@@ -12,10 +14,15 @@ use rings_webview::Result as WebviewResult;
 use rings_webview::WebviewError;
 use serde_json::json;
 use serde_json::Value;
+use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
 use crate::webview::WebviewNode;
+
+/// Type alias for a registered JS protocol callback owned by a [`DemoNode`].
+pub type ProtocolHandlerClosure = Closure<dyn FnMut(JsValue, JsValue) -> JsValue>;
 
 /// The public seed node Rings Network operates, as a literal so `concat!` can splice it into
 /// the guide's command listings; [`PUBLIC_SEED_ENDPOINT`] is the same value as a constant.
@@ -44,9 +51,16 @@ pub struct DemoNode {
     /// Controlled webview gateway attached through an HTTP(S) host or the extension adapter.
     pub webview: Option<WebviewNode>,
     listener: ProviderListener,
+    protocol_handlers: Rc<RefCell<Vec<ProtocolHandlerClosure>>>,
 }
 
 impl DemoNode {
+    /// Retain a registered JS protocol callback so it lives as long as this node and is freed
+    /// when the node closes.
+    pub fn retain_protocol_handler(&self, handler: ProtocolHandlerClosure) {
+        self.protocol_handlers.borrow_mut().push(handler);
+    }
+
     /// Return true when both handles refer to the same browser provider instance.
     pub(crate) fn same_provider_instance(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.provider, &other.provider)
@@ -61,6 +75,8 @@ impl DemoNode {
     /// IndexedDB Web Lock.
     pub async fn close(self) -> Result<(), String> {
         self.listener.stop();
+        self.protocol_handlers.borrow_mut().clear();
+        drop(self.protocol_handlers);
         drop(self.webview);
         drop(self.listener);
         match Arc::unwrap_or_clone(self.provider).close().await {
@@ -202,6 +218,7 @@ pub async fn open_node(
         provider,
         webview,
         listener,
+        protocol_handlers: Rc::new(RefCell::new(Vec::new())),
     })
 }
 

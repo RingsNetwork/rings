@@ -226,25 +226,15 @@ fn merge_online_node_descriptors(
     local: Vec<OnlineNodeDescriptor>,
     remote: Vec<OnlineNodeDescriptor>,
 ) -> Vec<OnlineNodeDescriptor> {
+    use crate::descriptor::SignedDescriptor;
     let mut merged = std::collections::BTreeMap::new();
     for descriptor in remote.into_iter().chain(local) {
-        let rank = (
-            descriptor.expires_at_ms,
-            descriptor.started_at_ms,
-            descriptor.heartbeat_at_ms,
-        );
         match merged.entry(descriptor.did) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(descriptor);
             }
             std::collections::btree_map::Entry::Occupied(mut slot) => {
-                let existing = slot.get();
-                let existing_rank = (
-                    existing.expires_at_ms,
-                    existing.started_at_ms,
-                    existing.heartbeat_at_ms,
-                );
-                if rank >= existing_rank {
+                if descriptor.supersedes(slot.get()) {
                     slot.insert(descriptor);
                 }
             }
@@ -257,25 +247,15 @@ fn merge_onion_exit_descriptors(
     local: Vec<OnionExitDescriptor>,
     remote: Vec<OnionExitDescriptor>,
 ) -> Vec<OnionExitDescriptor> {
+    use crate::descriptor::SignedDescriptor;
     let mut merged = std::collections::BTreeMap::new();
     for descriptor in remote.into_iter().chain(local) {
-        let rank = (
-            descriptor.expires_at_ms,
-            descriptor.started_at_ms,
-            descriptor.heartbeat_at_ms,
-        );
         match merged.entry((descriptor.did, descriptor.service.clone())) {
             std::collections::btree_map::Entry::Vacant(slot) => {
                 slot.insert(descriptor);
             }
             std::collections::btree_map::Entry::Occupied(mut slot) => {
-                let existing = slot.get();
-                let existing_rank = (
-                    existing.expires_at_ms,
-                    existing.started_at_ms,
-                    existing.heartbeat_at_ms,
-                );
-                if rank >= existing_rank {
+                if descriptor.supersedes(slot.get()) {
                     slot.insert(descriptor);
                 }
             }

@@ -338,6 +338,12 @@ impl OnionCircuitShell {
                 cell,
             )
         };
+        if !matches!(
+            outcome,
+            OnionHopOutcome::Refused(super::admission::OnionChargeRejection::LinkNotLive)
+        ) {
+            let _ = self.link_sender.activate(OnionLink::new(from));
+        }
         match outcome {
             OnionHopOutcome::Stepped(OnionStep::Relayed { next, cell }) => {
                 // A full lane drops the cell: the loop's session sees a gap and fails closed.

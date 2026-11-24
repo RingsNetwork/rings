@@ -57,6 +57,19 @@ const SESSION_QUEUE_CAPACITY: usize = 256;
 const MAX_BRIDGE_SESSIONS: usize = 8;
 const RECENT_STUN_TX_IDS_CAPACITY: usize = 32;
 
+/// Maximum TURN servers gathered per single `RTCPeerConnection` (#1316, #1317).
+///
+/// Bounding per-connection TURN allocations to 1 (chosen round-robin across the configured TURN
+/// server pool) eliminates redundant unselected `turn::client::RelayConn` instances that otherwise
+/// hold 3 extra UDP sockets and server relay ports open forever per peer and emit `437 Allocation
+/// Mismatch` permission-refresh errors every 120s once their idle NAT mappings expire.
+const MAX_TURN_SERVERS_PER_CONNECTION: usize = 1;
+
+static TURN_SERVER_ROUND_ROBIN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+static CAN_USE_OS_UDP_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 #[cfg(test)]
 static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -508,22 +521,30 @@ async fn can_use_os_udp() -> bool {
     if FORCE_OS_UDP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst) {
         return false;
     }
-
-    let Ok(sock) = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
-        return false;
-    };
-    let Ok(addr) = sock.local_addr() else {
-        return false;
-    };
-    let probe = *b"ping";
-    if sock.send_to(&probe, addr).await.is_err() {
-        return false;
+    if let Some(&cached) = CAN_USE_OS_UDP_CACHE.get() {
+        return cached;
     }
-    let mut recv_buf = [0u8; 8];
-    matches!(
-        tokio::time::timeout(OS_UDP_PROBE_TIMEOUT, sock.recv_from(&mut recv_buf)).await,
-        Ok(Ok((4, _))) if recv_buf.get(..4) == Some(&probe)
-    )
+
+    let ok = async {
+        let Ok(sock) = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await else {
+            return false;
+        };
+        let Ok(addr) = sock.local_addr() else {
+            return false;
+        };
+        let probe = *b"ping";
+        if sock.send_to(&probe, addr).await.is_err() {
+            return false;
+        }
+        let mut recv_buf = [0u8; 8];
+        matches!(
+            tokio::time::timeout(OS_UDP_PROBE_TIMEOUT, sock.recv_from(&mut recv_buf)).await,
+            Ok(Ok((4, _))) if recv_buf.get(..4) == Some(&probe)
+        )
+    }
+    .await;
+    let _ = CAN_USE_OS_UDP_CACHE.set(ok);
+    ok
 }
 
 fn build_tls_connector() -> std::io::Result<TlsConnector> {
@@ -679,14 +700,54 @@ async fn run_stream_io<S>(
     }
 }
 
+fn is_forbidden_turn_tcp_addr(host: &str, addr: SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return true;
+    }
+    match addr.ip() {
+        std::net::IpAddr::V4(v4) => {
+            let [first, second, _, _] = v4.octets();
+            if first == 0 || first >= 224 || (first == 169 && second == 254) {
+                return true;
+            }
+            if v4.is_loopback()
+                && !host.eq_ignore_ascii_case("localhost")
+                && host.parse::<std::net::IpAddr>() != Ok(std::net::IpAddr::V4(v4))
+            {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            if v6.is_loopback()
+                && !host.eq_ignore_ascii_case("localhost")
+                && host.parse::<std::net::IpAddr>() != Ok(std::net::IpAddr::V6(v6))
+            {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_forbidden_turn_tcp_addr(
+                    host,
+                    SocketAddr::new(mapped.into(), addr.port()),
+                );
+            }
+            false
+        }
+    }
+}
+
 async fn connect_turn_tcp_endpoint(endpoint: &TurnTcpEndpoint) -> std::io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
         .await?
+        .filter(|addr| !is_forbidden_turn_tcp_addr(&endpoint.host, *addr))
         .collect();
     if addrs.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AddrNotAvailable,
-            "no socket addresses resolved for TURN TCP endpoint",
+            "no allowed socket addresses resolved for TURN TCP endpoint",
         ));
     }
     let addr_count = u32::try_from(addrs.len()).unwrap_or(u32::MAX).max(1);
@@ -905,11 +966,72 @@ fn spawn_turn_tcp_bridge(
     })
 }
 
+/// Partition `ice_servers` so that all STUN URLs are retained while at most
+/// [`MAX_TURN_SERVERS_PER_CONNECTION`] TURN server is selected per peer connection in round-robin
+/// order across the configured pool (#1316, #1317).
+pub(crate) fn select_ice_servers_for_connection(ice_servers: &[IceServer]) -> Vec<IceServer> {
+    select_ice_servers_with_cursor(
+        ice_servers,
+        TURN_SERVER_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+pub(crate) fn select_ice_servers_with_cursor(
+    ice_servers: &[IceServer],
+    cursor: usize,
+) -> Vec<IceServer> {
+    fn is_turn_url(url: &str) -> bool {
+        let Some((scheme, _)) = url.trim().split_once(':') else {
+            return false;
+        };
+        scheme.eq_ignore_ascii_case("turn") || scheme.eq_ignore_ascii_case("turns")
+    }
+
+    let mut stun_servers = Vec::new();
+    let mut turn_servers = Vec::new();
+    for server in ice_servers {
+        let mut stun_urls = Vec::new();
+        let mut turn_urls = Vec::new();
+        for url in &server.urls {
+            if is_turn_url(url) {
+                turn_urls.push(url.clone());
+            } else {
+                stun_urls.push(url.clone());
+            }
+        }
+        if !stun_urls.is_empty() {
+            let mut s = server.clone();
+            s.urls = stun_urls;
+            stun_servers.push(s);
+        }
+        for turn_url in turn_urls {
+            let mut t = server.clone();
+            t.urls = vec![turn_url];
+            turn_servers.push(t);
+        }
+    }
+
+    if turn_servers.len() <= MAX_TURN_SERVERS_PER_CONNECTION {
+        stun_servers.extend(turn_servers);
+        return stun_servers;
+    }
+
+    let len = turn_servers.len();
+    for offset in 0..MAX_TURN_SERVERS_PER_CONNECTION {
+        if let Some(chosen) = turn_servers.get((cursor.wrapping_add(offset)) % len) {
+            stun_servers.push(chosen.clone());
+        }
+    }
+    stun_servers
+}
+
 /// Prepare the `RTCIceServer` list, `RTCIceTransportPolicy`, and optional `VNet` + TCP TURN
 /// bridges for `create_peer_connection_with_config`.
 pub(crate) async fn prepare_native_ice_config(
     ice_servers: &[IceServer],
 ) -> Result<PreparedNativeIceConfig> {
+    let selected_servers = select_ice_servers_for_connection(ice_servers);
+    let ice_servers = selected_servers.as_slice();
     let mut tcp_turn_urls = 0usize;
     for server in ice_servers {
         for url in &server.urls {

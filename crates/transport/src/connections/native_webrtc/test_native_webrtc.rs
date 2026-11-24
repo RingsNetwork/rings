@@ -593,6 +593,27 @@ async fn test_turn_tcp_url_parsing_and_rfc5766_stream_framing() {
     );
     assert_eq!(parse_turn_tcp_url("stun:stun.l.google.com:19302"), None);
 
+    // Per-connection TURN pool selection (#1316, #1317): retains all STUN servers while rotating
+    // across multiple TURN servers 1 at a time per connection.
+    let pool = parse_ice_servers_strict(
+        "stun://stun.l.google.com:19302;\
+         turn://u:p@turn1.example.com:3478;\
+         turn://u:p@turn2.example.com:3478;\
+         turn://u:p@turn3.example.com:3478;\
+         turn://u:p@turn4.example.com:3478",
+    )
+    .expect("valid 4-TURN pool");
+    let c0 = turn_tcp::select_ice_servers_with_cursor(&pool, 0);
+    let c1 = turn_tcp::select_ice_servers_with_cursor(&pool, 1);
+    let c2 = turn_tcp::select_ice_servers_with_cursor(&pool, 2);
+    let c3 = turn_tcp::select_ice_servers_with_cursor(&pool, 3);
+    assert_eq!(c0.len(), 2);
+    assert_eq!(c0[0].urls, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(c0[1].urls, vec!["turn:turn1.example.com:3478"]);
+    assert_eq!(c1[1].urls, vec!["turn:turn2.example.com:3478"]);
+    assert_eq!(c2[1].urls, vec!["turn:turn3.example.com:3478"]);
+    assert_eq!(c3[1].urls, vec!["turn:turn4.example.com:3478"]);
+
     // ChannelData with 5-byte payload (unaligned) must be padded to 8 bytes (total 12 bytes) over TCP.
     let unpadded_channel_data = [0x40, 0x01, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o'];
     let framed_cd = encode_turn_tcp_frame(&unpadded_channel_data).expect("valid ChannelData");

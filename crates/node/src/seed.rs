@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use rings_core::dht::Did;
 use rings_rpc::protos::rings_node::ConnectWithSeedRequest;
+pub use rings_rpc::protos::rings_node::SeedPeer;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -15,30 +16,6 @@ use crate::remote_endpoint::RemoteRpcEndpoint;
 pub struct Seed {
     /// Peers loaded from seed configuration.
     pub peers: Vec<SeedPeer>,
-}
-
-/// SeedPeer contain `Did` and `endpoint`.
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct SeedPeer {
-    /// an unique identify.
-    pub did: String,
-    /// remote client endpoint
-    pub url: String,
-    /// Optional Bearer token for a seed peer that gates its handshake; absent by default,
-    /// since the external handshake is public.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_token: Option<String>,
-}
-
-impl std::fmt::Debug for SeedPeer {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("SeedPeer")
-            .field("did", &self.did)
-            .field("url", &self.url)
-            .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
-            .finish()
-    }
 }
 
 /// Why a seed entry cannot be dialed.
@@ -179,34 +156,14 @@ impl TryFrom<ConnectWithSeedRequest> for Seed {
     type Error = Error;
 
     fn try_from(req: ConnectWithSeedRequest) -> Result<Self, Error> {
-        let mut peers = Vec::new();
-
-        for peer in req.peers {
-            peers.push(SeedPeer {
-                did: peer.did,
-                url: peer.url,
-                api_token: peer.api_token,
-            });
-        }
-
-        Ok(Seed { peers })
+        Ok(Seed { peers: req.peers })
     }
 }
 
 impl Seed {
     /// Converts this seed list into the RPC request used by `connectWithSeed`.
     pub fn into_connect_with_seed_request(self) -> ConnectWithSeedRequest {
-        let mut peers = Vec::new();
-
-        for peer in self.peers {
-            peers.push(rings_rpc::protos::rings_node::SeedPeer {
-                did: peer.did,
-                url: peer.url,
-                api_token: peer.api_token,
-            });
-        }
-
-        ConnectWithSeedRequest { peers }
+        ConnectWithSeedRequest { peers: self.peers }
     }
 }
 

@@ -183,14 +183,15 @@ fn replay_exit(history: &[ExitAction], mutant: Option<ExitMutant>) -> ExitSummar
                 drop(held);
             }
             ExitAction::RecordBytes(n) => {
-                if mutant == Some(ExitMutant::IgnoreByteWindow) {
-                    window_bytes = window_bytes.saturating_add(n);
-                    if window_bytes > policy.max_bytes_per_minute {
-                        summary.byte_window_ok = false;
+                let effective_policy = if mutant == Some(ExitMutant::IgnoreByteWindow) {
+                    OnionExitPolicy {
+                        max_bytes_per_minute: 0,
+                        ..policy.clone()
                     }
-                    continue;
-                }
-                match accounting.record_bytes(&policy, n, now_ms) {
+                } else {
+                    policy.clone()
+                };
+                match accounting.record_bytes(&effective_policy, n, now_ms) {
                     Ok(()) => {
                         window_bytes = window_bytes.saturating_add(n);
                         if window_bytes > policy.max_bytes_per_minute {

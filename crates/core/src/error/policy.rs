@@ -28,19 +28,34 @@ impl Error {
         matches!(self.send_class(), SendClass::Deferrable(_))
     }
 
-    /// Whether this error is a view refusal (#1151): a node declines a relay operation its own
-    /// view does not assign it, or a report from a node its view makes no member of the key.
-    /// Views converge (`Law (Convergence)` of `dht::relay_holder`) and the sender acts again on
-    /// its next pass, so a view refusal is the protocol's answer, not a fault.
-    pub(crate) const fn is_view_refusal(&self) -> bool {
-        matches!(
-            self,
+    /// Whether this error is a view refusal (#1151) or expected transient multi-hop routing /
+    /// topology-churn rejection (#1316): views converge and stale routes or sequences occur
+    /// naturally during churn, so the inbound actor logs them at `debug` instead of surfacing them
+    /// as transport callback `ERROR` lines.
+    pub(crate) fn is_view_refusal(&self) -> bool {
+        match self {
             Self::RelayHolderUnavailable
-                | Self::RelayCarrierNotHeldHere
-                | Self::RelayMessageHolderNotResponsible
-                | Self::RelayStorageUnavailable
-                | Self::RelayInboxReportFromNonMember(_)
-        )
+            | Self::RelayCarrierNotHeldHere
+            | Self::RelayMessageHolderNotResponsible
+            | Self::RelayStorageUnavailable
+            | Self::RelayInboxReportFromNonMember(_)
+            | Self::RelayDestinationUnreachable { .. }
+            | Self::RelayPathRepeatedHop { .. }
+            | Self::RelayPathHopUnlinked { .. }
+            | Self::RelayHopBudgetExhausted
+            | Self::TransactionSequenceStale { .. }
+            | Self::TransactionReplay { .. }
+            | Self::SwarmMissDidInTable(_)
+            | Self::SwarmMissTransport(_)
+            | Self::NotifyPredecessorOriginNotAdmitted { .. }
+            | Self::ConnectionAttemptCancelled { .. }
+            | Self::ConnectionAttemptSuperseded { .. }
+            | Self::OutboundTransferCancelled { .. } => true,
+            Self::InvalidMessage(reason) => {
+                reason == "probe transcript messages must be delivered directly without relaying"
+            }
+            _ => false,
+        }
     }
 
     /// Whether this error should degrade peer quality through `FailedToSend`.

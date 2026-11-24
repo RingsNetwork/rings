@@ -78,40 +78,22 @@ pub const fn is_public_ip(address: IpAddr) -> bool {
             }
             !matches!(
                 octets,
-                // IETF protocol assignments, including Teredo and ORCHID.
+                // IETF protocol assignments, including Teredo (2001:0000::/32), Benchmarking
+                // (2001:0002::/48), and ORCHID (2001:0010::/28, 2001:0020::/28).
                 [0x20, 0x01, 0x00..=0x01, ..]
                     // Documentation 2001:db8::/32.
                     | [0x20, 0x01, 0x0d, 0xb8, ..]
                     // 6to4 can embed a private IPv4 destination.
                     | [0x20, 0x02, ..]
-                    // Documentation 3fff::/20.
+                    // Documentation 3fff::/20 (RFC 9637).
                     | [0x3f, 0xf0..=0xff, ..]
             )
         }
     }
 }
 
-const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
-    let compatible_prefix = octets[0] == 0
-        && octets[1] == 0
-        && octets[2] == 0
-        && octets[3] == 0
-        && octets[4] == 0
-        && octets[5] == 0
-        && octets[6] == 0
-        && octets[7] == 0
-        && octets[8] == 0
-        && octets[9] == 0;
-    if compatible_prefix
-        && ((octets[10] == 0 && octets[11] == 0) || (octets[10] == 0xff && octets[11] == 0xff))
-    {
-        Some([octets[12], octets[13], octets[14], octets[15]])
-    } else {
-        None
-    }
-}
-
-const fn is_public_ipv4([first, second, third, _fourth]: [u8; 4]) -> bool {
+/// Return whether an IPv4 address is globally routable public unicast.
+pub const fn is_public_ipv4([first, second, third, _fourth]: [u8; 4]) -> bool {
     !matches!(
         (first, second, third),
         (0, _, _)
@@ -129,6 +111,41 @@ const fn is_public_ipv4([first, second, third, _fourth]: [u8; 4]) -> bool {
             | (203, 0, 113)
             | (224..=255, _, _)
     )
+}
+
+const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
+    let compatible_prefix = octets[0] == 0
+        && octets[1] == 0
+        && octets[2] == 0
+        && octets[3] == 0
+        && octets[4] == 0
+        && octets[5] == 0
+        && octets[6] == 0
+        && octets[7] == 0
+        && octets[8] == 0
+        && octets[9] == 0;
+    if compatible_prefix
+        && ((octets[10] == 0 && octets[11] == 0) || (octets[10] == 0xff && octets[11] == 0xff))
+    {
+        return Some([octets[12], octets[13], octets[14], octets[15]]);
+    }
+    // Well-Known NAT64 prefix 64:ff9b::/96 (RFC 6052) embeds IPv4 in octets 12..16.
+    if octets[0] == 0x00
+        && octets[1] == 0x64
+        && octets[2] == 0xff
+        && octets[3] == 0x9b
+        && octets[4] == 0
+        && octets[5] == 0
+        && octets[6] == 0
+        && octets[7] == 0
+        && octets[8] == 0
+        && octets[9] == 0
+        && octets[10] == 0
+        && octets[11] == 0
+    {
+        return Some([octets[12], octets[13], octets[14], octets[15]]);
+    }
+    None
 }
 
 #[cfg(test)]

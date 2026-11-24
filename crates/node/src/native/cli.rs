@@ -234,11 +234,11 @@ impl Client {
             .peers;
 
         let mut display = String::new();
-        display.push_str("Did, TransportId, Status\n");
+        display.push_str("Did, Status\n");
         display.push_str(
             peers
                 .iter()
-                .map(|peer| format!("{}, {}, {}", peer.did, peer.did, peer.state))
+                .map(|peer| format!("{}, {}", peer.did, peer.state))
                 .collect::<Vec<_>>()
                 .join("\n")
                 .as_str(),

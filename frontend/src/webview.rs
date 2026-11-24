@@ -494,12 +494,7 @@ impl WebviewNode {
         }
         let controlled_origin = Url::parse(&format!("{}/", origin.trim_end_matches('/')))
             .map_err(|error| WebviewError::Browser(format!("parse frontend origin: {error}")))?;
-        Self::new(
-            Rc::new((*provider).clone()),
-            controlled_origin,
-            web_shell_bootstrap,
-        )
-        .map(Some)
+        Self::new(provider, controlled_origin, web_shell_bootstrap).map(Some)
     }
 
     /// Build the gateway owned by the retained MV3 node.
@@ -509,11 +504,7 @@ impl WebviewNode {
     /// sandbox renders the returned bytes.
     pub(crate) fn for_extension(provider: Arc<Provider>) -> WebviewResult<Self> {
         let controlled_origin = Url::parse("https://rings-webview.invalid/")?;
-        Self::new(
-            Rc::new((*provider).clone()),
-            controlled_origin,
-            extension_webview_bootstrap,
-        )
+        Self::new(provider, controlled_origin, extension_webview_bootstrap)
     }
 
     /// Handle a browser request after the host has captured it before connection dispatch.
@@ -522,7 +513,7 @@ impl WebviewNode {
     }
 
     fn new(
-        provider: Rc<Provider>,
+        provider: Arc<Provider>,
         controlled_origin: Url,
         request_bootstrap: fn(&GatewayRequest) -> String,
     ) -> WebviewResult<Self> {
@@ -715,7 +706,7 @@ impl Drop for GatewayRequestPermit {
 }
 
 struct OnionGatewayTransport {
-    provider: Rc<Provider>,
+    provider: Arc<Provider>,
 }
 
 #[async_trait(?Send)]
