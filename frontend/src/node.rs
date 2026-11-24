@@ -458,6 +458,7 @@ mod tests {
             provider,
             webview: None,
             listener,
+            protocol_handlers: Rc::new(RefCell::new(Vec::new())),
         };
         Ok(node)
     }

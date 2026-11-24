@@ -28,18 +28,29 @@ impl Error {
         matches!(self.send_class(), SendClass::Deferrable(_))
     }
 
-    /// Whether this error is a view refusal (#1151) or expected transient multi-hop routing /
-    /// topology-churn rejection (#1316): views converge and stale routes or sequences occur
-    /// naturally during churn, so the inbound actor logs them at `debug` instead of surfacing them
-    /// as transport callback `ERROR` lines.
-    pub(crate) fn is_view_refusal(&self) -> bool {
-        match self {
+    /// Whether this error is a view refusal (#1151): the message was routed under a view that
+    /// no longer matches this node's, which views converge from on their own, so the inbound
+    /// actor logs it at `debug` and reports the step done.
+    pub(crate) const fn is_view_refusal(&self) -> bool {
+        matches!(
+            self,
             Self::RelayHolderUnavailable
-            | Self::RelayCarrierNotHeldHere
-            | Self::RelayMessageHolderNotResponsible
-            | Self::RelayStorageUnavailable
-            | Self::RelayInboxReportFromNonMember(_)
-            | Self::RelayDestinationUnreachable { .. }
+                | Self::RelayCarrierNotHeldHere
+                | Self::RelayMessageHolderNotResponsible
+                | Self::RelayStorageUnavailable
+                | Self::RelayInboxReportFromNonMember(_)
+        )
+    }
+
+    /// Whether this error is a view refusal (#1151) or expected transient multi-hop routing /
+    /// topology-churn rejection (#1316) that the transport callback boundary should log at
+    /// `debug` rather than surfacing as an `ERROR` line.
+    pub(crate) fn is_transient_inbound_rejection(&self) -> bool {
+        if self.is_view_refusal() {
+            return true;
+        }
+        match self {
+            Self::RelayDestinationUnreachable { .. }
             | Self::RelayPathRepeatedHop { .. }
             | Self::RelayPathHopUnlinked { .. }
             | Self::RelayHopBudgetExhausted

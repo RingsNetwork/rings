@@ -600,7 +600,7 @@ impl BoundCallback {
             Err(error)
                 if error
                     .downcast_ref::<Error>()
-                    .is_some_and(Error::is_view_refusal) =>
+                    .is_some_and(Error::is_transient_inbound_rejection) =>
             {
                 tracing::debug!(peer = %cid, ?error, "refused inbound message on transient view or routing rejection");
                 Ok(())

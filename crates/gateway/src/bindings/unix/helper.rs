@@ -180,6 +180,7 @@ impl ShutdownSignals {
 
     fn poll_triggered(&mut self, runtime: &tokio::runtime::Runtime) -> bool {
         runtime.block_on(async {
+            tokio::task::yield_now().await;
             tokio::select! {
                 biased;
                 _ = self.sigint.recv() => true,
