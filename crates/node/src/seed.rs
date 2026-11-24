@@ -8,7 +8,6 @@ pub use rings_rpc::protos::rings_node::SeedPeer;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::error::Error;
 use crate::remote_endpoint::RemoteRpcEndpoint;
 
 /// A list contains SeedPeer.
@@ -152,11 +151,9 @@ impl TryFrom<SeedPeer> for ValidatedSeedPeer {
     }
 }
 
-impl TryFrom<ConnectWithSeedRequest> for Seed {
-    type Error = Error;
-
-    fn try_from(req: ConnectWithSeedRequest) -> Result<Self, Error> {
-        Ok(Seed { peers: req.peers })
+impl From<ConnectWithSeedRequest> for Seed {
+    fn from(req: ConnectWithSeedRequest) -> Self {
+        Self { peers: req.peers }
     }
 }
 

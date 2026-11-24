@@ -623,7 +623,7 @@ impl WebrtcConnection {
             return Ok(());
         }
 
-        let selected = turn_tcp::select_ice_servers_for_connection(&desired);
+        let selected = turn_tcp::select_ice_servers_for_connection(&desired).await;
         let rtc_ice_servers: Vec<RTCIceServer> =
             selected.into_iter().map(RTCIceServer::from).collect();
         let mut cfg = current_conn.get_configuration().await;

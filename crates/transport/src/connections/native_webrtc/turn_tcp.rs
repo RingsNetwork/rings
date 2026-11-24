@@ -543,7 +543,9 @@ async fn can_use_os_udp() -> bool {
         )
     }
     .await;
-    let _ = CAN_USE_OS_UDP_CACHE.set(ok);
+    if ok {
+        let _ = CAN_USE_OS_UDP_CACHE.set(true);
+    }
     ok
 }
 
@@ -966,15 +968,15 @@ fn spawn_turn_tcp_bridge(
     })
 }
 
-/// Partition `ice_servers` so that all STUN URLs are retained while at most
 /// Select the subset of `ice_servers` used for one `RTCPeerConnection`: all STUN servers are
 /// retained, while at most [`MAX_TURN_SERVERS_PER_CONNECTION`] TURN server is selected per peer
 /// connection in round-robin order across the configured pool (#1316, #1317).
-pub(crate) fn select_ice_servers_for_connection(ice_servers: &[IceServer]) -> Vec<IceServer> {
+pub(crate) async fn select_ice_servers_for_connection(ice_servers: &[IceServer]) -> Vec<IceServer> {
+    let os_udp_ok = can_use_os_udp().await;
     select_ice_servers_with_cursor_and_udp(
         ice_servers,
         TURN_SERVER_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        true,
+        os_udp_ok,
     )
 }
 

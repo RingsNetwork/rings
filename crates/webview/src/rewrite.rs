@@ -500,7 +500,7 @@ fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) 
         if let Some(q) = quote {
             if b == b'\\' {
                 escaped = true;
-            } else if b == q {
+            } else if b == q || b == b'\n' || b == b'\r' || b == 0x0c {
                 quote = None;
             }
             i += 1;

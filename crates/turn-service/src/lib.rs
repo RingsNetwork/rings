@@ -1855,10 +1855,15 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
     }
 
     async fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.turn_server
+        let result = self
+            .turn_server
             .close()
             .await
-            .map_err(|e| anyhow::anyhow!("closing TurnServer failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("closing TurnServer failed: {e}"));
+        if let Some(factory) = self.onion_udp_factory.take() {
+            factory.detach_provider();
+        }
+        result
     }
 }
 

@@ -288,26 +288,6 @@ pub(super) fn encode_proof_bundle_bounded(
             }
         }
     }
-    if best.is_some() {
-        return best;
-    }
-
-    // Fallback when a single actor's proof group alone exceeds `max_bytes`: binary-search the
-    // longest prefix of `proofs` that fits within `max_bytes`.
-    let mut low = 1_usize;
-    let mut high = proofs.len().saturating_sub(1);
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        match proofs.get(..mid).and_then(|s| encode_proof_bundle(s).ok()) {
-            Some(encoded) if encoded.len() <= max_bytes => {
-                best = Some(encoded);
-                low = mid.saturating_add(1);
-            }
-            _ => {
-                high = mid - 1;
-            }
-        }
-    }
     best
 }
 

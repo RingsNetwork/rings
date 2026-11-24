@@ -575,11 +575,11 @@ pub async fn await_foreground_exit_with_signal<H: NativeDaemonHooks>(
         await_task_cleanup(&mut processor_task, "node processor shutdown").await
     };
     drop((gateway_task, processor_task));
+    let hooks_cleanup = hooks.shutdown().await;
     let processor_close = provider
         .close_with_drain_timeout(FOREGROUND_CLEANUP_TIMEOUT)
         .await
         .context("node provider close failed");
-    let hooks_cleanup = hooks.shutdown().await;
     combine_foreground_results(
         primary,
         gateway_cleanup,

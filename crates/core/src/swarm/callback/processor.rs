@@ -260,9 +260,13 @@ impl InboundProcessor {
         peer: Option<Did>,
         authentication: Authentication,
         msg: &[u8],
+        max_uncompressed_wire_bytes: usize,
     ) -> crate::error::Result<(MessagePayload, usize)> {
         let (payload, uncompressed_bytes) =
-            match MessagePayload::from_wire_with_uncompressed_len(msg) {
+            match MessagePayload::from_wire_with_max_uncompressed_len(
+                msg,
+                max_uncompressed_wire_bytes,
+            ) {
                 Ok(decoded) => decoded,
                 Err(e) => {
                     self.record_receive_failure(peer, authentication).await;

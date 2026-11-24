@@ -1,13 +1,11 @@
 //! Foreground privileged helper for Unix TUN/utun and route configuration.
 
 use std::fs::FileType;
-use std::io::IoSliceMut;
+use std::io::Read;
 use std::os::fd::AsFd;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
-use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
-use std::os::fd::RawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -22,9 +20,6 @@ use nix::poll::poll;
 use nix::poll::PollFd;
 use nix::poll::PollFlags;
 use nix::poll::PollTimeout;
-use nix::sys::socket::recvmsg;
-use nix::sys::socket::ControlMessageOwned;
-use nix::sys::socket::MsgFlags;
 use nix::unistd::chown;
 use nix::unistd::dup;
 use nix::unistd::Uid;
@@ -255,39 +250,14 @@ fn wait_readable_or_signal(
     }
 }
 
-/// Read bytes from `stream` while draining and immediately closing any unexpected `SCM_RIGHTS`
-/// file descriptors so an unprivileged peer cannot exhaust the helper's file-descriptor table.
-/// If ancillary data was truncated (`MSG_CTRUNC`), rejects the read with `InvalidData` to sever
-/// the misbehaving client connection immediately.
-fn recv_stream_discarding_fds(stream: &UnixStream, target: &mut [u8]) -> std::io::Result<usize> {
-    let mut control = nix::cmsg_space!([RawFd; 253]);
-    let mut slices = [IoSliceMut::new(target)];
-    let message = recvmsg::<()>(
-        stream.as_raw_fd(),
-        &mut slices,
-        Some(&mut control),
-        MsgFlags::empty(),
-    )
-    .map_err(std::io::Error::from)?;
-    let truncated = message.flags.contains(MsgFlags::MSG_CTRUNC);
-    if let Ok(cmsgs) = message.cmsgs() {
-        for cmsg in cmsgs {
-            if let ControlMessageOwned::ScmRights(fds) = cmsg {
-                for fd in fds {
-                    // SAFETY: `fd` was newly installed into our FD table by `recvmsg`; wrapping
-                    // and immediately dropping `OwnedFd` closes it cleanly.
-                    drop(unsafe { OwnedFd::from_raw_fd(fd) });
-                }
-            }
-        }
-    }
-    if truncated {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "rejecting unix helper frame with truncated ancillary control message",
-        ));
-    }
-    Ok(message.bytes)
+/// Read bytes from `stream` using ordinary stream `read()`, which takes `msg_control = NULL` in
+/// the kernel and therefore never installs incoming `SCM_RIGHTS` descriptors into the helper's
+/// file-descriptor table.
+fn recv_stream_discarding_fds(
+    stream: &mut UnixStream,
+    target: &mut [u8],
+) -> std::io::Result<usize> {
+    stream.read(target)
 }
 
 fn read_request_with_deadline(

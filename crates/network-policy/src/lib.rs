@@ -102,6 +102,9 @@ pub const fn is_valid_local_or_public_ip(address: IpAddr) -> bool {
             if address.is_unspecified() || address.is_multicast() {
                 return false;
             }
+            if address.is_loopback() {
+                return true;
+            }
             if let Some([first, ..]) = embedded_ipv4(address.octets()) {
                 return first != 0 && first < 224;
             }
@@ -209,6 +212,17 @@ mod tests {
             let parsed = address.parse::<IpAddr>();
             assert!(matches!(parsed, Ok(address) if is_public_ip(address)));
         }
+        for address in ["::1", "127.0.0.1"] {
+            let parsed = address.parse::<IpAddr>();
+            assert!(matches!(
+                parsed,
+                Ok(address) if is_valid_local_or_public_ip(address)
+            ));
+        }
+        assert!(matches!(
+            "::".parse::<IpAddr>(),
+            Ok(address) if !is_valid_local_or_public_ip(address)
+        ));
     }
 
     #[test]

@@ -238,7 +238,7 @@ fn data_proof_sentinel_version() -> EntryVersion {
 }
 
 const DOT_CHUNK_BYTES: usize = 52;
-const MAX_PROOF_BUNDLE_BYTES: usize = 1024 * 1024;
+const MAX_PROOF_BUNDLE_BYTES: usize = 2 * 1024 * 1024;
 
 fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     let mut buf = [0u8; DOT_CHUNK_BYTES];

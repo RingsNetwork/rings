@@ -60,8 +60,6 @@ pub(crate) use self::wire::SlotEncoding;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::wire::WireHopVerification;
 pub(crate) use self::wire::WirePayload;
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) use self::wire::WireSignature;
 pub(crate) use self::wire::MAX_COMPRESSED_FRAME_WIRE_BYTES;
 #[cfg(test)]
 pub(crate) use self::wire::MAX_COMPRESSED_PAYLOAD_BYTES;
@@ -333,16 +331,7 @@ impl MessagePayload {
             signer.by_ref(),
         )?;
         let relay = MessageRelay::new(hop, transaction.destination, HopBudget::MAX);
-        let verification = signer.sign_at(
-            PAYLOAD_DOMAIN_TAG,
-            &transaction.signed_hash(),
-            transaction.verification.ts_ms,
-        )?;
-        Ok(Self {
-            transaction,
-            relay,
-            verification,
-        })
+        Self::new(transaction, signer, relay)
     }
 
     #[cfg(test)]
@@ -397,7 +386,15 @@ impl MessagePayload {
 
     /// [`Self::from_wire`], together with the uncompressed wire frame length in bytes.
     pub(crate) fn from_wire_with_uncompressed_len(data: &[u8]) -> Result<(Self, usize)> {
-        match LinkFrame::from_wire_with_uncompressed_len(data)? {
+        Self::from_wire_with_max_uncompressed_len(data, MAX_COMPRESSED_FRAME_WIRE_BYTES)
+    }
+
+    /// [`Self::from_wire_with_uncompressed_len`] bounded by `max_uncompressed_wire_bytes`.
+    pub(crate) fn from_wire_with_max_uncompressed_len(
+        data: &[u8],
+        max_uncompressed_wire_bytes: usize,
+    ) -> Result<(Self, usize)> {
+        match LinkFrame::from_wire_with_max_uncompressed_len(data, max_uncompressed_wire_bytes)? {
             (LinkFrame::Payload(frame), uncompressed_len) => {
                 Ok((frame.into_self_contained()?, uncompressed_len))
             }
@@ -681,16 +678,7 @@ pub trait PayloadSender {
         let signer = self.message_signer();
         let sequence = self.next_sequence(origin, &msg).await?;
         let transaction = Transaction::new(origin, tx_id, sequence, None, msg, signer.by_ref())?;
-        let verification = signer.sign_at(
-            PAYLOAD_DOMAIN_TAG,
-            &transaction.signed_hash(),
-            transaction.verification.ts_ms,
-        )?;
-        let payload = MessagePayload {
-            transaction,
-            relay,
-            verification,
-        };
+        let payload = MessagePayload::new(transaction, signer.by_ref(), relay)?;
         self.send_payload(payload).await
     }
 

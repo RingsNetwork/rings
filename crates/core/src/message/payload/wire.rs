@@ -234,46 +234,7 @@ pub(crate) struct WireVerification<'a> {
     /// The proof's creation stamp.
     ts_ms: u128,
     /// The delegatee signature.
-    sig: WireSignature<'a>,
-}
-
-/// Compact wire encoding of a delegatee signature (#1315): a canonical 65-byte secp256k1
-/// recoverable signature travels without a redundant slice length prefix, while non-canonical
-/// lengths remain representable as raw slices so verification rejects them by signature length.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub(crate) enum WireSignature<'a> {
-    /// Canonical 65-byte recoverable secp256k1 signature (`r || s || v`).
-    Canonical65(([u8; 32], [u8; 32]), u8),
-    /// Non-canonical signature slice.
-    Bytes(Cow<'a, [u8]>),
-}
-
-impl<'a> WireSignature<'a> {
-    fn view(sig: &'a [u8]) -> Self {
-        match <[u8; 65]>::try_from(sig) {
-            Ok(bytes) => {
-                let mut r = [0u8; 32];
-                let mut s = [0u8; 32];
-                r.copy_from_slice(&bytes[..32]);
-                s.copy_from_slice(&bytes[32..64]);
-                Self::Canonical65((r, s), bytes[64])
-            }
-            Err(_) => Self::Bytes(Cow::Borrowed(sig)),
-        }
-    }
-
-    fn into_vec(self) -> Vec<u8> {
-        match self {
-            Self::Canonical65((r, s), v) => {
-                let mut bytes = Vec::with_capacity(65);
-                bytes.extend_from_slice(&r);
-                bytes.extend_from_slice(&s);
-                bytes.push(v);
-                bytes
-            }
-            Self::Bytes(bytes) => bytes.into_owned(),
-        }
-    }
+    sig: Cow<'a, [u8]>,
 }
 
 /// Compact wire form of the current hop's proof (#1315): elides the duplicate delegation slot and
@@ -284,7 +245,7 @@ pub(crate) enum WireHopVerification<'a> {
     /// stamps (every locally originated 1-hop or initial-hop payload).
     SameDelegationAndStamps {
         /// The hop's `PAYLOAD_DOMAIN_TAG` delegatee signature.
-        sig: WireSignature<'a>,
+        sig: Cow<'a, [u8]>,
     },
     /// Diagonal frame whose hop proof shares the origin's [`DelegationRef`] with distinct
     /// `(ttl_ms, ts_ms)` stamps.
@@ -294,7 +255,7 @@ pub(crate) enum WireHopVerification<'a> {
         /// The hop proof's creation stamp.
         ts_ms: u128,
         /// The hop's `PAYLOAD_DOMAIN_TAG` delegatee signature.
-        sig: WireSignature<'a>,
+        sig: Cow<'a, [u8]>,
     },
     /// Relayed frame whose hop slot carries its own [`DelegationRef`].
     Distinct(WireVerification<'a>),
@@ -353,7 +314,7 @@ impl<'a> WireVerification<'a> {
             delegation,
             ttl_ms: verification.ttl_ms,
             ts_ms: verification.ts_ms,
-            sig: WireSignature::view(verification.sig.as_slice()),
+            sig: Cow::Borrowed(verification.sig.as_slice()),
         }
     }
 
@@ -372,7 +333,7 @@ impl<'a> WireVerification<'a> {
             delegation: resolve(delegation)?,
             ttl_ms,
             ts_ms,
-            sig: sig.into_vec(),
+            sig: sig.into_owned(),
         })
     }
 }
@@ -385,7 +346,7 @@ impl<'a> WireHopVerification<'a> {
         hop_delegation: DelegationRef<'a>,
     ) -> Self {
         if *origin_delegation == hop_delegation {
-            let sig = WireSignature::view(hop_verification.sig.as_slice());
+            let sig = Cow::Borrowed(hop_verification.sig.as_slice());
             if origin_verification.ttl_ms == hop_verification.ttl_ms
                 && origin_verification.ts_ms == hop_verification.ts_ms
             {
@@ -412,13 +373,13 @@ impl<'a> WireHopVerification<'a> {
                 delegation: origin.delegation.clone(),
                 ttl_ms: origin.ttl_ms,
                 ts_ms: origin.ts_ms,
-                sig: sig.into_vec(),
+                sig: sig.into_owned(),
             }),
             Self::SameDelegation { ttl_ms, ts_ms, sig } => Ok(MessageVerification {
                 delegation: origin.delegation.clone(),
                 ttl_ms,
                 ts_ms,
-                sig: sig.into_vec(),
+                sig: sig.into_owned(),
             }),
             Self::Distinct(verification) => verification.resolve(resolve),
         }
@@ -669,6 +630,14 @@ impl LinkFrame {
     /// uncompressed body length), so inbound capacity and reassembly budgets account for the
     /// decompressed representation (#1280).
     pub(crate) fn from_wire_with_uncompressed_len(bytes: &[u8]) -> Result<(Self, usize)> {
+        Self::from_wire_with_max_uncompressed_len(bytes, MAX_COMPRESSED_FRAME_WIRE_BYTES)
+    }
+
+    /// Decode one frame while bounding any LZ4 decompression buffer to `max_uncompressed_wire_bytes`.
+    pub(crate) fn from_wire_with_max_uncompressed_len(
+        bytes: &[u8],
+        max_uncompressed_wire_bytes: usize,
+    ) -> Result<(Self, usize)> {
         let (kind, body) = split_frame(bytes)?;
         match kind {
             FrameKind::Payload => rings_codec::deserialize(body)
@@ -676,14 +645,17 @@ impl LinkFrame {
                 .map(|payload| (Self::Payload(payload), bytes.len()))
                 .map_err(Error::CodecDeserialize),
             FrameKind::CompressedPayload => {
-                if body.is_empty() || body.len() >= MAX_COMPRESSED_PAYLOAD_BYTES {
+                let max_payload_bytes = max_uncompressed_wire_bytes
+                    .saturating_sub(FRAME_HEADER_LEN)
+                    .min(MAX_COMPRESSED_PAYLOAD_BYTES);
+                if body.is_empty() || body.len() >= max_payload_bytes {
                     return Err(Error::InvalidMessage(
                         "compressed payload frame body length is out of bounds".to_owned(),
                     ));
                 }
                 let decompressed = lz4_flex::block::decompress_with_dict(
                     body,
-                    MAX_COMPRESSED_PAYLOAD_BYTES,
+                    max_payload_bytes,
                     WIRE_COMPRESSION_DICT,
                 )
                 .map_err(|error| {
