@@ -67,17 +67,17 @@ pub const DEFAULT_MAX_HANDSHAKE_STEP_BYTES: usize = 4096;
 /// Maximum number of signaling steps permitted in a multi-step transport handshake (`8`).
 pub const MAX_HANDSHAKE_STEPS: u8 = 8;
 
-/// Smallest `max_message_size` a transport connection may expose (`6142` bytes, #1130 / #1291).
+/// Smallest `max_message_size` a transport connection may expose (`6145` bytes, #1130 / #1291 / #1315).
 ///
 /// Every connection must fit the widest unchunked DHT control frame (`ConnectNodeSend` or
 /// `ConnectNodeReport`) whole without chunk fragmentation:
 /// - Variant tag (`1`) + `step_index` (`1`) + `final_step` (`1`) + `session_id: Some([u8; 16])`
 ///   (`17`) + `handshake` length varint (`2`) + `DEFAULT_MAX_HANDSHAKE_STEP_BYTES` (`4096`) +
 ///   widest `DhtProtocolMode` (`11`) + `RelayCustody` (`1`) = `4130` message bytes;
-/// - Plus the widest `< 16 KiB` `MessagePayload` envelope (`2008` bytes) and outer custom frame
-///   header (`4` bytes): `4130 + 2008 + 4 = 6142`, witnessed with equality in `rings_core` by
+/// - Plus the widest `< 16 KiB` `MessagePayload` envelope (`2011` bytes) and outer custom frame
+///   header (`4` bytes): `4130 + 2011 + 4 = 6145`, witnessed with equality in `rings_core` by
 ///   `test_min_max_message_size_fits_widest_control_payloads_whole`.
-pub const MIN_MAX_MESSAGE_SIZE: usize = 6142;
+pub const MIN_MAX_MESSAGE_SIZE: usize = 6145;
 
 /// Decode the internal `0 = not negotiated` sentinel used by connection backends.
 #[cfg(any(

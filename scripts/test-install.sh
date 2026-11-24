@@ -217,8 +217,10 @@ grep -q '^\[Unit\]' "$systemd_unit" || fail "systemd unit missing [Unit]"
 grep -q '^\[Service\]' "$systemd_unit" || fail "systemd unit missing [Service]"
 grep -q '^\[Install\]' "$systemd_unit" || fail "systemd unit missing [Install]"
 grep -q '^ExecStart=.*rings run' "$systemd_unit" || fail "systemd unit missing ExecStart"
+grep -q '^LimitNOFILE=65535' "$systemd_unit" || fail "systemd unit missing LimitNOFILE=65535"
 
 grep -q '<string>rs.rings.node</string>' "$launchd_plist" || fail "launchd plist missing Label"
+grep -q '<key>NumberOfFiles</key>' "$launchd_plist" || fail "launchd plist missing NumberOfFiles"
 if command -v plutil >/dev/null 2>&1; then
     plutil -lint "$launchd_plist" >/dev/null || fail "plutil -lint failed on ${launchd_plist}"
 fi

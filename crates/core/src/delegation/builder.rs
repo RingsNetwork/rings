@@ -40,12 +40,8 @@ impl DelegationBuilder {
 
     /// Construct the proof string that the external account must sign.
     pub fn unsigned_proof(&self) -> String {
-        let delegatee_did = self.delegatee_secret_key.address().into();
-        if let Ok(delegator) =
-            Account::try_from((self.delegator_entity.clone(), self.delegator_type.clone()))
-        {
-            pack_delegation(&delegator, delegatee_did, self.ts_ms, self.ttl_ms)
-        } else {
+        self.try_unsigned_proof().unwrap_or_else(|_| {
+            let delegatee_did = self.delegatee_secret_key.address().into();
             super::model::pack_delegation_parts(
                 &self.delegator_type,
                 crate::dht::Did::default(),
@@ -53,7 +49,7 @@ impl DelegationBuilder {
                 self.ts_ms,
                 self.ttl_ms,
             )
-        }
+        })
     }
 
     /// Set the delegator signature authorizing this delegation.
@@ -76,6 +72,20 @@ impl DelegationBuilder {
 }
 
 impl DelegationBuilder {
+    /// Construct the proof string that the external account must sign, validating the
+    /// `(delegator_entity, delegator_type)` account pair upfront.
+    pub fn try_unsigned_proof(&self) -> Result<String> {
+        let delegatee_did = self.delegatee_secret_key.address().into();
+        let delegator =
+            Account::try_from((self.delegator_entity.clone(), self.delegator_type.clone()))?;
+        Ok(pack_delegation(
+            &delegator,
+            delegatee_did,
+            self.ts_ms,
+            self.ttl_ms,
+        ))
+    }
+
     /// Set the delegation creation timestamp in milliseconds since the Unix epoch.
     pub fn set_ts(mut self, ts_ms: u128) -> Self {
         self.ts_ms = ts_ms;

@@ -129,7 +129,7 @@ use crate::online::ONLINE_NODES_TOPIC;
 ///
 /// Both parts are one literal so a diff shows the version and the hash moving together.
 const PINNED: (u16, &str) = (
-    5,
+    6,
     "e315b57fd8f8d9c72149d7a040a1864baa45c2cccb430ad5239a1f7da50028b3",
 );
 

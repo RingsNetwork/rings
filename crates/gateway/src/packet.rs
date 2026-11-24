@@ -161,11 +161,8 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
 }
 
 const fn is_non_routable_ipv4_destination(ip: Ipv4Addr) -> bool {
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_link_local()
-        || ip.is_multicast()
-        || ip.is_broadcast()
+    let [first, _, _, _] = ip.octets();
+    first == 0 || first >= 224 || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast()
 }
 
 #[cfg(test)]

@@ -92,6 +92,9 @@ pub(super) struct PeerLane<T> {
     pub(super) class: OnionLoopClass,
     /// The link's emission clock.
     pub(super) clock: LinkClock,
+    /// Whether this peer has participated in `onion-circuit` (by enqueuing an outbound cell or
+    /// delivering an inbound cell), gating proactive idle cover emission (#1314).
+    pub(super) peer_participates: bool,
     /// The emitter's wake-up while it waits: an enqueue or the link's close fires it.
     pub(super) wake: Option<oneshot::Sender<()>>,
 }
@@ -107,6 +110,7 @@ impl<T> PeerLane<T> {
             relayed: RelayShare::default(),
             class: OnionLoopClass::DEFAULT,
             clock: LinkClock::default(),
+            peer_participates: true,
             wake: None,
         }
     }
@@ -217,12 +221,29 @@ impl<T> OrderedSendState<T> {
     /// The link to `peer` is up at `now`: give it a lane, with the clock it had if it closed
     /// less than `V` ago, and return the epoch of the emitter to spawn if it had none. Nothing
     /// opens after a shutdown.
+    #[cfg(test)]
     pub(super) fn open(&mut self, peer: Did, now_us: u128) -> Option<u64> {
+        self.open_with_participation(peer, now_us, true)
+    }
+
+    /// Open `peer`'s lane in dormant mode (#1314): no cover cell is emitted until either a real
+    /// cell is enqueued toward `peer` or [`Self::activate_peer`] records inbound participation.
+    pub(super) fn open_dormant(&mut self, peer: Did, now_us: u128) -> Option<u64> {
+        self.open_with_participation(peer, now_us, false)
+    }
+
+    fn open_with_participation(
+        &mut self,
+        peer: Did,
+        now_us: u128,
+        participates_by_default: bool,
+    ) -> Option<u64> {
         if self.shut {
             return None;
         }
         self.prune_retired(now_us);
         let clock = self.retired.remove(&peer).unwrap_or_default();
+        let participated_before = clock.last_real_us.is_some();
         match self.lanes.entry(peer) {
             Entry::Occupied(_) => None,
             Entry::Vacant(lane) => {
@@ -230,10 +251,24 @@ impl<T> OrderedSendState<T> {
                 self.next_epoch = self.next_epoch.wrapping_add(1);
                 let mut fresh = PeerLane::new(epoch);
                 fresh.clock = clock;
+                fresh.peer_participates = participates_by_default || participated_before;
                 lane.insert(fresh);
                 Some(epoch)
             }
         }
+    }
+
+    /// Record that `peer` participates in `onion-circuit`, waking a dormant emitter (#1314).
+    /// Returns `true` when `peer`'s lane transitioned from dormant to participating.
+    pub(super) fn activate_peer(&mut self, peer: Did) -> bool {
+        if let Some(lane) = self.lanes.get_mut(&peer) {
+            if !lane.peer_participates {
+                lane.peer_participates = true;
+                lane.wake();
+                return true;
+            }
+        }
+        false
     }
 
     /// Queue one cell of `class`, `b` bytes, for `peer` at `now` as `role`; the cell makes the
@@ -288,6 +323,7 @@ impl<T> OrderedSendState<T> {
         });
         lane.class = class;
         lane.clock.last_real_us = Some(now_us);
+        lane.peer_participates = true;
         lane.wake();
         Ok(())
     }
@@ -391,6 +427,11 @@ impl<T> OrderedSendState<T> {
             return EmitterStep::Stop;
         };
         let queued = !lane.queued.is_empty() || lane.in_flight.is_some();
+        if !lane.peer_participates && !queued {
+            let (wake, woken) = oneshot::channel();
+            lane.wake = Some(wake);
+            return EmitterStep::Wait(u128::MAX, woken);
+        }
         match plan(lane.clock, queued, credited, floor, now_us) {
             Plan::WaitUntil(due_us) => {
                 let (wake, woken) = oneshot::channel();

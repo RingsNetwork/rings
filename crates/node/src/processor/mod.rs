@@ -820,11 +820,22 @@ impl Processor {
                 }
             }
         }
-        let closed = self
-            .swarm
-            .close()
-            .await
-            .map_err(Error::CloseConnectionError);
+        let closed = {
+            let close = self.swarm.close();
+            let deadline = rings_runtime::sleep(timeout);
+            futures::pin_mut!(close, deadline);
+            match futures::future::select(close, deadline).await {
+                futures::future::Either::Left((result, _)) => {
+                    result.map_err(Error::CloseConnectionError)
+                }
+                futures::future::Either::Right((_, _)) => Err(Error::InternalError(
+                    rings_core::error::Error::InvalidMessage(format!(
+                        "swarm close timed out after {}ms",
+                        u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+                    )),
+                )),
+            }
+        };
         let flushed = self.flush_measurements_with_timeout(timeout).await;
         closed.and(flushed)
     }

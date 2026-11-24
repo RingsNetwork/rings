@@ -1,6 +1,5 @@
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +7,8 @@ use std::time::Duration;
 use rings_core::ecc::SecretKey;
 use rings_core::utils::SharedClock;
 use rings_core::utils::SystemClock;
+use rings_network_policy::is_public_ip;
+use rings_network_policy::is_valid_local_or_public_ip;
 
 use crate::auth::TurnAdmissionPolicy;
 use crate::error::Result;
@@ -73,108 +74,9 @@ impl RelayPeerPolicy {
 
     /// Return whether `ip` is permitted as a TURN peer IP address under this policy.
     pub const fn is_allowed_ip(self, ip: IpAddr) -> bool {
-        match ip {
-            IpAddr::V4(v4) => self.is_allowed_ipv4(v4),
-            IpAddr::V6(v6) => self.is_allowed_ipv6(v6),
-        }
-    }
-
-    const fn is_allowed_ipv4(self, v4: Ipv4Addr) -> bool {
-        let octets = v4.octets();
-        // 0.0.0.0/8 ("this" network / unspecified), 224.0.0.0/4 (multicast),
-        // 240.0.0.0/4 (reserved / Class E / broadcast 255.255.255.255).
-        if octets[0] == 0 || octets[0] >= 224 {
-            return false;
-        }
         match self {
-            Self::AllowLocalAndPrivate => true,
-            Self::PublicOnly => {
-                if v4.is_loopback() || v4.is_private() || v4.is_link_local() {
-                    return false;
-                }
-                // 100.64.0.0/10 (Shared Address Space / CGNAT, RFC 6598)
-                if octets[0] == 100 && (octets[1] & 0b1100_0000) == 64 {
-                    return false;
-                }
-                // 192.0.0.0/24 (IETF Protocol Assignments, RFC 6890)
-                if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
-                    return false;
-                }
-                // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (TEST-NET documentation, RFC 5737)
-                if (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
-                    || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
-                    || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
-                {
-                    return false;
-                }
-                // 198.18.0.0/15 (Benchmarking, RFC 2544)
-                if octets[0] == 198 && (octets[1] & 0xfe) == 18 {
-                    return false;
-                }
-                true
-            }
-        }
-    }
-
-    const fn is_allowed_ipv6(self, v6: Ipv6Addr) -> bool {
-        if v6.is_unspecified() || v6.is_multicast() {
-            return false;
-        }
-        if let Some(mapped_v4) = v6.to_ipv4_mapped() {
-            return self.is_allowed_ipv4(mapped_v4);
-        }
-        let segments = v6.segments();
-        let octets = v6.octets();
-        // IPv4-compatible `::a.b.c.d` or Well-Known NAT64 `64:ff9b::/96` (RFC 6052)
-        let is_v4_compat = segments[0] == 0
-            && segments[1] == 0
-            && segments[2] == 0
-            && segments[3] == 0
-            && segments[4] == 0
-            && segments[5] == 0
-            && !v6.is_loopback();
-        let is_well_known_nat64 = segments[0] == 0x0064
-            && segments[1] == 0xff9b
-            && segments[2] == 0
-            && segments[3] == 0
-            && segments[4] == 0
-            && segments[5] == 0;
-        if is_v4_compat || is_well_known_nat64 {
-            let embedded_v4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
-            return self.is_allowed_ipv4(embedded_v4);
-        }
-        // Any other address under 64:ff9b::/32 (including the entire 64:ff9b:1::/48 local-use
-        // translation block, RFC 8215, whose suffix layout is deployment-defined) is local-use.
-        if segments[0] == 0x0064 && segments[1] == 0xff9b {
-            return matches!(self, Self::AllowLocalAndPrivate);
-        }
-
-        match self {
-            Self::AllowLocalAndPrivate => true,
-            Self::PublicOnly => {
-                // Only Global Unicast 2000::/3 (RFC 4291) is routable on the public Internet.
-                if (segments[0] & 0xe000) != 0x2000 {
-                    return false;
-                }
-                // 2002::/16 (6to4, RFC 3056) embeds an IPv4 address in octets 2..6.
-                if segments[0] == 0x2002 {
-                    let embedded_v4 = Ipv4Addr::new(octets[2], octets[3], octets[4], octets[5]);
-                    return self.is_allowed_ipv4(embedded_v4);
-                }
-                // 2001:0000::/32 (Teredo, RFC 4380), 2001:0002::/48 (Benchmarking, RFC 5180),
-                // 2001:0010::/28 & 2001:0020::/28 (ORCHID, RFC 4843 / RFC 7343),
-                // 2001:0db8::/32 (Documentation, RFC 3849).
-                if segments[0] == 0x2001
-                    && (segments[1] == 0x0000
-                        || (segments[1] == 0x0002 && segments[2] == 0)
-                        || (segments[1] & 0xfff0) == 0x0010
-                        || (segments[1] & 0xfff0) == 0x0020
-                        || segments[1] == 0x0db8)
-                {
-                    return false;
-                }
-                true
-            }
+            Self::PublicOnly => is_public_ip(ip),
+            Self::AllowLocalAndPrivate => is_valid_local_or_public_ip(ip),
         }
     }
 }

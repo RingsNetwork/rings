@@ -226,7 +226,7 @@ impl DelegationRef<'_> {
 
 /// The wire form of a [`MessageVerification`]: the proof with its delegation slot as a reference.
 #[derive(Deserialize, Serialize)]
-struct WireVerification<'a> {
+pub(crate) struct WireVerification<'a> {
     /// The delegation slot.
     delegation: DelegationRef<'a>,
     /// The proof's lifetime stamp, in the clear whether or not the slot is resolved.
@@ -235,6 +235,47 @@ struct WireVerification<'a> {
     ts_ms: u128,
     /// The delegatee signature.
     sig: Cow<'a, [u8]>,
+}
+
+/// Compact wire form of the current hop's proof (#1315): elides the duplicate delegation slot and
+/// identical `(ttl_ms, ts_ms)` stamps whenever the hop slot shares the origin's [`DelegationRef`].
+#[derive(Deserialize, Serialize)]
+pub(crate) enum WireHopVerification<'a> {
+    /// Diagonal frame whose hop proof shares the origin's [`DelegationRef`] and `(ttl_ms, ts_ms)`
+    /// stamps (every locally originated 1-hop or initial-hop payload).
+    SameDelegationAndStamps {
+        /// The hop's `PAYLOAD_DOMAIN_TAG` delegatee signature.
+        sig: Cow<'a, [u8]>,
+    },
+    /// Diagonal frame whose hop proof shares the origin's [`DelegationRef`] with distinct
+    /// `(ttl_ms, ts_ms)` stamps.
+    SameDelegation {
+        /// The hop proof's lifetime stamp.
+        ttl_ms: u64,
+        /// The hop proof's creation stamp.
+        ts_ms: u128,
+        /// The hop's `PAYLOAD_DOMAIN_TAG` delegatee signature.
+        sig: Cow<'a, [u8]>,
+    },
+    /// Relayed frame whose hop slot carries its own [`DelegationRef`].
+    Distinct(WireVerification<'a>),
+}
+
+/// Compact wire form of [`MessageRelay`] (#1315): elides `destination` when it equals
+/// `transaction.destination` (saving 20 bytes on all non-reset frames) and elides `next_hop` when
+/// it equals `relay.destination` (saving another 20 bytes on every direct or final-hop frame).
+#[derive(Deserialize, Serialize)]
+struct WireRelay<'a> {
+    /// `None` when `relay.destination == transaction.destination`.
+    redirected_destination: Option<Did>,
+    /// `None` when `relay.next_hop == relay.destination`.
+    intermediate_next_hop: Option<Did>,
+    /// See [`MessageRelay::hop_budget`].
+    hop_budget: crate::message::HopBudget,
+    /// See [`MessageRelay::stage`].
+    stage: crate::dht::delivery::RouteStage,
+    /// See [`MessageRelay::path`].
+    path: Option<Cow<'a, crate::message::SignalingPath>>,
 }
 
 /// The wire form of a [`Transaction`].
@@ -260,10 +301,10 @@ struct WireTransaction<'a> {
 pub(crate) struct WirePayload<'a> {
     /// The origin's transaction.
     transaction: WireTransaction<'a>,
-    /// The relay carrier.
-    relay: Cow<'a, MessageRelay>,
+    /// The compact relay carrier.
+    relay: WireRelay<'a>,
     /// The current hop's proof.
-    verification: WireVerification<'a>,
+    verification: WireHopVerification<'a>,
 }
 
 impl<'a> WireVerification<'a> {
@@ -297,6 +338,81 @@ impl<'a> WireVerification<'a> {
     }
 }
 
+impl<'a> WireHopVerification<'a> {
+    fn view(
+        origin_verification: &'a MessageVerification,
+        origin_delegation: &DelegationRef<'a>,
+        hop_verification: &'a MessageVerification,
+        hop_delegation: DelegationRef<'a>,
+    ) -> Self {
+        if *origin_delegation == hop_delegation {
+            let sig = Cow::Borrowed(hop_verification.sig.as_slice());
+            if origin_verification.ttl_ms == hop_verification.ttl_ms
+                && origin_verification.ts_ms == hop_verification.ts_ms
+            {
+                Self::SameDelegationAndStamps { sig }
+            } else {
+                Self::SameDelegation {
+                    ttl_ms: hop_verification.ttl_ms,
+                    ts_ms: hop_verification.ts_ms,
+                    sig,
+                }
+            }
+        } else {
+            Self::Distinct(WireVerification::view(hop_verification, hop_delegation))
+        }
+    }
+
+    fn resolve<E>(
+        self,
+        origin: &MessageVerification,
+        resolve: &mut impl FnMut(DelegationRef<'a>) -> std::result::Result<Delegation, E>,
+    ) -> std::result::Result<MessageVerification, E> {
+        match self {
+            Self::SameDelegationAndStamps { sig } => Ok(MessageVerification {
+                delegation: origin.delegation.clone(),
+                ttl_ms: origin.ttl_ms,
+                ts_ms: origin.ts_ms,
+                sig: sig.into_owned(),
+            }),
+            Self::SameDelegation { ttl_ms, ts_ms, sig } => Ok(MessageVerification {
+                delegation: origin.delegation.clone(),
+                ttl_ms,
+                ts_ms,
+                sig: sig.into_owned(),
+            }),
+            Self::Distinct(verification) => verification.resolve(resolve),
+        }
+    }
+}
+
+impl<'a> WireRelay<'a> {
+    fn view(relay: &'a MessageRelay, tx_destination: Did) -> Self {
+        let redirected_destination =
+            (relay.destination != tx_destination).then_some(relay.destination);
+        let intermediate_next_hop = (relay.next_hop != relay.destination).then_some(relay.next_hop);
+        Self {
+            redirected_destination,
+            intermediate_next_hop,
+            hop_budget: relay.hop_budget,
+            stage: relay.stage,
+            path: relay.path.as_ref().map(Cow::Borrowed),
+        }
+    }
+
+    fn into_relay(self, tx_destination: Did) -> MessageRelay {
+        let destination = self.redirected_destination.unwrap_or(tx_destination);
+        let next_hop = self.intermediate_next_hop.unwrap_or(destination);
+        MessageRelay {
+            next_hop,
+            destination,
+            hop_budget: self.hop_budget,
+            stage: self.stage,
+            path: self.path.map(Cow::into_owned),
+        }
+    }
+}
+
 impl<'a> WirePayload<'a> {
     /// View `payload` with `sessions` in its slots. Nothing is copied: every field borrows.
     ///
@@ -304,6 +420,12 @@ impl<'a> WirePayload<'a> {
     /// its digest); the round-trip law holds only then.
     pub(crate) fn view(payload: &'a MessagePayload, sessions: PerSlot<DelegationRef<'a>>) -> Self {
         let transaction = &payload.transaction;
+        let hop_verification = WireHopVerification::view(
+            &transaction.verification,
+            &sessions.origin,
+            &payload.verification,
+            sessions.hop,
+        );
         Self {
             transaction: WireTransaction {
                 destination: transaction.destination,
@@ -313,8 +435,8 @@ impl<'a> WirePayload<'a> {
                 data: Cow::Borrowed(transaction.data.as_slice()),
                 verification: WireVerification::view(&transaction.verification, sessions.origin),
             },
-            relay: Cow::Borrowed(&payload.relay),
-            verification: WireVerification::view(&payload.verification, sessions.hop),
+            relay: WireRelay::view(&payload.relay, transaction.destination),
+            verification: hop_verification,
         }
     }
 
@@ -396,10 +518,13 @@ impl<'a> WirePayload<'a> {
 
     /// What each slot holds.
     pub(crate) const fn delegation_refs(&self) -> PerSlot<&DelegationRef<'a>> {
-        PerSlot {
-            origin: &self.transaction.verification.delegation,
-            hop: &self.verification.delegation,
-        }
+        let origin = &self.transaction.verification.delegation;
+        let hop = match &self.verification {
+            WireHopVerification::SameDelegationAndStamps { .. }
+            | WireHopVerification::SameDelegation { .. } => origin,
+            WireHopVerification::Distinct(verification) => &verification.delegation,
+        };
+        PerSlot { origin, hop }
     }
 
     /// The encoded message, readable before the slots are resolved.
@@ -427,17 +552,18 @@ impl<'a> WirePayload<'a> {
             verification,
         } = self;
         let origin = transaction.verification.resolve(&mut resolve)?;
-        let hop = verification.resolve(&mut resolve)?;
+        let hop = verification.resolve(&origin, &mut resolve)?;
+        let tx_destination = transaction.destination;
         Ok(MessagePayload {
             transaction: Transaction {
-                destination: transaction.destination,
+                destination: tx_destination,
                 tx_id: transaction.tx_id,
                 sequence: transaction.sequence,
                 reply_via: transaction.reply_via,
                 data: transaction.data.into_owned(),
                 verification: origin,
             },
-            relay: relay.into_owned(),
+            relay: relay.into_relay(tx_destination),
             verification: hop,
         })
     }
@@ -504,6 +630,14 @@ impl LinkFrame {
     /// uncompressed body length), so inbound capacity and reassembly budgets account for the
     /// decompressed representation (#1280).
     pub(crate) fn from_wire_with_uncompressed_len(bytes: &[u8]) -> Result<(Self, usize)> {
+        Self::from_wire_with_max_uncompressed_len(bytes, MAX_COMPRESSED_FRAME_WIRE_BYTES)
+    }
+
+    /// Decode one frame while bounding any LZ4 decompression buffer to `max_uncompressed_wire_bytes`.
+    pub(crate) fn from_wire_with_max_uncompressed_len(
+        bytes: &[u8],
+        max_uncompressed_wire_bytes: usize,
+    ) -> Result<(Self, usize)> {
         let (kind, body) = split_frame(bytes)?;
         match kind {
             FrameKind::Payload => rings_codec::deserialize(body)
@@ -511,14 +645,17 @@ impl LinkFrame {
                 .map(|payload| (Self::Payload(payload), bytes.len()))
                 .map_err(Error::CodecDeserialize),
             FrameKind::CompressedPayload => {
-                if body.is_empty() || body.len() >= MAX_COMPRESSED_PAYLOAD_BYTES {
+                let max_payload_bytes = max_uncompressed_wire_bytes
+                    .saturating_sub(FRAME_HEADER_LEN)
+                    .min(MAX_COMPRESSED_PAYLOAD_BYTES);
+                if body.is_empty() || body.len() >= max_payload_bytes {
                     return Err(Error::InvalidMessage(
                         "compressed payload frame body length is out of bounds".to_owned(),
                     ));
                 }
                 let decompressed = lz4_flex::block::decompress_with_dict(
                     body,
-                    MAX_COMPRESSED_PAYLOAD_BYTES,
+                    max_payload_bytes,
                     WIRE_COMPRESSION_DICT,
                 )
                 .map_err(|error| {

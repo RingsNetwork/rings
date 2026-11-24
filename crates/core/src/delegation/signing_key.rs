@@ -143,7 +143,7 @@ impl DelegateeKey {
         let builder = DelegationBuilder::new(account_entity, account_type)
             .set_ttl(ttl_ms)
             .set_ts(ts_ms);
-        let sig = key.sign(&builder.unsigned_proof())?;
+        let sig = key.sign(&builder.try_unsigned_proof()?)?;
         builder
             .set_delegator_signature(sig.to_vec())
             .build_at(ts_ms)

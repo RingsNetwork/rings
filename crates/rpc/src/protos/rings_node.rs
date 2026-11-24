@@ -58,7 +58,7 @@ pub struct ConnectWithDidRequest {
 pub struct ConnectWithDidResponse {}
 
 /// Bootstrap peer descriptor used by seed connection requests.
-#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SeedPeer {
     /// Decentralized identifier of the seed peer.
     pub did: String,

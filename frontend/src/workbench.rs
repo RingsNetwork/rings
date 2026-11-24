@@ -1,18 +1,15 @@
 //! Workbench panels for onion proxy and custom messages.
 
 use std::cell::RefCell;
-use std::future::Future;
 use std::rc::Rc;
 use std::time::Duration;
 
-use futures::future::Either;
-use futures::FutureExt;
-use gloo_timers::future::sleep;
 use yew::prelude::*;
 
 use crate::controls::metric;
 use crate::custom;
 use crate::extension;
+use crate::extension::operation_timeout;
 use crate::forms::text_input;
 use crate::forms::textarea;
 use crate::generation::GenerationClock;
@@ -300,23 +297,6 @@ fn onion_result_panel(state: &OnionProxyState<'_>) -> Html {
     }
 }
 
-async fn operation_timeout<T, F>(
-    label: &'static str,
-    timeout: Duration,
-    operation: F,
-) -> Result<T, String>
-where
-    F: Future<Output = Result<T, String>>,
-{
-    let operation = operation.fuse();
-    let timer = sleep(timeout).fuse();
-    futures::pin_mut!(operation, timer);
-    match futures::future::select(operation, timer).await {
-        Either::Left((result, _)) => result,
-        Either::Right((_, _)) => Err(format!("{label} timed out")),
-    }
-}
-
 fn readonly_output(label: &'static str, value: String, placeholder: &'static str) -> Html {
     html! {
         <label class="field payload-output">
@@ -390,7 +370,10 @@ fn custom_register_callback(
         };
         let on_custom = custom_event_callback(events.clone());
         match custom::register(&node.provider, ns.clone(), on_custom) {
-            Ok(()) => record_registered_namespace(&registered, &status, ns),
+            Ok(handler) => {
+                node.retain_protocol_handler(handler);
+                record_registered_namespace(&registered, &status, ns);
+            }
             Err(error) => status.set(error),
         }
     })

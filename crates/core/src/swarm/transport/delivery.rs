@@ -765,6 +765,14 @@ mod tests {
             chunk,
             u64::MAX,
         )?;
+        assert_eq!(
+            payload.transaction.verification.ts_ms,
+            payload.verification.ts_ms
+        );
+        assert_eq!(
+            payload.transaction.verification.ttl_ms,
+            payload.verification.ttl_ms
+        );
         for verification in [
             &mut payload.transaction.verification,
             &mut payload.verification,

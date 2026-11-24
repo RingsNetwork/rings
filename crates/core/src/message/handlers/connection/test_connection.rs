@@ -588,7 +588,12 @@ async fn test_triple_ordered_nodes_connection(
     println!("||  now we connect node1 to node3 via DHT  ||");
     println!("=============================================");
 
-    if node1.swarm.transport.get_connection(node3.did()).is_none() {
+    if node1.swarm.transport.get_connection(node3.did()).is_some() {
+        assert!(matches!(
+            node1.swarm.connect(node3.did()).await,
+            Err(Error::AlreadyConnected)
+        ));
+    } else {
         node1.swarm.connect(node3.did()).await?;
     }
     wait_for_msgs([&node1, &node2, &node3]).await;
@@ -676,7 +681,12 @@ async fn test_triple_desc_ordered_nodes_connection(
     println!("||  now we connect node1 to node3 via DHT  ||");
     println!("=============================================");
 
-    if node1.swarm.transport.get_connection(node3.did()).is_none() {
+    if node1.swarm.transport.get_connection(node3.did()).is_some() {
+        assert!(matches!(
+            node1.swarm.connect(node3.did()).await,
+            Err(Error::AlreadyConnected)
+        ));
+    } else {
         node1.swarm.connect(node3.did()).await?;
     }
     wait_for_msgs([&node1, &node2, &node3]).await;
@@ -773,7 +783,12 @@ async fn test_fourth_node_connection() -> Result<()> {
     println!("| test node4 connect node3 via dht     |");
     println!("========================================");
 
-    if node4.swarm.transport.get_connection(node3.did()).is_none() {
+    if node4.swarm.transport.get_connection(node3.did()).is_some() {
+        assert!(matches!(
+            node4.swarm.connect(node3.did()).await,
+            Err(Error::AlreadyConnected)
+        ));
+    } else {
         node4.swarm.connect(node3.did()).await?;
     }
     // Same as above: poll for the post-connect converged state instead of a

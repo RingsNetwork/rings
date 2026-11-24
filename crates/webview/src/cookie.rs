@@ -139,21 +139,19 @@ impl CookieJar {
                     return Ok(());
                 }
                 self.remove_cookie(&cookie.key());
-                while self
-                    .cookies
-                    .iter()
-                    .filter(|existing| existing.partition == cookie.partition)
-                    .count()
-                    >= MAX_COOKIES_PER_PARTITION
-                {
-                    if let Some(pos) = self
-                        .cookies
-                        .iter()
-                        .position(|existing| existing.partition == cookie.partition)
-                    {
+                let mut partition_count = 0usize;
+                let mut oldest_in_partition = None;
+                for (idx, existing) in self.cookies.iter().enumerate() {
+                    if existing.partition == cookie.partition {
+                        partition_count += 1;
+                        if oldest_in_partition.is_none() {
+                            oldest_in_partition = Some(idx);
+                        }
+                    }
+                }
+                if partition_count >= MAX_COOKIES_PER_PARTITION {
+                    if let Some(pos) = oldest_in_partition {
                         self.cookies.remove(pos);
-                    } else {
-                        break;
                     }
                 }
                 if self.cookies.len() == MAX_COOKIES {

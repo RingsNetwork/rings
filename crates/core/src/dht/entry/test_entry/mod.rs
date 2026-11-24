@@ -889,9 +889,7 @@ fn test_cross_actor_tombstone_evicted_on_late_honest_arrival_and_rejected_when_h
     attacker_entry.validate_data_sync_on_local(Some(&honest_entry))?;
     honest_entry.validate_data_sync_on_local(Some(&attacker_entry))?;
     let honest_first = honest_entry.clone().join(attacker_entry.clone())?;
-    let attacker_first = attacker_entry
-        .without_cross_actor_tombstones_for(&honest_entry, honest)
-        .join(honest_entry.clone())?;
+    let attacker_first = attacker_entry.join(honest_entry.clone())?;
     assert_eq!(honest_first, attacker_first);
     assert_entry_data_set(&honest_first, &["honest-record", "attacker-record"])?;
 

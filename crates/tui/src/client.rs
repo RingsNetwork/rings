@@ -560,7 +560,10 @@ impl NodeClient for HttpNodeClient {
     }
 
     async fn connect_with_seed(&self, source: &str) -> Result<usize> {
-        let peers = load_seed_peers(source)?;
+        let source_owned = source.to_string();
+        let peers = tokio::task::spawn_blocking(move || load_seed_peers(&source_owned))
+            .await
+            .map_err(|err| TuiError::InvalidInput(format!("seed loader task failed: {err}")))??;
         let count = peers.len();
         self.rpc
             .connect_with_seed(&ConnectWithSeedRequest { peers })

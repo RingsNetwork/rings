@@ -186,7 +186,12 @@ async fn advance_chunk_event(
     let (bytes, charge) = retained.into_parts();
     event.permit.restore(charge);
     let (payload, uncompressed_wire_bytes) = processor
-        .decode_verified_payload(event.peer, event.authentication, bytes.as_ref())
+        .decode_verified_payload(
+            event.peer,
+            event.authentication,
+            bytes.as_ref(),
+            max_message_bytes,
+        )
         .await?;
     if uncompressed_wire_bytes > max_message_bytes {
         processor

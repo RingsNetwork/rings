@@ -2851,6 +2851,7 @@ dependencies = [
  "js-sys",
  "jsonrpc-core",
  "lazy_static",
+ "libc",
  "log",
  "rand",
  "reqwest",
@@ -2957,6 +2958,7 @@ dependencies = [
  "hex",
  "rings-codec",
  "rings-core",
+ "rings-network-policy",
  "serde",
  "zeroize",
 ]

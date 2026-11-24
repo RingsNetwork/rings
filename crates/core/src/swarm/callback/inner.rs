@@ -592,8 +592,21 @@ impl BoundCallback {
     ) -> Result<(), TransportCallbackError> {
         let carrier = message.lane();
         let (cid, msg, transport_credit) = message.into_parts();
-        self.submit_inbound_message(cid, msg, Some(transport_credit), Some(carrier))
+        match self
+            .submit_inbound_message(cid, msg, Some(transport_credit), Some(carrier))
             .await
+        {
+            Ok(()) => Ok(()),
+            Err(error)
+                if error
+                    .downcast_ref::<Error>()
+                    .is_some_and(Error::is_transient_inbound_rejection) =>
+            {
+                tracing::debug!(peer = %cid, ?error, "refused inbound message on transient view or routing rejection");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {

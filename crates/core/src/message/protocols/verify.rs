@@ -162,6 +162,11 @@ where S: Borrow<DelegateeKey>
         self.delegatee_key().delegatee_public_key()
     }
 
+    /// The delegation authorizing the session this authority signs with.
+    pub fn delegation(&self) -> Delegation {
+        self.delegatee_key().delegation()
+    }
+
     /// The overlay this authority signs for.
     pub const fn network_id(&self) -> u32 {
         self.network_id

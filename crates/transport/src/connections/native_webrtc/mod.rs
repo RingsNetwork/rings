@@ -623,8 +623,9 @@ impl WebrtcConnection {
             return Ok(());
         }
 
+        let selected = turn_tcp::select_ice_servers_for_connection(&desired).await;
         let rtc_ice_servers: Vec<RTCIceServer> =
-            desired.iter().cloned().map(RTCIceServer::from).collect();
+            selected.into_iter().map(RTCIceServer::from).collect();
         let mut cfg = current_conn.get_configuration().await;
         cfg.ice_servers = rtc_ice_servers;
         if let Err(error) = current_conn.set_configuration(cfg).await {

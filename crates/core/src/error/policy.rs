@@ -28,10 +28,9 @@ impl Error {
         matches!(self.send_class(), SendClass::Deferrable(_))
     }
 
-    /// Whether this error is a view refusal (#1151): a node declines a relay operation its own
-    /// view does not assign it, or a report from a node its view makes no member of the key.
-    /// Views converge (`Law (Convergence)` of `dht::relay_holder`) and the sender acts again on
-    /// its next pass, so a view refusal is the protocol's answer, not a fault.
+    /// Whether this error is a view refusal (#1151): the message was routed under a view that
+    /// no longer matches this node's, which views converge from on their own, so the inbound
+    /// actor logs it at `debug` and reports the step done.
     pub(crate) const fn is_view_refusal(&self) -> bool {
         matches!(
             self,
@@ -41,6 +40,33 @@ impl Error {
                 | Self::RelayStorageUnavailable
                 | Self::RelayInboxReportFromNonMember(_)
         )
+    }
+
+    /// Whether this error is a view refusal (#1151) or expected transient multi-hop routing /
+    /// topology-churn rejection (#1316) that the transport callback boundary should log at
+    /// `debug` rather than surfacing as an `ERROR` line.
+    pub(crate) fn is_transient_inbound_rejection(&self) -> bool {
+        if self.is_view_refusal() {
+            return true;
+        }
+        match self {
+            Self::RelayDestinationUnreachable { .. }
+            | Self::RelayPathRepeatedHop { .. }
+            | Self::RelayPathHopUnlinked { .. }
+            | Self::RelayHopBudgetExhausted
+            | Self::TransactionSequenceStale { .. }
+            | Self::TransactionReplay { .. }
+            | Self::SwarmMissDidInTable(_)
+            | Self::SwarmMissTransport(_)
+            | Self::NotifyPredecessorOriginNotAdmitted { .. }
+            | Self::ConnectionAttemptCancelled { .. }
+            | Self::ConnectionAttemptSuperseded { .. }
+            | Self::OutboundTransferCancelled { .. } => true,
+            Self::InvalidMessage(reason) => {
+                reason == "probe transcript messages must be delivered directly without relaying"
+            }
+            _ => false,
+        }
     }
 
     /// Whether this error should degrade peer quality through `FailedToSend`.

@@ -327,3 +327,31 @@ fn test_one_peer_cannot_exhaust_another_peers_inbound_allowance() {
         .is_ok());
     drop(permits);
 }
+
+#[test]
+fn test_arrival_charge_refuses_unbounded_first_chunk_reservation() {
+    let limits = crate::chunk::ReassemblyLimits::production();
+    let forged_chunk = crate::chunk::Chunk {
+        chunk: [0, limits.max_chunks_per_message + 100],
+        data: bytes::Bytes::from_static(b"RINGS\0\x00\x05\x00uncompressed"),
+        meta: crate::chunk::ChunkMeta {
+            id: uuid::Uuid::nil(),
+            ts_ms: 1_000,
+            ttl_ms: 1_000,
+        },
+    };
+    let wire_bytes = 256;
+    let charge = arrival_charge(
+        &crate::message::Message::Chunk(forged_chunk),
+        wire_bytes,
+        limits,
+        (
+            Some(MessageCategory::Application.channel_lane()),
+            Principal::Slot(1),
+        ),
+    );
+    assert!(
+        matches!(charge, InboundCharge::Bytes(bytes) if bytes == memory_reservation(wire_bytes)),
+        "a malformed [0, total] chunk must charge only its frame size, not an inflated message reservation"
+    );
+}

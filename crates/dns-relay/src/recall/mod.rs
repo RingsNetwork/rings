@@ -273,8 +273,6 @@ where D: Directory
                     if let Err(error) = persisted.flush_pending().await {
                         tracing::warn!("dns relay: memory not journaled: {error}");
                     }
-                } else if let Err(error) = persisted.journal.settle_pending_truncate().await {
-                    tracing::warn!("dns relay: memory journal not settled: {error}");
                 }
                 return Ok(answer);
             }

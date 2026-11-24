@@ -238,7 +238,7 @@ fn data_proof_sentinel_version() -> EntryVersion {
 }
 
 const DOT_CHUNK_BYTES: usize = 52;
-const MAX_PROOF_BUNDLE_BYTES: usize = 1024 * 1024;
+const MAX_PROOF_BUNDLE_BYTES: usize = 2 * 1024 * 1024;
 
 fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     let mut buf = [0u8; DOT_CHUNK_BYTES];
@@ -363,16 +363,16 @@ impl From<EntryCrdt> for WireEntryCrdt {
             ]
         }));
         if !crdt.proofs.is_empty() {
-            if let Ok(encoded) = super::provenance::encode_proof_bundle(&crdt.proofs) {
-                if encoded.len() <= MAX_PROOF_BUNDLE_BYTES {
-                    if let Ok(byte_len) = u32::try_from(encoded.len()) {
-                        dots.push(EntryDot {
-                            version: proof_sentinel,
-                            index: byte_len,
-                        });
-                        for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
-                            dots.push(pack_proof_chunk(chunk, chunk_idx));
-                        }
+            if let Some(encoded) =
+                super::provenance::encode_proof_bundle_bounded(&crdt.proofs, MAX_PROOF_BUNDLE_BYTES)
+            {
+                if let Ok(byte_len) = u32::try_from(encoded.len()) {
+                    dots.push(EntryDot {
+                        version: proof_sentinel,
+                        index: byte_len,
+                    });
+                    for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
+                        dots.push(pack_proof_chunk(chunk, chunk_idx));
                     }
                 }
             }
@@ -448,18 +448,16 @@ impl EntryCrdt {
         proofs: &[super::provenance::SignedDataMutation],
     ) -> Vec<EntryDot> {
         let mut dots = Vec::new();
-        if !proofs.is_empty() {
-            if let Ok(encoded) = super::provenance::encode_proof_bundle(proofs) {
-                if encoded.len() <= MAX_PROOF_BUNDLE_BYTES {
-                    if let Ok(byte_len) = u32::try_from(encoded.len()) {
-                        dots.push(EntryDot {
-                            version: data_proof_sentinel_version(),
-                            index: byte_len,
-                        });
-                        for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
-                            dots.push(pack_proof_chunk(chunk, chunk_idx));
-                        }
-                    }
+        if let Some(encoded) =
+            super::provenance::encode_proof_bundle_bounded(proofs, MAX_PROOF_BUNDLE_BYTES)
+        {
+            if let Ok(byte_len) = u32::try_from(encoded.len()) {
+                dots.push(EntryDot {
+                    version: data_proof_sentinel_version(),
+                    index: byte_len,
+                });
+                for (chunk_idx, chunk) in encoded.chunks(DOT_CHUNK_BYTES).enumerate() {
+                    dots.push(pack_proof_chunk(chunk, chunk_idx));
                 }
             }
         }

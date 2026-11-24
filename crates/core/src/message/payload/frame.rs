@@ -49,7 +49,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// The wire version of this build; see the bump rule.
-pub const WIRE_VERSION: u16 = 5;
+pub const WIRE_VERSION: u16 = 6;
 
 /// The opening of every frame, fixed forever (the frame-header law).
 const FRAME_MAGIC: &[u8] = b"RINGS\0";
@@ -219,8 +219,15 @@ pub(super) fn split_frame(bytes: &[u8]) -> Result<(FrameKind, &[u8])> {
 /// [`FrameKind::CompressedPayload`] frame of this wire version.
 pub(crate) fn may_start_compressed_payload(bytes: &[u8]) -> bool {
     if bytes.len() < FRAME_HEADER_LEN {
-        let prefix_len = bytes.len().min(FRAME_MAGIC.len());
-        return bytes.get(..prefix_len) == FRAME_MAGIC.get(..prefix_len);
+        let mut header_prefix = [0_u8; FRAME_MAGIC.len() + WIRE_VERSION_LEN];
+        if let Some(magic) = header_prefix.get_mut(..FRAME_MAGIC.len()) {
+            magic.copy_from_slice(FRAME_MAGIC);
+        }
+        if let Some(version) = header_prefix.get_mut(FRAME_MAGIC.len()..) {
+            version.copy_from_slice(&WIRE_VERSION.to_be_bytes());
+        }
+        let prefix_len = bytes.len().min(header_prefix.len());
+        return bytes.get(..prefix_len) == header_prefix.get(..prefix_len);
     }
     matches!(split_frame(bytes), Ok((FrameKind::CompressedPayload, _)))
 }

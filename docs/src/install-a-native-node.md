@@ -38,6 +38,9 @@ rings --version
 
 For running `rings` persistently under `systemd` or `launchd`, see
 [`contrib/README.md`](https://github.com/RingsNetwork/rings/blob/master/contrib/README.md).
+Both templates configure file-descriptor limits (`LimitNOFILE=65535` on Linux and
+`NumberOfFiles = 10240` on macOS), and `rings run` automatically raises its soft `RLIMIT_NOFILE`
+limit on startup to prevent `EMFILE (Too many open files)` across multi-peer WebRTC meshes.
 
 ### From Cargo
 

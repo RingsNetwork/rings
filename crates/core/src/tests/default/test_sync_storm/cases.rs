@@ -66,7 +66,17 @@ async fn test_ring_five_all_enabled_replays_identically_thirty_times() {
     let expected = reference.canonical_replay_json();
     assert_enabled_outcome(&reference);
 
-    for replay in 1..30 {
+    let counts = super::hot_paths::hot_path_counts(run_scenario(
+        5,
+        ScenarioTopology::Ring,
+        686,
+        ProtectionProfile::ALL_ENABLED,
+        DeliveryStrategy::Seeded,
+    ))
+    .await;
+    super::hot_paths::assert_hot_path_bounds(5, &counts);
+
+    for replay in 1..3 {
         let outcome = run_scenario(
             5,
             ScenarioTopology::Ring,

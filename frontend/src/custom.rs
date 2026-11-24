@@ -29,12 +29,12 @@ pub struct CustomEvent {
     pub payload: String,
 }
 
-/// Register a custom namespace and emit inbound events to the UI.
+/// Register a custom namespace, emit inbound events to the UI, and return the owned callback closure.
 pub fn register(
     provider: &Arc<Provider>,
     namespace: String,
     on_event: Callback<CustomEvent>,
-) -> Result<(), String> {
+) -> Result<Closure<dyn FnMut(JsValue, JsValue) -> JsValue>, String> {
     let namespace_for_handler = namespace.clone();
     let handler = Closure::<dyn FnMut(JsValue, JsValue) -> JsValue>::new(
         move |ctx: JsValue, event: JsValue| handle(&ctx, &event, &namespace_for_handler, &on_event),
@@ -43,8 +43,7 @@ pub fn register(
     provider
         .on(namespace, JsValue::NULL, function.clone())
         .map_err(|error| format!("register custom namespace: {error:?}"))?;
-    handler.forget();
-    Ok(())
+    Ok(handler)
 }
 
 /// Send a custom namespace message.

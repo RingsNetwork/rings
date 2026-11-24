@@ -51,6 +51,9 @@ enum RepairMutant {
     /// Treats a virtual-node `vhint` copy as `OwnershipHandoff` (source-delete authority) under a
     /// stale view (`S1''` violation).
     VirtualHintDeletesSource,
+    /// Persists an incoming copy without checking whether the receiver's local view owns the slot
+    /// (`S1'` violation).
+    AcceptUnownedPlacement,
     /// Deletes the sender's local placement on ack without checking
     /// `SyncedEntryAck::confirms_local_value` (`S2'` violation).
     IgnoreAckValueMatch,
@@ -364,7 +367,8 @@ impl Model for VirtualRepairModel {
                     return Some(state);
                 }
                 let r = usize::from(msg.to);
-                let accepted = self.virtual_owner(state.views[r], msg.slot) == Some(msg.to);
+                let accepted = self.mutant == Some(RepairMutant::AcceptUnownedPlacement)
+                    || self.virtual_owner(state.views[r], msg.slot) == Some(msg.to);
                 if accepted {
                     let slot = usize::from(msg.slot);
                     let joined =
@@ -859,6 +863,15 @@ fn test_each_storage_repair_mutant_is_refuted() {
     assert!(
         vhint_refuted.contains("virtual-node repair never deletes source placements (S1'')"),
         "VirtualHintDeletesSource must violate S1'': {vhint_refuted:?}"
+    );
+
+    let unowned_refuted = refuted(VirtualRepairModel::new(
+        0,
+        Some(RepairMutant::AcceptUnownedPlacement),
+    ));
+    assert!(
+        unowned_refuted.contains("receivers persist only placements accepted by local view (S1')"),
+        "AcceptUnownedPlacement must violate S1': {unowned_refuted:?}"
     );
 
     let pre_ack_refuted = refuted(HandoffRepairModel::new(

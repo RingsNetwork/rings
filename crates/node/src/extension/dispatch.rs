@@ -141,13 +141,31 @@ impl DispatchDrops {
         }
     }
 
-    /// Count one envelope dropped for `reason`, and log it.
-    fn record(&self, reason: DispatchDrop) {
+    /// Count one envelope from `from` (in `namespace`, if decoded) dropped for `reason`,
+    /// rate-limiting WARN log lines to power-of-two milestones.
+    fn record(&self, reason: DispatchDrop, from: Did, namespace: Option<&str>) {
         let dropped = self
             .counter(reason)
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
-        tracing::warn!(?reason, dropped, "application envelope dropped");
+        let namespace = namespace.unwrap_or("<undecodable>");
+        if dropped.is_power_of_two() {
+            tracing::warn!(
+                ?reason,
+                %from,
+                namespace,
+                dropped,
+                "application envelope dropped"
+            );
+        } else {
+            tracing::debug!(
+                ?reason,
+                %from,
+                namespace,
+                dropped,
+                "application envelope dropped"
+            );
+        }
     }
 
     /// The counts so far.
@@ -551,11 +569,12 @@ impl NamespaceQueues {
     /// copied only when the namespace's queue is first made.
     pub(super) fn submit(&mut self, from: Did, bytes: &Bytes) {
         let Ok(envelope) = Envelope::view(bytes) else {
-            self.drops.record(DispatchDrop::Undecodable);
+            self.drops.record(DispatchDrop::Undecodable, from, None);
             return;
         };
         let Some(route) = self.core.route(envelope.namespace) else {
-            self.drops.record(DispatchDrop::Unregistered);
+            self.drops
+                .record(DispatchDrop::Unregistered, from, Some(envelope.namespace));
             return;
         };
         let queue = queue_of(
@@ -569,12 +588,13 @@ impl NamespaceQueues {
         match queue.submit_envelope(route.clone(), from, payload, weight) {
             Ok(()) => {}
             Err(DispatchDrop::QueueFull) => {
-                self.drops.record(DispatchDrop::QueueFull);
+                self.drops
+                    .record(DispatchDrop::QueueFull, from, Some(envelope.namespace));
                 if self.core.peer_admitted(from) {
                     queue.tell(route, LinkFact::Dropped(from));
                 }
             }
-            Err(reason) => self.drops.record(reason),
+            Err(reason) => self.drops.record(reason, from, Some(envelope.namespace)),
         }
     }
 
@@ -692,10 +712,13 @@ mod tests {
 
     #[test]
     fn test_each_drop_is_counted_under_its_own_reason() {
+        use rings_core::dht::Did;
+
+        let peer = Did::from(1_u32);
         let drops = DispatchDrops::default();
-        drops.record(DispatchDrop::Undecodable);
-        drops.record(DispatchDrop::QueueFull);
-        drops.record(DispatchDrop::QueueFull);
+        drops.record(DispatchDrop::Undecodable, peer, None);
+        drops.record(DispatchDrop::QueueFull, peer, Some("ns"));
+        drops.record(DispatchDrop::QueueFull, peer, Some("ns"));
         assert_eq!(drops.counters(), DispatchDropCounters {
             undecodable: 1,
             unregistered: 0,

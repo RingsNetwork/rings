@@ -279,29 +279,36 @@ fn evaluate_history(history: &[Action], mutant: Option<Mutant>) -> ReplaySummary
                     tag: OnionReplayNonce::new(effective_tag.to_le_bytes()),
                 };
 
+                let mut cumulative_requested = before_units;
                 let verdict = if mutant == Some(Mutant::IgnoreSenderBudget) && was_live {
                     let would_overflow =
                         before_units.saturating_add(requested) > ONION_ADMISSION_SENDER_UNITS;
                     let charged_units = if would_overflow { 1 } else { requested };
-                    if would_overflow {
-                        summary.over_sender_budget = true;
-                    }
                     match state.charge_units(now_ms, target_link, units(charged_units)) {
                         Err(rej) => Verdict::Unpaid(rej),
-                        Ok(tok) => match state.admit(now_ms, tok, lyr) {
-                            Ok(()) => Verdict::Admitted,
-                            Err(rej) => Verdict::Rejected(rej),
-                        },
+                        Ok(tok) => {
+                            cumulative_requested = before_units.saturating_add(requested);
+                            match state.admit(now_ms, tok, lyr) {
+                                Ok(()) => Verdict::Admitted,
+                                Err(rej) => Verdict::Rejected(rej),
+                            }
+                        }
                     }
                 } else {
                     match state.charge_units(now_ms, target_link, units(requested)) {
                         Err(rej) => Verdict::Unpaid(rej),
-                        Ok(tok) => match state.admit(now_ms, tok, lyr) {
-                            Ok(()) => Verdict::Admitted,
-                            Err(rej) => Verdict::Rejected(rej),
-                        },
+                        Ok(tok) => {
+                            cumulative_requested = before_units.saturating_add(requested);
+                            match state.admit(now_ms, tok, lyr) {
+                                Ok(()) => Verdict::Admitted,
+                                Err(rej) => Verdict::Rejected(rej),
+                            }
+                        }
                     }
                 };
+                if cumulative_requested > ONION_ADMISSION_SENDER_UNITS {
+                    summary.over_sender_budget = true;
+                }
 
                 match verdict {
                     Verdict::Admitted => {
@@ -355,21 +362,27 @@ fn evaluate_history(history: &[Action], mutant: Option<Mutant>) -> ReplaySummary
                     summary.rollback_refunded_load = true;
                 }
                 if state.is_rolled_back_at(rolled_back_ms) {
-                    if mutant == Some(Mutant::RenewSameEpoch)
-                        || state.renew(current_epoch, OnionReplayFilterKey::new([5; 32]))
-                            != Err(OnionEpochNotFresh)
-                    {
-                        summary.same_epoch_renew_accepted = true;
-                    }
                     let next_epoch = if current_epoch == EPOCH {
                         FRESH_EPOCH
                     } else {
                         EPOCH
                     };
+                    let candidate_epoch = if mutant == Some(Mutant::RenewSameEpoch) {
+                        next_epoch
+                    } else {
+                        current_epoch
+                    };
+                    if state.renew(candidate_epoch, OnionReplayFilterKey::new([5; 32]))
+                        != Err(OnionEpochNotFresh)
+                    {
+                        summary.same_epoch_renew_accepted = true;
+                    }
                     let live_before = state.live_links();
-                    state
-                        .renew(next_epoch, OnionReplayFilterKey::new([6; 32]))
-                        .expect("distinct epoch renews cleanly");
+                    if mutant != Some(Mutant::RenewSameEpoch) {
+                        state
+                            .renew(next_epoch, OnionReplayFilterKey::new([6; 32]))
+                            .expect("distinct epoch renews cleanly");
+                    }
                     assert_eq!(
                         state.live_links(),
                         live_before,

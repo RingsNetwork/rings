@@ -26,6 +26,11 @@
     </dict>
     <key>ProcessType</key>
     <string>Background</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>10240</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>/tmp/rs.rings.node.out.log</string>
     <key>StandardErrorPath</key>

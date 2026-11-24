@@ -1011,7 +1011,9 @@ impl Provider {
         signer: Signer,
     ) -> Result<DelegateeKey> {
         let mut sk_builder = DelegationBuilder::new(account, account_type);
-        let proof = sk_builder.unsigned_proof();
+        let proof = sk_builder
+            .try_unsigned_proof()
+            .map_err(Error::InternalError)?;
         let sig = match signer {
             Signer::Sync(s) => s(proof)?,
             Signer::Async(s) => s(proof).await?,
