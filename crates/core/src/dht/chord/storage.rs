@@ -239,9 +239,7 @@ async fn join_live_entry(
         .then(|| admitted.validate_data_sync_on_local(live.as_ref()))
         .transpose()?;
     let joined = match live {
-        Some(live) => store
-            .sanitize_local_tombstones(live, &admitted, Did::default())
-            .join(admitted)?,
+        Some(live) => live.join(admitted)?,
         None => admitted,
     }
     .retired_at(now_ms);
@@ -273,7 +271,7 @@ async fn operate_live_entry(
         .then(|| op.validate_data_write_on_local(live.as_ref(), actor))
         .transpose()?;
     let local = match live {
-        Some(local) => store.sanitize_local_tombstones(local, op.entry(), actor),
+        Some(local) => local,
         None => op.gen_default_entry()?,
     };
     match local.operate(now_ms, op, actor)?.live_at(now_ms) {
@@ -501,9 +499,7 @@ impl PeerRing {
             .then(|| incoming.validate_data_sync_on_local(local.as_ref()))
             .transpose()?;
         let stored = match local {
-            Some(local) => store
-                .sanitize_local_tombstones(local, &incoming, Did::default())
-                .join(incoming)?,
+            Some(local) => local.join(incoming)?,
             None => incoming.try_into_storage_entry()?,
         }
         .retired_at(now_ms);

@@ -183,12 +183,12 @@ pub struct SignedDataMutation {
     pub(crate) leaf_index: u32,
     pub(crate) witness_dot: Option<EntryDot>,
     pub(crate) merkle_siblings: Vec<[u8; 32]>,
-    pub(crate) proof: Option<MessageVerification>,
+    pub(crate) proof: MessageVerification,
 }
 
 #[derive(Serialize, Deserialize)]
 struct WireProofBundle {
-    batches: Vec<(DataMutationClaim, Option<MessageVerification>)>,
+    batches: Vec<(DataMutationClaim, MessageVerification)>,
     items: Vec<WireProofItem>,
 }
 
@@ -202,14 +202,12 @@ struct WireProofItem {
 }
 
 pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u8>> {
-    let mut batches: Vec<(DataMutationClaim, Option<MessageVerification>)> = Vec::new();
+    let mut batches: Vec<(DataMutationClaim, MessageVerification)> = Vec::new();
     let mut batch_indices: BTreeMap<(DataMutationClaim, [u8; 32]), usize> = BTreeMap::new();
     let mut items = Vec::with_capacity(proofs.len());
     for mutation in proofs {
-        let proof_digest = mutation
-            .proof
-            .as_ref()
-            .and_then(|p| rings_codec::serialize(p).ok())
+        let proof_digest = rings_codec::serialize(&mutation.proof)
+            .ok()
             .map(|bytes| keccak256(&bytes))
             .unwrap_or([0u8; 32]);
         let key = (mutation.claim, proof_digest);
@@ -302,9 +300,6 @@ pub(super) fn decode_proof_bundle(raw: &[u8]) -> Result<Vec<SignedDataMutation>>
         let Some((claim, proof)) = bundle.batches.get(item.batch_index as usize) else {
             return Err(Error::DataEntryWriteUnauthorized);
         };
-        if proof.is_none() {
-            return Err(Error::DataEntryWriteUnauthorized);
-        }
         out.push(SignedDataMutation {
             key: item.key,
             claim: *claim,
@@ -330,16 +325,10 @@ impl Ord for SignedDataMutation {
         }
         self.key
             .cmp(&other.key)
-            .then_with(|| self.proof.is_some().cmp(&other.proof.is_some()))
             .then_with(|| self.effective_version().cmp(&other.effective_version()))
             .then_with(|| self.witness_dot.cmp(&other.witness_dot))
             .then_with(|| self.claim.cmp(&other.claim))
-            .then_with(|| {
-                self.proof
-                    .as_ref()
-                    .map(|p| p.ts_ms)
-                    .cmp(&other.proof.as_ref().map(|p| p.ts_ms))
-            })
+            .then_with(|| self.proof.ts_ms.cmp(&other.proof.ts_ms))
             .then_with(|| self.leaf_index.cmp(&other.leaf_index))
             .then_with(|| self.merkle_siblings.cmp(&other.merkle_siblings))
     }
@@ -350,20 +339,14 @@ impl SignedDataMutation {
         self.witness_dot.map_or(self.claim.version, |d| d.version)
     }
 
-    pub(crate) fn is_corrupted(&self) -> bool {
-        self.proof.is_none()
-    }
-
     pub(crate) fn matches_register(&self, floor: EntryVersion) -> bool {
-        self.proof.is_some()
-            && self.key == DataProofKey::Register(floor.actor)
+        self.key == DataProofKey::Register(floor.actor)
             && self.claim.kind == DataMutationOpKind::Reset
             && self.claim.version == floor
     }
 
     pub(crate) fn matches_add(&self, digest: ElementDigest, dot: EntryDot) -> bool {
-        self.proof.is_some()
-            && self.key == DataProofKey::Add(digest, dot.version.actor)
+        self.key == DataProofKey::Add(digest, dot.version.actor)
             && matches!(
                 self.claim.kind,
                 DataMutationOpKind::Reset | DataMutationOpKind::Append
@@ -381,8 +364,7 @@ impl SignedDataMutation {
 
     pub(crate) fn matches_remove(&self, digest: ElementDigest, remove_dot: EntryDot) -> bool {
         let actor = remove_dot.version.actor;
-        if self.proof.is_none()
-            || self.key != DataProofKey::Remove(digest, actor)
+        if self.key != DataProofKey::Remove(digest, actor)
             || self.claim.kind != DataMutationOpKind::Retract
         {
             return false;
@@ -663,7 +645,7 @@ impl EntryOperation {
                         leaf_index: 0,
                         witness_dot: None,
                         merkle_siblings: Vec::new(),
-                        proof: Some(sig.clone()),
+                        proof: sig.clone(),
                     });
                     for (idx, (elem, merkle_siblings)) in
                         elements.into_iter().zip(branches).enumerate()
@@ -674,7 +656,7 @@ impl EntryOperation {
                             leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
                             witness_dot: None,
                             merkle_siblings,
-                            proof: Some(sig.clone()),
+                            proof: sig.clone(),
                         });
                     }
                     entry.crdt.proofs = proofs;
@@ -717,7 +699,7 @@ impl EntryOperation {
                             leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
                             witness_dot: None,
                             merkle_siblings,
-                            proof: Some(sig.clone()),
+                            proof: sig.clone(),
                         })
                         .collect();
                 }
@@ -757,7 +739,7 @@ impl EntryOperation {
                             leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
                             witness_dot: Some(dot),
                             merkle_siblings,
-                            proof: Some(sig.clone()),
+                            proof: sig.clone(),
                         })
                         .collect();
                 } else {
@@ -797,7 +779,7 @@ impl EntryOperation {
                             leaf_index: u32::try_from(idx).unwrap_or(u32::MAX),
                             witness_dot: None,
                             merkle_siblings,
-                            proof: Some(sig.clone()),
+                            proof: sig.clone(),
                         })
                         .collect();
                 }
@@ -863,9 +845,7 @@ impl Entry {
         let max_ts = now_ms.saturating_add(TS_OFFSET_TOLERANCE_MS);
         let mut verified_batches: Vec<(Did, DataMutationClaim, MessageVerification)> = Vec::new();
         for item in &self.crdt.proofs {
-            let Some(proof) = &item.proof else {
-                return Err(Error::DataEntryWriteUnauthorized);
-            };
+            let proof = &item.proof;
             if proof.ts_ms > max_ts || item.claim.version.logical_time_ms > max_ts {
                 return Err(Error::EntryVersionAheadOfClock);
             }
@@ -892,7 +872,7 @@ impl Entry {
         self.crdt
             .proofs
             .iter()
-            .any(|proof| !proof.is_corrupted() && proof.key.actor() == actor)
+            .any(|proof| proof.key.actor() == actor)
     }
 
     fn has_signed_register_proof(&self, floor: EntryVersion) -> bool {
@@ -919,7 +899,7 @@ impl Entry {
                 .crdt
                 .proofs
                 .iter()
-                .all(|proof| !proof.is_corrupted() && proof.key.actor() == writer)
+                .all(|proof| proof.key.actor() == writer)
     }
 
     /// Whether an `Overwrite` carrier satisfies the reset envelope invariant for `introducer`:
@@ -1163,17 +1143,6 @@ impl Entry {
                 self.data.get(index as usize).map(|value| (value, dot))
             }))
             .filter(|(_, dot)| dot.is_attributed())
-    }
-
-    /// Return `self` unchanged: tombstones on `EntryKind::Data` are actor-scoped in
-    /// [`DataTopicBuffer`](super::DataTopicBuffer), so cross-actor tombstones never cover another
-    /// writer's dots and are never evicted (#1220).
-    pub(crate) fn without_cross_actor_tombstones_for(
-        self,
-        _incoming: &Self,
-        _fallback_actor: Did,
-    ) -> Self {
-        self
     }
 }
 
