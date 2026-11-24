@@ -31,8 +31,9 @@
 
 .debug-actions > span {
   color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 800;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -58,9 +59,9 @@
 .metric span,
 .identity-value span {
   color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 800;
-  letter-spacing: 0;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -71,7 +72,7 @@
 
 .mono,
 code {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .mono {
@@ -579,7 +580,7 @@ code {
   min-height: 0;
   background: #f3ead8;
   color: #111827;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
   overflow: hidden;
 }
 
@@ -621,8 +622,9 @@ code {
 .rail-card-header span,
 .rail-row span {
   color: var(--muted);
-  font-size: 0.58rem;
-  font-weight: 800;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
@@ -636,9 +638,14 @@ code {
   min-width: 0;
   overflow: hidden;
   color: var(--ink-strong);
-  font-size: 0.68rem;
+  font-size: 0.72rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.signal-card p {
+  white-space: normal;
+  line-height: 1.4;
 }
 
 .rail-state {
@@ -938,9 +945,9 @@ code {
     0 0 18px rgba(84, 255, 208, 0.16),
     inset 0 0 14px rgba(0, 229, 255, 0.12);
   color: var(--green);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
   font-size: 1.35rem;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
 }
 

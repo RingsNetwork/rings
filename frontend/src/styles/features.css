@@ -23,7 +23,7 @@
 }
 
 .topology text {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: ui-monospace, "SF Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 .topology .orbit {
@@ -238,9 +238,10 @@
 .topology .topology-mode,
 .topology .core-label {
   fill: var(--ink-strong);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
   font-size: 0.68rem;
-  font-weight: 900;
-  letter-spacing: 0;
+  font-weight: 700;
+  letter-spacing: 0.06em;
 }
 
 .topology .topology-count,

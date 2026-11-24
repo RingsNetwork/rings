@@ -1,7 +1,10 @@
 use super::border;
 use super::rule;
 use super::Theme;
+use super::MONO_FONT;
+use super::SERIF_FONT;
 
+/// Appends landing page document shell, hero, action, and section theme rules.
 pub(super) fn append(css: &mut String, theme: Theme) {
     append_document_shell(css, theme);
     append_hero(css, theme);
@@ -26,24 +29,21 @@ fn append_document_shell(css: &mut String, theme: Theme) {
         ("overflow", "auto"),
         ("background", theme.page),
     ]);
-    rule(
-        css,
-        ".site-page",
-        &[
-            ("display", "grid"),
-            ("grid-template-columns", "minmax(0, 1fr)"),
-            ("gap", "52px"),
-            ("padding", "0 10% 64px"),
-            ("color", "#111827"),
-            ("font-family", "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"),
-        ],
-    );
+    rule(css, ".site-page", &[
+        ("display", "grid"),
+        ("grid-template-columns", "minmax(0, 1fr)"),
+        ("gap", "52px"),
+        ("padding", "0 10% 64px"),
+        ("color", "#111827"),
+        ("font-family", SERIF_FONT),
+    ]);
     rule(css, ".landing-page", &[(
         "background",
         "linear-gradient(180deg, #fbf4e6 0, #fbf4e6 620px, #f3ead8 620px), #f3ead8",
     )]);
 }
 
+/// Appends hero banner layout, background image, gradient overlay, and typography rules.
 fn append_hero(css: &mut String, theme: Theme) {
     rule(css, ".landing-hero", &[
         ("position", "relative"),
@@ -97,7 +97,7 @@ fn append_hero(css: &mut String, theme: Theme) {
             ("margin", "0"),
             ("color", theme.accent),
             ("font-size", "0.78rem"),
-            ("font-weight", "900"),
+            ("font-weight", "700"),
             ("letter-spacing", "0.08em"),
             ("text-transform", "uppercase"),
         ],
@@ -107,8 +107,9 @@ fn append_hero(css: &mut String, theme: Theme) {
         ("margin", "0"),
         ("color", theme.ink),
         ("font-size", "4rem"),
-        ("letter-spacing", "0"),
-        ("line-height", "1.02"),
+        ("font-weight", "700"),
+        ("letter-spacing", "-0.015em"),
+        ("line-height", "1.04"),
         ("text-transform", "none"),
     ]);
     rule(css, ".landing-lede", &[
@@ -120,6 +121,7 @@ fn append_hero(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends primary and secondary call-to-action button rules for the landing page.
 fn append_landing_actions(css: &mut String, theme: Theme) {
     rule(css, ".landing-actions", &[
         ("display", "flex"),
@@ -133,9 +135,11 @@ fn append_landing_actions(css: &mut String, theme: Theme) {
         ("align-items", "center"),
         ("justify-content", "center"),
         ("border-radius", "8px"),
-        ("padding", "10px 14px"),
+        ("padding", "10px 15px"),
+        ("font-family", SERIF_FONT),
         ("font-size", "0.84rem"),
-        ("font-weight", "900"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.05em"),
         ("text-decoration", "none"),
         ("text-transform", "uppercase"),
     ]);
@@ -162,6 +166,7 @@ fn append_landing_actions(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends landing section shells, feature cards, architecture explorer, and final callout rules.
 fn append_landing_sections(css: &mut String, theme: Theme) {
     append_section_shell(css, theme);
     append_feature_cards(css, theme);
@@ -169,6 +174,7 @@ fn append_landing_sections(css: &mut String, theme: Theme) {
     append_final_callout(css, theme);
 }
 
+/// Appends section divider, heading, and lede typography rules for `.landing-section`.
 fn append_section_shell(css: &mut String, theme: Theme) {
     rule(css, ".landing-section", &[
         ("display", "grid"),
@@ -186,7 +192,9 @@ fn append_section_shell(css: &mut String, theme: Theme) {
         ("margin", "0"),
         ("color", theme.ink),
         ("font-size", "2rem"),
-        ("line-height", "1.12"),
+        ("font-weight", "700"),
+        ("letter-spacing", "-0.01em"),
+        ("line-height", "1.14"),
         ("text-transform", "none"),
     ]);
     rule(
@@ -201,6 +209,7 @@ fn append_section_shell(css: &mut String, theme: Theme) {
     );
 }
 
+/// Appends feature card grid, illustration, and shared document card surface rules.
 fn append_feature_cards(css: &mut String, theme: Theme) {
     rule(css, ".landing-feature-grid", &[
         ("display", "grid"),
@@ -256,8 +265,9 @@ fn append_feature_cards(css: &mut String, theme: Theme) {
         &[
             ("margin", "0"),
             ("color", theme.ink),
-            ("font-size", "0.98rem"),
-            ("line-height", "1.25"),
+            ("font-size", "1.02rem"),
+            ("font-weight", "700"),
+            ("line-height", "1.28"),
             ("text-transform", "none"),
         ],
     );
@@ -267,13 +277,14 @@ fn append_feature_cards(css: &mut String, theme: Theme) {
         &[
             ("margin", "0"),
             ("color", "#475467"),
-            ("font-size", "0.88rem"),
-            ("line-height", "1.58"),
+            ("font-size", "0.92rem"),
+            ("line-height", "1.62"),
         ],
     );
     append_example_cards(css, theme);
 }
 
+/// Appends three-column example card grid and hover rules.
 fn append_example_cards(css: &mut String, theme: Theme) {
     rule(css, ".landing-example-grid", &[
         ("display", "grid"),
@@ -286,6 +297,7 @@ fn append_example_cards(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends architecture explorer layout, layer stack, detail card, and code block rules.
 fn append_architecture(css: &mut String, theme: Theme) {
     append_architecture_layout(css);
     append_layer_stack(css, theme);
@@ -296,6 +308,7 @@ fn append_architecture(css: &mut String, theme: Theme) {
     append_landing_code(css);
 }
 
+/// Appends responsive grid layout rules for the architecture and runtime sections.
 fn append_architecture_layout(css: &mut String) {
     rule(css, ".landing-architecture", &[(
         "grid-template-columns",
@@ -325,6 +338,7 @@ fn append_architecture_layout(css: &mut String) {
     ]);
 }
 
+/// Appends container rules for the architecture layer selector stack.
 fn append_layer_stack(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer-stack", &[
         ("display", "grid"),
@@ -337,6 +351,7 @@ fn append_layer_stack(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends interactive button and typography rules for individual architecture layers.
 fn append_layer_button(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer", &[
         ("display", "grid"),
@@ -380,19 +395,16 @@ fn append_layer_button(css: &mut String, theme: Theme) {
         ("border", "0"),
         ("background", "transparent"),
         ("color", "#8a5a12"),
-        (
-            "font-family",
-            "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-        ),
-        ("font-size", "0.72rem"),
-        ("font-weight", "900"),
+        ("font-family", MONO_FONT),
+        ("font-size", "0.74rem"),
+        ("font-weight", "700"),
         ("line-height", "1"),
     ]);
     rule(css, ".landing-layer h3", &[
         ("margin", "0 0 4px"),
         ("color", theme.ink),
-        ("font-size", "0.95rem"),
-        ("font-weight", "800"),
+        ("font-size", "0.96rem"),
+        ("font-weight", "700"),
         ("line-height", "1.25"),
         ("text-transform", "none"),
         ("white-space", "normal"),
@@ -400,28 +412,30 @@ fn append_layer_button(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer p", &[
         ("margin", "0"),
         ("color", "#5f5140"),
-        ("font-size", "0.82rem"),
-        ("line-height", "1.45"),
+        ("font-size", "0.84rem"),
+        ("line-height", "1.48"),
         ("overflow-wrap", "anywhere"),
         ("white-space", "normal"),
     ]);
 }
 
+/// Appends summary, label, and section header text rules for the layer detail panel.
 fn append_layer_detail_text(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer-detail-summary", &[
         ("color", theme.ink_soft),
         ("font-size", "0.98rem"),
-        ("font-weight", "700"),
+        ("font-weight", "600"),
         ("line-height", "1.62"),
     ]);
     rule(css, ".landing-layer-label", &[
         ("display", "block"),
         ("margin", "0 0 5px"),
         ("color", theme.accent),
-        ("font-size", "0.72rem"),
-        ("font-weight", "900"),
-        ("letter-spacing", "0"),
-        ("text-transform", "none"),
+        ("font-family", SERIF_FONT),
+        ("font-size", "0.74rem"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.06em"),
+        ("text-transform", "uppercase"),
     ]);
     rule(css, ".landing-layer-detail-section", &[
         ("display", "grid"),
@@ -429,31 +443,31 @@ fn append_layer_detail_text(css: &mut String, theme: Theme) {
     ]);
     rule(css, ".landing-layer-detail-section>span", &[
         ("color", theme.accent),
-        (
-            "font-family",
-            "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-        ),
-        ("font-size", "0.72rem"),
-        ("font-weight", "900"),
-        ("letter-spacing", "0"),
+        ("font-family", SERIF_FONT),
+        ("font-size", "0.74rem"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.06em"),
+        ("text-transform", "uppercase"),
     ]);
 }
 
+/// Appends container, heading, and index badge rules for the layer detail card.
 fn append_layer_detail_card(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer-detail-section p", &[
         ("margin", "0"),
         ("color", "#475467"),
-        ("font-size", "0.94rem"),
+        ("font-size", "0.95rem"),
         ("line-height", "1.68"),
     ]);
     rule(css, ".landing-layer-detail-list dt", &[
         ("display", "block"),
         ("margin", "0 0 5px"),
         ("color", theme.accent),
-        ("font-size", "0.72rem"),
-        ("font-weight", "900"),
-        ("letter-spacing", "0"),
-        ("text-transform", "none"),
+        ("font-family", SERIF_FONT),
+        ("font-size", "0.74rem"),
+        ("font-weight", "700"),
+        ("letter-spacing", "0.06em"),
+        ("text-transform", "uppercase"),
     ]);
     rule(css, ".landing-layer-detail", &[
         ("display", "grid"),
@@ -482,16 +496,14 @@ fn append_layer_detail_card(css: &mut String, theme: Theme) {
         ("border-radius", "4px"),
         ("background", "#fbf4e8"),
         ("color", theme.accent),
-        (
-            "font-family",
-            "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-        ),
+        ("font-family", MONO_FONT),
         ("font-size", "0.82rem"),
-        ("font-weight", "900"),
+        ("font-weight", "700"),
         ("line-height", "1"),
     ]);
 }
 
+/// Appends two-column definition list rules inside the layer detail card.
 fn append_layer_detail_list(css: &mut String, theme: Theme) {
     rule(css, ".landing-layer-detail-list", &[
         ("display", "grid"),
@@ -512,6 +524,7 @@ fn append_layer_detail_list(css: &mut String, theme: Theme) {
     ]);
 }
 
+/// Appends dark code-block surface and monospace font rules for `.landing-code`.
 fn append_landing_code(css: &mut String) {
     rule(css, ".landing-code", &[
         ("min-width", "0"),
@@ -522,15 +535,14 @@ fn append_landing_code(css: &mut String) {
         ("padding", "18px"),
         ("background", "#101828"),
         ("color", "#f2f4f7"),
+        ("font-family", MONO_FONT),
         ("font-size", "0.82rem"),
         ("line-height", "1.65"),
     ]);
-    rule(css, ".landing-code code", &[(
-        "font-family",
-        "\"SFMono-Regular\", Consolas, \"Liberation Mono\", Menlo, monospace",
-    )]);
+    rule(css, ".landing-code code", &[("font-family", MONO_FONT)]);
 }
 
+/// Appends final callout banner rules at the bottom of the landing page.
 fn append_final_callout(css: &mut String, theme: Theme) {
     rule(css, ".landing-final", &[
         ("display", "grid"),
