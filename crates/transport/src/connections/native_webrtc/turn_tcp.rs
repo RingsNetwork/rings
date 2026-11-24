@@ -967,18 +967,29 @@ fn spawn_turn_tcp_bridge(
 }
 
 /// Partition `ice_servers` so that all STUN URLs are retained while at most
-/// [`MAX_TURN_SERVERS_PER_CONNECTION`] TURN server is selected per peer connection in round-robin
-/// order across the configured pool (#1316, #1317).
+/// Select the subset of `ice_servers` used for one `RTCPeerConnection`: all STUN servers are
+/// retained, while at most [`MAX_TURN_SERVERS_PER_CONNECTION`] TURN server is selected per peer
+/// connection in round-robin order across the configured pool (#1316, #1317).
 pub(crate) fn select_ice_servers_for_connection(ice_servers: &[IceServer]) -> Vec<IceServer> {
-    select_ice_servers_with_cursor(
+    select_ice_servers_with_cursor_and_udp(
         ice_servers,
         TURN_SERVER_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        true,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn select_ice_servers_with_cursor(
     ice_servers: &[IceServer],
     cursor: usize,
+) -> Vec<IceServer> {
+    select_ice_servers_with_cursor_and_udp(ice_servers, cursor, true)
+}
+
+pub(crate) fn select_ice_servers_with_cursor_and_udp(
+    ice_servers: &[IceServer],
+    cursor: usize,
+    os_udp_ok: bool,
 ) -> Vec<IceServer> {
     fn is_turn_url(url: &str) -> bool {
         let Some((scheme, _)) = url.trim().split_once(':') else {
@@ -1011,6 +1022,22 @@ pub(crate) fn select_ice_servers_with_cursor(
         }
     }
 
+    if !os_udp_ok {
+        let tcp_only: Vec<IceServer> = turn_servers
+            .iter()
+            .filter(|server| {
+                server
+                    .urls
+                    .iter()
+                    .any(|url| parse_turn_tcp_url(url).is_some())
+            })
+            .cloned()
+            .collect();
+        if !tcp_only.is_empty() {
+            turn_servers = tcp_only;
+        }
+    }
+
     if turn_servers.len() <= MAX_TURN_SERVERS_PER_CONNECTION {
         stun_servers.extend(turn_servers);
         return stun_servers;
@@ -1030,7 +1057,12 @@ pub(crate) fn select_ice_servers_with_cursor(
 pub(crate) async fn prepare_native_ice_config(
     ice_servers: &[IceServer],
 ) -> Result<PreparedNativeIceConfig> {
-    let selected_servers = select_ice_servers_for_connection(ice_servers);
+    let os_udp_ok = can_use_os_udp().await;
+    let selected_servers = select_ice_servers_with_cursor_and_udp(
+        ice_servers,
+        TURN_SERVER_ROUND_ROBIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        os_udp_ok,
+    );
     let ice_servers = selected_servers.as_slice();
     let mut tcp_turn_urls = 0usize;
     for server in ice_servers {
@@ -1041,7 +1073,6 @@ pub(crate) async fn prepare_native_ice_config(
         }
     }
 
-    let os_udp_ok = can_use_os_udp().await;
     if tcp_turn_urls == 0 {
         return Ok(PreparedNativeIceConfig {
             ice_servers: ice_servers

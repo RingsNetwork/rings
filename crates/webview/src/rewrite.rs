@@ -488,6 +488,7 @@ fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) 
     let bytes = input.as_bytes();
     let mut i = 0usize;
     let mut quote: Option<u8> = None;
+    let mut in_unquoted_url = false;
     let mut escaped = false;
     while i < bytes.len() {
         let b = bytes.get(i).copied()?;
@@ -501,6 +502,15 @@ fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) 
                 escaped = true;
             } else if b == q {
                 quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if in_unquoted_url {
+            if b == b'\\' {
+                escaped = true;
+            } else if b == b')' {
+                in_unquoted_url = false;
             }
             i += 1;
             continue;
@@ -521,6 +531,24 @@ fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) 
             .is_some_and(|candidate| candidate.eq_ignore_ascii_case(pattern))
         {
             return Some(i);
+        }
+        if bytes
+            .get(i..i.saturating_add(4))
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(b"url("))
+        {
+            i += 4;
+            while i < bytes.len() && bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+                i += 1;
+            }
+            if let Some(&next_b) = bytes.get(i) {
+                if matches!(next_b, b'\'' | b'"') {
+                    quote = Some(next_b);
+                    i += 1;
+                } else if next_b != b')' {
+                    in_unquoted_url = true;
+                }
+            }
+            continue;
         }
         if matches!(b, b'\'' | b'"') {
             quote = Some(b);
@@ -1131,12 +1159,20 @@ mod tests {
     #[test]
     fn test_css_rewrite_ignores_urls_and_imports_inside_comments() -> Result<()> {
         let ctx = context()?;
-        let css = r#"/* @import "commented.css"; background: url(/commented.png); */ body { background: url(/live.png); }"#;
+        let css = r#"/* @import "commented.css"; background: url(/commented.png); */ @import url(https://example.com/*/a.css); @import "b.css"; body { background: url(/live.png); }"#;
 
         let rewritten = ctx.rewrite_css(css)?;
 
         assert!(rewritten
             .contains(r#"/* @import "commented.css"; background: url(/commented.png); */"#));
+        assert!(
+            rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2F%2A%2Fa%2Ecss"),
+            "unquoted url(...) containing /* must still be rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fb%2Ecss"),
+            "subsequent @import after unquoted url(/*) must not be swallowed as comment: {rewritten}"
+        );
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flive%2Epng"));
         Ok(())
     }

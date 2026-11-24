@@ -33,7 +33,7 @@ use crate::TURN_TICKET_INVOKE_BACKEND;
 use crate::TURN_TICKET_INVOKE_SHAPE;
 
 const PINNED: (u16, &str) = (
-    5,
+    6,
     "6a86b00cd6771cdf4ff2a4f0afc311bb3e82f426aeeae853029d76849d5d6b3f",
 );
 
