@@ -227,10 +227,37 @@ fn derive_turn_credential(shared_secret: &[u8; SHARED_SECRET_BYTES], sig: &[u8])
     base58_monero::encode(&digest).map_err(|_| Error::Encode)
 }
 
+/// Account and authorized session public key encoded into a STUN `USERNAME` claim.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct AccountSessionClaim {
-    account: Account,
-    session_pubkey: PublicKey<33>,
+pub struct AccountSessionClaim {
+    /// Authorizing long-term account.
+    pub account: Account,
+    /// Ephemeral session public key authorized by the account signature.
+    pub session_pubkey: PublicKey<33>,
+}
+
+/// Decoded identity claim extracted from a STUN `USERNAME` attribute before signature verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodedTurnClaim {
+    /// Delegation-backed claim.
+    Delegation(Delegation),
+    /// Direct [`Account`] claim (legacy `0x<did>` hex username).
+    Account(Account),
+    /// Account-signed session public key claim.
+    AccountSession(AccountSessionClaim),
+    /// Unlinkable server-issued ephemeral session ticket (`tkt-...`).
+    SessionTicket(SignedTurnSessionTicket),
+}
+
+/// Parsed STUN `USERNAME` payload and signature prior to cryptographic verification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecodedTurnUsername<'a> {
+    /// Decoded identity claim.
+    pub claim: DecodedTurnClaim,
+    /// Raw signature bytes decoded from base58.
+    pub sig_bytes: Vec<u8>,
+    /// Original base58-encoded signature slice within the username.
+    pub sig_b58: &'a str,
 }
 
 /// Unlinkable ephemeral TURN session ticket parameters issued by a TURN server during a DHT or
@@ -703,11 +730,9 @@ impl TurnCredentials {
         Self::verify_with_mode(username, server_key, at_ms, true)
     }
 
-    /// Decode the `(TurnAuthIdentity, optional_session_pubkey, sig_bytes, sig_b58)` parts from
-    /// `username` without running signature verification yet.
-    pub fn decode_username_parts(
-        username: &str,
-    ) -> Result<(TurnAuthIdentity, Option<PublicKey<33>>, Vec<u8>, &str)> {
+    /// Decode the [`DecodedTurnUsername`] parts from `username` without running signature
+    /// verification yet.
+    pub fn decode_username(username: &str) -> Result<DecodedTurnUsername<'_>> {
         if username.len() > MAX_STUN_USERNAME_BYTES {
             return Err(Error::Decode);
         }
@@ -721,54 +746,67 @@ impl TurnCredentials {
             let claim_bytes = base58_monero::decode(ticket_b58).map_err(|_| Error::Decode)?;
             let signed_ticket = rings_codec::deserialize::<SignedTurnSessionTicket>(&claim_bytes)
                 .map_err(|_| Error::Decode)?;
-            return Ok((
-                TurnAuthIdentity::SessionTicket(signed_ticket),
-                None,
+            return Ok(DecodedTurnUsername {
+                claim: DecodedTurnClaim::SessionTicket(signed_ticket),
                 sig_bytes,
                 sig_b58,
-            ));
+            });
         }
 
         if claim_str.starts_with("0x") || claim_str.starts_with("0X") {
             let did = Did::from_str(claim_str)?;
-            return Ok((
-                TurnAuthIdentity::Account(Account::Secp256k1(did)),
-                None,
+            return Ok(DecodedTurnUsername {
+                claim: DecodedTurnClaim::Account(Account::Secp256k1(did)),
                 sig_bytes,
                 sig_b58,
-            ));
+            });
         }
 
         if let Ok(claim_bytes) = base58_monero::decode(claim_str) {
             if let Ok(delegation) = rings_codec::deserialize::<Delegation>(&claim_bytes) {
-                return Ok((
-                    TurnAuthIdentity::Delegation(delegation),
-                    None,
+                return Ok(DecodedTurnUsername {
+                    claim: DecodedTurnClaim::Delegation(delegation),
                     sig_bytes,
                     sig_b58,
-                ));
+                });
             }
             if let Ok(claim) = rings_codec::deserialize::<AccountSessionClaim>(&claim_bytes) {
-                return Ok((
-                    TurnAuthIdentity::Account(claim.account),
-                    Some(claim.session_pubkey),
+                return Ok(DecodedTurnUsername {
+                    claim: DecodedTurnClaim::AccountSession(claim),
                     sig_bytes,
                     sig_b58,
-                ));
+                });
             }
         }
 
         if claim_str.len() == 40 && claim_str.bytes().all(|b| b.is_ascii_hexdigit()) {
             let did = Did::from_str(claim_str)?;
-            return Ok((
-                TurnAuthIdentity::Account(Account::Secp256k1(did)),
-                None,
+            return Ok(DecodedTurnUsername {
+                claim: DecodedTurnClaim::Account(Account::Secp256k1(did)),
                 sig_bytes,
                 sig_b58,
-            ));
+            });
         }
 
         Err(Error::Decode)
+    }
+
+    #[cfg(all(feature = "server", not(target_family = "wasm")))]
+    pub(crate) fn verify_decoded_at(
+        decoded: DecodedTurnUsername<'_>,
+        server_key: &SecretKey,
+        at_ms: u128,
+    ) -> Result<VerifiedTurnAuth> {
+        Self::verify_decoded_with_mode(decoded, server_key, at_ms, false)
+    }
+
+    #[cfg(all(feature = "server", not(target_family = "wasm")))]
+    pub(crate) fn verify_decoded_established_at(
+        decoded: DecodedTurnUsername<'_>,
+        server_key: &SecretKey,
+        at_ms: u128,
+    ) -> Result<VerifiedTurnAuth> {
+        Self::verify_decoded_with_mode(decoded, server_key, at_ms, true)
     }
 
     fn verify_with_mode(
@@ -777,37 +815,52 @@ impl TurnCredentials {
         at_ms: u128,
         established: bool,
     ) -> Result<VerifiedTurnAuth> {
+        let decoded = Self::decode_username(username)?;
+        Self::verify_decoded_with_mode(decoded, server_key, at_ms, established)
+    }
+
+    fn verify_decoded_with_mode(
+        decoded: DecodedTurnUsername<'_>,
+        server_key: &SecretKey,
+        at_ms: u128,
+        established: bool,
+    ) -> Result<VerifiedTurnAuth> {
         let server_pubkey = server_key.pubkey();
-        let (identity, session_pubkey, sig_bytes, _sig_b58) =
-            Self::decode_username_parts(username)?;
-        let client_pubkey = match (&identity, session_pubkey) {
-            (TurnAuthIdentity::Delegation(delegation), _) => {
-                let transcript = pack_turn_auth(delegation, server_pubkey)?;
-                if established {
+        let sig_bytes = decoded.sig_bytes;
+        let (identity, client_pubkey) = match decoded.claim {
+            DecodedTurnClaim::Delegation(delegation) => {
+                let transcript = pack_turn_auth(&delegation, server_pubkey)?;
+                let client_pk = if established {
                     delegation.recover_established_signer_at(&transcript, &sig_bytes, at_ms)?
                 } else {
                     delegation.recover_signer_at(&transcript, &sig_bytes, at_ms)?
-                }
+                };
+                (TurnAuthIdentity::Delegation(delegation), client_pk)
             }
-            (TurnAuthIdentity::Account(Account::Secp256k1(did)), None) => {
-                let transcript = pack_turn_did_auth(*did, server_pubkey);
-                signers::secp256k1::recover(&transcript, &sig_bytes)
+            DecodedTurnClaim::Account(Account::Secp256k1(did)) => {
+                let transcript = pack_turn_did_auth(did, server_pubkey);
+                let client_pk = signers::secp256k1::recover(&transcript, &sig_bytes)
                     .ok()
-                    .filter(|pk| Did::from(pk.address()) == *did)
-                    .ok_or(Error::VerifySignatureFailed)?
+                    .filter(|pk| Did::from(pk.address()) == did)
+                    .ok_or(Error::VerifySignatureFailed)?;
+                (TurnAuthIdentity::Account(Account::Secp256k1(did)), client_pk)
             }
-            (TurnAuthIdentity::Account(account), Some(session_pk)) => {
-                let _ = NonIdentityPoint::<Secp256k1>::try_from(session_pk)?;
+            DecodedTurnClaim::Account(_) => return Err(Error::Decode),
+            DecodedTurnClaim::AccountSession(claim) => {
+                let _ = NonIdentityPoint::<Secp256k1>::try_from(claim.session_pubkey)?;
                 if !established {
-                    let transcript = pack_turn_account_auth(account, session_pk, server_pubkey);
-                    if !account.account_verifier().verify(&transcript, &sig_bytes) {
+                    let transcript =
+                        pack_turn_account_auth(&claim.account, claim.session_pubkey, server_pubkey);
+                    if !claim.account.account_verifier().verify(&transcript, &sig_bytes) {
                         return Err(Error::VerifySignatureFailed);
                     }
                 }
-                session_pk
+                (
+                    TurnAuthIdentity::Account(claim.account),
+                    claim.session_pubkey,
+                )
             }
-            (TurnAuthIdentity::Account(_), None) => return Err(Error::Decode),
-            (TurnAuthIdentity::SessionTicket(signed_ticket), _) => {
+            DecodedTurnClaim::SessionTicket(signed_ticket) => {
                 signed_ticket.verify_grant_at(server_pubkey, at_ms)?;
                 let client_transcript = signed_ticket.ticket.pack_client_auth(server_pubkey);
                 let recovered_client = signers::secp256k1::recover(&client_transcript, &sig_bytes)
@@ -815,7 +868,10 @@ impl TurnCredentials {
                 if recovered_client != signed_ticket.ticket.ephemeral_client_pubkey {
                     return Err(Error::VerifySignatureFailed);
                 }
-                recovered_client
+                (
+                    TurnAuthIdentity::SessionTicket(signed_ticket),
+                    recovered_client,
+                )
             }
         };
         let shared = secp256k1_shared_secret(server_key, client_pubkey)?;

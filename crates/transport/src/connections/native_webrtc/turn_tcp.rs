@@ -7,8 +7,8 @@ use std::sync::Mutex as SyncMutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 
+use rings_network_policy::is_forbidden_turn_tcp_addr;
 use tokio::io::AsyncRead;
-use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -27,9 +27,11 @@ use webrtc::util::Conn;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::IceServer;
+pub(crate) use crate::turn_tcp_framing::encode_turn_tcp_frame;
+use crate::turn_tcp_framing::is_valid_turn_tcp_datagram;
+use crate::turn_tcp_framing::STUN_HEADER_BYTES;
+use crate::turn_tcp_framing::STUN_MAGIC_COOKIE;
 
-const STUN_HEADER_BYTES: usize = 20;
-const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
 /// STUN `ERROR-CODE` attribute (`400 Bad Request`) returned locally when `gather_candidates_srflx`
 /// probes the local UDP TURN-over-TCP bridge address.
 const STUN_BINDING_BAD_REQUEST_BODY: [u8; 8] = [
@@ -38,9 +40,6 @@ const STUN_BINDING_BAD_REQUEST_BODY: [u8; 8] = [
     0x00, 0x00, // reserved
     0x04, 0x00, // class = 4, number = 0 (400 Bad Request)
 ];
-const CHANNEL_DATA_HEADER_BYTES: usize = 4;
-const CHANNEL_NUMBER_MIN: u16 = 0x4000;
-const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const DEFAULT_TURN_PORT: u16 = 3478;
 const DEFAULT_TURNS_PORT: u16 = 5349;
 const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -206,57 +205,6 @@ pub(crate) fn parse_turn_tcp_url(raw_url: &str) -> Option<TurnTcpEndpoint> {
     })
 }
 
-/// Allocation-free check whether `datagram` is a well-formed RFC 5389 STUN message or RFC 5766
-/// `ChannelData` datagram that can be framed over a TCP/TLS TURN stream.
-pub(crate) fn is_valid_turn_tcp_datagram(datagram: &[u8]) -> bool {
-    let &[b0, b1, b2, b3, ..] = datagram else {
-        return false;
-    };
-    let first_u16 = u16::from_be_bytes([b0, b1]);
-    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
-
-    if (b0 & 0b1100_0000) == 0 {
-        if (length_u16 & 0b11) != 0 || datagram.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
-            return false;
-        }
-        STUN_HEADER_BYTES
-            .checked_add(length_u16)
-            .is_some_and(|total| datagram.len() >= total)
-    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
-        CHANNEL_DATA_HEADER_BYTES
-            .checked_add(length_u16)
-            .is_some_and(|total| datagram.len() >= total)
-    } else {
-        false
-    }
-}
-
-/// Encode an outbound STUN message or TURN `ChannelData` datagram for transmission over a
-/// stream-oriented TCP/TLS TURN connection (RFC 5766 §7.3 & §11.5).
-pub(crate) fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
-    if !is_valid_turn_tcp_datagram(datagram) {
-        return None;
-    }
-    let &[b0, _b1, b2, b3, ..] = datagram else {
-        return None;
-    };
-    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
-
-    if (b0 & 0b1100_0000) == 0 {
-        let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
-        Some(datagram.get(..total)?.to_vec())
-    } else {
-        let unpadded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(length_u16)?;
-        let slice = datagram.get(..unpadded_total)?;
-        let padded_data_len = (length_u16 + 3) & !3;
-        let padded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(padded_data_len)?;
-        let mut out = Vec::with_capacity(padded_total);
-        out.extend_from_slice(slice);
-        out.resize(padded_total, 0u8);
-        Some(out)
-    }
-}
-
 /// Extract the 12-byte STUN transaction ID if `pkt` is a STUN Request (RFC 5389 §6 class `0b00`).
 fn stun_request_transaction_id(pkt: &[u8]) -> Option<[u8; 12]> {
     let &[b0, b1, ..] = pkt else {
@@ -420,6 +368,11 @@ pub(crate) const fn turn_bridge_outbound_decision(
     }
 }
 
+/// Return whether an unmapped local client peer may initiate a new outbound TCP/TLS session.
+pub(crate) const fn may_spawn_turn_tcp_session(phase: TurnBridgePhase) -> bool {
+    matches!(phase, TurnBridgePhase::Active | TurnBridgePhase::Quiescing)
+}
+
 /// Pure transition `TurnBridgePhase × is_stun_control_response -> InboundTurnDecision`.
 pub(crate) const fn turn_bridge_inbound_decision(
     phase: TurnBridgePhase,
@@ -438,82 +391,12 @@ pub(crate) const fn turn_bridge_inbound_decision(
 /// Read a single RFC 5766 STUN message or `ChannelData` frame from a TCP/TLS stream.
 pub(crate) async fn read_turn_tcp_frame<R>(reader: &mut R) -> std::io::Result<Vec<u8>>
 where R: AsyncRead + Unpin {
-    let mut prefix = [0u8; 4];
-    reader.read_exact(&mut prefix).await?;
-    let [b0, b1, b2, b3] = prefix;
-    let first_u16 = u16::from_be_bytes([b0, b1]);
-    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
-
-    if (b0 & 0b1100_0000) == 0 {
-        if (length_u16 & 0b11) != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unaligned STUN message length over TCP: {length_u16}"),
-            ));
-        }
-        let mut hdr_rest = [0u8; 16];
-        tokio::time::timeout(
-            TURN_TCP_FRAME_BODY_TIMEOUT,
-            reader.read_exact(&mut hdr_rest),
-        )
-        .await
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out reading STUN header over TCP",
-            )
-        })??;
-        if hdr_rest.get(..4) != Some(&STUN_MAGIC_COOKIE) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid STUN magic cookie on TCP stream",
-            ));
-        }
-        let mut frame = vec![0u8; STUN_HEADER_BYTES.saturating_add(length_u16)];
-        if let Some(head) = frame.get_mut(..4) {
-            head.copy_from_slice(&prefix);
-        }
-        if let Some(rest) = frame.get_mut(4..STUN_HEADER_BYTES) {
-            rest.copy_from_slice(&hdr_rest);
-        }
-        if let Some(body) = frame.get_mut(STUN_HEADER_BYTES..) {
-            if !body.is_empty() {
-                tokio::time::timeout(TURN_TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
-                    .await
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "timed out reading STUN body over TCP",
-                        )
-                    })??;
-            }
-        }
-        Ok(frame)
-    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
-        let padded_body_bytes = (length_u16 + 3) & !3;
-        let mut frame = vec![0u8; CHANNEL_DATA_HEADER_BYTES.saturating_add(padded_body_bytes)];
-        if let Some(head) = frame.get_mut(..4) {
-            head.copy_from_slice(&prefix);
-        }
-        if let Some(body) = frame.get_mut(4..) {
-            if !body.is_empty() {
-                tokio::time::timeout(TURN_TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
-                    .await
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "timed out reading ChannelData body over TCP",
-                        )
-                    })??;
-            }
-        }
-        Ok(frame)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid TURN TCP frame header: 0x{first_u16:04x}"),
-        ))
-    }
+    crate::turn_tcp_framing::read_turn_tcp_frame(
+        reader,
+        BRIDGE_UDP_MTU,
+        TURN_TCP_FRAME_BODY_TIMEOUT,
+    )
+    .await
 }
 
 async fn can_use_os_udp() -> bool {
@@ -702,45 +585,6 @@ async fn run_stream_io<S>(
     }
 }
 
-fn is_forbidden_turn_tcp_addr(host: &str, addr: SocketAddr) -> bool {
-    if addr.port() == 0 {
-        return true;
-    }
-    match addr.ip() {
-        std::net::IpAddr::V4(v4) => {
-            let [first, second, _, _] = v4.octets();
-            if first == 0 || first >= 224 || (first == 169 && second == 254) {
-                return true;
-            }
-            if v4.is_loopback()
-                && !host.eq_ignore_ascii_case("localhost")
-                && host.parse::<std::net::IpAddr>() != Ok(std::net::IpAddr::V4(v4))
-            {
-                return true;
-            }
-            false
-        }
-        std::net::IpAddr::V6(v6) => {
-            if v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
-                return true;
-            }
-            if v6.is_loopback()
-                && !host.eq_ignore_ascii_case("localhost")
-                && host.parse::<std::net::IpAddr>() != Ok(std::net::IpAddr::V6(v6))
-            {
-                return true;
-            }
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_forbidden_turn_tcp_addr(
-                    host,
-                    SocketAddr::new(mapped.into(), addr.port()),
-                );
-            }
-            false
-        }
-    }
-}
-
 async fn connect_turn_tcp_endpoint(endpoint: &TurnTcpEndpoint) -> std::io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
         .await?
@@ -844,7 +688,7 @@ struct BridgeSession {
     last_active: Instant,
 }
 
-fn spawn_turn_tcp_bridge(
+pub(crate) fn spawn_turn_tcp_bridge(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     endpoint: TurnTcpEndpoint,
     inbound_cancel: CancellationToken,
@@ -922,6 +766,10 @@ fn spawn_turn_tcp_bridge(
                         framed = returned;
                     }
                 }
+            }
+
+            if !may_spawn_turn_tcp_session(phase) {
+                continue;
             }
 
             if sessions.len() >= MAX_BRIDGE_SESSIONS {

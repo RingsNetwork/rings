@@ -18,6 +18,10 @@ use rand::Rng;
 use rings_core::delegation::DelegateeKey;
 use rings_core::ecc::PublicKey;
 use rings_core::utils::SharedClock;
+use rings_transport::turn_tcp_framing::encode_turn_tcp_frame;
+use rings_transport::turn_tcp_framing::is_stun_control_response;
+use rings_transport::turn_tcp_framing::read_turn_tcp_frame_body;
+use rings_transport::turn_tcp_framing::STUN_HEADER_BYTES;
 use stun::agent::TransactionId;
 use stun::attributes::AttrType;
 use stun::attributes::ATTR_DONT_FRAGMENT;
@@ -65,7 +69,6 @@ use stun::textattrs::Realm;
 use stun::textattrs::Username;
 use stun::uattrs::UnknownAttributes;
 use stun::xoraddr::XorMappedAddress;
-use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -82,7 +85,6 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use turn::allocation::five_tuple::FiveTuple;
 use turn::allocation::AllocationInfo;
-use turn::auth::AuthHandler;
 use turn::proto::chandata::ChannelData;
 use turn::proto::channum::ChannelNumber;
 use turn::proto::data::Data;
@@ -107,11 +109,10 @@ use crate::config::TurnServerConfig;
 use crate::config::DEFAULT_PORT_RANGE_MAX_RETRIES;
 use crate::credentials::format_turn_server_url;
 use crate::credentials::SignedTurnSessionTicket;
-use crate::credentials::TurnAuthIdentity;
 use crate::credentials::TurnCredentialSigner;
-use crate::credentials::TurnCredentials;
+use crate::credentials::VerifiedTurnAuth;
 use crate::error::Result;
-use crate::relay_backend::BeginAllocateDecision;
+use crate::relay_backend::BeginAllocateOutcome;
 use crate::relay_backend::CompleteAllocateDecision;
 use crate::relay_backend::CorePermissionError;
 use crate::relay_backend::CoreReserveError;
@@ -122,13 +123,8 @@ use crate::relay_backend::TurnDatagramRelayFactory;
 use crate::relay_backend::TurnFiveTupleKey;
 use crate::relay_backend::TurnRelayCloseHandle;
 
-const STUN_HEADER_BYTES: usize = 20;
 const INBOUND_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
 const STUN_ATTR_HEADER_BYTES: usize = 4;
-const STUN_MAGIC_COOKIE: [u8; 4] = [0x21, 0x12, 0xA4, 0x42];
-const CHANNEL_DATA_HEADER_BYTES: usize = 4;
-const CHANNEL_NUMBER_MIN: u16 = 0x4000;
-const CHANNEL_NUMBER_MAX: u16 = 0x7FFF;
 const PROTO_TCP: Protocol = Protocol(6);
 const MAX_ALLOCATION_OUTBOUND_QUEUE: usize = 64;
 const MAX_ALLOCATION_CONTROL_QUEUE: usize = 16;
@@ -408,7 +404,7 @@ type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDel
 /// Result of reserving a TURN relay session on a [`TurnServer`] (#1292).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TurnSessionReservation {
-    /// Server-signed unlinkable session ticket used to derive [`TurnCredentials`].
+    /// Server-signed unlinkable session ticket used to derive [`crate::credentials::TurnCredentials`].
     pub ticket: SignedTurnSessionTicket,
     /// This TURN server's connectable advertised address.
     pub server_addr: SocketAddr,
@@ -652,6 +648,11 @@ impl ServerAllocationBook {
         self.take_open_ids(&evicted)
     }
 
+    fn prune_expired_allocations_and_take(&mut self, now_ms: u128) -> Vec<Arc<ManagedAllocation>> {
+        let evicted = self.core.prune_expired_allocations(now_ms);
+        self.take_open_ids(&evicted)
+    }
+
     fn get_active(
         &mut self,
         five_tuple: &FiveTuple,
@@ -686,126 +687,6 @@ impl ServerAllocationBook {
             .active_allocations()
             .get(&tuple_key)
             .map(|active| active.username.clone())
-    }
-}
-
-fn encode_turn_tcp_frame(datagram: &[u8]) -> Option<Vec<u8>> {
-    let &[b0, b1, b2, b3, ..] = datagram else {
-        return None;
-    };
-    let first_u16 = u16::from_be_bytes([b0, b1]);
-    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
-
-    if (b0 & 0b1100_0000) == 0 {
-        if (length_u16 & 0b11) != 0 {
-            return None;
-        }
-        let cookie = datagram.get(4..8)?;
-        if cookie != STUN_MAGIC_COOKIE {
-            return None;
-        }
-        let total = STUN_HEADER_BYTES.checked_add(length_u16)?;
-        let slice = datagram.get(..total)?;
-        Some(slice.to_vec())
-    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
-        let unpadded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(length_u16)?;
-        let slice = datagram.get(..unpadded_total)?;
-        let padded_data_len = (length_u16 + 3) & !3;
-        let padded_total = CHANNEL_DATA_HEADER_BYTES.checked_add(padded_data_len)?;
-        let mut out = Vec::with_capacity(padded_total);
-        out.extend_from_slice(slice);
-        out.resize(padded_total, 0u8);
-        Some(out)
-    } else {
-        None
-    }
-}
-
-fn is_stun_control_response(datagram: &[u8]) -> bool {
-    let Some(&b0) = datagram.first() else {
-        return false;
-    };
-    if datagram.get(4..8) != Some(&STUN_MAGIC_COOKIE) {
-        return false;
-    }
-    // RFC 5389 Figure 3: STUN messages have top 2 bits 00, and STUN class bit C1 (bit 0 of byte 0)
-    // is 1 for both Success Response (class 0b10) and Error Response (class 0b11), and 0 for
-    // Request (0b00) and Indication (0b01, such as Data Indication 0x0017).
-    (b0 & 0b1100_0001) == 0b0000_0001
-}
-
-async fn read_turn_tcp_frame_body<R>(reader: &mut R, prefix: [u8; 4]) -> std::io::Result<Vec<u8>>
-where R: AsyncRead + Unpin {
-    let [b0, b1, b2, b3] = prefix;
-    let first_u16 = u16::from_be_bytes([b0, b1]);
-    let length_u16 = usize::from(u16::from_be_bytes([b2, b3]));
-
-    if (b0 & 0b1100_0000) == 0 {
-        if (length_u16 & 0b11) != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("unaligned STUN message length over TCP: {length_u16}"),
-            ));
-        }
-        let mut hdr_rest = [0u8; 16];
-        tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(&mut hdr_rest))
-            .await
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "timed out reading STUN header over TCP",
-                )
-            })??;
-        if hdr_rest.get(..4) != Some(&STUN_MAGIC_COOKIE) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid STUN magic cookie on TCP stream",
-            ));
-        }
-        let mut frame = vec![0u8; STUN_HEADER_BYTES.saturating_add(length_u16)];
-        if let Some(head) = frame.get_mut(..4) {
-            head.copy_from_slice(&prefix);
-        }
-        if let Some(rest) = frame.get_mut(4..STUN_HEADER_BYTES) {
-            rest.copy_from_slice(&hdr_rest);
-        }
-        if let Some(body) = frame.get_mut(STUN_HEADER_BYTES..) {
-            if !body.is_empty() {
-                tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
-                    .await
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "timed out reading STUN body over TCP",
-                        )
-                    })??;
-            }
-        }
-        Ok(frame)
-    } else if (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&first_u16) {
-        let padded_body_bytes = (length_u16 + 3) & !3;
-        let mut frame = vec![0u8; CHANNEL_DATA_HEADER_BYTES.saturating_add(padded_body_bytes)];
-        if let Some(head) = frame.get_mut(..4) {
-            head.copy_from_slice(&prefix);
-        }
-        if let Some(body) = frame.get_mut(4..) {
-            if !body.is_empty() {
-                tokio::time::timeout(TCP_FRAME_BODY_TIMEOUT, reader.read_exact(body))
-                    .await
-                    .map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "timed out reading ChannelData body over TCP",
-                        )
-                    })??;
-            }
-        }
-        Ok(frame)
-    } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("invalid TURN TCP frame header: 0x{first_u16:04x}"),
-        ))
     }
 }
 
@@ -1090,7 +971,7 @@ impl TcpTurnListenerConn {
                                 break;
                             }
                             let frame_res = tokio::select! {
-                                res = read_turn_tcp_frame_body(&mut reader, prefix) => res,
+                                res = read_turn_tcp_frame_body(&mut reader, prefix, INBOUND_MTU, TCP_FRAME_BODY_TIMEOUT) => res,
                                 _ = evict_read.changed() => break,
                                 res = peer_shutdown_read.changed() => {
                                     if res.is_err() || *peer_shutdown_read.borrow() {
@@ -1740,6 +1621,7 @@ async fn issue_nonce_challenge(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authenticate_turn_request(
     conn: &Arc<dyn Conn + Send + Sync>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
@@ -1747,8 +1629,9 @@ async fn authenticate_turn_request(
     auth_handler: &DelegationAuthHandler,
     realm: &str,
     five_tuple: FiveTuple,
+    expected_owner: Option<&str>,
     m: &Message,
-) -> Option<(Username, Vec<u8>)> {
+) -> Option<(Username, VerifiedTurnAuth, Vec<u8>)> {
     let src_addr = five_tuple.src_addr;
     if !m.contains(ATTR_MESSAGE_INTEGRITY) {
         issue_nonce_challenge(
@@ -1811,16 +1694,27 @@ async fn authenticate_turn_request(
         return None;
     }
 
-    let Ok(key) = auth_handler.auth_handle(&username_attr.text, &realm_attr.text, src_addr) else {
-        send_unauthenticated_error(conn, src_addr, m, CODE_UNAUTHORIZED, b"Unauthorized").await;
-        return None;
-    };
+    let (verified_auth, key) =
+        match auth_handler.authenticate(&username_attr.text, &realm_attr.text, expected_owner) {
+            Ok(verified_and_key) => verified_and_key,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    src_addr = %src_addr,
+                    realm = %realm_attr.text,
+                    "rejected TURN request authentication"
+                );
+                send_unauthenticated_error(conn, src_addr, m, CODE_UNAUTHORIZED, b"Unauthorized")
+                    .await;
+                return None;
+            }
+        };
     if MessageIntegrity(key.clone()).check(&mut m.clone()).is_err() {
         send_unauthenticated_error(conn, src_addr, m, CODE_UNAUTHORIZED, b"Unauthorized").await;
         return None;
     }
 
-    Some((username_attr, key))
+    Some((username_attr, verified_auth, key))
 }
 
 async fn send_authenticated_error(
@@ -2443,6 +2337,7 @@ async fn handle_authenticated_allocate(
     src_addr: SocketAddr,
     m: &Message,
     username_attr: Username,
+    verified_auth: &VerifiedTurnAuth,
     mi_key: Vec<u8>,
 ) {
     let mut requested_transport = RequestedTransport::default();
@@ -2644,19 +2539,16 @@ async fn handle_authenticated_allocate(
     };
     let tcp_authenticated_tx = tcp_peer_ctx.map(|(_, tx)| tx);
 
-    let ticket_session_id = match TurnCredentials::decode_username_parts(&username_attr.text) {
-        Ok((TurnAuthIdentity::SessionTicket(signed_ticket), ..)) => {
-            Some(signed_ticket.ticket.session_id)
-        }
-        _ => None,
-    };
+    let ticket_session_id = verified_auth
+        .session_ticket()
+        .map(|signed_ticket| signed_ticket.ticket.session_id);
 
     let tuple_key = TurnFiveTupleKey::from(five_tuple);
     let mut now_ms = clock.now_ms();
     for _ in 0..2 {
         let pre_expired = {
             let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.prune_and_take_expired(now_ms)
+            guard.prune_expired_allocations_and_take(now_ms)
         };
         if pre_expired.is_empty() {
             break;
@@ -2690,7 +2582,7 @@ async fn handle_authenticated_allocate(
         } else {
             guard.core.max_allocations()
         };
-        let decision = guard.core.begin_allocate_with_busy_slots(
+        let alloc_step = guard.core.begin_allocate_with_busy_slots(
             tuple_key,
             m.transaction_id.0,
             username_attr.text.clone(),
@@ -2699,8 +2591,9 @@ async fn handle_authenticated_allocate(
             now_ms,
             extra_busy_slots,
         );
-        let expired = guard.take_open_ids(decision.expired_open_ids());
-        let cached = if matches!(decision, BeginAllocateDecision::ReplayActive { .. }) {
+        let expired = guard.take_open_ids(alloc_step.expired_open_ids());
+        let decision = alloc_step.outcome;
+        let cached = if matches!(decision, BeginAllocateOutcome::ReplayActive { .. }) {
             guard
                 .allocate_responses
                 .get(&five_tuple)
@@ -2711,7 +2604,7 @@ async fn handle_authenticated_allocate(
             None
         };
         let pending_ctx = match (&decision, maybe_permit) {
-            (&BeginAllocateDecision::StartOpen { open_id, .. }, Some(permit)) => {
+            (&BeginAllocateOutcome::StartOpen { open_id }, Some(permit)) => {
                 let (cancel_tx, cancel_rx) = watch::channel(false);
                 guard.pending_cancels.insert(open_id, cancel_tx);
                 Some((permit, cancel_rx))
@@ -2723,14 +2616,14 @@ async fn handle_authenticated_allocate(
     close_allocations(expired_allocs).await;
 
     match decision {
-        BeginAllocateDecision::ReplayActive { .. } => {
+        BeginAllocateOutcome::ReplayActive { .. } => {
             if let Some(raw) = cached_replay {
                 let _ = conn.send_to(&raw, src_addr).await;
             }
         }
-        BeginAllocateDecision::CoalescePending { .. }
-        | BeginAllocateDecision::RejectShuttingDown { .. } => {}
-        BeginAllocateDecision::RejectAllocationMismatch { .. } => {
+        BeginAllocateOutcome::CoalescePending { .. }
+        | BeginAllocateOutcome::RejectShuttingDown => {}
+        BeginAllocateOutcome::RejectAllocationMismatch => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2742,7 +2635,7 @@ async fn handle_authenticated_allocate(
             )
             .await;
         }
-        BeginAllocateDecision::RejectTicketUnknown { .. } => {
+        BeginAllocateOutcome::RejectTicketUnknown => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2754,7 +2647,7 @@ async fn handle_authenticated_allocate(
             )
             .await;
         }
-        BeginAllocateDecision::RejectTicketExpired { .. } => {
+        BeginAllocateOutcome::RejectTicketExpired => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2766,7 +2659,7 @@ async fn handle_authenticated_allocate(
             )
             .await;
         }
-        BeginAllocateDecision::RejectInsufficientCapacity { .. } => {
+        BeginAllocateOutcome::RejectInsufficientCapacity => {
             send_authenticated_error(
                 conn,
                 src_addr,
@@ -2778,7 +2671,7 @@ async fn handle_authenticated_allocate(
             )
             .await;
         }
-        BeginAllocateDecision::StartOpen { open_id, .. } => {
+        BeginAllocateOutcome::StartOpen { open_id } => {
             let Some((relay_permit, cancel_rx)) = pending_ctx else {
                 {
                     let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3551,6 +3444,7 @@ pub struct TurnServer {
     max_reservation_ttl: Duration,
     book: Arc<SyncMutex<ServerAllocationBook>>,
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
+    start_tx: watch::Sender<bool>,
     shutdown_tx: watch::Sender<bool>,
     done_rx: watch::Receiver<bool>,
 }
@@ -3558,6 +3452,23 @@ pub struct TurnServer {
 impl TurnServer {
     /// Bind the UDP listener socket and start the TURN server with [`DelegationAuthHandler`].
     pub async fn start(config: TurnServerConfig) -> Result<Self> {
+        Self::start_with_gate(config, true).await
+    }
+
+    /// Bind the TURN listener sockets and initialize [`TurnServer`] paused so callers can finish
+    /// attaching runtime dependencies (such as [`crate::TurnDatagramRelayFactory`]) before calling
+    /// [`Self::resume`] to begin reading incoming packets.
+    pub async fn start_paused(config: TurnServerConfig) -> Result<Self> {
+        Self::start_with_gate(config, false).await
+    }
+
+    /// Unblock a server started with [`Self::start_paused`] so its listener reader tasks begin
+    /// accepting and processing TURN requests.
+    pub fn resume(&self) {
+        let _ = self.start_tx.send_replace(true);
+    }
+
+    async fn start_with_gate(config: TurnServerConfig, initially_running: bool) -> Result<Self> {
         config.relay.validate()?;
         if let Some(advertised_ip) = config.advertised_ip {
             if advertised_ip.is_ipv4() != config.listen_addr.ip().is_ipv4() {
@@ -3619,6 +3530,7 @@ impl TurnServer {
             max_permissions,
         )));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
+        let (start_tx, start_rx) = watch::channel(initially_running);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (done_tx, done_rx) = watch::channel(false);
         let channel_bind_timeout = if config.channel_bind_timeout.is_zero() {
@@ -3639,6 +3551,7 @@ impl TurnServer {
             config.peer_policy,
             config.max_nonces.max(1),
             max_allocations,
+            start_rx,
             shutdown_rx,
             done_tx,
         ));
@@ -3653,6 +3566,7 @@ impl TurnServer {
             max_reservation_ttl,
             book,
             nonces,
+            start_tx,
             shutdown_tx,
             done_rx,
         })
@@ -3671,9 +3585,43 @@ impl TurnServer {
         peer_policy: RelayPeerPolicy,
         max_nonces: usize,
         max_allocations: usize,
+        mut start_rx: watch::Receiver<bool>,
         mut shutdown_rx: watch::Receiver<bool>,
         done_tx: watch::Sender<bool>,
     ) {
+        while !*start_rx.borrow_and_update() {
+            if *shutdown_rx.borrow_and_update() {
+                for listener in &listeners {
+                    listener.shutdown_listener().await;
+                }
+                drop(listeners);
+                let _ = done_tx.send_replace(true);
+                return;
+            }
+            tokio::select! {
+                res = start_rx.changed() => {
+                    if res.is_err() {
+                        for listener in &listeners {
+                            listener.shutdown_listener().await;
+                        }
+                        drop(listeners);
+                        let _ = done_tx.send_replace(true);
+                        return;
+                    }
+                }
+                res = shutdown_rx.changed() => {
+                    if res.is_err() || *shutdown_rx.borrow() {
+                        for listener in &listeners {
+                            listener.shutdown_listener().await;
+                        }
+                        drop(listeners);
+                        let _ = done_tx.send_replace(true);
+                        return;
+                    }
+                }
+            }
+        }
+
         let (pkt_tx, mut pkt_rx) =
             tokio::sync::mpsc::channel::<(Vec<u8>, SocketAddr, Arc<RecordingConn>)>(256);
         let mut reader_handles = Vec::with_capacity(listeners.len());
@@ -3923,10 +3871,6 @@ impl TurnServer {
             } else {
                 existing_alloc.as_ref().map(|alloc| alloc.username.clone())
             };
-            if let Some(owner) = expected_owner {
-                auth_handler.set_expected_allocation_owner(addr, Some(owner));
-            }
-
             let auth_res = authenticate_turn_request(
                 &recording_conn_dyn,
                 &nonces,
@@ -3934,12 +3878,12 @@ impl TurnServer {
                 &auth_handler,
                 &realm,
                 five_tuple,
+                expected_owner.as_deref(),
                 &decoded_msg,
             )
             .await;
-            auth_handler.set_expected_allocation_owner(addr, None);
 
-            let Some((username_attr, mi_key)) = auth_res else {
+            let Some((username_attr, verified_auth, mi_key)) = auth_res else {
                 continue;
             };
 
@@ -3956,6 +3900,7 @@ impl TurnServer {
                         addr,
                         &decoded_msg,
                         username_attr,
+                        &verified_auth,
                         mi_key,
                     )
                     .await;

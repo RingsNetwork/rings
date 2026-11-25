@@ -20,7 +20,8 @@ workspace = true
 # `web-sys-webrtc`) explicitly. The crate root rejects native+wasm backend combinations.
 default = ["tokio/rt", "tokio/time", "tokio-util", "rings-runtime/tokio"]
 dummy = ["rand", "lazy_static", "tokio/rt", "tokio/sync", "tokio/time", "rings-runtime/tokio"]
-native-webrtc = ["webrtc", "tokio-util", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync", "tokio/time", "dep:tokio-rustls", "dep:webpki-roots", "rings-runtime/tokio"]
+turn-tcp-io = ["tokio/io-util", "tokio/time"]
+native-webrtc = ["turn-tcp-io", "webrtc", "tokio-util", "tokio/io-util", "tokio/macros", "tokio/net", "tokio/rt", "tokio/sync", "tokio/time", "dep:tokio-rustls", "dep:webpki-roots", "rings-runtime/tokio"]
 web-sys-webrtc = ["dep:futures-util", "dep:futures-channel", "wasm-bindgen", "js-sys", "web-sys", "wasm-bindgen-futures", "rings-runtime/browser"]
 
 [dependencies]
@@ -65,6 +66,7 @@ async-trait = { workspace = true }
 bytes = { version = "1.4.0", features = ["serde"] }
 dashmap = "5.5.1"
 rings-codec = { workspace = true }
+rings-network-policy = { workspace = true }
 rings-runtime = { workspace = true }
 serde = "1.0.183"
 serde_json = "1.0.106"

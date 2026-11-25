@@ -56,6 +56,9 @@ pub use credentials::has_turn_pubkey_query_param;
 pub use credentials::pack_turn_account_auth;
 pub use credentials::pack_turn_auth;
 pub use credentials::pack_turn_did_auth;
+pub use credentials::AccountSessionClaim;
+pub use credentials::DecodedTurnClaim;
+pub use credentials::DecodedTurnUsername;
 pub use credentials::SignedTurnSessionTicket;
 pub use credentials::TurnAuthIdentity;
 pub use credentials::TurnCredentialSigner;
@@ -72,7 +75,9 @@ pub use error::TurnError;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::ActiveAllocationSpec;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
-pub use relay_backend::BeginAllocateDecision;
+pub use relay_backend::BeginAllocateOutcome;
+#[cfg(all(feature = "server", not(target_family = "wasm")))]
+pub use relay_backend::BeginAllocateStep;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
 pub use relay_backend::CompleteAllocateDecision;
 #[cfg(all(feature = "server", not(target_family = "wasm")))]
@@ -3057,7 +3062,7 @@ mod tests {
 
     #[test]
     fn turn_allocation_core_install_permissions_returns_expired_open_id() {
-        use crate::relay_backend::BeginAllocateDecision;
+        use crate::relay_backend::BeginAllocateOutcome;
         use crate::relay_backend::CompleteAllocateDecision;
         use crate::relay_backend::CorePermissionError;
         use crate::relay_backend::TurnFiveTupleKey;
@@ -3068,8 +3073,9 @@ mod tests {
             dst_addr: "127.0.0.1:3478".parse().unwrap(),
             protocol: 17,
         };
-        let BeginAllocateDecision::StartOpen { open_id, .. } =
-            core.begin_allocate(tuple, [7u8; 12], "u".to_string(), None, 1_000, 100)
+        let BeginAllocateOutcome::StartOpen { open_id } = core
+            .begin_allocate(tuple, [7u8; 12], "u".to_string(), None, 1_000, 100)
+            .outcome
         else {
             panic!("expected StartOpen");
         };
@@ -3355,6 +3361,152 @@ mod tests {
         unbounded_cfg.max_allocations = usize::MAX;
         let unbounded_server = TurnServer::start(unbounded_cfg).await?;
         unbounded_server.close().await?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_begin_allocate_distinguishes_expired_vs_unknown_ticket() {
+        let mut core = TurnAllocationCore::new(2, 4, 4);
+        let tuple = TurnFiveTupleKey {
+            src_addr: "127.0.0.1:42000".parse().unwrap(),
+            dst_addr: "127.0.0.1:3478".parse().unwrap(),
+            protocol: 17,
+        };
+        let expired_sid = [1u8; 16];
+        core.reserve_ticket(expired_sid, 1_500, 1_000).unwrap();
+
+        // Unknown ticket is rejected as RejectTicketUnknown.
+        assert_eq!(
+            core.begin_allocate(
+                tuple,
+                [2u8; 12],
+                "u-unknown".to_string(),
+                Some([9u8; 16]),
+                1_000,
+                1_200,
+            )
+            .outcome,
+            BeginAllocateOutcome::RejectTicketUnknown
+        );
+
+        // Expired reserved ticket returns RejectTicketExpired on first Allocate, then prunes it.
+        assert_eq!(
+            core.begin_allocate(
+                tuple,
+                [3u8; 12],
+                "u-expired".to_string(),
+                Some(expired_sid),
+                1_000,
+                1_501,
+            )
+            .outcome,
+            BeginAllocateOutcome::RejectTicketExpired
+        );
+        assert_eq!(
+            core.begin_allocate(
+                tuple,
+                [4u8; 12],
+                "u-expired".to_string(),
+                Some(expired_sid),
+                1_000,
+                1_502,
+            )
+            .outcome,
+            BeginAllocateOutcome::RejectTicketUnknown
+        );
+
+        // Valid reserved ticket within window enters StartOpen.
+        let valid_sid = [5u8; 16];
+        core.reserve_ticket(valid_sid, 2_000, 1_600).unwrap();
+        assert!(matches!(
+            core.begin_allocate(
+                tuple,
+                [5u8; 12],
+                "u-valid".to_string(),
+                Some(valid_sid),
+                1_000,
+                2_000,
+            )
+            .outcome,
+            BeginAllocateOutcome::StartOpen { .. }
+        ));
+    }
+
+    #[test]
+    fn test_delegation_auth_handler_authenticate_enforces_expected_owner_statelessly() {
+        let now_ms = 1_700_000_000_000_u128;
+        let clock: rings_core::utils::SharedClock = Arc::new(ManualClock::new(now_ms));
+        let server_key = SecretKey::random();
+        let handler = DelegationAuthHandler::with_server_key_and_clock(
+            TurnAdmissionPolicy::AllowAnyDelegation,
+            server_key,
+            clock,
+        );
+
+        let key1 = DelegateeKey::new_with_seckey_at(&SecretKey::random(), 60_000, now_ms).unwrap();
+        let key2 = DelegateeKey::new_with_seckey_at(&SecretKey::random(), 60_000, now_ms).unwrap();
+        let creds1 = TurnCredentials::from_delegatee_key(&key1, handler.server_pubkey()).unwrap();
+        let creds2 = TurnCredentials::from_delegatee_key(&key2, handler.server_pubkey()).unwrap();
+
+        let (verified1, _) = handler
+            .authenticate(&creds1.username, "rings", Some(&creds1.username))
+            .unwrap();
+        assert_eq!(verified1.did(), key1.delegator_did());
+
+        let err = handler
+            .authenticate(&creds2.username, "rings", Some(&creds1.username))
+            .unwrap_err();
+        assert!(matches!(err, TurnError::AllocationOwnerMismatch));
+
+        // Simultaneous independent request without expected_owner succeeds without interference.
+        let (verified2, _) = handler
+            .authenticate(&creds2.username, "rings", None)
+            .unwrap();
+        assert_eq!(verified2.did(), key2.delegator_did());
+    }
+
+    #[tokio::test]
+    async fn test_turn_server_start_paused_holds_packets_until_resume_and_closes_cleanly(
+    ) -> Result<()> {
+        let paused_only = TurnServer::start_paused(TurnServerConfig::loopback_ephemeral()).await?;
+        paused_only.close().await?;
+
+        let server = TurnServer::start_paused(TurnServerConfig::loopback_ephemeral()).await?;
+        let sock = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).await?;
+        let tx_id = TransactionId::new();
+        let mut binding_req = Message::new();
+        binding_req
+            .build(&[
+                Box::new(tx_id),
+                Box::new(MessageType::new(
+                    stun::message::METHOD_BINDING,
+                    CLASS_REQUEST,
+                )),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        sock.send_to(&binding_req.raw, server.local_addr()).await?;
+
+        let mut buf = [0u8; 1500];
+        let early = tokio::time::timeout(Duration::from_millis(60), sock.recv_from(&mut buf)).await;
+        assert!(
+            early.is_err(),
+            "paused TurnServer must not process incoming packets before resume()"
+        );
+
+        server.resume();
+        let (n, _) = tokio::time::timeout(Duration::from_secs(1), sock.recv_from(&mut buf))
+            .await
+            .expect("resumed TurnServer must answer buffered STUN Binding request")?;
+        let mut resp = Message {
+            raw: buf[..n].to_vec(),
+            ..Default::default()
+        };
+        resp.decode().unwrap();
+        assert_eq!(resp.transaction_id, tx_id);
+        assert_eq!(resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        server.close().await?;
         Ok(())
     }
 }

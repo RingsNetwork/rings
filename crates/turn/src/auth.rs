@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -16,6 +15,7 @@ use rings_core::utils::SystemClock;
 use turn::auth::generate_auth_key;
 use turn::auth::AuthHandler;
 
+use crate::credentials::DecodedTurnClaim;
 use crate::credentials::TurnAuthIdentity;
 use crate::credentials::TurnCredentials;
 use crate::credentials::VerifiedTurnAuth;
@@ -109,7 +109,6 @@ pub struct DelegationAuthHandler {
     server_key: SecretKey,
     clock: SharedClock,
     cache: Mutex<VerifiedAuthCache>,
-    expected_allocation_owners: Mutex<HashMap<SocketAddr, String>>,
 }
 
 impl Default for DelegationAuthHandler {
@@ -144,7 +143,6 @@ impl DelegationAuthHandler {
             cache: Mutex::new(VerifiedAuthCache::new(
                 DEFAULT_VERIFIED_DELEGATION_CACHE_CAPACITY,
             )),
-            expected_allocation_owners: Mutex::new(HashMap::new()),
         }
     }
 
@@ -163,30 +161,6 @@ impl DelegationAuthHandler {
         self.server_key.pubkey()
     }
 
-    pub(crate) fn set_expected_allocation_owner(
-        &self,
-        src_addr: SocketAddr,
-        owner_username: Option<String>,
-    ) {
-        let mut map = self
-            .expected_allocation_owners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(owner) = owner_username {
-            map.insert(src_addr, owner);
-        } else {
-            map.remove(&src_addr);
-        }
-    }
-
-    fn expected_allocation_owner(&self, src_addr: SocketAddr) -> Option<String> {
-        self.expected_allocation_owners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&src_addr)
-            .cloned()
-    }
-
     /// Verify a TURN `username` and `realm` at the handler's current clock instant and compute
     /// the 16-byte RFC 5389 `MESSAGE-INTEGRITY` key.
     pub fn verify_and_derive_key(
@@ -194,27 +168,37 @@ impl DelegationAuthHandler {
         username: &str,
         realm: &str,
     ) -> Result<(VerifiedTurnAuth, Vec<u8>)> {
-        self.verify_and_derive_key_for_allocation(username, realm, false)
+        self.authenticate(username, realm, None)
     }
 
-    fn verify_and_derive_key_for_allocation(
+    /// Authenticate a TURN `username` and `realm` against this handler's policy and clock,
+    /// optionally enforcing an established allocation owner `expected_owner` cleanly without
+    /// mutable handler state.
+    pub fn authenticate(
         &self,
         username: &str,
         realm: &str,
-        established_allocation: bool,
+        expected_owner: Option<&str>,
     ) -> Result<(VerifiedTurnAuth, Vec<u8>)> {
+        let established_allocation = match expected_owner {
+            Some(owner) if owner == username => true,
+            Some(_) => return Err(TurnError::AllocationOwnerMismatch),
+            None => false,
+        };
         let now_ms = self.clock.now_ms();
-        let (identity, _, _, _) = TurnCredentials::decode_username_parts(username)?;
-        let verification_ts_ms = match (&identity, established_allocation) {
-            (TurnAuthIdentity::Delegation(delegation), true) => delegation.created_at_ms(),
-            (TurnAuthIdentity::SessionTicket(signed), true) => signed.ticket.expires_at_ms,
+        let decoded = TurnCredentials::decode_username(username)?;
+        let verification_ts_ms = match (&decoded.claim, established_allocation) {
+            (DecodedTurnClaim::Delegation(delegation), true) => delegation.created_at_ms(),
+            (DecodedTurnClaim::SessionTicket(signed), true) => signed.ticket.expires_at_ms,
             _ => now_ms,
         };
-        let cache_entry = match &identity {
-            TurnAuthIdentity::Delegation(delegation) => {
+        let cache_entry = match &decoded.claim {
+            DecodedTurnClaim::Delegation(delegation) => {
                 CacheEntry::Delegation(delegation.digest()?)
             }
-            TurnAuthIdentity::Account(_) | TurnAuthIdentity::SessionTicket(_) => {
+            DecodedTurnClaim::Account(_)
+            | DecodedTurnClaim::AccountSession(_)
+            | DecodedTurnClaim::SessionTicket(_) => {
                 CacheEntry::DirectAccount(keccak256(username.as_bytes()))
             }
         };
@@ -226,10 +210,14 @@ impl DelegationAuthHandler {
             .contains(&cache_entry);
 
         let verified = if is_cached {
-            TurnCredentials::verify_established_at(username, &self.server_key, verification_ts_ms)?
+            TurnCredentials::verify_decoded_established_at(
+                decoded,
+                &self.server_key,
+                verification_ts_ms,
+            )?
         } else {
             let verified =
-                TurnCredentials::verify_at(username, &self.server_key, verification_ts_ms)?;
+                TurnCredentials::verify_decoded_at(decoded, &self.server_key, verification_ts_ms)?;
             self.cache
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -256,19 +244,7 @@ impl AuthHandler for DelegationAuthHandler {
         realm: &str,
         src_addr: SocketAddr,
     ) -> std::result::Result<Vec<u8>, turn::Error> {
-        let established_allocation = match self.expected_allocation_owner(src_addr) {
-            Some(expected_owner) if expected_owner == username => true,
-            Some(_) => {
-                tracing::debug!(
-                    %src_addr,
-                    %realm,
-                    "rejected TURN request: username does not match established allocation owner"
-                );
-                return Err(turn::Error::ErrNoSuchUser);
-            }
-            None => false,
-        };
-        match self.verify_and_derive_key_for_allocation(username, realm, established_allocation) {
+        match self.authenticate(username, realm, None) {
             Ok((verified, key)) => {
                 match &verified.identity {
                     TurnAuthIdentity::Delegation(delegation) => {
@@ -277,7 +253,6 @@ impl AuthHandler for DelegationAuthHandler {
                             delegatee = %delegation.delegatee_did(),
                             %src_addr,
                             %realm,
-                            established_allocation,
                             "admitted TURN request via Delegation signature"
                         );
                     }
@@ -294,7 +269,6 @@ impl AuthHandler for DelegationAuthHandler {
                             ephemeral_did = %signed.ticket.ephemeral_did(),
                             %src_addr,
                             %realm,
-                            established_allocation,
                             "admitted TURN request via unlinkable SessionTicket"
                         );
                     }

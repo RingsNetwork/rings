@@ -7,6 +7,8 @@
 //! connect to that retained snapshot so DNS rebinding cannot change the destination.
 
 use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::net::SocketAddr;
 
 use url::Host;
 use url::Url;
@@ -173,6 +175,58 @@ const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
     None
 }
 
+const fn is_forbidden_turn_tcp_ipv4(v4: Ipv4Addr, host_is_explicit_loopback: bool) -> bool {
+    let [first, ..] = v4.octets();
+    v4.is_unspecified()
+        || v4.is_multicast()
+        || v4.is_broadcast()
+        || v4.is_link_local()
+        || first == 0
+        || first >= 224
+        || (v4.is_loopback() && !host_is_explicit_loopback)
+}
+
+/// Return whether dialing `addr` resolved for TURN-over-TCP `host` violates egress policy.
+///
+/// Rejects port `0`, unspecified/reserved (`0.0.0.0/8`), multicast/Class E (`>= 224.0.0.0`),
+/// broadcast, link-local (`169.254.0.0/16`, `fe80::/10`), and loopback targets — including IPv4
+/// addresses embedded inside IPv4-compatible (`::/96`), IPv4-mapped (`::ffff:0:0/96`), NAT64
+/// (`64:ff9b::/96`), and 6to4 (`2002::/16`) IPv6 prefixes — unless `host` explicitly names
+/// `localhost` or a loopback IP literal.
+pub fn is_forbidden_turn_tcp_addr(host: &str, addr: SocketAddr) -> bool {
+    if addr.port() == 0 {
+        return true;
+    }
+    let host_ip = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .parse::<IpAddr>()
+        .ok();
+    let host_is_explicit_loopback =
+        host.eq_ignore_ascii_case("localhost") || host_ip.is_some_and(|ip| ip.is_loopback());
+
+    match addr.ip() {
+        IpAddr::V4(v4) => is_forbidden_turn_tcp_ipv4(v4, host_is_explicit_loopback),
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+            {
+                return true;
+            }
+            if v6.is_loopback() {
+                return !host_is_explicit_loopback;
+            }
+            if let Some(octets) = embedded_ipv4(v6.octets()) {
+                return is_forbidden_turn_tcp_ipv4(
+                    Ipv4Addr::from(octets),
+                    host_is_explicit_loopback,
+                );
+            }
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +313,69 @@ mod tests {
                 Ok(Ok(()))
             ));
         }
+    }
+
+    #[test]
+    fn turn_tcp_egress_rejects_embedded_ipv4_ssrf_and_port_zero(
+    ) -> Result<(), std::net::AddrParseError> {
+        let forbidden_for_domain = [
+            "0.0.0.0:3478",
+            "0.1.2.3:3478",
+            "127.0.0.1:3478",
+            "169.254.169.254:3478",
+            "224.0.0.1:3478",
+            "255.255.255.255:3478",
+            "1.1.1.1:0",
+            "[::]:3478",
+            "[::1]:3478",
+            "[fe80::1]:3478",
+            "[ff02::1]:3478",
+            "[::127.0.0.1]:3478",
+            "[::169.254.169.254]:3478",
+            "[::ffff:127.0.0.1]:3478",
+            "[::ffff:169.254.169.254]:3478",
+            "[64:ff9b::127.0.0.1]:3478",
+            "[64:ff9b::169.254.169.254]:3478",
+            "[2002:7f00:0001::1]:3478",
+            "[2002:a9fe:a9fe::1]:3478",
+        ];
+        for raw in forbidden_for_domain {
+            let addr: SocketAddr = raw.parse()?;
+            assert!(
+                is_forbidden_turn_tcp_addr("turn.rings.example", addr),
+                "expected {raw} to be rejected for public domain host"
+            );
+        }
+
+        // Explicit loopback hosts permit local test/loopback targets, still forbid link-local/port 0.
+        assert!(!is_forbidden_turn_tcp_addr(
+            "localhost",
+            "127.0.0.1:3478".parse()?
+        ));
+        assert!(!is_forbidden_turn_tcp_addr(
+            "127.0.0.1",
+            "127.0.0.1:3478".parse()?
+        ));
+        assert!(!is_forbidden_turn_tcp_addr(
+            "[::1]",
+            "[::1]:3478".parse()?
+        ));
+        assert!(!is_forbidden_turn_tcp_addr(
+            "localhost",
+            "[::1]:3478".parse()?
+        ));
+        assert!(is_forbidden_turn_tcp_addr(
+            "localhost",
+            "[64:ff9b::169.254.169.254]:3478".parse()?
+        ));
+        assert!(!is_forbidden_turn_tcp_addr(
+            "turn.rings.example",
+            "1.1.1.1:3478".parse()?
+        ));
+        assert!(!is_forbidden_turn_tcp_addr(
+            "turn.rings.example",
+            "[2606:4700:4700::1111]:3478".parse()?
+        ));
+        Ok(())
     }
 }

@@ -255,7 +255,8 @@ async fn test_real_peer_connection_concurrent_close_waits_for_first_cleanup_befo
                 NodeFramePool::new(),
             ));
             let result = close_failed_native_send(
-                webrtc_conn,
+                Arc::new(Mutex::new(())),
+                Arc::new(std::sync::RwLock::new(webrtc_conn)),
                 channel_pool,
                 data_channel_notifier,
                 inner_cb,
@@ -920,5 +921,129 @@ async fn test_turn_over_tcp_establishes_webrtc_data_channel_when_os_udp_is_block
 
     server_cancel.cancel();
     let _ = turn_server.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shared_close_failure_preserves_send_failure_class_for_waiters() {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    handle.abort();
+    let join_err = handle.await.unwrap_err();
+    let fatal_cases = [
+        Error::NativeConnectionCloseTask(join_err),
+        Error::NativeSendRuntimeUnavailable,
+        Error::NativeConnectionRetirementTimeout { timeout_ms: 5_000 },
+        Error::ConnectionReleased("peer".to_string()),
+    ];
+    for error in fatal_cases {
+        let shared = SharedCloseFailure::from_error(error);
+        let first = shared.clone().into_error();
+        let second = shared.into_error();
+        assert_eq!(first.send_failure_class(), TransportSendFailureClass::Fatal);
+        assert_eq!(
+            second.send_failure_class(),
+            TransportSendFailureClass::Fatal
+        );
+    }
+
+    let webrtc_shared =
+        SharedCloseFailure::from_error(Error::Webrtc(webrtc::error::Error::new("sctp closed".into())));
+    assert_eq!(
+        webrtc_shared.clone().into_error().send_failure_class(),
+        TransportSendFailureClass::Ambiguous
+    );
+    assert_eq!(
+        webrtc_shared.into_error().send_failure_class(),
+        TransportSendFailureClass::Ambiguous
+    );
+}
+
+#[tokio::test]
+async fn turn_tcp_bridge_refuses_to_spawn_new_tcp_session_while_draining() -> Result<()> {
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+    use tokio::net::UdpSocket;
+    use webrtc::util::vnet::net::Net;
+
+    use turn_tcp::TurnBridgePhase;
+
+    assert!(turn_tcp::may_spawn_turn_tcp_session(TurnBridgePhase::Active));
+    assert!(turn_tcp::may_spawn_turn_tcp_session(
+        TurnBridgePhase::Quiescing
+    ));
+    assert!(!turn_tcp::may_spawn_turn_tcp_session(
+        TurnBridgePhase::Draining
+    ));
+    assert!(!turn_tcp::may_spawn_turn_tcp_session(
+        TurnBridgePhase::Cancelled
+    ));
+
+    let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .unwrap();
+    let tcp_port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accept_cancel = CancellationToken::new();
+    let accept_task = tokio::spawn({
+        let accepted = Arc::clone(&accepted);
+        let cancel = accept_cancel.clone();
+        async move {
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    Ok((_sock, _)) = listener.accept() => {
+                        accepted.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+    });
+
+    let net = Arc::new(Net::new(None));
+    let bridge_conn = net
+        .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .map_err(|e| Error::Webrtc(webrtc::error::Error::Util(e)))?;
+    let bridge_addr = bridge_conn
+        .local_addr()
+        .map_err(|e| Error::Webrtc(webrtc::error::Error::Util(e)))?;
+
+    let cancel = CancellationToken::new();
+    let drain_cancel = cancel.child_token();
+    let inbound_cancel = drain_cancel.child_token();
+    inbound_cancel.cancel();
+    drain_cancel.cancel();
+
+    let handle = turn_tcp::spawn_turn_tcp_bridge(
+        bridge_conn,
+        turn_tcp::TurnTcpEndpoint {
+            host: "127.0.0.1".to_string(),
+            port: tcp_port,
+            use_tls: false,
+        },
+        inbound_cancel,
+        drain_cancel,
+        cancel.clone(),
+    );
+
+    let sender = UdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+        .await
+        .unwrap();
+    // Valid TURN ChannelData datagram (channel 0x4000, len 4) with no existing session.
+    let channel_data = [0x40, 0x00, 0x00, 0x04, 1, 2, 3, 4];
+    sender.send_to(&channel_data, bridge_addr).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        0,
+        "draining bridge must not initiate new TCP connects for unmapped UDP peers"
+    );
+
+    cancel.cancel();
+    let _ = handle.await;
+    accept_cancel.cancel();
+    let _ = accept_task.await;
     Ok(())
 }

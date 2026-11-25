@@ -290,3 +290,34 @@ fn test_admission_holds_its_invariant_over_every_schedule() {
         }
     }
 }
+
+#[test]
+fn entered_and_bound_slots_release_without_double_bind() {
+    let admission = Arc::new(Mutex::new(Admission::new(AdmissionLimits {
+        total: 2,
+        per_owner: 1,
+    })));
+
+    // Dropping an EnteredSlot before bind returns its total slot cleanly.
+    let entered = EnteredSlot::enter(&admission).unwrap();
+    assert_eq!(admission.lock().unwrap().live(), 1);
+    drop(entered);
+    assert_eq!(admission.lock().unwrap().live(), 0);
+
+    // Binding moves EnteredSlot into BoundSlot and enforces per_owner limit cleanly.
+    let first_entered = EnteredSlot::enter(&admission).unwrap();
+    let first_bound = first_entered.bind(TestOwner(1)).unwrap();
+    assert_eq!(admission.lock().unwrap().live(), 1);
+    assert_eq!(admission.lock().unwrap().live_for(&TestOwner(1)), 1);
+
+    // A failed bind on the second connection releases its total slot and leaves owner quota intact.
+    let second_entered = EnteredSlot::enter(&admission).unwrap();
+    assert_eq!(admission.lock().unwrap().live(), 2);
+    assert!(second_entered.bind(TestOwner(1)).is_none());
+    assert_eq!(admission.lock().unwrap().live(), 1);
+    assert_eq!(admission.lock().unwrap().live_for(&TestOwner(1)), 1);
+
+    drop(first_bound);
+    assert_eq!(admission.lock().unwrap().live(), 0);
+    assert_eq!(admission.lock().unwrap().live_for(&TestOwner(1)), 0);
+}
