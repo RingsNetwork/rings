@@ -598,12 +598,12 @@ impl PeriodicMeasure {
             should_spawn
         };
         if should_spawn {
-            let state = Arc::clone(&self.state);
+            let pending_guard = PendingFlushGuard::new(Arc::clone(&self.state));
             drop(
                 self.state
                     .tasks
                     .spawn_with(&self.state.spawner, async move {
-                        run_coalesced_flush(state).await;
+                        run_coalesced_flush(pending_guard).await;
                     }),
             );
         }
@@ -669,6 +669,32 @@ impl Drop for EvidenceAdmissionCancelGuard<'_> {
     }
 }
 
+struct PendingFlushGuard {
+    state: Arc<MeasureState>,
+    armed: bool,
+}
+
+impl PendingFlushGuard {
+    const fn new(state: Arc<MeasureState>) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn take_waiters(&mut self) -> Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>> {
+        let waiters = std::mem::take(&mut *lock_or_recover(&self.state.pending_flushes));
+        self.armed = false;
+        waiters
+    }
+}
+
+impl Drop for PendingFlushGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let waiters = std::mem::take(&mut *lock_or_recover(&self.state.pending_flushes));
+            drop(waiters);
+        }
+    }
+}
+
 fn clone_core_error(error: &rings_core::error::Error) -> rings_core::error::Error {
     use rings_core::error::Error as CoreError;
     match error {
@@ -716,9 +742,10 @@ fn clone_runtime_error(error: &MeasureRuntimeError) -> MeasureRuntimeError {
     }
 }
 
-async fn run_coalesced_flush(state: Arc<MeasureState>) {
+async fn run_coalesced_flush(mut pending_guard: PendingFlushGuard) {
+    let state = Arc::clone(&pending_guard.state);
     let ledger_turn = state.ledger_turns.acquire().await;
-    let waiters = std::mem::take(&mut *lock_or_recover(&state.pending_flushes));
+    let waiters = pending_guard.take_waiters();
     if waiters.is_empty() {
         return;
     }

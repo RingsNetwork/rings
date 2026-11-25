@@ -1266,3 +1266,89 @@ async fn write_turn_queue_is_cancel_safe_after_turn_handoff() {
     tokio::pin!(guard_d);
     assert!(matches!(guard_d.as_mut().poll(&mut cx), Poll::Ready(_)));
 }
+
+#[test]
+fn flush_after_captured_runtime_shutdown_returns_stopped_and_clears_pending_waiters() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("dedicated test runtime must build: {error}"));
+    let measure = rt.block_on(async {
+        PeriodicMeasure::new_with_clock(
+            Box::new(MemStorage::new()),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}"))
+    });
+    drop(rt);
+
+    let outer_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("outer test runtime must build: {error}"));
+    outer_rt.block_on(async {
+        for attempt in 0..2 {
+            let result = tokio::time::timeout(Duration::from_secs(1), measure.flush())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "flush attempt {attempt} must not hang when captured runtime is shut down"
+                    )
+                });
+            assert!(
+                matches!(result, Err(MeasureRuntimeError::FlushTaskStopped)),
+                "expected FlushTaskStopped on attempt {attempt}, got {result:?}"
+            );
+            assert!(
+                lock_or_recover(&measure.state.pending_flushes).is_empty(),
+                "pending_flushes must be cleared when flush task is dropped on attempt {attempt}"
+            );
+        }
+    });
+}
+
+#[tokio::test]
+async fn cancelled_coalesced_flush_while_waiting_for_ledger_turn_notifies_waiters_and_allows_next_flush(
+) {
+    use std::future::Future;
+    use std::task::Context;
+    use std::task::Poll;
+
+    let measure = PeriodicMeasure::new_with_clock(
+        Box::new(MemStorage::new()),
+        Arc::new(ManualMeasureClock::new(10)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+    // Hold the ledger turn so the coalesced flush parks at `ledger_turns.acquire().await`.
+    let turn = measure.state.ledger_turns.acquire().await;
+    let (tx1, mut rx1) = oneshot::channel();
+    let (tx2, mut rx2) = oneshot::channel();
+    {
+        let mut pending = lock_or_recover(&measure.state.pending_flushes);
+        pending.push(tx1);
+        pending.push(tx2);
+    }
+
+    {
+        let flush_future = run_coalesced_flush(PendingFlushGuard::new(Arc::clone(&measure.state)));
+        tokio::pin!(flush_future);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(flush_future.as_mut().poll(&mut cx), Poll::Pending));
+    }
+    assert!(rx1.try_recv().is_err());
+    assert!(rx2.try_recv().is_err());
+    assert!(lock_or_recover(&measure.state.pending_flushes).is_empty());
+
+    drop(turn);
+    let follow_up = tokio::time::timeout(Duration::from_secs(1), measure.flush())
+        .await
+        .unwrap_or_else(|_| panic!("subsequent flush after cancellation must not hang"));
+    assert!(
+        follow_up.is_ok(),
+        "subsequent flush must succeed, got {follow_up:?}"
+    );
+}
