@@ -946,8 +946,9 @@ async fn shared_close_failure_preserves_send_failure_class_for_waiters() {
         );
     }
 
-    let webrtc_shared =
-        SharedCloseFailure::from_error(Error::Webrtc(webrtc::error::Error::new("sctp closed".into())));
+    let webrtc_shared = SharedCloseFailure::from_error(Error::Webrtc(webrtc::error::Error::new(
+        "sctp closed".into(),
+    )));
     assert_eq!(
         webrtc_shared.clone().into_error().send_failure_class(),
         TransportSendFailureClass::Ambiguous
@@ -962,13 +963,15 @@ async fn shared_close_failure_preserves_send_failure_class_for_waiters() {
 async fn turn_tcp_bridge_refuses_to_spawn_new_tcp_session_while_draining() -> Result<()> {
     use std::net::Ipv4Addr;
     use std::net::SocketAddr;
+
     use tokio::net::TcpListener;
     use tokio::net::UdpSocket;
+    use turn_tcp::TurnBridgePhase;
     use webrtc::util::vnet::net::Net;
 
-    use turn_tcp::TurnBridgePhase;
-
-    assert!(turn_tcp::may_spawn_turn_tcp_session(TurnBridgePhase::Active));
+    assert!(turn_tcp::may_spawn_turn_tcp_session(
+        TurnBridgePhase::Active
+    ));
     assert!(turn_tcp::may_spawn_turn_tcp_session(
         TurnBridgePhase::Quiescing
     ));

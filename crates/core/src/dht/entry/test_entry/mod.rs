@@ -164,12 +164,11 @@ fn test_data_topic_buffer_join_commutes_across_distinct_same_timestamp_proofs() 
     else {
         unreachable!("overwrite yields overwrite")
     };
-    let EntryOperation::Overwrite(op2) = EntryOperation::Overwrite(base_entry)
-        .with_author_proofs(
-            actor_did,
-            crate::message::MessageSigner::new(&signer2, TEST_NETWORK_ID),
-            NOW_MS,
-        )?
+    let EntryOperation::Overwrite(op2) = EntryOperation::Overwrite(base_entry).with_author_proofs(
+        actor_did,
+        crate::message::MessageSigner::new(&signer2, TEST_NETWORK_ID),
+        NOW_MS,
+    )?
     else {
         unreachable!("overwrite yields overwrite")
     };
@@ -200,7 +199,10 @@ fn test_data_topic_buffer_join_commutes_across_distinct_same_timestamp_proofs() 
     let buf_a = op1.topic_buffer()?;
     let buf_b = entry2.topic_buffer()?;
     let empty = Entry::new(Entry::gen_did(topic)?, vec![], EntryKind::Data).topic_buffer()?;
-    assert_eq!(buf_a.clone().join(buf_b.clone()), buf_b.clone().join(buf_a.clone()));
+    assert_eq!(
+        buf_a.clone().join(buf_b.clone()),
+        buf_b.clone().join(buf_a.clone())
+    );
     assert_join_semilattice_laws(&[empty, buf_a, buf_b]);
     Ok(())
 }

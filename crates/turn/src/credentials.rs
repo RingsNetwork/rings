@@ -241,8 +241,8 @@ pub struct AccountSessionClaim {
 pub enum DecodedTurnClaim {
     /// Delegation-backed claim.
     Delegation(Delegation),
-    /// Direct [`Account`] claim (legacy `0x<did>` hex username).
-    Account(Account),
+    /// Direct legacy secp256k1 [`Did`] claim (`0x<did>` or 40-char hex username).
+    DirectDid(Did),
     /// Account-signed session public key claim.
     AccountSession(AccountSessionClaim),
     /// Unlinkable server-issued ephemeral session ticket (`tkt-...`).
@@ -756,7 +756,7 @@ impl TurnCredentials {
         if claim_str.starts_with("0x") || claim_str.starts_with("0X") {
             let did = Did::from_str(claim_str)?;
             return Ok(DecodedTurnUsername {
-                claim: DecodedTurnClaim::Account(Account::Secp256k1(did)),
+                claim: DecodedTurnClaim::DirectDid(did),
                 sig_bytes,
                 sig_b58,
             });
@@ -782,7 +782,7 @@ impl TurnCredentials {
         if claim_str.len() == 40 && claim_str.bytes().all(|b| b.is_ascii_hexdigit()) {
             let did = Did::from_str(claim_str)?;
             return Ok(DecodedTurnUsername {
-                claim: DecodedTurnClaim::Account(Account::Secp256k1(did)),
+                claim: DecodedTurnClaim::DirectDid(did),
                 sig_bytes,
                 sig_b58,
             });
@@ -837,21 +837,27 @@ impl TurnCredentials {
                 };
                 (TurnAuthIdentity::Delegation(delegation), client_pk)
             }
-            DecodedTurnClaim::Account(Account::Secp256k1(did)) => {
+            DecodedTurnClaim::DirectDid(did) => {
                 let transcript = pack_turn_did_auth(did, server_pubkey);
                 let client_pk = signers::secp256k1::recover(&transcript, &sig_bytes)
                     .ok()
                     .filter(|pk| Did::from(pk.address()) == did)
                     .ok_or(Error::VerifySignatureFailed)?;
-                (TurnAuthIdentity::Account(Account::Secp256k1(did)), client_pk)
+                (
+                    TurnAuthIdentity::Account(Account::Secp256k1(did)),
+                    client_pk,
+                )
             }
-            DecodedTurnClaim::Account(_) => return Err(Error::Decode),
             DecodedTurnClaim::AccountSession(claim) => {
                 let _ = NonIdentityPoint::<Secp256k1>::try_from(claim.session_pubkey)?;
                 if !established {
                     let transcript =
                         pack_turn_account_auth(&claim.account, claim.session_pubkey, server_pubkey);
-                    if !claim.account.account_verifier().verify(&transcript, &sig_bytes) {
+                    if !claim
+                        .account
+                        .account_verifier()
+                        .verify(&transcript, &sig_bytes)
+                    {
                         return Err(Error::VerifySignatureFailed);
                     }
                 }

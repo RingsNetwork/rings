@@ -658,7 +658,7 @@ impl ServerAllocationBook {
         five_tuple: &FiveTuple,
         now_ms: u128,
     ) -> (Option<Arc<ManagedAllocation>>, Vec<Arc<ManagedAllocation>>) {
-        let expired = self.prune_and_take_expired(now_ms);
+        let expired = self.prune_expired_allocations_and_take(now_ms);
         let found = self.by_tuple.get(five_tuple).cloned();
         (found, expired)
     }
@@ -771,6 +771,7 @@ impl TcpTurnListenerConn {
         listener: TcpListener,
         local_addr: SocketAddr,
         connection_semaphore: Arc<Semaphore>,
+        mut start_rx: watch::Receiver<bool>,
     ) -> Arc<Self> {
         let (inbound_tx, inbound_rx) = mpsc::channel(TCP_INBOUND_QUEUE_CAPACITY);
         let peers: Arc<SyncMutex<TcpPeerMap>> = Arc::new(SyncMutex::new(HashMap::new()));
@@ -785,6 +786,27 @@ impl TcpTurnListenerConn {
         let handoffs_for_accept = Arc::clone(&handoffs);
         let disconnect_acks_for_accept = Arc::clone(&disconnect_acks);
         let accept_handle = tokio::spawn(async move {
+            while !*start_rx.borrow_and_update() {
+                if *shutdown_rx.borrow_and_update() {
+                    drop(listener);
+                    return;
+                }
+                tokio::select! {
+                    res = start_rx.changed() => {
+                        if res.is_err() {
+                            drop(listener);
+                            return;
+                        }
+                    }
+                    res = shutdown_rx.changed() => {
+                        if res.is_err() || *shutdown_rx.borrow() {
+                            drop(listener);
+                            return;
+                        }
+                    }
+                }
+            }
+
             let mut peer_tasks = JoinSet::new();
             loop {
                 if *shutdown_rx.borrow_and_update() {
@@ -2621,8 +2643,8 @@ async fn handle_authenticated_allocate(
                 let _ = conn.send_to(&raw, src_addr).await;
             }
         }
-        BeginAllocateOutcome::CoalescePending { .. }
-        | BeginAllocateOutcome::RejectShuttingDown => {}
+        BeginAllocateOutcome::CoalescePending { .. } | BeginAllocateOutcome::RejectShuttingDown => {
+        }
         BeginAllocateOutcome::RejectAllocationMismatch => {
             send_authenticated_error(
                 conn,
@@ -3274,6 +3296,7 @@ async fn bind_listener_sockets(
     listen_addr: SocketAddr,
     extra_local_ips: &[IpAddr],
     connection_semaphore: Arc<Semaphore>,
+    start_rx: watch::Receiver<bool>,
 ) -> Result<(SocketAddr, Vec<Arc<RecordingConn>>)> {
     if !listen_addr.ip().is_unspecified() {
         if listen_addr.port() != 0 {
@@ -3281,8 +3304,12 @@ async fn bind_listener_sockets(
             let local_addr = socket.local_addr()?;
             let tcp_listener = TcpListener::bind(local_addr).await?;
             let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
-            let tcp_conn: Arc<dyn Conn + Send + Sync> =
-                TcpTurnListenerConn::spawn(tcp_listener, local_addr, connection_semaphore);
+            let tcp_conn: Arc<dyn Conn + Send + Sync> = TcpTurnListenerConn::spawn(
+                tcp_listener,
+                local_addr,
+                connection_semaphore,
+                start_rx,
+            );
             return Ok((local_addr, vec![
                 Arc::new(RecordingConn::new(udp_conn, local_addr)),
                 Arc::new(RecordingConn::new_tcp(tcp_conn, local_addr)),
@@ -3296,8 +3323,12 @@ async fn bind_listener_sockets(
             match TcpListener::bind(local_addr).await {
                 Ok(tcp_listener) => {
                     let udp_conn: Arc<dyn Conn + Send + Sync> = Arc::new(socket);
-                    let tcp_conn: Arc<dyn Conn + Send + Sync> =
-                        TcpTurnListenerConn::spawn(tcp_listener, local_addr, connection_semaphore);
+                    let tcp_conn: Arc<dyn Conn + Send + Sync> = TcpTurnListenerConn::spawn(
+                        tcp_listener,
+                        local_addr,
+                        connection_semaphore,
+                        start_rx,
+                    );
                     return Ok((local_addr, vec![
                         Arc::new(RecordingConn::new(udp_conn, local_addr)),
                         Arc::new(RecordingConn::new_tcp(tcp_conn, local_addr)),
@@ -3336,6 +3367,7 @@ async fn bind_listener_sockets(
                         tcp_listener,
                         concrete_addr,
                         Arc::clone(&connection_semaphore),
+                        start_rx.clone(),
                     );
                     listeners.push(Arc::new(RecordingConn::new(udp_conn, concrete_addr)));
                     listeners.push(Arc::new(RecordingConn::new_tcp(tcp_conn, concrete_addr)));
@@ -3387,6 +3419,7 @@ async fn bind_listener_sockets(
                                 tcp_listener,
                                 concrete_addr,
                                 Arc::clone(&connection_semaphore),
+                                start_rx.clone(),
                             );
                             listeners.push(Arc::new(RecordingConn::new(udp_conn, concrete_addr)));
                             listeners
@@ -3490,8 +3523,14 @@ impl TurnServer {
             .saturating_add(config.max_nonces.max(1))
             .min(MAX_TCP_CONNECTIONS_CAP);
         let connection_semaphore = Arc::new(Semaphore::new(max_tcp_connections));
-        let (local_addr, listeners) =
-            bind_listener_sockets(config.listen_addr, &extra_ips, connection_semaphore).await?;
+        let (start_tx, start_rx) = watch::channel(initially_running);
+        let (local_addr, listeners) = bind_listener_sockets(
+            config.listen_addr,
+            &extra_ips,
+            connection_semaphore,
+            start_rx.clone(),
+        )
+        .await?;
         let advertised_ip = match config.advertised_ip {
             Some(ip) if !ip.is_unspecified() => ip,
             _ if !local_addr.ip().is_unspecified() => local_addr.ip(),
@@ -3530,7 +3569,6 @@ impl TurnServer {
             max_permissions,
         )));
         let nonces = Arc::new(Mutex::new(HashMap::new()));
-        let (start_tx, start_rx) = watch::channel(initially_running);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (done_tx, done_rx) = watch::channel(false);
         let channel_bind_timeout = if config.channel_bind_timeout.is_zero() {
@@ -4204,5 +4242,45 @@ impl TurnServer {
         let _ = done_rx.wait_for(|&done| done).await;
         shutdown_all_allocations(&self.book).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::SocketAddr;
+
+    use turn::allocation::five_tuple::FiveTuple;
+    use turn::proto::PROTO_UDP;
+
+    use super::ServerAllocationBook;
+    use crate::relay_backend::BeginAllocateOutcome;
+    use crate::relay_backend::TurnFiveTupleKey;
+
+    #[test]
+    fn get_active_preserves_expired_ticket_reservations_for_allocate_rejection() {
+        let mut book = ServerAllocationBook::new(2, 4, 4);
+        let five_tuple = FiveTuple {
+            src_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 41_000),
+            dst_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3_478),
+            protocol: PROTO_UDP,
+        };
+        let sid = [0x42u8; 16];
+        book.core.reserve_ticket(sid, 1_500, 1_000).unwrap();
+
+        let (found, expired) = book.get_active(&five_tuple, 1_501);
+        assert!(found.is_none());
+        assert!(expired.is_empty());
+
+        let step = book.core.begin_allocate(
+            TurnFiveTupleKey::from(five_tuple),
+            [7u8; 12],
+            "ticket-user".to_string(),
+            Some(sid),
+            1_000,
+            1_501,
+        );
+        assert_eq!(step.outcome, BeginAllocateOutcome::RejectTicketExpired);
     }
 }

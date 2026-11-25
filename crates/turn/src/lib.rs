@@ -3509,4 +3509,57 @@ mod tests {
         server.close().await?;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_turn_server_start_paused_holds_tcp_until_resume() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpStream;
+
+        let server = TurnServer::start_paused(TurnServerConfig::loopback_ephemeral()).await?;
+        let mut tcp = TcpStream::connect(server.local_addr()).await?;
+
+        let tx_id = TransactionId::new();
+        let mut binding_req = Message::new();
+        binding_req
+            .build(&[
+                Box::new(tx_id),
+                Box::new(MessageType::new(
+                    stun::message::METHOD_BINDING,
+                    CLASS_REQUEST,
+                )),
+                Box::new(FINGERPRINT),
+            ])
+            .unwrap();
+        tcp.write_all(&binding_req.raw).await?;
+
+        let mut probe_buf = [0u8; 64];
+        let early = tokio::time::timeout(Duration::from_millis(60), tcp.read(&mut probe_buf)).await;
+        assert!(
+            early.is_err(),
+            "paused TurnServer must neither answer nor prematurely close TCP connections before resume()"
+        );
+
+        server.resume();
+        let raw = tokio::time::timeout(
+            Duration::from_secs(1),
+            rings_transport::turn_tcp_framing::read_turn_tcp_frame(
+                &mut tcp,
+                2048,
+                Duration::from_secs(1),
+            ),
+        )
+        .await
+        .expect("resumed TurnServer must accept and answer TCP STUN Binding request")?;
+        let mut resp = Message {
+            raw,
+            ..Default::default()
+        };
+        resp.decode().unwrap();
+        assert_eq!(resp.transaction_id, tx_id);
+        assert_eq!(resp.typ.class, CLASS_SUCCESS_RESPONSE);
+
+        server.close().await?;
+        Ok(())
+    }
 }

@@ -852,8 +852,14 @@ impl SwarmTransport {
                     .classify_step_failure(attempt, err, "validating continuation offer")
                     .await?);
             }
-            self.dht
-                .observe_relay_custody(peer, offer_msg.relay_custody)?;
+            if let Err(err) = self
+                .dht
+                .observe_relay_custody(peer, offer_msg.relay_custody)
+            {
+                return Err(self
+                    .classify_step_failure(attempt, err, "recording continuation relay custody")
+                    .await?);
+            }
             return match self
                 .advance_responder_step(
                     attempt,

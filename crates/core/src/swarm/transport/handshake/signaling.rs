@@ -361,7 +361,11 @@ impl SwarmTransport {
                     }
                 }
             };
-            self.dht.observe_relay_custody(peer, offer.relay_custody)?;
+            if let Err(err) = self.dht.observe_relay_custody(peer, offer.relay_custody) {
+                return Err(self
+                    .classify_step_failure(attempt, err, "recording continuation relay custody")
+                    .await?);
+            }
             let (transport, request, step_index, final_step, handshake) = (
                 Arc::clone(self),
                 request.clone(),

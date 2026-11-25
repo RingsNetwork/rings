@@ -207,10 +207,7 @@ pub fn is_forbidden_turn_tcp_addr(host: &str, addr: SocketAddr) -> bool {
     match addr.ip() {
         IpAddr::V4(v4) => is_forbidden_turn_tcp_ipv4(v4, host_is_explicit_loopback),
         IpAddr::V6(v6) => {
-            if v6.is_unspecified()
-                || v6.is_multicast()
-                || (v6.segments()[0] & 0xffc0) == 0xfe80
-            {
+            if v6.is_unspecified() || v6.is_multicast() || (v6.segments()[0] & 0xffc0) == 0xfe80 {
                 return true;
             }
             if v6.is_loopback() {
@@ -356,10 +353,7 @@ mod tests {
             "127.0.0.1",
             "127.0.0.1:3478".parse()?
         ));
-        assert!(!is_forbidden_turn_tcp_addr(
-            "[::1]",
-            "[::1]:3478".parse()?
-        ));
+        assert!(!is_forbidden_turn_tcp_addr("[::1]", "[::1]:3478".parse()?));
         assert!(!is_forbidden_turn_tcp_addr(
             "localhost",
             "[::1]:3478".parse()?

@@ -195,19 +195,24 @@ where O: Owner
 
     /// Consume this unbound slot and acquire a per-owner slot for `owner`.
     ///
-    /// On failure, `self` is dropped before returning `None`, releasing the entered total slot.
+    /// On failure, releases the entered total slot atomically under the same lock before returning
+    /// `None`.
     fn bind(mut self, owner: O) -> Option<BoundSlot<O>> {
         let admission = self.admission.take()?;
         let bound = admission
             .lock()
-            .map(|mut guard| guard.bind(owner))
+            .map(|mut guard| {
+                if guard.bind(owner) {
+                    true
+                } else {
+                    guard.leave(None);
+                    false
+                }
+            })
             .unwrap_or(false);
         if bound {
             Some(BoundSlot { admission, owner })
         } else {
-            if let Ok(mut guard) = admission.lock() {
-                guard.leave(None);
-            }
             None
         }
     }

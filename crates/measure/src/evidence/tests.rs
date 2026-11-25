@@ -297,7 +297,10 @@ fn admit_rejects_mismatched_pair_and_freshness_beneficiary() {
         UnixTime::from_secs(5),
         4,
     );
-    assert_eq!(store.admit(malformed), Err(EvidenceError::BeneficiaryMismatch));
+    assert_eq!(
+        store.admit(malformed),
+        Err(EvidenceError::BeneficiaryMismatch)
+    );
     assert!(store.is_empty());
     assert_eq!(store.replay_floor(), 0);
     assert_eq!(store.counters().rejected_records(), 1);

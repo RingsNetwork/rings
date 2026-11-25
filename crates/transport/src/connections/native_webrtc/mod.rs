@@ -343,7 +343,9 @@ impl SharedCloseFailureKind {
                 let class = match other.send_failure_class() {
                     TransportSendFailureClass::Fatal => BackendSendFailureClass::Fatal,
                     TransportSendFailureClass::Ambiguous
-                    | TransportSendFailureClass::PreAcceptance => BackendSendFailureClass::Ambiguous,
+                    | TransportSendFailureClass::PreAcceptance => {
+                        BackendSendFailureClass::Ambiguous
+                    }
                 };
                 Self::Backend {
                     class,
@@ -669,6 +671,10 @@ impl WebrtcConnection {
             tracing::debug!(
                 "Skipped set_configuration on negotiated connection with active local TURN-TCP bridge"
             );
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
             return Ok(());
         }
 
@@ -691,11 +697,17 @@ impl WebrtcConnection {
             tracing::debug!(
                 "Skipped set_configuration containing only unbridged TCP/TLS TURN URLs on negotiated connection"
             );
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
             return Ok(());
         }
 
-        let rtc_ice_servers: Vec<RTCIceServer> =
-            non_tcp_selected.into_iter().map(RTCIceServer::from).collect();
+        let rtc_ice_servers: Vec<RTCIceServer> = non_tcp_selected
+            .into_iter()
+            .map(RTCIceServer::from)
+            .collect();
         let mut cfg = current_conn.get_configuration().await;
         cfg.ice_servers = rtc_ice_servers;
         if let Err(error) = current_conn.set_configuration(cfg).await {
@@ -703,7 +715,7 @@ impl WebrtcConnection {
                 %error,
                 "Skipped set_configuration on native peer connection"
             );
-        } else if !skipped_tcp_turn_urls {
+        } else {
             *self
                 .configured_ice_servers
                 .write()

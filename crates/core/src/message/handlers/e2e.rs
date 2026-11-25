@@ -296,11 +296,8 @@ mod tests {
             recipient_did,
             recipient_did,
         )?;
-        let relayed_frame = MessagePayload::new(
-            initial_frame.transaction,
-            relay_signer,
-            initial_frame.relay,
-        )?;
+        let relayed_frame =
+            MessagePayload::new(initial_frame.transaction, relay_signer, initial_frame.relay)?;
         assert_eq!(relayed_frame.origin(), sender_did);
         assert_eq!(relayed_frame.last_hop_signer(), relay_did);
         frame.verify_sender(relayed_frame.origin())?;

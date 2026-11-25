@@ -195,7 +195,10 @@ fn test_apply_fixed_finger_prunes_newly_referenced_peer_from_bridged() -> Result
     let dht = PeerRing::new_with_storage(local, 1, Box::new(MemStorage::new()));
     let _ = dht.admit_connected(seed, None)?;
     dht.record_bridged_peers(seed, vec![distant])?;
-    assert_eq!(dht.topology_state()?.bridged.get(&distant).copied(), Some(seed));
+    assert_eq!(
+        dht.topology_state()?.bridged.get(&distant).copied(),
+        Some(seed)
+    );
 
     let request = match dht.fix_fingers()? {
         PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessorForFix { request, .. }) => {
@@ -215,5 +218,60 @@ fn test_apply_fixed_finger_prunes_newly_referenced_peer_from_bridged() -> Result
         !state.bridged.contains_key(&distant),
         "apply_fixed_finger must prune newly referenced finger from bridged"
     );
+    Ok(())
+}
+
+#[test]
+fn test_apply_fixed_finger_preserves_bridged_routes_via_confirmed_peer_and_on_stale_proof(
+) -> Result<()> {
+    let local = Did::from(0u32);
+    let near = Did::from(8u32);
+    let far = Did::from_str("0x9000000000000000000000000000000000000000").unwrap();
+    let other_bridged = Did::from_str("0xa000000000000000000000000000000000000000").unwrap();
+    let distant_bridged = Did::from_str("0xb000000000000000000000000000000000000000").unwrap();
+    let dht = PeerRing::new_with_storage(local, 1, Box::new(MemStorage::new()));
+    let _ = dht.admit_connected(near, None)?;
+    let _ = dht.admit_connected(far, None)?;
+    dht.record_bridged_peers(far, vec![other_bridged, distant_bridged])?;
+    let initial = dht.topology_state()?;
+    assert_eq!(initial.bridged.get(&distant_bridged).copied(), Some(far));
+    assert_eq!(initial.bridged.get(&other_bridged).copied(), Some(far));
+
+    let request = match dht.fix_fingers()? {
+        PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessorForFix { request, .. }) => {
+            request
+        }
+        other => panic!("expected FindSuccessorForFix, got {other:?}"),
+    };
+
+    // A stale/mismatched proof that does not install `distant_bridged` must not prune its bridged
+    // hint or unrelated bridged entries via `far`.
+    let stale_request =
+        crate::dht::finger::FingerFixRequest::new(request.slot_index(), uuid::Uuid::new_v4())
+            .expect("slot fits u16");
+    let stale_outcome = dht.apply_fixed_finger(stale_request, distant_bridged)?;
+    assert_ne!(
+        stale_outcome,
+        crate::dht::finger::FingerApplyOutcome::Applied,
+        "stale proof must not be applied"
+    );
+    let after_stale = dht.topology_state()?;
+    assert_eq!(
+        after_stale.bridged.get(&distant_bridged).copied(),
+        Some(far)
+    );
+    assert_eq!(after_stale.bridged.get(&other_bridged).copied(), Some(far));
+
+    // Confirming an already-referenced peer (`far`) for an unverified finger slot must preserve
+    // all active bridged hints relayed through `via == far`.
+    let outcome = dht.apply_fixed_finger(request, far)?;
+    assert_eq!(
+        outcome,
+        crate::dht::finger::FingerApplyOutcome::Applied,
+        "expected Applied outcome for confirmed peer finger, got {outcome:?}"
+    );
+    let after_far = dht.topology_state()?;
+    assert_eq!(after_far.bridged.get(&distant_bridged).copied(), Some(far));
+    assert_eq!(after_far.bridged.get(&other_bridged).copied(), Some(far));
     Ok(())
 }

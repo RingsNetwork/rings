@@ -2109,13 +2109,18 @@ mod tests {
         let omitted_cfg: TurnServiceConfig = serde_saphyr::from_str("{}").unwrap();
         assert_eq!(omitted_cfg.allow_dids, None);
         assert_eq!(
-            omitted_cfg.to_turn_server_config(clock.clone()).unwrap().admission,
+            omitted_cfg
+                .to_turn_server_config(clock.clone())
+                .unwrap()
+                .admission,
             TurnAdmissionPolicy::AllowAnyDelegation
         );
 
         let ticket_only_cfg: TurnServiceConfig = serde_saphyr::from_str("allow_dids: []").unwrap();
         assert_eq!(ticket_only_cfg.allow_dids, Some(Vec::new()));
-        let server_cfg = ticket_only_cfg.to_turn_server_config(clock.clone()).unwrap();
+        let server_cfg = ticket_only_cfg
+            .to_turn_server_config(clock.clone())
+            .unwrap();
         assert_eq!(
             server_cfg.admission,
             TurnAdmissionPolicy::allowlist(std::iter::empty::<Did>())

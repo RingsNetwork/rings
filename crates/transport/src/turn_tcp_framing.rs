@@ -112,10 +112,7 @@ where
             ));
         }
         let total = STUN_HEADER_BYTES.checked_add(length_u16).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "STUN frame size overflow",
-            )
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "STUN frame size overflow")
         })?;
         if total > max_frame_bytes {
             return Err(std::io::Error::new(
@@ -244,7 +241,10 @@ mod tests {
         stun_resp.extend_from_slice(&STUN_MAGIC_COOKIE);
         stun_resp.extend_from_slice(&[7u8; 12]);
         assert!(is_stun_control_response(&stun_resp));
-        assert_eq!(encode_turn_tcp_frame(&stun_resp).as_deref(), Some(stun_resp.as_slice()));
+        assert_eq!(
+            encode_turn_tcp_frame(&stun_resp).as_deref(),
+            Some(stun_resp.as_slice())
+        );
 
         let mut stun_req = vec![0x00, 0x01, 0x00, 0x00];
         stun_req.extend_from_slice(&STUN_MAGIC_COOKIE);

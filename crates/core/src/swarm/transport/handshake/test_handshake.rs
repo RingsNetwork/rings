@@ -1889,13 +1889,14 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
         g2.swarm.close().await?;
     }
 
-    // - A7: `claim_continuation_step` enforces uniform validation across out-of-band and
-    //   in-band continuations: out-of-band `answer_remote_connection` records `relay_custody`,
-    //   and in-band `answer_signaled_offer` rejects mismatched `dht_protocol_mode`.
+    // - Continuation validation parity: `claim_continuation_step` enforces uniform validation
+    //   across out-of-band and in-band continuations: out-of-band `answer_remote_connection`
+    //   records `relay_custody`, and in-band `answer_signaled_offer` rejects mismatched
+    //   `dht_protocol_mode`.
     {
-        let a7_switchboard: Switchboard = Arc::new(DashMap::new());
-        let c1 = build_custom_node(k1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a7_switchboard)?;
-        let c2 = build_custom_node(k2.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a7_switchboard)?;
+        let parity_switchboard: Switchboard = Arc::new(DashMap::new());
+        let c1 = build_custom_node(k1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &parity_switchboard)?;
+        let c2 = build_custom_node(k2.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &parity_switchboard)?;
         let (attempt, Some(offer0)) = c1.swarm.offer_connection_step(c2.did()).await? else {
             panic!("expected step-0 offer");
         };
@@ -1946,7 +1947,8 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
         );
 
         let mut bad_mode_msg = step2_msg;
-        bad_mode_msg.dht_protocol_mode = crate::message::DhtProtocolMode::new(TEST_NETWORK_ID + 1, 3, 4);
+        bad_mode_msg.dht_protocol_mode =
+            crate::message::DhtProtocolMode::new(TEST_NETWORK_ID + 1, 3, 4);
         assert!(matches!(
             c2.swarm
                 .transport

@@ -196,7 +196,7 @@ impl DelegationAuthHandler {
             DecodedTurnClaim::Delegation(delegation) => {
                 CacheEntry::Delegation(delegation.digest()?)
             }
-            DecodedTurnClaim::Account(_)
+            DecodedTurnClaim::DirectDid(_)
             | DecodedTurnClaim::AccountSession(_)
             | DecodedTurnClaim::SessionTicket(_) => {
                 CacheEntry::DirectAccount(keccak256(username.as_bytes()))

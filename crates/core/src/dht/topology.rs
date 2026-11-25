@@ -987,7 +987,7 @@ pub(crate) fn step_apply_finger(
 ) -> (TopologyStep, FingerApplyOutcome) {
     let (mut step, outcome) = apply_finger(state, request, successor, now_ms);
     prune_predecessors(&mut step.state, capacity);
-    prune_bridged(&mut step.state, Some(successor), capacity);
+    prune_bridged(&mut step.state, None, capacity);
     (step, outcome)
 }
 
