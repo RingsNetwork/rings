@@ -153,7 +153,7 @@ async fn relay_custom(
     send_by_hop(sender, relay, destination, data).await?;
     let delivered = next_custom_message_from(destination, sender.did(), data).await?;
     assert_eq!(delivered.transaction.destination, destination.did());
-    assert_eq!(delivered.signer(), relay.did());
+    assert_eq!(delivered.last_hop_signer(), relay.did());
     assert!(delivered.verify_transaction_and_payload(TEST_NETWORK_ID));
     Ok(delivered)
 }

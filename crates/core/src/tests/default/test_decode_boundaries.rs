@@ -21,7 +21,6 @@ use crate::message::LinkFrame;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageSigner;
-use crate::message::MessageVerificationExt;
 use crate::message::PerSlot;
 use crate::message::SlotEncoding;
 use crate::message::WirePayload;
@@ -206,7 +205,7 @@ fn exercise_payload_wire_forms(payload: &MessagePayload) {
 }
 
 fn judge_payload(payload: &MessagePayload) {
-    let _verified = payload.verify(TEST_NETWORK_ID);
+    let _verified = payload.verify_hop(TEST_NETWORK_ID);
     let _message = payload.transaction.data::<Message>();
 }
 

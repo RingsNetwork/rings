@@ -303,6 +303,12 @@ impl MessageVerification {
             && now_ms <= self.ts_ms.saturating_add(u128::from(self.ttl_ms))
     }
 
+    /// Return whether both the proof liveness window and the attached delegation's validity
+    /// window admit `at_ms`, without re-running signature cryptography.
+    pub fn is_live_with_delegation_at(&self, at_ms: u128) -> bool {
+        self.is_live_at(at_ms) && self.delegation.check_validity_window_at(at_ms).is_ok()
+    }
+
     /// Verify the signature only when the proof is live now.
     pub fn verify_live(&self, domain: SigningDomain, data: &[u8]) -> bool {
         self.verify_live_at(domain, data, get_epoch_ms())

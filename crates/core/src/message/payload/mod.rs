@@ -25,6 +25,7 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageSigner;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
+use super::protocols::SigningDomain;
 use super::replay::StreamKey;
 use super::replay::TransactionDigest;
 use crate::delegation::DelegateeKey;
@@ -198,9 +199,9 @@ impl fmt::Debug for MessagePayload {
 
 impl Transaction {
     /// Wrap data: serialize it with [rings_codec::serialize], then sign it, `reply_via`
-    /// included, with `signer`. `reply_via` names the peer the origin's successor answers
-    /// return through; a reply, or any transaction whose origin has a predecessor, names
-    /// `None`.
+    /// included, with `signer` at the current epoch timestamp. `reply_via` names the peer the
+    /// origin's successor answers return through; a reply, or any transaction whose origin has
+    /// a predecessor, names `None`.
     pub fn new<T>(
         destination: Did,
         tx_id: uuid::Uuid,
@@ -208,6 +209,30 @@ impl Transaction {
         reply_via: Option<Did>,
         data: T,
         signer: MessageSigner<impl Borrow<DelegateeKey>>,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        Self::new_at(
+            destination,
+            tx_id,
+            sequence,
+            reply_via,
+            data,
+            signer,
+            crate::utils::get_epoch_ms(),
+        )
+    }
+
+    /// Wrap data and sign it with `signer` stamped at the explicit epoch timestamp `ts_ms`.
+    pub fn new_at<T>(
+        destination: Did,
+        tx_id: uuid::Uuid,
+        sequence: u64,
+        reply_via: Option<Did>,
+        data: T,
+        signer: MessageSigner<impl Borrow<DelegateeKey>>,
+        ts_ms: u128,
     ) -> Result<Self>
     where
         T: Serialize,
@@ -221,7 +246,7 @@ impl Transaction {
             reply_via,
             &data,
         );
-        let verification = signer.sign(TRANSACTION_DOMAIN_TAG, &msg_hash)?;
+        let verification = signer.sign_at(TRANSACTION_DOMAIN_TAG, &msg_hash, ts_ms)?;
         Ok(Self {
             destination,
             tx_id,
@@ -454,6 +479,43 @@ impl MessagePayload {
         )
     }
 
+    /// The origin of this payload's transaction: the account that authorized the origin session
+    /// and to which replies should be routed.
+    pub fn origin(&self) -> Did {
+        self.transaction.origin()
+    }
+
+    /// The peer that signed the carrier envelope for the current hop (not necessarily the
+    /// transaction's [`Self::origin`]).
+    pub fn last_hop_signer(&self) -> Did {
+        self.verification.delegation.delegator_did()
+    }
+
+    /// Verify the current hop's carrier signature under `PAYLOAD_DOMAIN_TAG` at `at_ms`.
+    pub fn verify_hop_at(&self, network_id: u32, at_ms: u128) -> bool {
+        self.verify_hop_under_at(network_id, at_ms, DelegatorAuthorization::Verify)
+    }
+
+    /// Verify the current hop's carrier signature under `PAYLOAD_DOMAIN_TAG` as of now.
+    #[cfg(test)]
+    pub(crate) fn verify_hop(&self, network_id: u32) -> bool {
+        self.verify_hop_at(network_id, get_epoch_ms())
+    }
+
+    pub(crate) fn verify_hop_under_at(
+        &self,
+        network_id: u32,
+        at_ms: u128,
+        authorization: DelegatorAuthorization,
+    ) -> bool {
+        self.verification.verify_live_under(
+            SigningDomain::new(PAYLOAD_DOMAIN_TAG, network_id),
+            &self.transaction.signed_hash(),
+            at_ms,
+            authorization,
+        )
+    }
+
     /// [`Self::verify_transaction_and_payload_at`] with each slot's delegator authorization treated
     /// as `authorization` says: the origin slot's for the transaction, the hop slot's for the
     /// carrier.
@@ -464,7 +526,7 @@ impl MessagePayload {
         authorization: PerSlot<DelegatorAuthorization>,
     ) -> bool {
         verify_message_under(&self.transaction, network_id, now_ms, authorization.origin)
-            && verify_message_under(self, network_id, now_ms, authorization.hop)
+            && self.verify_hop_under_at(network_id, now_ms, authorization.hop)
             && self.relay_destination_matches_transaction()
     }
 }
@@ -474,18 +536,6 @@ impl MessageVerificationExt for Transaction {
 
     fn verification_data(&self) -> Result<Vec<u8>> {
         Ok(self.signed_hash().to_vec())
-    }
-
-    fn verification(&self) -> &MessageVerification {
-        &self.verification
-    }
-}
-
-impl MessageVerificationExt for MessagePayload {
-    const DOMAIN_TAG: DomainTag = PAYLOAD_DOMAIN_TAG;
-
-    fn verification_data(&self) -> Result<Vec<u8>> {
-        self.transaction.verification_data()
     }
 
     fn verification(&self) -> &MessageVerification {

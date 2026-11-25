@@ -146,6 +146,68 @@ fn test_data_topic_buffer_satisfies_join_semilattice_laws() -> Result<()> {
 }
 
 #[test]
+fn test_data_topic_buffer_join_commutes_across_distinct_same_timestamp_proofs() -> Result<()> {
+    let key1 = crate::ecc::SecretKey::random();
+    let key2 = crate::ecc::SecretKey::random();
+    let actor_did: Did = key1.address().into();
+    let signer1 = crate::delegation::DelegateeKey::new_with_seckey(&key1)?;
+    let signer2 = crate::delegation::DelegateeKey::new_with_seckey(&key2)?;
+
+    let topic = "proven-commute";
+    let base_entry = overwrite_delta(topic, "item", 1)?;
+    let EntryOperation::Overwrite(mut op1) = EntryOperation::Overwrite(base_entry.clone())
+        .with_author_proofs(
+            actor_did,
+            crate::message::MessageSigner::new(&signer1, TEST_NETWORK_ID),
+            NOW_MS,
+        )?
+    else {
+        unreachable!("overwrite yields overwrite")
+    };
+    let EntryOperation::Overwrite(op2) = EntryOperation::Overwrite(base_entry).with_author_proofs(
+        actor_did,
+        crate::message::MessageSigner::new(&signer2, TEST_NETWORK_ID),
+        NOW_MS,
+    )?
+    else {
+        unreachable!("overwrite yields overwrite")
+    };
+
+    op1.crdt
+        .proofs
+        .retain(|p| matches!(p.key, provenance::DataProofKey::Add(_, _)));
+    let mut proofs2 = op2
+        .crdt
+        .proofs
+        .iter()
+        .filter(|p| matches!(p.key, provenance::DataProofKey::Add(_, _)))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(!op1.crdt.proofs.is_empty());
+    assert_eq!(op1.crdt.proofs.len(), proofs2.len());
+    for (p1, p2) in op1.crdt.proofs.iter().zip(proofs2.iter_mut()) {
+        p2.key = p1.key;
+        p2.claim = p1.claim;
+        let p2_ref: &provenance::SignedDataMutation = p2;
+        assert_ne!(p1, p2_ref);
+        assert_ne!(p1.cmp(p2_ref), std::cmp::Ordering::Equal);
+        assert_eq!(p1.cmp(p2_ref), p2_ref.cmp(p1).reverse());
+    }
+    let mut entry2 = op1.clone();
+    entry2.crdt.proofs = proofs2;
+
+    let buf_a = op1.topic_buffer()?;
+    let buf_b = entry2.topic_buffer()?;
+    let empty = Entry::new(Entry::gen_did(topic)?, vec![], EntryKind::Data).topic_buffer()?;
+    assert_eq!(
+        buf_a.clone().join(buf_b.clone()),
+        buf_b.clone().join(buf_a.clone())
+    );
+    assert_join_semilattice_laws(&[empty, buf_a, buf_b]);
+    Ok(())
+}
+
+#[test]
 fn test_relay_message_set_satisfies_join_semilattice_laws() -> Result<()> {
     let did = Did::from(10u32);
     let a = Entry::new(did, vec![element("a")?], EntryKind::RelayMessage)
