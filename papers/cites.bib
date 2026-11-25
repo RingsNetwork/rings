@@ -1,36 +1,3 @@
-@article{Kshetri2013,
-  author = {Nir Kshetri},
-  title = {Privacy and Security Issues in Cloud Computing: The Role of Institutions and Institutional Evolution},
-  journal = {Telecommunications Policy},
-  volume = {37},
-  number = {4--5},
-  pages = {372--386},
-  year = {2013},
-  doi = {10.1016/j.telpol.2012.04.011}
-}
-
-@article{Zissis2012,
-  author = {Dimitrios Zissis and Dimitrios Lekkas},
-  title = {Addressing Cloud Computing Security Issues},
-  journal = {Future Generation Computer Systems},
-  volume = {28},
-  number = {3},
-  pages = {583--592},
-  year = {2012},
-  doi = {10.1016/j.future.2010.12.006}
-}
-
-@article{KshetriMurugesan2013,
-  author = {Nir Kshetri and San Murugesan},
-  title = {Cloud Computing and {EU} Data Privacy Regulations},
-  journal = {Computer},
-  volume = {46},
-  number = {3},
-  pages = {86--89},
-  year = {2013},
-  doi = {10.1109/MC.2013.86}
-}
-
 @inproceedings{Chord,
   author = {Ion Stoica and Robert Morris and David Karger and M. Frans Kaashoek and Hari Balakrishnan},
   title = {Chord: A Scalable Peer-to-Peer Lookup Service for Internet Applications},
@@ -55,10 +22,9 @@
 @misc{Zave2015,
   author        = {Pamela Zave},
   title         = {How to Make {Chord} Correct (Using a Stable Base)},
+  howpublished  = {arXiv:1502.06461 [cs.DC]},
   year          = {2015},
-  eprint        = {1502.06461},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.DC}
+  note          = {\url{https://arxiv.org/abs/1502.06461}}
 }
 
 @article{ZaveChordCorrect,
@@ -101,7 +67,7 @@
 }
 
 @inproceedings{Freedman2005,
-  author    = {Michael J. Freedman and Karthik Lakshminarayanan and David Mazi{\`e}res},
+  author    = {Michael J. Freedman and Karthik Lakshminarayanan and Sean Rhea and Ion Stoica},
   title     = {Non-Transitive Connectivity and {DHT}s},
   booktitle = {Proceedings of the 2nd Conference on Real, Large Distributed Systems (WORLDS '05)},
   pages     = {55--60},
@@ -128,7 +94,7 @@
   publisher = {USENIX Association}
 }
 
-@techreport{RFC8840,
+@techreport{RFC6940,
   author      = {Cullen Jennings and Bruce Lowekamp and Eric Rescorla and Salman Baset and Henning Schulzrinne},
   title       = {Resource Location And Discovery ({RELOAD}) Base Protocol},
   type        = {RFC},
@@ -148,6 +114,36 @@
   publisher = {Springer},
   year = {2011},
   doi = {10.1007/978-3-642-24550-3_29}
+}
+
+@article{Almeida2018,
+  author  = {Paulo S{\'e}rgio Almeida and Ali Shoker and Carlos Baquero},
+  title   = {Delta State Replicated Data Types},
+  journal = {Journal of Parallel and Distributed Computing},
+  volume  = {111},
+  pages   = {162--173},
+  year    = {2018},
+  doi     = {10.1016/j.jpdc.2017.08.003}
+}
+
+@misc{Preguica2018,
+  author        = {Nuno Pregui{\c{c}}a},
+  title         = {Conflict-free Replicated Data Types: An Overview},
+  howpublished  = {arXiv:1806.10254 [cs.DC]},
+  year          = {2018},
+  note          = {\url{https://arxiv.org/abs/1806.10254}}
+}
+
+@inproceedings{Kulkarni2014,
+  author    = {Sandeep S. Kulkarni and Murat Demirbas and Deepak Madeppa and Bharadwaj Avva and Marcelo Leone},
+  title     = {Logical Physical Clocks and Consistent Snapshots in Globally Distributed Databases},
+  booktitle = {Principles of Distributed Systems (OPODIS 2014)},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {8878},
+  pages     = {17--32},
+  publisher = {Springer},
+  year      = {2014},
+  doi       = {10.1007/978-3-319-14472-6_2}
 }
 
 @article{HerlihyWing1990,
@@ -206,7 +202,7 @@
   author       = {{SQLite}},
   title        = {Write-Ahead Logging, and {PRAGMA} synchronous},
   howpublished = {\url{https://www.sqlite.org/wal.html}},
-  note         = {Accessed 2026-10-23},
+  note         = {accessed 2026-10-23},
   year         = {2026}
 }
 
@@ -214,7 +210,7 @@
   author       = {{MDN Web Docs}},
   title        = {Storage quotas and eviction criteria},
   howpublished = {\url{https://developer.mozilla.org/en-US/docs/Web/API/Storage_API/Storage_quotas_and_eviction_criteria}},
-  note         = {Accessed 2026-10-23},
+  note         = {accessed 2026-10-23},
   year         = {2026}
 }
 
@@ -222,7 +218,7 @@
   author       = {{Apple}},
   title        = {\texttt{fsync(2)} and \texttt{fcntl(2)}: \texttt{F\_FULLFSYNC}},
   howpublished = {macOS manual pages},
-  note         = {Accessed 2026-10-23},
+  note         = {accessed 2026-10-23},
   year         = {2026}
 }
 
@@ -230,7 +226,7 @@
   author       = {{Microsoft}},
   title        = {\texttt{MoveFileExW} function (\texttt{winbase.h}): \texttt{MOVEFILE\_WRITE\_THROUGH}},
   howpublished = {\url{https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw}},
-  note         = {Accessed 2026-10-23},
+  note         = {accessed 2026-10-23},
   year         = {2026}
 }
 
@@ -438,7 +434,7 @@
 @misc{RingsDRanking2026,
   author       = {Ryan J. Kung},
   title        = {The {DRanking} Protocol: Verifiable Distributed Ranking and Sybil-Bounded Admission for Structured Peer-to-Peer Networks},
-  howpublished = {Rings Network Companion Specification (\texttt{papers/dranking.pdf})},
+  howpublished = {Rings Network Technical Report (Companion Specification)},
   year         = {2026}
 }
 
@@ -497,7 +493,7 @@
   author = {Jonathan Nadal},
   title = {Stateright: Model Checking for Implementing Distributed Systems},
   howpublished = {\url{https://www.stateright.rs/}},
-  note = {Accessed: July 4, 2026},
+  note = {accessed 2026-07-04},
   year = {2026}
 }
 
@@ -545,6 +541,14 @@
   howpublished = {Whitepaper},
   year = {2021},
   note = {\url{https://nym.com/nym-whitepaper.pdf}}
+}
+
+@misc{Veilid2023,
+  author = {Christien Rioux and Katelyn Bowden},
+  title = {The Internals of {Veilid}, a New Decentralized Application Framework},
+  howpublished = {DEF CON 31 Technical Release \& Documentation, \url{https://veilid.com/}},
+  year = {2023},
+  note = {Source repository: \url{https://gitlab.com/veilid/veilid}; accessed 2026-11-25}
 }
 
 @misc{webrtc-standard,

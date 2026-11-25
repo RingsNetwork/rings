@@ -18,23 +18,23 @@ This directory contains the two authoritative specifications for the Rings Netwo
 - **Section IV — Chord Implementation (`PeerRing`), Range-Proved Finger Convergence & Non-Transitive WebRTC Overlay**:
   - Base Chord lookup and Zave's `CorrectChord` maintenance invariant.
   - **Range-Proved Finger Convergence** (`dht::finger::convergence`): Chord Range Lemma coverage proofs $\pi = (i, \mathrm{id}, e_\pi, s, \operatorname{end})$, zero-lookup local range confirmation over $(n, \operatorname{head}(n)]$, monotone evidence epochs $e(n,m)$, single-owner attempt machine ($\mathsf{Idle} \mid \mathsf{AwR} \mid \mathsf{AwA}$), cyclic starvation-free slot selection (`next_fix_slot`), and two-phase report claims (`NotifyPredecessor` / `ReportFloor`).
-  - **Non-Transitive WebRTC Overlay**: bounded multi-predecessor sequence $\operatorname{Preds}_K(n) = \langle p_1, \dots, p_m \rangle$ ($m \le K = 4$) with `rectify_preds`, candidate dial backoff (`DialBackoff`, $\beta_0 = 5\,\text{s}$, $\beta_{\max} = 60\,\text{s}$), passive 1-hop gap-bridge hints in `TopoInfo`, and loop-free bridge-delegated delivery over $\operatorname{RouteStage} = \operatorname{aim}(\mathsf{Did}_\bot) \times \mathsf{bridged}(\mathbb{B})$ (Theorem: Bounded Single-Hop Bridge Delegation in $\le 2|V|$ hops).
+  - **Non-Transitive WebRTC Overlay**: bounded multi-predecessor sequence $\operatorname{Preds}_K(n) = \langle p_1, \dots, p_m \rangle$ ($m \le K = 4$) with `rectify_preds`, candidate dial backoff (`DialBackoff`, $\beta_0 = 5\,\text{s}$, $\beta_{\max} = 60\,\text{s}$), passive 1-hop gap-bridge hints in `TopoInfo`, and loop-free bridge-delegated delivery over $\operatorname{RouteStage} = \operatorname{aim}(\mathsf{Did}_\bot) \times \mathsf{bridged}(\mathbb{B})$ (Theorem: Bounded Single-Hop Bridge Delegation in $\le 2|V|$ hops worst-case and $\le 3$ hops across cliques with $C_{\text{sub}} \le K$).
 - **Section V — CRDT Storage, Removal Stability & Cryptographic Data Provenance**:
   - Normalized data-topic carrier $x = (V, D, \rho, \beta)$ with Hybrid Logical Clock (HLC) timestamps $\tau_{\mathrm{HLC}} = (w, c, o)$.
-  - Per-writer cryptographic provenance (`DataProvenance` over `rings-data-carrier-v1\0`) for `Append`/`Extend` (`#1179`) and `Tombstone` (`#1220`).
-  - Removal stability horizon $t \ge \tau(r) + H + \sigma$ ($H = 86\,400\,\text{s}$, $\sigma = 300\,\text{s}$), factored carrier $x = \mathsf{E}(x) \sqcup \mathsf{R}(x)$, **Theorem: No Resurrection**, tombstone bound $T_{\max} = 1024$ (`Storage Tombstone Full`), pure-read fetch-cache linearizability (Law 6), and zero-tombstone signed lease heartbeats (`LeaseHeartbeat` over `rings-lease-heartbeat-v1\0`).
+  - Per-writer cryptographic provenance (`DataProvenance` over `rings-core:data-entry:mutation` with batched Merkle commitment `DataMutationClaim`) for `Append`/`Extend` and `Tombstone`.
+  - Removal stability horizon $t \ge \tau(r) + H + \sigma$ (`DEFAULT_TTL_MS = 600 s`, data element horizon $H = 6\,000\,\text{s}$, $\sigma = 3\,\text{s}$; relay inbox up to $7\,\text{d}$), factored carrier $x = \mathsf{E}(x) \sqcup \mathsf{R}(x)$, **Theorem: No Resurrection**, tombstone bound $T_{\max} = 1024$ (`Storage Tombstone Full`, max carrier `33,731,696 B = 33.73 MB`), pure-read fetch-cache linearizability, and zero-tombstone signed lease heartbeats (`LeaseHeartbeat` across `rings-node:{online-node,service,mail}-descriptor` and `rings-turn:service-descriptor`).
 - **Section VI — Durable Local Stores & Replicated Custody**:
   - Crash-meaning product authority lattice $C \times M$ (`RecordAuthority`), native `.p` presence markers ($P \subseteq R$), and per-platform crash durability (`F_FULLFSYNC` on macOS/iOS, `FlushFileBuffers` + `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` on Windows, `fsync` + parent dir sync on Linux, and IndexedDB `durability: "strict"` + `navigator.storage.persist()` on browsers).
-  - Speculative group commit `put*` with undo logs, link-local volatile replay windows $\mathcal{W}_{s,g}$ (`Join|Sync|Leave|Send`), atomic receiver custody sets $(\mathcal{W}_s, \mathcal{K}_s)$, and age-gated ($A_{\min} = 30\,\text{min}$) $r$-member replicated relay custody chains $\mathcal{M}_r(k)$ with digest-comparison repair.
+  - Speculative group commit `put*` with undo logs, link-local volatile replay windows $\mathcal{W}_{s,g}$ (`Join|Sync|Leave|Send`), atomic receiver custody sets $(\mathcal{W}_s, \mathcal{K}_s)$, and age-gated (`DEFAULT_RELAY_AGE_GATE_MS = 2 min`, production profiles up to $30\,\text{min}$) $r$-member replicated relay custody chains $\mathcal{M}_r(k)$ (`r = 8` default) with digest-comparison repair.
 - **Section VII — Fair Admission, Slot Accounting & Load Bounds**:
-  - Cleanest-first connection slot roster (`SlotRoster`) over $\mathcal{R}(s) = 2(F + s + 1)$ slots ($F = 160, s = 4 \implies \mathcal{R} = 330$) tracking `(epoch, strikes, last_seen_ms)` to defeat Sybil identity rotation.
-  - **Law: Slot Accounting** ($f_T + \lceil \mathcal{P}_T / n(\mathcal{A}(t)) \rceil$) and **Theorem: Multi-Table Slot Isolation** across the five shared node tables (Application Inbox, Relay Store, CRDT Removal Store, Transaction Replay Table, and Chunk Reassembly Buffer).
-  - Replay stream spent-horizon eviction ($H_{\text{spent}} = 600\,\text{s}$), generational credit reclaim (`Credit/Shrink/Returned`) with hard frame bound $B_F(s) \le c(s) + W_{\text{shrink}}$, single-charge chunk reassembly with credit-time $\hat{\tau}$ rate floor ($r_{\min} = 1024\,\text{B/s}$, $G = 15\,\text{s}$), and per-category reassembly barriers (`Control | Interactive | Bulk`).
+  - Cleanest-first connection slot roster (`SlotRoster`) over $\mathcal{R}(s) = 2(F + s + 1)$ slots ($F = 160, s = 4 \implies \mathcal{R}(4) = 330$; $s = 3 \implies 328$) tracking `(epoch, strikes, last_seen_ms)` to defeat Sybil identity rotation.
+  - **Law: Slot Accounting** ($f_T + \lceil \mathcal{P}_T / n(\mathcal{A}(t)) \rceil$) and **Theorem: Multi-Table Slot Isolation** across the five shared node tables (Application Inbox, Relay Store, CRDT Removal Store `82,176` at `s=4`, Transaction Replay Table `15,680` / Origin Quota `4,074`, and Chunk Reassembly Buffer `210.5 MiB <= 256 MiB`).
+  - Replay stream spent-horizon eviction ($H_{\text{spent}} = 600\,\text{s}$), generational credit reclaim (`Credit/Shrink/Returned`) with hard frame bound $B_F(s) = \mathcal{R}(s)(W + 3) + \mathcal{P}_F$ (`6,526` at `s=4`; `6,488` at `s=3`), single-charge chunk reassembly with credit-time $\hat{\tau}$ rate floor ($r_{\min} = 1024\,\text{B/s}$, $G = 15\,\text{s}$), and per-category reassembly barriers (`Control | Interactive | Bulk`).
 - **Section VIII — Privacy Layer & Sphinx Onion Kleisli Pipeline**:
   - Static operation signature $\Sigma = \{\mathsf{relay}, \mathsf{tcp}, \mathsf{https}, \mathsf{udp}\} \cup \Sigma_I$ (`invoke<In, Out, L>` shapes over `In` $\in \{0,32,64,256,1024,16384\}$, `Out` $\in \{32,64,256,1024,16384\}$, latency $L \in \{10,100,500,2000\}\,\text{ms}$, paired with open backend names $\Omega$ such as `turn.ticket`) composed in the Kleisli category $\mathbf{Kl}(M)$.
   - Client-sealed loops $g \to m_1 \to \cdots \to g$ ($s = 2$ relays per segment, hop budget $\hat{H} = 14$), Hall-filter hop draw order, 2919-byte Sphinx header ($\alpha$ 33 B, 2870-byte routing block $\beta$ of fourteen 205-byte layers `HopRole::Transit | Terminal | GuardReturn`, $\gamma$ 16 B MAC), AEZ v5 wide-block body carry (`OnionBodyCipher`), $k = 4$ SURB batching, constant-rate cover loops, `SlotRoster`-backed sliced-Bloom replay admission ($K = 26$ slices, FP $\le 2^{-20}$), and Security Laws L5 (Noninterference), L5$'$ (Position Hiding), L6 (Client Path Authority), and L8 (Byte Unlinkability).
-- **Sections IX–X — Counterparty-Signed Service Receipts, DRanking Bridge & Formal Verification**:
-  - Dual-signed `ServiceReceipt` over `rings-service-receipt-v1\0` bridging into DRanking 2.0, Stateright model-checked state spaces across all six subsystems, and closed-form analytical and operational complexity bounds.
+- **Sections IX–XII — DRanking Bridge, Empirical Benchmarks, Formal Verification & Related Work**:
+  - Provisional service receipts (`rings-core:service-receipt:provisional:{provider,beneficiary}`) bridging into DRanking 2.0 `rings-service-receipt-v1`, quantitative Stateright/BFS verification across 16 models ($9,496,521$ reachable finite states / $9.50\times 10^6$, 54 refuted mutants), empirical benchmarks across all Rings 1.0 subsystems, and expanded related work.
 
 ---
 
@@ -48,15 +48,45 @@ This directory contains the two authoritative specifications for the Rings Netwo
 
 ---
 
-## Building the Papers
+## Reproducing Benchmarks and Formal-Verification Metrics
 
-Both papers compile with `latexmk` and `xelatex`:
+All Section X quantitative measurements and Stateright/BFS metrics in `rings.pdf` can be reproduced directly from the workspace root:
 
 ```bash
-# Build both rings.pdf and dranking.pdf
+# Core empirical benchmarks (finger convergence, 2-clique routing, CRDT/LeaseHeartbeat, F_FULLFSYNC group commit, SlotRoster)
+cargo test --profile ci -p rings-core --lib paper_benchmarks:: -- --ignored --nocapture --test-threads=1
+
+# Stateright / BFS formal verification model metrics across all four checked crates
+cargo test --profile ci -p rings-core --lib report_ -- --ignored --nocapture --test-threads=1
+cargo test --profile ci -p rings-transport --lib report_ -- --ignored --nocapture --test-threads=1
+cargo test --profile ci -p rings-transport --features native-webrtc --lib report_turn_tcp_model_metrics -- --ignored --nocapture --test-threads=1
+cargo test --profile ci -p rings-node --lib report_ -- --ignored --nocapture --test-threads=1
+cargo test --profile ci -p rings-turn-service --lib report_ -- --ignored --nocapture --test-threads=1
+
+# Release crypto, Sphinx/Bloom, 5-node WebRTC loopback, and multi-flow gateway benchmarks
+cargo test --release -p rings-aez --lib bench_paper_aez_throughput -- --ignored --nocapture --test-threads=1
+cargo test --release -p rings-node --lib sphinx::tests::test_peel_cost:: -- --ignored --nocapture --test-threads=1
+cargo test --release -p rings-node --lib onion::circuit::admission::tests::bloom::bench_paper_sliced_bloom_replay -- --ignored --nocapture --test-threads=1
+cargo test --release -p rings-node --lib onion::tests::test_loop_native::bench_tcp_download_rate -- --ignored --nocapture --test-threads=1
+RINGS_GATEWAY_BENCH_FLOWS=1024 cargo run --release -p rings-gateway --features test-support --example gateway-bench
+```
+
+---
+
+## Building the Papers
+
+`rings.tex` compiles cleanly under both **standard `pdflatex + bibtex`** (the arXiv submission engine) and `xelatex`:
+
+```bash
+# arXiv-native pdflatex + bibtex build for rings.tex
+pdflatex -interaction=nonstopmode -halt-on-error rings.tex
+bibtex rings
+pdflatex -interaction=nonstopmode -halt-on-error rings.tex
+pdflatex -interaction=nonstopmode -halt-on-error rings.tex
+
+# Alternative xelatex build for both papers
 latexmk -xelatex -interaction=nonstopmode -halt-on-error rings.tex dranking.tex
 
 # Clean intermediate build artifacts while keeping rings.pdf and dranking.pdf
-latexmk -c rings.tex dranking.tex
-rm -f *.bbl *.run.xml *.synctex.gz *.xdv
+rm -f *.aux *.bbl *.blg *.fls *.fdb_latexmk *.log *.out *.run.xml *.synctex.gz *.xdv
 ```
