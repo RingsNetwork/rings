@@ -8,7 +8,7 @@ Rings Derive
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-derive.svg)](https://crates.io/crates/rings-derive)
-[![docs](https://docs.rs/rings-derive/badge.svg?version=1.0.0-pre.10)](https://docs.rs/rings-derive/1.0.0-pre.10/rings_derive/)
+[![docs](https://docs.rs/rings-derive/badge.svg?version=1.0.0)](https://docs.rs/rings-derive/1.0.0/rings_derive/)
 
 Procedural macro crate shared by Rings workspace crates.
 

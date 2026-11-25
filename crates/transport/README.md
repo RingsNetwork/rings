@@ -7,7 +7,7 @@
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-transport.svg)](https://crates.io/crates/rings-transport)
-[![docs](https://docs.rs/rings-transport/badge.svg?version=1.0.0-pre.10)](https://docs.rs/rings-transport/1.0.0-pre.10/rings_transport/)
+[![docs](https://docs.rs/rings-transport/badge.svg?version=1.0.0)](https://docs.rs/rings-transport/1.0.0/rings_transport/)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 This crate implements the transport layer for the Rings Network across native, browser WebAssembly, and simulation targets. It provides three Rust-based implementations behind [`TransportInterface`](crate::core::transport::TransportInterface) and [`ConnectionInterface`](crate::core::transport::ConnectionInterface):
