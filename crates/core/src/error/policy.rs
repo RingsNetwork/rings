@@ -69,6 +69,24 @@ impl Error {
         }
     }
 
+    /// Whether this error is a transient routing or peer-departure refusal (#1321): the target
+    /// peer left the routing table, rotated or cancelled its connection generation, or its
+    /// transport transitioned out of a ready state before an outbound follow-up or maintenance
+    /// send could leave.
+    pub(crate) const fn is_transient_routing_refusal(&self) -> bool {
+        matches!(
+            self,
+            Self::SwarmMissDidInTable(_)
+                | Self::SwarmMissTransport(_)
+                | Self::TransportNotReady { .. }
+                | Self::ConnectionAttemptSuperseded { .. }
+                | Self::ConnectionAttemptCancelled { .. }
+                | Self::OutboundTransferCancelled { .. }
+                | Self::RelayDestinationUnreachable { .. }
+                | Self::RelayPathHopUnlinked { .. }
+        )
+    }
+
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
         if self.is_local_send_backpressure() {
@@ -96,6 +114,57 @@ impl Error {
                     | rings_transport::core::transport::TransportConnectionState::Closed
             ),
             _ => true,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rings_transport::core::transport::TransportConnectionState;
+
+    use super::Error;
+    use crate::dht::Did;
+
+    #[test]
+    fn test_transient_routing_refusal_classification() {
+        let peer = Did::from(1_u32);
+        let transient = [
+            Error::SwarmMissDidInTable(peer),
+            Error::SwarmMissTransport(peer),
+            Error::TransportNotReady {
+                state: TransportConnectionState::Disconnected,
+                channel_open: true,
+            },
+            Error::ConnectionAttemptSuperseded {
+                peer,
+                generation: 1,
+            },
+            Error::ConnectionAttemptCancelled {
+                peer,
+                generation: 2,
+            },
+            Error::OutboundTransferCancelled { peer },
+            Error::RelayDestinationUnreachable { destination: peer },
+            Error::RelayPathHopUnlinked { hop: peer },
+        ];
+        for error in transient {
+            assert!(
+                error.is_transient_routing_refusal(),
+                "expected transient routing refusal for {error:?}"
+            );
+        }
+
+        let non_transient = [
+            Error::LockPoisoned,
+            Error::PeerRingInvalidAction,
+            Error::VerifySignatureFailed,
+            Error::ServiceIOError(std::io::Error::other("io")),
+        ];
+        for error in non_transient {
+            assert!(
+                !error.is_transient_routing_refusal(),
+                "expected non-transient error for {error:?}"
+            );
         }
     }
 }

@@ -52,3 +52,85 @@ async fn test_step_deadline_drops_work_that_does_not_complete() {
     assert!(matches!(result, StepDeadline::TimedOut));
     assert!(dropped.load(Ordering::Acquire));
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn test_run_step_logs_transient_routing_refusals_at_debug_and_other_errors_at_error(
+) -> Result<()> {
+    use crate::delegation::DelegateeKey;
+    use crate::ecc::SecretKey;
+    use crate::storage::MemStorage;
+    use crate::swarm::SwarmBuilder;
+
+    let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let swarm = Arc::new(
+        SwarmBuilder::new(
+            0,
+            crate::tests::test_transport(""),
+            Box::new(MemStorage::new()),
+            session,
+        )
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .build(),
+    );
+    let stabilizer = swarm.stabilizer();
+    let peer = Did::from(7_u32);
+
+    assert!(stabilizer
+        .run_step(
+            "transient_not_ready",
+            Duration::from_secs(1),
+            futures::future::ready(Err::<(), _>(Error::TransportNotReady {
+                state: TransportConnectionState::Disconnected,
+                channel_open: true,
+            })),
+        )
+        .await
+        .is_none());
+    assert!(stabilizer
+        .run_step(
+            "transient_miss_did",
+            Duration::from_secs(1),
+            futures::future::ready(Err::<(), _>(Error::SwarmMissDidInTable(peer))),
+        )
+        .await
+        .is_none());
+    assert!(stabilizer
+        .run_step(
+            "non_transient_lock_poisoned",
+            Duration::from_secs(1),
+            futures::future::ready(Err::<(), _>(Error::LockPoisoned)),
+        )
+        .await
+        .is_none());
+
+    logs_assert(|lines: &[&str]| {
+        let step_failures = lines
+            .iter()
+            .filter(|line| line.contains("STABILIZATION step failed"))
+            .copied()
+            .collect::<Vec<_>>();
+        let [transient_not_ready, transient_miss_did, non_transient] = step_failures.as_slice()
+        else {
+            return Err(format!(
+                "expected 3 STABILIZATION step failed logs, found {}: {step_failures:?}",
+                step_failures.len()
+            ));
+        };
+        for line in [transient_not_ready, transient_miss_did] {
+            if !line.contains("DEBUG") || line.contains("ERROR") {
+                return Err(format!(
+                    "expected DEBUG log for transient routing refusal: {line}"
+                ));
+            }
+        }
+        if !non_transient.contains("ERROR") {
+            return Err(format!(
+                "expected ERROR log for non-transient failure: {non_transient}"
+            ));
+        }
+        Ok(())
+    });
+    Ok(())
+}

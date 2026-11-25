@@ -557,20 +557,38 @@ fn chunk_send_cancel_reason(
 }
 
 fn log_chunk_send_cancel(did: Did, phase: &'static str, reason: &ChunkSendCancelReason) {
-    tracing::warn!(
-        target: "rings_core::transport::chunked_send",
-        peer = %did,
-        phase,
-        reason = reason.as_str(),
-        attempt = ?reason.attempt(),
-        transport_readiness = ?reason.transport_readiness(),
-        transport_readiness_kind = ?reason
-            .transport_readiness()
-            .map(TransportReadiness::as_str),
-        check_error = ?reason.check_error(),
-        records_peer_failure = reason.records_peer_failure(),
-        "chunked send cancelled"
-    );
+    let records_peer_failure = reason.records_peer_failure();
+    if records_peer_failure {
+        tracing::warn!(
+            target: "rings_core::transport::chunked_send",
+            peer = %did,
+            phase,
+            reason = reason.as_str(),
+            attempt = ?reason.attempt(),
+            transport_readiness = ?reason.transport_readiness(),
+            transport_readiness_kind = ?reason
+                .transport_readiness()
+                .map(TransportReadiness::as_str),
+            check_error = ?reason.check_error(),
+            records_peer_failure,
+            "chunked send cancelled"
+        );
+    } else {
+        tracing::debug!(
+            target: "rings_core::transport::chunked_send",
+            peer = %did,
+            phase,
+            reason = reason.as_str(),
+            attempt = ?reason.attempt(),
+            transport_readiness = ?reason.transport_readiness(),
+            transport_readiness_kind = ?reason
+                .transport_readiness()
+                .map(TransportReadiness::as_str),
+            check_error = ?reason.check_error(),
+            records_peer_failure,
+            "chunked send cancelled"
+        );
+    }
 }
 
 /// Await one admitted frame's delivery, cancelling it with its transfer and expiring it by the
@@ -820,6 +838,67 @@ mod tests {
             ChunkSendCancelReason::RouteCheckFailed(error).resolve_initial(),
             Err(Error::InvalidMessage(_))
         ));
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[tracing_test::traced_test]
+    #[test]
+    fn test_log_chunk_send_cancel_uses_debug_for_non_fault_reasons_and_warn_for_failures() {
+        use rings_transport::core::transport::TransportConnectionState;
+
+        let did = Did::from(1_u32);
+        let attempt = PendingConnectionAttempt {
+            peer: did,
+            generation: 9,
+        };
+        let non_fault_reasons = [
+            ChunkSendCancelReason::RouteNoLongerPermitted,
+            ChunkSendCancelReason::TransferStopped,
+            ChunkSendCancelReason::AdmissionRevoked(attempt),
+            ChunkSendCancelReason::TransportNotReady(TransportReadiness::for_test(
+                TransportConnectionState::Disconnected,
+                true,
+            )),
+        ];
+        for reason in &non_fault_reasons {
+            log_chunk_send_cancel(did, "chunked_first", reason);
+        }
+
+        let terminal_reason = ChunkSendCancelReason::TransportNotReady(
+            TransportReadiness::for_test(TransportConnectionState::Failed, false),
+        );
+        log_chunk_send_cancel(did, "chunked_next", &terminal_reason);
+
+        logs_assert(|lines: &[&str]| {
+            let events = lines
+                .iter()
+                .filter(|line| line.contains("rings_core::transport::chunked_send"))
+                .copied()
+                .collect::<Vec<_>>();
+            let Some((terminal_event, non_fault_events)) = events.split_last() else {
+                return Err("expected at least one chunked_send event".to_string());
+            };
+            if non_fault_events.len() != non_fault_reasons.len() {
+                return Err(format!(
+                    "expected {} chunked_send events, found {}: {events:?}",
+                    non_fault_reasons.len() + 1,
+                    events.len()
+                ));
+            }
+            for event in non_fault_events {
+                if !event.contains("DEBUG") || event.contains("WARN") || event.contains("ERROR") {
+                    return Err(format!(
+                        "expected DEBUG event for non-fault cancel: {event}"
+                    ));
+                }
+            }
+            if !terminal_event.contains("WARN") || terminal_event.contains("ERROR") {
+                return Err(format!(
+                    "expected WARN event for terminal failure cancel: {terminal_event}"
+                ));
+            }
+            Ok(())
+        });
     }
 }
 

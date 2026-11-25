@@ -19,7 +19,7 @@
 //! generation, a join of `(ℕ, max)`, so credits released faster than the pump sends them
 //! coalesce into one frame; and the latest shrink and return. Each lane has its own pump (see
 //! `credit_pump`), so a signal held up behind one lane's channel delays no other lane. A sender
-//! that finds no credit waits, and that wait is logged at `warn`, once per wait, as
+//! that finds no credit waits, and that wait is logged at `debug`, once per wait, as
 //! backpressure; a frame beyond the advertised credit is a protocol violation of the peer.
 //!
 //! Lock law: every transition takes the lock once, never across a suspension point, and wakes
@@ -240,7 +240,7 @@ impl LinkCredit {
     ///
     /// Post: `Ok` holds a reservation the caller binds to its send (see
     /// [`CreditReservation::bind`]); `Err` once the connection is gone. Dropping the future
-    /// before it completes reserves nothing. A wait is logged at `warn` once, when it starts.
+    /// before it completes reserves nothing. A wait is logged at `debug` once, when it starts.
     pub(crate) async fn reserve(self: &Arc<Self>, lane: ChannelLane) -> Result<CreditReservation> {
         let mut wait = CreditWait::new(Arc::downgrade(self), credit_index(lane));
         poll_fn(|context| self.poll_reserve(wait.index, &mut wait.id, context)).await
@@ -268,7 +268,7 @@ impl LinkCredit {
         }
         if id.is_none() {
             let (sent, limit) = credit.usage();
-            tracing::warn!(
+            tracing::debug!(
                 peer = %self.peer,
                 lane = index.lane().index(),
                 sent,
