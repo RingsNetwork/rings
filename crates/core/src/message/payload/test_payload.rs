@@ -44,7 +44,7 @@ fn test_new_then_verify() {
     let did2 = key2.address().into();
 
     let payload = new_test_payload(did2);
-    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.verify_hop(TEST_NETWORK_ID));
 }
 
 #[test]
@@ -487,11 +487,11 @@ fn test_wire_size_matches_every_message_discriminant_and_signature_width() -> Re
 fn test_transaction_and_payload_signatures_are_not_interchangeable() {
     let next_hop = SecretKey::random().address().into();
     let mut payload = new_test_payload(next_hop);
-    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.verify_hop(TEST_NETWORK_ID));
     assert!(payload.transaction.verify(TEST_NETWORK_ID));
 
     payload.verification = payload.transaction.verification.clone();
-    assert!(!payload.verify(TEST_NETWORK_ID));
+    assert!(!payload.verify_hop(TEST_NETWORK_ID));
 }
 
 /// Overlay binding: both signatures verify only under the overlay they were issued for.
@@ -500,7 +500,7 @@ fn test_payload_signed_for_another_overlay_is_rejected() {
     let next_hop = SecretKey::random().address().into();
     let payload = new_test_payload(next_hop);
 
-    assert!(!payload.verify(TEST_NETWORK_ID + 1));
+    assert!(!payload.verify_hop(TEST_NETWORK_ID + 1));
     assert!(!payload.transaction.verify(TEST_NETWORK_ID + 1));
 }
 
@@ -508,12 +508,12 @@ fn test_payload_signed_for_another_overlay_is_rejected() {
 fn test_transaction_sequence_is_inside_both_signature_transcripts() {
     let next_hop = SecretKey::random().address().into();
     let mut payload = new_test_payload(next_hop);
-    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.verify_hop(TEST_NETWORK_ID));
     assert!(payload.transaction.verify(TEST_NETWORK_ID));
 
     payload.transaction.sequence = payload.transaction.sequence.saturating_add(1);
     assert!(!payload.transaction.verify(TEST_NETWORK_ID));
-    assert!(!payload.verify(TEST_NETWORK_ID));
+    assert!(!payload.verify_hop(TEST_NETWORK_ID));
 }
 
 /// `reply_via` is inside both signature transcripts: only the origin chooses where its reports
@@ -533,13 +533,13 @@ fn test_reply_via_is_inside_both_signature_transcripts() -> Result<()> {
         Some(bootstrap),
     )?;
     assert_eq!(payload.transaction.reply_via, Some(bootstrap));
-    assert!(payload.verify(TEST_NETWORK_ID));
+    assert!(payload.verify_hop(TEST_NETWORK_ID));
     assert!(payload.transaction.verify(TEST_NETWORK_ID));
 
     for forged in [None, Some(next_hop)] {
         payload.transaction.reply_via = forged;
         assert!(!payload.transaction.verify(TEST_NETWORK_ID));
-        assert!(!payload.verify(TEST_NETWORK_ID));
+        assert!(!payload.verify_hop(TEST_NETWORK_ID));
     }
     Ok(())
 }
@@ -563,7 +563,7 @@ fn test_wire_round_trip_keeps_reply_via_and_stage() -> Result<()> {
     assert_eq!(decoded, payload);
     assert_eq!(decoded.transaction.reply_via, Some(bootstrap));
     assert_eq!(decoded.relay.stage, stage);
-    assert!(decoded.verify(TEST_NETWORK_ID));
+    assert!(decoded.verify_hop(TEST_NETWORK_ID));
     Ok(())
 }
 

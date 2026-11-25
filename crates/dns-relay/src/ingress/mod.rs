@@ -160,50 +160,82 @@ where O: Owner
     }
 }
 
-/// One admitted connection's slots: released when dropped, so a connection that ends any way,
-/// a panicking forward included, gives its slots back.
-struct Slot<O>
+/// One entered connection's slot of the total admission budget before routing resolves an owner.
+///
+/// Consuming it via [`Self::bind`] promotes it to a [`BoundSlot`] without double-binding; dropping
+/// it before binding returns the total-connection slot cleanly.
+struct EnteredSlot<O>
+where O: Owner
+{
+    admission: Option<Arc<Mutex<Admission<O>>>>,
+}
+
+/// One admitted and owner-bound connection's slots: released when dropped so neither the total
+/// nor per-owner counter can leak or be overwritten.
+struct BoundSlot<O>
 where O: Owner
 {
     admission: Arc<Mutex<Admission<O>>>,
-    owner: Option<O>,
+    owner: O,
 }
 
-impl<O> Slot<O>
+impl<O> EnteredSlot<O>
 where O: Owner
 {
-    /// A slot of the total, if `admission` admits one more connection.
+    /// Acquire one slot of the total limit, if `admission` admits one more connection.
     fn enter(admission: &Arc<Mutex<Admission<O>>>) -> Option<Self> {
         let entered = admission
             .lock()
             .map(|mut admission| admission.enter())
             .unwrap_or(false);
         entered.then(|| Self {
-            admission: Arc::clone(admission),
-            owner: None,
+            admission: Some(Arc::clone(admission)),
         })
     }
 
-    /// Take a slot of `owner` too; return whether the owner admits one more connection.
-    fn bind(&mut self, owner: O) -> bool {
-        let bound = self
-            .admission
+    /// Consume this unbound slot and acquire a per-owner slot for `owner`.
+    ///
+    /// On failure, releases the entered total slot atomically under the same lock before returning
+    /// `None`.
+    fn bind(mut self, owner: O) -> Option<BoundSlot<O>> {
+        let admission = self.admission.take()?;
+        let bound = admission
             .lock()
-            .map(|mut admission| admission.bind(owner))
+            .map(|mut guard| {
+                if guard.bind(owner) {
+                    true
+                } else {
+                    guard.leave(None);
+                    false
+                }
+            })
             .unwrap_or(false);
         if bound {
-            self.owner = Some(owner);
+            Some(BoundSlot { admission, owner })
+        } else {
+            None
         }
-        bound
     }
 }
 
-impl<O> Drop for Slot<O>
+impl<O> Drop for EnteredSlot<O>
 where O: Owner
 {
     fn drop(&mut self) {
-        if let Ok(mut admission) = self.admission.lock() {
-            admission.leave(self.owner.as_ref());
+        if let Some(admission) = self.admission.take() {
+            if let Ok(mut guard) = admission.lock() {
+                guard.leave(None);
+            }
+        }
+    }
+}
+
+impl<O> Drop for BoundSlot<O>
+where O: Owner
+{
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.admission.lock() {
+            guard.leave(Some(&self.owner));
         }
     }
 }
@@ -289,7 +321,7 @@ where
                 accepted = listener.accept() => match accepted {
                     Ok((stream, _peer)) => {
                         backoff = ACCEPT_BACKOFF_FIRST;
-                        match Slot::enter(&self.admission) {
+                        match EnteredSlot::enter(&self.admission) {
                             Some(slot) => {
                                 connections.spawn(Arc::clone(&self).carry(stream, slot));
                             }
@@ -309,20 +341,20 @@ where
     }
 
     /// Route `stream` by its destination and carry it, holding `slot`, or close it.
-    async fn carry(self: Arc<Self>, stream: TcpStream, mut slot: Slot<D::Owner>) {
+    async fn carry(self: Arc<Self>, stream: TcpStream, slot: EnteredSlot<D::Owner>) {
         let (Ok(client), Ok(destination)) = (stream.peer_addr(), stream.local_addr()) else {
             return;
         };
         let Some(route) = self.route(destination).await else {
             return;
         };
-        if !slot.bind(route.owner) {
+        let Some(_bound_slot) = slot.bind(route.owner) else {
             tracing::debug!(
                 "dns relay ingress: {} is at its connection limit",
                 route.owner.label()
             );
             return;
-        }
+        };
         let preamble = match route.proxy {
             ProxyProtocol::Off => Vec::new(),
             ProxyProtocol::V2 => match proxy_v2_header(client, destination) {

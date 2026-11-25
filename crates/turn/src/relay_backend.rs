@@ -106,89 +106,54 @@ pub enum CorePermissionError {
     QuotaExceeded,
 }
 
-/// Synchronous transition decision produced by [`TurnAllocationCore::begin_allocate`].
+/// Outcome of synchronously arbitrating an authenticated `Allocate` request in
+/// [`TurnAllocationCore::begin_allocate`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BeginAllocateDecision {
+pub enum BeginAllocateOutcome {
     /// Begin an asynchronous relay open under `open_id`; capacity and single-use ticket (if any)
     /// have been atomically reserved.
     StartOpen {
         /// Monotonic identifier correlating the in-flight open with [`TurnAllocationCore::complete_allocate`].
         open_id: u64,
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
     },
     /// Identical `(five_tuple, tx_id, username)` arrived while `open_id` is still opening; coalesce
     /// onto the in-flight open without re-consuming the single-use ticket.
     CoalescePending {
         /// Identifier of the in-flight open to attach to.
         open_id: u64,
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
     },
     /// Identical `(five_tuple, tx_id, username)` arrived after the allocation already completed;
     /// replay the cached success response advertising `relayed_addr`.
     ReplayActive {
         /// Bound relay endpoint of the established allocation.
         relayed_addr: SocketAddr,
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
     },
     /// Another pending or active allocation already owns `five_tuple` (`437 Allocation Mismatch`).
-    RejectAllocationMismatch {
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
-    },
+    RejectAllocationMismatch,
     /// Single-use session ticket is unknown or was already consumed by a different transaction (`401`).
-    RejectTicketUnknown {
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
-    },
+    RejectTicketUnknown,
     /// Single-use session ticket expired before `Allocate` arrived (`401`).
-    RejectTicketExpired {
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
-    },
+    RejectTicketExpired,
     /// Combined pending + active allocations reached `max_allocations` (`508 Insufficient Capacity`).
-    RejectInsufficientCapacity {
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
-    },
+    RejectInsufficientCapacity,
     /// Server is shutting down (`508` / drop).
-    RejectShuttingDown {
-        /// Expired active `open_id`s pruned during this step whose relays must be closed.
-        expired_open_ids: Vec<u64>,
-    },
+    RejectShuttingDown,
 }
 
-impl BeginAllocateDecision {
+/// Synchronous transition step produced by [`TurnAllocationCore::begin_allocate`], pairing the
+/// [`BeginAllocateOutcome`] with any expired active `open_id`s whose relays must be closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BeginAllocateStep {
+    /// Outcome for this `Allocate` transaction.
+    pub outcome: BeginAllocateOutcome,
+    /// Expired active `open_id`s pruned during this step whose relays must be closed.
+    pub expired_open_ids: Vec<u64>,
+}
+
+impl BeginAllocateStep {
     /// Borrow any expired active `open_id`s pruned during [`TurnAllocationCore::begin_allocate`].
     pub fn expired_open_ids(&self) -> &[u64] {
-        match self {
-            Self::StartOpen {
-                expired_open_ids, ..
-            }
-            | Self::CoalescePending {
-                expired_open_ids, ..
-            }
-            | Self::ReplayActive {
-                expired_open_ids, ..
-            }
-            | Self::RejectAllocationMismatch {
-                expired_open_ids, ..
-            }
-            | Self::RejectTicketUnknown {
-                expired_open_ids, ..
-            }
-            | Self::RejectTicketExpired {
-                expired_open_ids, ..
-            }
-            | Self::RejectInsufficientCapacity {
-                expired_open_ids, ..
-            }
-            | Self::RejectShuttingDown {
-                expired_open_ids, ..
-            } => expired_open_ids,
-        }
+        &self.expired_open_ids
     }
 }
 
@@ -342,11 +307,9 @@ impl TurnAllocationCore {
         &self.active_allocations
     }
 
-    /// Prune expired unclaimed reservations (`now_ms > expires_at_ms`) and expired active
-    /// allocations (`expires_at_ms <= now_ms`), returning evicted active `open_id`s.
-    pub fn prune_expired(&mut self, now_ms: u128) -> Vec<u64> {
-        self.reservations
-            .retain(|_, &mut expires_at_ms| now_ms <= expires_at_ms);
+    /// Prune expired active allocations (`expires_at_ms <= now_ms`) without modifying unclaimed
+    /// ticket reservations, returning evicted active `open_id`s.
+    pub fn prune_expired_allocations(&mut self, now_ms: u128) -> Vec<u64> {
         let expired_keys: Vec<TurnFiveTupleKey> = self
             .active_allocations
             .iter()
@@ -360,6 +323,14 @@ impl TurnAllocationCore {
             }
         }
         evicted_ids
+    }
+
+    /// Prune expired unclaimed reservations (`now_ms > expires_at_ms`) and expired active
+    /// allocations (`expires_at_ms <= now_ms`), returning evicted active `open_id`s.
+    pub fn prune_expired(&mut self, now_ms: u128) -> Vec<u64> {
+        self.reservations
+            .retain(|_, &mut expires_at_ms| now_ms <= expires_at_ms);
+        self.prune_expired_allocations(now_ms)
     }
 
     /// Record a newly issued single-use session ticket expiring at `expires_at_ms`.
@@ -399,7 +370,7 @@ impl TurnAllocationCore {
         ticket_session_id: Option<[u8; 16]>,
         lifetime_ms: u128,
         now_ms: u128,
-    ) -> BeginAllocateDecision {
+    ) -> BeginAllocateStep {
         self.begin_allocate_with_busy_slots(
             tuple,
             tx_id,
@@ -423,41 +394,62 @@ impl TurnAllocationCore {
         lifetime_ms: u128,
         now_ms: u128,
         extra_busy_slots: usize,
-    ) -> BeginAllocateDecision {
+    ) -> BeginAllocateStep {
+        // Capture any reserved ticket expiry BEFORE `prune_expired` removes expired reservations so
+        // an expired ticket produces `RejectTicketExpired` rather than `RejectTicketUnknown`.
+        let requested_ticket_expiry =
+            ticket_session_id.and_then(|session_id| self.reservations.get(&session_id).copied());
         let expired_open_ids = self.prune_expired(now_ms);
         if self.shutting_down {
-            return BeginAllocateDecision::RejectShuttingDown { expired_open_ids };
+            return BeginAllocateStep {
+                outcome: BeginAllocateOutcome::RejectShuttingDown,
+                expired_open_ids,
+            };
         }
 
         if let Some(active) = self.active_allocations.get(&tuple) {
-            if active.username == username && active.tx_id == tx_id {
-                return BeginAllocateDecision::ReplayActive {
+            let outcome = if active.username == username && active.tx_id == tx_id {
+                BeginAllocateOutcome::ReplayActive {
                     relayed_addr: active.relayed_addr,
-                    expired_open_ids,
-                };
-            }
-            return BeginAllocateDecision::RejectAllocationMismatch { expired_open_ids };
+                }
+            } else {
+                BeginAllocateOutcome::RejectAllocationMismatch
+            };
+            return BeginAllocateStep {
+                outcome,
+                expired_open_ids,
+            };
         }
 
         if let Some(pending) = self.pending_opens.get(&tuple) {
-            if pending.username == username && pending.tx_id == tx_id {
-                return BeginAllocateDecision::CoalescePending {
+            let outcome = if pending.username == username && pending.tx_id == tx_id {
+                BeginAllocateOutcome::CoalescePending {
                     open_id: pending.open_id,
-                    expired_open_ids,
-                };
-            }
-            return BeginAllocateDecision::RejectAllocationMismatch { expired_open_ids };
+                }
+            } else {
+                BeginAllocateOutcome::RejectAllocationMismatch
+            };
+            return BeginAllocateStep {
+                outcome,
+                expired_open_ids,
+            };
         }
 
-        if let Some(session_id) = ticket_session_id {
-            // Note: prune_expired(now_ms) already removed tickets with now_ms > expires_at_ms, so
-            // check raw lookup cleanly by keeping expired detection explicit when present.
-            let Some(&expires_at_ms) = self.reservations.get(&session_id) else {
-                return BeginAllocateDecision::RejectTicketUnknown { expired_open_ids };
-            };
-            if now_ms > expires_at_ms {
-                self.reservations.remove(&session_id);
-                return BeginAllocateDecision::RejectTicketExpired { expired_open_ids };
+        if ticket_session_id.is_some() {
+            match requested_ticket_expiry {
+                None => {
+                    return BeginAllocateStep {
+                        outcome: BeginAllocateOutcome::RejectTicketUnknown,
+                        expired_open_ids,
+                    };
+                }
+                Some(expires_at_ms) if now_ms > expires_at_ms => {
+                    return BeginAllocateStep {
+                        outcome: BeginAllocateOutcome::RejectTicketExpired,
+                        expired_open_ids,
+                    };
+                }
+                Some(_) => {}
             }
         }
 
@@ -471,7 +463,10 @@ impl TurnAllocationCore {
             if let Some(session_id) = ticket_session_id {
                 self.reservations.remove(&session_id);
             }
-            return BeginAllocateDecision::RejectInsufficientCapacity { expired_open_ids };
+            return BeginAllocateStep {
+                outcome: BeginAllocateOutcome::RejectInsufficientCapacity,
+                expired_open_ids,
+            };
         }
 
         if let Some(session_id) = ticket_session_id {
@@ -486,8 +481,8 @@ impl TurnAllocationCore {
             username,
             lifetime_ms,
         });
-        BeginAllocateDecision::StartOpen {
-            open_id,
+        BeginAllocateStep {
+            outcome: BeginAllocateOutcome::StartOpen { open_id },
             expired_open_ids,
         }
     }

@@ -198,7 +198,7 @@ impl HeldMessage {
             return Err(Error::RelayMessageUnverifiable);
         }
         if !(self.payload.transaction.verify_at(network_id, held_at_ms)
-            && self.payload.verify_at(network_id, held_at_ms))
+            && self.payload.verify_hop_at(network_id, held_at_ms))
         {
             return Err(Error::RelayMessageHeldOutsideSenderProof);
         }

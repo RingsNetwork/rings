@@ -412,6 +412,29 @@ async fn test_authoritative_scan_reports_and_keeps_undecodable_rows() {
     assert_eq!(count_rows(&instance).await.unwrap(), 2);
 }
 
+/// A retained store deletes an undecodable row on `get` and reports it absent, matching `get_all`
+/// and `RecordAuthority::Retained`'s decode law, while keeping decodable rows.
+#[wasm_bindgen_test]
+async fn test_retained_store_retires_undecodable_rows_on_get() {
+    let name = format!("rings-idb-retained-test-{}", uuid::Uuid::new_v4());
+    let instance = IdbStorage::new_with_cap_name_and_authority(4, &name, RecordAuthority::Retained)
+        .await
+        .unwrap();
+    instance.put("old", &42_u32).await.unwrap();
+    instance
+        .put("current", &TestDataStruct {
+            content: "kept".to_owned(),
+        })
+        .await
+        .unwrap();
+
+    let retired: Option<TestDataStruct> = instance.get("old").await.unwrap();
+    assert!(retired.is_none());
+    assert_eq!(count_rows(&instance).await.unwrap(), 1);
+    let kept: Option<TestDataStruct> = instance.get("current").await.unwrap();
+    assert_eq!(kept.map(|v| v.content), Some("kept".to_owned()));
+}
+
 /// The shape of `EntryCrdt` before #874: tombstones were bare dots.
 #[derive(Serialize, Deserialize)]
 struct LegacyEntryCrdt {

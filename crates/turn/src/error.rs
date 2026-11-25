@@ -45,6 +45,10 @@ pub enum TurnError {
     #[error("Delegator DID {0} is not admitted by TURN policy")]
     DelegatorNotAdmitted(Did),
 
+    /// Request username does not match the established allocation owner.
+    #[error("TURN request username does not match established allocation owner")]
+    AllocationOwnerMismatch,
+
     /// Relay port range configuration is invalid.
     #[error("Invalid relay port range: min_port={min_port}, max_port={max_port}")]
     InvalidPortRange {

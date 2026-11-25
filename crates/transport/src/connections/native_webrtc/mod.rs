@@ -61,8 +61,10 @@ use crate::delivery::tracker::BufferedChannel;
 use crate::delivery::tracker::DeliveryTracker;
 use crate::delivery::tracker::RoundLease;
 use crate::delivery::DeliveryFuture;
+use crate::error::BackendSendFailureClass;
 use crate::error::Error;
 use crate::error::Result;
+use crate::error::TransportSendFailureClass;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::parse_ice_servers_strict;
 use crate::ice_server::IceServer;
@@ -313,35 +315,78 @@ pub struct WebrtcConnection {
     callback: Arc<InnerTransportCallback>,
 }
 
+/// Reconstructible close-error representation that preserves [`TransportSendFailureClass`].
+#[derive(Clone)]
+enum SharedCloseFailureKind {
+    Webrtc(String),
+    NativeConnectionRetirementTimeout {
+        timeout_ms: u128,
+    },
+    NativeSendRuntimeUnavailable,
+    Backend {
+        class: BackendSendFailureClass,
+        message: String,
+    },
+}
+
+impl SharedCloseFailureKind {
+    fn from_error(error: &Error) -> Self {
+        match error {
+            Error::Webrtc(err) => Self::Webrtc(err.to_string()),
+            Error::NativeConnectionRetirementTimeout { timeout_ms } => {
+                Self::NativeConnectionRetirementTimeout {
+                    timeout_ms: *timeout_ms,
+                }
+            }
+            Error::NativeSendRuntimeUnavailable => Self::NativeSendRuntimeUnavailable,
+            other => {
+                let class = match other.send_failure_class() {
+                    TransportSendFailureClass::Fatal => BackendSendFailureClass::Fatal,
+                    TransportSendFailureClass::Ambiguous
+                    | TransportSendFailureClass::PreAcceptance => {
+                        BackendSendFailureClass::Ambiguous
+                    }
+                };
+                Self::Backend {
+                    class,
+                    message: other.to_string(),
+                }
+            }
+        }
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Self::Webrtc(message) => Error::Webrtc(webrtc::error::Error::new(message)),
+            Self::NativeConnectionRetirementTimeout { timeout_ms } => {
+                Error::NativeConnectionRetirementTimeout { timeout_ms }
+            }
+            Self::NativeSendRuntimeUnavailable => Error::NativeSendRuntimeUnavailable,
+            Self::Backend { class, message } => Error::Backend {
+                class,
+                source: Box::new(std::io::Error::other(message)),
+            },
+        }
+    }
+}
+
 /// Shared error representation for coalesced native physical-close waiters.
 ///
 /// The first waiter takes the original [`Error`] directly when available; any concurrent or
-/// later waiter reconstructs an equivalent typed [`Error`] without requiring [`Error`] to be
-/// globally `Clone`.
+/// later waiter reconstructs an equivalent typed [`Error`] preserving [`TransportSendFailureClass`]
+/// without requiring [`Error`] to be globally `Clone`.
 #[derive(Clone)]
 struct SharedCloseFailure {
     primary: Arc<std::sync::Mutex<Option<Error>>>,
-    webrtc_error: Option<String>,
-    timeout_ms: Option<u128>,
-    fallback_message: String,
+    fallback: SharedCloseFailureKind,
 }
 
 impl SharedCloseFailure {
     fn from_error(error: Error) -> Self {
-        let webrtc_error = match &error {
-            Error::Webrtc(err) => Some(err.to_string()),
-            _ => None,
-        };
-        let timeout_ms = match &error {
-            Error::NativeConnectionRetirementTimeout { timeout_ms } => Some(*timeout_ms),
-            _ => None,
-        };
-        let fallback_message = error.to_string();
+        let fallback = SharedCloseFailureKind::from_error(&error);
         Self {
             primary: Arc::new(std::sync::Mutex::new(Some(error))),
-            webrtc_error,
-            timeout_ms,
-            fallback_message,
+            fallback,
         }
     }
 
@@ -349,13 +394,7 @@ impl SharedCloseFailure {
         if let Some(error) = lock_recover(&self.primary).take() {
             return error;
         }
-        if let Some(error) = self.webrtc_error {
-            return Error::Webrtc(webrtc::error::Error::new(error));
-        }
-        if let Some(timeout_ms) = self.timeout_ms {
-            return Error::NativeConnectionRetirementTimeout { timeout_ms };
-        }
-        Error::MessageNotDelivered(self.fallback_message)
+        self.fallback.into_error()
     }
 }
 
@@ -623,9 +662,52 @@ impl WebrtcConnection {
             return Ok(());
         }
 
+        let has_active_bridge = self
+            .turn_tcp_bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some();
+        if has_active_bridge {
+            tracing::debug!(
+                "Skipped set_configuration on negotiated connection with active local TURN-TCP bridge"
+            );
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
+            return Ok(());
+        }
+
         let selected = turn_tcp::select_ice_servers_for_connection(&desired).await;
-        let rtc_ice_servers: Vec<RTCIceServer> =
-            selected.into_iter().map(RTCIceServer::from).collect();
+        let mut skipped_tcp_turn_urls = false;
+        let mut non_tcp_selected = Vec::with_capacity(selected.len());
+        for mut server in selected {
+            let before_len = server.urls.len();
+            server
+                .urls
+                .retain(|url| turn_tcp::parse_turn_tcp_url(url).is_none());
+            if server.urls.len() != before_len {
+                skipped_tcp_turn_urls = true;
+            }
+            if !server.urls.is_empty() {
+                non_tcp_selected.push(server);
+            }
+        }
+        if non_tcp_selected.is_empty() && skipped_tcp_turn_urls {
+            tracing::debug!(
+                "Skipped set_configuration containing only unbridged TCP/TLS TURN URLs on negotiated connection"
+            );
+            *self
+                .configured_ice_servers
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = desired;
+            return Ok(());
+        }
+
+        let rtc_ice_servers: Vec<RTCIceServer> = non_tcp_selected
+            .into_iter()
+            .map(RTCIceServer::from)
+            .collect();
         let mut cfg = current_conn.get_configuration().await;
         cfg.ice_servers = rtc_ice_servers;
         if let Err(error) = current_conn.set_configuration(cfg).await {
@@ -935,7 +1017,8 @@ impl FrameSink for WebrtcConnection {
         let runtime = native_send_runtime()?;
         let acceptance = permit.acceptance();
         let pool = self.webrtc_data_channel.clone();
-        let connection = self.webrtc_conn();
+        let reconfigure_lock = Arc::clone(&self.reconfigure_lock);
+        let webrtc_conn = Arc::clone(&self.webrtc_conn);
         let physical_close_completed = self.physical_close_completed.clone();
         let retirement_fence = self.retirement_fence.clone();
         run_send_with_retirement(
@@ -947,7 +1030,8 @@ impl FrameSink for WebrtcConnection {
                     .await
             },
             close_failed_native_send(
-                connection,
+                reconfigure_lock,
+                webrtc_conn,
                 self.webrtc_data_channel.clone(),
                 self.webrtc_data_channel_state_notifier.clone(),
                 self.callback.clone(),
@@ -1169,6 +1253,37 @@ fn schedule_deferred_remote_candidates(
     });
 }
 
+async fn close_native_connection_under_reconfigure_lock(
+    reconfigure_lock: Arc<Mutex<()>>,
+    webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
+    turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
+) -> Result<()> {
+    let connection = {
+        let _guard = reconfigure_lock.lock().await;
+        if let Some(guard) = turn_tcp_bridge
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            guard.quiesce_inbound();
+        }
+        Arc::clone(
+            &webrtc_conn
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    };
+    let result = connection.close().await.map_err(Into::into);
+    let maybe_guard = turn_tcp_bridge
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(guard) = maybe_guard {
+        guard.shutdown().await;
+    }
+    result
+}
+
 async fn close_reconfigurable_native_connection(
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
@@ -1178,32 +1293,11 @@ async fn close_reconfigurable_native_connection(
     let runtime = native_send_runtime()?;
     run_native_close_with_witness(
         &runtime,
-        async move {
-            let connection = {
-                let _guard = reconfigure_lock.lock().await;
-                if let Some(guard) = turn_tcp_bridge
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                {
-                    guard.quiesce_inbound();
-                }
-                Arc::clone(
-                    &webrtc_conn
-                        .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
-                )
-            };
-            let result = connection.close().await.map_err(Into::into);
-            let maybe_guard = turn_tcp_bridge
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(guard) = maybe_guard {
-                guard.shutdown().await;
-            }
-            result
-        },
+        close_native_connection_under_reconfigure_lock(
+            reconfigure_lock,
+            webrtc_conn,
+            turn_tcp_bridge,
+        ),
         physical_close_completed,
     )
     .await
@@ -1234,7 +1328,8 @@ async fn run_native_close_with_witness(
 /// Close a generation already fenced by its send lifecycle, with bounded waiting.
 /// The detached close task retains the separate physical-completion witness.
 async fn close_failed_native_send(
-    connection: Arc<RTCPeerConnection>,
+    reconfigure_lock: Arc<Mutex<()>>,
+    webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
     channel_pool: Arc<ChannelPool<TrackedChannel>>,
     data_channel_notifier: Notifier,
     callback: Arc<InnerTransportCallback>,
@@ -1247,24 +1342,11 @@ async fn close_failed_native_send(
     let runtime = native_send_runtime()?;
     close_failed_native_send_with_witness(
         &runtime,
-        async move {
-            if let Some(guard) = turn_tcp_bridge
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-            {
-                guard.quiesce_inbound();
-            }
-            let result = connection.close().await.map_err(Into::into);
-            let maybe_guard = turn_tcp_bridge
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(guard) = maybe_guard {
-                guard.shutdown().await;
-            }
-            result
-        },
+        close_native_connection_under_reconfigure_lock(
+            reconfigure_lock,
+            webrtc_conn,
+            turn_tcp_bridge,
+        ),
         physical_close_completed,
     )
     .await
