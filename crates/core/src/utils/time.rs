@@ -4,6 +4,8 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::time::Duration;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) use std::time::Instant as OsInstant;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use std::time::SystemTime;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use std::time::UNIX_EPOCH;
@@ -12,6 +14,8 @@ use std::time::UNIX_EPOCH;
 pub(crate) use tokio::time::Instant;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) use web_time::Instant;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) use web_time::Instant as OsInstant;
 
 /// Capability for reading the current Unix epoch timestamp in milliseconds.
 ///

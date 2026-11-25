@@ -339,3 +339,29 @@ async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrectio
     assert_eq!(manual_injected.read_epoch_ms_for(t0 - 5_000), t0 - 5_000);
     Ok(())
 }
+
+/// #1332 regression: advancing Tokio's paused virtual timer (`tokio::time::Instant`) while
+/// `PeerRing` uses real wall-clock [`SystemClock`] must not inflate [`PeerRing::read_epoch_ms`]
+/// past real wall time.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn test_read_epoch_ms_ignores_tokio_paused_virtual_advance() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::utils::get_epoch_ms;
+    use crate::utils::SystemClock;
+
+    let before_ms = get_epoch_ms();
+    let ring = PeerRing::new_with_storage(Did::from(6u32), 3, Box::new(MemStorage::new()))
+        .with_clock(Arc::new(SystemClock));
+    assert!(ring.read_epoch_ms() >= before_ms);
+
+    tokio::time::advance(Duration::from_secs(3_600)).await;
+    let after_wall_ms = get_epoch_ms();
+    let read_ms = ring.read_epoch_ms();
+    assert!(read_ms >= after_wall_ms);
+    assert!(
+        read_ms <= after_wall_ms + 5_000,
+        "paused Tokio advance leaked into read_epoch_ms: read_ms={read_ms}, wall_ms={after_wall_ms}"
+    );
+}
