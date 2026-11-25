@@ -351,12 +351,9 @@ mod tests {
         let beneficiary_signer = MessageSigner::new(&beneficiary_del, TEST_NETWORK_ID);
         let provider_signer = MessageSigner::new(&provider_del, TEST_NETWORK_ID);
 
-        let request = ProbeRequest {
-            epoch: ProvisionalEpoch::from_unix_seconds(
-                u64::try_from(shifted_now_ms / 1_000).unwrap_or(u64::MAX),
-            ),
-            nonce: [0x5a; 32],
-        };
+        let request = ProbeRequest::random_for_epoch(ProvisionalEpoch::from_unix_seconds(
+            u64::try_from(shifted_now_ms / 1_000).unwrap_or(u64::MAX),
+        ));
         let tx = Transaction::new_at(
             provider_did,
             uuid::Uuid::new_v4(),

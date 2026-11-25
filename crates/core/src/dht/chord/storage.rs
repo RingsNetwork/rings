@@ -669,17 +669,25 @@ impl PeerRing {
         }
     }
 
-    /// Look up every placement of `entry_key`: the first stored value ends the lookup with the
-    /// misses observed before it; otherwise every remote placement becomes a `FindEntry`.
+    /// Look up every placement of `entry_key`.
+    ///
+    /// When `query_all_placements` is `false` (used by remote single-placement `SearchEntry`
+    /// handling via [`Self::entry_lookup`]), the first locally stored value short-circuits the
+    /// lookup with the misses observed before it. When `query_all_placements` is `true` (used by
+    /// [`Self::entry_lookup_for_fetch`]), all `redundancy` placements are interrogated so locally
+    /// held CRDT replicas are joined and remote placements still emit `FindEntry` queries instead
+    /// of letting a partial local split-brain replica shadow remote state.
     async fn entry_lookup_inner(
         &self,
         entry_key: Did,
         fallback_on_local_virtual_miss: bool,
+        query_all_placements: bool,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
         let now_ms = self.read_epoch_ms();
         let mut ret = vec![];
         let mut misses = vec![];
+        let mut local_found: Option<Entry> = None;
         for placement_key in entry_key.rotate_affine(redundancy)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
             match self
@@ -687,9 +695,15 @@ impl PeerRing {
                 .await?
             {
                 PlacementLookup::Settled(LookupSettlement::Found(value)) => {
-                    return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
-                        *value, misses,
-                    )));
+                    if !query_all_placements {
+                        return Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
+                            *value, misses,
+                        )));
+                    }
+                    local_found = Some(match local_found {
+                        Some(existing) => existing.join(*value)?,
+                        None => *value,
+                    });
                 }
                 PlacementLookup::Settled(LookupSettlement::Missed(miss)) => misses.push(miss),
                 PlacementLookup::Remote { next, query } => {
@@ -700,26 +714,37 @@ impl PeerRing {
                 }
             }
         }
+        if let Some(entry) = local_found {
+            let evidence = PeerRingAction::SomeEntry(EntryLookupEvidence::new(entry, misses));
+            if ret.is_empty() {
+                return Ok(evidence);
+            }
+            ret.insert(0, evidence);
+            return Ok(ret.into());
+        }
         if !misses.is_empty() {
             ret.push(PeerRingAction::EntryMisses(misses));
         }
         Ok(ret.into())
     }
 
-    /// Look up an [`Entry`] for a local storage fetch.
+    /// Look up an [`Entry`] for a local storage fetch across all `redundancy` placements.
     ///
     /// A fresh node with storage virtual nodes enabled can observe itself as the
     /// owner for an existing placement before sync has copied historical data
-    /// locally. Local fetches may ask a known successor for that placement so
-    /// read repair can converge instead of treating the fresh local miss as
-    /// authoritative. Remote `SearchEntry` handling uses [`Self::entry_lookup`] and
-    /// intentionally does not enable this fallback.
+    /// locally, or briefly diverge from global virtual ownership under partial
+    /// topology views and hold only its own writes locally. Local fetches therefore
+    /// interrogate all `redundancy` placements—joining any locally stored replicas
+    /// and querying every remote placement—and enable successor fallback on a local
+    /// virtual miss. Remote `SearchEntry` handling uses [`Self::entry_lookup`] and
+    /// intentionally interrogates one placement without fallback.
     pub(crate) async fn entry_lookup_for_fetch(
         &self,
         entry_key: Did,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        self.entry_lookup_inner(entry_key, true, redundancy).await
+        self.entry_lookup_inner(entry_key, true, true, redundancy)
+            .await
     }
 
     /// Look up an [`Entry`] by its ring key under `redundancy` placements, always
@@ -734,7 +759,8 @@ impl PeerRing {
         entry_key: Did,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        self.entry_lookup_inner(entry_key, false, redundancy).await
+        self.entry_lookup_inner(entry_key, false, false, redundancy)
+            .await
     }
 
     /// Where an operation of `kind` at `placement` is applied under the topology now: the

@@ -926,3 +926,147 @@ async fn test_found_entry_replies_join_in_the_cache() -> Result<()> {
     assert_eq!(forward.as_ref().map(|entry| entry.data.len()), Some(2));
     Ok(())
 }
+
+#[tokio::test]
+async fn test_local_hit_with_remote_fetch_waits_for_remote_reply_and_joins_cache() -> Result<()> {
+    let [key1, key2] = split_owner_keys()?;
+    let node1 = prepare_node_with_storage_redundancy(key1, 2)?;
+    let node2 = prepare_node_with_storage_redundancy(key2, 2)?;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    let nodes = [&node1, &node2];
+    let (sample, primary, replica, primary_owner, replica_owner) = split_redundant_entry(&nodes)?;
+    let reader = nodes[primary_owner];
+    let remote = nodes[replica_owner];
+    let resource = sample.did;
+    let now_ms = get_epoch_ms();
+    let local_delta = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["local-a"],
+        now_ms,
+        reader.did(),
+    )?;
+    let remote_delta = stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["remote-b"],
+        now_ms,
+        remote.did(),
+    )?;
+
+    // Place ONLY `local_delta` on `reader`, leaving `remote` empty so `remote` sends a `FoundEntry`
+    // miss reply first (proving local cache was seeded before `SearchEntry` left and the answer
+    // clock stayed unmarked while waiting for remote data).
+    reader
+        .dht()
+        .storage
+        .put(&primary.to_string(), &local_delta)
+        .await?;
+    assert_eq!(reader.swarm.storage_check_cache(resource).await, None);
+
+    let mark = reader.swarm.storage_fetch_mark();
+    reader.swarm.storage_fetch(resource).await?;
+
+    next_payload_matching(remote, "remote placement SearchEntry", |payload| {
+        Ok(payload.transaction.signer() == reader.did()
+            && payload.transaction.destination == remote.did()
+            && payload.relay.destination == remote.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::SearchEntry(search)
+                    if search.resource == resource && search.placement == replica
+            ))
+    })
+    .await?;
+    next_payload_matching(reader, "remote FoundEntry miss reply", |payload| {
+        Ok(payload.transaction.signer() == remote.did()
+            && payload.transaction.destination == reader.did()
+            && payload.relay.destination == reader.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::FoundEntry(found)
+                    if found.resource == resource && found.data.is_empty() && !found.misses.is_empty()
+            ))
+    })
+    .await?;
+
+    probe_on_activity(
+        "local replica cached and repaired remotely",
+        TEST_HANG_GUARD,
+        || async {
+            let repaired = remote.dht().storage.get(&replica.to_string()).await?;
+            Ok(repaired.map(|_| ()))
+        },
+    )
+    .await?;
+    assert!(
+        !reader.swarm.storage_fetch_answered_since(resource, mark)?,
+        "local hit alongside remote SearchEntry must not mark lookup answered before remote data"
+    );
+    let pre_reply_cached = reader
+        .swarm
+        .storage_check_cache(resource)
+        .await
+        .ok_or_else(|| Error::InvalidMessage("expected local replica cached".to_string()))?;
+    assert_eq!(pre_reply_cached.data, vec![Bytes::from("local-a")]);
+
+    // Delivering the remote `FoundEntry` reply joins `remote-b` into the cache and marks the
+    // lookup answered.
+    let handler = MessageHandler::new(reader.swarm.transport.clone());
+    let found_remote = FoundEntry {
+        data: vec![remote_delta],
+        misses: vec![],
+        resource,
+        redundancy: 2,
+    };
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(found_remote.clone()),
+        remote.swarm.transport.message_signer(),
+        reader.did(),
+        reader.did(),
+    )?;
+    handler
+        .handle(&HandlerContext::unbound_for_test(&context), &found_remote)
+        .await?;
+
+    assert!(reader.swarm.storage_fetch_answered_since(resource, mark)?);
+    let joined = reader
+        .swarm
+        .storage_check_cache(resource)
+        .await
+        .ok_or_else(|| Error::InvalidMessage("expected joined cached entry".to_string()))?;
+    let values: std::collections::BTreeSet<Bytes> = joined.data.into_iter().collect();
+    assert_eq!(
+        values,
+        std::collections::BTreeSet::from([Bytes::from("local-a"), Bytes::from("remote-b")])
+    );
+
+    // An all-local fetch (no remote actions) still marks the answer clock immediately.
+    let solo = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let solo_resource = Did::from(77u32);
+    let solo_entry = stamped_delta(
+        EntryOperation::Extend,
+        solo_resource,
+        &["solo"],
+        now_ms,
+        solo.did(),
+    )?;
+    let solo_first = solo_resource
+        .rotate_affine(2)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMessage("expected solo placement".to_string()))?;
+    solo.dht()
+        .storage
+        .put(&solo_first.to_string(), &solo_entry)
+        .await?;
+    let solo_mark = solo.swarm.storage_fetch_mark();
+    solo.swarm.storage_fetch(solo_resource).await?;
+    assert!(solo
+        .swarm
+        .storage_fetch_answered_since(solo_resource, solo_mark)?);
+    Ok(())
+}
