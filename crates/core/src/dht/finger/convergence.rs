@@ -318,7 +318,7 @@ impl FingerConvergenceState {
         successor: Did,
         now_ms: u64,
     ) -> FingerDeferOutcome {
-        let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
+        let proof = match self.validated_proof(local, fingers, request, successor, now_ms) {
             Ok(proof) => proof,
             Err(rejection) => {
                 self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
@@ -344,7 +344,7 @@ impl FingerConvergenceState {
         successor: Did,
         now_ms: u64,
     ) -> FingerApplyOutcome {
-        let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
+        let proof = match self.validated_proof(local, fingers, request, successor, now_ms) {
             Ok(proof) => proof,
             Err(rejection) => {
                 self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
@@ -353,8 +353,9 @@ impl FingerConvergenceState {
         };
         self.attempt.clear_if_owned(request);
         // `validated_proof` established that the proof is accepted by at least
-        // one slot of its range, so application always commits.
-        self.evidence.apply(fingers, local, proof);
+        // one slot of its range under both epoch and monotonicity guards.
+        let committed = self.evidence.apply(fingers, local, proof);
+        debug_assert!(committed);
         self.cursor = proof.end.saturating_add(1);
         self.retry.record_progress();
         FingerApplyOutcome::Applied
@@ -375,7 +376,7 @@ impl FingerConvergenceState {
         successor: Did,
         now_ms: u64,
     ) -> FingerRetireOutcome {
-        let proof = match self.validated_proof(local, fingers.len(), request, successor, now_ms) {
+        let proof = match self.validated_proof(local, fingers, request, successor, now_ms) {
             Ok(proof) => proof,
             Err(rejection) => {
                 self.retire_rejected_current(fingers, request, successor, rejection, now_ms);
@@ -442,38 +443,36 @@ impl FingerConvergenceState {
         self.retry.record_failure(now_ms);
     }
 
-    /// Validate token ownership first, then the Chord range and evidence epoch.
+    /// Validate token ownership first, then the Chord range, evidence epoch, and monotonicity.
     ///
-    /// Fresh reports become geometric range proofs. Retained admission proofs
-    /// skip repeated geometry work but still require exact ownership and lease.
+    /// Fresh reports become geometric range proofs. Retained admission proofs still require
+    /// exact ownership, lease validity, and current range admissibility in case a higher finger
+    /// slot tightened the table while admission was in flight.
     fn validated_proof(
         &self,
         local: Did,
-        slot_count: usize,
+        fingers: &[Option<Did>],
         request: FingerFixRequest,
         successor: Did,
         now_ms: u64,
     ) -> Result<FingerRangeProof, FingerReportRejection> {
-        match self.attempt.proof_source(request, successor, now_ms)? {
-            // Admission proofs already passed Chord geometry and epoch checks
-            // when they were retained, so only token/successor/expiry had to be
-            // rechecked by `proof_source`.
-            FingerProofSource::Admission(proof) => Ok(proof),
+        let proof = match self.attempt.proof_source(request, successor, now_ms)? {
+            FingerProofSource::Admission(proof) => proof,
             FingerProofSource::Report { issued_epoch } => {
-                let end = finger_proof_end(local, successor, request.slot_index(), slot_count)
+                let end = finger_proof_end(local, successor, request.slot_index(), fingers.len())
                     .ok_or(FingerReportRejection::Invalid)?;
-                let proof = FingerRangeProof {
+                FingerRangeProof {
                     request,
                     issued_epoch,
                     successor,
                     end,
-                };
-                self.evidence
-                    .accepts(proof)
-                    .then_some(proof)
-                    .ok_or(FingerReportRejection::Stale)
+                }
             }
-        }
+        };
+        self.evidence
+            .accepts(fingers, local, proof)
+            .then_some(proof)
+            .ok_or(FingerReportRejection::Stale)
     }
 
     /// Retire a consumed current token. Reordering is not a network failure.

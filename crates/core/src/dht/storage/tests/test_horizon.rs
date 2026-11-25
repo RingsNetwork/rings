@@ -219,9 +219,10 @@ async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()>
     Ok(())
 }
 
-/// #1332 regression: `PeerRing::read_epoch_ms` fences lagging wall clocks via both the
-/// monotonic floor and the Byzantine-safe admitted HLC floor so retired additions cannot
-/// resurface on local reads or DHT lookups after wake-from-sleep drift.
+/// #1332 regression: `PeerRing::read_epoch_ms` and `read_epoch_ms_for` fence backward/stalled
+/// wall clocks via the monotonic floor (including when `SystemClock` is injected via `with_clock`,
+/// as `SwarmBuilder::build` does) and the Byzantine-safe admitted HLC floor so retired additions
+/// cannot resurface on local reads, cache lookups, or DHT lookups.
 #[tokio::test(flavor = "current_thread")]
 async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrection() -> Result<()> {
     use std::sync::Arc;
@@ -233,6 +234,7 @@ async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrectio
     use crate::dht::ChordStorageCache;
     use crate::tests::with_retention;
     use crate::utils::ManualClock;
+    use crate::utils::SystemClock;
 
     let t0 = 1_700_000_000_000_u128;
     let horizon = u128::from(MAX_TTL_MS);
@@ -286,9 +288,11 @@ async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrectio
     node.join_storage_entry(t_later, other_key, fresh, Principal::Local)
         .await?;
 
-    // Simulate waking with a local wall clock lagging 10 s behind `t_later` (< `t0 + H`).
+    // Backward wall-clock rollback 10 s behind `t_later` (< `t0 + H`) stays fenced at `t_later - σ`.
     clock.set(t_later - 10_000);
     assert_eq!(node.read_epoch_ms(), t_later - TS_OFFSET_TOLERANCE_MS);
+    let fenced_read_ms = node.read_epoch_ms_for(t_later - 10_000);
+    assert_eq!(fenced_read_ms, t_later - TS_OFFSET_TOLERANCE_MS);
 
     // Fetch cache read strips `"stale"` at the fenced timestamp while keeping `"keep"`.
     let cached = node
@@ -297,18 +301,41 @@ async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrectio
         .ok_or_else(|| Error::InvalidMessage("expected live cached carrier".to_string()))?;
     assert_eq!(cached.data, vec![Bytes::from("keep")]);
 
+    // Handler-style explicit `read_epoch_ms_for(lagged_wall)` also fences `local_cache_get_at` and
+    // `local_cache_held`.
+    let cached_for = node
+        .local_cache_get_at(resource, fenced_read_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected fenced cached carrier".to_string()))?;
+    assert_eq!(cached_for.data, vec![Bytes::from("keep")]);
+    let held_for = node
+        .local_cache_held(resource, fenced_read_ms)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected fenced held carrier".to_string()))?;
+    assert_eq!(held_for.data, vec![Bytes::from("keep")]);
+
     // Storage lookup also strips `"stale"` rather than resurface it under the lagging clock.
     let PeerRingAction::SomeEntry(evidence) = node.entry_lookup(resource, 1).await? else {
         return Err(Error::InvalidMessage("expected stored carrier".to_string()));
     };
     assert_eq!(evidence.entry.data, vec![Bytes::from("keep")]);
 
-    // Monotonic elapsed time alone also fences a lagging wall clock.
-    let mono_node = PeerRing::new_with_storage(Did::from(4u32), 3, Box::new(MemStorage::new()));
-    assert_eq!(mono_node.read_epoch_ms_with(t0, Some(0)), t0);
+    // `SwarmBuilder::build()` injects `Arc::new(SystemClock)` via `with_clock`; verify monotonic
+    // fencing stays enabled (`>= t0` after backward step), unlike deterministic `ManualClock`.
+    let system_injected =
+        PeerRing::new_with_storage(Did::from(4u32), 3, Box::new(MemStorage::new()))
+            .with_clock(Arc::new(SystemClock));
+    assert_eq!(system_injected.read_epoch_ms_for(t0), t0);
+    assert!(system_injected.read_epoch_ms_for(t0 - 5_000) >= t0);
     assert_eq!(
-        mono_node.read_epoch_ms_with(t0 + 1_000, Some(horizon + 1_000)),
+        system_injected.read_epoch_ms_with(t0 + 1_000, Some(horizon + 1_000)),
         t0 + horizon + 1_000
     );
+
+    let manual_injected =
+        PeerRing::new_with_storage(Did::from(5u32), 3, Box::new(MemStorage::new()))
+            .with_clock(Arc::new(ManualClock::new(t0)));
+    assert_eq!(manual_injected.read_epoch_ms_for(t0), t0);
+    assert_eq!(manual_injected.read_epoch_ms_for(t0 - 5_000), t0 - 5_000);
     Ok(())
 }

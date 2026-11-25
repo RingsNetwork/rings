@@ -304,22 +304,85 @@ impl FingerEvidence {
         }
     }
 
-    /// Check that a proof can still update at least one slot in its range.
-    ///
-    /// One slot whose change epoch is no newer than the issue epoch is enough to
-    /// admit a partial, non-rollback commit. This is the same per-slot
-    /// predicate that [`Self::apply`] commits by, so an accepted proof always
-    /// commits at least one slot.
-    pub(super) fn accepts(&self, proof: FingerRangeProof) -> bool {
-        self.slots
+    /// Clamped inclusive slot range `(start, end)` covered by `proof`, or `None` if empty.
+    fn proof_range(fingers_len: usize, proof: FingerRangeProof) -> Option<(usize, usize)> {
+        let start = proof.request.slot_index();
+        let covered = proof.covered_slot_count();
+        if start >= fingers_len || covered == 0 {
+            return None;
+        }
+        let end = start
+            .saturating_add(covered)
+            .min(fingers_len)
+            .saturating_sub(1);
+        Some((start, end))
+    }
+
+    /// Closest clockwise distance among occupied finger slots strictly above `end`.
+    fn min_distance_above(fingers: &[Option<Did>], local: Did, end: usize) -> Option<BigUint> {
+        fingers
+            .get(end.saturating_add(1)..)
+            .unwrap_or_default()
             .iter()
-            .skip(proof.request.slot_index())
-            .take(proof.covered_slot_count())
-            .any(|slot| slot.admits(proof))
+            .flatten()
+            .copied()
+            .map(|peer| dist(local, peer))
+            .min()
+    }
+
+    /// Check that a proof can still commit at least one slot in its range without rolling back
+    /// newer evidence or violating clockwise monotonicity against occupied higher slots.
+    ///
+    /// This uses the exact same epoch and monotonicity condition as [`Self::apply`], so an
+    /// accepted proof is guaranteed to commit at least one slot.
+    pub(super) fn accepts(
+        &self,
+        fingers: &[Option<Did>],
+        local: Did,
+        proof: FingerRangeProof,
+    ) -> bool {
+        if proof.successor == local {
+            return fingers
+                .iter()
+                .zip(&self.slots)
+                .skip(proof.request.slot_index())
+                .take(proof.covered_slot_count())
+                .any(|(_, evidence)| evidence.admits(proof));
+        }
+
+        let Some((start, end)) = Self::proof_range(fingers.len(), proof) else {
+            return false;
+        };
+        let succ_dist = dist(local, proof.successor);
+        if Self::min_distance_above(fingers, local, end)
+            .as_ref()
+            .is_some_and(|above| succ_dist > *above)
+        {
+            return false;
+        }
+
+        for slot in (start..=end).rev() {
+            if self
+                .slots
+                .get(slot)
+                .is_some_and(|evidence| evidence.admits(proof))
+            {
+                return true;
+            }
+            if let Some(existing) = fingers.get(slot).copied().flatten() {
+                // In `apply`, any un-admitted occupied slot closer than `succ_dist` lowers
+                // `min_above` below `succ_dist` for all lower slots in the range.
+                if dist(local, existing) < succ_dist {
+                    return false;
+                }
+            }
+        }
+        false
     }
 
     /// Apply a validated range without overwriting evidence from a newer epoch or
-    /// violating clockwise monotonicity across occupied finger slots.
+    /// violating clockwise monotonicity across occupied finger slots, returning whether at least
+    /// one slot in the range was committed.
     ///
     /// Post: every slot in the range that admits the proof contains the
     /// reported successor (when monotonic with higher occupied slots) and is
@@ -331,10 +394,11 @@ impl FingerEvidence {
         fingers: &mut [Option<Did>],
         local: Did,
         proof: FingerRangeProof,
-    ) {
+    ) -> bool {
         // A self-successor proof means this node owns the target range; the
         // table stores that as no remote finger hint.
         let Some(successor) = (proof.successor != local).then_some(proof.successor) else {
+            let mut applied = false;
             for (finger, evidence) in fingers
                 .iter_mut()
                 .zip(&mut self.slots)
@@ -344,29 +408,17 @@ impl FingerEvidence {
                 if evidence.admits(proof) {
                     *finger = None;
                     evidence.verified = true;
+                    applied = true;
                 }
             }
-            return;
+            return applied;
         };
 
-        let start = proof.request.slot_index();
-        let covered = proof.covered_slot_count();
-        if start >= fingers.len() || covered == 0 {
-            return;
-        }
-        let end = start
-            .saturating_add(covered)
-            .min(fingers.len())
-            .saturating_sub(1);
+        let Some((start, end)) = Self::proof_range(fingers.len(), proof) else {
+            return false;
+        };
         let succ_dist = dist(local, successor);
-        let mut min_above: Option<BigUint> = fingers
-            .get(end.saturating_add(1)..)
-            .unwrap_or_default()
-            .iter()
-            .flatten()
-            .copied()
-            .map(|peer| dist(local, peer))
-            .min();
+        let mut min_above = Self::min_distance_above(fingers, local, end);
         let mut applied = false;
 
         for slot in (start..=end).rev() {
@@ -422,6 +474,7 @@ impl FingerEvidence {
                 }
             }
         }
+        applied
     }
 
     /// Confirm a range using evidence obtained outside finger lookup traffic.

@@ -13,8 +13,6 @@ pub(crate) use tokio::time::Instant;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) use web_time::Instant;
 
-use crate::consts::TS_OFFSET_TOLERANCE_MS;
-
 /// Capability for reading the current Unix epoch timestamp in milliseconds.
 ///
 /// Protocol handlers and session drivers read time through an injected `Clock` rather than
@@ -27,6 +25,16 @@ pub trait Clock: Send + Sync + fmt::Debug {
     /// Return the current Unix epoch timestamp in milliseconds, saturating at `i64::MAX`.
     fn now_ms_i64(&self) -> i64 {
         i64::try_from(self.now_ms()).unwrap_or(i64::MAX)
+    }
+
+    /// Whether this clock tracks real platform wall time (`true` for [`SystemClock`], `false`
+    /// for deterministic test clocks such as [`ManualClock`]).
+    ///
+    /// [`crate::dht::PeerRing::with_clock`] uses this to preserve monotonic read-clock fencing on
+    /// production wall clocks without shifting deterministic test clocks by host CPU elapsed time
+    /// (#1332).
+    fn is_wall_clock(&self) -> bool {
+        false
     }
 }
 
@@ -44,6 +52,10 @@ pub(crate) const SYSTEM_CLOCK: SystemClock = SystemClock;
 impl Clock for SystemClock {
     fn now_ms(&self) -> u128 {
         get_epoch_ms()
+    }
+
+    fn is_wall_clock(&self) -> bool {
+        true
     }
 }
 
@@ -107,9 +119,11 @@ impl Clock for ManualClock {
 /// Pure read-clock floor combining monotonic elapsed time with Byzantine-safe admitted HLC
 /// observations (#1332).
 ///
-/// When a browser tab or host wakes from suspension with a lagging wall clock, CRDT retirement
-/// must evaluate at least as high as the previously anchored wall time plus elapsed monotonic time
-/// and at least as high as `τ - σ` for every admitted HLC version (`τ ≤ t_admit + σ ⇒ τ - σ ≤ t_admit`).
+/// Prevents backward wall-clock steps, awake wall-clock stalls while the monotonic clock advances,
+/// and rollback below `τ - σ` for any admitted HLC version (`τ ≤ t_admit + σ ⇒ τ - σ ≤ t_admit`).
+/// If OS/browser suspension pauses both wall and monotonic clocks prior to NTP resynchronization,
+/// no single untrusted peer can safely advance the read floor past local wall time without
+/// breaking Byzantine retirement safety, so this floor complements OS/NTP resynchronization.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ClockFloor {
     anchor: Option<(u128, u128)>,
@@ -166,61 +180,6 @@ impl ClockFloor {
     /// Return how far `wall_ms` lags behind [`Self::floor_ms`] at `monotonic_ms`.
     pub fn lag_ms(&self, wall_ms: u128, monotonic_ms: u128) -> u128 {
         self.floor_ms(monotonic_ms).saturating_sub(wall_ms)
-    }
-}
-
-/// Monotonic-guarded [`Clock`] wrapper preventing backward wall-clock steps and wake-from-sleep
-/// wall-clock lag (#1332).
-#[derive(Debug)]
-pub struct MonotonicClock {
-    inner: SharedClock,
-    origin: Instant,
-    floor: Mutex<ClockFloor>,
-    bypass_when_simulated: bool,
-}
-
-impl MonotonicClock {
-    /// Wrap [`SystemClock`] with monotonic anchoring (bypassing monotonic advancement when a
-    /// deterministic simulation override is active).
-    pub fn system() -> Self {
-        Self {
-            inner: Arc::new(SystemClock),
-            origin: Instant::now(),
-            floor: Mutex::new(ClockFloor::new()),
-            bypass_when_simulated: true,
-        }
-    }
-
-    /// Wrap an arbitrary [`SharedClock`] with monotonic and HLC read-floor anchoring.
-    pub fn new(inner: SharedClock) -> Self {
-        Self {
-            inner,
-            origin: Instant::now(),
-            floor: Mutex::new(ClockFloor::new()),
-            bypass_when_simulated: false,
-        }
-    }
-
-    /// Record an already-admitted HLC timestamp using [`TS_OFFSET_TOLERANCE_MS`].
-    pub fn observe_admitted_hlc(&self, hlc_ms: u128) -> u128 {
-        self.floor
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .observe_admitted_hlc(hlc_ms, TS_OFFSET_TOLERANCE_MS)
-    }
-}
-
-impl Clock for MonotonicClock {
-    fn now_ms(&self) -> u128 {
-        let wall_ms = self.inner.now_ms();
-        if self.bypass_when_simulated && is_simulated_epoch_ms() {
-            return wall_ms;
-        }
-        let mono_ms = self.origin.elapsed().as_millis();
-        self.floor
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .observe_wall(wall_ms, mono_ms)
     }
 }
 
@@ -305,6 +264,7 @@ pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::consts::TS_OFFSET_TOLERANCE_MS;
 
     #[test]
     fn clock_floor_guards_against_lagging_and_backward_wall_clock() {
@@ -338,12 +298,14 @@ mod tests {
             admit_t
         );
         // Lagging local clock 10s behind `admit_t` is floored to `admit_t`.
-        let lag_clock = Arc::new(ManualClock::new(admit_t - 10_000));
-        let mono = MonotonicClock::new(lag_clock);
-        assert_eq!(
-            mono.observe_admitted_hlc(admit_t + 5_000 + TS_OFFSET_TOLERANCE_MS),
-            admit_t + 5_000
+        let floored = floor.observe_admitted_hlc(
+            admit_t + 5_000 + TS_OFFSET_TOLERANCE_MS,
+            TS_OFFSET_TOLERANCE_MS,
         );
-        assert_eq!(mono.now_ms(), admit_t + 5_000);
+        assert_eq!(floored, admit_t + 5_000);
+        assert_eq!(floor.observe_wall(admit_t - 10_000, 0), admit_t + 5_000);
+
+        assert!(SystemClock.is_wall_clock());
+        assert!(!ManualClock::new(0).is_wall_clock());
     }
 }

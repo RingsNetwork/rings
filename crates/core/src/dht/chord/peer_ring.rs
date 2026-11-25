@@ -188,8 +188,9 @@ pub struct PeerRing {
     read_clock_floor: Mutex<ClockFloor>,
     /// Whether [`Self::read_epoch_ms`] advances the monotonic component from `clock_origin`.
     ///
-    /// Disabled by [`Self::with_clock`] so injected deterministic [`ManualClock`] tests are never
-    /// shifted by real host CPU elapsed time.
+    /// Derived from `clock.is_wall_clock()` so production [`SystemClock`] rings retain monotonic
+    /// read-clock fencing while injected deterministic [`ManualClock`] tests are never shifted by
+    /// host CPU elapsed time (#1332).
     monotonic_read_guard: bool,
     /// Rate-limit timestamp (ms) for lagging wall-clock warnings in [`Self::read_epoch_ms_with`].
     last_clock_lag_warned_ms: AtomicU64,
@@ -331,8 +332,8 @@ impl PeerRing {
 
     /// Configure the epoch [`SharedClock`] capability read by this ring's storage decisions.
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.monotonic_read_guard = clock.is_wall_clock();
         self.clock = clock;
-        self.monotonic_read_guard = false;
         self
     }
 
@@ -355,7 +356,12 @@ impl PeerRing {
     /// Read the current read-projection timestamp in milliseconds, fenced against lagging local
     /// wall clocks via the monotonic and admitted-HLC floors (#1332).
     pub fn read_epoch_ms(&self) -> u128 {
-        let wall_ms = self.epoch_ms();
+        self.read_epoch_ms_for(self.epoch_ms())
+    }
+
+    /// Evaluate the fenced read-projection timestamp for an explicitly supplied `wall_ms`
+    /// instant, advancing the monotonic floor only when `monotonic_read_guard` is active (#1332).
+    pub(crate) fn read_epoch_ms_for(&self, wall_ms: u128) -> u128 {
         let monotonic_ms = (self.monotonic_read_guard && !crate::utils::is_simulated_epoch_ms())
             .then(|| self.clock_origin.elapsed().as_millis());
         self.read_epoch_ms_with(wall_ms, monotonic_ms)

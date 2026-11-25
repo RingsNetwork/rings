@@ -24,7 +24,6 @@ pub use time::Clock;
 pub use time::ClockFloor;
 pub(crate) use time::Instant;
 pub use time::ManualClock;
-pub use time::MonotonicClock;
 pub use time::SharedClock;
 pub use time::SystemClock;
 pub(crate) use time::SYSTEM_CLOCK;
