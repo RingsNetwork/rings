@@ -7,6 +7,7 @@ use num_bigint::BigUint;
 
 use super::*;
 use crate::dht::finger::FingerApplyOutcome;
+use crate::dht::finger::FingerDeferOutcome;
 use crate::dht::finger::FingerReportRejection;
 
 /// Convert a small integer into the deterministic DID used by compact rings.
@@ -1217,4 +1218,84 @@ fn test_admit_and_finger_proof_preserve_finger_monotonicity_across_unpopulated_l
     assert_eq!(applied.state.fingers[2], Some(did(4)));
     assert!(!projection.verified[1]);
     assert!(projection.verified[2]);
+}
+
+/// Prove that a stale finger proof superseded by a closer higher occupied slot is rejected as
+/// `Stale` rather than reporting `Applied` while committing zero slots—both on direct `apply`
+/// and after `defer` + concurrent `Admit` (#1331).
+#[test]
+fn test_non_monotonic_stale_proof_rejected_instead_of_zero_commit_apply() {
+    let local = did(0);
+
+    // Case 1: direct `apply` after `Admit(did(4))` updates slot 2 without touching slot 1.
+    let initial = state(
+        local,
+        vec![did(1)],
+        None,
+        vec![Some(did(1)), Some(did(3)), None, None],
+        1,
+    );
+    let issued = step(&initial, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let slot1 = emitted_finger_request(&issued);
+    assert_eq!(slot1.slot_index(), 1);
+    let after_admit = step(
+        &issued.state,
+        TopologyEvent::Admit {
+            peer: did(4),
+            deferred_proof: None,
+            now_ms: 1_010,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    assert_eq!(after_admit.fingers[1], Some(did(3)));
+    assert_eq!(after_admit.fingers[2], Some(did(4)));
+
+    let (rejected_step, outcome) = apply_finger(&after_admit, slot1, did(6), 1_020);
+    assert_eq!(
+        outcome,
+        FingerApplyOutcome::Rejected(FingerReportRejection::Stale)
+    );
+    assert!(rejected_step
+        .state
+        .is_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
+    assert_eq!(rejected_step.state.fingers[1], Some(did(3)));
+    assert_eq!(rejected_step.state.fingers[2], Some(did(4)));
+    let proj = rejected_step.state.finger_convergence_projection();
+    assert!(!proj.verified[1]);
+    assert!(proj.in_flight.is_none());
+    assert!(proj.deferred.is_none());
+    assert_eq!(proj.failure_streak, 0);
+    assert_eq!(proj.cursor, 1);
+
+    // Case 2: deferred proof invalidated mid-admission by `Admit(did(4))` at slot 2.
+    let (deferred_step, defer_outcome) = defer_finger(&issued.state, slot1, did(6), 1_010);
+    assert_eq!(defer_outcome, FingerDeferOutcome::Deferred);
+    let after_deferred_admit = step(
+        &deferred_step.state,
+        TopologyEvent::Admit {
+            peer: did(4),
+            deferred_proof: None,
+            now_ms: 1_020,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    let (rejected_deferred_step, deferred_apply_outcome) =
+        apply_finger(&after_deferred_admit, slot1, did(6), 1_030);
+    assert_eq!(
+        deferred_apply_outcome,
+        FingerApplyOutcome::Rejected(FingerReportRejection::Stale)
+    );
+    assert!(rejected_deferred_step
+        .state
+        .is_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
+    assert_eq!(rejected_deferred_step.state.fingers[1], Some(did(3)));
+    assert_eq!(rejected_deferred_step.state.fingers[2], Some(did(4)));
+    let deferred_proj = rejected_deferred_step.state.finger_convergence_projection();
+    assert!(!deferred_proj.verified[1]);
+    assert!(deferred_proj.in_flight.is_none());
+    assert!(deferred_proj.deferred.is_none());
+    assert_eq!(deferred_proj.failure_streak, 0);
+    assert_eq!(deferred_proj.cursor, 1);
 }

@@ -420,9 +420,9 @@ fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
     Ok(())
 }
 
-/// #1332 regression: a waking browser node whose local wall clock lags synchronized peers past
-/// the tombstone stability horizon cannot resurrect a deleted addition when local reads are
-/// fenced with `ClockFloor` via [`Entry::retired_at_guarded`].
+/// #1332 unit check: given an external lower bound `floor_ms = t_p - σ` from a synchronized
+/// peer's admitted HLC, fencing pure read projection with [`Entry::retired_at_guarded`] /
+/// [`Entry::live_at_guarded`] strips the covered addition even when `t_q < t_p - σ`.
 #[test]
 fn test_lagging_clock_read_resurrection_prevented_by_guard() -> Result<()> {
     use crate::utils::ClockFloor;
