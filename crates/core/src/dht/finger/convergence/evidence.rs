@@ -56,7 +56,10 @@
 //!            convergence complete
 //! ```
 
+use num_bigint::BigUint;
+
 use super::proof::FingerRangeProof;
+use crate::dht::topology::dist;
 use crate::dht::Did;
 
 /// Verification state for one finger-table slot.
@@ -207,6 +210,19 @@ impl FingerEvidence {
             .unwrap_or(slot)
     }
 
+    /// Inclusive end of a populated (`Some`) equal-hint run starting at `slot`.
+    ///
+    /// Unpopulated (`None`) slots share no expected successor—each targets an
+    /// exponentially distinct ring coordinate `n + 2^j`—so a failed attempt at
+    /// a `None` slot returns `slot` alone rather than skipping subsequent
+    /// uninitialized slots (#1331).
+    pub(super) fn populated_hint_run_end(fingers: &[Option<Did>], slot: usize) -> usize {
+        match fingers.get(slot) {
+            Some(Some(_)) => Self::hint_run_end(fingers, slot),
+            _ => slot,
+        }
+    }
+
     /// Return whether the hint at `slot` changed between two topology snapshots.
     ///
     /// Indexed `get` comparison safely handles unequal snapshot lengths.
@@ -302,11 +318,14 @@ impl FingerEvidence {
             .any(|slot| slot.admits(proof))
     }
 
-    /// Apply a validated range without overwriting evidence from a newer epoch.
+    /// Apply a validated range without overwriting evidence from a newer epoch or
+    /// violating clockwise monotonicity across occupied finger slots.
     ///
     /// Post: every slot in the range that admits the proof contains the
-    /// reported successor and is marked verified. A newer slot is skipped
-    /// rather than rolled back.
+    /// reported successor (when monotonic with higher occupied slots) and is
+    /// marked verified. A newer slot is skipped rather than rolled back, and any
+    /// lower occupied slot farther than `proof.successor` is tightened to
+    /// `proof.successor` with `verified = false` so `FingersWellFormed` holds.
     pub(super) fn apply(
         &mut self,
         fingers: &mut [Option<Did>],
@@ -315,16 +334,92 @@ impl FingerEvidence {
     ) {
         // A self-successor proof means this node owns the target range; the
         // table stores that as no remote finger hint.
-        let replacement = (proof.successor != local).then_some(proof.successor);
-        for (finger, evidence) in fingers
-            .iter_mut()
-            .zip(&mut self.slots)
-            .skip(proof.request.slot_index())
-            .take(proof.covered_slot_count())
-        {
-            if evidence.admits(proof) {
-                *finger = replacement;
-                evidence.verified = true;
+        let Some(successor) = (proof.successor != local).then_some(proof.successor) else {
+            for (finger, evidence) in fingers
+                .iter_mut()
+                .zip(&mut self.slots)
+                .skip(proof.request.slot_index())
+                .take(proof.covered_slot_count())
+            {
+                if evidence.admits(proof) {
+                    *finger = None;
+                    evidence.verified = true;
+                }
+            }
+            return;
+        };
+
+        let start = proof.request.slot_index();
+        let covered = proof.covered_slot_count();
+        if start >= fingers.len() || covered == 0 {
+            return;
+        }
+        let end = start
+            .saturating_add(covered)
+            .min(fingers.len())
+            .saturating_sub(1);
+        let succ_dist = dist(local, successor);
+        let mut min_above: Option<BigUint> = fingers
+            .get(end.saturating_add(1)..)
+            .unwrap_or_default()
+            .iter()
+            .flatten()
+            .copied()
+            .map(|peer| dist(local, peer))
+            .min();
+        let mut applied = false;
+
+        for slot in (start..=end).rev() {
+            let admits = self
+                .slots
+                .get(slot)
+                .is_some_and(|evidence| evidence.admits(proof));
+            if admits && min_above.as_ref().is_none_or(|above| succ_dist <= *above) {
+                if let Some(finger) = fingers.get_mut(slot) {
+                    *finger = Some(successor);
+                }
+                if let Some(evidence) = self.slots.get_mut(slot) {
+                    evidence.verified = true;
+                }
+                min_above = Some(succ_dist.clone());
+                applied = true;
+            } else if let Some(existing) = fingers.get(slot).copied().flatten() {
+                let existing_dist = dist(local, existing);
+                if min_above
+                    .as_ref()
+                    .is_some_and(|above| existing_dist > *above)
+                {
+                    if let Some(finger) = fingers.get_mut(slot) {
+                        *finger = (min_above.as_ref().is_none_or(|above| succ_dist <= *above))
+                            .then_some(successor);
+                    }
+                    if let Some(evidence) = self.slots.get_mut(slot) {
+                        evidence.verified = false;
+                    }
+                    if min_above.as_ref().is_none_or(|above| succ_dist <= *above) {
+                        min_above = Some(succ_dist.clone());
+                    }
+                } else {
+                    min_above = Some(match min_above {
+                        Some(above) => above.min(existing_dist),
+                        None => existing_dist,
+                    });
+                }
+            }
+        }
+
+        if applied {
+            for slot in (0..start).rev() {
+                if let Some(existing) = fingers.get(slot).copied().flatten() {
+                    if dist(local, existing) > succ_dist {
+                        if let Some(finger) = fingers.get_mut(slot) {
+                            *finger = Some(successor);
+                        }
+                        if let Some(evidence) = self.slots.get_mut(slot) {
+                            evidence.verified = false;
+                        }
+                    }
+                }
             }
         }
     }

@@ -218,3 +218,97 @@ async fn test_lookup_moves_past_an_expired_placement_to_the_next() -> Result<()>
     ));
     Ok(())
 }
+
+/// #1332 regression: `PeerRing::read_epoch_ms` fences lagging wall clocks via both the
+/// monotonic floor and the Byzantine-safe admitted HLC floor so retired additions cannot
+/// resurface on local reads or DHT lookups after wake-from-sleep drift.
+#[tokio::test(flavor = "current_thread")]
+async fn test_peer_ring_read_epoch_fences_lagging_clock_and_prevents_resurrection() -> Result<()> {
+    use std::sync::Arc;
+
+    use crate::consts::MAX_TTL_MS;
+    use crate::consts::TS_OFFSET_TOLERANCE_MS;
+    use crate::dht::entry::EntryDot;
+    use crate::dht::entry::EntryVersion;
+    use crate::dht::ChordStorageCache;
+    use crate::tests::with_retention;
+    use crate::utils::ManualClock;
+
+    let t0 = 1_700_000_000_000_u128;
+    let horizon = u128::from(MAX_TTL_MS);
+    let t1 = t0 + 20_000;
+    let t_later = t0 + horizon + 4_000;
+    let clock = Arc::new(ManualClock::new(t0));
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()))
+        .with_clock(clock.clone());
+
+    let resource = Did::from(300u32);
+    let mut stale_cached = with_retention(
+        Entry::new(resource, vec![Bytes::from("stale")], EntryKind::Data),
+        t0 + horizon,
+    );
+    stale_cached.crdt.dots = vec![EntryDot {
+        version: EntryVersion::new(t0, Did::from(1u32), Did::from(10u32)),
+        index: 0,
+    }];
+    node.local_cache_put(stale_cached.clone()).await?;
+
+    clock.set(t1);
+    let mut keep_entry = with_retention(
+        Entry::new(resource, vec![Bytes::from("keep")], EntryKind::Data),
+        t1 + horizon,
+    );
+    keep_entry.crdt.dots = vec![EntryDot {
+        version: EntryVersion::new(t1, Did::from(2u32), Did::from(20u32)),
+        index: 0,
+    }];
+    node.local_cache_put(keep_entry.clone()).await?;
+
+    let placement = resource
+        .rotate_affine(1)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMessage("one placement".to_string()))?;
+    let combined = stale_cached.join(keep_entry)?;
+    node.storage.put(&placement.to_string(), &combined).await?;
+
+    // Peer `node` later admits a legitimate entry at `t_later`, setting `HLC floor = t_later - σ`.
+    clock.set(t_later);
+    let other_key = Did::from(301u32);
+    let mut fresh = with_retention(
+        Entry::new(other_key, vec![Bytes::from("fresh")], EntryKind::Data),
+        t_later + 60_000,
+    );
+    fresh.crdt.dots = vec![EntryDot {
+        version: EntryVersion::new(t_later, Did::from(3u32), Did::from(30u32)),
+        index: 0,
+    }];
+    node.join_storage_entry(t_later, other_key, fresh, Principal::Local)
+        .await?;
+
+    // Simulate waking with a local wall clock lagging 10 s behind `t_later` (< `t0 + H`).
+    clock.set(t_later - 10_000);
+    assert_eq!(node.read_epoch_ms(), t_later - TS_OFFSET_TOLERANCE_MS);
+
+    // Fetch cache read strips `"stale"` at the fenced timestamp while keeping `"keep"`.
+    let cached = node
+        .local_cache_get(resource)
+        .await?
+        .ok_or_else(|| Error::InvalidMessage("expected live cached carrier".to_string()))?;
+    assert_eq!(cached.data, vec![Bytes::from("keep")]);
+
+    // Storage lookup also strips `"stale"` rather than resurface it under the lagging clock.
+    let PeerRingAction::SomeEntry(evidence) = node.entry_lookup(resource, 1).await? else {
+        return Err(Error::InvalidMessage("expected stored carrier".to_string()));
+    };
+    assert_eq!(evidence.entry.data, vec![Bytes::from("keep")]);
+
+    // Monotonic elapsed time alone also fences a lagging wall clock.
+    let mono_node = PeerRing::new_with_storage(Did::from(4u32), 3, Box::new(MemStorage::new()));
+    assert_eq!(mono_node.read_epoch_ms_with(t0, Some(0)), t0);
+    assert_eq!(
+        mono_node.read_epoch_ms_with(t0 + 1_000, Some(horizon + 1_000)),
+        t0 + horizon + 1_000
+    );
+    Ok(())
+}

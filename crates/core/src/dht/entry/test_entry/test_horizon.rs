@@ -419,3 +419,53 @@ fn test_digest_work_is_bounded_on_a_full_carrier() -> Result<()> {
     assert_eq!((joined == full, hashed), (true, ENTRY_DATA_MAX_LEN));
     Ok(())
 }
+
+/// #1332 regression: a waking browser node whose local wall clock lags synchronized peers past
+/// the tombstone stability horizon cannot resurrect a deleted addition when local reads are
+/// fenced with `ClockFloor` via [`Entry::retired_at_guarded`].
+#[test]
+fn test_lagging_clock_read_resurrection_prevented_by_guard() -> Result<()> {
+    use crate::utils::ClockFloor;
+
+    let horizon = data_horizon_ms();
+    // Covered addition `(resurrect, d)` and later tombstone `(e, r)` at offset 1 s.
+    let stale_add = with_retention(delta_by("resurrect", NOW_MS, 1)?, NOW_MS + 2 * horizon);
+    let covered = stale_add
+        .clone()
+        .join(delta_by("keep", NOW_MS + horizon + 4_000, 2)?)?;
+    // At synchronized peer `p`, `t_p = τ(r) + H + σ` retires both the tombstone `(e, r)` and the
+    // covered addition `resurrect`, leaving only `keep` (without the garbage-collected tombstone).
+    let mut tombstoned_by_r = covered.clone();
+    tombstoned_by_r.crdt.tombstones = vec![EntryTombstone::of(
+        &element("resurrect")?,
+        EntryDot::for_index(
+            EntryVersion::new(NOW_MS + 1_000, Did::from(1u32), Did::from(1001u32)),
+            0,
+        )?,
+    )];
+    let t_p = NOW_MS + 1_000 + horizon + TS_OFFSET_TOLERANCE_MS;
+    let at_p = tombstoned_by_r.retired_at(t_p);
+    assert_entry_data_set(&at_p, &["keep"])?;
+    assert!(at_p.crdt.tombstones.is_empty());
+
+    // A stale local carrier holding `(resurrect, d)` is joined with `at_p` on waking node `q`,
+    // whose wall clock `t_q` lags `t_p` by 10 s (> σ = 3 s).
+    let waking_carrier = stale_add.join(at_p)?;
+    let t_q = t_p - 10_000;
+    assert_entry_data_set(&waking_carrier.clone().retired_at(t_q), &[
+        "resurrect",
+        "keep",
+    ])?;
+
+    // Recording the already-admitted `keep` HLC (`t_p`) yields Byzantine-safe floor `t_p - σ`.
+    let mut floor = ClockFloor::new();
+    let floor_ms = floor.observe_admitted_hlc(NOW_MS + horizon + 4_000, TS_OFFSET_TOLERANCE_MS);
+    assert_entry_data_set(
+        &waking_carrier.clone().retired_at_guarded(t_q, floor_ms),
+        &["keep"],
+    )?;
+    let live_guarded = waking_carrier
+        .live_at_guarded(t_q, floor_ms)
+        .ok_or_else(|| Error::InvalidMessage("expected live guarded carrier".to_string()))?;
+    assert_entry_data_set(&live_guarded, &["keep"])
+}

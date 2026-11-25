@@ -12,7 +12,7 @@
 //!                          torn  if rename survives ∧ ¬data survives
 //!                          old   otherwise
 //! remove: removal is durable iff SyncDirectory followed it
-//! marker: Witness creates and flushes it; Unwitness removes and flushes it
+//! marker: Witness creates and flushes it; Unwitness removes it, durable iff SyncDirectory followed it
 //! ```
 //!
 //! The presence law (#915) adds one invariant over the same crash points: a durable marker
@@ -123,17 +123,26 @@ fn marker_names_a_record(effects: PutEffects) -> bool {
 }
 
 /// Whether a crash after the first `steps` of a removal plan may leave the record gone while
-/// its marker survives: the removal outlives the marker's removal only if the marker's removal
-/// came first and was flushed (pure).
+/// its marker survives: the marker's removal must precede the record's removal with an intervening
+/// directory flush (pure).
 fn removal_may_orphan_the_marker(steps: &[RemoveStep]) -> bool {
-    let unwitnessed = steps.contains(&RemoveStep::Unwitness);
-    steps.contains(&RemoveStep::Remove) && !unwitnessed
+    let mut unwitnessed = false;
+    let mut unwitness_durable = false;
+    for step in steps {
+        match step {
+            RemoveStep::Unwitness => unwitnessed = true,
+            RemoveStep::SyncDirectory if unwitnessed => unwitness_durable = true,
+            RemoveStep::Remove if !unwitness_durable => return true,
+            RemoveStep::Remove | RemoveStep::SyncDirectory => {}
+        }
+    }
+    false
 }
 
 /// Every outcome a crash after the first `steps` of a removal plan may leave.
 fn remove_outcomes(steps: &[RemoveStep]) -> Vec<Outcome> {
     let removed = steps.contains(&RemoveStep::Remove);
-    // Unwitness flushes the directory itself; only a flush after the removal makes it durable.
+    // Only a flush after the removal makes the removal itself durable.
     let durable = removed
         && steps
             .iter()
@@ -158,6 +167,7 @@ fn test_plans_flush_before_and_after_the_rename() {
     ]);
     assert_eq!(RecordAuthority::Authoritative.remove_plan(), [
         RemoveStep::Unwitness,
+        RemoveStep::SyncDirectory,
         RemoveStep::Remove,
         RemoveStep::SyncDirectory,
     ]);
@@ -260,6 +270,11 @@ fn test_the_presence_model_rejects_a_misordered_plan() {
     let early = put_effects(&[PutStep::WriteTemporary, PutStep::Rename, PutStep::Witness]);
     assert!(!marker_names_a_record(early));
     assert!(removal_may_orphan_the_marker(&[RemoveStep::Remove]));
+    assert!(removal_may_orphan_the_marker(&[
+        RemoveStep::Unwitness,
+        RemoveStep::Remove,
+        RemoveStep::SyncDirectory,
+    ]));
 }
 
 /// The batch plans themselves: dropping or reordering the barrier or a flush fails here first.

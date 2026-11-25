@@ -256,6 +256,21 @@ impl Entry {
         projected.is_live_at(now_ms).then_some(projected)
     }
 
+    /// [`Self::retired_at`] fenced against a lagging local wall clock using an external
+    /// monotonic or admitted-HLC lower bound `floor_ms` (#1332).
+    ///
+    /// The carrier is projected at `now_ms.max(floor_ms)`, preserving the join-semilattice
+    /// homomorphism of `retire_t` at the guarded instant.
+    pub fn retired_at_guarded(self, now_ms: u128, floor_ms: u128) -> Self {
+        self.retired_at(now_ms.max(floor_ms))
+    }
+
+    /// Return [`Self::retired_at_guarded`] iff the projected entry remains live at
+    /// `now_ms.max(floor_ms)` (#1332).
+    pub fn live_at_guarded(self, now_ms: u128, floor_ms: u128) -> Option<Self> {
+        self.live_at(now_ms.max(floor_ms))
+    }
+
     /// [`Self::retired_at`] under the retention law `retention`.
     pub(super) fn retired_under(self, retention: Option<ElementRetention>, now_ms: u128) -> Self {
         let Some(retention) = retention else {

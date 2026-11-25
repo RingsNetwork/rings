@@ -11,7 +11,7 @@
 //! ```text
 //! put n (authoritative):  write n.tmp ; sync ; rename n.tmp → n ; sync dir ; [n ∉ P: mark n]
 //! mark n:                 write n.p.tmp ; rename n.p.tmp → n.p ; sync dir
-//! remove n:               remove n.p ; remove n ; sync dir
+//! remove n:               remove n.p ; sync dir ; remove n ; sync dir
 //! ```
 //!
 //! **Durable directory mutations.** On unix a rename or a removal is made durable by the
