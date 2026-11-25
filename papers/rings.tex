@@ -1,3 +1,4 @@
+\pdfoutput=1
 \documentclass[journal]{IEEEtran}
 \usepackage{cite}
 \usepackage{amsfonts}
@@ -57,7 +58,7 @@
 \title{Rings: An Algebraic Structured Peer-to-Peer Network\\
 for Decentralized Identity and Resource Ownership}
 \author{Ryan~J.~Kung%
-\thanks{Ryan J. Kung is with the Rings Network project (e-mail: ryankung@ieee.org). Manuscript created February 8, 2023; consolidated and empirically evaluated for Rings 1.0 in November 2026.}}
+\thanks{Ryan J. Kung is with the Rings Network project (e-mail: ryankung@ieee.org; ORCID: \href{https://orcid.org/0009-0000-3026-1111}{0009-0000-3026-1111}). Manuscript created February 8, 2023; consolidated and empirically evaluated for Rings 1.0 in November 2026. Source code and formal-verification artifacts: \url{https://github.com/RingsNetwork/rings}.}}
 
 \begin{document}
 
@@ -318,7 +319,7 @@ Lease descriptors & \texttt{rings-node:\allowbreak\{online-node,\allowbreak serv
 Store authority & crash $\times$ meaning lattice $C\times M$ \\
 Load accounting & slot floor $f_T$ + fair pool $\mathcal{P}_T$ over $\mathcal{R}$ slots \\
 Onion pipeline & Kleisli category $\mathbf{Kl}(M)$ with Sphinx + AEZ v5 \\
-Service receipts & \code{rings-core:service-receipt:provisional} \\ & $\to$ DRanking \code{rings-service-receipt-v1} \\
+Service receipts & \code{rings-core:\allowbreak service-receipt:\allowbreak provisional} \\ & $\to$ DRanking \code{rings-service-receipt-v1} \\
 Effects & writer monad $\mathsf{T}^{\mathcal{E}}_A$ over action lists \\
 \bottomrule
 \end{tabular}
@@ -379,10 +380,9 @@ D&:&K\to R,\\
 \]
 \[
 \begin{aligned}
-  \operatorname{Session}(d,s,e) &\Rightarrow
-  V\bigl(k_d,\sigma_{d\to s},
-  \mathtt{rings\mbox{-}delegation\mbox{-}v1}\Vert d\Vert s\Vert e\bigr)\\
-  &\qquad=\top\land now<e,
+  \operatorname{Session}(d,s,e) &\Rightarrow V\bigl(k_d,\sigma_{d\to s},\\
+  &\quad\mathtt{rings\mbox{-}delegation\mbox{-}v1}\Vert d\Vert s\Vert e\bigr)\\
+  &\quad=\top\land now<e,
 \end{aligned}
 \]
 checked at each authenticated hop via $\mathsf{HopCheck}(d,s,e)\equiv\operatorname{Session}(d,s,e)$.
@@ -632,7 +632,7 @@ where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ 
 \State $succ[n]\gets take(r, s :: list)$
 \If{$head(succ[n]) \neq none$}
 \State $h\gets head(succ[n])$
-\State \Return $Multi(Notify(h, n.did), SyncStorage(h))$
+\State \Return $Multi(Notify(h, n.did),$ $\allowbreak SyncStorage(h))$
 \Else
 \State \Return $Noop$
 \EndIf
@@ -709,9 +709,11 @@ where $p_n\in N\cup\{\bot\}$, $L_n\in N^{\leq r}$, $F_n:[0,L)\to N\cup\{\bot\}$ 
 \begin{invariant}[Ring fixpoint and lookup owner preservation]\label{inv:ring-fixpoint}
 \[
 \begin{gathered}
-  \operatorname{Inv}_{ring}(N,S)
-  \equiv \forall n\in N.\;
-  p_n=\operatorname{pred}_N(n)\land L_n=\operatorname{Succ}^r_N(n),\\[2pt]
+  \begin{aligned}
+    \operatorname{Inv}_{ring}(N,S) \equiv \forall n\in N.\;&
+    p_n=\operatorname{pred}_N(n)\\
+    &\land L_n=\operatorname{Succ}^r_N(n),
+  \end{aligned}\\[2pt]
   \mathsf{Steady}(N)\land\operatorname{Inv}_{ring}(N,S)
   \Rightarrow
   \operatorname{Lookup}(S,k)\Downarrow
@@ -835,7 +837,7 @@ A report $(u',p',y')$ consumes $\alpha$ iff either $\alpha=\mathsf{AwR}(u,p,t)\l
 \textsc{Retire}(\operatorname{end})&:\ (\mathsf{Idle},\ \operatorname{end}+1,\ k+1,\ t+f(k+1)),\\
 \textsc{Progress}(\operatorname{end})&:\ (\mathsf{Idle},\ \operatorname{end}+1,\ 0,\ \bot),
 \end{align*}
-where $\textsc{Fail}(p)$ handles expired or empty lookup attempts ($\mathsf{AwR}$), $\textsc{Retire}(\operatorname{end})$ handles admission refusal/expiry ($\mathsf{AwA}$), $\textsc{Progress}(\operatorname{end})$ records admitted range confirmation, $\operatorname{run}(p)=\max\{j\in[p,L):\forall l\in[p,j],\,\mathsf{hint}_l=\mathsf{hint}_p\}$, and $f(k)=\min(2^{\min(k,6)}\,\mathrm{s},\,60\,\mathrm{s})$ with minimum issue spacing $T_{\min}=1\,\mathrm{s}$. (Under Law~\ref{law:evidence-epochs}(3), losing the last successor clears $\alpha\gets\mathsf{Idle}$ and preserves monotonic backoff pacing until a head is restored.)
+where $\textsc{Fail}(p)$ handles expired or empty lookup attempts ($\mathsf{AwR}$), $\textsc{Retire}(\operatorname{end})$ handles admission refusal/expiry ($\mathsf{AwA}$), $\textsc{Progress}(\operatorname{end})$ records admitted range confirmation, $\operatorname{run}(p)=\max\{j\in[p,L):\forall l\in[p,j],\,\mathsf{hint}_l=\mathsf{hint}_p\}$ when $\mathsf{hint}_p\neq\bot$ and $\operatorname{run}(p)=p$ when $\mathsf{hint}_p=\bot$, and $f(k)=\min(2^{\min(k,6)}\,\mathrm{s},\,60\,\mathrm{s})$ with minimum issue spacing $T_{\min}=1\,\mathrm{s}$. (Under Law~\ref{law:evidence-epochs}(3), losing the last successor clears $\alpha\gets\mathsf{Idle}$ and preserves monotonic backoff pacing until a head is restored.)
 \end{law}
 
 \begin{definition}[Cyclic Slot Selection (\code{next\_fix\_slot})]\label{def:next-fix-slot}
@@ -851,9 +853,7 @@ With $h=\operatorname{head}(n)$ and first routable slot $r=\lfloor\log_2\delta_n
 \end{definition}
 
 \begin{proposition}[Starvation freedom]\label{prop:starve}
-Let $\mathcal{U}$ be the set of maximal contiguous equal-hint runs (or unretired ranges) among routable slots remaining unverified across attempts.  Between any two selections of a run/slot in $\mathcal{U}$, every other run in $\mathcal{U}$ is
-selected at least once, and periodic revalidation reopens proved ranges whenever
-$\alpha=\mathsf{Idle}\land(\neg\exists j\ge r:\neg\mathsf{ver}_j\ \lor\ k>0)$. (Restricting $\operatorname{run}(p)$ to populated hints $\mathsf{hint}_p\neq\bot$, as opposed to skipping contiguous $\bot$ entries before initial population, tightens selection from maximal $\bot$-runs to individual uninitialized slots.)
+Let $\mathcal{U}$ be the set of maximal contiguous populated equal-hint runs and individual unpopulated ($\bot$) or unretired slots among routable entries remaining unverified across attempts.  Between any two selections in $\mathcal{U}$, every other element of $\mathcal{U}$ is selected at least once, and periodic revalidation reopens proved ranges whenever $\alpha=\mathsf{Idle}\land(\neg\exists j\ge r:\neg\mathsf{ver}_j\ \lor\ k>0)$.
 \end{proposition}
 \begin{proof}
 Every completed or failed attempt at slot $j$ advances $c$ strictly past $j$
@@ -1045,8 +1045,10 @@ decided relative to pivot $C$ via Algorithm~\ref{alg:biasdid}.
 
 \begin{definition}[Replicated entry algebra and placement invariant]
 \[
-  \mathcal{E}^{join}_v=(E_v,\sqsubseteq,\sqcup,\bot),\qquad
-  \mathcal{E}^{final}_v=(E_v,\mathsf{conflict}_v,\mathsf{finalize}_v),
+\begin{aligned}
+  \mathcal{E}^{join}_v&=(E_v,\sqsubseteq,\sqcup,\bot),\\
+  \mathcal{E}^{final}_v&=(E_v,\mathsf{conflict}_v,\mathsf{finalize}_v),
+\end{aligned}
 \]
 where $(E_v,\sqsubseteq,\sqcup,\bot)$ is a join-semilattice~\cite{ShapiroCRDT}
 ($x\sqcup y=y\sqcup x$, $(x\sqcup y)\sqcup z=x\sqcup(y\sqcup z)$, $x\sqcup x=x$,
@@ -1182,7 +1184,7 @@ $\operatorname{retire}_t$.
 \end{proof}
 
 \begin{remark}[Clock-Skew Boundary for Browser Nodes]
-Lemma~\ref{lem:stable-covers} and Theorem~\ref{theo:no-resurrection} rely on bounded physical clock skew $|t_p-t_q|\le\sigma=3\,\mathrm{s}$ across synchronized honest holders. When a browser device wakes from sleep with wall-clock drift exceeding $\sigma$, Law~\ref{law:provenance} temporarily rejects skewed writes until OS/NTP time resynchronizes, prioritizing strict no-resurrection safety over skewed liveness. Conversely, because Law~\ref{law:cache-linear} evaluates local reads via pure projection $t_q\mapsto\operatorname{retire}_{t_q}(c[k])$ without a sleep-drift fence, a waking browser node $q$ whose local wall clock lags a synchronized peer $p$ by more than $\sigma$ ($t_q<t_p-\sigma$) can fail to retire and transiently surface an unretired addition $(v,d)$ whose covering tombstone $(e,r)$ has already reached stability and been garbage-collected at $p$; preventing wake-clock read resurrection requires fencing reads against a monotonic or peer-observed HLC lower bound.
+Lemma~\ref{lem:stable-covers} and Theorem~\ref{theo:no-resurrection} rely on bounded physical clock skew $|t_p-t_q|\le\sigma=3\,\mathrm{s}$ across synchronized honest holders. When a browser device wakes from sleep with wall-clock drift exceeding $\sigma$, Law~\ref{law:provenance} temporarily rejects skewed writes until OS/NTP time resynchronizes, prioritizing strict no-resurrection safety over skewed liveness. Without read fencing, a pure wall-clock projection $t_q\mapsto\operatorname{retire}_{t_q}(c[k])$ at a waking node $q$ whose wall clock lags a synchronized peer $p$ by more than $\sigma$ ($t_q<t_p-\sigma$) would fail to retire and transiently surface an unretired addition $(v,d)$ whose covering tombstone $(e,r)$ has already reached stability and been garbage-collected at $p$. Fencing local reads against a combined monotonic and Byzantine-safe admitted-HLC lower bound ($\tau-\sigma\le t_{\mathrm{admit}}$ under Law~\ref{law:provenance}) prevents backward wall-clock jumps and awake clock stalls from resurrecting retired additions; if OS/browser suspension pauses both wall and monotonic clocks prior to NTP resynchronization, no single untrusted peer can safely advance $q$'s read floor past $t_q$ without risking premature-retirement DoS, so read fencing complements rather than replaces OS/NTP clock resynchronization.
 \end{remark}
 
 \begin{law}[Tombstone Bound (\code{Storage Tombstone Full})]\label{law:tombstone-bound}
@@ -1278,9 +1280,9 @@ stream $n$ closed (discharging W for every partial loss $\lambda_{\mathrm{part}}
 whereas total directory loss $\lambda_{\mathrm{tot}}$ leaves $P=R=\varnothing$ and serves as the documented operator reset).
 \item \emph{macOS / iOS:} File data and directory entries are flushed via
 $\mathtt{fcntl}(\mathtt{F\_FULLFSYNC})$~\cite{AppleFsync}.
-\item \emph{Windows:} Temporary files flush via \code{FlushFileBuffers} and
-all directory mutations execute via \code{MoveFileExW} with
-\code{MOVEFILE\_REPLACE\_EXISTING} $|$ \code{MOVEFILE\_WRITE\_THROUGH}~\cite{MoveFileEx}.
+\item \emph{Windows:} Temporary file data flushes via \code{FlushFileBuffers} and
+directory mutations execute via \code{MoveFileExW} using the
+\code{MOVEFILE\_REPLACE\_EXISTING} and \code{MOVEFILE\_WRITE\_THROUGH} flags~\cite{MoveFileEx}.
 \item \emph{Linux / Unix:} Data files flush via $\mathtt{fsync}$ followed by
 parent directory $\mathtt{fsync}$ after atomic rename~\cite{Pillai2014}.
 \item \emph{Browsers (IndexedDB):} Read-write transactions at $\mathsf{Dur}$
@@ -1783,7 +1785,7 @@ Seen'_s&=&Seen_s\cup\{\eta\},\\
 
 \subsection{Experimental Setup and Reproducibility}\label{sec:eval-setup}
 
-All empirical benchmarks and formal-verification explorers in this section were executed directly against the shipped Rust transition reducers and networking crates of Rings~1.0 (workspace version \code{1.0.0-pre.8}, commit \code{6b5a3434}) on an Apple M1 Max workstation (10~ARM64 cores, $64\,\text{GiB}$ RAM, Darwin~27.0.0) using \code{rustc 1.97.0} and hardware ARMv8 AES/POLYVAL instructions enabled via \code{.cargo/config.toml} (\code{--cfg aes\_armv8 --cfg polyval\_armv8}). Pure overlay/CRDT/storage benchmarks and all 16 Stateright/BFS model-checking reporters ran under \code{--profile ci} (\code{opt-level=3}, release assertion semantics preserved), whereas AEZ~v5 cipher microbenchmarks (\code{rings-aez}), multi-flow gateway harnesses (\code{rings-gateway}), and Sphinx/Bloom/live 5-node WebRTC loopback tests (\code{rings-node}) ran sequentially (\code{--test-threads=1}) under full \code{--release} (\code{opt-level=3}, fat LTO).
+All empirical benchmarks and formal-verification explorers in this section were executed directly against the shipped Rust transition reducers and networking crates of Rings~1.0 (workspace version \code{1.0.0-pre.8}, commit \code{6b5a3434}; source and reproduction commands in \code{papers/README.md} at \url{https://github.com/RingsNetwork/rings}) on an Apple M1 Max workstation (10~ARM64 cores, $64\,\text{GiB}$ RAM, Darwin~27.0.0) using \code{rustc 1.97.0} and hardware ARMv8 AES/POLYVAL instructions enabled via \code{.cargo/config.toml} (\code{--cfg aes\_armv8 --cfg polyval\_armv8}). Pure overlay/CRDT/storage benchmarks and all 16 Stateright/BFS model-checking reporters ran under \code{--profile ci} (\code{opt-level=3}, release assertion semantics preserved), whereas AEZ~v5 cipher microbenchmarks (\code{rings-aez}), multi-flow gateway harnesses (\code{rings-gateway}), and Sphinx/Bloom/live 5-node WebRTC loopback tests (\code{rings-node}) ran sequentially (\code{--test-threads=1}) under full \code{--release} (\code{opt-level=3}, fat LTO).
 
 \subsection{Stateright State Relation and Quantitative Formal Verification}
 
@@ -1985,7 +1987,7 @@ Table~\ref{tab:crdt-lease} reports real microbenchmarks for CRDT normalization/r
 \caption{CRDT lattice operations, Merkle provenance, and 1-hour \code{LeaseHeartbeat} savings}
 \label{tab:crdt-lease}
 \scriptsize
-\setlength{\tabcolsep}{2.5pt}
+\setlength{\tabcolsep}{2.0pt}
 \begin{tabular}{@{}lrrr@{}}
 \toprule
 \multicolumn{4}{@{}l}{\textbf{Part A: CRDT \code{join} / \code{retire} \& Provenance (\code{rings-core})}} \\
