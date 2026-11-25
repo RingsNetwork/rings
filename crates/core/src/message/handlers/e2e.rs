@@ -10,7 +10,6 @@ use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-use crate::message::MessageVerificationExt;
 
 fn e2e_local_or_forward_effects<'payload>(
     local: crate::dht::Did,
@@ -40,10 +39,10 @@ fn e2e_handshake_response_effect<'payload>(
     msg: &E2eHandshakeRequest,
     responder_public_key: crate::ecc::PublicKey<33>,
 ) -> Result<CoreEffect<'payload>> {
-    msg.verify_requester(ctx.signer())?;
+    msg.verify_requester(ctx.origin())?;
     Ok(CoreEffect::send_message(
         Message::E2eHandshakeResponse(E2eHandshakeResponse::new(responder_public_key)),
-        ctx.signer(),
+        ctx.origin(),
     ))
 }
 
@@ -70,7 +69,7 @@ impl HandleMsg<E2eHandshakeResponse> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &E2eHandshakeResponse) -> Result<()> {
         let ctx = context.payload();
         run_e2e_local_or_forward(self, ctx, || {
-            msg.verify_responder(ctx.signer())?;
+            msg.verify_responder(ctx.origin())?;
             Ok(Vec::new())
         })
         .await
@@ -83,7 +82,7 @@ impl HandleMsg<E2eStreamFrame> for MessageHandler {
     async fn handle(&self, context: &HandlerContext<'_>, msg: &E2eStreamFrame) -> Result<()> {
         let ctx = context.payload();
         run_e2e_local_or_forward(self, ctx, || {
-            msg.verify_sender(ctx.signer())?;
+            msg.verify_sender(ctx.origin())?;
             Ok(Vec::new())
         })
         .await
@@ -209,6 +208,102 @@ mod tests {
                 )))
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_relayed_handshake_request_verifies_origin_and_replies_to_origin() -> Result<()> {
+        let requester = SecretKey::random();
+        let relay = SecretKey::random();
+        let responder = SecretKey::random();
+        let requester_did: crate::dht::Did = requester.address().into();
+        let relay_did: crate::dht::Did = relay.address().into();
+        let responder_did: crate::dht::Did = responder.address().into();
+
+        let request = E2eHandshakeRequest::new(requester.pubkey());
+        let initial = signed_handshake_request(&requester, request, responder_did)?;
+        let relay_delegatee = DelegateeKey::new_with_seckey(&relay)?;
+        let relayed = MessagePayload::new(
+            initial.transaction,
+            MessageSigner::new(&relay_delegatee, TEST_NETWORK_ID),
+            initial.relay,
+        )?;
+        assert_eq!(relayed.origin(), requester_did);
+        assert_eq!(relayed.last_hop_signer(), relay_did);
+        assert_ne!(relayed.origin(), relayed.last_hop_signer());
+
+        let effect = e2e_handshake_response_effect(&relayed, &request, responder.pubkey())?;
+        match effect {
+            CoreEffect::SendMessage { msg, destination } => {
+                assert_eq!(destination, requester_did);
+                assert_ne!(destination, relay_did);
+                assert!(matches!(
+                    *msg,
+                    Message::E2eHandshakeResponse(response)
+                        if response.verify_responder(responder_did).is_ok()
+                ));
+            }
+            other => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendMessage effect, got {other:?}"
+                )))
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_relayed_handshake_response_and_stream_frame_verify_origin() -> Result<()> {
+        let sender = SecretKey::random();
+        let relay = SecretKey::random();
+        let recipient = SecretKey::random();
+        let sender_did: crate::dht::Did = sender.address().into();
+        let relay_did: crate::dht::Did = relay.address().into();
+        let recipient_did: crate::dht::Did = recipient.address().into();
+        let relay_delegatee = DelegateeKey::new_with_seckey(&relay)?;
+        let relay_signer = MessageSigner::new(&relay_delegatee, TEST_NETWORK_ID);
+
+        let response = E2eHandshakeResponse::new(sender.pubkey());
+        let sender_delegatee = DelegateeKey::new_with_seckey(&sender)?;
+        let initial_resp = MessagePayload::new_send(
+            Message::E2eHandshakeResponse(response),
+            MessageSigner::new(&sender_delegatee, TEST_NETWORK_ID),
+            recipient_did,
+            recipient_did,
+        )?;
+        let relayed_resp = MessagePayload::new(
+            initial_resp.transaction,
+            relay_signer.by_ref(),
+            initial_resp.relay,
+        )?;
+        assert_eq!(relayed_resp.last_hop_signer(), relay_did);
+        response.verify_responder(relayed_resp.origin())?;
+
+        let mut rng = rand_hc::Hc128Rng::from_entropy();
+        let frame = encrypt_stream_with_rng(
+            b"relayed-e2e",
+            uuid::Uuid::new_v4(),
+            sender.pubkey(),
+            recipient.pubkey(),
+            16,
+            &mut rng,
+        )?
+        .pop()
+        .ok_or_else(|| Error::InvalidMessage("expected one E2E stream frame".to_string()))?;
+        let initial_frame = MessagePayload::new_send(
+            Message::E2eStreamFrame(frame.clone()),
+            MessageSigner::new(&sender_delegatee, TEST_NETWORK_ID),
+            recipient_did,
+            recipient_did,
+        )?;
+        let relayed_frame = MessagePayload::new(
+            initial_frame.transaction,
+            relay_signer,
+            initial_frame.relay,
+        )?;
+        assert_eq!(relayed_frame.origin(), sender_did);
+        assert_eq!(relayed_frame.last_hop_signer(), relay_did);
+        frame.verify_sender(relayed_frame.origin())?;
         Ok(())
     }
 }

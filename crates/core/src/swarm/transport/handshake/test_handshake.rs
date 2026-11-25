@@ -86,7 +86,7 @@ async fn offer_hops(node: &Node, origin: Did) -> Vec<Did> {
             .data::<Message>()
             .is_ok_and(|message| matches!(message, Message::ConnectNodeSend(_)));
         if is_offer && payload.transaction.signer() == origin {
-            hops.push(payload.signer());
+            hops.push(payload.last_hop_signer());
         }
     }
     hops
@@ -1887,6 +1887,79 @@ async fn test_zero_step_and_three_step_custom_transports_establish_admitted_dht_
         let _ = g_session_2;
         g1.swarm.close().await?;
         g2.swarm.close().await?;
+    }
+
+    // - A7: `claim_continuation_step` enforces uniform validation across out-of-band and
+    //   in-band continuations: out-of-band `answer_remote_connection` records `relay_custody`,
+    //   and in-band `answer_signaled_offer` rejects mismatched `dht_protocol_mode`.
+    {
+        let a7_switchboard: Switchboard = Arc::new(DashMap::new());
+        let c1 = build_custom_node(k1.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a7_switchboard)?;
+        let c2 = build_custom_node(k2.clone(), 3, MAX_CHANNEL_MESSAGE_SIZE, &a7_switchboard)?;
+        let (attempt, Some(offer0)) = c1.swarm.offer_connection_step(c2.did()).await? else {
+            panic!("expected step-0 offer");
+        };
+        let OfferReply::Answer(Some(ans1)) = c2.swarm.answer_offer_step(offer0).await? else {
+            panic!("expected step-1 non-final answer");
+        };
+        let Some(offer2) = c1.swarm.accept_answer_step_for(attempt, ans1).await? else {
+            panic!("expected step-2 continuation offer");
+        };
+
+        let Message::ConnectNodeSend(mut step2_msg) = offer2.transaction.data::<Message>()? else {
+            panic!("expected ConnectNodeSend");
+        };
+        let flipped_custody = if step2_msg.relay_custody.holds() {
+            crate::dht::RelayCustody::HoldsNone
+        } else {
+            crate::dht::RelayCustody::Holds
+        };
+        assert_eq!(
+            c2.swarm
+                .transport
+                .dht
+                .relay_storage_less_peers()?
+                .contains(&c1.did()),
+            !step2_msg.relay_custody.holds(),
+        );
+        step2_msg.relay_custody = flipped_custody;
+        let OfferReply::Answer(None) = c2
+            .swarm
+            .transport
+            .answer_remote_connection(
+                c1.did(),
+                SwarmTransportCallback::new(c2.swarm.transport.clone()),
+                &step2_msg,
+            )
+            .await?
+        else {
+            panic!("expected out-of-band continuation completion");
+        };
+        assert_eq!(
+            c2.swarm
+                .transport
+                .dht
+                .relay_storage_less_peers()?
+                .contains(&c1.did()),
+            !flipped_custody.holds(),
+            "out-of-band continuation must update dht.observe_relay_custody"
+        );
+
+        let mut bad_mode_msg = step2_msg;
+        bad_mode_msg.dht_protocol_mode = crate::message::DhtProtocolMode::new(TEST_NETWORK_ID + 1, 3, 4);
+        assert!(matches!(
+            c2.swarm
+                .transport
+                .answer_signaled_offer(
+                    SwarmTransportCallback::new(c2.swarm.transport.clone()),
+                    &offer2,
+                    &bad_mode_msg,
+                )
+                .await,
+            Err(Error::InvalidMessage(_))
+        ));
+        c1.swarm.close().await?;
+        c2.swarm.close().await?;
     }
 
     valid_zero_1.swarm.close().await?;

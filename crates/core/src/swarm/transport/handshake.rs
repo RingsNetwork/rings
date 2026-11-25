@@ -134,6 +134,13 @@ pub(crate) struct CounterOffer {
 /// What this node does with a received offer.
 pub(crate) type OfferOutcome = OfferReply<Option<CreatedAnswer>, CounterOffer>;
 
+/// Validated handshake continuation state claimed from a pending `Answering` slot.
+pub(super) struct ClaimedContinuation {
+    pub(super) attempt: PendingConnectionAttempt,
+    pub(super) connection: Option<SwarmConnection>,
+    pub(super) session_id: [u8; 16],
+}
+
 /// The admitted record an incoming offer meets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IncomingOfferAdmittedPeer {
@@ -778,6 +785,45 @@ impl SwarmTransport {
         Ok(OfferReply::Answer((pending, offer_msg.handshake.clone())))
     }
 
+    /// Validate and claim an incoming even-step handshake continuation (`step_index >= 2`) for
+    /// `peer`, returning `Ok(None)` if no matching `Answering` generation owns the slot.
+    pub(super) fn claim_continuation_step(
+        &self,
+        peer: Did,
+        offer: &ConnectNodeSend,
+    ) -> Result<Option<ClaimedContinuation>> {
+        if !self.accepts_connection_offer(offer) {
+            return Err(Error::InvalidMessage(
+                "connection continuation DHT protocol mismatch".to_string(),
+            ));
+        }
+        if !offer.step_index.is_multiple_of(2) {
+            return Err(Error::InvalidMessage(format!(
+                "ConnectNodeSend continuation step_index must be even, got {}",
+                offer.step_index
+            )));
+        }
+        let Some(session_id) = offer.session_id else {
+            return Err(Error::InvalidMessage(
+                "ConnectNodeSend continuation missing session_id".to_string(),
+            ));
+        };
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.peer_lifecycles()?.claim_answering_continuation(
+                peer,
+                offer.step_index,
+                session_id,
+            ) else {
+                return Ok(None);
+            };
+            Ok(Some(ClaimedContinuation {
+                attempt,
+                connection: self.get_raw_connection(peer),
+                session_id,
+            }))
+        })
+    }
+
     /// Reply to an out-of-band connection offer (or even continuation step) from `peer`.
     pub(in crate::swarm) async fn answer_remote_connection(
         &self,
@@ -786,32 +832,14 @@ impl SwarmTransport {
         offer_msg: &ConnectNodeSend,
     ) -> Result<OfferOutcome> {
         if offer_msg.step_index > 0 {
-            if !self.accepts_connection_offer(offer_msg) {
-                return Err(Error::InvalidMessage(
-                    "connection continuation DHT protocol mismatch".to_string(),
-                ));
-            }
-            if !offer_msg.step_index.is_multiple_of(2) {
-                return Err(Error::InvalidMessage(format!(
-                    "ConnectNodeSend continuation step_index must be even, got {}",
-                    offer_msg.step_index
-                )));
-            }
-            let Some(sid) = offer_msg.session_id else {
-                return Err(Error::InvalidMessage(
-                    "ConnectNodeSend continuation missing session_id".to_string(),
-                ));
+            let Some(ClaimedContinuation {
+                attempt,
+                connection: maybe_conn,
+                session_id: sid,
+            }) = self.claim_continuation_step(peer, offer_msg)?
+            else {
+                return Err(Error::SwarmMissTransport(peer));
             };
-            let (attempt, maybe_conn) = self.with_connection_lifecycle(|| {
-                let Some(attempt) = self.peer_lifecycles()?.claim_answering_continuation(
-                    peer,
-                    offer_msg.step_index,
-                    sid,
-                ) else {
-                    return Err(Error::SwarmMissTransport(peer));
-                };
-                Ok((attempt, self.get_raw_connection(peer)))
-            })?;
             let Some(conn) = maybe_conn else {
                 self.abandon_pending_connection(attempt, "missing raw connection for continuation")
                     .await;
@@ -824,6 +852,8 @@ impl SwarmTransport {
                     .classify_step_failure(attempt, err, "validating continuation offer")
                     .await?);
             }
+            self.dht
+                .observe_relay_custody(peer, offer_msg.relay_custody)?;
             return match self
                 .advance_responder_step(
                     attempt,

@@ -318,28 +318,12 @@ impl SwarmTransport {
     ) -> Result<()> {
         let peer = request.transaction.origin();
         if offer.step_index > 0 {
-            if !offer.step_index.is_multiple_of(2) {
-                return Err(Error::InvalidMessage(format!(
-                    "ConnectNodeSend continuation step_index must be even, got {}",
-                    offer.step_index
-                )));
-            }
-            let Some(sid) = offer.session_id else {
-                return Err(Error::InvalidMessage(
-                    "ConnectNodeSend continuation missing session_id".to_string(),
-                ));
-            };
-            let claimed = self.with_connection_lifecycle(|| {
-                let Some(attempt) = self.peer_lifecycles()?.claim_answering_continuation(
-                    peer,
-                    offer.step_index,
-                    sid,
-                ) else {
-                    return Ok(None);
-                };
-                Ok(Some((attempt, self.get_raw_connection(peer))))
-            })?;
-            let Some((attempt, maybe_conn)) = claimed else {
+            let Some(super::ClaimedContinuation {
+                attempt,
+                connection: maybe_conn,
+                session_id: sid,
+            }) = self.claim_continuation_step(peer, offer)?
+            else {
                 tracing::debug!(
                     target: "rings_core::swarm::transport::handshake",
                     local = %self.dht.did,

@@ -721,6 +721,6 @@ fn origin_expired_in_flight(network_id: u32, payload: &MessagePayload, now_ms: u
     let expires_at_ms = delegations.origin.expires_at_ms();
     !delegations.is_diagonal()
         && expired_within_grace(expires_at_ms, now_ms)
-        && MessageVerificationExt::verify_at(payload, network_id, now_ms)
+        && payload.verify_hop_at(network_id, now_ms)
         && payload.transaction.verify_at(network_id, expires_at_ms)
 }

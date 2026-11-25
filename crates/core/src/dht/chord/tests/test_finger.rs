@@ -186,3 +186,34 @@ fn test_begin_finger_revalidation_does_not_emit_a_lookup() -> Result<()> {
     assert!(dht.finger_convergence_status()?.may_advance());
     Ok(())
 }
+
+#[test]
+fn test_apply_fixed_finger_prunes_newly_referenced_peer_from_bridged() -> Result<()> {
+    let local = Did::from(0u32);
+    let seed = Did::from(8u32);
+    let distant = Did::from_str("0x8000000000000000000000000000000000000000").unwrap();
+    let dht = PeerRing::new_with_storage(local, 1, Box::new(MemStorage::new()));
+    let _ = dht.admit_connected(seed, None)?;
+    dht.record_bridged_peers(seed, vec![distant])?;
+    assert_eq!(dht.topology_state()?.bridged.get(&distant).copied(), Some(seed));
+
+    let request = match dht.fix_fingers()? {
+        PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessorForFix { request, .. }) => {
+            request
+        }
+        other => panic!("expected FindSuccessorForFix, got {other:?}"),
+    };
+    let outcome = dht.apply_fixed_finger(request, distant)?;
+    assert_eq!(
+        outcome,
+        crate::dht::finger::FingerApplyOutcome::Applied,
+        "expected Applied outcome, got {outcome:?}"
+    );
+    let state = dht.topology_state()?;
+    assert!(state.references(distant));
+    assert!(
+        !state.bridged.contains_key(&distant),
+        "apply_fixed_finger must prune newly referenced finger from bridged"
+    );
+    Ok(())
+}

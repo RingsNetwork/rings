@@ -329,6 +329,13 @@ impl Ord for SignedDataMutation {
             .then_with(|| self.witness_dot.cmp(&other.witness_dot))
             .then_with(|| self.claim.cmp(&other.claim))
             .then_with(|| self.proof.ts_ms.cmp(&other.proof.ts_ms))
+            .then_with(|| self.proof.ttl_ms.cmp(&other.proof.ttl_ms))
+            .then_with(|| self.proof.sig.cmp(&other.proof.sig))
+            .then_with(|| {
+                let left = rings_codec::serialize(&self.proof.delegation).unwrap_or_default();
+                let right = rings_codec::serialize(&other.proof.delegation).unwrap_or_default();
+                left.cmp(&right)
+            })
             .then_with(|| self.leaf_index.cmp(&other.leaf_index))
             .then_with(|| self.merkle_siblings.cmp(&other.merkle_siblings))
     }

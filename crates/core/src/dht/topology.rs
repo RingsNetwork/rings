@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 
 use num_bigint::BigUint;
 
+use super::finger::FingerApplyOutcome;
 use super::finger::FingerConvergenceState;
 use super::finger::FingerConvergenceStatus;
 #[cfg(test)]
@@ -538,6 +539,15 @@ pub enum TopologyEvent {
         /// gain admission ownership.
         now_ms: u64,
     },
+    /// Retire a deferred finger candidate whose transport admission could not complete.
+    RetireFingerCandidate {
+        /// Exact deferred correlation token owning the candidate proof.
+        request: FingerFixRequest,
+        /// Candidate successor whose deferred proof is being retired.
+        successor: Did,
+        /// Process-monotonic time from which retry backoff begins.
+        now_ms: u64,
+    },
     /// Cancel an in-flight request after its outbound send failed.
     CancelFinger {
         /// Correlation token of the failed outbound lookup request.
@@ -966,6 +976,21 @@ fn step_remove(
     }
 }
 
+/// Pure transition applying a reported finger successor together with post-transition
+/// predecessor and bridged-peer pruning.
+pub(crate) fn step_apply_finger(
+    state: &TopologyState,
+    request: FingerFixRequest,
+    successor: Did,
+    now_ms: u64,
+    capacity: usize,
+) -> (TopologyStep, FingerApplyOutcome) {
+    let (mut step, outcome) = apply_finger(state, request, successor, now_ms);
+    prune_predecessors(&mut step.state, capacity);
+    prune_bridged(&mut step.state, Some(successor), capacity);
+    (step, outcome)
+}
+
 /// Apply one pure topology transition.
 ///
 /// Post: the returned state depends only on `state` and `event`; no locks,
@@ -1055,17 +1080,17 @@ fn step_event(state: &TopologyState, event: TopologyEvent, capacity: usize) -> T
             request,
             successor,
             now_ms,
-        } => {
-            let mut step = apply_finger(state, request, successor, now_ms).0;
-            prune_predecessors(&mut step.state, capacity);
-            prune_bridged(&mut step.state, Some(successor), capacity);
-            step
-        }
+        } => step_apply_finger(state, request, successor, now_ms, capacity).0,
         TopologyEvent::DeferFinger {
             request,
             successor,
             now_ms,
         } => defer_finger(state, request, successor, now_ms).0,
+        TopologyEvent::RetireFingerCandidate {
+            request,
+            successor,
+            now_ms,
+        } => retire_finger_candidate(state, request, successor, now_ms).0,
         TopologyEvent::CancelFinger { request, now_ms } => TopologyStep {
             state: cancel_finger_result(state, request, now_ms),
             actions: Vec::new(),
