@@ -4430,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "rings-aez"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "aes",
  "subtle",
@@ -4441,7 +4441,7 @@ dependencies = [
 
 [[package]]
 name = "rings-codec"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "postcard",
  "serde",
@@ -4449,7 +4449,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -4516,7 +4516,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "rings-dns-relay"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "hickory-proto",
@@ -4547,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "rings-gateway"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "ipnet",
@@ -4566,11 +4566,11 @@ dependencies = [
 
 [[package]]
 name = "rings-logo"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 
 [[package]]
 name = "rings-mailbox-example"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4602,7 +4602,7 @@ dependencies = [
 
 [[package]]
 name = "rings-measure"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "serde",
  "serde_json",
@@ -4612,7 +4612,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4627,7 +4627,7 @@ dependencies = [
 
 [[package]]
 name = "rings-network-policy"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "thiserror 1.0.69",
  "url",
@@ -4635,7 +4635,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -4706,7 +4706,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -4715,7 +4715,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4739,7 +4739,7 @@ dependencies = [
 
 [[package]]
 name = "rings-runtime"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "futures",
  "futures-timer",
@@ -4754,7 +4754,7 @@ dependencies = [
 
 [[package]]
 name = "rings-test-support"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "futures",
  "rings-core",
@@ -4763,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4797,7 +4797,7 @@ dependencies = [
 
 [[package]]
 name = "rings-tui"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4820,7 +4820,7 @@ dependencies = [
 
 [[package]]
 name = "rings-turn"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "base58-monero",
@@ -4844,7 +4844,7 @@ dependencies = [
 
 [[package]]
 name = "rings-turn-service"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4880,7 +4880,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "1.0.0-pre.10"
+version = "1.0.0-pre.11"
 dependencies = [
  "async-trait",
  "chrono",

@@ -9,7 +9,7 @@ Rings Core
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-core.svg)](https://crates.io/crates/rings-core)
-[![docs](https://docs.rs/rings-core/badge.svg?version=1.0.0-pre.10)](https://docs.rs/rings-core/1.0.0-pre.10/rings_core/)
+[![docs](https://docs.rs/rings-core/badge.svg?version=1.0.0-pre.11)](https://docs.rs/rings-core/1.0.0-pre.11/rings_core/)
 
 
 # Architecture
