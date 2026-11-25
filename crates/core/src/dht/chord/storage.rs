@@ -264,7 +264,7 @@ async fn operate_live_entry(
     actor: Did,
     introducer: Principal,
     now_ms: u128,
-) -> Result<bool> {
+) -> Result<Option<Entry>> {
     let live = live_entry(store, key, now_ms, Projection::ReturnedOnly).await?;
     store
         .enforces_data_provenance(op.kind())
@@ -278,11 +278,11 @@ async fn operate_live_entry(
         Some(value) => {
             value.check_tombstone_bound()?;
             store.put(key, &value, introducer, now_ms).await?;
-            Ok(true)
+            Ok(Some(value))
         }
         None => {
             store.remove(key).await?;
-            Ok(false)
+            Ok(None)
         }
     }
 }
@@ -505,6 +505,7 @@ impl PeerRing {
         .retired_at(now_ms);
         stored.check_tombstone_bound()?;
         store.put(&key, &stored, introducer, now_ms).await?;
+        self.observe_admitted_entry_hlc(&stored);
         self.note_storage_custody_write(slot)?;
         Ok(stored)
     }
@@ -534,6 +535,7 @@ impl PeerRing {
         )
         .await;
         let stored = join_live_entry(&store, &key, admitted, introducer, now_ms).await?;
+        self.observe_admitted_entry_hlc(&stored);
         self.note_storage_custody_write(slot)?;
         Ok(stored)
     }
@@ -584,10 +586,14 @@ impl PeerRing {
             self.storage_transition.lock(),
         )
         .await;
-        if operate_live_entry(&store, &key, op, writer, introducer, now_ms).await? {
-            self.note_storage_custody_write(slot)?;
-        } else {
-            self.advance_storage_custody_incarnation(slot)?;
+        match operate_live_entry(&store, &key, op, writer, introducer, now_ms).await? {
+            Some(stored) => {
+                self.observe_admitted_entry_hlc(&stored);
+                self.note_storage_custody_write(slot)?;
+            }
+            None => {
+                self.advance_storage_custody_incarnation(slot)?;
+            }
         }
         Ok(())
     }
@@ -671,7 +677,7 @@ impl PeerRing {
         fallback_on_local_virtual_miss: bool,
         redundancy: u16,
     ) -> Result<PeerRingAction> {
-        let now_ms = self.epoch_ms();
+        let now_ms = self.read_epoch_ms();
         let mut ret = vec![];
         let mut misses = vec![];
         for placement_key in entry_key.rotate_affine(redundancy)? {
@@ -1000,15 +1006,16 @@ impl PeerRing {
         let key = entry.did.to_string();
         let admitted = entry.validate_admissible_at(now_ms, self.network_id())?;
         let _transition = self.cache_transition.lock().await;
-        join_live_entry(
+        let stored = join_live_entry(
             &CarrierStore::Whole(&self.cache),
             &key,
             admitted,
             Principal::Local,
             now_ms,
         )
-        .await
-        .map(drop)
+        .await?;
+        self.observe_admitted_entry_hlc(&stored);
+        Ok(())
     }
 
     /// Read a cached entry at `now_ms`, as a lookup serves it.
@@ -1071,7 +1078,11 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
         )
         .await
         {
-            Ok(_) | Err(Error::DataEntryWriteUnauthorized) => Ok(()),
+            Ok(Some(stored)) => {
+                self.observe_admitted_entry_hlc(&stored);
+                Ok(())
+            }
+            Ok(None) | Err(Error::DataEntryWriteUnauthorized) => Ok(()),
             Err(err) => Err(err),
         }
     }
@@ -1082,6 +1093,7 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// register, is served as absent, as a replica serves it: a cache entry that serves no
     /// element must not answer a fetch as a found, empty topic while the owners hold live data.
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        self.local_cache_get_at(entry_key, self.epoch_ms()).await
+        self.local_cache_get_at(entry_key, self.read_epoch_ms())
+            .await
     }
 }

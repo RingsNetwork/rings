@@ -432,12 +432,13 @@ impl FingerConvergenceState {
 
     /// Record one failed attempt at `slot` and move selection past its hint run.
     ///
-    /// The slots sharing `slot`'s inferred hint expect the same successor, so
-    /// retrying them next would repeat the same failure; the cursor skips the
-    /// run and the retry floor rises.
+    /// Populated slots sharing `slot`'s inferred hint expect the same
+    /// successor, so retrying them next would repeat the same failure;
+    /// unpopulated (`None`) slots target distinct ring coordinates and advance by
+    /// one slot rather than skipping the rest of an empty table (#1331).
     fn fail_attempt(&mut self, fingers: &[Option<Did>], slot: usize, now_ms: u64) {
         self.attempt.clear();
-        self.cursor = FingerEvidence::hint_run_end(fingers, slot).saturating_add(1);
+        self.cursor = FingerEvidence::populated_hint_run_end(fingers, slot).saturating_add(1);
         self.retry.record_failure(now_ms);
     }
 

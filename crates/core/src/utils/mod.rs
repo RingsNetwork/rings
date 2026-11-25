@@ -17,11 +17,14 @@ pub use slow_lock::SLOW_ASYNC_LOCK_THRESHOLD;
 pub use time::get_epoch_ms;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use time::get_epoch_ms_i64;
+pub(crate) use time::is_simulated_epoch_ms;
 pub(crate) use time::sleep;
 pub(crate) use time::try_sleep;
 pub use time::Clock;
+pub use time::ClockFloor;
 pub(crate) use time::Instant;
 pub use time::ManualClock;
+pub use time::MonotonicClock;
 pub use time::SharedClock;
 pub use time::SystemClock;
 pub(crate) use time::SYSTEM_CLOCK;

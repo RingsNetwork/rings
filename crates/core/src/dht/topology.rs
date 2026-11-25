@@ -704,25 +704,36 @@ pub fn update_successors(local: Did, current: &[Did], candidate: Did, capacity: 
     sorted_successors(candidates, local, capacity)
 }
 
-/// Refine sparse/no-wrap finger hints after learning one peer.
+/// Refine sparse/no-wrap finger hints after learning one peer while preserving
+/// clockwise monotonicity across occupied slots (`FingersWellFormed`).
 fn finger_join(local: Did, current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
     let bias = dist(local, peer);
-    current
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(slot, old)| {
-            let pos = BigUint::from(Did::power_of_two(slot));
-            if bias < pos || peer == local {
-                old
-            } else {
-                match old {
-                    Some(existing) if dist(local, existing) < bias => old,
-                    _ => Some(peer),
-                }
+    let mut next = current.to_vec();
+    let mut closest_above: Option<BigUint> = None;
+    for slot in (0..next.len()).rev() {
+        let old = next.get(slot).copied().flatten();
+        let pos = BigUint::from(Did::power_of_two(slot));
+        let updated = if bias < pos || peer == local {
+            old
+        } else {
+            match old {
+                Some(existing) if dist(local, existing) <= bias => Some(existing),
+                _ if closest_above.as_ref().is_none_or(|above| bias <= *above) => Some(peer),
+                _ => old,
             }
-        })
-        .collect()
+        };
+        if let Some(entry) = next.get_mut(slot) {
+            *entry = updated;
+        }
+        if let Some(occupied) = updated {
+            let distance = dist(local, occupied);
+            closest_above = Some(match closest_above {
+                Some(above) => above.min(distance),
+                None => distance,
+            });
+        }
+    }
+    next
 }
 
 /// Remove `peer` from every finger slot without erasing valid slots between

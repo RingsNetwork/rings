@@ -1096,3 +1096,125 @@ fn test_proved_progress_resets_failure_backoff() {
         1
     );
 }
+
+/// Prove failing a probe on an uninitialized (`None`) slot advances to `slot + 1`
+/// instead of skipping the rest of the unpopulated table (#1331).
+#[test]
+fn test_failed_uninitialized_none_slot_advances_to_next_slot() {
+    let local = did(0);
+    let seed = did(1);
+    let hinted = step(
+        &state(local, Vec::new(), None, vec![None; 8], 0),
+        TopologyEvent::Admit {
+            peer: seed,
+            deferred_proof: None,
+            now_ms: 0,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )
+    .state;
+    // Slot 0 is in the local successor range (`Some(seed)`), while slots 1..=7 remain `None`.
+    assert_eq!(hinted.fingers, vec![
+        Some(seed),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None
+    ]);
+
+    let first = step(&hinted, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let slot1 = emitted_finger_request(&first);
+    assert_eq!(slot1.slot_index(), 1);
+    let cancelled1 = step(
+        &first.state,
+        TopologyEvent::CancelFinger {
+            request: slot1,
+            now_ms: 1_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    let second = step(
+        &cancelled1.state,
+        advance(3_000),
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let slot2 = emitted_finger_request(&second);
+    assert_eq!(slot2.slot_index(), 2);
+    let cancelled2 = step(
+        &second.state,
+        TopologyEvent::CancelFinger {
+            request: slot2,
+            now_ms: 3_000,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+
+    let third = step(
+        &cancelled2.state,
+        advance(7_000),
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    let slot3 = emitted_finger_request(&third);
+    assert_eq!(slot3.slot_index(), 3);
+}
+
+/// Prove `Admit` and `ApplyFinger` preserve `FingersWellFormed` clockwise
+/// monotonicity when higher finger slots become populated ahead of lower slots.
+#[test]
+fn test_admit_and_finger_proof_preserve_finger_monotonicity_across_unpopulated_lower_slots() {
+    let local = did(0);
+    // Case 1: admitting `did(6)` when slot 2 already holds closer `did(4)` leaves slot 1 `None`
+    // rather than inserting a non-monotonic `Some(did(6))` ahead of `Some(did(4))`.
+    let initial = state(
+        local,
+        vec![did(1)],
+        None,
+        vec![Some(did(1)), None, Some(did(4)), None],
+        0,
+    );
+    let admitted = step(
+        &initial,
+        TopologyEvent::Admit {
+            peer: did(6),
+            deferred_proof: None,
+            now_ms: 100,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(admitted.state.is_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
+    assert_eq!(admitted.state.fingers[1], None);
+    assert_eq!(admitted.state.fingers[2], Some(did(4)));
+
+    // Case 2: if a stale lower slot 1 holds `Some(did(6))` and a probe at slot 2 resolves to
+    // closer `Some(did(4))`, slot 1 is lowered to `Some(did(4))` (left unverified) so
+    // `FingersWellFormed` holds across the table.
+    let non_mono_setup = state(
+        local,
+        vec![did(1)],
+        None,
+        vec![Some(did(1)), Some(did(6)), None, None],
+        2,
+    );
+    let issued = step(&non_mono_setup, advance(1_000), DEFAULT_SUCCESSOR_CAPACITY);
+    let slot2 = emitted_finger_request(&issued);
+    assert_eq!(slot2.slot_index(), 2);
+    let applied = step(
+        &issued.state,
+        TopologyEvent::ApplyFinger {
+            request: slot2,
+            successor: did(4),
+            now_ms: 1_050,
+        },
+        DEFAULT_SUCCESSOR_CAPACITY,
+    );
+    assert!(applied.state.is_well_formed(DEFAULT_SUCCESSOR_CAPACITY));
+    let projection = applied.state.finger_convergence_projection();
+    assert_eq!(applied.state.fingers[1], Some(did(4)));
+    assert_eq!(applied.state.fingers[2], Some(did(4)));
+    assert!(!projection.verified[1]);
+    assert!(projection.verified[2]);
+}

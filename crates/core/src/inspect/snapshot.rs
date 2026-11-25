@@ -66,7 +66,7 @@ impl MailboxStorageInspect {
     /// Post: read only, as every snapshot is: values are projected and filtered as a storage
     /// read would, but no projection is written back and no expired value is retired.
     pub async fn inspect(dht: &PeerRing) -> crate::error::Result<Self> {
-        let now_ms = dht.epoch_ms();
+        let now_ms = dht.read_epoch_ms();
         let mut snapshot = Self::default();
         let Some(relay_storage) = dht.relay_storage.as_ref() else {
             return Ok(Self::default());

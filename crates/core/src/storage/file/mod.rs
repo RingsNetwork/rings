@@ -147,6 +147,7 @@ impl RecordAuthority {
         match (self.flushes(), self.witnesses()) {
             (true, true) => &[
                 RemoveStep::Unwitness,
+                RemoveStep::SyncDirectory,
                 RemoveStep::Remove,
                 RemoveStep::SyncDirectory,
             ],
@@ -175,12 +176,12 @@ enum PutStep {
 /// One file-system step of a removal, as data the store interprets (the durability law).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoveStep {
-    /// Remove the records' presence markers and flush the directory (the presence law): before
-    /// the records, so a marker always names a record.
+    /// Remove the records' presence markers (the presence law): a directory flush must follow
+    /// before removing the records, so a marker always names a record.
     Unwitness,
     /// Remove the records and forget them.
     Remove,
-    /// Flush the directory's entries (the removals) to stable storage.
+    /// Flush the directory's entries (the unwitness or removals) to stable storage.
     SyncDirectory,
 }
 
@@ -615,10 +616,7 @@ impl FileStore {
     fn remove_records(&self, index: &mut FileIndex, names: &[String]) -> Result<()> {
         for step in self.authority.remove_plan() {
             match step {
-                RemoveStep::Unwitness => {
-                    self.unwitness(index, names)?;
-                    sync_directory(&self.root)?;
-                }
+                RemoveStep::Unwitness => self.unwitness(index, names)?,
                 RemoveStep::Remove => {
                     for name in names {
                         self.retire_indexed(index, name)?;
