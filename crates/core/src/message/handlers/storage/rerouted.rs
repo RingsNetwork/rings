@@ -60,7 +60,7 @@ impl Placement for LookupPlacement {
     async fn route(&self, dht: &PeerRing) -> Result<Route<LookupSettlement>> {
         Ok(
             match dht
-                .lookup_placement(self.query, true, dht.epoch_ms())
+                .lookup_placement(self.query, true, dht.read_epoch_ms())
                 .await?
             {
                 PlacementLookup::Settled(settlement) => Route::Local(settlement),

@@ -189,6 +189,13 @@ turn_service:
   multi_hop_onion_udp: false
 ```
 
+`turn_service.allow_dids` is optional and defaults to omitted (`None`), which admits any valid live
+delegation or account signature (`AllowAnyDelegation`). Explicitly setting `allow_dids: []`
+configures **ticket-only mode** (rejecting non-ticket delegations/account credentials while still
+admitting server-issued `turn.ticket` `SessionTicket` credentials), whereas setting
+`allow_dids: ["0x..."]` restricts non-ticket authentication to the listed delegator DIDs while still
+admitting server-issued session tickets.
+
 `rings-turn-service run` also accepts `--storage-path`, `--storage-capacity`, `--bootstrap-seed`,
 `--api-token-path`, `--api-allowed-origin`, and `--allow-remote-external-api`.
 

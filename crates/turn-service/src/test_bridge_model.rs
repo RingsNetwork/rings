@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use rings_node::onion::OnionUdpClientFrame;
 use rings_node::onion::OnionUdpPinholeTable;
 use rings_node::onion::OnionUdpServerFrame;
-use rings_turn::BeginAllocateDecision;
+use rings_turn::BeginAllocateOutcome;
 use rings_turn::CompleteAllocateDecision;
 use rings_turn::RefreshDecision;
 use rings_turn::TurnAllocationCore;
@@ -441,7 +441,7 @@ impl Model for BridgeModel {
                 {
                     // Mutant #1 (Review Bug #3): consumes ticket via `begin_allocate` on first try,
                     // then drops the pending registration before yielding!
-                    let dec = s.core.begin_allocate(
+                    let step = s.core.begin_allocate(
                         tuple,
                         tx_id,
                         username.clone(),
@@ -449,11 +449,11 @@ impl Model for BridgeModel {
                         ALLOC_LIFETIME_MS,
                         s.now_ms,
                     );
-                    for &exp_id in dec.expired_open_ids() {
+                    for &exp_id in step.expired_open_ids() {
                         self.initiate_close(&mut s, exp_id);
                     }
-                    match dec {
-                        BeginAllocateDecision::StartOpen { open_id, .. } => {
+                    match step.outcome {
+                        BeginAllocateOutcome::StartOpen { open_id } => {
                             let _ = s.core.disconnect_tuple(&tuple);
                             s.mutant_detached_opens.insert(open_id, MutantDetachedOpen {
                                 tuple,
@@ -462,7 +462,10 @@ impl Model for BridgeModel {
                                 open_id,
                             });
                         }
-                        BeginAllocateDecision::RejectTicketUnknown { .. } if was_in_flight => {
+                        BeginAllocateOutcome::RejectTicketUnknown
+                        | BeginAllocateOutcome::RejectTicketExpired
+                            if was_in_flight =>
+                        {
                             s.law1_false_401_on_retransmit = true;
                         }
                         _ => {}
@@ -481,7 +484,7 @@ impl Model for BridgeModel {
                         });
                     }
                 } else {
-                    let dec = s.core.begin_allocate(
+                    let step = s.core.begin_allocate(
                         tuple,
                         tx_id,
                         username,
@@ -489,20 +492,23 @@ impl Model for BridgeModel {
                         ALLOC_LIFETIME_MS,
                         s.now_ms,
                     );
-                    for &exp_id in dec.expired_open_ids() {
+                    for &exp_id in step.expired_open_ids() {
                         self.initiate_close(&mut s, exp_id);
                     }
-                    match dec {
-                        BeginAllocateDecision::CoalescePending { .. } => {
+                    match step.outcome {
+                        BeginAllocateOutcome::CoalescePending { .. } => {
                             s.saw_coalesced_pending = true;
                         }
-                        BeginAllocateDecision::ReplayActive { .. } => {
+                        BeginAllocateOutcome::ReplayActive { .. } => {
                             s.saw_replayed_active = true;
                         }
-                        BeginAllocateDecision::RejectTicketUnknown { .. } if was_in_flight => {
+                        BeginAllocateOutcome::RejectTicketUnknown
+                        | BeginAllocateOutcome::RejectTicketExpired
+                            if was_in_flight =>
+                        {
                             s.law1_false_401_on_retransmit = true;
                         }
-                        BeginAllocateDecision::StartOpen { .. } if was_in_flight => {
+                        BeginAllocateOutcome::StartOpen { .. } if was_in_flight => {
                             s.law1_duplicate_session_for_tx = true;
                         }
                         _ => {}

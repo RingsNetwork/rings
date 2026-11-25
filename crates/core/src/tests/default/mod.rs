@@ -473,9 +473,9 @@ pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
                 .map(|name| name.clone())
                 .unwrap_or_else(|| node.did().to_string());
             let signer_name = did_names
-                .get(&payload.signer())
+                .get(&payload.last_hop_signer())
                 .map(|name| name.clone())
-                .unwrap_or_else(|| payload.signer().to_string());
+                .unwrap_or_else(|| payload.last_hop_signer().to_string());
             let transaction_signer_name = did_names
                 .get(&payload.transaction.signer())
                 .map(|name| name.clone())
@@ -515,7 +515,7 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
                 drained = true;
                 println!(
                     "Msg {} -> {} [{} => {}] : {:?}",
-                    did_name_or_default(&did_names, payload.signer()),
+                    did_name_or_default(&did_names, payload.last_hop_signer()),
                     did_name_or_default(&did_names, node.did()),
                     did_name_or_default(&did_names, payload.transaction.signer()),
                     did_name_or_default(&did_names, payload.transaction.destination),

@@ -1037,3 +1037,318 @@ async fn evidence(measure: &PeriodicMeasure) -> rings_core::measure::PeerQuality
         .map(|measurement| measurement.evidence)
         .unwrap_or_default()
 }
+
+#[tokio::test]
+async fn concurrent_flushes_while_write_in_flight_coalesce_into_single_followup_write() {
+    let storage = GatedStorage::default();
+    let measure = Arc::new(
+        PeriodicMeasure::new_with_clock(
+            Box::new(storage.clone()),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}")),
+    );
+    {
+        let mut runtime = lock_or_recover(&measure.state.runtime);
+        runtime
+            .ledger
+            .apply(
+                did(),
+                Authentication::Authenticated,
+                MeasurementEvent::Connected,
+                UnixTime::from_secs(10),
+                reliability_policy(),
+            )
+            .unwrap_or_else(|error| panic!("first measurement must apply: {error}"));
+        mark_runtime_dirty(&mut runtime);
+    }
+
+    let first_measure = Arc::clone(&measure);
+    let first_handle =
+        crate::test_support::TestTask::spawn(async move { first_measure.flush().await });
+    tokio::time::timeout(Duration::from_secs(1), storage.wait_for_writes(1))
+        .await
+        .unwrap_or_else(|_| panic!("first flush must park inside storage.put"));
+
+    {
+        let mut runtime = lock_or_recover(&measure.state.runtime);
+        runtime
+            .ledger
+            .apply(
+                did(),
+                Authentication::Authenticated,
+                MeasurementEvent::Connected,
+                UnixTime::from_secs(10),
+                reliability_policy(),
+            )
+            .unwrap_or_else(|error| panic!("second measurement must apply: {error}"));
+        mark_runtime_dirty(&mut runtime);
+    }
+
+    let concurrent = futures::future::join_all((0..4).map(|_| measure.flush()));
+    tokio::pin!(concurrent);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), concurrent.as_mut())
+            .await
+            .is_err(),
+        "coalesced flushes must wait behind the active write"
+    );
+    assert_eq!(storage.state.writes.load(Ordering::SeqCst), 1);
+
+    storage.release_first_write();
+    first_handle
+        .await
+        .unwrap_or_else(|error| panic!("first flush task must join: {error}"))
+        .unwrap_or_else(|error| panic!("first flush must succeed: {error}"));
+    let results = concurrent.await;
+    for result in results {
+        result.unwrap_or_else(|error| panic!("coalesced flush must succeed: {error}"));
+    }
+
+    assert_eq!(storage.state.writes.load(Ordering::SeqCst), 2);
+    let persisted = lock_or_recover(&storage.state.value)
+        .clone()
+        .unwrap_or_else(|| panic!("coalesced snapshot must be persisted"));
+    let record = persisted
+        .records
+        .first()
+        .unwrap_or_else(|| panic!("persisted snapshot must contain the recorded peer"));
+    assert_eq!(record.record.reliability().stored_evidence().connected, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_storage_writes_do_not_trigger_slow_async_lock_warnings() {
+    #[derive(Clone)]
+    struct VecWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for VecWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            lock_or_recover(&self.0).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SlowStorage {
+        value: Arc<Mutex<Option<MeasurementSnapshot<Did>>>>,
+        writes: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<MeasurementSnapshot<Did>> for SlowStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<MeasurementSnapshot<Did>>> {
+            Ok(lock_or_recover(&self.value).clone())
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            value: &MeasurementSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            tokio::time::sleep(Duration::from_millis(650)).await;
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            *lock_or_recover(&self.value) = Some(value.clone());
+            Ok(())
+        }
+
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(0)
+        }
+    }
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer_buf = Arc::clone(&captured);
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || VecWriter(Arc::clone(&writer_buf)))
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let _log_guard = tracing::subscriber::set_default(subscriber);
+
+    let holds_before = rings_core::utils::slow_lock_hold_count();
+    let waits_before = rings_core::utils::slow_lock_wait_count();
+
+    let storage = SlowStorage::default();
+    let measure = PeriodicMeasure::new_with_clock(
+        Box::new(storage.clone()),
+        Arc::new(ManualMeasureClock::new(10)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+    measure
+        .record(
+            did(),
+            Authentication::Authenticated,
+            MeasurementEvent::Sent { useful_bytes: 7 },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must apply: {error}"));
+
+    let (first, second) = tokio::join!(measure.flush(), measure.flush());
+    first.unwrap_or_else(|error| panic!("first slow flush must succeed: {error}"));
+    second.unwrap_or_else(|error| panic!("second slow flush must succeed: {error}"));
+    assert!(storage.writes.load(Ordering::SeqCst) >= 1);
+
+    assert_eq!(rings_core::utils::slow_lock_hold_count(), holds_before);
+    assert_eq!(rings_core::utils::slow_lock_wait_count(), waits_before);
+
+    let logs = String::from_utf8_lossy(&lock_or_recover(&captured)).into_owned();
+    assert!(
+        !logs.contains("PeriodicMeasure::persistence_lock")
+            && !logs.contains("async lock held across slow operation")
+            && !logs.contains("async lock acquisition waited behind a long-held lock"),
+        "expected zero slow-lock warnings, got:\n{logs}"
+    );
+}
+
+#[tokio::test]
+async fn write_turn_queue_is_cancel_safe_after_turn_handoff() {
+    use std::future::Future;
+    use std::task::Context;
+    use std::task::Poll;
+
+    let queue = WriteTurnQueue::default();
+    let guard_a = queue.acquire().await;
+
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+
+    let fut_pre = queue.acquire();
+    tokio::pin!(fut_pre);
+    assert!(matches!(fut_pre.as_mut().poll(&mut cx), Poll::Pending));
+
+    let fut_b = queue.acquire();
+    tokio::pin!(fut_b);
+    assert!(matches!(fut_b.as_mut().poll(&mut cx), Poll::Pending));
+
+    let fut_c = queue.acquire();
+    tokio::pin!(fut_c);
+    assert!(matches!(fut_c.as_mut().poll(&mut cx), Poll::Pending));
+
+    // Cancel `fut_pre` before `guard_a` releases.
+    fut_pre.set(queue.acquire());
+
+    // Release `guard_a`: ownership transfers into `fut_b`'s oneshot channel.
+    drop(guard_a);
+
+    // Drop `fut_b` without polling it again so it must forward ownership to `fut_c`.
+    fut_b.set(queue.acquire());
+
+    let guard_c = match fut_c.as_mut().poll(&mut cx) {
+        Poll::Ready(guard) => guard,
+        Poll::Pending => panic!("waiter C must receive the turn forwarded by cancelled waiter B"),
+    };
+    drop(guard_c);
+
+    // The queue is idle again and must grant the next turn synchronously on first poll.
+    let guard_d = queue.acquire();
+    tokio::pin!(guard_d);
+    assert!(matches!(guard_d.as_mut().poll(&mut cx), Poll::Ready(_)));
+}
+
+#[test]
+fn flush_after_captured_runtime_shutdown_returns_stopped_and_clears_pending_waiters() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("dedicated test runtime must build: {error}"));
+    let measure = rt.block_on(async {
+        PeriodicMeasure::new_with_clock(
+            Box::new(MemStorage::new()),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}"))
+    });
+    drop(rt);
+
+    let outer_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap_or_else(|error| panic!("outer test runtime must build: {error}"));
+    outer_rt.block_on(async {
+        for attempt in 0..2 {
+            let result = tokio::time::timeout(Duration::from_secs(1), measure.flush())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "flush attempt {attempt} must not hang when captured runtime is shut down"
+                    )
+                });
+            assert!(
+                matches!(result, Err(MeasureRuntimeError::FlushTaskStopped)),
+                "expected FlushTaskStopped on attempt {attempt}, got {result:?}"
+            );
+            assert!(
+                lock_or_recover(&measure.state.pending_flushes).is_empty(),
+                "pending_flushes must be cleared when flush task is dropped on attempt {attempt}"
+            );
+        }
+    });
+}
+
+#[tokio::test]
+async fn cancelled_coalesced_flush_while_waiting_for_ledger_turn_notifies_waiters_and_allows_next_flush(
+) {
+    use std::future::Future;
+    use std::task::Context;
+    use std::task::Poll;
+
+    let measure = PeriodicMeasure::new_with_clock(
+        Box::new(MemStorage::new()),
+        Arc::new(ManualMeasureClock::new(10)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+    // Hold the ledger turn so the coalesced flush parks at `ledger_turns.acquire().await`.
+    let turn = measure.state.ledger_turns.acquire().await;
+    let (tx1, mut rx1) = oneshot::channel();
+    let (tx2, mut rx2) = oneshot::channel();
+    {
+        let mut pending = lock_or_recover(&measure.state.pending_flushes);
+        pending.push(tx1);
+        pending.push(tx2);
+    }
+
+    {
+        let flush_future = run_coalesced_flush(PendingFlushGuard::new(Arc::clone(&measure.state)));
+        tokio::pin!(flush_future);
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(flush_future.as_mut().poll(&mut cx), Poll::Pending));
+    }
+    assert!(rx1.try_recv().is_err());
+    assert!(rx2.try_recv().is_err());
+    assert!(lock_or_recover(&measure.state.pending_flushes).is_empty());
+
+    drop(turn);
+    let follow_up = tokio::time::timeout(Duration::from_secs(1), measure.flush())
+        .await
+        .unwrap_or_else(|_| panic!("subsequent flush after cancellation must not hang"));
+    assert!(
+        follow_up.is_ok(),
+        "subsequent flush must succeed, got {follow_up:?}"
+    );
+}

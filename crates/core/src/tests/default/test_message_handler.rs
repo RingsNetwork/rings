@@ -306,7 +306,7 @@ async fn received_hops(node: &Node, origin: Did, matches: fn(&Message) -> bool) 
             .data::<Message>()
             .is_ok_and(|message| matches(&message));
         if is_match && payload.transaction.signer() == origin {
-            hops.push(payload.signer());
+            hops.push(payload.last_hop_signer());
         }
     }
     hops

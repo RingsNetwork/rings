@@ -112,7 +112,6 @@ pub struct OnionUdpRelayFactory {
     runtime: SyncMutex<Option<(Weak<Processor>, NativeOnionCircuitHandle)>>,
     loop_class: OnionLoopClass,
     peer_policy: RelayPeerPolicy,
-    support_ipv6: bool,
 }
 
 impl OnionUdpRelayFactory {
@@ -127,7 +126,6 @@ impl OnionUdpRelayFactory {
             runtime: SyncMutex::new(Some((Arc::downgrade(processor), circuit))),
             loop_class,
             peer_policy,
-            support_ipv6: true,
         }
     }
 
@@ -138,7 +136,6 @@ impl OnionUdpRelayFactory {
             runtime: SyncMutex::new(None),
             loop_class,
             peer_policy,
-            support_ipv6: true,
         })
     }
 
@@ -161,8 +158,8 @@ impl OnionUdpRelayFactory {
 
 #[async_trait]
 impl TurnDatagramRelayFactory for OnionUdpRelayFactory {
-    fn supports_family(&self, use_ipv4: bool) -> bool {
-        use_ipv4 || self.support_ipv6
+    fn supports_family(&self, _use_ipv4: bool) -> bool {
+        true
     }
 
     async fn allocate_relay(

@@ -1,5 +1,6 @@
 //! Runtime adapter for the pure `rings-measure` state relation.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -10,7 +11,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
-use futures::lock::Mutex as AsyncMutex;
 use futures::FutureExt;
 use futures::StreamExt;
 use rings_core::dht::Did;
@@ -44,7 +44,6 @@ use rings_measure::ProvisionalEvidenceStore;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
 use rings_runtime::sleep;
-use rings_runtime::Abandoned;
 use rings_runtime::RuntimeUnavailable;
 use rings_runtime::Spawner;
 use rings_runtime::TaskSet;
@@ -209,11 +208,15 @@ pub struct PeriodicMeasure {
 struct MeasureState {
     storage: SharedMeasureStorage,
     evidence_storage: SharedEvidenceStorage,
-    /// Synchronous in-memory ledger and evidence state (`Law (Lock order): persistence_lock ≺ runtime`,
-    /// `runtime` is a leaf never held across `.await`).
+    /// Synchronous in-memory ledger and evidence state (`runtime` is a leaf never held across
+    /// `.await`).
     runtime: Mutex<RuntimeLedger>,
-    /// Serializes durable snapshot writes (`Law (Lock order): persistence_lock ≺ runtime`).
-    persistence_lock: AsyncMutex<()>,
+    /// Cancel-safe FIFO turn serializer for durable ledger snapshot writes (`storage`).
+    ledger_turns: WriteTurnQueue,
+    /// Cancel-safe FIFO turn serializer for durable evidence snapshot writes (`evidence_storage`).
+    evidence_turns: WriteTurnQueue,
+    /// Waiters coalescing behind the active or next explicit [`PeriodicMeasure::flush`] pass.
+    pending_flushes: Mutex<Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>>>,
     clock: Arc<dyn MeasureClock>,
     /// The executor captured at construction, which owns persistence and flush work.
     spawner: Spawner,
@@ -224,6 +227,105 @@ struct MeasureState {
     /// Never sent on, only dropped: fields drop in declaration order, so this one drops after
     /// both stores, and its receiver's `Canceled` is the event that the stores are released.
     _released: oneshot::Sender<Infallible>,
+}
+
+/// Cancel-safe FIFO turn serializer for async storage writes without holding an async mutex lock
+/// across I/O or triggering slow-async-lock warnings.
+#[derive(Default)]
+struct WriteTurnQueue {
+    state: Mutex<WriteTurnState>,
+}
+
+#[derive(Default)]
+struct WriteTurnState {
+    active: bool,
+    next_id: u64,
+    waiters: VecDeque<(u64, oneshot::Sender<()>)>,
+}
+
+struct WriteTurnGuard<'a> {
+    queue: &'a WriteTurnQueue,
+}
+
+impl Drop for WriteTurnGuard<'_> {
+    fn drop(&mut self) {
+        self.queue.release_turn();
+    }
+}
+
+struct PendingTurn<'a> {
+    queue: &'a WriteTurnQueue,
+    id: u64,
+    rx: oneshot::Receiver<()>,
+    acquired: bool,
+}
+
+impl Drop for PendingTurn<'_> {
+    fn drop(&mut self) {
+        if self.acquired {
+            return;
+        }
+        let removed = {
+            let mut state = lock_or_recover(&self.queue.state);
+            let before = state.waiters.len();
+            state.waiters.retain(|(id, _)| *id != self.id);
+            state.waiters.len() < before
+        };
+        if removed {
+            return;
+        }
+        self.rx.close();
+        if matches!(self.rx.try_recv(), Ok(Some(()))) {
+            self.queue.release_turn();
+        }
+    }
+}
+
+impl WriteTurnQueue {
+    async fn acquire(&self) -> WriteTurnGuard<'_> {
+        loop {
+            let mut pending = {
+                let mut state = lock_or_recover(&self.state);
+                if !state.active {
+                    state.active = true;
+                    return WriteTurnGuard { queue: self };
+                }
+                let id = state.next_id;
+                state.next_id = state.next_id.wrapping_add(1);
+                let (tx, rx) = oneshot::channel();
+                state.waiters.push_back((id, tx));
+                PendingTurn {
+                    queue: self,
+                    id,
+                    rx,
+                    acquired: false,
+                }
+            };
+            if (&mut pending.rx).await.is_ok() {
+                pending.acquired = true;
+                return WriteTurnGuard { queue: self };
+            }
+            pending.acquired = true;
+        }
+    }
+
+    fn release_turn(&self) {
+        loop {
+            let waiter = {
+                let mut state = lock_or_recover(&self.state);
+                match state.waiters.pop_front() {
+                    Some((_, waiter)) => waiter,
+                    None => {
+                        state.active = false;
+                        return;
+                    }
+                }
+            };
+            if waiter.send(()).is_ok() {
+                return;
+            }
+        }
+    }
 }
 
 impl MeasureState {
@@ -240,10 +342,13 @@ struct RuntimeLedger {
     evidence: ProvisionalEvidenceStore<Did>,
     /// Last durable view while an admission write is in flight, so read-only evidence queries
     /// need only the synchronous `runtime` lock without observing uncommitted state.
-    committed_evidence_override: Option<ProvisionalEvidenceStore<Did>>,
+    committed_evidence_override: Option<Arc<ProvisionalEvidenceStore<Did>>>,
     dirty: bool,
     persisting: bool,
     mutated_while_persisting: bool,
+    evidence_dirty: bool,
+    evidence_persisting: bool,
+    evidence_mutated_while_persisting: bool,
     last_clock: UnixTime,
     next_prune_at: UnixTime,
 }
@@ -251,7 +356,7 @@ struct RuntimeLedger {
 impl RuntimeLedger {
     fn committed_evidence(&self) -> &ProvisionalEvidenceStore<Did> {
         self.committed_evidence_override
-            .as_ref()
+            .as_deref()
             .unwrap_or(&self.evidence)
     }
 }
@@ -388,9 +493,8 @@ impl PeriodicMeasure {
         }
         let pruning = ledger.prune(now, CreditPolicy::amule());
         log_prune_failures(&pruning);
-        let dirty = reconciliation.is_adjusted()
-            || pruning.removed_count() > 0
-            || evidence_load.rejected_records() > 0
+        let dirty = reconciliation.is_adjusted() || pruning.removed_count() > 0;
+        let evidence_dirty = evidence_load.rejected_records() > 0
             || evidence_load.evicted_records() > 0
             || evidence_load.rejected_replay_markers() > 0;
         let next_prune_at = next_prune_time(&ledger, now);
@@ -405,10 +509,15 @@ impl PeriodicMeasure {
                 dirty,
                 persisting: false,
                 mutated_while_persisting: false,
+                evidence_dirty,
+                evidence_persisting: false,
+                evidence_mutated_while_persisting: false,
                 last_clock: now,
                 next_prune_at,
             }),
-            persistence_lock: AsyncMutex::new(()),
+            ledger_turns: WriteTurnQueue::default(),
+            evidence_turns: WriteTurnQueue::default(),
+            pending_flushes: Mutex::new(Vec::new()),
             clock,
             spawner,
             tasks: TaskSet::new(),
@@ -419,7 +528,7 @@ impl PeriodicMeasure {
             &state.spawner,
             run_persistence_worker(state.clone(), receiver),
         ));
-        if dirty {
+        if dirty || evidence_dirty {
             let _ = persistence_wake.try_send(());
         }
         Ok(Self {
@@ -477,19 +586,31 @@ impl PeriodicMeasure {
         }
     }
 
-    /// Start a flush on the captured executor now; the flush outlives a caller that stops
-    /// waiting for it (a timed-out [`Self::flush_with_timeout`]).
+    /// Start a flush on the captured executor now, coalescing behind any flush pass not yet
+    /// started; the flush outlives a caller that stops waiting for it (a timed-out
+    /// [`Self::flush_with_timeout`]).
     fn start_flush(&self) -> impl std::future::Future<Output = Result<(), MeasureRuntimeError>> {
-        let state = Arc::clone(&self.state);
-        let flush =
-            self.state.tasks.spawn_with(
-                &self.state.spawner,
-                async move { flush_state(&state).await },
+        let (tx, rx) = oneshot::channel();
+        let should_spawn = {
+            let mut pending = lock_or_recover(&self.state.pending_flushes);
+            let should_spawn = pending.is_empty();
+            pending.push(tx);
+            should_spawn
+        };
+        if should_spawn {
+            let pending_guard = PendingFlushGuard::new(Arc::clone(&self.state));
+            drop(
+                self.state
+                    .tasks
+                    .spawn_with(&self.state.spawner, async move {
+                        run_coalesced_flush(pending_guard).await;
+                    }),
             );
+        }
         async move {
-            match flush.await {
+            match rx.await {
                 Ok(result) => result,
-                Err(Abandoned) => Err(MeasureRuntimeError::FlushTaskStopped),
+                Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
             }
         }
     }
@@ -504,28 +625,204 @@ impl PeriodicMeasure {
     }
 }
 
-async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
-    // Law (Lock order): persistence_lock ≺ runtime; `runtime` is released before storage I/O.
-    let _guard = rings_core::utils::SlowLockGuard::acquire(
-        "PeriodicMeasure::persistence_lock",
-        state.persistence_lock.lock(),
-    )
-    .await;
-    let (snapshot, evidence_snapshot) = {
-        let mut runtime = lock_or_recover(&state.runtime);
-        prepare_snapshots(&mut runtime)
-    };
-    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
-        Ok(()) => {
-            state
-                .evidence_storage
-                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
-                .await
+struct LedgerPersistGuard<'a> {
+    state: &'a MeasureState,
+    armed: bool,
+}
+
+impl Drop for LedgerPersistGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            runtime.persisting = false;
+            runtime.mutated_while_persisting = false;
         }
-        Err(error) => Err(error),
+    }
+}
+
+struct EvidencePersistGuard<'a> {
+    state: &'a MeasureState,
+    armed: bool,
+}
+
+impl Drop for EvidencePersistGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            runtime.evidence_persisting = false;
+            runtime.evidence_mutated_while_persisting = false;
+        }
+    }
+}
+
+struct EvidenceAdmissionCancelGuard<'a> {
+    wake: &'a mpsc::Sender<()>,
+    armed: bool,
+}
+
+impl Drop for EvidenceAdmissionCancelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut sender = self.wake.clone();
+            let _ = sender.try_send(());
+        }
+    }
+}
+
+struct PendingFlushGuard {
+    state: Arc<MeasureState>,
+    armed: bool,
+}
+
+impl PendingFlushGuard {
+    const fn new(state: Arc<MeasureState>) -> Self {
+        Self { state, armed: true }
+    }
+
+    fn take_waiters(&mut self) -> Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>> {
+        let waiters = std::mem::take(&mut *lock_or_recover(&self.state.pending_flushes));
+        self.armed = false;
+        waiters
+    }
+}
+
+impl Drop for PendingFlushGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let waiters = std::mem::take(&mut *lock_or_recover(&self.state.pending_flushes));
+            drop(waiters);
+        }
+    }
+}
+
+fn clone_core_error(error: &rings_core::error::Error) -> rings_core::error::Error {
+    use rings_core::error::Error as CoreError;
+    match error {
+        CoreError::ServiceIOError(io) => {
+            CoreError::ServiceIOError(std::io::Error::new(io.kind(), io.to_string()))
+        }
+        CoreError::StorageValueExceedsCapacity { required, capacity } => {
+            CoreError::StorageValueExceedsCapacity {
+                required: *required,
+                capacity: *capacity,
+            }
+        }
+        CoreError::StorageBudgetExhausted {
+            used,
+            required,
+            capacity,
+        } => CoreError::StorageBudgetExhausted {
+            used: *used,
+            required: *required,
+            capacity: *capacity,
+        },
+        CoreError::StorageCountOverflow => CoreError::StorageCountOverflow,
+        CoreError::StorageRecordUndecodable(record) => {
+            CoreError::StorageRecordUndecodable(record.clone())
+        }
+        CoreError::StorageRecordMissing(record) => CoreError::StorageRecordMissing(record.clone()),
+        CoreError::StorageDirectoryLocked(path) => CoreError::StorageDirectoryLocked(path.clone()),
+        other => CoreError::ServiceIOError(std::io::Error::other(other.to_string())),
+    }
+}
+
+fn clone_runtime_error(error: &MeasureRuntimeError) -> MeasureRuntimeError {
+    match error {
+        MeasureRuntimeError::Storage(core_err) => {
+            MeasureRuntimeError::Storage(clone_core_error(core_err))
+        }
+        MeasureRuntimeError::Model(err) => MeasureRuntimeError::Model(*err),
+        MeasureRuntimeError::Evidence(err) => MeasureRuntimeError::Evidence(*err),
+        MeasureRuntimeError::FlushTimeout => MeasureRuntimeError::FlushTimeout,
+        MeasureRuntimeError::FlushTaskStopped => MeasureRuntimeError::FlushTaskStopped,
+        MeasureRuntimeError::Timer(err) => MeasureRuntimeError::Timer(err.clone()),
+        MeasureRuntimeError::RuntimeUnavailable(err) => {
+            MeasureRuntimeError::RuntimeUnavailable(*err)
+        }
+    }
+}
+
+async fn run_coalesced_flush(mut pending_guard: PendingFlushGuard) {
+    let state = Arc::clone(&pending_guard.state);
+    let ledger_turn = state.ledger_turns.acquire().await;
+    let waiters = pending_guard.take_waiters();
+    if waiters.is_empty() {
+        return;
+    }
+    let result = flush_state_with_ledger_turn(&state, ledger_turn).await;
+    match result {
+        Ok(()) => {
+            for waiter in waiters {
+                let _ = waiter.send(Ok(()));
+            }
+        }
+        Err(error) => {
+            let mut iter = waiters.into_iter().peekable();
+            while let Some(waiter) = iter.next() {
+                if iter.peek().is_none() {
+                    let _ = waiter.send(Err(error));
+                    break;
+                }
+                let _ = waiter.send(Err(clone_runtime_error(&error)));
+            }
+        }
+    }
+}
+
+async fn persist_ledger_with_turn(
+    state: &MeasureState,
+    only_if_dirty: bool,
+) -> Result<(), MeasureRuntimeError> {
+    let snapshot = {
+        let mut runtime = lock_or_recover(&state.runtime);
+        if only_if_dirty && !runtime.dirty {
+            return Ok(());
+        }
+        prepare_ledger_snapshot(&mut runtime)
     };
-    finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
+    let mut guard = LedgerPersistGuard { state, armed: true };
+    let result = state.storage.put(SNAPSHOT_KEY, &snapshot).await;
+    guard.armed = false;
+    finish_ledger_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
     result.map_err(MeasureRuntimeError::from)
+}
+
+async fn persist_pending_evidence(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+    let _turn = state.evidence_turns.acquire().await;
+    let evidence_snapshot = {
+        let mut runtime = lock_or_recover(&state.runtime);
+        if !evidence_persist_needed(&runtime) {
+            return Ok(());
+        }
+        prepare_evidence_snapshot(&mut runtime)
+    };
+    let mut guard = EvidencePersistGuard { state, armed: true };
+    let result = state
+        .evidence_storage
+        .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+        .await;
+    guard.armed = false;
+    finish_evidence_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
+    result.map_err(MeasureRuntimeError::from)
+}
+
+async fn flush_state_with_ledger_turn(
+    state: &MeasureState,
+    ledger_turn: WriteTurnGuard<'_>,
+) -> Result<(), MeasureRuntimeError> {
+    let ledger_result = persist_ledger_with_turn(state, false).await;
+    drop(ledger_turn);
+    ledger_result?;
+    if evidence_persist_needed(&lock_or_recover(&state.runtime)) {
+        persist_pending_evidence(state).await?;
+    }
+    Ok(())
+}
+
+#[cfg(all(test, feature = "node"))]
+async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+    let ledger_turn = state.ledger_turns.acquire().await;
+    flush_state_with_ledger_turn(state, ledger_turn).await
 }
 
 /// Wait on the shared runtime timer, reporting failure as a measurement runtime error.
@@ -587,12 +884,27 @@ fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
-fn prepare_snapshots(
-    runtime: &mut RuntimeLedger,
-) -> (MeasurementSnapshot<Did>, EvidenceSnapshot<Did>) {
+fn mark_evidence_dirty(runtime: &mut RuntimeLedger) {
+    runtime.evidence_dirty = true;
+    if runtime.evidence_persisting {
+        runtime.evidence_mutated_while_persisting = true;
+    }
+}
+
+fn evidence_persist_needed(runtime: &RuntimeLedger) -> bool {
+    runtime.evidence_dirty || runtime.committed_evidence_override.is_some()
+}
+
+fn prepare_ledger_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
     runtime.persisting = true;
     runtime.mutated_while_persisting = false;
-    (runtime.ledger.snapshot(), runtime.evidence.snapshot())
+    runtime.ledger.snapshot()
+}
+
+fn prepare_evidence_snapshot(runtime: &mut RuntimeLedger) -> EvidenceSnapshot<Did> {
+    runtime.evidence_persisting = true;
+    runtime.evidence_mutated_while_persisting = false;
+    runtime.evidence.snapshot()
 }
 
 fn valid_persisted_evidence(
@@ -635,15 +947,23 @@ fn valid_persisted_replay_marker(
         && marker.pair().beneficiary() == marker.freshness().beneficiary()
 }
 
-fn finish_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
+fn finish_ledger_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.persisting = false;
-    if succeeded {
-        runtime.committed_evidence_override = None;
-    }
     if succeeded && !runtime.mutated_while_persisting {
         runtime.dirty = false;
     }
     runtime.mutated_while_persisting = false;
+}
+
+fn finish_evidence_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
+    runtime.evidence_persisting = false;
+    if succeeded {
+        runtime.committed_evidence_override = None;
+    }
+    if succeeded && !runtime.evidence_mutated_while_persisting {
+        runtime.evidence_dirty = false;
+    }
+    runtime.evidence_mutated_while_persisting = false;
 }
 
 fn log_prune_failures(report: &rings_measure::PruneReport<Did>) {
@@ -777,30 +1097,18 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
 }
 
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
-    // Law (Lock order): persistence_lock ≺ runtime; `runtime` is released before storage I/O.
-    let _guard = rings_core::utils::SlowLockGuard::acquire(
-        "PeriodicMeasure::persistence_lock",
-        state.persistence_lock.lock(),
-    )
-    .await;
-    let (snapshot, evidence_snapshot) = {
-        let mut runtime = lock_or_recover(&state.runtime);
-        if !runtime.dirty {
-            return Ok(());
-        }
-        prepare_snapshots(&mut runtime)
+    let (ledger_dirty, evidence_dirty) = {
+        let runtime = lock_or_recover(&state.runtime);
+        (runtime.dirty, evidence_persist_needed(&runtime))
     };
-    let result = match state.storage.put(SNAPSHOT_KEY, &snapshot).await {
-        Ok(()) => {
-            state
-                .evidence_storage
-                .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
-                .await
-        }
-        Err(error) => Err(error),
-    };
-    finish_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
-    result.map_err(MeasureRuntimeError::from)
+    if ledger_dirty {
+        let _turn = state.ledger_turns.acquire().await;
+        persist_ledger_with_turn(state, true).await?;
+    }
+    if evidence_dirty {
+        persist_pending_evidence(state).await?;
+    }
+    Ok(())
 }
 
 #[cfg_attr(feature = "node", async_trait)]
@@ -935,40 +1243,54 @@ impl Measure for PeriodicMeasure {
         record: ProvisionalEvidenceRecord<Did>,
     ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
         // The evidence-storage put below is the successful operation's linearization point.
-        // Law (Lock order): persistence_lock ≺ runtime. While the durable write is in flight,
+        // Law (Lock order): evidence_turns ≺ runtime. While the durable write is in flight,
         // `committed_evidence_override` preserves the pre-admission view for read-only queries so
         // they never block behind storage I/O and never observe an uncommitted admission.
-        let _persistence_guard = rings_core::utils::SlowLockGuard::acquire(
-            "PeriodicMeasure::persistence_lock",
-            self.state.persistence_lock.lock(),
-        )
-        .await;
-        let (rollback_before, previous_override, result, snapshot) = {
+        let _evidence_turn = self.state.evidence_turns.acquire().await;
+        let (rollback_before, previous_override, previous_evidence_dirty, result, snapshot) = {
             let mut runtime = lock_or_recover(&self.state.runtime);
-            let rollback_before = runtime.evidence.clone();
+            let rollback_before = Arc::new(runtime.evidence.clone());
             let previous_override = runtime.committed_evidence_override.clone();
+            let previous_evidence_dirty = runtime.evidence_dirty;
             if runtime.committed_evidence_override.is_none() {
-                runtime.committed_evidence_override = Some(rollback_before.clone());
+                runtime.committed_evidence_override = Some(Arc::clone(&rollback_before));
             }
             let result = runtime.evidence.admit(record);
-            mark_runtime_dirty(&mut runtime);
+            mark_evidence_dirty(&mut runtime);
             let snapshot = runtime.evidence.snapshot();
-            (rollback_before, previous_override, result, snapshot)
+            (
+                rollback_before,
+                previous_override,
+                previous_evidence_dirty,
+                result,
+                snapshot,
+            )
         };
-        self.wake_persistence();
+        let mut cancel_guard = EvidenceAdmissionCancelGuard {
+            wake: &self.persistence_wake,
+            armed: true,
+        };
         if let Err(error) = self
             .state
             .evidence_storage
             .put(EVIDENCE_SNAPSHOT_KEY, &snapshot)
             .await
         {
+            cancel_guard.armed = false;
             tracing::error!(%error, "failed to commit provisional evidence admission");
             let mut runtime = lock_or_recover(&self.state.runtime);
-            runtime.evidence = rollback_before;
             runtime.committed_evidence_override = previous_override;
+            runtime.evidence =
+                Arc::try_unwrap(rollback_before).unwrap_or_else(|arc| (*arc).clone());
+            runtime.evidence_dirty = previous_evidence_dirty;
             return Err(EvidenceError::PersistenceUnavailable);
         }
-        lock_or_recover(&self.state.runtime).committed_evidence_override = None;
+        cancel_guard.armed = false;
+        {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            runtime.committed_evidence_override = None;
+            runtime.evidence_dirty = false;
+        }
         result
     }
 
@@ -977,14 +1299,14 @@ impl Measure for PeriodicMeasure {
         after: Option<EvidenceDigest>,
         limit: NonZeroUsize,
     ) -> Result<EvidencePage<Did>, EvidenceError> {
-        // Leaf read (`runtime` only, `Law (Lock order): persistence_lock ≺ runtime`).
+        // Leaf read (`runtime` only, `Law (Lock order): evidence_turns ≺ runtime`).
         Ok(lock_or_recover(&self.state.runtime)
             .committed_evidence()
             .page(after, limit))
     }
 
     async fn provisional_evidence_counters(&self) -> EvidenceCounters {
-        // Leaf read (`runtime` only, `Law (Lock order): persistence_lock ≺ runtime`).
+        // Leaf read (`runtime` only, `Law (Lock order): evidence_turns ≺ runtime`).
         lock_or_recover(&self.state.runtime)
             .committed_evidence()
             .counters()

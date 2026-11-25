@@ -1405,9 +1405,10 @@ pub struct TurnServiceConfig {
     /// ChannelBind timeout in seconds (`0` uses the RFC 5766 default of `600s`).
     #[serde(default)]
     pub channel_bind_timeout_secs: u64,
-    /// Optional allowlist of delegator DIDs for non-ticket TURN authentication.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow_dids: Vec<Did>,
+    /// Optional allowlist of delegator DIDs for non-ticket TURN authentication: `None` allows any
+    /// valid live delegation or account signature, whereas `Some(vec![])` enters ticket-only mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_dids: Option<Vec<Did>>,
     /// Descriptor heartbeat interval in seconds.
     #[serde(default = "default_turn_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
@@ -1571,7 +1572,7 @@ impl Default for TurnServiceConfig {
             max_reservation_ttl_secs: default_turn_max_reservation_ttl_secs(),
             max_permissions_per_allocation: default_turn_max_permissions_per_allocation(),
             channel_bind_timeout_secs: 0,
-            allow_dids: Vec::new(),
+            allow_dids: None,
             heartbeat_interval_secs: default_turn_heartbeat_interval_secs(),
             ttl_secs: default_turn_ttl_secs(),
             issue_tickets: default_turn_issue_tickets(),
@@ -1678,10 +1679,9 @@ impl TurnServiceConfig {
         } else {
             rings_turn::RelayPeerPolicy::PublicOnly
         };
-        let admission = if self.allow_dids.is_empty() {
-            rings_turn::TurnAdmissionPolicy::AllowAnyDelegation
-        } else {
-            rings_turn::TurnAdmissionPolicy::allowlist(self.allow_dids.iter().copied())
+        let admission = match &self.allow_dids {
+            None => rings_turn::TurnAdmissionPolicy::AllowAnyDelegation,
+            Some(dids) => rings_turn::TurnAdmissionPolicy::allowlist(dids.iter().copied()),
         };
 
         Ok(rings_turn::TurnServerConfig {
@@ -1843,6 +1843,7 @@ impl rings_node::native::daemon::NativeDaemonHooks for TurnDaemonHooks {
             )?;
         }
         install_turn_client_rpc(provider)?;
+        self.turn_server.resume();
         tracing::info!(
             did = %provider.processor().did(),
             turn_listen = %self.turn_server.local_addr(),
@@ -1901,11 +1902,15 @@ pub async fn run_turn_service_daemon(
     } else {
         None
     };
-    let turn_server = Arc::new(
+    let turn_server = Arc::new(if onion_udp_factory.is_some() {
+        rings_turn::TurnServer::start_paused(server_cfg)
+            .await
+            .context("starting paused TurnServer")?
+    } else {
         rings_turn::TurnServer::start(server_cfg)
             .await
-            .context("starting TurnServer")?,
-    );
+            .context("starting TurnServer")?
+    });
     let offer = match turn_service.service_offer(&turn_server) {
         Ok(offer) => offer,
         Err(err) => {
@@ -2094,6 +2099,71 @@ mod tests {
         };
         let (builder, _) = ok.to_processor_builder().unwrap();
         assert!(builder.configured_onion_role().invoke().is_some());
+    }
+
+    #[test]
+    fn turn_service_config_distinguishes_omitted_vs_empty_allow_dids() {
+        let now_ms = 1_700_000_000_000_u128;
+        let clock: rings_core::utils::SharedClock = Arc::new(ManualClock::new(now_ms));
+
+        let omitted_cfg: TurnServiceConfig = serde_saphyr::from_str("{}").unwrap();
+        assert_eq!(omitted_cfg.allow_dids, None);
+        assert_eq!(
+            omitted_cfg
+                .to_turn_server_config(clock.clone())
+                .unwrap()
+                .admission,
+            TurnAdmissionPolicy::AllowAnyDelegation
+        );
+
+        let ticket_only_cfg: TurnServiceConfig = serde_saphyr::from_str("allow_dids: []").unwrap();
+        assert_eq!(ticket_only_cfg.allow_dids, Some(Vec::new()));
+        let server_cfg = ticket_only_cfg
+            .to_turn_server_config(clock.clone())
+            .unwrap();
+        assert_eq!(
+            server_cfg.admission,
+            TurnAdmissionPolicy::allowlist(std::iter::empty::<Did>())
+        );
+
+        let handler = rings_turn::DelegationAuthHandler::with_server_key_and_clock(
+            server_cfg.admission,
+            server_cfg.server_key,
+            clock,
+        );
+        let account = SecretKey::random();
+        let delegatee = DelegateeKey::new_with_seckey_at(&account, 60_000, now_ms).unwrap();
+        let deleg_creds =
+            rings_turn::TurnCredentials::from_delegatee_key(&delegatee, handler.server_pubkey())
+                .unwrap();
+        assert!(
+            matches!(
+                handler.authenticate(&deleg_creds.username, "rings", None),
+                Err(rings_turn::TurnError::DelegatorNotAdmitted(_))
+            ),
+            "ticket-only allow_dids: Some([]) must reject non-ticket delegations"
+        );
+
+        let eph_key = SecretKey::random();
+        let signed_ticket = rings_turn::SignedTurnSessionTicket::issue(
+            [7u8; 16],
+            eph_key.pubkey(),
+            now_ms + 30_000,
+            handler.server_key(),
+        )
+        .unwrap();
+        let ticket_creds = rings_turn::TurnCredentials::from_session_ticket(
+            &signed_ticket,
+            &eph_key,
+            handler.server_pubkey(),
+        )
+        .unwrap();
+        assert!(
+            handler
+                .authenticate(&ticket_creds.username, "rings", None)
+                .is_ok(),
+            "ticket-only mode must still admit valid server-issued session tickets"
+        );
     }
 
     #[tokio::test]

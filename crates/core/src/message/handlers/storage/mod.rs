@@ -179,11 +179,17 @@ pub(crate) async fn admit_storage_lookup_reply(
     Ok(())
 }
 
+fn action_has_remote_fetch(act: &PeerRingAction) -> bool {
+    match act {
+        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindEntry(_)) => true,
+        PeerRingAction::MultiActions(acts) => acts.iter().any(action_has_remote_fetch),
+        _ => false,
+    }
+}
+
 /// Execute storage fetch actions for the Swarm-facing storage API: each remote lookup is a
 /// placement making the `attempts` given (`reroute`, #859), each read repair is sent through
 /// `sender`, the application boundary's egress.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 pub(crate) async fn handle_storage_fetch_act(
     transport: Arc<SwarmTransport>,
     sender: &Egress<'_, Application>,
@@ -192,9 +198,45 @@ pub(crate) async fn handle_storage_fetch_act(
     redundancy: u16,
     attempts: Attempts,
 ) -> Result<()> {
+    let mark_local_answered = !action_has_remote_fetch(&act);
+    handle_storage_fetch_act_inner(
+        transport,
+        sender,
+        resource,
+        act,
+        redundancy,
+        attempts,
+        mark_local_answered,
+    )
+    .await
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
+async fn handle_storage_fetch_act_inner(
+    transport: Arc<SwarmTransport>,
+    sender: &Egress<'_, Application>,
+    resource: Did,
+    act: PeerRingAction,
+    redundancy: u16,
+    attempts: Attempts,
+    mark_local_answered: bool,
+) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(evidence) => {
-            cache_lookup_reply(&transport, resource, redundancy, evidence.entry.clone()).await?;
+            if mark_local_answered {
+                cache_lookup_reply(&transport, resource, redundancy, evidence.entry.clone())
+                    .await?;
+            } else {
+                // Local replica hit while remote placements are also being queried: seed the
+                // fetch cache without advancing the answer clock prematurely, so the caller
+                // waits for remote `FoundEntry` replies to join into the cache (and still falls
+                // back to this cached local value if every remote placement misses or fails).
+                transport
+                    .dht
+                    .local_cache_put_at(evidence.entry.clone(), transport.now_ms())
+                    .await?;
+            }
             let misses = evidence.misses;
             let repair = transport
                 .dht
@@ -215,21 +257,40 @@ pub(crate) async fn handle_storage_fetch_act(
             .await?;
         }
         PeerRingAction::MultiActions(acts) => {
-            // Placements are independent: one waiting for its trigger must not hold the others.
-            // The Swarm storage API runs off the core actor, so nothing here yields to it.
-            join_placements(
-                join_all(acts.into_iter().map(|act| {
-                    handle_storage_fetch_act(
-                        transport.clone(),
-                        sender,
-                        resource,
-                        act,
-                        redundancy,
-                        attempts.clone(),
-                    )
-                }))
-                .await,
-            )?;
+            // Apply local hits and miss observations before remote `SearchEntry` messages leave so
+            // `local_cache_held` already holds any local carrier if a remote miss reply arrives
+            // immediately. Placements are independent: remote sends run concurrently off the core
+            // actor so one waiting for its trigger must not hold the others.
+            let (remote_acts, local_acts): (Vec<_>, Vec<_>) =
+                acts.into_iter().partition(action_has_remote_fetch);
+            for act in local_acts {
+                handle_storage_fetch_act_inner(
+                    transport.clone(),
+                    sender,
+                    resource,
+                    act,
+                    redundancy,
+                    attempts.clone(),
+                    mark_local_answered,
+                )
+                .await?;
+            }
+            if !remote_acts.is_empty() {
+                join_placements(
+                    join_all(remote_acts.into_iter().map(|act| {
+                        handle_storage_fetch_act_inner(
+                            transport.clone(),
+                            sender,
+                            resource,
+                            act,
+                            redundancy,
+                            attempts.clone(),
+                            mark_local_answered,
+                        )
+                    }))
+                    .await,
+                )?;
+            }
         }
         PeerRingAction::EntryMisses(misses) => {
             transport.observe_storage_misses(resource, redundancy, misses)?;

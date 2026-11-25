@@ -61,7 +61,7 @@ Optional overrides on `rings-turn-service run`:
 `rings-turn-service` reads a `TurnServiceDaemonConfig` YAML document with two top-level keys:
 
 - `node`: standard `rings-node` configuration (`advertise_onion_relay: true` is required when `turn_service.issue_tickets: true`).
-- `turn_service`: `TurnServiceConfig` settings covering `listen_addr`, `public_ip`, `advertised_ip`, `turn_url`, `relay_bind_ip`, `min_port`, `max_port`, `realm` (default `rings`), `server_key`, `allow_private_peers`, `max_nonces`, `max_allocations`, `max_reservations`, `max_reservation_ttl_secs` (`60`), `max_permissions_per_allocation`, `channel_bind_timeout_secs`, `allow_dids`, `heartbeat_interval_secs` (`30`), `ttl_secs` (`90`), `issue_tickets` (`true`), `ticket_invoke_policy`, and `multi_hop_onion_udp` (`false`).
+- `turn_service`: `TurnServiceConfig` settings covering `listen_addr`, `public_ip`, `advertised_ip`, `turn_url`, `relay_bind_ip`, `min_port`, `max_port`, `realm` (default `rings`), `server_key`, `allow_private_peers`, `max_nonces`, `max_allocations`, `max_reservations`, `max_reservation_ttl_secs` (`60`), `max_permissions_per_allocation`, `channel_bind_timeout_secs`, `allow_dids` (omit for any valid delegation/signature; `[]` for ticket-only mode; `[0x...]` for a delegator allowlist), `heartbeat_interval_secs` (`30`), `ttl_secs` (`90`), `issue_tickets` (`true`), `ticket_invoke_policy`, and `multi_hop_onion_udp` (`false`).
 
 ## Discovery & Client APIs
 

@@ -362,13 +362,23 @@ impl Stabilizer {
                 Some(output)
             }
             Err(e) => {
-                tracing::error!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    step,
-                    error = ?e,
-                    "STABILIZATION step failed"
-                );
+                if e.is_transient_routing_refusal() {
+                    tracing::debug!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        step,
+                        error = ?e,
+                        "STABILIZATION step failed"
+                    );
+                } else {
+                    tracing::error!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        step,
+                        error = ?e,
+                        "STABILIZATION step failed"
+                    );
+                }
                 None
             }
         }
@@ -781,18 +791,33 @@ impl Stabilizer {
                     // Maintenance never waits on a peer: the query is queued and the
                     // step moves on; a query that leaves no report expires with its lookup.
                     if let Err(e) = self.transport.protocol_egress().send_payload(payload).await {
-                        tracing::error!(
-                            target: "rings_core::dht::stabilization",
-                            local = %self.dht.did,
-                            next_hop = %closest_predecessor,
-                            next_hop_state = ?next_hop_state,
-                            finger_did = %finger_did,
-                            finger_slot = request.slot(),
-                            request_id = %request.request_id(),
-                            tx_id = %tx_id,
-                            error = ?e,
-                            "STABILIZATION fix_fingers send failed"
-                        );
+                        if e.is_transient_routing_refusal() {
+                            tracing::debug!(
+                                target: "rings_core::dht::stabilization",
+                                local = %self.dht.did,
+                                next_hop = %closest_predecessor,
+                                next_hop_state = ?next_hop_state,
+                                finger_did = %finger_did,
+                                finger_slot = request.slot(),
+                                request_id = %request.request_id(),
+                                tx_id = %tx_id,
+                                error = ?e,
+                                "STABILIZATION fix_fingers send failed"
+                            );
+                        } else {
+                            tracing::error!(
+                                target: "rings_core::dht::stabilization",
+                                local = %self.dht.did,
+                                next_hop = %closest_predecessor,
+                                next_hop_state = ?next_hop_state,
+                                finger_did = %finger_did,
+                                finger_slot = request.slot(),
+                                request_id = %request.request_id(),
+                                tx_id = %tx_id,
+                                error = ?e,
+                                "STABILIZATION fix_fingers send failed"
+                            );
+                        }
                         let _ = self.dht.cancel_finger_lookup(request);
                         return Err(e);
                     }
@@ -858,14 +883,25 @@ impl Stabilizer {
                     ),
                     Err(e) => {
                         self.dht.cancel_stabilization(request_id)?;
-                        tracing::error!(
-                            target: "rings_core::dht::stabilization",
-                            local = %self.dht.did,
-                            next = %next,
-                            next_hop_state = ?next_hop_state,
-                            error = ?e,
-                            "STABILIZATION correct_stabilize query failed"
-                        );
+                        if e.is_transient_routing_refusal() {
+                            tracing::debug!(
+                                target: "rings_core::dht::stabilization",
+                                local = %self.dht.did,
+                                next = %next,
+                                next_hop_state = ?next_hop_state,
+                                error = ?e,
+                                "STABILIZATION correct_stabilize query failed"
+                            );
+                        } else {
+                            tracing::error!(
+                                target: "rings_core::dht::stabilization",
+                                local = %self.dht.did,
+                                next = %next,
+                                next_hop_state = ?next_hop_state,
+                                error = ?e,
+                                "STABILIZATION correct_stabilize query failed"
+                            );
+                        }
                         return Err(e);
                     }
                 }

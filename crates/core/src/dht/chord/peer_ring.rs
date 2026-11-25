@@ -45,6 +45,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 
 use futures::lock::Mutex as FuturesMutex;
 
@@ -56,6 +57,7 @@ use super::storage::StorageKey;
 use super::PeerRingAction;
 use super::RemoteAction;
 use crate::consts::LOCAL_CACHE_CAPACITY;
+use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::EntryVersion;
@@ -90,6 +92,7 @@ use crate::lifecycle::epoch::Epoch;
 use crate::message::RelayHoldDigest;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+use crate::utils::ClockFloor;
 use crate::utils::Instant;
 use crate::utils::SharedClock;
 use crate::utils::SharedRng;
@@ -181,6 +184,15 @@ pub struct PeerRing {
     clock_origin: Instant,
     /// Injectable epoch clock capability used by storage and carrier retention decisions.
     clock: SharedClock,
+    /// Monotonic and Byzantine-safe admitted-HLC floor for CRDT read projection (#1332).
+    read_clock_floor: Mutex<ClockFloor>,
+    /// Whether [`Self::read_epoch_ms`] advances the monotonic component from `clock_origin`.
+    ///
+    /// Disabled by [`Self::with_clock`] so injected deterministic [`ManualClock`] tests are never
+    /// shifted by real host CPU elapsed time.
+    monotonic_read_guard: bool,
+    /// Rate-limit timestamp (ms) for lagging wall-clock warnings in [`Self::read_epoch_ms_with`].
+    last_clock_lag_warned_ms: AtomicU64,
     /// Injectable cryptographic RNG capability used for request tokens and finger jitter.
     rng: SharedRng,
     /// Lazily initialized entropy used to phase automatic finger maintenance.
@@ -291,6 +303,9 @@ impl PeerRing {
             pending_connect_lookup: Mutex::new(VecDeque::new()),
             clock_origin: Instant::now(),
             clock: Arc::new(SystemClock),
+            read_clock_floor: Mutex::new(ClockFloor::new()),
+            monotonic_read_guard: true,
+            last_clock_lag_warned_ms: AtomicU64::new(0),
             rng: SharedRng::system(),
             finger_jitter_entropy: OnceLock::new(),
             storage_transition: FuturesMutex::new(()),
@@ -317,6 +332,7 @@ impl PeerRing {
     /// Configure the epoch [`SharedClock`] capability read by this ring's storage decisions.
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
+        self.monotonic_read_guard = false;
         self
     }
 
@@ -334,6 +350,63 @@ impl PeerRing {
     /// Read the current Unix epoch timestamp in milliseconds from this ring's [`SharedClock`].
     pub fn epoch_ms(&self) -> u128 {
         self.clock.now_ms()
+    }
+
+    /// Read the current read-projection timestamp in milliseconds, fenced against lagging local
+    /// wall clocks via the monotonic and admitted-HLC floors (#1332).
+    pub fn read_epoch_ms(&self) -> u128 {
+        let wall_ms = self.epoch_ms();
+        let monotonic_ms = (self.monotonic_read_guard && !crate::utils::is_simulated_epoch_ms())
+            .then(|| self.clock_origin.elapsed().as_millis());
+        self.read_epoch_ms_with(wall_ms, monotonic_ms)
+    }
+
+    /// Evaluate and advance [`Self::read_clock_floor`] against `wall_ms` and optional
+    /// monotonic elapsed milliseconds `monotonic_ms` (#1332).
+    pub(crate) fn read_epoch_ms_with(&self, wall_ms: u128, monotonic_ms: Option<u128>) -> u128 {
+        let mut floor = self
+            .read_clock_floor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let effective = match monotonic_ms {
+            Some(mono_ms) => floor.observe_wall(wall_ms, mono_ms),
+            None => wall_ms.max(floor.observed_hlc_floor_ms()),
+        };
+        drop(floor);
+
+        let lag_ms = effective.saturating_sub(wall_ms);
+        if lag_ms > TS_OFFSET_TOLERANCE_MS {
+            let stamp = u64::try_from(monotonic_ms.unwrap_or(effective))
+                .unwrap_or(u64::MAX)
+                .max(1);
+            let prev = self.last_clock_lag_warned_ms.load(Ordering::Relaxed);
+            if (prev == 0 || stamp.saturating_sub(prev) >= 60_000)
+                && self
+                    .last_clock_lag_warned_ms
+                    .compare_exchange(prev, stamp, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+            {
+                tracing::warn!(
+                    lag_ms,
+                    wall_ms,
+                    effective_ms = effective,
+                    "local wall clock lags monotonic/HLC floor; fencing CRDT read projection against wake-clock resurrection (#1332)"
+                );
+            }
+        }
+        effective
+    }
+
+    /// Record the maximum HLC timestamp observed on an already-admitted or locally stored
+    /// carrier into [`Self::read_clock_floor`] minus `TS_OFFSET_TOLERANCE_MS` (#1332).
+    pub(crate) fn observe_admitted_entry_hlc(&self, entry: &Entry) {
+        let Some(version) = entry.max_observed_version() else {
+            return;
+        };
+        self.read_clock_floor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .observe_admitted_hlc(version.logical_time_ms, TS_OFFSET_TOLERANCE_MS);
     }
 
     /// Return the [`SharedRng`] capability bound to this ring.
@@ -361,9 +434,11 @@ impl PeerRing {
     /// its predecessor or one of its successors (load-bounds paper, Sec. V, the custody
     /// principal `χ`).
     pub(crate) fn names_previous_owner(&self, node: Did) -> Result<bool> {
-        Ok(*self.lock_predecessor_state()? == Some(node)
-            || self.lock_predecessors_state()?.contains(&node)
-            || self.successor_seq.contains(&node)?)
+        self.with_topology_state(|state| {
+            state.predecessor == Some(node)
+                || state.predecessors.contains(&node)
+                || state.successors.contains(&node)
+        })
     }
 
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
@@ -855,8 +930,11 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerApplyOutcome> {
-        self.transition(|state, now_ms| topology::apply_finger(state, request, successor, now_ms))
-            .map(|(_, outcome)| outcome)
+        let capacity = self.successor_seq.capacity();
+        self.transition(|state, now_ms| {
+            topology::step_apply_finger(state, request, successor, now_ms, capacity)
+        })
+        .map(|(_, outcome)| outcome)
     }
 
     /// Park a valid finger proof under an admission lease while transport

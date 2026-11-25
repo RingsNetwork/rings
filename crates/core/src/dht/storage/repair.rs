@@ -208,7 +208,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // Post S4: for every local entry e, each key in place(id(e),
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
-        let now_ms = self.epoch_ms();
+        let now_ms = self.read_epoch_ms();
         let entries = coalesce_by_key(
             self.live_storage_entries(now_ms)
                 .await?
@@ -244,7 +244,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // used only to validate observed misses, never to synthesize targets.
         // Preservation S1/S3: this transition never removes and duplicate copy
         // actions are duplicate Entry::join deliveries.
-        let now_ms = self.epoch_ms();
+        let now_ms = self.read_epoch_ms();
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
             let action = self

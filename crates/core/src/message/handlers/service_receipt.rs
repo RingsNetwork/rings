@@ -93,8 +93,9 @@ impl ProbeOfferPlan {
         self,
         completion_sequence: u64,
         signer: MessageSigner<impl Borrow<DelegateeKey>>,
+        ts_ms: u128,
     ) -> Result<ProbeOffer> {
-        let completion = Transaction::new(
+        let completion = Transaction::new_at(
             self.beneficiary,
             self.request.tx_id,
             completion_sequence,
@@ -104,6 +105,7 @@ impl ProbeOfferPlan {
                 nonce: self.nonce,
             },
             signer.by_ref(),
+            ts_ms,
         )?;
         let claim = ProvisionalServiceClaim::probe(
             self.network_id,
@@ -114,7 +116,7 @@ impl ProbeOfferPlan {
             self.request_digest,
             completion.digest()?.into_bytes(),
         );
-        let provider_attestation = claim.sign_provider(signer.by_ref())?;
+        let provider_attestation = claim.sign_provider_at(signer.by_ref(), ts_ms)?;
         Ok(ProbeOffer {
             request: self.request,
             completion,
@@ -155,8 +157,9 @@ fn plan_probe_offer(
 fn build_probe_acknowledgement(
     offer: &ProbeOffer,
     signer: MessageSigner<impl Borrow<DelegateeKey>>,
+    ts_ms: u128,
 ) -> Result<ProbeAcknowledgement> {
-    let beneficiary_attestation = offer.claim.sign_beneficiary(signer)?;
+    let beneficiary_attestation = offer.claim.sign_beneficiary_at(signer, ts_ms)?;
     let receipt = ProvisionalServiceReceipt::new(
         offer.claim.clone(),
         offer.provider_attestation.clone(),
@@ -226,7 +229,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .await?
             .start();
         let signer = self.handler.transport.message_signer();
-        let offer = plan.build(completion_sequence, signer.by_ref())?;
+        let offer = plan.build(completion_sequence, signer.by_ref(), self.now_ms)?;
         // The answer takes its next hop's answer slot, not the shared capacity, so peers that
         // hold this node's control reserve cannot keep it from answering.
         self.handler
@@ -254,7 +257,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
                 Error::InvalidMessage("probe offer has no matching outstanding request".to_string())
             })?;
         let signer = self.handler.transport.message_signer();
-        let acknowledgement = build_probe_acknowledgement(offer, signer.by_ref())?;
+        let acknowledgement = build_probe_acknowledgement(offer, signer.by_ref(), self.now_ms)?;
         self.handler
             .run_effects([CoreEffect::send_report_message(
                 ctx,
@@ -313,5 +316,111 @@ impl HandleMsg<ProbeAcknowledgement> for MessageHandler {
         ProbeEffectInterpreter::new(self, context.now_ms())
             .run(ProbeEffect::acknowledgement(self.dht.did, ctx, msg))
             .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::consts::DEFAULT_DELEGATION_TTL_MS;
+    use crate::dht::delivery::NextHop;
+    use crate::dht::delivery::RouteStage;
+    use crate::ecc::SecretKey;
+    use crate::message::MessageRelay;
+    use crate::tests::TEST_NETWORK_ID;
+
+    #[test]
+    fn probe_transcript_signing_uses_injected_clock_not_ambient_wall_clock() -> Result<()> {
+        // Year 2033 ms — deliberately disjoint from host wall clock.
+        let shifted_now_ms: u128 = 2_000_000_000_000;
+        let beneficiary_key = SecretKey::random();
+        let provider_key = SecretKey::random();
+        let beneficiary_did: Did = beneficiary_key.address().into();
+        let provider_did: Did = provider_key.address().into();
+
+        let beneficiary_del = DelegateeKey::new_with_seckey_at(
+            &beneficiary_key,
+            DEFAULT_DELEGATION_TTL_MS,
+            shifted_now_ms,
+        )?;
+        let provider_del = DelegateeKey::new_with_seckey_at(
+            &provider_key,
+            DEFAULT_DELEGATION_TTL_MS,
+            shifted_now_ms,
+        )?;
+        let beneficiary_signer = MessageSigner::new(&beneficiary_del, TEST_NETWORK_ID);
+        let provider_signer = MessageSigner::new(&provider_del, TEST_NETWORK_ID);
+
+        let request = ProbeRequest::random_for_epoch(ProvisionalEpoch::from_unix_seconds(
+            u64::try_from(shifted_now_ms / 1_000).unwrap_or(u64::MAX),
+        ));
+        let tx = Transaction::new_at(
+            provider_did,
+            uuid::Uuid::new_v4(),
+            1,
+            None,
+            Message::ProbeRequest(request),
+            beneficiary_signer.by_ref(),
+            shifted_now_ms,
+        )?;
+        let req_payload = MessagePayload::new(
+            tx,
+            beneficiary_signer.by_ref(),
+            MessageRelay::new(
+                NextHop::new(provider_did, RouteStage::TOWARD),
+                provider_did,
+                crate::message::HopBudget::MAX,
+            ),
+        )?;
+
+        let plan = plan_probe_offer(
+            &req_payload,
+            &request,
+            provider_did,
+            TEST_NETWORK_ID,
+            shifted_now_ms,
+        )?;
+        let offer = plan.build(7, provider_signer.by_ref(), shifted_now_ms)?;
+        assert_eq!(offer.completion.verification.ts_ms, shifted_now_ms);
+        assert_eq!(offer.provider_attestation.ts_ms, shifted_now_ms);
+
+        let offer_tx = Transaction::new_at(
+            beneficiary_did,
+            req_payload.transaction.tx_id,
+            1,
+            None,
+            Message::ProbeOffer(Box::new(offer.clone())),
+            provider_signer.by_ref(),
+            shifted_now_ms,
+        )?;
+        let offer_payload = MessagePayload::new(
+            offer_tx,
+            provider_signer,
+            MessageRelay::new(
+                NextHop::new(beneficiary_did, RouteStage::replying_via(None)),
+                beneficiary_did,
+                crate::message::HopBudget::MAX,
+            ),
+        )?;
+        let verified_req = offer.verify_live_transcript_at(
+            &offer_payload,
+            TEST_NETWORK_ID,
+            beneficiary_did,
+            shifted_now_ms,
+        )?;
+        assert_eq!(verified_req, request);
+
+        let ack = build_probe_acknowledgement(&offer, beneficiary_signer, shifted_now_ms)?;
+        assert_eq!(ack.receipt.beneficiary_attestation.ts_ms, shifted_now_ms);
+        assert!(ack
+            .receipt
+            .verify_live_at(TEST_NETWORK_ID, shifted_now_ms)
+            .is_ok());
+        assert!(matches!(
+            ack.receipt
+                .verify_live_at(TEST_NETWORK_ID, crate::utils::get_epoch_ms()),
+            Err(ServiceReceiptError::ProviderAttestationNotLive)
+        ));
+        Ok(())
     }
 }

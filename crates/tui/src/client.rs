@@ -962,7 +962,7 @@ impl NodeClient for DemoNodeClient {
         Ok(NodeSnapshot {
             did: Some(local_did.clone()),
             wire_version: Some(4),
-            version: Some("1.0.0-pre.8".to_string()),
+            version: Some("1.0.0-pre.10".to_string()),
             swarm: Some(SwarmInfo {
                 peers: peers.clone(),
                 dht: Some(DhtInfo {
@@ -1127,7 +1127,7 @@ impl NodeClient for DemoNodeClient {
                     heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
                     fresh_for_ms: 60_000,
                     expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
-                    version: "1.0.0-pre.8".to_string(),
+                    version: "1.0.0-pre.10".to_string(),
                     signature: serde_json::Value::Null,
                 },
                 OnlineNodeDescriptorInfo {
@@ -1147,7 +1147,7 @@ impl NodeClient for DemoNodeClient {
                     heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
                     fresh_for_ms: 60_000,
                     expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
-                    version: "1.0.0-pre.8".to_string(),
+                    version: "1.0.0-pre.10".to_string(),
                     signature: serde_json::Value::Null,
                 },
             ],
@@ -1169,7 +1169,7 @@ impl NodeClient for DemoNodeClient {
                 heartbeat_at_ms: u64::try_from(now_ms).unwrap_or(0),
                 fresh_for_ms: 60_000,
                 expires_at_ms: u64::try_from(now_ms + 300_000).unwrap_or(0),
-                version: "1.0.0-pre.8".to_string(),
+                version: "1.0.0-pre.10".to_string(),
                 signature: serde_json::Value::Null,
             }],
             online_nodes_error: None,

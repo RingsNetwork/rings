@@ -285,3 +285,28 @@ fn snapshot_restore_preserves_historical_counters_without_recounting_records(
     assert_eq!(restored.counters(), counters);
     Ok(())
 }
+
+#[test]
+fn admit_rejects_mismatched_pair_and_freshness_beneficiary() {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+
+    let hasher = RandomState::new();
+    let nonce: [u8; 32] = std::array::from_fn(|index| hasher.hash_one(index) as u8);
+    let mut store = ProvisionalEvidenceStore::new(limits(4, 64, 4, 64));
+    let malformed = ProvisionalEvidenceRecord::new(
+        EvidenceAccountPair::new(1, 2),
+        EvidenceFreshnessKey::new(1, 9, 5, nonce),
+        EvidenceDigest::new([7; 32]),
+        vec![1, 2, 3, 4],
+        UnixTime::from_secs(5),
+        4,
+    );
+    assert_eq!(
+        store.admit(malformed),
+        Err(EvidenceError::BeneficiaryMismatch)
+    );
+    assert!(store.is_empty());
+    assert_eq!(store.replay_floor(), 0);
+    assert_eq!(store.counters().rejected_records(), 1);
+}

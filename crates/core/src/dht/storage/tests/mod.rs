@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -1852,5 +1853,138 @@ fn test_non_transitive_cliques_share_virtual_node_ring_and_bridge_storage_sync()
     let dest_e = crate::dht::StorageSyncDestination::PhysicalOwner(e50);
     assert_eq!(ring_a.next_hop_for_storage_sync(dest_e)?, Some(c30));
     assert!(ring_a.storage_sync_route_still_permits(dest_e, c30)?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_entry_lookup_for_fetch_does_not_short_circuit_split_brain_virtual_owner() -> Result<()>
+{
+    use crate::dht::topology::DEFAULT_SUCCESSOR_CAPACITY;
+    use crate::dht::StorageVirtualNodes;
+    use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+
+    let entry = Did::from(0u32);
+    let s0 = Did::from(1u32);
+    let s1 = Did::from(2u32);
+    let s2 = Did::from(3u32);
+    let s3 = Did::power_of_two(159) + Did::from(1u32);
+    let s4 = Did::power_of_two(159) + Did::from(2u32);
+    let s5 = Did::from(ethereum_types::H160::repeat_byte(0xff));
+
+    let vcfg = VirtualNodeConfig::new(1, DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER);
+    let entry_ring = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        entry,
+        DEFAULT_SUCCESSOR_CAPACITY as u8,
+        Box::new(MemStorage::new()),
+        usize::from(DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER),
+        vcfg,
+    );
+    for peer in [s0, s1, s2, s3, s4, s5] {
+        let _ = entry_ring.admit_connected(peer, None)?;
+    }
+    let _ = entry_ring.notify_within_topology(s5)?;
+
+    let referenced = entry_ring.topology_state()?.referenced_peers();
+    assert_eq!(referenced.len(), 5);
+    assert!(!referenced.contains(&s4));
+
+    let global_vnodes = StorageVirtualNodes::from_owners(vcfg, [entry, s0, s1, s2, s3, s4, s5]);
+    let mut witness = None;
+    for seed in 1u32..10_000 {
+        let resource = Entry::gen_did(&format!("split-brain-topic-{seed}"))?;
+        let placements = resource.rotate_affine(6)?;
+        let mut local_split_placement = None;
+        let mut remote_placements = 0usize;
+        for placement in placements {
+            let local_owner = entry_ring.observed_storage_virtual_owner(placement)?;
+            let global_owner = global_vnodes.owner_for_key(placement);
+            if local_owner == Some(entry) && global_owner == Some(s4) {
+                local_split_placement = Some(placement);
+            } else if local_owner.is_some_and(|owner| owner != entry) {
+                remote_placements += 1;
+            }
+        }
+        if let Some(p_local) = local_split_placement {
+            if remote_placements >= 1 {
+                witness = Some((resource, p_local));
+                break;
+            }
+        }
+    }
+    let (resource, p_local) = witness.ok_or_else(|| {
+        Error::InvalidMessage("expected deterministic 7-node split-brain placement".to_string())
+    })?;
+
+    let partial = data_entry_with_data(resource, "entry-only");
+    entry_ring
+        .storage
+        .put(
+            &StorageKey::new(EntryKind::Data, p_local).to_string(),
+            &partial,
+        )
+        .await?;
+
+    let PeerRingAction::MultiActions(actions) =
+        entry_ring.entry_lookup_for_fetch(resource, 6).await?
+    else {
+        return Err(Error::InvalidMessage(
+            "expected local SomeEntry and remote FindEntry actions without short-circuiting"
+                .to_string(),
+        ));
+    };
+
+    let some_entry_count = actions
+        .iter()
+        .filter(|act| matches!(act, PeerRingAction::SomeEntry(_)))
+        .count();
+    let remote_find_count = actions
+        .iter()
+        .filter(|act| {
+            matches!(
+                act,
+                PeerRingAction::RemoteAction(_, RemoteAction::FindEntry(_))
+            )
+        })
+        .count();
+    assert_eq!(some_entry_count, 1);
+    assert!(
+        remote_find_count >= 1,
+        "local split-brain hit must still query remote placements"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_entry_lookup_for_fetch_joins_multiple_local_replicas() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let resource = Did::from(10u32);
+    let now_ms = get_epoch_ms();
+    let entry_a = crate::tests::stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["a"],
+        now_ms,
+        Did::from(1u32),
+    )?;
+    let entry_b = crate::tests::stamped_delta(
+        EntryOperation::Extend,
+        resource,
+        &["b"],
+        now_ms,
+        Did::from(2u32),
+    )?;
+    let (first_key, second_key) = first_two_affine_keys(resource)?;
+    node.storage.put(&first_key.to_string(), &entry_a).await?;
+    node.storage.put(&second_key.to_string(), &entry_b).await?;
+
+    let PeerRingAction::SomeEntry(evidence) = node.entry_lookup_for_fetch(resource, 2).await?
+    else {
+        return Err(Error::InvalidMessage(
+            "expected joined local SomeEntry without remote actions".to_string(),
+        ));
+    };
+    let values: BTreeSet<Bytes> = evidence.entry.data.into_iter().collect();
+    assert_eq!(values, BTreeSet::from([Bytes::from("a"), Bytes::from("b")]));
+    assert!(evidence.misses.is_empty());
     Ok(())
 }
