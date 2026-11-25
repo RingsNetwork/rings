@@ -223,3 +223,49 @@ async fn test_handler_ctx_clock_drives_probe_tolerance_and_storage_hold_expiry_w
 
     Ok(())
 }
+
+#[cfg(not(target_family = "wasm"))]
+#[tracing_test::traced_test]
+#[tokio::test]
+async fn test_run_prioritized_dht_effects_logs_transient_routing_refusal_at_debug() -> Result<()> {
+    use super::CoreEffect;
+    use crate::dht::Did;
+    use crate::message::types::QueryForTopoInfoSend;
+
+    let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let swarm = SwarmBuilder::new(
+        TEST_NETWORK_ID,
+        crate::tests::test_transport(""),
+        Box::new(MemStorage::new()),
+        session,
+    )
+    .replay_storage(crate::tests::volatile_replay_storage())
+    .build();
+    let handler = MessageHandler::new(swarm.transport.clone());
+    let absent_peer: Did = SecretKey::random().address().into();
+
+    handler
+        .run_prioritized_dht_effects(vec![CoreEffect::send_direct_message(
+            Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_stab(
+                absent_peer,
+                uuid::Uuid::new_v4(),
+            )),
+            absent_peer,
+        )])
+        .await?;
+
+    logs_assert(|lines: &[&str]| {
+        let matches = lines
+            .iter()
+            .filter(|line| line.contains("Failed on handle multi action"))
+            .copied()
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [line] if line.contains("DEBUG") && !line.contains("ERROR") => Ok(()),
+            _ => Err(format!(
+                "expected one DEBUG 'Failed on handle multi action' log without ERROR, got {matches:?}"
+            )),
+        }
+    });
+    Ok(())
+}

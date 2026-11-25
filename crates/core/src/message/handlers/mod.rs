@@ -292,7 +292,11 @@ impl MessageHandler {
             .await;
         for (peer, has_next) in core_actor_steps(ordered_peers) {
             if let Err(e) = self.connect_dht_peer(peer).await {
-                tracing::error!("Failed on handle multi connection action: {e:?}");
+                if e.is_transient_routing_refusal() {
+                    tracing::debug!("Failed on handle multi connection action: {e:?}");
+                } else {
+                    tracing::error!("Failed on handle multi connection action: {e:?}");
+                }
             }
             if has_next || !other_effects.is_empty() {
                 yield_core_actor_step().await;
@@ -301,7 +305,11 @@ impl MessageHandler {
 
         for (effect, has_next) in core_actor_steps(other_effects) {
             if let Err(e) = self.run_effects([effect]).await {
-                tracing::error!("Failed on handle multi action: {e:?}");
+                if e.is_transient_routing_refusal() {
+                    tracing::debug!("Failed on handle multi action: {e:?}");
+                } else {
+                    tracing::error!("Failed on handle multi action: {e:?}");
+                }
             }
             if has_next {
                 yield_core_actor_step().await;

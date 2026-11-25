@@ -51,6 +51,11 @@ impl TransportReadiness {
         })
     }
 
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(super) const fn for_test(state: TransportConnectionState, channel_open: bool) -> Self {
+        Self::from_snapshot(ConnectionStateSnapshot::new(state, channel_open))
+    }
+
     pub(crate) const fn can_make_progress(self) -> bool {
         matches!(self.0, TransportReadinessState::Ready(_))
     }

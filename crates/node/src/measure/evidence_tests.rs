@@ -457,7 +457,7 @@ async fn evidence_reads_do_not_block_or_observe_uncommitted_state_during_slow_pu
         .await
         .unwrap_or_else(|_| panic!("admission must enter evidence_storage.put"));
 
-    // Read queries complete immediately without waiting on persistence_lock and still see 0
+    // Read queries complete immediately without waiting on evidence_turns and still see 0
     // committed records until the durable write finishes.
     let in_flight_page = tokio::time::timeout(
         std::time::Duration::from_millis(200),
@@ -641,7 +641,7 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
         .await
         .unwrap_or_else(|_| panic!("admission A must commit to store and park"));
     drop(task_a);
-    // Allow the cancelled task to drop its `persistence_lock` guard.
+    // Allow the cancelled task to drop its `evidence_turns` guard.
     tokio::task::yield_now().await;
 
     // Step 2: run admission B whose store write fails, triggering rollback.
@@ -670,4 +670,169 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
         page.records().first().map(|r| r.digest()),
         Some(record_a.digest())
     );
+}
+
+#[tokio::test]
+async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger() {
+    use std::sync::atomic::AtomicBool;
+
+    use crate::test_support::TestTask;
+
+    #[derive(Clone)]
+    struct GatedLedgerStorage {
+        gate_next: Arc<AtomicBool>,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+        writes: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<MeasurementSnapshot<Did>> for GatedLedgerStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<MeasurementSnapshot<Did>>> {
+            Ok(None)
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            _value: &MeasurementSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            if self.gate_next.swap(false, Ordering::SeqCst) {
+                self.entered.notify_waiters();
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingEvidenceStorage {
+        puts: Arc<AtomicU64>,
+        snapshot: Arc<std::sync::Mutex<Option<EvidenceSnapshot<Did>>>>,
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<EvidenceSnapshot<Did>> for CountingEvidenceStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+            Ok(lock_or_recover(&self.snapshot).clone())
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            value: &EvidenceSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            *lock_or_recover(&self.snapshot) = Some(value.clone());
+            Ok(())
+        }
+
+        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(0)
+        }
+    }
+
+    let (record, collector) = provisional_evidence_fixture(12);
+    let ledger_storage = GatedLedgerStorage {
+        gate_next: Arc::new(AtomicBool::new(true)),
+        entered: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        writes: Arc::new(AtomicU64::new(0)),
+    };
+    let evidence_storage = CountingEvidenceStorage::default();
+    let measure = Arc::new(
+        PeriodicMeasure::new_with_clock_and_evidence(
+            Box::new(ledger_storage.clone()),
+            Box::new(evidence_storage.clone()),
+            Some(collector),
+            Arc::new(ManualMeasureClock::new(10)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}")),
+    );
+
+    let entered = ledger_storage.entered.notified();
+    let flushing_measure = Arc::clone(&measure);
+    let flush_task = TestTask::spawn(async move { flushing_measure.flush().await });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered)
+        .await
+        .unwrap_or_else(|_| panic!("ledger flush must park inside storage.put"));
+
+    // Provisional evidence admission uses its own WriteTurnQueue and must complete immediately
+    // without blocking on the slow ledger write or dirtying the ledger snapshot.
+    let report = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        measure.admit_provisional_evidence(record),
+    )
+    .await
+    .unwrap_or_else(|_| panic!("evidence admission must not block behind ledger write"))
+    .unwrap_or_else(|error| panic!("evidence admission must succeed: {error}"));
+    assert_eq!(
+        report.admission(),
+        rings_measure::EvidenceAdmission::Admitted
+    );
+    assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 1);
+    assert!(!lock_or_recover(&measure.state.runtime).dirty);
+    assert!(!lock_or_recover(&measure.state.runtime).evidence_dirty);
+
+    ledger_storage.release.notify_waiters();
+    flush_task
+        .await
+        .unwrap_or_else(|error| panic!("flush task must join: {error}"))
+        .unwrap_or_else(|error| panic!("ledger flush must finish: {error}"));
+    assert_eq!(ledger_storage.writes.load(Ordering::SeqCst), 1);
+
+    // Mutate only the measurement ledger and run persist_pending_once; clean evidence_storage
+    // must not be rewritten.
+    let peer: Did = rings_core::ecc::SecretKey::random().address().into();
+    measure
+        .record(
+            peer,
+            rings_measure::Authentication::Authenticated,
+            rings_measure::MeasurementEvent::Sent { useful_bytes: 19 },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("ledger record must apply: {error}"));
+    persist_pending_once(&measure.state)
+        .await
+        .unwrap_or_else(|error| panic!("ledger-only persist must succeed: {error}"));
+    assert_eq!(ledger_storage.writes.load(Ordering::SeqCst), 2);
+    assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 1);
 }
