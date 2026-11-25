@@ -434,9 +434,11 @@ impl PeerRing {
     /// its predecessor or one of its successors (load-bounds paper, Sec. V, the custody
     /// principal `χ`).
     pub(crate) fn names_previous_owner(&self, node: Did) -> Result<bool> {
-        Ok(*self.lock_predecessor_state()? == Some(node)
-            || self.lock_predecessors_state()?.contains(&node)
-            || self.successor_seq.contains(&node)?)
+        self.with_topology_state(|state| {
+            state.predecessor == Some(node)
+                || state.predecessors.contains(&node)
+                || state.successors.contains(&node)
+        })
     }
 
     /// The connection slots of this node (see [`Self::edges`](PeerRing#structfield.edges)).
@@ -928,8 +930,11 @@ impl PeerRing {
         request: FingerFixRequest,
         successor: Did,
     ) -> Result<FingerApplyOutcome> {
-        self.transition(|state, now_ms| topology::apply_finger(state, request, successor, now_ms))
-            .map(|(_, outcome)| outcome)
+        let capacity = self.successor_seq.capacity();
+        self.transition(|state, now_ms| {
+            topology::step_apply_finger(state, request, successor, now_ms, capacity)
+        })
+        .map(|(_, outcome)| outcome)
     }
 
     /// Park a valid finger proof under an admission lease while transport

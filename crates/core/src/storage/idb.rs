@@ -788,16 +788,25 @@ impl IdbStorage {
     }
 
     /// Read `key` in a read-only transaction, leaving its stamp as written: the `get` of a store
-    /// that never evicts, where recency orders nothing (module docs). An undecodable payload is
-    /// reported under the decode law, and nothing is deleted.
+    /// that never evicts, where recency orders nothing (module docs). Under
+    /// [`RecordAuthority::Retained`], an undecodable payload is retired via a separate read-write
+    /// transaction and `Ok(None)` is returned; under [`RecordAuthority::Authoritative`], decoding
+    /// fails closed with an error.
     async fn get_unstamped<V>(&self, key: &str) -> Result<Option<V>>
     where V: DeserializeOwned {
         let scope = self.scope(IdbTransactionMode::Readonly)?;
         let stored = scope.row(key).await?;
         scope.done().await?;
-        js_value::deserialize::<Option<StoredRow>>(stored)?
-            .map(|row| js_value::deserialize(row.data))
-            .transpose()
+        let Some(row) = js_value::deserialize::<Option<StoredRow>>(stored)? else {
+            return Ok(None);
+        };
+        match self.decode_under_authority::<V>(row.data)? {
+            Some(value) => Ok(Some(value)),
+            None => {
+                self.retire_undecodable::<V>(vec![row.key]).await?;
+                Ok(None)
+            }
+        }
     }
 
     /// Delete each row of `keys` that still does not decode as `V`, in one read-write

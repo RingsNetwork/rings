@@ -130,7 +130,7 @@ impl Delegation {
     }
 
     /// Enforce both ends of the validity interval `[ts_ms - TS_OFFSET_TOLERANCE_MS, ts_ms + ttl_ms]`.
-    fn check_validity_window_at(&self, at_ms: u128) -> Result<()> {
+    pub(crate) fn check_validity_window_at(&self, at_ms: u128) -> Result<()> {
         if self.is_not_yet_valid_at(at_ms) {
             return Err(Error::DelegationNotYetValid);
         }

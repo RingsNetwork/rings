@@ -140,22 +140,43 @@ impl ProvisionalServiceClaim {
         Ok(ServiceReceiptDigest(keccak256(&self.canonical_bytes()?)))
     }
 
-    /// Sign the provider role domain with the delegated provider session.
+    /// Sign the provider role domain with the delegated provider session at the current epoch
+    /// timestamp.
     pub fn sign_provider(
         &self,
         signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
     ) -> Result<MessageVerification> {
-        self.require_signer(signer.by_ref(), self.provider_account)?;
-        signer.sign(PROVIDER_DOMAIN, &self.canonical_bytes()?)
+        self.sign_provider_at(signer, crate::utils::get_epoch_ms())
     }
 
-    /// Sign the beneficiary role domain with the delegated beneficiary session.
+    /// Sign the provider role domain with the delegated provider session stamped at `ts_ms`.
+    pub fn sign_provider_at(
+        &self,
+        signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
+        ts_ms: u128,
+    ) -> Result<MessageVerification> {
+        self.require_signer(signer.by_ref(), self.provider_account)?;
+        signer.sign_at(PROVIDER_DOMAIN, &self.canonical_bytes()?, ts_ms)
+    }
+
+    /// Sign the beneficiary role domain with the delegated beneficiary session at the current
+    /// epoch timestamp.
     pub fn sign_beneficiary(
         &self,
         signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
     ) -> Result<MessageVerification> {
+        self.sign_beneficiary_at(signer, crate::utils::get_epoch_ms())
+    }
+
+    /// Sign the beneficiary role domain with the delegated beneficiary session stamped at
+    /// `ts_ms`.
+    pub fn sign_beneficiary_at(
+        &self,
+        signer: MessageSigner<impl Borrow<crate::delegation::DelegateeKey>>,
+        ts_ms: u128,
+    ) -> Result<MessageVerification> {
         self.require_signer(signer.by_ref(), self.beneficiary_account)?;
-        signer.sign(BENEFICIARY_DOMAIN, &self.canonical_bytes()?)
+        signer.sign_at(BENEFICIARY_DOMAIN, &self.canonical_bytes()?, ts_ms)
     }
 
     fn require_signer(
@@ -196,31 +217,6 @@ impl ProvisionalServiceClaim {
             attestation.ts_ms,
         ) {
             return Err(invalid);
-        }
-        Ok(())
-    }
-
-    fn verify_live_role_attestation_at(
-        &self,
-        attestation: &MessageVerification,
-        expected_account: Did,
-        domain: super::DomainTag,
-        observed_at_ms: u128,
-        not_live: ServiceReceiptError,
-    ) -> std::result::Result<(), ServiceReceiptError> {
-        if attestation.delegation.delegator_did() != expected_account {
-            return Err(ServiceReceiptError::SignerRoleMismatch {
-                expected: expected_account,
-                actual: attestation.delegation.delegator_did(),
-            });
-        }
-        let claim = self.canonical_bytes()?;
-        if !attestation.verify_live_at(
-            SigningDomain::new(domain, self.network_id),
-            &claim,
-            observed_at_ms,
-        ) {
-            return Err(not_live);
         }
         Ok(())
     }
@@ -317,20 +313,18 @@ impl ProvisionalServiceReceipt {
         self.verify_crypto(receiver_network_id)?;
         let seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| ServiceReceiptError::ObservationTimeOverflow)?;
-        self.claim.verify_live_role_attestation_at(
-            &self.provider_attestation,
-            self.claim.provider_account,
-            PROVIDER_DOMAIN,
-            observed_at_ms,
-            ServiceReceiptError::ProviderAttestationNotLive,
-        )?;
-        self.claim.verify_live_role_attestation_at(
-            &self.beneficiary_attestation,
-            self.claim.beneficiary_account,
-            BENEFICIARY_DOMAIN,
-            observed_at_ms,
-            ServiceReceiptError::BeneficiaryAttestationNotLive,
-        )?;
+        if !self
+            .provider_attestation
+            .is_live_with_delegation_at(observed_at_ms)
+        {
+            return Err(ServiceReceiptError::ProviderAttestationNotLive);
+        }
+        if !self
+            .beneficiary_attestation
+            .is_live_with_delegation_at(observed_at_ms)
+        {
+            return Err(ServiceReceiptError::BeneficiaryAttestationNotLive);
+        }
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,
@@ -506,13 +500,12 @@ impl ProbeOffer {
             self.verify_transcript_at(outer, receiver_network_id, beneficiary, observed_at_ms)?;
         let seconds = u64::try_from(observed_at_ms / 1_000)
             .map_err(|_| ServiceReceiptError::ObservationTimeOverflow)?;
-        self.claim.verify_live_role_attestation_at(
-            &self.provider_attestation,
-            self.claim.provider_account,
-            PROVIDER_DOMAIN,
-            observed_at_ms,
-            ServiceReceiptError::ProviderAttestationNotLive,
-        )?;
+        if !self
+            .provider_attestation
+            .is_live_with_delegation_at(observed_at_ms)
+        {
+            return Err(ServiceReceiptError::ProviderAttestationNotLive);
+        }
         if !self.claim.epoch.is_accepted_at(seconds) {
             return Err(ServiceReceiptError::EpochOutsideTolerance {
                 claim_slot: self.claim.epoch.slot,

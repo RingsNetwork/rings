@@ -476,6 +476,9 @@ pub enum EvidenceError {
         /// Unrecognized version.
         found: u16,
     },
+    /// The record's `pair.beneficiary` differs from `freshness.beneficiary`.
+    #[error("evidence pair beneficiary does not match freshness beneficiary")]
+    BeneficiaryMismatch,
     /// A canonical receipt is empty.
     #[error("canonical receipt bytes are empty")]
     EmptyReceipt,
@@ -634,6 +637,10 @@ where P: Clone + Ord
         &mut self,
         record: ProvisionalEvidenceRecord<P>,
     ) -> Result<EvidenceAdmissionReport<P>, EvidenceError> {
+        if record.pair.beneficiary() != record.freshness.beneficiary() {
+            self.counters.rejected_records = self.counters.rejected_records.saturating_add(1);
+            return Err(EvidenceError::BeneficiaryMismatch);
+        }
         self.validate_size(&record)?;
         self.advance_replay_floor(record.replay_floor);
         if record.freshness.epoch_slot < self.replay_floor {

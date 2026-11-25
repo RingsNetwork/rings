@@ -776,6 +776,7 @@ fn production_refines(history: &[Action], mutant: Option<Mutant>) -> bool {
                 }
                 Err(EvidenceError::StorageUnavailable)
                 | Err(EvidenceError::UnsupportedSnapshotVersion { .. })
+                | Err(EvidenceError::BeneficiaryMismatch)
                 | Err(EvidenceError::ReplayMarkerLimitExceeded { .. })
                 | Err(EvidenceError::PersistenceUnavailable) => return false,
             },
