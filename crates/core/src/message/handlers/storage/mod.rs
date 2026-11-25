@@ -139,9 +139,10 @@ async fn cache_lookup_reply_at(
     now_ms: u128,
 ) -> Result<()> {
     transport.dht.local_cache_put_at(entry, now_ms).await?;
+    let read_ms = transport.dht.read_epoch_ms_for(now_ms);
     if transport
         .dht
-        .local_cache_get_at(resource, now_ms)
+        .local_cache_get_at(resource, read_ms)
         .await?
         .is_some()
     {
@@ -172,7 +173,8 @@ pub(crate) async fn admit_storage_lookup_reply(
         cache_lookup_reply_at(&transport, resource, redundancy, data.clone(), now_ms).await?;
         repair_observed_storage_misses(transport, data, introducer, redundancy).await?;
     } else if !misses.is_empty() {
-        if let Some(entry) = transport.dht.local_cache_held(resource, now_ms).await? {
+        let read_ms = transport.dht.read_epoch_ms_for(now_ms);
+        if let Some(entry) = transport.dht.local_cache_held(resource, read_ms).await? {
             repair_observed_storage_misses(transport, entry, introducer, redundancy).await?;
         }
     }
