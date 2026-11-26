@@ -9,7 +9,7 @@ Rings RPC
 
 [![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-rpc.svg)](https://crates.io/crates/rings-rpc)
-[![docs](https://docs.rs/rings-rpc/badge.svg?version=1.0.0-pre.12)](https://docs.rs/rings-rpc/1.0.0-pre.12/rings_rpc/)
+[![docs](https://docs.rs/rings-rpc/badge.svg?version=1.0.0-pre.13)](https://docs.rs/rings-rpc/1.0.0-pre.13/rings_rpc/)
 ![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 `rings-rpc` provides the JSON-RPC 2.0 method catalog (`method::Method`), listener authorization classes (`method::AuthorizationClass`), typed request/response DTOs (`protos`), error types (`error`), and authenticated HTTP client (`jsonrpc`) shared by `rings-node`, `rings-tui`, and external tools.
