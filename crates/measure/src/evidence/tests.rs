@@ -316,10 +316,28 @@ fn admit_rejects_mismatched_pair_and_freshness_beneficiary() {
 #[test]
 fn replay_persisted_delta_restores_valid_and_isolates_invalid_records() -> Result<(), EvidenceError>
 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+
+    let random_nonce = || -> [u8; 32] {
+        let hasher = RandomState::new();
+        std::array::from_fn(|index| hasher.hash_one(index) as u8)
+    };
+    let make_record = |digest: u8, observed: u64| {
+        ProvisionalEvidenceRecord::new(
+            EvidenceAccountPair::new(1, 2),
+            EvidenceFreshnessKey::new(1, 2, 10, random_nonce()),
+            EvidenceDigest::new([digest; 32]),
+            vec![digest; 8],
+            UnixTime::from_secs(observed),
+            9,
+        )
+    };
+
     let mut store = ProvisionalEvidenceStore::new(limits(2, 64, 2, 64));
-    let r1 = record(1, 2, 10, 1, 1, 10, 8);
-    let r2 = record(1, 2, 10, 2, 2, 11, 8);
-    let r3 = record(1, 2, 10, 3, 3, 12, 8);
+    let r1 = make_record(1, 10);
+    let r2 = make_record(2, 11);
+    let r3 = make_record(3, 12);
 
     let rep1 = store.replay_persisted_delta(
         EvidenceAdmissionDelta {
