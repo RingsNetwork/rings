@@ -745,23 +745,26 @@ pub trait PayloadSender {
     /// Connect signaling retracing a recorded path takes the path's return hop, which must be
     /// linked here (#947); no other message consults a path. Otherwise, with `next_hop = None`
     /// the hop is the delivery decision for the carrier's stage (see [`Self::next_hop_toward`]).
-    /// A fixed `next_hop` is taken as given, as the owner-lookup protocols choose it from
-    /// `find_successor`, unless the destination is directly linked; the stage is then carried
-    /// unchanged.
+    /// A fixed `next_hop` is taken as given when `requires_storage_route` holds (e.g.
+    /// `SyncEntriesWithSuccessor`), so `ChunkSendPermit::StorageSyncRoute` preserves the
+    /// topology-proved hop, matching [`Self::originate`]; other messages take a direct link to
+    /// `destination` when connected, carrying the stage unchanged.
     async fn forward_payload(&self, payload: &MessagePayload, next_hop: Option<Did>) -> Result<()> {
         let (local, destination) = (self.dht().did, payload.relay.destination);
-        let return_hop =
-            if MessageKind::from_wire(&payload.transaction.data)?.carries_signaling_path() {
-                payload
-                    .relay
-                    .linked_return_hop(|peer| self.is_connected(peer))?
-            } else {
-                None
-            };
+        let message_kind = MessageKind::from_wire(&payload.transaction.data)?;
+        let return_hop = if message_kind.carries_signaling_path() {
+            payload
+                .relay
+                .linked_return_hop(|peer| self.is_connected(peer))?
+        } else {
+            None
+        };
         let hop = match (return_hop, next_hop) {
             (Some(hop), _) => NextHop::new(hop, payload.relay.stage),
             (None, None) => self.next_hop_toward(destination, payload.relay.stage)?,
-            (None, Some(_)) if self.is_connected(destination) => {
+            (None, Some(_))
+                if !message_kind.requires_storage_route() && self.is_connected(destination) =>
+            {
                 NextHop::new(destination, payload.relay.stage)
             }
             (None, Some(next_hop)) => NextHop::new(next_hop, payload.relay.stage),

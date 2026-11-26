@@ -415,6 +415,44 @@ pub struct EvidenceSnapshot<P> {
     pub counters: EvidenceCounters,
 }
 
+/// One durably persisted incremental provisional-evidence admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvidenceAdmissionDelta<P> {
+    /// Schema version (`EVIDENCE_SNAPSHOT_VERSION`).
+    pub schema_version: u16,
+    /// Strictly monotonic sequence number within one node's evidence journal.
+    pub sequence: u64,
+    /// Admitted provisional evidence record.
+    pub record: ProvisionalEvidenceRecord<P>,
+}
+
+/// Versioned storage value stored under keys of `provisional-evidence`.
+///
+/// Steady-state admissions append O(1) [`Self::Delta`] (or [`Self::ReplayFloor`]) entries so
+/// admission durability never rewrites the full [`EvidenceSnapshot`]. Periodic compaction and
+/// clean flushes fold accumulated deltas into a single [`Self::Snapshot`] entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EvidenceStorageEntry<P> {
+    /// Base checkpoint covering all deltas with `sequence <= compacted_through_sequence`.
+    Snapshot {
+        /// Greatest delta sequence included in `snapshot` (`0` before any delta existed).
+        compacted_through_sequence: u64,
+        /// Serialized evidence snapshot at this checkpoint.
+        snapshot: EvidenceSnapshot<P>,
+    },
+    /// Single admitted evidence record written after the latest compacted checkpoint.
+    Delta(EvidenceAdmissionDelta<P>),
+    /// Replay-floor advance emitted when a rejected admission raised `replay_floor`.
+    ReplayFloor {
+        /// Schema version (`EVIDENCE_SNAPSHOT_VERSION`).
+        schema_version: u16,
+        /// Strictly monotonic sequence number within one node's evidence journal.
+        sequence: u64,
+        /// Monotonic replay floor reached after the transition.
+        replay_floor: u64,
+    },
+}
+
 /// Summary of invalid records/markers skipped and valid records evicted during restore.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceLoadReport {
@@ -437,6 +475,15 @@ impl EvidenceLoadReport {
     /// Replay markers rejected by runtime binding or structural validation.
     pub const fn rejected_replay_markers(self) -> usize {
         self.rejected_replay_markers
+    }
+
+    /// Accumulate the counts of `other` into `self`.
+    pub fn merge(&mut self, other: Self) {
+        self.rejected_records = self.rejected_records.saturating_add(other.rejected_records);
+        self.evicted_records = self.evicted_records.saturating_add(other.evicted_records);
+        self.rejected_replay_markers = self
+            .rejected_replay_markers
+            .saturating_add(other.rejected_replay_markers);
     }
 }
 
@@ -744,6 +791,55 @@ where P: Clone + Ord
     /// Monotonic oldest epoch that may still be admitted after clock regression.
     pub const fn replay_floor(&self) -> u64 {
         self.replay_floor
+    }
+
+    /// Advance the monotonic replay floor when replaying a persisted `ReplayFloor` checkpoint.
+    pub fn restore_replay_floor(&mut self, floor: u64) {
+        self.advance_replay_floor(floor);
+    }
+
+    /// Replay one persisted [`EvidenceAdmissionDelta`] during startup restore.
+    ///
+    /// Returns [`EvidenceError::UnsupportedSnapshotVersion`] on an unrecognized schema version.
+    /// Invalid or corrupt records are isolated and skipped while preserving valid neighbors,
+    /// matching [`Self::from_snapshot_with_validator`].
+    pub fn replay_persisted_delta(
+        &mut self,
+        delta: EvidenceAdmissionDelta<P>,
+        validator: impl FnOnce(&ProvisionalEvidenceRecord<P>) -> bool,
+    ) -> Result<EvidenceLoadReport, EvidenceError> {
+        if delta.schema_version != EVIDENCE_SNAPSHOT_VERSION {
+            return Err(EvidenceError::UnsupportedSnapshotVersion {
+                found: delta.schema_version,
+            });
+        }
+        if !validator(&delta.record) {
+            self.counters.rejected_records = self.counters.rejected_records.saturating_add(1);
+            self.counters.rejected_replay_markers =
+                self.counters.rejected_replay_markers.saturating_add(1);
+            return Ok(EvidenceLoadReport {
+                rejected_records: 1,
+                evicted_records: 0,
+                rejected_replay_markers: 1,
+            });
+        }
+        match self.admit(delta.record) {
+            Ok(report) => Ok(EvidenceLoadReport {
+                rejected_records: 0,
+                evicted_records: report.evictions().len(),
+                rejected_replay_markers: 0,
+            }),
+            Err(_) => {
+                // `self.admit` already incremented `self.counters.rejected_records`.
+                self.counters.rejected_replay_markers =
+                    self.counters.rejected_replay_markers.saturating_add(1);
+                Ok(EvidenceLoadReport {
+                    rejected_records: 1,
+                    evicted_records: 0,
+                    rejected_replay_markers: 1,
+                })
+            }
+        }
     }
 
     /// Produce the deterministic persistence form.

@@ -214,7 +214,7 @@ pub(super) async fn open_browser_provider_stores(
     .map(|storage| Box::new(storage) as MeasureStorage);
     let evidence_storage = Some(
         lock::LockedBrowserStorage::open_with_byte_cap(
-            2,
+            1024,
             DEFAULT_STORAGE_CAPACITY,
             &format!("{storage_name}/provisional-evidence"),
             RecordAuthority::Disposable,

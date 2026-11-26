@@ -433,3 +433,172 @@ async fn test_sync_entries_physical_destination_routes_by_physical_did_not_stora
     assert_eq!(physical_owner_next_hop(&node, coinciding)?, Some(head));
     Ok(())
 }
+
+/// Regression test for #1343: when forwarding `SyncEntriesWithSuccessor`, even if the final
+/// `destination` has a direct transport link, `forward_payload` must preserve the topology-proved
+/// `next_hop` (`head`) so `ChunkSendPermit::StorageSyncRoute` permits the transfer instead of
+/// cancelling it as `RouteNoLongerPermitted` and recording `Forwarded` / `Failed`.
+#[tokio::test]
+async fn test_sync_entries_handler_preserves_topology_hop_when_destination_is_connected(
+) -> Result<()> {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use crate::dht::topology::dist;
+    use crate::message::MessageSigner;
+    use crate::message::PayloadSender;
+    use crate::storage::MemStorage;
+    use crate::swarm::observer::LookupCorrelation;
+    use crate::swarm::observer::LookupKind;
+    use crate::swarm::observer::LookupOutcome;
+    use crate::swarm::observer::MessageActivity;
+    use crate::swarm::observer::MessageObservation;
+    use crate::swarm::observer::ObservationOutcome;
+    use crate::swarm::observer::SwarmObserver;
+    use crate::swarm::SwarmBuilder;
+    use crate::tests::activity::probe_on_activity;
+    use crate::tests::activity::record_activity;
+    use crate::tests::default::TEST_HANG_GUARD;
+
+    #[derive(Default)]
+    struct RecordingObserver(Mutex<Vec<MessageObservation>>);
+
+    impl SwarmObserver for RecordingObserver {
+        fn observe_message(&self, observation: MessageObservation) {
+            if let Ok(mut guard) = self.0.lock() {
+                guard.push(observation);
+            }
+            record_activity();
+        }
+
+        fn lookup_started(&self, _kind: LookupKind, _correlation: LookupCorrelation) {
+            record_activity();
+        }
+
+        fn lookup_finished(
+            &self,
+            _kind: LookupKind,
+            _correlation: LookupCorrelation,
+            _outcome: LookupOutcome,
+        ) {
+            record_activity();
+        }
+    }
+
+    let observer = Arc::new(RecordingObserver::default());
+    let forwarder_key = fixture_key(0x10)?;
+    let forwarder_session = DelegateeKey::new_with_seckey(&forwarder_key)?;
+    let forwarder = Node::build_with_observer(
+        SwarmBuilder::new(
+            0,
+            crate::tests::test_transport(crate::tests::default::TEST_TRAVERSAL_SERVERS),
+            Box::new(MemStorage::new()),
+            forwarder_session,
+        )
+        .replay_storage(crate::tests::volatile_replay_storage())
+        .dht_virtual_nodes(0),
+        observer.clone(),
+    );
+    let head = prepare_node(fixture_key(0x15)?).await;
+    let destination = prepare_node(fixture_key(0x13)?).await;
+    assert!(
+        dist(forwarder.did(), head.did()) < dist(forwarder.did(), destination.did()),
+        "head (0x15) must sit clockwise closer to forwarder (0x10) than destination (0x13)"
+    );
+
+    manually_establish_connection(&forwarder.swarm, &head.swarm).await;
+    manually_establish_connection(&forwarder.swarm, &destination.swarm).await;
+    wait_for_msgs([&forwarder, &head, &destination]).await;
+    assert_no_more_msg([&forwarder, &head, &destination]).await;
+
+    // Keep direct transport open to both `head` and `destination`, while routing `PhysicalOwner(destination)`
+    // through `head` in forwarder's topology view.
+    for succ in forwarder.dht().successors().list()? {
+        if succ != head.did() {
+            forwarder.dht().successors().remove(succ)?;
+        }
+    }
+    *forwarder.dht().lock_predecessor()? = Some(head.did());
+    forwarder.dht().lock_finger()?.reset_finger();
+    assert_eq!(
+        forwarder
+            .dht()
+            .next_hop_for_storage_sync(StorageSyncDestination::PhysicalOwner(destination.did()))?,
+        Some(head.did())
+    );
+    assert!(forwarder
+        .swarm
+        .transport
+        .protocol_egress()
+        .is_connected(destination.did()));
+
+    let origin_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let entry = live_entry(
+        Did::from(42u32),
+        vec![Bytes::from("multi-hop sync")],
+        EntryKind::Data,
+    );
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(destination.did()),
+        data: vec![PlacedEntry::new(entry.did, entry)],
+    };
+    let inbound_context = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+        MessageSigner::new(&origin_key, crate::tests::TEST_NETWORK_ID),
+        forwarder.did(),
+        destination.did(),
+    )?;
+
+    let handler = MessageHandler::new(forwarder.swarm.transport.clone());
+    handler
+        .handle(
+            &HandlerContext::unbound_for_test(&inbound_context),
+            &sync_msg,
+        )
+        .await?;
+
+    let forwarded = next_payload_for_tx(&head, inbound_context.transaction.tx_id).await?;
+    assert_eq!(forwarded.relay.next_hop, head.did());
+    assert_eq!(forwarded.relay.destination, destination.did());
+    let delivered = next_payload_for_tx(&destination, inbound_context.transaction.tx_id).await?;
+    assert_eq!(delivered.relay.next_hop, destination.did());
+    assert_eq!(delivered.relay.destination, destination.did());
+    assert_ne!(
+        delivered.relay.hop_budget, forwarded.relay.hop_budget,
+        "destination must receive the payload forwarded through head rather than directly from forwarder"
+    );
+
+    let observations = probe_on_activity(
+        "forwarded SyncEntriesWithSuccessor observation recorded",
+        TEST_HANG_GUARD,
+        || async {
+            let snapshot = observer.0.lock().map_err(|_| Error::LockPoisoned)?.clone();
+            Ok(snapshot
+                .iter()
+                .any(|obs| {
+                    obs.activity == MessageActivity::Forwarded
+                        && obs.message_class == "SyncEntriesWithSuccessor"
+                })
+                .then_some(snapshot))
+        },
+    )
+    .await?;
+    assert!(
+        observations.iter().any(|obs| {
+            obs.activity == MessageActivity::Forwarded
+                && obs.message_class == "SyncEntriesWithSuccessor"
+                && obs.outcome == ObservationOutcome::Succeeded
+        }),
+        "expected Forwarded/SyncEntriesWithSuccessor/Succeeded observation, got {observations:?}"
+    );
+    assert!(
+        !observations.iter().any(|obs| {
+            obs.activity == MessageActivity::Forwarded
+                && obs.message_class == "SyncEntriesWithSuccessor"
+                && obs.outcome == ObservationOutcome::Failed
+        }),
+        "forwarded SyncEntriesWithSuccessor must not fail with RouteNoLongerPermitted: {observations:?}"
+    );
+    Ok(())
+}

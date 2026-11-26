@@ -1,11 +1,10 @@
 //! A monotone event counter that waiters can await without a duration.
 //!
 //! An [`Epoch`] counts the occurrences of one class of event (a topology commit, a link
-//! transition, a capacity release) and notifies each. Production waiters never read the count:
-//! each guards on a state predicate, registered before the check, so `Law (Wake)` alone rules
-//! out a lost event. The count is kept in every build, so the type is the counter its laws
-//! describe (`Law (Mono)`, and laws stated in counts such as `PeerRing`'s `Law (Epoch)`); only
-//! its reader, `current`, is a test hook.
+//! transition, a capacity release) and notifies each. Production waiters never replace `Law (Wake)`
+//! with polling `current`: each guards on a state predicate, registered before the check, so
+//! `Law (Wake)` alone rules out a lost event. The monotonic count in `current` may still be read
+//! as an invalidation stamp for in-memory caches or anti-entropy cooldowns.
 //!
 //! ```text
 //! Epoch      ≜ (value : ℕ, changed : Event)
@@ -43,8 +42,7 @@ impl Epoch {
         self.changed.notify(usize::MAX);
     }
 
-    /// Test hook: the number of events recorded so far.
-    #[cfg(test)]
+    /// The number of events recorded so far.
     pub(crate) fn current(&self) -> u64 {
         self.value.load(Ordering::Acquire)
     }

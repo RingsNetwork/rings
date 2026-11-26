@@ -1088,3 +1088,132 @@ fn test_wire_compression_dict_and_binary_pubkey_encoding_shrink_control_frames()
     assert_eq!(MessagePayload::from_wire(&wire)?, payload);
     Ok(())
 }
+
+/// Regression test for #1343: forwarding a `StorageRoute` payload (`SyncEntriesWithSuccessor`)
+/// with an explicit topology-proved `next_hop` must keep `next_hop` even when `destination` is
+/// directly connected, whereas non-`StorageRoute` payloads still take the direct shortcut.
+#[cfg_attr(
+    all(feature = "wasm", target_family = "wasm"),
+    wasm_bindgen_test::wasm_bindgen_test
+)]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
+async fn test_forward_payload_preserves_storage_route_next_hop_when_destination_connected(
+) -> Result<()> {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+
+    use async_trait::async_trait;
+
+    use crate::dht::Did;
+    use crate::dht::PeerRing;
+    use crate::dht::StorageSyncDestination;
+    use crate::dht::StorageSyncPurpose;
+    use crate::message::FindSuccessorReportHandler;
+    use crate::message::FindSuccessorSend;
+    use crate::message::FindSuccessorThen;
+    use crate::message::SyncEntriesWithSuccessor;
+    use crate::storage::MemStorage;
+
+    struct RecordingForwardSender {
+        dht: Arc<PeerRing>,
+        signer_key: DelegateeKey,
+        connected: Vec<Did>,
+        next_seq: AtomicU64,
+        sent: std::sync::Mutex<Vec<(Did, MessagePayload)>>,
+    }
+
+    #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+    impl PayloadSender for RecordingForwardSender {
+        fn message_signer(&self) -> MessageSigner<DelegateeKey> {
+            MessageSigner::new(self.signer_key.clone(), TEST_NETWORK_ID)
+        }
+
+        fn dht(&self) -> Arc<PeerRing> {
+            Arc::clone(&self.dht)
+        }
+
+        fn is_connected(&self, did: Did) -> bool {
+            self.connected.contains(&did)
+        }
+
+        async fn reserve_transaction_sequences(
+            &self,
+            _destination: Did,
+            _class: MessageCategory,
+            count: NonZeroU64,
+        ) -> Result<std::ops::RangeInclusive<u64>> {
+            let start = self.next_seq.fetch_add(count.get(), Ordering::Relaxed);
+            Ok(start..=(start + count.get() - 1))
+        }
+
+        async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
+            self.sent
+                .lock()
+                .map_err(|_| Error::LockPoisoned)?
+                .push((did, payload));
+            Ok(())
+        }
+    }
+
+    let origin_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let forwarder_key = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+    let forwarder_did = forwarder_key.delegator_did();
+    let explicit_hop: Did = SecretKey::random().address().into();
+    let destination: Did = SecretKey::random().address().into();
+
+    let dht = Arc::new(PeerRing::new_with_storage(
+        forwarder_did,
+        3,
+        Box::new(MemStorage::new()),
+    ));
+    let sender = RecordingForwardSender {
+        dht,
+        signer_key: forwarder_key,
+        connected: vec![explicit_hop, destination],
+        next_seq: AtomicU64::new(1),
+        sent: std::sync::Mutex::new(Vec::new()),
+    };
+
+    let sync_payload = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+            purpose: StorageSyncPurpose::AdditiveRepair,
+            destination: StorageSyncDestination::PhysicalOwner(destination),
+            data: Vec::new(),
+        }),
+        MessageSigner::new(&origin_key, TEST_NETWORK_ID),
+        forwarder_did,
+        destination,
+    )?;
+    sender
+        .forward_payload(&sync_payload, Some(explicit_hop))
+        .await?;
+
+    let lookup_payload = MessagePayload::new_send(
+        Message::FindSuccessorSend(FindSuccessorSend {
+            did: destination,
+            strict: false,
+            then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+        }),
+        MessageSigner::new(&origin_key, TEST_NETWORK_ID),
+        forwarder_did,
+        destination,
+    )?;
+    sender
+        .forward_payload(&lookup_payload, Some(explicit_hop))
+        .await?;
+
+    let sent = sender.sent.lock().map_err(|_| Error::LockPoisoned)?;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[0].0, explicit_hop,
+        "StorageRoute payload must keep topology-proved next_hop even if destination is connected"
+    );
+    assert_eq!(sent[0].1.relay.next_hop, explicit_hop);
+    assert_eq!(
+        sent[1].0, destination,
+        "non-StorageRoute payload may still take the direct link shortcut to destination"
+    );
+    assert_eq!(sent[1].1.relay.next_hop, destination);
+    Ok(())
+}

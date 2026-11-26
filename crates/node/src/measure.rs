@@ -26,14 +26,18 @@ use rings_core::utils::SystemClock;
 use rings_measure::ApplyOutcome;
 use rings_measure::Authentication;
 use rings_measure::CreditPolicy;
+use rings_measure::EvidenceAdmission;
+use rings_measure::EvidenceAdmissionDelta;
 use rings_measure::EvidenceAdmissionReport;
 use rings_measure::EvidenceCounters;
 use rings_measure::EvidenceDigest;
 use rings_measure::EvidenceError;
 use rings_measure::EvidenceLimits;
+use rings_measure::EvidenceLoadReport;
 use rings_measure::EvidencePage;
 use rings_measure::EvidenceReplayMarker;
 use rings_measure::EvidenceSnapshot;
+use rings_measure::EvidenceStorageEntry;
 use rings_measure::MeasureError;
 use rings_measure::MeasurementBatch;
 use rings_measure::MeasurementEvent;
@@ -43,6 +47,7 @@ use rings_measure::ProvisionalEvidenceRecord;
 use rings_measure::ProvisionalEvidenceStore;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
+use rings_measure::EVIDENCE_SNAPSHOT_VERSION;
 use rings_runtime::sleep;
 use rings_runtime::RuntimeUnavailable;
 use rings_runtime::Spawner;
@@ -53,6 +58,15 @@ use rings_runtime::TimerError;
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
 const SNAPSHOT_KEY: &str = "MeasurementLedger";
 const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence";
+/// Prefix for sequentially numbered incremental evidence log entries.
+const EVIDENCE_DELTA_KEY_PREFIX: &str = "ProvisionalEvidenceDelta/";
+/// Maximum uncompacted incremental evidence entries retained before snapshot compaction.
+const EVIDENCE_DELTA_COMPACTION_THRESHOLD: usize = 512;
+
+/// Format the deterministic storage key for incremental evidence entry `sequence`.
+fn evidence_delta_key(sequence: u64) -> String {
+    format!("{EVIDENCE_DELTA_KEY_PREFIX}{sequence:020}")
+}
 const PERSISTENCE_WAKE_CAPACITY: usize = 1;
 const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
@@ -93,9 +107,9 @@ const fn reliability_policy() -> ReliabilityPolicy {
 pub type MeasureStorage =
     Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<MeasurementSnapshot<Did>>)>;
 
-/// Storage used for the separate provisional-receipt evidence snapshot.
+/// Storage used for the separate provisional-receipt evidence log and checkpoints.
 pub type EvidenceStorage =
-    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceSnapshot<Did>>)>;
+    Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceStorageEntry<Did>>)>;
 
 /// Evidence backend used when a provider did not configure durable receipt storage.
 ///
@@ -106,27 +120,36 @@ pub(crate) struct UnavailableEvidenceStorage;
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
-impl KvStorageInterface<EvidenceSnapshot<Did>> for UnavailableEvidenceStorage {
-    async fn get(&self, _key: &str) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+impl KvStorageInterface<EvidenceStorageEntry<Did>> for UnavailableEvidenceStorage {
+    async fn get(
+        &self,
+        _key: &str,
+    ) -> rings_core::error::Result<Option<EvidenceStorageEntry<Did>>> {
         Ok(None)
     }
 
     async fn put(
         &self,
         _key: &str,
-        value: &EvidenceSnapshot<Did>,
+        value: &EvidenceStorageEntry<Did>,
     ) -> rings_core::error::Result<()> {
-        if value.records.is_empty()
-            && value.replay_markers.is_empty()
-            && value.replay_floor == 0
-            && value.counters == EvidenceCounters::default()
+        if let EvidenceStorageEntry::Snapshot {
+            compacted_through_sequence: 0,
+            snapshot,
+        } = value
         {
-            return Ok(());
+            if snapshot.records.is_empty()
+                && snapshot.replay_markers.is_empty()
+                && snapshot.replay_floor == 0
+                && snapshot.counters == EvidenceCounters::default()
+            {
+                return Ok(());
+            }
         }
         Err(EvidenceError::StorageUnavailable.into())
     }
 
-    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceStorageEntry<Did>)>> {
         Ok(Vec::new())
     }
 
@@ -164,7 +187,7 @@ type SharedMeasureStorage =
     Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<MeasurementSnapshot<Did>>)>;
 
 type SharedEvidenceStorage =
-    Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceSnapshot<Did>>)>;
+    Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceStorageEntry<Did>>)>;
 
 /// Failure while loading or explicitly flushing the runtime measurement adapter.
 #[derive(Debug, thiserror::Error)]
@@ -208,12 +231,14 @@ pub struct PeriodicMeasure {
 struct MeasureState {
     storage: SharedMeasureStorage,
     evidence_storage: SharedEvidenceStorage,
+    /// Uncompacted delta count that triggers background snapshot compaction.
+    evidence_compaction_threshold: usize,
     /// Synchronous in-memory ledger and evidence state (`runtime` is a leaf never held across
     /// `.await`).
     runtime: Mutex<RuntimeLedger>,
     /// Cancel-safe FIFO turn serializer for durable ledger snapshot writes (`storage`).
     ledger_turns: WriteTurnQueue,
-    /// Cancel-safe FIFO turn serializer for durable evidence snapshot writes (`evidence_storage`).
+    /// Cancel-safe FIFO turn serializer for durable evidence writes (`evidence_storage`).
     evidence_turns: WriteTurnQueue,
     /// Waiters coalescing behind the active or next explicit [`PeriodicMeasure::flush`] pass.
     pending_flushes: Mutex<Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>>>,
@@ -343,6 +368,10 @@ struct RuntimeLedger {
     /// Last durable view while an admission write is in flight, so read-only evidence queries
     /// need only the synchronous `runtime` lock without observing uncommitted state.
     committed_evidence_override: Option<Arc<ProvisionalEvidenceStore<Did>>>,
+    /// Next monotonic sequence number for an incremental provisional-evidence entry.
+    next_evidence_delta_seq: u64,
+    /// Uncompacted `(sequence, key)` entries currently persisted in `evidence_storage`.
+    pending_evidence_deltas: Vec<(u64, String)>,
     dirty: bool,
     persisting: bool,
     mutated_while_persisting: bool,
@@ -441,11 +470,31 @@ impl PeriodicMeasure {
         .await
     }
 
+    /// Load persisted state with an explicit collector binding and default compaction threshold.
     async fn new_with_clock_and_evidence(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,
         collector: Option<EvidenceCollectorIdentity>,
         clock: Arc<dyn MeasureClock>,
+    ) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock_evidence_and_threshold(
+            storage,
+            evidence_storage,
+            collector,
+            clock,
+            EVIDENCE_DELTA_COMPACTION_THRESHOLD,
+        )
+        .await
+    }
+
+    /// Load persisted state and replay post-checkpoint evidence deltas with an explicit
+    /// compaction threshold.
+    async fn new_with_clock_evidence_and_threshold(
+        storage: MeasureStorage,
+        evidence_storage: EvidenceStorage,
+        collector: Option<EvidenceCollectorIdentity>,
+        clock: Arc<dyn MeasureClock>,
+        evidence_compaction_threshold: usize,
     ) -> Result<Self, MeasureRuntimeError> {
         let spawner = Spawner::current()?;
         let storage = SharedMeasureStorage::from(storage);
@@ -455,31 +504,16 @@ impl PeriodicMeasure {
             None => MeasurementLedger::new(),
         };
         let now = clock.now();
-        let (evidence, evidence_load) = match evidence_storage.get(EVIDENCE_SNAPSHOT_KEY).await? {
-            Some(snapshot) => ProvisionalEvidenceStore::from_snapshot_with_validator(
-                snapshot,
-                EvidenceLimits::default(),
-                |record| {
-                    collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
-                },
-                |marker| {
-                    collector
-                        .is_some_and(|identity| valid_persisted_replay_marker(marker, identity))
-                },
-            )?,
-            None => (
-                ProvisionalEvidenceStore::new(EvidenceLimits::default()),
-                rings_measure::EvidenceLoadReport::default(),
-            ),
-        };
-        if evidence_load.rejected_records() > 0
-            || evidence_load.evicted_records() > 0
-            || evidence_load.rejected_replay_markers() > 0
+        let raw_evidence_entries = evidence_storage.get_all().await?;
+        let restored = restore_evidence_from_entries(raw_evidence_entries, collector)?;
+        if restored.load_report.rejected_records() > 0
+            || restored.load_report.evicted_records() > 0
+            || restored.load_report.rejected_replay_markers() > 0
         {
             tracing::warn!(
-                rejected_records = evidence_load.rejected_records(),
-                evicted_records = evidence_load.evicted_records(),
-                rejected_replay_markers = evidence_load.rejected_replay_markers(),
+                rejected_records = restored.load_report.rejected_records(),
+                evicted_records = restored.load_report.evicted_records(),
+                rejected_replay_markers = restored.load_report.rejected_replay_markers(),
                 "reconciled provisional evidence during startup"
             );
         }
@@ -494,18 +528,24 @@ impl PeriodicMeasure {
         let pruning = ledger.prune(now, CreditPolicy::amule());
         log_prune_failures(&pruning);
         let dirty = reconciliation.is_adjusted() || pruning.removed_count() > 0;
-        let evidence_dirty = evidence_load.rejected_records() > 0
-            || evidence_load.evicted_records() > 0
-            || evidence_load.rejected_replay_markers() > 0;
+        let evidence_compaction_threshold = evidence_compaction_threshold.max(1);
+        let evidence_dirty = restored.load_report.rejected_records() > 0
+            || restored.load_report.evicted_records() > 0
+            || restored.load_report.rejected_replay_markers() > 0
+            || restored.has_stale_deltas
+            || restored.pending_deltas.len() >= evidence_compaction_threshold;
         let next_prune_at = next_prune_time(&ledger, now);
         let (released_signal, released) = oneshot::channel();
         let state = Arc::new(MeasureState {
             storage,
             evidence_storage,
+            evidence_compaction_threshold,
             runtime: Mutex::new(RuntimeLedger {
                 ledger,
-                evidence,
+                evidence: restored.evidence,
                 committed_evidence_override: None,
+                next_evidence_delta_seq: restored.next_delta_seq,
+                pending_evidence_deltas: restored.pending_deltas,
                 dirty,
                 persisting: false,
                 mutated_while_persisting: false,
@@ -787,11 +827,36 @@ async fn persist_ledger_with_turn(
     result.map_err(MeasureRuntimeError::from)
 }
 
-async fn persist_pending_evidence(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+/// Remove compacted incremental evidence keys from `evidence_storage`, returning any sequence
+/// numbers whose deletion failed so callers can keep cleanup dirty for retry.
+async fn prune_compacted_delta_keys(
+    evidence_storage: &SharedEvidenceStorage,
+    keys_to_prune: &[(u64, String)],
+) -> Vec<u64> {
+    let mut failed_seqs = Vec::new();
+    for (seq, key) in keys_to_prune {
+        if let Err(error) = evidence_storage.remove(key).await {
+            tracing::warn!(
+                %error,
+                key,
+                sequence = seq,
+                "failed to prune compacted provisional evidence delta"
+            );
+            failed_seqs.push(*seq);
+        }
+    }
+    failed_seqs
+}
+
+/// Write a compacted provisional-evidence snapshot checkpoint and prune covered delta keys.
+async fn persist_pending_evidence(
+    state: &MeasureState,
+    force_compact_deltas: bool,
+) -> Result<(), MeasureRuntimeError> {
     let _turn = state.evidence_turns.acquire().await;
-    let evidence_snapshot = {
+    let (entry, compacted_through_sequence, keys_to_prune) = {
         let mut runtime = lock_or_recover(&state.runtime);
-        if !evidence_persist_needed(&runtime) {
+        if !evidence_persist_needed(&runtime, force_compact_deltas) {
             return Ok(());
         }
         prepare_evidence_snapshot(&mut runtime)
@@ -799,13 +864,32 @@ async fn persist_pending_evidence(state: &MeasureState) -> Result<(), MeasureRun
     let mut guard = EvidencePersistGuard { state, armed: true };
     let result = state
         .evidence_storage
-        .put(EVIDENCE_SNAPSHOT_KEY, &evidence_snapshot)
+        .put(EVIDENCE_SNAPSHOT_KEY, &entry)
         .await;
+    if result.is_ok() {
+        let failed_seqs = prune_compacted_delta_keys(&state.evidence_storage, &keys_to_prune).await;
+        guard.armed = false;
+        let mut runtime = lock_or_recover(&state.runtime);
+        apply_compaction_cleanup(
+            &mut runtime,
+            compacted_through_sequence,
+            &failed_seqs,
+            state.evidence_compaction_threshold,
+        );
+        finish_evidence_persist(&mut runtime, true);
+        if !failed_seqs.is_empty()
+            || runtime.pending_evidence_deltas.len() >= state.evidence_compaction_threshold
+        {
+            runtime.evidence_dirty = true;
+        }
+        return Ok(());
+    }
     guard.armed = false;
-    finish_evidence_persist(&mut lock_or_recover(&state.runtime), result.is_ok());
+    finish_evidence_persist(&mut lock_or_recover(&state.runtime), false);
     result.map_err(MeasureRuntimeError::from)
 }
 
+/// Flush the measurement ledger under `ledger_turn` and compact any pending evidence state.
 async fn flush_state_with_ledger_turn(
     state: &MeasureState,
     ledger_turn: WriteTurnGuard<'_>,
@@ -813,8 +897,8 @@ async fn flush_state_with_ledger_turn(
     let ledger_result = persist_ledger_with_turn(state, false).await;
     drop(ledger_turn);
     ledger_result?;
-    if evidence_persist_needed(&lock_or_recover(&state.runtime)) {
-        persist_pending_evidence(state).await?;
+    if evidence_persist_needed(&lock_or_recover(&state.runtime), true) {
+        persist_pending_evidence(state, true).await?;
     }
     Ok(())
 }
@@ -891,20 +975,185 @@ fn mark_evidence_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
-fn evidence_persist_needed(runtime: &RuntimeLedger) -> bool {
-    runtime.evidence_dirty || runtime.committed_evidence_override.is_some()
+/// Return whether evidence state requires writing a compacted snapshot checkpoint.
+fn evidence_persist_needed(runtime: &RuntimeLedger, force_compact_deltas: bool) -> bool {
+    runtime.evidence_dirty
+        || runtime.committed_evidence_override.is_some()
+        || (force_compact_deltas && !runtime.pending_evidence_deltas.is_empty())
 }
 
+/// Capture an immutable measurement ledger snapshot and mark persistence in flight.
 fn prepare_ledger_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
     runtime.persisting = true;
     runtime.mutated_while_persisting = false;
     runtime.ledger.snapshot()
 }
 
-fn prepare_evidence_snapshot(runtime: &mut RuntimeLedger) -> EvidenceSnapshot<Did> {
+/// Build a compacted provisional-evidence snapshot entry together with its sequence watermark
+/// and currently pending delta keys eligible for pruning after commit.
+fn prepare_evidence_snapshot(
+    runtime: &mut RuntimeLedger,
+) -> (EvidenceStorageEntry<Did>, u64, Vec<(u64, String)>) {
     runtime.evidence_persisting = true;
     runtime.evidence_mutated_while_persisting = false;
-    runtime.evidence.snapshot()
+    let compacted_through_sequence = runtime.next_evidence_delta_seq.saturating_sub(1);
+    let entry = EvidenceStorageEntry::Snapshot {
+        compacted_through_sequence,
+        snapshot: runtime.evidence.snapshot(),
+    };
+    let keys_to_prune = runtime.pending_evidence_deltas.clone();
+    (entry, compacted_through_sequence, keys_to_prune)
+}
+
+/// Drop compacted delta entries through `compacted_through_sequence` (except `failed_seqs`) and
+/// report whether follow-up compaction/cleanup remains necessary.
+fn apply_compaction_cleanup(
+    runtime: &mut RuntimeLedger,
+    compacted_through_sequence: u64,
+    failed_seqs: &[u64],
+    compaction_threshold: usize,
+) -> bool {
+    runtime
+        .pending_evidence_deltas
+        .retain(|(seq, _)| *seq > compacted_through_sequence || failed_seqs.contains(seq));
+    !failed_seqs.is_empty() || runtime.pending_evidence_deltas.len() >= compaction_threshold
+}
+
+/// Reconstructed in-memory evidence store and journal bookkeeping loaded during startup.
+struct RestoredEvidenceState {
+    /// Restored bounded provisional-evidence state after checkpoint and delta replay.
+    evidence: ProvisionalEvidenceStore<Did>,
+    /// Merged counts of rejected or evicted entries observed during restore.
+    load_report: EvidenceLoadReport,
+    /// Pending `(sequence, key)` delta/replay-floor entries present in storage.
+    pending_deltas: Vec<(u64, String)>,
+    /// Next monotonic sequence number strictly above both checkpoint and journal entries.
+    next_delta_seq: u64,
+    /// Whether orphaned or pre-checkpoint entries remain in storage requiring cleanup.
+    has_stale_deltas: bool,
+}
+
+/// Reconstruct the bounded provisional-evidence store from the base snapshot checkpoint and
+/// any strictly newer delta or replay-floor journal entries in deterministic sequence order.
+fn restore_evidence_from_entries(
+    raw_entries: Vec<(String, EvidenceStorageEntry<Did>)>,
+    collector: Option<EvidenceCollectorIdentity>,
+) -> Result<RestoredEvidenceState, EvidenceError> {
+    let mut base_snapshot: Option<(u64, EvidenceSnapshot<Did>)> = None;
+    let mut pending_deltas: Vec<(u64, String)> = Vec::new();
+    let mut replay_entries: Vec<(u64, String, EvidenceStorageEntry<Did>)> = Vec::new();
+    let mut has_stale_deltas = false;
+
+    for (key, entry) in raw_entries {
+        if key == EVIDENCE_SNAPSHOT_KEY {
+            match entry {
+                EvidenceStorageEntry::Snapshot {
+                    compacted_through_sequence,
+                    snapshot,
+                } => {
+                    base_snapshot = Some((compacted_through_sequence, snapshot));
+                }
+                _other => {
+                    tracing::warn!(
+                        key,
+                        "ignoring unexpected non-snapshot provisional evidence entry under snapshot key"
+                    );
+                    has_stale_deltas = true;
+                }
+            }
+            continue;
+        }
+        match &entry {
+            EvidenceStorageEntry::Delta(delta) => {
+                let seq = delta.sequence;
+                pending_deltas.push((seq, key.clone()));
+                replay_entries.push((seq, key, entry));
+            }
+            EvidenceStorageEntry::ReplayFloor { sequence, .. } => {
+                let seq = *sequence;
+                pending_deltas.push((seq, key.clone()));
+                replay_entries.push((seq, key, entry));
+            }
+            EvidenceStorageEntry::Snapshot {
+                compacted_through_sequence,
+                ..
+            } => {
+                tracing::warn!(
+                    key,
+                    compacted_through_sequence,
+                    "ignoring stray provisional evidence snapshot under non-snapshot key"
+                );
+                has_stale_deltas = true;
+                pending_deltas.push((0, key));
+            }
+        }
+    }
+
+    let (base_seq, (mut evidence, mut load_report)) = match base_snapshot {
+        Some((compacted_through_sequence, snapshot)) => (
+            compacted_through_sequence,
+            ProvisionalEvidenceStore::from_snapshot_with_validator(
+                snapshot,
+                EvidenceLimits::default(),
+                |record| {
+                    collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
+                },
+                |marker| {
+                    collector
+                        .is_some_and(|identity| valid_persisted_replay_marker(marker, identity))
+                },
+            )?,
+        ),
+        None => (
+            0,
+            (
+                ProvisionalEvidenceStore::new(EvidenceLimits::default()),
+                EvidenceLoadReport::default(),
+            ),
+        ),
+    };
+
+    let mut max_seq = base_seq;
+    replay_entries.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    for (seq, _key, entry) in replay_entries {
+        max_seq = max_seq.max(seq);
+        if seq <= base_seq {
+            has_stale_deltas = true;
+            continue;
+        }
+        match entry {
+            EvidenceStorageEntry::Delta(delta) => {
+                let report = evidence.replay_persisted_delta(delta, |record| {
+                    collector.is_some_and(|identity| valid_persisted_evidence(record, identity))
+                })?;
+                load_report.merge(report);
+            }
+            EvidenceStorageEntry::ReplayFloor {
+                schema_version,
+                sequence: _,
+                replay_floor,
+            } => {
+                if schema_version != EVIDENCE_SNAPSHOT_VERSION {
+                    return Err(EvidenceError::UnsupportedSnapshotVersion {
+                        found: schema_version,
+                    });
+                }
+                evidence.restore_replay_floor(replay_floor);
+            }
+            EvidenceStorageEntry::Snapshot { .. } => {}
+        }
+    }
+
+    pending_deltas.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    let next_delta_seq = max_seq.saturating_add(1).max(1);
+
+    Ok(RestoredEvidenceState {
+        evidence,
+        load_report,
+        pending_deltas,
+        next_delta_seq,
+        has_stale_deltas,
+    })
 }
 
 fn valid_persisted_evidence(
@@ -1096,17 +1345,18 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
     }
 }
 
+/// Flush dirty ledger or dirty/compaction-pending evidence state once for the background worker.
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let (ledger_dirty, evidence_dirty) = {
         let runtime = lock_or_recover(&state.runtime);
-        (runtime.dirty, evidence_persist_needed(&runtime))
+        (runtime.dirty, evidence_persist_needed(&runtime, false))
     };
     if ledger_dirty {
         let _turn = state.ledger_turns.acquire().await;
         persist_ledger_with_turn(state, true).await?;
     }
     if evidence_dirty {
-        persist_pending_evidence(state).await?;
+        persist_pending_evidence(state, false).await?;
     }
     Ok(())
 }
@@ -1242,54 +1492,205 @@ impl Measure for PeriodicMeasure {
         &self,
         record: ProvisionalEvidenceRecord<Did>,
     ) -> Result<EvidenceAdmissionReport<Did>, EvidenceError> {
+        enum AdmissionWritePlan {
+            Snapshot {
+                entry: EvidenceStorageEntry<Did>,
+                compacted_through_sequence: u64,
+                keys_to_prune: Vec<(u64, String)>,
+            },
+            Incremental {
+                key: String,
+                entry: EvidenceStorageEntry<Did>,
+            },
+            NoWrite,
+        }
+
         // The evidence-storage put below is the successful operation's linearization point.
         // Law (Lock order): evidence_turns ≺ runtime. While the durable write is in flight,
         // `committed_evidence_override` preserves the pre-admission view for read-only queries so
         // they never block behind storage I/O and never observe an uncommitted admission.
         let _evidence_turn = self.state.evidence_turns.acquire().await;
-        let (rollback_before, previous_override, previous_evidence_dirty, result, snapshot) = {
+        let (
+            rollback_before,
+            previous_override,
+            previous_evidence_dirty,
+            previous_pending_len,
+            result,
+            plan,
+        ) = {
             let mut runtime = lock_or_recover(&self.state.runtime);
             let rollback_before = Arc::new(runtime.evidence.clone());
             let previous_override = runtime.committed_evidence_override.clone();
             let previous_evidence_dirty = runtime.evidence_dirty;
-            if runtime.committed_evidence_override.is_none() {
-                runtime.committed_evidence_override = Some(Arc::clone(&rollback_before));
-            }
-            let result = runtime.evidence.admit(record);
-            mark_evidence_dirty(&mut runtime);
-            let snapshot = runtime.evidence.snapshot();
+            let previous_replay_floor = runtime.evidence.replay_floor();
+            let previous_pending_len = runtime.pending_evidence_deltas.len();
+            let result = runtime.evidence.admit(record.clone());
+
+            let stage_incremental = |runtime: &mut RuntimeLedger| {
+                if runtime.committed_evidence_override.is_none() {
+                    runtime.committed_evidence_override = Some(Arc::clone(&rollback_before));
+                }
+                mark_evidence_dirty(runtime);
+                let sequence = runtime.next_evidence_delta_seq;
+                runtime.next_evidence_delta_seq = sequence.saturating_add(1);
+                let key = evidence_delta_key(sequence);
+                runtime
+                    .pending_evidence_deltas
+                    .push((sequence, key.clone()));
+                (sequence, key)
+            };
+
+            let plan = if previous_override.is_some() || previous_evidence_dirty {
+                // Reconcile prior cancelled/dirty state with a compacted Snapshot checkpoint.
+                // Checked before the NoWrite branch so a Duplicate retry reconciles cleanly.
+                if runtime.committed_evidence_override.is_none() {
+                    runtime.committed_evidence_override = Some(Arc::clone(&rollback_before));
+                }
+                mark_evidence_dirty(&mut runtime);
+                let compacted_through_sequence = runtime.next_evidence_delta_seq.saturating_sub(1);
+                let keys_to_prune = runtime.pending_evidence_deltas.clone();
+                AdmissionWritePlan::Snapshot {
+                    entry: EvidenceStorageEntry::Snapshot {
+                        compacted_through_sequence,
+                        snapshot: runtime.evidence.snapshot(),
+                    },
+                    compacted_through_sequence,
+                    keys_to_prune,
+                }
+            } else if matches!(
+                &result,
+                Ok(report) if report.admission() == EvidenceAdmission::Admitted
+            ) {
+                let (sequence, key) = stage_incremental(&mut runtime);
+                AdmissionWritePlan::Incremental {
+                    key,
+                    entry: EvidenceStorageEntry::Delta(EvidenceAdmissionDelta {
+                        schema_version: EVIDENCE_SNAPSHOT_VERSION,
+                        sequence,
+                        record,
+                    }),
+                }
+            } else if runtime.evidence.replay_floor() > previous_replay_floor {
+                let (sequence, key) = stage_incremental(&mut runtime);
+                AdmissionWritePlan::Incremental {
+                    key,
+                    entry: EvidenceStorageEntry::ReplayFloor {
+                        schema_version: EVIDENCE_SNAPSHOT_VERSION,
+                        sequence,
+                        replay_floor: runtime.evidence.replay_floor(),
+                    },
+                }
+            } else {
+                AdmissionWritePlan::NoWrite
+            };
+
             (
                 rollback_before,
                 previous_override,
                 previous_evidence_dirty,
+                previous_pending_len,
                 result,
-                snapshot,
+                plan,
             )
         };
+
         let mut cancel_guard = EvidenceAdmissionCancelGuard {
             wake: &self.persistence_wake,
             armed: true,
         };
-        if let Err(error) = self
-            .state
-            .evidence_storage
-            .put(EVIDENCE_SNAPSHOT_KEY, &snapshot)
-            .await
-        {
-            cancel_guard.armed = false;
+        /// Restore pre-admission in-memory evidence state and pending delta list after a failed write.
+        #[allow(clippy::too_many_arguments)]
+        fn rollback_admission(
+            state: &MeasureState,
+            error: rings_core::error::Error,
+            guard: &mut EvidenceAdmissionCancelGuard<'_>,
+            previous_override: Option<Arc<ProvisionalEvidenceStore<Did>>>,
+            rollback_before: Arc<ProvisionalEvidenceStore<Did>>,
+            previous_evidence_dirty: bool,
+            previous_pending_len: usize,
+        ) -> EvidenceError {
+            guard.armed = false;
             tracing::error!(%error, "failed to commit provisional evidence admission");
-            let mut runtime = lock_or_recover(&self.state.runtime);
+            let mut runtime = lock_or_recover(&state.runtime);
             runtime.committed_evidence_override = previous_override;
             runtime.evidence =
                 Arc::try_unwrap(rollback_before).unwrap_or_else(|arc| (*arc).clone());
             runtime.evidence_dirty = previous_evidence_dirty;
-            return Err(EvidenceError::PersistenceUnavailable);
+            runtime
+                .pending_evidence_deltas
+                .truncate(previous_pending_len);
+            EvidenceError::PersistenceUnavailable
         }
-        cancel_guard.armed = false;
-        {
-            let mut runtime = lock_or_recover(&self.state.runtime);
-            runtime.committed_evidence_override = None;
-            runtime.evidence_dirty = false;
+
+        match plan {
+            AdmissionWritePlan::Snapshot {
+                entry,
+                compacted_through_sequence,
+                keys_to_prune,
+            } => {
+                if let Err(error) = self
+                    .state
+                    .evidence_storage
+                    .put(EVIDENCE_SNAPSHOT_KEY, &entry)
+                    .await
+                {
+                    return Err(rollback_admission(
+                        &self.state,
+                        error,
+                        &mut cancel_guard,
+                        previous_override,
+                        rollback_before,
+                        previous_evidence_dirty,
+                        previous_pending_len,
+                    ));
+                }
+                let failed_seqs =
+                    prune_compacted_delta_keys(&self.state.evidence_storage, &keys_to_prune).await;
+                cancel_guard.armed = false;
+                let should_compact = {
+                    let mut runtime = lock_or_recover(&self.state.runtime);
+                    runtime.committed_evidence_override = None;
+                    let dirty = apply_compaction_cleanup(
+                        &mut runtime,
+                        compacted_through_sequence,
+                        &failed_seqs,
+                        self.state.evidence_compaction_threshold,
+                    );
+                    runtime.evidence_dirty = dirty;
+                    dirty
+                };
+                if should_compact {
+                    self.wake_persistence();
+                }
+            }
+            AdmissionWritePlan::Incremental { key, entry } => {
+                if let Err(error) = self.state.evidence_storage.put(&key, &entry).await {
+                    return Err(rollback_admission(
+                        &self.state,
+                        error,
+                        &mut cancel_guard,
+                        previous_override,
+                        rollback_before,
+                        previous_evidence_dirty,
+                        previous_pending_len,
+                    ));
+                }
+                cancel_guard.armed = false;
+                let should_compact = {
+                    let mut runtime = lock_or_recover(&self.state.runtime);
+                    runtime.committed_evidence_override = None;
+                    let should_compact = runtime.pending_evidence_deltas.len()
+                        >= self.state.evidence_compaction_threshold;
+                    runtime.evidence_dirty = previous_evidence_dirty || should_compact;
+                    should_compact
+                };
+                if should_compact {
+                    self.wake_persistence();
+                }
+            }
+            AdmissionWritePlan::NoWrite => {
+                cancel_guard.armed = false;
+            }
         }
         result
     }

@@ -131,6 +131,13 @@ pub(crate) struct StorageSyncDeliveryCursor {
     placement_keys: Vec<Did>,
 }
 
+impl StorageSyncDeliveryCursor {
+    /// Return the storage-sync purpose represented by this cursor key.
+    pub(crate) const fn purpose(&self) -> StorageSyncPurpose {
+        self.purpose
+    }
+}
+
 impl StorageSyncDelivery {
     fn from_parts(
         purpose: StorageSyncPurpose,
