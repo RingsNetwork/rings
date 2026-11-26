@@ -166,9 +166,10 @@ struct GuardTimeoutState {
 /// Persistent manager for local onion entry-guard selection, rotation, and timeout eviction.
 ///
 /// Law (Lock order): `storage_gate ≺ timeout_state`. `storage_gate` serializes asynchronous
-/// read-modify-write persistence across [`Self::evict_guard`] and [`Self::select_relay_guards_at`]
-/// so a concurrent route selection never overwrites a concurrent timeout eviction; `timeout_state`
-/// is a synchronous leaf mutex never held across `.await`.
+/// outcome recording and read-modify-write persistence across [`Self::record_route_outcome`],
+/// [`Self::evict_guard_locked`], and [`Self::select_relay_guards_at`] so neither a concurrent
+/// route selection nor a concurrent route success can interleave with an in-flight timeout
+/// eviction; `timeout_state` is a synchronous leaf mutex never held across `.await`.
 pub(crate) struct OnionEntryGuards {
     /// Durable cache backend storing [`OnionEntryGuardState`] snapshots.
     storage: OnionEntryGuardStorage,
@@ -223,6 +224,11 @@ impl OnionEntryGuards {
         timed_out: bool,
         now_ms: u128,
     ) -> Result<bool> {
+        let _storage_turn = rings_core::utils::SlowLockGuard::acquire(
+            "OnionEntryGuards::storage_gate",
+            self.storage_gate.lock(),
+        )
+        .await;
         let should_evict = {
             let mut state = self.timeout_state.lock().map_err(|_| Error::Lock)?;
             state
@@ -251,19 +257,14 @@ impl OnionEntryGuards {
             }
         };
         if should_evict {
-            self.evict_guard(network_id, guard).await
+            self.evict_guard_locked(network_id, guard).await
         } else {
             Ok(false)
         }
     }
 
-    /// Remove `guard` from `network_id`'s persisted entry-guard set if present.
-    pub(crate) async fn evict_guard(&self, network_id: u32, guard: Did) -> Result<bool> {
-        let _storage_turn = rings_core::utils::SlowLockGuard::acquire(
-            "OnionEntryGuards::storage_gate",
-            self.storage_gate.lock(),
-        )
-        .await;
+    /// Remove `guard` from `network_id`'s persisted entry-guard set while `storage_gate` is held.
+    async fn evict_guard_locked(&self, network_id: u32, guard: Did) -> Result<bool> {
         let key = self.state_key(network_id);
         let Some(mut stored) = self
             .storage
@@ -1428,6 +1429,39 @@ mod tests {
 
         assert!(evicted?);
         assert_eq!(selected?.dids, BTreeSet::from([relay_b.did]));
+
+        // Also verify `record_route_outcome(timed_out = false)` serializes behind an in-flight
+        // eviction on `relay_b`, so the newer success clears cooldown cleanly after eviction
+        // completes rather than racing before `evict_guard_locked` touches storage.
+        storage
+            .gate_first_put
+            .store(true, std::sync::atomic::Ordering::Release);
+        let entered_b = storage.put_entered.notified();
+        tokio::pin!(entered_b);
+        for attempt in 0..ENTRY_GUARD_MAX_CONSECUTIVE_TIMEOUTS - 1 {
+            assert!(
+                !manager
+                    .record_route_outcome(1, relay_b.did, true, 13_000 + u128::from(attempt))
+                    .await?
+            );
+        }
+        let evict_b = manager.record_route_outcome(1, relay_b.did, true, 14_000);
+        let succeed_b = manager.record_route_outcome(1, relay_b.did, false, 14_001);
+        let release_b = async {
+            entered_b.await;
+            tokio::task::yield_now().await;
+            storage.put_release.notify_waiters();
+        };
+        let (evicted_b, succeeded_b, ()) = futures::join!(evict_b, succeed_b, release_b);
+        assert!(evicted_b?);
+        assert!(!succeeded_b?);
+        // Because `succeed_b` serialized after `evict_b`, `relay_b`'s cooldown was cleared and it
+        // is immediately eligible again on the next selection.
+        let mut reselect_entropy = FixedEntropy::new([1]);
+        let reselected = manager
+            .select_relay_guards_at(1, &relays, &[], 14_002, &mut reselect_entropy, |_| true)
+            .await?;
+        assert_eq!(reselected.dids, BTreeSet::from([relay_b.did]));
         Ok(())
     }
 }

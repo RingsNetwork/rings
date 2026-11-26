@@ -316,16 +316,7 @@ impl LogicalInbound {
             Message::FindSuccessorSend(msg) => Ok(matches!(
                 self.message_handler.find_successor_for_query(msg)?,
                 crate::dht::PeerRingAction::Some(did)
-                    if msg.accepts_local_successor(local)
-                        || did == local
-                        || (self.transport.get_connection(did).is_none()
-                            && self
-                                .transport
-                                .dht
-                                .successors()
-                                .list()?
-                                .into_iter()
-                                .all(|peer| peer == local))
+                    if msg.accepts_local_successor(local) || did == local
             )),
             Message::FindRelayHolder(msg) => Ok(payload.is_relay_destination_for(local)
                 && matches!(
@@ -895,6 +886,32 @@ mod tests {
                 .await
                 .expect("terminates_locally"),
             "strict FindSuccessorSend forwarded to referenced peer must not terminate locally"
+        );
+
+        // Even when the successor list is temporarily empty, if `pred_did` remains referenced in
+        // topology (e.g. via predecessor/finger) `HandleMsg<FindSuccessorSend>` still chooses the
+        // `reset_destination(pred_did)` redirecting branch rather than settling locally.
+        swarm
+            .dht()
+            .successors()
+            .remove(succ_did)
+            .expect("clear successor");
+        assert!(
+            !logical
+                .terminates_locally(&payload, &msg)
+                .await
+                .expect("terminates_locally without successor"),
+            "strict FindSuccessorSend to referenced peer must remain non-terminating when successors empty"
+        );
+
+        // Once no reference or remote successor remains, an isolated node settles locally (`did == local`).
+        *swarm.dht().lock_predecessor().expect("clear predecessor") = None;
+        assert!(
+            logical
+                .terminates_locally(&payload, &msg)
+                .await
+                .expect("terminates_locally when isolated"),
+            "strict FindSuccessorSend on an isolated node with unreferenced target settles locally"
         );
     }
 }

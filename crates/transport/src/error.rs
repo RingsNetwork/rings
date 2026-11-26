@@ -346,12 +346,11 @@ impl Error {
                 ..
             } => false,
             #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-            Self::Webrtc(_)
-            | Self::NativeSendCompletionTimeout { .. }
-            | Self::NativeSendTask(_)
-            | Self::NativeSendPanic(_) => true,
+            Self::Webrtc(_) | Self::NativeSendCompletionTimeout { .. } => true,
             #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-            Self::NativeSendRuntimeUnavailable
+            Self::NativeSendTask(_)
+            | Self::NativeSendPanic(_)
+            | Self::NativeSendRuntimeUnavailable
             | Self::NativeConnectionCloseTask(_)
             | Self::NativeConnectionRetirementTimeout { .. } => false,
             #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
@@ -458,6 +457,13 @@ mod tests {
                 err.send_failure_class(),
                 TransportSendFailureClass::Fatal,
                 "expected Fatal for {err:?}"
+            );
+        }
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+        {
+            assert!(!Error::NativeSendPanic("boom".to_string()).blames_remote_peer_on_send());
+            assert!(
+                Error::NativeSendCompletionTimeout { timeout_ms: 100 }.blames_remote_peer_on_send()
             );
         }
     }
