@@ -84,7 +84,9 @@ macro_rules! domain_tag {
 /// The message family and overlay a signature transcript is bound to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SigningDomain {
+    /// Domain tag identifying the message family.
     tag: DomainTag,
+    /// Overlay network identifier separating signatures across networks.
     network_id: u32,
 }
 
@@ -138,7 +140,9 @@ impl SigningDomain {
 /// and the same overlay.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageSigner<S> {
+    /// Owned or borrowed delegatee signing key.
     delegatee_key: S,
+    /// Overlay network identifier bound into every signature produced by this signer.
     network_id: u32,
 }
 
@@ -153,6 +157,7 @@ where S: Borrow<DelegateeKey>
         }
     }
 
+    /// Borrow the underlying [`DelegateeKey`].
     fn delegatee_key(&self) -> &DelegateeKey {
         self.delegatee_key.borrow()
     }

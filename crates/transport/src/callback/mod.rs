@@ -4,6 +4,7 @@ mod capacity;
 #[cfg(rings_transport_webrtc)]
 pub(crate) mod credit_pump;
 mod inner;
+/// Bounded asynchronous reporting of malformed and oversized inbound frames.
 mod invalid_report;
 pub(crate) mod link_credit;
 #[cfg(rings_transport_backend)]

@@ -45,21 +45,30 @@ impl StorageRepairOutcome {
     }
 }
 
+/// Reason why a storage-repair delivery was deferred instead of sent immediately.
 #[derive(Clone, Copy, Debug)]
 enum StorageRepairDeferReason {
+    /// No next-hop route could be resolved for the destination.
     MissingNextHop,
+    /// The resolved next hop does not have an active admitted attempt.
     NextHopNotAdmitted,
+    /// The admitted next hop currently has no live transport connection.
     NextHopTransportMissing,
+    /// The next hop's transport is not yet ready to make forward progress.
     NextHopTransportNotReady(TransportReadiness),
 }
 
+/// Outcome of attempting to dispatch a single storage-repair delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepairDeliveryResult {
+    /// The repair delivery was handed to the transport.
     Sent,
+    /// The repair delivery was deferred for a later pass.
     Deferred,
 }
 
 impl StorageRepairDeferReason {
+    /// Return a static log-friendly label for this defer reason.
     const fn as_str(self) -> &'static str {
         match self {
             Self::MissingNextHop => "missing_next_hop",
@@ -69,6 +78,7 @@ impl StorageRepairDeferReason {
         }
     }
 
+    /// Return the underlying transport readiness when deferred due to readiness.
     const fn transport_readiness(self) -> Option<TransportReadiness> {
         match self {
             Self::NextHopTransportNotReady(readiness) => Some(readiness),
@@ -237,6 +247,7 @@ impl Stabilizer {
         }
     }
 
+    /// Emit a structured debug log when a storage-repair delivery is deferred.
     fn log_storage_repair_deferred(
         &self,
         destination: crate::dht::StorageSyncDestination,
@@ -256,6 +267,7 @@ impl Stabilizer {
         );
     }
 
+    /// Select a bounded, cursor-rotating window of storage-repair deliveries for this step.
     fn storage_repair_window(
         &self,
         deliveries: Vec<StorageSyncDelivery>,
@@ -298,6 +310,7 @@ impl Stabilizer {
         Ok(selected)
     }
 
+    /// Check whether `next_hop` is admitted and transport-ready, returning a defer reason if not.
     fn storage_repair_defer_reason(
         &self,
         next_hop: Option<Did>,

@@ -33,21 +33,37 @@ use crate::utils::SystemClock;
 
 /// Creates a SwarmBuilder to configure a Swarm.
 pub struct SwarmBuilder {
+    /// Network identifier separating independent overlay rings.
     network_id: u32,
+    /// Injected transport implementation used for peer connections.
     transport: SharedTransport,
+    /// Maximum number of successors maintained in the Chord ring.
     dht_succ_max: u8,
+    /// Size of the Chord finger table.
     dht_finger_table_size: usize,
+    /// Replication factor for DHT storage entries.
     dht_storage_redundancy: u16,
+    /// Number of virtual ring positions per storage owner.
     dht_virtual_nodes: u16,
+    /// Memory and timeout limits for inbound chunk reassembly.
     reassembly_limits: ReassemblyLimits,
+    /// Persistent storage backend for DHT entries.
     dht_storage: EntryStorage,
+    /// Optional dedicated storage backend for offline relay inbox entries.
     relay_storage: Option<EntryStorage>,
+    /// Optional persistent storage backend for entry removal tombstones.
     removal_storage: Option<RemovalStorage>,
+    /// Replication policy for relay mailbox entries.
     relay_replication: RelayReplication,
+    /// Optional persistent storage backend for transaction replay deduplication.
     replay_storage: Option<ReplayStorage>,
+    /// Per-origin quota configuration for replay and admission control.
     origin_quota: OriginQuotaConfig,
+    /// Active delegatee signing key for this node.
     delegatee_key: DelegateeKey,
+    /// Optional session time-to-live in seconds.
     session_ttl: Option<usize>,
+    /// Optional peer quality measurement backend.
     measure: Option<MeasureImpl>,
     /// Optional bounded sink for privacy-safe operational observations.
     observer: Option<SharedSwarmObserver>,
@@ -254,11 +270,13 @@ impl SwarmBuilder {
     }
 }
 
+/// Return the default production reassembly limits for non-WASM targets.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 fn default_reassembly_limits() -> ReassemblyLimits {
     ReassemblyLimits::production()
 }
 
+/// Return the constrained reassembly limits for WASM targets.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 fn default_reassembly_limits() -> ReassemblyLimits {
     ReassemblyLimits::constrained()

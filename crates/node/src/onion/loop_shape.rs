@@ -67,6 +67,7 @@ const fn loop_hops(symbols: usize) -> usize {
 /// Invariant: `1 ≤ symbols ≤ MAX_ONION_LOOP_SYMBOLS`, so `hop_count() ≤ MAX_ONION_LOOP_HOPS`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OnionLoopShape {
+    /// Number `n ∈ [1, MAX_ONION_LOOP_SYMBOLS]` of symbol applications in the loop.
     symbols: usize,
 }
 
@@ -108,8 +109,11 @@ impl OnionLoopShape {
 /// the terminal symbol `fₙ` is total.
 #[derive(Debug)]
 pub(crate) struct OnionPipelineSymbols<'s, S> {
+    /// All symbols `f₁ … fₙ` in pipeline order.
     all: &'s [S],
+    /// Intermediate symbols `f₁ … fₙ₋₁` preceding the terminal symbol.
     intermediate: &'s [S],
+    /// Terminal symbol `fₙ`.
     terminal: &'s S,
 }
 
@@ -192,10 +196,15 @@ pub enum OnionLoopRole {
 /// are established by `OnionLoop::try_unfold`, the only constructor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionLoop<P, T = P> {
+    /// Entry guard label at position `1` (and repeated at closing position `H`).
     guard: P,
+    /// Relay labels immediately following the entry guard before the first symbol.
     lead: Vec<P>,
+    /// Intermediate symbol labels paired with the relay segment following each symbol.
     stages: Vec<(T, Vec<P>)>,
+    /// Terminal symbol label `hₙ`.
     terminal: T,
+    /// Relay labels between the terminal symbol and the closing guard.
     tail: Vec<P>,
 }
 

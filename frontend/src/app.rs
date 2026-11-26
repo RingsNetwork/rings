@@ -42,95 +42,166 @@ use crate::workbench;
 mod actions;
 mod routes;
 
+/// Default ICE server list setting (empty to use the node's built-in defaults).
 pub(crate) const DEFAULT_ICE_SERVERS: &str = "";
+/// Legacy default ICE server URL migrated automatically to [`DEFAULT_ICE_SERVERS`].
 pub(crate) const LEGACY_DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+/// Default DHT stabilization interval setting, in seconds.
 pub(crate) const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
+/// Legacy stabilization interval setting migrated automatically to [`DEFAULT_STABILIZE_INTERVAL_SECONDS`].
 const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
 
+/// Snapshot of persisted frontend settings used as a Yew effect dependency.
 #[derive(Clone, PartialEq)]
 struct SettingsSnapshot {
+    /// Serialized wallet kind identifier.
     wallet_kind: String,
+    /// Rings network identifier.
     network_id: String,
+    /// ICE server configuration string.
     ice_servers: String,
+    /// DHT stabilization interval in seconds.
     stabilize_interval: String,
+    /// Browser storage database name.
     storage_name: String,
+    /// Default seed HTTP endpoint URL.
     seed_url: String,
+    /// Last entered peer HTTP endpoint URL.
     http_endpoint: String,
 }
 
+/// Top-level UI navigation and shell layout state.
 struct ShellState {
+    /// Currently displayed top-level page.
     active_page: UseStateHandle<ShellPage>,
+    /// Selected layer index in the landing page architecture diagram.
     active_architecture_layer: UseStateHandle<usize>,
+    /// Active workbench panel tab.
     active_panel: UseStateHandle<Panel>,
+    /// Currently open console dialog, if any.
     active_dialog: UseStateHandle<ActiveDialog>,
+    /// Whether the console control sidebar is collapsed.
     control_sidebar_collapsed: UseStateHandle<bool>,
 }
 
+/// Reactive state and handles for the local or extension Rings node.
 struct NodeState {
+    /// Selected wallet standard.
     wallet_kind: UseStateHandle<WalletKind>,
+    /// Authenticated wallet account metadata, if connected.
     wallet_account: UseStateHandle<Option<WalletAccount>>,
+    /// Whether the node is currently starting or stopping.
     node_starting: UseStateHandle<bool>,
+    /// Shared reference to the active in-page [`DemoNode`].
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    /// Generation clock used to invalidate stale async operations.
     generation: GenerationClock,
+    /// In-memory dweb site content served by the local node.
     site: dweb::Site,
+    /// Local node DID string, empty when offline.
     did: UseStateHandle<String>,
+    /// Human-readable status line shown in the console.
     status: UseStateHandle<String>,
+    /// Configured Rings network identifier.
     network_id: UseStateHandle<String>,
+    /// Configured ICE server list.
     ice_servers: UseStateHandle<String>,
+    /// Configured stabilization interval in seconds.
     stabilize_interval: UseStateHandle<String>,
+    /// Configured browser storage database name.
     storage_name: UseStateHandle<String>,
+    /// Current snapshot of connected peers.
     peers: UseStateHandle<Vec<PeerView>>,
+    /// Configured seed HTTP endpoint URL.
     seed_url: UseStateHandle<String>,
+    /// Whether the local browser WebView gateway is registered.
     webview_ready: UseStateHandle<bool>,
 }
 
+/// Reactive state for the peer connection and manual SDP exchange dialog.
 struct LinkState {
+    /// HTTP seed endpoint input value.
     http_endpoint: UseStateHandle<String>,
+    /// Remote peer DID input value for manual SDP offers.
     sdp_remote_did: UseStateHandle<String>,
+    /// Locally generated SDP offer payload.
     generated_offer: UseStateHandle<String>,
+    /// Remote SDP offer payload pasted by the responder.
     remote_offer: UseStateHandle<String>,
+    /// Locally generated SDP answer payload.
     generated_answer: UseStateHandle<String>,
+    /// Remote SDP answer payload pasted by the initiator.
     remote_answer: UseStateHandle<String>,
+    /// Selected manual SDP role (initiator or responder).
     sdp_mode: UseStateHandle<SdpMode>,
+    /// Whether the peer link dialog is open.
     link_dialog_open: UseStateHandle<bool>,
+    /// Active tab in the peer link dialog.
     link_tab: UseStateHandle<LinkTab>,
 }
 
+/// Reactive state for the custom protocol workbench panel.
 struct CustomState {
+    /// Target custom protocol namespace input.
     namespace: UseStateHandle<String>,
+    /// List of currently registered custom protocol namespaces.
     registered: UseStateHandle<Vec<String>>,
+    /// Target peer DID input for outgoing messages.
     peer: UseStateHandle<String>,
+    /// Outgoing message payload input.
     payload: UseStateHandle<String>,
+    /// Bounded log of received custom protocol events.
     events: UseStateHandle<Vec<custom::CustomEvent>>,
 }
 
+/// Reactive state for the onion HTTP proxy workbench panel.
 struct OnionState {
+    /// Target request URL input.
     url: UseStateHandle<String>,
+    /// HTTP method input.
     method: UseStateHandle<String>,
+    /// Request headers text input.
     headers: UseStateHandle<String>,
+    /// Request body text input.
     body: UseStateHandle<String>,
+    /// Summary of the onion route used for the last request.
     route_result: UseStateHandle<String>,
+    /// Status text of the last onion proxy response.
     response_status: UseStateHandle<String>,
+    /// Formatted response headers from the last onion proxy request.
     response_headers: UseStateHandle<String>,
+    /// Response body from the last onion proxy request.
     response_body: UseStateHandle<String>,
 }
 
+/// Availability status and disabled reason for the WebView launcher control.
 #[derive(Debug, Eq, PartialEq)]
 struct WebviewAvailability {
+    /// Whether the WebView popup can currently be opened.
     ready: bool,
+    /// Explanation shown when WebView is unavailable; empty when ready.
     unavailable_reason: String,
 }
 
+/// Borrowed application state and actions passed to the top-level render helpers.
 struct AppRenderContext<'a> {
+    /// Shell navigation and layout state.
     shell: &'a ShellState,
+    /// Node identity, settings, and peer state.
     node: &'a NodeState,
+    /// Peer link dialog state.
     link: &'a LinkState,
+    /// Custom protocol workbench state.
     custom_state: &'a CustomState,
+    /// Onion proxy workbench state.
     onion: &'a OnionState,
+    /// Node launch and disconnect callbacks.
     launch_actions: LaunchActions,
+    /// Whether the app is running inside the browser extension popup/bridge.
     extension_mode: bool,
 }
 
+/// Initializes the shell navigation, panel, and dialog state handles.
 #[hook]
 fn use_shell_state() -> ShellState {
     ShellState {
@@ -142,6 +213,7 @@ fn use_shell_state() -> ShellState {
     }
 }
 
+/// Initializes the node lifecycle, persisted settings, and peer state handles.
 #[hook]
 fn use_node_state() -> NodeState {
     let generation_ref = use_mut_ref(GenerationClock::default);
@@ -183,6 +255,7 @@ fn use_node_state() -> NodeState {
     }
 }
 
+/// Initializes the peer link dialog and SDP exchange state handles.
 #[hook]
 fn use_link_state() -> LinkState {
     LinkState {
@@ -204,6 +277,7 @@ fn use_link_state() -> LinkState {
     }
 }
 
+/// Initializes the custom protocol workbench state handles.
 #[hook]
 fn use_custom_state() -> CustomState {
     CustomState {
@@ -220,6 +294,7 @@ fn use_custom_state() -> CustomState {
     }
 }
 
+/// Initializes the onion proxy workbench state handles.
 #[hook]
 fn use_onion_state() -> OnionState {
     OnionState {
@@ -234,6 +309,7 @@ fn use_onion_state() -> OnionState {
     }
 }
 
+/// Loads the persisted wallet kind or falls back to [`WalletKind::WebCrypto`].
 fn initial_wallet_kind() -> WalletKind {
     extension::load_setting_with_legacy(
         extension::SETTING_WALLET_KIND,
@@ -243,10 +319,12 @@ fn initial_wallet_kind() -> WalletKind {
     .unwrap_or(WalletKind::WebCrypto)
 }
 
+/// Loads a setting from current or legacy storage keys, returning `default` if absent.
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
 }
 
+/// Loads the ICE servers setting, migrating the legacy STUN default to an empty string.
 fn load_ice_servers_setting_or_default() -> String {
     match extension::load_setting_with_legacy(
         extension::SETTING_ICE_SERVERS,
@@ -261,6 +339,7 @@ fn load_ice_servers_setting_or_default() -> String {
     }
 }
 
+/// Loads the stabilization interval setting, migrating the legacy 3-second default.
 fn load_stabilize_interval_setting_or_default() -> String {
     match extension::load_setting_with_legacy(
         extension::SETTING_STABILIZE_INTERVAL,
@@ -306,6 +385,7 @@ pub fn app() -> Html {
     })
 }
 
+/// Builds a change callback that updates `wallet_kind` from a `<select>` event.
 fn wallet_kind_callback(wallet_kind: &UseStateHandle<WalletKind>) -> Callback<Event> {
     let wallet_kind = wallet_kind.clone();
     Callback::from(move |event: Event| {
@@ -315,6 +395,7 @@ fn wallet_kind_callback(wallet_kind: &UseStateHandle<WalletKind>) -> Callback<Ev
     })
 }
 
+/// Persists node and link configuration values whenever any setting changes.
 #[hook]
 fn use_settings_persistence(node: &NodeState, link: &LinkState) {
     let settings_snapshot = SettingsSnapshot {
@@ -340,6 +421,7 @@ fn use_settings_persistence(node: &NodeState, link: &LinkState) {
     });
 }
 
+/// Fetches the initial background node status when running inside the browser extension.
 #[hook]
 fn use_extension_status(node: &NodeState) {
     let did = node.did.clone();
@@ -371,6 +453,7 @@ fn use_extension_status(node: &NodeState) {
     });
 }
 
+/// Polls the peer list every four seconds while the node is online.
 #[hook]
 fn use_peer_refresh(node: &NodeState) {
     let node_ref = node.node_ref.clone();
@@ -401,6 +484,7 @@ fn use_peer_refresh(node: &NodeState) {
     });
 }
 
+/// Refreshes the connected peer snapshot from either the extension bridge or the local node.
 fn refresh_peer_snapshot(
     node_ref: Rc<RefCell<Option<DemoNode>>>,
     generation: GenerationClock,
@@ -440,6 +524,7 @@ fn refresh_peer_snapshot(
     });
 }
 
+/// Fetches and applies the latest node status snapshot from the browser extension bridge.
 fn refresh_extension_snapshot(
     bridge: JsValue,
     generation: GenerationClock,
@@ -465,6 +550,7 @@ fn refresh_extension_snapshot(
     });
 }
 
+/// Resets the workbench panel to [`Panel::Onion`] when entering extension mode.
 #[hook]
 fn use_extension_panel_reset(active_panel: UseStateHandle<Panel>, extension_mode: bool) {
     use_effect_with(extension_mode, move |extension_mode| {
@@ -475,6 +561,7 @@ fn use_extension_panel_reset(active_panel: UseStateHandle<Panel>, extension_mode
     });
 }
 
+/// Subscribes to `popstate` and `hashchange` events to keep shell state aligned with the URL.
 #[hook]
 fn use_shell_history(
     active_page: UseStateHandle<ShellPage>,
@@ -505,6 +592,7 @@ fn use_shell_history(
     });
 }
 
+/// Renders the active top-level view (WebView, document shell, or console shell).
 fn render_app(ctx: AppRenderContext<'_>) -> Html {
     let effective_page = effective_shell_page(ctx.shell, ctx.extension_mode);
     if effective_page == ShellPage::Webview {
@@ -536,6 +624,7 @@ fn document_body(
     }
 }
 
+/// Resolves the page to display, forcing [`ShellPage::Console`] in extension mode.
 fn effective_shell_page(shell: &ShellState, extension_mode: bool) -> ShellPage {
     if extension_mode {
         ShellPage::Console
@@ -544,12 +633,14 @@ fn effective_shell_page(shell: &ShellState, extension_mode: bool) -> ShellPage {
     }
 }
 
+/// Builds a callback that navigates to a new [`ShellPage`] and updates browser history.
 fn navigate_page_callback(shell: &ShellState) -> Callback<ShellPage> {
     let active_page = shell.active_page.clone();
     let active_dialog = shell.active_dialog.clone();
     Callback::from(move |page| routes::navigate_shell_page(page, &active_page, &active_dialog))
 }
 
+/// Builds the open and close callbacks for console modal dialogs.
 fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
     let open_page = shell.active_page.clone();
     let open_dialog = shell.active_dialog.clone();
@@ -586,6 +677,7 @@ fn render_document_shell(
     }
 }
 
+/// Renders the full-viewport console shell with topology stage, link control, and sidebar.
 fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     let link_control = render_link_control(ctx.node, ctx.link, ctx.shell);
     let workbench_body = render_workbench_body(&ctx);
@@ -643,6 +735,7 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     }
 }
 
+/// Returns the CSS class list for the console shell root element.
 fn console_shell_class(extension_mode: bool) -> &'static str {
     if extension_mode {
         "app-shell topology-shell extension-mode"
@@ -651,6 +744,7 @@ fn console_shell_class(extension_mode: bool) -> &'static str {
     }
 }
 
+/// Returns whether the WebView gateway is ready in either extension or browser mode.
 fn webview_gateway_ready(extension_mode: bool, node_did: &str, local_gateway_ready: bool) -> bool {
     if extension_mode {
         !node_did.is_empty()
@@ -659,6 +753,7 @@ fn webview_gateway_ready(extension_mode: bool, node_did: &str, local_gateway_rea
     }
 }
 
+/// Computes the WebView button readiness and disabled tooltip text.
 fn webview_availability(gateway_ready: bool, extension_mode: bool) -> WebviewAvailability {
     if !gateway_ready {
         let reason = if extension_mode {
@@ -679,6 +774,7 @@ fn webview_availability(gateway_ready: bool, extension_mode: bool) -> WebviewAva
     }
 }
 
+/// Projects [`NodeState`] into a borrowed [`ControlView`] for the control sidebar.
 fn control_view(node: &NodeState) -> ControlView<'_> {
     ControlView {
         wallet_kind: *node.wallet_kind,
@@ -695,6 +791,7 @@ fn control_view(node: &NodeState) -> ControlView<'_> {
     }
 }
 
+/// Projects [`NodeState`] into a borrowed [`SessionView`] for the network stage.
 fn session_view(node: &NodeState) -> SessionView<'_> {
     SessionView {
         wallet_account: (*node.wallet_account).clone(),
@@ -703,6 +800,7 @@ fn session_view(node: &NodeState) -> SessionView<'_> {
     }
 }
 
+/// Renders the peer connection launcher button and modal dialog.
 fn render_link_control(node: &NodeState, link: &LinkState, shell: &ShellState) -> Html {
     connect::link_control(
         connect_state(link, shell),
@@ -713,6 +811,7 @@ fn render_link_control(node: &NodeState, link: &LinkState, shell: &ShellState) -
     )
 }
 
+/// Projects [`LinkState`] and [`ShellState`] into a borrowed [`ConnectState`].
 fn connect_state<'a>(link: &'a LinkState, shell: &ShellState) -> ConnectState<'a> {
     ConnectState {
         http_endpoint: &link.http_endpoint,
@@ -728,6 +827,7 @@ fn connect_state<'a>(link: &'a LinkState, shell: &ShellState) -> ConnectState<'a
     }
 }
 
+/// Renders the active workbench panel body (onion proxy or custom protocol).
 fn render_workbench_body(ctx: &AppRenderContext<'_>) -> Html {
     match *ctx.shell.active_panel {
         Panel::Onion => render_onion_panel(ctx.node, ctx.onion),
@@ -735,6 +835,7 @@ fn render_workbench_body(ctx: &AppRenderContext<'_>) -> Html {
     }
 }
 
+/// Renders the onion HTTP proxy workbench panel.
 fn render_onion_panel(node: &NodeState, onion: &OnionState) -> Html {
     workbench::onion_proxy_panel(
         workbench::OnionProxyState {
@@ -753,6 +854,7 @@ fn render_onion_panel(node: &NodeState, onion: &OnionState) -> Html {
     )
 }
 
+/// Renders the custom protocol workbench panel.
 fn render_custom_panel(node: &NodeState, custom_state: &CustomState) -> Html {
     workbench::custom_panel(
         &custom_state.namespace,

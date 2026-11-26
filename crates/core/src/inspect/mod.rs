@@ -1,6 +1,8 @@
 //! Runtime inspection snapshots and compact topology projections.
 
+/// Compact iterator compression for inspection snapshots.
 mod compress;
+/// Runtime inspection snapshot data structures.
 mod snapshot;
 
 pub use compress::compress_iter;

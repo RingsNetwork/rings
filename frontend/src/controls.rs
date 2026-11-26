@@ -20,16 +20,25 @@ mod sidebar;
 pub(crate) use sidebar::control_sidebar;
 pub(crate) use sidebar::ControlSidebarShell;
 
+/// Chrome internal URL for inspecting live WebRTC peer connections.
 const CHROME_WEBRTC_DEBUG_URL: &str = "chrome://webrtc-internals/";
+/// Firefox internal URL for inspecting live WebRTC peer connections.
 const FIREFOX_WEBRTC_DEBUG_URL: &str = "about:webrtc";
+/// Chrome internal URL for managing installed browser extensions.
 const CHROME_EXTENSION_MANAGER_URL: &str = "chrome://extensions/";
+/// Firefox internal URL for debugging installed browser extensions.
 const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firefox";
 
+/// Top-level pages routed within the frontend application shell.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ShellPage {
+    /// Marketing and quick-start landing page.
     Home,
+    /// Documentation and setup guide page.
     Guide,
+    /// Interactive node topology and control console.
     Console,
+    /// Controlled browser WebView surface.
     Webview,
 }
 
@@ -39,6 +48,7 @@ impl ShellPage {
     /// a header destination.
     pub(crate) const HEADER: [Self; 2] = [Self::Home, Self::Guide];
 
+    /// Return the human-readable navigation label for this page.
     fn label(self) -> &'static str {
         match self {
             Self::Home => "Home",
@@ -84,13 +94,17 @@ impl ShellPage {
     }
 }
 
+/// Active tab panel inside the node workbench modal.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
+    /// Onion-routed HTTP proxy panel.
     Onion,
+    /// Custom namespace messaging panel.
     Custom,
 }
 
 impl Panel {
+    /// Return the display label for this workbench panel.
     fn label(self) -> &'static str {
         match self {
             Self::Onion => "Onion Proxy",
@@ -99,30 +113,44 @@ impl Panel {
     }
 }
 
+/// Currently open modal dialog in the console shell.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ActiveDialog {
+    /// No modal dialog is open.
     None,
+    /// Node settings and identity dialog.
     Settings,
+    /// Node workbench dialog (Onion Proxy / Custom protocols).
     Workbench,
 }
 
 impl ActiveDialog {
+    /// Return `true` when any modal dialog is currently open.
     pub(crate) fn is_open(self) -> bool {
         self != Self::None
     }
 }
 
+/// Inline SVG icon identifiers used across shell controls.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum UiIcon {
+    /// Start-node power icon.
     Power,
+    /// Stop-node power-off icon.
     PowerOff,
+    /// Workbench terminal icon.
     Terminal,
+    /// WebView globe icon.
     Globe,
+    /// Settings sliders icon.
     Sliders,
+    /// Expand-sidebar icon.
     PanelOpen,
+    /// Collapse-sidebar icon.
     PanelClose,
 }
 
+/// Render an inline SVG element for the requested [`UiIcon`].
 fn ui_icon(icon: UiIcon) -> Html {
     let content = match icon {
         UiIcon::Power => html! {
@@ -196,36 +224,59 @@ fn ui_icon(icon: UiIcon) -> Html {
     }
 }
 
+/// Callbacks wired to node lifecycle and wallet selection controls.
 #[derive(Clone)]
 pub(crate) struct LaunchActions {
+    /// Callback invoked when the user selects a different wallet standard.
     pub(crate) on_wallet_kind: Callback<Event>,
+    /// Callback invoked when the user clicks Start.
     pub(crate) on_start: Callback<MouseEvent>,
+    /// Callback invoked when the user clicks Stop.
     pub(crate) on_disconnect: Callback<MouseEvent>,
 }
 
+/// Callbacks for opening and closing shell modal dialogs.
 #[derive(Clone)]
 pub(crate) struct DialogActions {
+    /// Open the requested [`ActiveDialog`].
     pub(crate) open: Callback<ActiveDialog>,
+    /// Close whichever modal dialog is currently open.
     pub(crate) close: Callback<MouseEvent>,
 }
 
+/// Borrowed state handles rendered by the control sidebar and settings dialog.
 pub(crate) struct ControlView<'a> {
+    /// Currently selected wallet standard.
     pub(crate) wallet_kind: WalletKind,
+    /// Connected wallet account metadata, if authorized.
     pub(crate) wallet_account: Option<WalletAccount>,
+    /// Whether the node is currently starting.
     pub(crate) node_starting: bool,
+    /// Local node DID state handle.
     pub(crate) did: &'a UseStateHandle<String>,
+    /// Current status line text handle.
     pub(crate) status: &'a UseStateHandle<String>,
+    /// Connected peer list handle.
     pub(crate) peers: &'a UseStateHandle<Vec<PeerView>>,
+    /// Configured network ID input handle.
     pub(crate) network_id: &'a UseStateHandle<String>,
+    /// Configured ICE servers input handle.
     pub(crate) ice_servers: &'a UseStateHandle<String>,
+    /// Configured stabilization interval input handle.
     pub(crate) stabilize_interval: &'a UseStateHandle<String>,
+    /// Configured IndexedDB storage name input handle.
     pub(crate) storage_name: &'a UseStateHandle<String>,
+    /// Configured seed HTTP URL input handle.
     pub(crate) seed_url: &'a UseStateHandle<String>,
 }
 
+/// Borrowed session identity and peer state displayed in the network topology stage.
 pub(crate) struct SessionView<'a> {
+    /// Connected wallet account metadata, if authorized.
     pub(crate) wallet_account: Option<WalletAccount>,
+    /// Local node DID state handle.
     pub(crate) did: &'a UseStateHandle<String>,
+    /// Connected peer list handle.
     pub(crate) peers: &'a UseStateHandle<Vec<PeerView>>,
 }
 
@@ -258,22 +309,37 @@ pub(crate) fn webview_control(
     }
 }
 
+/// View model passed to [`settings_dialog`].
 struct SettingsDialogView<'a> {
+    /// Currently selected wallet standard.
     wallet_kind: WalletKind,
+    /// Lifecycle and wallet selection callbacks.
     actions: LaunchActions,
+    /// Configured network ID input handle.
     network_id: &'a UseStateHandle<String>,
+    /// Configured ICE servers input handle.
     ice_servers: &'a UseStateHandle<String>,
+    /// Configured stabilization interval input handle.
     stabilize_interval: &'a UseStateHandle<String>,
+    /// Configured IndexedDB storage name input handle.
     storage_name: &'a UseStateHandle<String>,
+    /// Configured seed HTTP URL input handle.
     seed_url: &'a UseStateHandle<String>,
+    /// Current status line text handle.
     status: &'a UseStateHandle<String>,
+    /// Display string for the local node DID.
     did_value: String,
+    /// Callback that copies the local DID to the clipboard.
     on_copy_did: Callback<MouseEvent>,
+    /// Whether copying the local DID is enabled.
     can_copy_did: bool,
+    /// Connected wallet account metadata, if authorized.
     wallet_account: Option<WalletAccount>,
+    /// Callback that dismisses the settings dialog.
     close_dialog: Callback<MouseEvent>,
 }
 
+/// Render the top application header with brand mark and optional primary navigation.
 pub(crate) fn app_header(
     active_page: ShellPage,
     navigate_page: Callback<ShellPage>,
@@ -311,6 +377,7 @@ pub(crate) fn app_header(
     }
 }
 
+/// Return the CSS class for a header navigation button, marking the active page.
 fn header_page_class(active: ShellPage, page: ShellPage) -> &'static str {
     if active == page {
         "header-nav-button active"
@@ -319,6 +386,7 @@ fn header_page_class(active: ShellPage, page: ShellPage) -> &'static str {
     }
 }
 
+/// Render the modal dialog for wallet standard, runtime settings, and local node identity.
 fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
     let close_dialog = view.close_dialog;
     html! {
@@ -386,6 +454,7 @@ fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
     }
 }
 
+/// Render the WorkBench trigger button and, when open, its tabbed modal dialog.
 pub(crate) fn workbench_control(
     active: Panel,
     active_panel: UseStateHandle<Panel>,
@@ -458,6 +527,7 @@ pub(crate) fn workbench_control(
     }
 }
 
+/// Render the main Chord ring topology stage, HUD telemetry, sidebar, and status line.
 pub(crate) fn network_stage(
     view: SessionView<'_>,
     status: &UseStateHandle<String>,
@@ -524,6 +594,7 @@ pub(crate) fn network_stage(
     }
 }
 
+/// Render the tab bar switching between [`Panel`] views inside the workbench modal.
 fn workspace_tabs(
     active: Panel,
     active_panel: UseStateHandle<Panel>,
@@ -559,6 +630,7 @@ fn workspace_tabs(
     }
 }
 
+/// Render a labelled key-value telemetry metric tile.
 pub(crate) fn metric(label: &'static str, value: String) -> Html {
     html! {
         <div class="metric">
@@ -568,6 +640,7 @@ pub(crate) fn metric(label: &'static str, value: String) -> Html {
     }
 }
 
+/// Render the local DID metric tile with an inline copy button.
 fn local_did_metric(value: String, on_copy: Callback<MouseEvent>, enabled: bool) -> Html {
     html! {
         <div class="metric local-did-metric copyable-metric">
@@ -589,6 +662,7 @@ fn local_did_metric(value: String, on_copy: Callback<MouseEvent>, enabled: bool)
     }
 }
 
+/// Build a click callback that copies the local node DID to the clipboard and updates `status`.
 fn copy_local_did_callback(
     did: &UseStateHandle<String>,
     status: &UseStateHandle<String>,
@@ -611,6 +685,7 @@ fn copy_local_did_callback(
     })
 }
 
+/// Render a single label/value row inside a sidebar telemetry rail card.
 fn rail_row(label: &'static str, value: String) -> Html {
     html! {
         <div class="rail-row">
@@ -620,6 +695,7 @@ fn rail_row(label: &'static str, value: String) -> Html {
     }
 }
 
+/// Render a read-only monospace identity field inside the settings dialog.
 fn identity_value(label: &'static str, value: String) -> Html {
     html! {
         <div class="identity-value">
@@ -629,6 +705,7 @@ fn identity_value(label: &'static str, value: String) -> Html {
     }
 }
 
+/// Render a monospace identity field paired with a copy-to-clipboard button.
 fn copyable_identity_value(
     label: &'static str,
     value: String,
@@ -653,6 +730,7 @@ fn copyable_identity_value(
     }
 }
 
+/// Render authorized wallet account details when a wallet account is connected.
 fn account_details(account: Option<WalletAccount>) -> Html {
     match account {
         Some(account) => html! {
@@ -666,6 +744,7 @@ fn account_details(account: Option<WalletAccount>) -> Html {
     }
 }
 
+/// Render the account standard `<select>` dropdown for choosing a [`WalletKind`].
 fn wallet_provider_control(wallet_kind: WalletKind, on_wallet_kind: Callback<Event>) -> Html {
     html! {
         <label class="field">
@@ -679,6 +758,7 @@ fn wallet_provider_control(wallet_kind: WalletKind, on_wallet_kind: Callback<Eve
     }
 }
 
+/// Render the runtime configuration inputs and browser debug shortcuts.
 fn settings_controls(
     network_id: &UseStateHandle<String>,
     ice_servers: &UseStateHandle<String>,
@@ -699,6 +779,7 @@ fn settings_controls(
     }
 }
 
+/// Render buttons that open or copy browser-internal WebRTC and extension debug URLs.
 fn webrtc_debug_controls(status: &UseStateHandle<String>) -> Html {
     let open_auto_webrtc = open_detected_debug_callback(DebugTarget::WebRtc, status.clone());
     let open_auto_extensions =
@@ -714,20 +795,28 @@ fn webrtc_debug_controls(status: &UseStateHandle<String>) -> Html {
     }
 }
 
+/// Browser engine family detected from `navigator.userAgent`.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum BrowserKind {
+    /// Chromium-based browser.
     Chrome,
+    /// Firefox browser.
     Firefox,
+    /// Unrecognized or unavailable browser user agent.
     Unknown,
 }
 
+/// Browser-internal diagnostic page that can be opened from settings.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DebugTarget {
+    /// WebRTC internals diagnostic page.
     WebRtc,
+    /// Installed extensions management page.
     ExtensionManager,
 }
 
 impl BrowserKind {
+    /// Return a human-readable browser name for status messages.
     fn label(self) -> &'static str {
         match self {
             Self::Chrome => "Chrome",
@@ -738,6 +827,7 @@ impl BrowserKind {
 }
 
 impl DebugTarget {
+    /// Return a human-readable target name for status messages.
     fn label(self) -> &'static str {
         match self {
             Self::WebRtc => "WebRTC debug",
@@ -746,6 +836,7 @@ impl DebugTarget {
     }
 }
 
+/// Build a click callback that opens or copies the browser-specific debug URL for `target`.
 fn open_detected_debug_callback(
     target: DebugTarget,
     status: UseStateHandle<String>,
@@ -786,6 +877,7 @@ fn open_detected_debug_callback(
     })
 }
 
+/// Map a `(browser, target)` pair to its browser-internal debug URL, if supported.
 fn debug_url(browser: BrowserKind, target: DebugTarget) -> Option<&'static str> {
     match (browser, target) {
         (BrowserKind::Chrome, DebugTarget::WebRtc) => Some(CHROME_WEBRTC_DEBUG_URL),
@@ -798,6 +890,7 @@ fn debug_url(browser: BrowserKind, target: DebugTarget) -> Option<&'static str> 
     }
 }
 
+/// Detect the current [`BrowserKind`] from `navigator.userAgent`.
 fn detect_browser() -> BrowserKind {
     let user_agent = navigator_user_agent()
         .unwrap_or_default()
@@ -811,6 +904,7 @@ fn detect_browser() -> BrowserKind {
     }
 }
 
+/// Read `navigator.userAgent` from the global JS environment.
 fn navigator_user_agent() -> Result<String, String> {
     let navigator = js_global_prop("navigator")?;
     js_string_field(&navigator, "userAgent")

@@ -45,13 +45,17 @@ use crate::message::Transaction;
 use crate::utils::sleep;
 use crate::utils::Instant;
 
+/// Timeout budget for the transport layer to accept an outbound frame.
 pub(super) const CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
 
+/// Polling interval used to recheck send permits and stall deadlines during tests.
 #[cfg(test)]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Polling interval used to recheck send permits and stall deadlines in production.
 #[cfg(not(test))]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Stall timeout budget for an accepted frame to complete delivery.
 const CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
 
 /// `deadline`, one of a frame's two deadlines (its send acceptance and its delivery stall),
@@ -129,17 +133,25 @@ impl DeliveryProgress {
     }
 }
 
+/// Reason why a chunk or frame send was cancelled before completion.
 #[derive(Debug)]
 pub(super) enum ChunkSendCancelReason {
+    /// Transfer stop token was triggered by the caller or scheduler.
     TransferStopped,
+    /// Admitted connection generation was superseded or retired.
     AdmissionRevoked(PendingConnectionAttempt),
+    /// Checking connection admission failed with an internal error.
     AdmissionCheckFailed(Error),
+    /// Underlying transport connection is no longer ready to make progress.
     TransportNotReady(TransportReadiness),
+    /// Storage-sync route is no longer permitted by the current DHT topology.
     RouteNoLongerPermitted,
+    /// Checking the storage-sync route permit failed with an internal error.
     RouteCheckFailed(Error),
 }
 
 impl ChunkSendCancelReason {
+    /// Return a snake-case diagnostic label for this cancellation reason.
     const fn as_str(&self) -> &'static str {
         match self {
             Self::TransferStopped => "transfer_stopped",
@@ -151,6 +163,7 @@ impl ChunkSendCancelReason {
         }
     }
 
+    /// Return the transport readiness snapshot if cancellation was caused by unreadiness.
     const fn transport_readiness(&self) -> Option<TransportReadiness> {
         match self {
             Self::TransportNotReady(readiness) => Some(*readiness),
@@ -162,6 +175,7 @@ impl ChunkSendCancelReason {
         }
     }
 
+    /// Return the underlying check error if an admission or route check failed.
     const fn check_error(&self) -> Option<&Error> {
         match self {
             Self::AdmissionCheckFailed(error) | Self::RouteCheckFailed(error) => Some(error),
@@ -172,6 +186,7 @@ impl ChunkSendCancelReason {
         }
     }
 
+    /// Return whether this cancellation reason should be recorded as a peer failure.
     pub(super) const fn records_peer_failure(&self) -> bool {
         match self {
             Self::TransportNotReady(readiness) => readiness.is_terminal(),
@@ -183,6 +198,7 @@ impl ChunkSendCancelReason {
         }
     }
 
+    /// Return the revoked connection attempt if cancellation was caused by revocation.
     const fn attempt(&self) -> Option<PendingConnectionAttempt> {
         match self {
             Self::AdmissionRevoked(attempt) => Some(*attempt),
@@ -217,19 +233,25 @@ impl ChunkSendCancelReason {
     }
 }
 
+/// Result of a cancellable frame-send or delivery step.
 pub(super) enum ChunkSendProgress<T> {
+    /// Step completed with value `T`.
     Ready(T),
+    /// Step was cancelled before completion for the given reason.
     Cancelled(ChunkSendCancelReason),
 }
 
 /// Combined caller and scheduler cancellation observed by every frame phase.
 #[derive(Clone)]
 pub(super) struct TransferStop {
+    /// Stop token controlled by the originating caller.
     caller: StopToken,
+    /// Stop token controlled by the outbound peer scheduler.
     scheduler: StopToken,
 }
 
 impl TransferStop {
+    /// Create a transfer stop handle observing only the `caller` stop token.
     pub(super) fn new(caller: StopToken) -> Self {
         Self {
             caller,
@@ -237,15 +259,18 @@ impl TransferStop {
         }
     }
 
+    /// Attach a `scheduler` stop token alongside the caller stop token.
     pub(super) fn bind_scheduler(&mut self, scheduler: StopToken) {
         self.scheduler = scheduler;
     }
 
+    /// Return whether either the caller or scheduler has requested stop.
     pub(super) fn should_stop(&self) -> bool {
         self.caller.should_stop() || self.scheduler.should_stop()
     }
 }
 
+/// Final completion status of an outbound payload send.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SendCompletionOutcome {
     /// The boundary selected by the completion policy was reached: transport
@@ -255,19 +280,27 @@ pub(crate) enum SendCompletionOutcome {
     Cancelled,
 }
 
+/// Route-level authorization predicate checked before each frame of a transfer is sent.
+///
 /// Clone law: every clone contains the same immutable route proof and shared
 /// DHT handle, so it evaluates the same route proposition at a given DHT state.
 #[derive(Clone)]
 pub(super) enum ChunkSendPermit {
+    /// Unconditionally permitted for ordinary non-storage-sync messages.
     Always,
+    /// Permitted only while the DHT still authorizes forwarding a storage sync to `next_hop`.
     StorageSyncRoute {
+        /// Shared DHT handle queried to verify the storage-sync route.
         dht: Arc<PeerRing>,
+        /// Destination mode of the storage-sync message.
         destination: StorageSyncDestination,
+        /// Next-hop peer DID authorized at send preparation time.
         next_hop: Did,
     },
 }
 
 impl ChunkSendPermit {
+    /// Construct the route permit appropriate for sending `message` via `next_hop`.
     pub(super) fn for_message(dht: Arc<PeerRing>, next_hop: Did, message: &Message) -> Self {
         match message.storage_sync_destination() {
             Some(destination) => Self::StorageSyncRoute {
@@ -279,6 +312,7 @@ impl ChunkSendPermit {
         }
     }
 
+    /// Verify that this permit still allows sending a frame, returning a cancel reason otherwise.
     fn check(&self) -> std::result::Result<(), ChunkSendCancelReason> {
         match self {
             Self::Always => Ok(()),
@@ -294,6 +328,7 @@ impl ChunkSendPermit {
         }
     }
 
+    /// Evaluate `final_condition` while holding any required route authorization invariant.
     fn admits(&self, final_condition: impl FnOnce() -> bool) -> bool {
         match self {
             Self::Always => final_condition(),
@@ -395,6 +430,7 @@ pub(super) async fn send_data_with_timeout(
     }
 }
 
+/// Construct a transport [`SendPermit`] guarding both pre-check and irrevocable send claim.
 fn build_transport_send_permit(
     admitted: &AdmittedConnection,
     permit: &ChunkSendPermit,
@@ -449,6 +485,7 @@ fn build_transport_send_permit(
     })
 }
 
+/// Await an already-irrevocable frame send against `timeout`, terminating the connection on failure or expiry.
 async fn await_irrevocable_send(
     send: impl Future<Output = Result<DeliveryFuture>>,
     timeout: impl Future<Output = ()>,
@@ -466,6 +503,7 @@ async fn await_irrevocable_send(
     }
 }
 
+/// Terminate `admitted` and report a send-completion timeout error after an irrevocable send expires.
 async fn expire_irrevocable_send(
     admitted: &AdmittedConnection,
     did: Did,
@@ -481,6 +519,7 @@ async fn expire_irrevocable_send(
     }))
 }
 
+/// Finalize an irrevocable send result, terminating `admitted` if the transport returned an error.
 async fn complete_irrevocable_send(
     result: Result<DeliveryFuture>,
     admitted: &AdmittedConnection,
@@ -491,6 +530,7 @@ async fn complete_irrevocable_send(
     ChunkSendProgress::Ready(result)
 }
 
+/// Record a peer measurement event if a measurement backend is configured, logging any error.
 pub(super) async fn record_measurement(
     measure: Option<MeasureImpl>,
     did: Did,
@@ -531,6 +571,7 @@ pub(super) fn frame_chunk(
     Ok(payload)
 }
 
+/// Check stop token, admission liveness, transport readiness, and route permit for cancellation.
 fn chunk_send_cancel_reason(
     admitted: &AdmittedConnection,
     permit: &ChunkSendPermit,
@@ -556,6 +597,7 @@ fn chunk_send_cancel_reason(
     permit.check().err()
 }
 
+/// Emit a structured debug or warning log describing a cancelled chunk send.
 fn log_chunk_send_cancel(did: Did, phase: &'static str, reason: &ChunkSendCancelReason) {
     let records_peer_failure = reason.records_peer_failure();
     if records_peer_failure {
@@ -646,6 +688,7 @@ pub(super) async fn await_delivery_or_cancel(
     }
 }
 
+/// Log cancellation, terminate `admitted`, and return `ChunkSendProgress::Cancelled(reason)`.
 async fn cancel_accepted_delivery(
     admitted: &AdmittedConnection,
     did: Did,
@@ -657,6 +700,7 @@ async fn cancel_accepted_delivery(
     ChunkSendProgress::Cancelled(reason)
 }
 
+/// Mark `admitted` send-terminal and close its underlying transport within the bounded close timeout.
 pub(super) async fn terminate_accepted_connection(
     admitted: &AdmittedConnection,
     cause: &'static str,
@@ -682,11 +726,15 @@ pub(super) async fn terminate_accepted_connection(
     }
 }
 
+/// Combined outcome of marking a generation send-terminal and closing its transport.
 struct TerminalizationOutcome {
+    /// Result of marking the generation send-terminal in the lifecycle registry.
     terminal: Result<bool>,
+    /// Result of closing the raw transport within the bounded close timeout.
     close: Result<bool>,
 }
 
+/// Run `mark_terminal` and then await `close` within the bounded connection-close timeout.
 async fn attempt_terminalization_and_close<F>(
     mark_terminal: impl FnOnce() -> Result<bool>,
     close: F,
@@ -699,6 +747,7 @@ where
     TerminalizationOutcome { terminal, close }
 }
 
+/// Log a warning when terminalizing or closing a data-channel generation fails.
 fn log_terminal_cleanup_failure(
     admitted: &AdmittedConnection,
     cause: &'static str,

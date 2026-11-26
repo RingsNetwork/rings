@@ -57,44 +57,70 @@ use submission::SubmittedTransfer;
 use submission::TransferReceipt;
 pub(crate) use watcher::AdmissionWatcher;
 
+/// Default timeout budget for a tracked outbound payload send.
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
 
+/// Diagnostic fields recorded when rejecting an outbound payload exceeding the transport size limit.
 struct OversizedPayloadLog {
+    /// Local node DID attempting the send.
     local: Did,
+    /// Immediate next-hop peer DID.
     next_hop: Did,
+    /// Logical transaction destination DID.
     destination: Did,
+    /// Relay target destination DID.
     relay_destination: Did,
+    /// Transaction identifier of the oversized payload.
     tx_id: uuid::Uuid,
+    /// Human-readable kind of the outbound message.
     message_kind: &'static str,
+    /// Serialized wire size in bytes of the rejected payload.
     bytes: usize,
+    /// Maximum wire size in bytes permitted by the transport.
     max_bytes: usize,
 }
 
+/// Structured metadata logged and observed for an outbound payload send.
 struct OutboundSendLog {
     /// Account DID that originated the logical message.
     origin: Did,
+    /// Immediate next-hop peer DID.
     next_hop: Did,
+    /// Logical transaction destination DID.
     destination: Did,
+    /// Relay target destination DID.
     relay_destination: Did,
+    /// Transaction identifier of the outbound payload.
     tx_id: uuid::Uuid,
+    /// Human-readable kind of the outbound message.
     message_kind: &'static str,
     /// Finite scheduling class used for bounded aggregation.
     category: MessageCategory,
     /// Whether this locally originated send begins a successor lookup round.
     starts_successor_lookup: bool,
+    /// Completion policy (detached or tracked) governing this send.
     completion: OutboundCompletion,
 }
 
+/// Validated metadata extracted from an outbound payload before capacity reservation and framing.
 struct OutboundPreparation {
+    /// Classified outbound message kind.
     message_kind: OutboundMessageKind,
+    /// Total serialized wire length in bytes.
     wire_bytes: usize,
+    /// Payload body length in bytes credited to useful throughput measurements.
     useful_bytes: u64,
+    /// Whether a missing connection should be recorded as a peer measurement failure.
     records_missing_connection_failure: bool,
+    /// Transaction identifier of the outbound payload.
     tx_id: uuid::Uuid,
     /// Account DID that originated the logical message.
     origin: Did,
+    /// Logical transaction destination DID.
     destination: Did,
+    /// Relay target destination DID.
     relay_destination: Did,
+    /// Immediate next-hop peer DID.
     next_hop: Did,
 }
 
@@ -118,38 +144,60 @@ impl OutboundPreparation {
     }
 }
 
+/// Fully prepared outbound transfer ready to submit to a peer's outbound worker.
 struct PreparedOutboundTransfer {
+    /// Admitted connection generation that will carry the transfer.
     admitted: AdmittedConnection,
+    /// Handle to the target peer's outbound scheduler worker.
     handle: OutboundPeerHandle,
+    /// Framed transfer unit to enqueue on the worker.
     transfer: OutboundTransfer,
+    /// Reserved outbound capacity permit held for the lifetime of the transfer.
     capacity_permit: TransferCapacityPermit,
+    /// Oneshot channel delivering the transfer's completion outcome.
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
+    /// Structured logging and observer metadata for this send.
     log: OutboundSendLog,
 }
 
+/// Result of framing a payload into an [`OutboundTransfer`] and its completion receiver.
 struct FramedOutboundTransfer {
+    /// Framed whole or chunked outbound transfer.
     transfer: OutboundTransfer,
+    /// Oneshot channel delivering the transfer's completion outcome.
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
 }
 
+/// Per-transfer parameters passed when framing a payload into an [`OutboundTransfer`].
 struct OutboundTransferProperties {
+    /// Logical transaction sequence number used when framing chunks.
     logical_sequence: u64,
+    /// Useful payload bytes credited on completion.
     useful_bytes: u64,
+    /// Completion policy (detached or tracked) for this transfer.
     completion: OutboundCompletion,
+    /// Caller stop token observed by every frame phase.
     stop: StopToken,
+    /// Optional detached-admission coordination handle for detached sends.
     detached_admission: Option<DetachedAdmission>,
 }
 
+/// Drop guard that triggers a transfer stop if the caller is cancelled before completion.
 struct StopOnDrop {
+    /// Armed drop guard executing [`stop_outbound_transfer`] unless disarmed.
     cleanup: ArmedDropGuard<StopCleanup, fn(StopCleanup)>,
 }
 
+/// Resources held by [`StopOnDrop`] to signal cancellation to the outbound worker.
 struct StopCleanup {
+    /// Stop source whose token is observed by the in-flight transfer.
     source: StopSource,
+    /// Peer outbound worker handle notified to evict stopped queued transfers.
     handle: Option<OutboundPeerHandle>,
 }
 
 impl StopCleanup {
+    /// Signal the stop source and wake the peer worker to cancel stopped entries.
     fn request_stop(&self) {
         self.source.request_stop();
         if let Some(handle) = &self.handle {
@@ -158,10 +206,12 @@ impl StopCleanup {
     }
 }
 
+/// Drop callback invoked by [`StopOnDrop`] to stop an abandoned outbound transfer.
 fn stop_outbound_transfer(cleanup: StopCleanup) {
     cleanup.request_stop();
 }
 
+/// Await `future` up to `cleanup_grace`, returning `None` if the grace period expires first.
 async fn await_bounded_cleanup<F, T>(future: F, cleanup_grace: Duration) -> Option<T>
 where F: Future<Output = T> {
     let future = future.fuse();
@@ -174,6 +224,7 @@ where F: Future<Output = T> {
 }
 
 impl StopOnDrop {
+    /// Create an armed [`StopOnDrop`] guard paired with its [`StopToken`].
     fn new() -> (Self, StopToken) {
         let source = StopSource::new();
         let token = source.token();
@@ -191,33 +242,42 @@ impl StopOnDrop {
         )
     }
 
+    /// Attach the peer's [`OutboundPeerHandle`] so stop requests wake the worker.
     fn bind_handle(&mut self, handle: OutboundPeerHandle) {
         if let Some(cleanup) = self.cleanup.value_mut() {
             cleanup.handle = Some(handle);
         }
     }
 
+    /// Explicitly request stop on the guarded transfer without waiting for drop.
     fn request_stop(&self) {
         if let Some(cleanup) = self.cleanup.value() {
             cleanup.request_stop();
         }
     }
 
+    /// Disarm the guard so dropping it will not trigger a stop.
     fn disarm(&mut self) {
         self.cleanup.disarm();
     }
 }
 
+/// Drop guard that cancels a detached send's admission if dropped before first-frame settlement.
 struct DetachedAdmissionOnDrop {
+    /// Armed drop guard executing [`cancel_detached_admission`] unless disarmed.
     cleanup: ArmedDropGuard<DetachedAdmissionCleanup, fn(DetachedAdmissionCleanup)>,
 }
 
+/// Resources held by [`DetachedAdmissionOnDrop`] to cancel a detached admission.
 struct DetachedAdmissionCleanup {
+    /// Detached admission state machine shared with the outbound worker.
     admission: DetachedAdmission,
+    /// Peer outbound worker handle notified when cancellation succeeds.
     handle: OutboundPeerHandle,
 }
 
 impl DetachedAdmissionCleanup {
+    /// Attempt to cancel the detached admission and wake the worker if cancelled.
     fn cancel(&self) -> DetachedAdmissionCancel {
         let decision = self.admission.cancel();
         if decision == DetachedAdmissionCancel::Cancelled {
@@ -227,11 +287,13 @@ impl DetachedAdmissionCleanup {
     }
 }
 
+/// Drop callback invoked by [`DetachedAdmissionOnDrop`] to cancel an abandoned detached send.
 fn cancel_detached_admission(cleanup: DetachedAdmissionCleanup) {
     cleanup.cancel();
 }
 
 impl DetachedAdmissionOnDrop {
+    /// Create an armed drop guard for a detached send's `admission` and worker `handle`.
     fn new(admission: DetachedAdmission, handle: OutboundPeerHandle) -> Self {
         Self {
             cleanup: ArmedDropGuard::new(
@@ -241,6 +303,7 @@ impl DetachedAdmissionOnDrop {
         }
     }
 
+    /// Attempt to cancel the detached admission, returning whether the caller must still await it.
     fn cancel(&self) -> DetachedAdmissionCancel {
         self.cleanup.value().map_or(
             DetachedAdmissionCancel::MustAwait,
@@ -259,11 +322,13 @@ impl DetachedAdmissionOnDrop {
             })
     }
 
+    /// Disarm the guard so dropping it will not cancel the detached admission.
     fn disarm(&mut self) {
         self.cleanup.disarm();
     }
 }
 
+/// Emit an error log entry for a payload rejected due to exceeding `TRANSPORT_MAX_SIZE`.
 fn log_oversized_payload(metadata: OversizedPayloadLog) {
     tracing::error!(
         local = %metadata.local,
@@ -278,6 +343,7 @@ fn log_oversized_payload(metadata: OversizedPayloadLog) {
     );
 }
 
+/// Compute the retained memory reservation in bytes for a payload of `wire_bytes`.
 fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     // Preparation owns the payload bytes plus the serialized transport frame.
     // The custom frame shares the payload's Bytes allocation, so weighting by
@@ -290,6 +356,7 @@ fn transfer_demand(kind: OutboundMessageKind, wire_bytes: usize) -> TransferDema
     TransferDemand::new(kind.class(), outbound_memory_reservation(wire_bytes))
 }
 
+/// Translate an outbound scheduler submission error into cancellation if `admitted` was superseded.
 fn resolve_scheduler_loss(
     admitted: &AdmittedConnection,
     local_error: Error,
@@ -371,6 +438,7 @@ impl SwarmTransport {
         .await
     }
 
+    /// Send `payload` under tracked completion semantics with explicit timeout and cleanup budgets.
     async fn send_payload_tracked_with_timeouts(
         &self,
         payload: MessagePayload,
@@ -444,6 +512,7 @@ impl SwarmTransport {
         result
     }
 
+    /// Log a warning when a tracked payload send exceeds its deadline and enters bounded cleanup.
     fn log_tracked_payload_timeout(
         &self,
         did: Did,
@@ -680,6 +749,7 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Validate, reserve capacity, acquire the peer connection, and frame an outbound transfer.
     async fn prepare_outbound_transfer(
         &self,
         did: Did,
@@ -768,6 +838,7 @@ impl SwarmTransport {
         }))
     }
 
+    /// Inspect `payload` size, kind, and connection availability before reserving outbound capacity.
     async fn inspect_outbound_preparation(
         &self,
         did: Did,
@@ -890,6 +961,7 @@ impl SwarmTransport {
         }
     }
 
+    /// Submit `prepared` to the peer's outbound worker and await its completion outcome.
     async fn submit_prepared_outbound_transfer(
         &self,
         prepared: PreparedOutboundTransfer,

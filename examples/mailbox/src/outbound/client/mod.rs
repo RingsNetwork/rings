@@ -213,7 +213,9 @@ pub fn data_of(message: &[u8]) -> Vec<u8> {
 
 /// One side of an SMTP conversation: the stream and what was read of it but not yet parsed.
 struct Wire<S> {
+    /// Underlying async byte stream connected to the remote exchanger.
     stream: S,
+    /// Buffered bytes read from `stream` that have not yet been parsed into replies.
     unparsed: Vec<u8>,
 }
 

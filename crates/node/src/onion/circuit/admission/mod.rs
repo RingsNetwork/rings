@@ -639,6 +639,7 @@ impl OnionAdmissionState {
             .set_extra_floor_use(self.floor_use_at(quantum));
     }
 
+    /// Release `did`'s owned roster slot on close, reassigning it to `remaining_peer` if needed.
     fn release_roster_slot_on_close(
         &mut self,
         did: Did,
@@ -798,6 +799,7 @@ impl OnionAdmissionState {
             .is_some_and(|slot| slot.contains_live(link.peer(), link.generation()))
     }
 
+    /// Return `did`'s assigned slot from `slot_roster` if it lies within `0..slot_capacity`.
     fn roster_slot_of(&self, did: Did) -> Option<OnionSlotId> {
         match self.slot_roster.principal_of(Some(did)) {
             Principal::Slot(slot) if usize::from(slot) < self.slot_capacity => {
@@ -807,6 +809,7 @@ impl OnionAdmissionState {
         }
     }
 
+    /// Return whether `did` can resume `slot_id` (the slot is free or already holds `did`).
     fn can_resume_slot(&self, did: Did, slot_id: OnionSlotId) -> bool {
         self.slots
             .get(&slot_id)
@@ -823,6 +826,7 @@ impl OnionAdmissionState {
             .or_else(|| self.roster_slot_of(did))
     }
 
+    /// Reattach `did` to its previously bound slot if it can still be resumed at `quantum`.
     fn resume_existing_slot(&mut self, did: Did, quantum: u128) -> Option<OnionSlotId> {
         let slot_id = self.peer_slots.get(&did).copied()?;
         if !self.can_resume_slot(did, slot_id) {
@@ -840,6 +844,7 @@ impl OnionAdmissionState {
         Some(slot_id)
     }
 
+    /// Ask the owned `slot_roster` to assign a free slot for `did`, preferring `preferred`.
     fn acquire_roster_slot(
         &mut self,
         did: Did,
@@ -881,6 +886,7 @@ impl OnionAdmissionState {
         cleanest.ok_or(OnionLinkTableFull)
     }
 
+    /// Return whether `assigned` is at least as clean as `cleanest` under `slot_rank`.
     fn is_cleanest_free_roster_slot(
         &self,
         assigned: OnionSlotId,
@@ -906,6 +912,7 @@ impl OnionAdmissionState {
         }))
     }
 
+    /// Compute the cleanest-first ordering key for slot `index` at `quantum`.
     fn slot_rank(
         &self,
         index: usize,

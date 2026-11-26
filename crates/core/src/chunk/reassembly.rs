@@ -26,8 +26,9 @@ pub(super) struct Pending<C> {
     /// received positions -> bytes. A `BTreeMap` dedups by position (first write wins) and keeps
     /// the data ordered, so assembly is a single in-order concat.
     pub(super) slots: BTreeMap<usize, Bytes>,
-    /// creation time / ttl of the first chunk seen, used for TTL eviction.
+    /// creation time of the first chunk seen, used for TTL eviction.
     ts_ms: u128,
+    /// Time-to-live in milliseconds of the first chunk seen, used for TTL eviction.
     ttl_ms: u64,
     /// This logical transmission already produced its one peer-attributable failure.
     failure_charged: bool,
@@ -99,12 +100,16 @@ impl<C> Pending<C> {
 /// and TTL rather than blocking that UUID indefinitely.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct LogicalTransmission {
+    /// Message identifier from chunk metadata.
     id: Uuid,
+    /// Origin timestamp in milliseconds from chunk metadata.
     ts_ms: u128,
+    /// Message TTL in milliseconds from chunk metadata.
     ttl_ms: u64,
 }
 
 impl LogicalTransmission {
+    /// Construct a logical transmission identity from chunk metadata fields.
     const fn new(id: Uuid, ts_ms: u128, ttl_ms: u64) -> Self {
         Self { id, ts_ms, ttl_ms }
     }
@@ -142,12 +147,14 @@ impl LogicalTransmission {
 /// credit, per carrier, from its transport; a caller that reads none (`|_| 0`, as the plain API
 /// does) never advances the clock, and a message then expires at its TTL alone.
 pub struct MessageReassembler<C = ()> {
+    /// Incomplete messages currently being reassembled, keyed by message ID.
     pub(super) pending: HashMap<Uuid, Pending<C>>,
     /// Tombstones for ids that have already been delivered, each paired with its expiry
     /// (`ts_ms + ttl_ms`). A chunk for one of these is dropped, so a post-completion retransmit of a
     /// whole message is not re-assembled and delivered again. `VecDeque` for FIFO/TTL eviction, the
     /// `HashSet` for an O(1) membership check; the two are kept in lockstep.
     completed: VecDeque<(Uuid, u128)>,
+    /// O(1) lookup set kept in lockstep with `completed`.
     pub(super) completed_ids: HashSet<Uuid>,
     /// Failed or expired logical transmissions retained until a bounded local horizon. Once a
     /// transmission has produced a terminal failure, later chunks with the same UUID, timestamp,
@@ -155,6 +162,7 @@ pub struct MessageReassembler<C = ()> {
     /// fail-open (not attributed) while this bounded set is full, so hostile UUID rotation cannot
     /// make memory unbounded.
     failed: VecDeque<(LogicalTransmission, u128)>,
+    /// O(1) lookup set kept in lockstep with `failed`.
     failed_ids: HashSet<LogicalTransmission>,
     /// When invalid-terminal tracking saturates, new invalid arrivals fail open and untracked
     /// already-scored expiries remain replays until this horizon. This prevents a retained expiry
@@ -166,6 +174,7 @@ pub struct MessageReassembler<C = ()> {
 
 /// A completed message and the charge its first chunk took for it.
 pub(crate) struct RetainedReassembly<C> {
+    /// Fully reassembled payload bytes in chunk order.
     bytes: Bytes,
     /// The charge, handed on with the message.
     charge: C,
@@ -325,6 +334,7 @@ impl<C> MessageReassembler<C> {
         self.clear_terminal_history();
     }
 
+    /// Clear all completed and failed tombstone tracking state.
     fn clear_terminal_history(&mut self) {
         self.completed.clear();
         self.completed_ids.clear();
@@ -380,6 +390,7 @@ impl<C> MessageReassembler<C> {
         expired_count
     }
 
+    /// Evict completed and failed tombstones whose expiry is at or before `now`.
     fn evict_expired_terminal_history(&mut self, now: u128) {
         // Evict every expired tombstone, not just a leading run: completion order need not equal
         // expiry order, so a `retain` is correct where front-popping would leave an out-of-order
@@ -519,6 +530,8 @@ impl<C> MessageReassembler<C> {
         }
     }
 
+    /// Record a terminal failure for `chunk`'s logical transmission, returning `true` only the
+    /// first time that transmission is charged.
     fn mark_logical_failure(&mut self, chunk: &Chunk, now: u128) -> bool {
         let meta = &chunk.meta;
         if let Some(pending) = self.pending.get_mut(&meta.id) {
@@ -535,6 +548,8 @@ impl<C> MessageReassembler<C> {
         )
     }
 
+    /// Insert `transmission` into the bounded failed-transmission tombstone set, returning `true`
+    /// if newly recorded or `false` if already tracked or saturated.
     fn mark_failed_transmission(&mut self, transmission: LogicalTransmission, now: u128) -> bool {
         if self.failed_ids.contains(&transmission) || self.failure_tracking_saturated_until > now {
             return false;
@@ -551,6 +566,7 @@ impl<C> MessageReassembler<C> {
         true
     }
 
+    /// Extend the failure-tracking saturation horizon to at least `now + MAX_TTL_MS`.
     fn extend_failure_tracking_saturation(&mut self, now: u128) {
         self.failure_tracking_saturated_until = self
             .failure_tracking_saturated_until
@@ -656,6 +672,7 @@ enum Rejected {
 }
 
 impl Rejected {
+    /// Map this rejection reason to its coarse peer-evidence classification.
     const fn rejection(self) -> ReassemblyRejection {
         match self {
             Self::AlreadyCompleted | Self::AlreadyFailed | Self::DuplicatePosition => {

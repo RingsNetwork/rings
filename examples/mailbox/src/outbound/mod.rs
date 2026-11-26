@@ -68,11 +68,17 @@ pub enum OutboundError {
 
 /// The outbound queue.
 pub struct Outbound {
+    /// Directory where queued outbound messages are persisted.
     dir: PathBuf,
+    /// Local hostname advertised in outbound SMTP greetings.
     host: String,
+    /// Mailbox store used to deliver bounce notices.
     store: Arc<Store>,
+    /// Mail exchanger resolver for remote recipient domains.
     exchangers: Arc<dyn Exchangers>,
+    /// Next sequence ID and map of pending outbound deliveries.
     queue: Mutex<(u64, BTreeMap<u64, Pending>)>,
+    /// Notifier woken whenever new outbound mail is queued.
     wake: Notify,
 }
 

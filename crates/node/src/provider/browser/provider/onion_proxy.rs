@@ -42,8 +42,11 @@ use crate::remote_endpoint::attach_bearer_token;
 #[derive(Clone)]
 #[wasm_export]
 pub struct BrowserOnionProxy {
+    /// Node processor used for local DHT lookups and overlay messaging.
     pub(super) processor: Arc<Processor>,
+    /// Underlying onion HTTPS client executing requests over built routes.
     pub(super) client: OnionHttpsClient,
+    /// Optional remote JSON-RPC directory endpoint supplementing local DHT lookups.
     pub(super) directory_endpoint: Option<BrowserDirectoryEndpoint>,
 }
 
@@ -84,8 +87,11 @@ fn browser_onion_route_info(route: &crate::onion::OnionRoute) -> NodeResult<Brow
     })
 }
 
+/// Directory reader combining local browser DHT state with an optional remote RPC endpoint.
 struct BrowserOnionDirectoryReader {
+    /// Node processor used for local DHT queries and peer metrics.
     processor: Arc<Processor>,
+    /// Optional remote directory RPC endpoint queried alongside the local DHT.
     endpoint: Option<BrowserDirectoryEndpoint>,
 }
 
@@ -201,6 +207,7 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     }
 }
 
+/// Builds a filtered onion invoke pipeline route using browser directory lookups.
 pub(crate) async fn build_browser_onion_pipeline_route_filtered(
     processor: Arc<Processor>,
     directory_endpoint: Option<BrowserDirectoryEndpoint>,
@@ -222,6 +229,7 @@ async fn build_browser_route_from_reader(
     directory::build_onion_proxy_route(reader, OnionProxyProtocol::HttpsProxy, target).await
 }
 
+/// Merges local and remote online-node descriptors by DID, keeping the superseding descriptor.
 fn merge_online_node_descriptors(
     local: Vec<OnlineNodeDescriptor>,
     remote: Vec<OnlineNodeDescriptor>,
@@ -243,6 +251,7 @@ fn merge_online_node_descriptors(
     merged.into_values().collect()
 }
 
+/// Merges local and remote onion-exit descriptors by `(did, service)`, keeping the superseding descriptor.
 fn merge_onion_exit_descriptors(
     local: Vec<OnionExitDescriptor>,
     remote: Vec<OnionExitDescriptor>,
@@ -264,6 +273,7 @@ fn merge_onion_exit_descriptors(
     merged.into_values().collect()
 }
 
+/// Builds an HTTPS onion proxy route for `target` from local and optional remote directory sources.
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     target: OnionProxyTarget,
@@ -343,6 +353,7 @@ pub(super) fn parse_browser_https_request(
 }
 
 impl BrowserOnionProxy {
+    /// Builds an HTTPS onion proxy route for `target` using this proxy's directory configuration.
     async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
         build_browser_onion_proxy_route(
             self.processor.clone(),

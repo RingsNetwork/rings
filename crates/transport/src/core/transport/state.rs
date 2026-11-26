@@ -46,7 +46,9 @@ impl TransportConnectionState {
 /// so consumers never need to reconstruct this product from independent reads.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ConnectionStateSnapshot {
+    /// Current transport connection phase.
     state: TransportConnectionState,
+    /// Whether all outbound payload data channels are currently open.
     channel_open: bool,
 }
 
@@ -69,6 +71,7 @@ impl ConnectionStateSnapshot {
         self.channel_open
     }
 
+    /// Apply a single state transition event to this snapshot.
     fn apply(self, event: ConnectionStateEvent) -> Self {
         match event {
             ConnectionStateEvent::Close => Self::new(TransportConnectionState::Closed, false),
@@ -91,10 +94,14 @@ impl ConnectionStateSnapshot {
     }
 }
 
+/// Internal transition event applied to [`ConnectionStateSnapshot`].
 #[derive(Clone, Copy)]
 enum ConnectionStateEvent {
+    /// Connection phase changed to the given state.
     Phase(TransportConnectionState),
+    /// Outbound payload channel readiness changed.
     Channels(bool),
+    /// Local close requested; permanently transitions to `(Closed, false)`.
     Close,
 }
 
@@ -105,6 +112,7 @@ enum ConnectionStateEvent {
 /// never retain or regain open payload channels.
 #[derive(Clone, Debug)]
 pub struct ConnectionStateCell {
+    /// Synchronized product state of connection phase and channel readiness.
     state: Arc<Mutex<ConnectionStateSnapshot>>,
 }
 
@@ -125,12 +133,14 @@ impl ConnectionStateCell {
         }
     }
 
+    /// Lock the inner snapshot, recovering from mutex poisoning.
     fn lock(&self) -> MutexGuard<'_, ConnectionStateSnapshot> {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Atomically apply `event` to the stored snapshot.
     fn apply(&self, event: ConnectionStateEvent) {
         let mut state = self.lock();
         *state = state.apply(event);

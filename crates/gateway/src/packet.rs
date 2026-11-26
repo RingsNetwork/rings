@@ -134,6 +134,7 @@ pub fn classify_ipv4_packet(packet: &[u8]) -> PacketDisposition {
     }
 }
 
+/// Validate an IPv4 TCP payload, verify its checksum, and classify its routing disposition.
 fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
     let Ok(tcp) = TcpPacket::new_checked(ipv4.payload()) else {
         return PacketDisposition::Drop(PacketDropReason::MalformedTcp);
@@ -160,6 +161,7 @@ fn classify_tcp(ipv4: &Ipv4Packet<&[u8]>) -> PacketDisposition {
     })
 }
 
+/// Return whether `ip` is unspecified, multicast, loopback, link-local, or broadcast.
 const fn is_non_routable_ipv4_destination(ip: Ipv4Addr) -> bool {
     let [first, _, _, _] = ip.octets();
     first == 0 || first >= 224 || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast()

@@ -23,11 +23,14 @@ use crate::storage::ScannedRecord;
 /// The table behind the lock together with its key budget.
 #[derive(Debug)]
 struct MemTable<V> {
+    /// Stored entries ordered by write recency.
     slots: WriteOrderedMap<V>,
+    /// Optional maximum number of retained keys.
     capacity: Option<NonZeroU32>,
 }
 
 impl<V> MemTable<V> {
+    /// Create an empty in-memory table with an optional key `capacity`.
     fn new(capacity: Option<NonZeroU32>) -> Self {
         Self {
             slots: WriteOrderedMap::default(),
@@ -57,6 +60,7 @@ impl<V> MemTable<V> {
 /// In-memory storage implementation ordered by write recency.
 #[derive(Debug)]
 pub struct MemStorage<V> {
+    /// Synchronized in-memory key-value table.
     table: RwLock<MemTable<V>>,
 }
 
@@ -81,10 +85,12 @@ impl<V> MemStorage<V> {
         }
     }
 
+    /// Acquire a read guard on the underlying table.
     fn read(&self) -> Result<RwLockReadGuard<'_, MemTable<V>>> {
         self.table.read().map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire a write guard on the underlying table.
     fn write(&self) -> Result<RwLockWriteGuard<'_, MemTable<V>>> {
         self.table.write().map_err(|_| Error::LockPoisoned)
     }

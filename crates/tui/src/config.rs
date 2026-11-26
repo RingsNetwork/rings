@@ -120,20 +120,28 @@ pub enum CredentialSource {
 /// Subset of `config.yaml` relevant to a local operator TUI client.
 #[derive(Debug, Default, Clone, Deserialize)]
 struct PartialFileConfig {
+    /// Configured network ID.
     #[serde(default)]
     network_id: Option<u32>,
+    /// Internal HTTP API port.
     #[serde(default)]
     internal_api_port: Option<u16>,
+    /// External HTTP API bind address.
     #[serde(default)]
     external_api_addr: Option<String>,
+    /// Explicit internal endpoint URL override.
     #[serde(default)]
     endpoint_url: Option<String>,
+    /// Path to the API authentication token file.
     #[serde(default)]
     api_token_path: Option<String>,
+    /// Local Onion HTTP CONNECT proxy bind address.
     #[serde(default)]
     onion_http_proxy_addr: Option<String>,
+    /// Whether this node advertises itself as an onion relay.
     #[serde(default)]
     advertise_onion_relay: Option<bool>,
+    /// Whether this node advertises itself as an onion exit.
     #[serde(default)]
     advertise_onion_exit: Option<bool>,
 }

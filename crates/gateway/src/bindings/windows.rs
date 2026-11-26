@@ -9,6 +9,7 @@ mod route;
 pub(crate) use route::Route;
 pub(crate) use route::RouteManager;
 
+/// Apply Windows Wintun adapter options to a `tun_rs::DeviceBuilder`.
 pub(crate) fn configure(
     mut builder: DeviceBuilder,
     options: &NativeTunnelOptions,

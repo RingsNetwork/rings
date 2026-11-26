@@ -11,10 +11,12 @@ use crate::error::Result;
 use crate::swarm::observer::LookupCorrelation;
 use crate::swarm::observer::LookupKind;
 
+/// Freshness TTL in milliseconds for cached storage-lookup miss observations.
 const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
 /// Maximum number of read-repair miss observation buckets retained per transport.
 pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
 
+/// Bounded map of recent read-repair miss observations keyed by resource and redundancy.
 // Invariant: after every successful observation-buffer mutation,
 // observations.len() <= STORAGE_LOOKUP_OBSERVATION_CAPACITY.
 // Invariant: after evict_storage_lookup_observations(observations, now), every
@@ -24,14 +26,20 @@ pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
 pub(super) type StorageLookupObservationMap =
     BTreeMap<StorageLookupObservationKey, StorageLookupObservation>;
 
+/// Lookup key identifying a read-repair observation bucket.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct StorageLookupObservationKey {
+    /// Target resource DID being looked up.
     resource: Did,
+    /// Requested storage redundancy factor for the lookup.
     redundancy: u16,
 }
 
+/// Recorded miss observations and answer watermark for one storage lookup bucket.
 pub(super) struct StorageLookupObservation {
+    /// Timestamp in milliseconds when this lookup round was started.
     observed_at_ms: i64,
+    /// Placement misses reported during this lookup round.
     misses: BTreeSet<PlacementMiss>,
     /// The node's answer clock at the last entry cached for this key, `0` before any: the reply
     /// marker (see [`StorageAnswerClock`]).
@@ -59,6 +67,7 @@ impl StorageAnswerClock {
     }
 }
 
+/// Return the key of the oldest observation bucket, breaking ties by key order.
 fn oldest_storage_lookup_observation_key(
     observations: &StorageLookupObservationMap,
 ) -> Option<StorageLookupObservationKey> {
@@ -68,6 +77,7 @@ fn oldest_storage_lookup_observation_key(
         .map(|(key, _)| *key)
 }
 
+/// Remove expired observation buckets and trim the oldest entries down to `max_len`.
 // Post: observations.len() <= STORAGE_LOOKUP_OBSERVATION_CAPACITY.
 // Post: forall bucket in observations,
 // now_ms.saturating_sub(bucket.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS.
@@ -93,6 +103,7 @@ fn evict_storage_lookup_observations(
 }
 
 impl SwarmTransport {
+    /// Validate `redundancy` and construct the observation bucket key for `resource`.
     fn storage_lookup_observation_key(
         &self,
         resource: Did,

@@ -1,3 +1,5 @@
+//! Short-term aligned-window transport reliability classification and ordering.
+
 use std::num::NonZeroU64;
 
 use serde::Deserialize;
@@ -13,8 +15,11 @@ use crate::UnixTime;
 /// Absolute failure limits used to classify recent local evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReliabilityThresholds {
+    /// Minimum disconnection count in an epoch that marks a peer degraded.
     disconnected: u64,
+    /// Minimum send-failure count in an epoch that marks a peer degraded.
     failed_to_send: u64,
+    /// Minimum receive-failure count in an epoch that marks a peer degraded.
     failed_to_receive: u64,
 }
 
@@ -32,8 +37,11 @@ impl ReliabilityThresholds {
 /// Policy for recent local transport reliability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReliabilityPolicy {
+    /// Duration of each aligned reliability epoch in seconds.
     window_seconds: NonZeroU64,
+    /// Minimum positive observations required to classify a peer as healthy.
     minimum_positive_observations: u64,
+    /// Absolute failure limits that classify a peer as degraded.
     thresholds: ReliabilityThresholds,
 }
 
@@ -85,6 +93,7 @@ impl ReliabilityPolicy {
         self.thresholds
     }
 
+    /// Floors `at` down to the start of its aligned reliability epoch.
     fn epoch_start(self, at: UnixTime) -> UnixTime {
         UnixTime::from_secs(at.as_secs() - at.as_secs() % self.window_seconds.get())
     }
@@ -184,6 +193,7 @@ impl ReliabilityEvidence {
             .saturating_add(self.received)
     }
 
+    /// Increments the evidence counter corresponding to `event` by `occurrences`.
     fn increment_by(
         &mut self,
         event: MeasurementEvent,
@@ -214,8 +224,11 @@ impl ReliabilityEvidence {
 /// prevents historical reliability from becoming a long-lived reputation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReliabilityWindow {
+    /// Start timestamp of the active aligned epoch, if any observation occurred.
     epoch_start: Option<UnixTime>,
+    /// Window duration in seconds under which `epoch_start` was aligned.
     window_seconds: Option<u64>,
+    /// Accumulated logical transport outcomes within the active epoch.
     evidence: ReliabilityEvidence,
 }
 
@@ -248,6 +261,7 @@ impl ReliabilityWindow {
         self.evidence
     }
 
+    /// Validates that any stored window duration matches `policy.window_seconds()`.
     pub(crate) fn ensure_policy(self, policy: ReliabilityPolicy) -> Result<(), MeasureError> {
         match self.window_seconds {
             None if self.epoch_start.is_none() => Ok(()),
@@ -291,6 +305,7 @@ impl ReliabilityWindow {
         self.observe_batch(MeasurementBatch::single(event), at, policy)
     }
 
+    /// Records a homogeneous observation batch at `at`, rolling over on new epochs.
     pub(crate) fn observe_batch(
         &mut self,
         batch: MeasurementBatch,
@@ -317,6 +332,7 @@ impl ReliabilityWindow {
             .increment_by(batch.event(), batch.occurrences())
     }
 
+    /// Clamps a future `epoch_start` back to the epoch containing `now`, returning whether it changed.
     pub(crate) fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
         let observed = policy.epoch_start(now);
         let Some(current) = self.epoch_start else {
@@ -329,6 +345,7 @@ impl ReliabilityWindow {
         true
     }
 
+    /// Clears stored epoch evidence if its window duration differs from `policy`.
     pub(crate) fn reset_for_policy_change(&mut self, policy: ReliabilityPolicy) -> bool {
         let has_mismatched_epoch =
             self.epoch_start.is_some() && self.window_seconds != Some(policy.window_seconds());

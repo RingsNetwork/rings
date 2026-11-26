@@ -27,6 +27,7 @@ use crate::fair_admission::SlotAccounting;
 use crate::message::admission_delegation::MessageLimit;
 use crate::message::types::MessageCategory;
 
+/// Fixed-point scaling factor (nanoseconds per second) for token-bucket arithmetic.
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
 /// Default message rate admitted for one origin in one logical lane.
 pub const DEFAULT_ORIGIN_QUOTA_MESSAGES_PER_SECOND: u64 = 64;
@@ -65,6 +66,7 @@ pub(crate) const ORIGIN_QUOTA_SHARES: Shares = Shares {
     custody: 0,
 };
 
+/// Maximum successor-list width whose edge slots fit inside [`DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE`].
 const ORIGIN_QUOTA_SUCCESSORS_MAX: usize = 15;
 const _: () = assert!(
     ORIGIN_QUOTA_SHARES.bound(crate::dht::topology::edge_slots(
@@ -77,6 +79,7 @@ const _: () = assert!(
     )) > DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE
 );
 
+/// Compute fair-admission [`Shares`] scaled to a lane's configured `max_records` capacity.
 const fn shares_for_capacity(max_records: usize) -> Shares {
     if max_records >= DEFAULT_ORIGIN_QUOTA_RECORDS_PER_LANE {
         Shares {
@@ -103,19 +106,30 @@ const fn shares_for_capacity(max_records: usize) -> Shares {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(into = "OriginQuotaLaneConfigWire")]
 pub struct OriginQuotaLaneConfig {
+    /// Sustained message refill rate per second.
     message_rate_per_second: u64,
+    /// Maximum accumulated message tokens.
     message_burst: u64,
+    /// Sustained byte refill rate per second.
     byte_rate_per_second: u64,
+    /// Maximum accumulated byte tokens.
     byte_burst: u64,
+    /// Maximum number of runtime-local origin records retained for this lane.
     max_records: usize,
 }
 
+/// Unvalidated serde wire mirror of [`OriginQuotaLaneConfig`].
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct OriginQuotaLaneConfigWire {
+    /// Sustained message refill rate per second.
     message_rate_per_second: u64,
+    /// Maximum accumulated message tokens.
     message_burst: u64,
+    /// Sustained byte refill rate per second.
     byte_rate_per_second: u64,
+    /// Maximum accumulated byte tokens.
     byte_burst: u64,
+    /// Maximum number of runtime-local origin records retained for this lane.
     max_records: usize,
 }
 
@@ -336,18 +350,22 @@ impl OriginQuotaKey {
     }
 }
 
+/// Fixed-point token bucket storing tokens scaled by [`NANOS_PER_SECOND`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TokenBucket {
+    /// Current token balance multiplied by [`NANOS_PER_SECOND`].
     scaled_tokens: u128,
 }
 
 impl TokenBucket {
+    /// Construct a bucket initialized to full `burst` capacity.
     fn full(burst: u64) -> Self {
         Self {
             scaled_tokens: u128::from(burst) * NANOS_PER_SECOND,
         }
     }
 
+    /// Return a copy replenished over `elapsed_nanos` at `rate` per second, capped at `burst`.
     fn refill(self, rate: u64, burst: u64, elapsed_nanos: u128) -> Self {
         let capacity = u128::from(burst) * NANOS_PER_SECOND;
         let replenished = elapsed_nanos.saturating_mul(u128::from(rate));
@@ -356,14 +374,17 @@ impl TokenBucket {
         }
     }
 
+    /// Return whether the bucket holds at least `scaled_cost` scaled tokens.
     fn has(self, scaled_cost: u128) -> bool {
         self.scaled_tokens >= scaled_cost
     }
 
+    /// Subtract `scaled_cost` from the bucket, saturating at zero.
     fn consume(&mut self, scaled_cost: u128) {
         self.scaled_tokens = self.scaled_tokens.saturating_sub(scaled_cost);
     }
 
+    /// Return whether the bucket is completely replenished to `burst`.
     fn is_full(self, burst: u64) -> bool {
         self.scaled_tokens == u128::from(burst) * NANOS_PER_SECOND
     }
@@ -372,8 +393,11 @@ impl TokenBucket {
 /// Pure message and byte token-bucket state for one origin quota key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OriginQuota {
+    /// Message-count token bucket.
     messages: TokenBucket,
+    /// Logical byte-volume token bucket.
     bytes: TokenBucket,
+    /// Monotonic instant at which both buckets were last refilled.
     last_refill: OriginQuotaInstant,
 }
 
@@ -420,6 +444,7 @@ impl OriginQuota {
         Ok((next, OriginQuotaVerdict::Admitted))
     }
 
+    /// Refill both token buckets up to `now`, failing if monotonic time regressed.
     fn refilled(
         self,
         config: OriginQuotaLaneConfig,
@@ -442,6 +467,7 @@ impl OriginQuota {
         })
     }
 
+    /// Return whether both token buckets would be completely full at `now`.
     fn fully_replenished_at(
         self,
         config: OriginQuotaLaneConfig,
@@ -492,6 +518,7 @@ pub enum OriginQuotaVerdict {
 }
 
 impl OriginQuotaVerdict {
+    /// Convert a non-admitted verdict into its corresponding [`OriginQuotaRejection`], or `None` if admitted.
     fn rejection(self) -> Option<OriginQuotaRejection> {
         match self {
             Self::Admitted => None,
@@ -550,34 +577,53 @@ pub enum OriginQuotaError {
     },
 }
 
+/// Internal failure returned while reserving a record in [`OriginQuotaTable`].
 #[derive(Debug)]
 pub(super) enum OriginQuotaAdmissionError {
+    /// Admission was rejected by a rate or capacity limit.
     Verdict(OriginQuotaRejection),
+    /// Token-bucket evaluation encountered an arithmetic or clock error.
     Arithmetic(OriginQuotaArithmeticError),
 }
 
+/// Reason a quota reservation was rejected by policy or table capacity.
 #[derive(Debug)]
 pub(super) enum OriginQuotaRejection {
+    /// The origin's message-rate bucket was exhausted.
     MessageRate,
+    /// The origin's byte-rate bucket was exhausted.
     ByteRate,
-    Capacity { capacity: usize },
+    /// The lane's record table had no free slot or fully replenished victim.
+    Capacity {
+        /// Configured record capacity of the exhausted lane.
+        capacity: usize,
+    },
 }
 
+/// One active origin quota record stored inside [`OriginQuotaTable`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct OriginQuotaRecord {
+    /// Current message and byte token-bucket state.
     quota: OriginQuota,
+    /// Principal charged for holding this record slot.
     introducer: Principal,
 }
 
+/// Undo handle capturing a speculative [`OriginQuotaTable::reserve`] mutation for rollback.
 #[derive(Debug)]
 pub(super) struct OriginQuotaReservation {
+    /// Quota key whose record was created or updated.
     key: OriginQuotaKey,
+    /// Principal charged for the reservation.
     introducer: Principal,
+    /// Prior record for `key` if one existed before this reservation.
     previous: Option<OriginQuotaRecord>,
+    /// Fully replenished victim evicted to make room for a new record, if any.
     evicted: Option<(OriginQuotaKey, OriginQuotaRecord)>,
 }
 
 impl OriginQuotaReservation {
+    /// Undo this speculative quota reservation in `table` if durable commit fails.
     pub(super) fn rollback(self, table: &mut OriginQuotaTable) {
         match self.previous {
             Some(previous) => {
@@ -599,13 +645,18 @@ impl OriginQuotaReservation {
     }
 }
 
+/// Bounded runtime-local table of active [`OriginQuotaRecord`] entries across all logical lanes.
 pub(super) struct OriginQuotaTable {
+    /// Per-lane token-bucket and record-capacity limits.
     config: OriginQuotaConfig,
+    /// Active quota records indexed by [`OriginQuotaKey`].
     records: BTreeMap<OriginQuotaKey, OriginQuotaRecord>,
+    /// Per-lane fair-admission slot accounting tables.
     accounting: [SlotAccounting; MessageCategory::COUNT],
 }
 
 impl OriginQuotaTable {
+    /// Construct an empty [`OriginQuotaTable`] configured with `config`.
     pub(super) fn new(config: OriginQuotaConfig) -> Self {
         let accounting = [
             MessageCategory::DhtControl,
@@ -621,6 +672,7 @@ impl OriginQuotaTable {
         }
     }
 
+    /// Borrow the fair-admission [`SlotAccounting`] for `lane`.
     fn lane_accounting(&self, lane: MessageCategory) -> &SlotAccounting {
         let [dht_control, storage, e2e, application] = &self.accounting;
         match lane {
@@ -631,6 +683,7 @@ impl OriginQuotaTable {
         }
     }
 
+    /// Mutably borrow the fair-admission [`SlotAccounting`] for `lane`.
     fn lane_accounting_mut(&mut self, lane: MessageCategory) -> &mut SlotAccounting {
         let [dht_control, storage, e2e, application] = &mut self.accounting;
         match lane {
@@ -641,6 +694,7 @@ impl OriginQuotaTable {
         }
     }
 
+    /// Speculatively admit `(key, byte_cost)` at `now`, returning a rollback-capable [`OriginQuotaReservation`].
     pub(super) fn reserve(
         &mut self,
         key: OriginQuotaKey,
@@ -694,6 +748,7 @@ impl OriginQuotaTable {
         }
     }
 
+    /// Allocate a record slot in `lane` for `introducer`, recycling an idle victim if needed.
     fn allocate_record(
         &mut self,
         lane: MessageCategory,
@@ -727,6 +782,7 @@ impl OriginQuotaTable {
         }
     }
 
+    /// Evict the oldest fully replenished record owned by `introducer` when `eligible` is true.
     fn evict_own_victim_if(
         &mut self,
         lane: MessageCategory,
@@ -754,6 +810,7 @@ impl OriginQuotaTable {
             })
     }
 
+    /// Admit one record for `introducer` into unused `lane` capacity if within both record and share bounds.
     fn admit_into_free_capacity(
         &mut self,
         lane: MessageCategory,
@@ -770,6 +827,7 @@ impl OriginQuotaTable {
             .is_some()
     }
 
+    /// Evict a fully replenished shared-pool victim if doing so frees admission capacity for `introducer`.
     fn evict_pool_victim_for(
         &mut self,
         lane: MessageCategory,
@@ -805,6 +863,7 @@ impl OriginQuotaTable {
             }))
     }
 
+    /// Find the oldest fully replenished record in `lane` satisfying `eligible` that is safe to evict.
     fn safe_victim(
         &self,
         lane: MessageCategory,
@@ -873,6 +932,7 @@ pub struct OriginQuotaLaneCounters {
 /// Aggregate quota drop counters partitioned only by bounded logical lane.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct OriginQuotaCounters {
+    /// Per-lane counter snapshots ordered by [`MessageCategory`].
     lanes: [OriginQuotaLaneCounters; 4],
 }
 
@@ -889,15 +949,21 @@ impl OriginQuotaCounters {
     }
 }
 
+/// Atomic drop-counter cells backing [`OriginQuotaLaneCounters`] for one lane.
 #[derive(Default)]
 struct OriginQuotaLaneCounterState {
+    /// Drops caused by message-token exhaustion.
     message_rate_exhausted: AtomicU64,
+    /// Drops caused by byte-token exhaustion.
     byte_rate_exhausted: AtomicU64,
+    /// Drops caused by the bounded table having no safe victim.
     capacity_exhausted: AtomicU64,
+    /// Drops caused by arithmetic or monotonic-clock failure.
     arithmetic_failure: AtomicU64,
 }
 
 impl OriginQuotaLaneCounterState {
+    /// Read a relaxed snapshot of this lane's drop counters.
     fn snapshot(&self) -> OriginQuotaLaneCounters {
         OriginQuotaLaneCounters {
             message_rate_exhausted: self.message_rate_exhausted.load(Ordering::Relaxed),
@@ -908,7 +974,9 @@ impl OriginQuotaLaneCounterState {
     }
 }
 
+/// Atomic drop-counter array backing [`OriginQuotaCounters`] across all four logical lanes.
 pub(super) struct OriginQuotaCounterState {
+    /// Per-lane atomic drop counters ordered by [`MessageCategory`].
     lanes: [OriginQuotaLaneCounterState; 4],
 }
 
@@ -921,6 +989,7 @@ impl Default for OriginQuotaCounterState {
 }
 
 impl OriginQuotaCounterState {
+    /// Read a relaxed snapshot of quota drop counters for all four lanes.
     pub(super) fn snapshot(&self) -> OriginQuotaCounters {
         OriginQuotaCounters {
             lanes: self
@@ -930,6 +999,7 @@ impl OriginQuotaCounterState {
         }
     }
 
+    /// Increment the counter for `lane` corresponding to `error`.
     pub(super) fn record(&self, lane: MessageCategory, error: &OriginQuotaAdmissionError) {
         let [dht_control, storage, e2e, application] = &self.lanes;
         let counters = match lane {
@@ -957,6 +1027,7 @@ impl OriginQuotaCounterState {
     }
 }
 
+/// Convert an internal [`OriginQuotaAdmissionError`] into the public crate error type.
 pub(super) fn quota_admission_error(
     key: OriginQuotaKey,
     byte_cost: usize,

@@ -10,13 +10,18 @@ use smoltcp::phy::RxToken;
 use smoltcp::phy::TxToken;
 use smoltcp::time::Instant;
 
+/// In-memory IP packet queue implementing `smoltcp::phy::Device`.
 pub(super) struct PacketQueueDevice {
+    /// Queued inbound IP packets waiting for `smoltcp` to consume.
     ingress: VecDeque<Vec<u8>>,
+    /// Outbound IP packets emitted by `smoltcp` waiting to be written to the tunnel.
     egress: VecDeque<Vec<u8>>,
+    /// Maximum transmission unit reported to `smoltcp`.
     mtu: usize,
 }
 
 impl PacketQueueDevice {
+    /// Create an empty packet queue device with the given `mtu`.
     pub(super) fn new(mtu: usize) -> Self {
         Self {
             ingress: VecDeque::new(),
@@ -25,16 +30,20 @@ impl PacketQueueDevice {
         }
     }
 
+    /// Push one inbound IP packet onto the ingress queue.
     pub(super) fn enqueue_ingress(&mut self, packet: Vec<u8>) {
         self.ingress.push_back(packet);
     }
 
+    /// Drain all outbound IP packets emitted by `smoltcp` since the last poll.
     pub(super) fn drain_egress(&mut self) -> Vec<Vec<u8>> {
         self.egress.drain(..).collect()
     }
 }
 
+/// Receive token delivering one queued ingress IP packet to `smoltcp`.
 pub(super) struct QueueRxToken {
+    /// Raw IP packet bytes.
     packet: Vec<u8>,
 }
 
@@ -45,7 +54,9 @@ impl RxToken for QueueRxToken {
     }
 }
 
+/// Transmit token appending one serialized egress IP packet onto the device queue.
 pub(super) struct QueueTxToken<'a> {
+    /// Reference to the device's outbound packet queue.
     egress: &'a mut VecDeque<Vec<u8>>,
 }
 

@@ -160,7 +160,9 @@ impl GatewayFailureCode {
 /// human-readable `detail` message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayFailure {
+    /// Closed machine-readable failure classification.
     code: GatewayFailureCode,
+    /// Human-readable diagnostic detail.
     detail: String,
 }
 

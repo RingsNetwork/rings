@@ -89,6 +89,7 @@ pub(crate) async fn build_onion_proxy_route(
     Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
+/// Build an onion proxy route to `target` using `proxy` whose first hop satisfies `first_hop_permitted`.
 pub(crate) async fn build_onion_proxy_route_with_first_hop(
     reader: &impl OnionDirectoryReader,
     proxy: OnionProxyProtocol,
@@ -180,6 +181,7 @@ pub(crate) async fn build_onion_pipeline_route_filtered(
     Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
+/// Build an onion pipeline route using predicates to filter permitted first hops and invoke descriptors.
 pub(crate) async fn build_onion_pipeline_route_with_first_hop_and_filter(
     reader: &impl OnionDirectoryReader,
     pipeline: &OnionInvokePipeline,
@@ -225,6 +227,7 @@ pub(crate) async fn build_onion_pipeline_route_with_first_hop_and_filter(
     )
 }
 
+/// Select a guard-closed multi-hop route for `request` from pre-filtered `exits`.
 async fn build_onion_route_from_exits(
     reader: &impl OnionDirectoryReader,
     request: OnionRouteRequest,

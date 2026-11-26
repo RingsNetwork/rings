@@ -79,6 +79,7 @@ pub fn json_value(obj: impl Into<JsValue>) -> Result<serde_json::Value> {
     js_to_json_value(obj.into(), 0)
 }
 
+/// Recursively convert a [`JsValue`] into a [`serde_json::Value`] up to `MAX_JSON_DEPTH`.
 fn js_to_json_value(value: JsValue, depth: usize) -> Result<serde_json::Value> {
     if depth > MAX_JSON_DEPTH {
         return Err(Error::JsError(
@@ -190,6 +191,7 @@ fn js_to_json_value(value: JsValue, depth: usize) -> Result<serde_json::Value> {
     ))
 }
 
+/// Convert a JavaScript string, finite number, or `BigInt` key into a JSON object key string.
 fn js_key_to_string(key: &JsValue) -> Result<String> {
     if let Some(text) = key.as_string() {
         return Ok(text);
@@ -211,6 +213,7 @@ fn js_key_to_string(key: &JsValue) -> Result<String> {
     ))
 }
 
+/// Extract raw bytes if `value` is a `Uint8Array` or `ArrayBuffer`.
 fn extract_bytes(value: &JsValue) -> Option<Vec<u8>> {
     if let Some(view) = value.dyn_ref::<Uint8Array>() {
         return Some(view.to_vec());
@@ -221,14 +224,19 @@ fn extract_bytes(value: &JsValue) -> Option<Vec<u8>> {
     None
 }
 
+/// Serde serializer producing JSON-safe JavaScript values (`Object`, `Array`, primitives).
 struct JsonSafeJsSerializer;
 
+/// Sequence/tuple serializer accumulating elements into a JavaScript `Array`.
 struct JsArraySeq {
+    /// Destination JavaScript array.
     target: Array,
+    /// Next element index to write.
     idx: u32,
 }
 
 impl JsArraySeq {
+    /// Create an empty JavaScript array sequence serializer.
     fn new() -> Self {
         Self {
             target: Array::new(),
@@ -288,12 +296,16 @@ impl ser::SerializeTupleStruct for JsArraySeq {
     }
 }
 
+/// Map serializer writing stringified key/value pairs onto a plain JavaScript `Object`.
 struct JsObjectMap {
+    /// Destination JavaScript object.
     target: Object,
+    /// Key serialized by `serialize_key`, awaiting its paired `serialize_value`.
     next_key: Option<JsString>,
 }
 
 impl JsObjectMap {
+    /// Create an empty JavaScript object map serializer.
     fn new() -> Self {
         Self {
             target: Object::new(),
@@ -302,6 +314,7 @@ impl JsObjectMap {
     }
 }
 
+/// Construct a [`serde_wasm_bindgen::Error`] from any displayable message.
 fn js_err(msg: impl std::fmt::Display) -> serde_wasm_bindgen::Error {
     serde_wasm_bindgen::Error::new(msg)
 }
@@ -340,11 +353,14 @@ impl ser::SerializeMap for JsObjectMap {
     }
 }
 
+/// Struct serializer writing named fields onto a plain JavaScript `Object`.
 struct JsStructSerializer {
+    /// Destination JavaScript object.
     target: Object,
 }
 
 impl JsStructSerializer {
+    /// Create an empty JavaScript struct serializer.
     fn new() -> Self {
         Self {
             target: Object::new(),
@@ -372,12 +388,16 @@ impl ser::SerializeStruct for JsStructSerializer {
     }
 }
 
+/// Externally tagged enum variant serializer wrapping an inner payload serializer `S`.
 struct JsVariantSerializer<S> {
+    /// Variant name used as the outer object property key.
     variant: &'static str,
+    /// Inner serializer for the variant's payload.
     inner: S,
 }
 
 impl<S> JsVariantSerializer<S> {
+    /// Wrap `value` in a single-property object `{ [variant]: value }`.
     fn wrap(
         variant: &'static str,
         value: JsValue,
@@ -424,6 +444,7 @@ impl ser::SerializeStructVariant for JsVariantSerializer<JsStructSerializer> {
     }
 }
 
+/// Special-purpose serializer that recovers a preserved `JsValue` from its wasm ABI handle.
 struct PreservedAbiCapture;
 
 impl ser::Serializer for PreservedAbiCapture {
@@ -801,11 +822,14 @@ impl ser::Serializer for &JsonSafeJsSerializer {
     }
 }
 
+/// Serde deserializer converting JavaScript values without losing integer precision or bytes.
 struct LosslessJsDeserializer {
+    /// JavaScript value currently being deserialized.
     value: JsValue,
 }
 
 impl LosslessJsDeserializer {
+    /// Return `self.value` as `i64` if it is a JavaScript safe integer.
     fn safe_i64(&self) -> Option<i64> {
         if Number::is_safe_integer(&self.value) {
             self.value.as_f64().map(|v| v as i64)
@@ -815,7 +839,9 @@ impl LosslessJsDeserializer {
     }
 }
 
+/// Sequence access adapter iterating over JavaScript array elements.
 struct JsSeqAccess {
+    /// Remaining element values to deserialize.
     items: std::vec::IntoIter<JsValue>,
 }
 
@@ -836,8 +862,11 @@ impl<'de> de::SeqAccess<'de> for JsSeqAccess {
     }
 }
 
+/// Map access adapter iterating over JavaScript object or `Map` key-value pairs.
 struct JsMapAccess {
+    /// Remaining `(key, value)` pairs to deserialize.
     entries: std::vec::IntoIter<(JsValue, JsValue)>,
+    /// Value paired with the most recently yielded key.
     pending_value: Option<JsValue>,
 }
 
@@ -864,8 +893,11 @@ impl<'de> de::MapAccess<'de> for JsMapAccess {
     }
 }
 
+/// Enum access adapter for externally tagged JavaScript objects `{ [tag]: payload }`.
 struct JsEnumAccess {
+    /// Variant name extracted from the object's single property key.
     tag: String,
+    /// Associated variant payload value.
     payload: JsValue,
 }
 

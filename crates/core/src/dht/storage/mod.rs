@@ -24,6 +24,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 mod repair;
+/// Storage handoff and anti-entropy sync batching.
 mod sync;
 
 /// Storage-sync transition kind.
@@ -118,16 +119,22 @@ impl StorageSyncRoute {
 /// Lowered storage-sync delivery ready for the message layer.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StorageSyncDelivery {
+    /// Sync transition kind (`OwnershipHandoff` vs `AdditiveRepair`).
     purpose: StorageSyncPurpose,
+    /// Wire destination for this batch of entries.
     destination: StorageSyncDestination,
+    /// Placed entries included in this delivery batch.
     data: Vec<PlacedEntry>,
 }
 
 /// Stable identity used to continue bounded storage repair across changing plans.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StorageSyncDeliveryCursor {
+    /// Sync transition kind of the delivery.
     purpose: StorageSyncPurpose,
+    /// Wire destination of the delivery.
     destination: StorageSyncDestination,
+    /// Sorted placement keys belonging to the delivery batch.
     placement_keys: Vec<Did>,
 }
 
@@ -139,6 +146,7 @@ impl StorageSyncDeliveryCursor {
 }
 
 impl StorageSyncDelivery {
+    /// Construct a [`StorageSyncDelivery`] directly from its lowered wire parts.
     fn from_parts(
         purpose: StorageSyncPurpose,
         destination: StorageSyncDestination,
@@ -151,6 +159,7 @@ impl StorageSyncDelivery {
         }
     }
 
+    /// Construct a [`StorageSyncDelivery`] from a `(target, route)` pair.
     fn from_route(
         purpose: StorageSyncPurpose,
         target: Did,
@@ -195,8 +204,11 @@ impl StorageSyncDelivery {
     }
 }
 
+/// Local vs remote ownership target for a storage placement key.
 pub(super) enum StorageSyncTarget {
+    /// This node owns the placement locally.
     Local,
+    /// A remote node owns the placement at the given wire destination.
     Remote(StorageSyncDestination),
 }
 
@@ -231,6 +243,7 @@ where
 }
 
 impl PeerRingAction {
+    /// Build a remote ownership-handoff sync action for `data` toward `destination`.
     pub(crate) fn sync_entries_for_handoff(
         destination: StorageSyncDestination,
         data: Vec<PlacedEntry>,
@@ -238,6 +251,7 @@ impl PeerRingAction {
         Self::sync_entries(StorageSyncPurpose::OwnershipHandoff, destination, data)
     }
 
+    /// Build a remote additive-repair sync action for `data` toward `destination`.
     pub(crate) fn sync_entries_for_repair(
         destination: StorageSyncDestination,
         data: Vec<PlacedEntry>,
@@ -245,6 +259,7 @@ impl PeerRingAction {
         Self::sync_entries(StorageSyncPurpose::AdditiveRepair, destination, data)
     }
 
+    /// Build a remote `SyncEntriesWithSuccessor` action with the given `purpose`, `destination`, and `data`.
     fn sync_entries(
         purpose: StorageSyncPurpose,
         destination: StorageSyncDestination,
@@ -296,6 +311,7 @@ impl PeerRingAction {
         Ok(deliveries)
     }
 
+    /// Recursively flatten `SyncEntriesWithSuccessor` leaves from this action tree into `deliveries`.
     fn collect_storage_sync_deliveries(
         self,
         deliveries: &mut Vec<StorageSyncDelivery>,
@@ -337,15 +353,18 @@ impl PeerRing {
         Ok(self.storage_virtual_nodes()?.positions_for_owner(owner))
     }
 
+    /// Return the observed virtual-node physical owner for `placement_key`, if virtual nodes are enabled.
     pub(super) fn observed_storage_virtual_owner(&self, placement_key: Did) -> Result<Option<Did>> {
         Ok(self.storage_virtual_nodes()?.owner_for_key(placement_key))
     }
 
+    /// Build the [`StorageVirtualNodes`] registry for the current topology snapshot.
     fn storage_virtual_nodes(&self) -> Result<StorageVirtualNodes> {
         let state = self.topology_state()?;
         Ok(self.storage_virtual_nodes_for_topology(&state))
     }
 
+    /// Build the [`StorageVirtualNodes`] registry from an authenticated `TopologyState` snapshot.
     fn storage_virtual_nodes_for_topology(&self, state: &TopologyState) -> StorageVirtualNodes {
         // Pre: `state` is this node's authenticated topology view.
         // Post: the virtual-owner set is `{local} ∪ { p | Referenced(n, p) } ∪ dom(bridged)`,
@@ -356,6 +375,7 @@ impl PeerRing {
         StorageVirtualNodes::from_owners(self.storage_virtual_node_config(), owners)
     }
 
+    /// Resolve the routing action to reach the storage owner responsible for `placement_key`.
     pub(crate) fn find_storage_owner(&self, placement_key: Did) -> Result<PeerRingAction> {
         if let Some(owner) = self.observed_storage_virtual_owner(placement_key)? {
             if owner == self.did {
@@ -371,6 +391,7 @@ impl PeerRing {
         }
     }
 
+    /// Classify whether `placement_key` is owned locally or by a remote [`StorageSyncDestination`].
     pub(super) fn storage_sync_target(&self, placement_key: Did) -> Result<StorageSyncTarget> {
         if let Some(owner) = self.observed_storage_virtual_owner(placement_key)? {
             if owner == self.did {
@@ -395,6 +416,7 @@ impl PeerRing {
         }
     }
 
+    /// Compute the next physical hop for sending a storage-sync batch to `destination`.
     pub(crate) fn next_hop_for_storage_sync(
         &self,
         destination: StorageSyncDestination,
@@ -433,6 +455,7 @@ impl PeerRing {
         })
     }
 
+    /// Return whether `state` registers `next_hop` and selects it as the next hop for `destination`.
     fn storage_sync_route_permits_in(
         &self,
         state: &TopologyState,
@@ -448,8 +471,10 @@ impl PeerRing {
         peer == state.local || state.references(peer)
     }
 
-    // Pre: `state` is one authenticated topology snapshot.
-    // Post: both route registration and next-hop selection use only `state`.
+    /// Resolve the next physical hop for `destination` using only the topology snapshot `state`.
+    ///
+    /// Pre: `state` is one authenticated topology snapshot.
+    /// Post: both route registration and next-hop selection use only `state`.
     fn next_hop_for_storage_sync_in(
         &self,
         state: &TopologyState,
@@ -465,6 +490,7 @@ impl PeerRing {
         }
     }
 
+    /// Resolve the next physical hop toward physical peer `owner` within `state`.
     fn next_hop_to_physical_owner_in(state: &TopologyState, owner: Did) -> Option<Did> {
         if owner == state.local {
             return None;
@@ -488,6 +514,7 @@ impl PeerRing {
         }
     }
 
+    /// Resolve the next physical hop toward storage placement `key` within `state`.
     fn next_hop_to_storage_placement_in(&self, state: &TopologyState, key: Did) -> Option<Did> {
         if let Some(owner) = self
             .storage_virtual_nodes_for_topology(state)

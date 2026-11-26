@@ -11,6 +11,7 @@ use crate::types::GatewayHeader;
 use crate::types::GatewayRequest;
 use crate::types::GatewayResponse;
 
+/// CORS-safelisted response header names exposed without `Access-Control-Expose-Headers`.
 const SAFE_RESPONSE_HEADERS: &[&str] = &[
     "cache-control",
     "content-language",
@@ -125,14 +126,17 @@ pub fn validate_preflight_response(
     Ok(())
 }
 
+/// Return whether `request` requires a CORS preflight `OPTIONS` exchange.
 fn requires_preflight(request: &GatewayRequest) -> bool {
     !is_safelisted_method(request.method.as_str()) || !non_safelisted_headers(request).is_empty()
 }
 
+/// Return whether `method` is a CORS-safelisted HTTP method.
 fn is_safelisted_method(method: &str) -> bool {
     matches!(method, "GET" | "HEAD" | "POST")
 }
 
+/// Collect lowercased forwarded author header names that are not CORS-safelisted.
 fn non_safelisted_headers(request: &GatewayRequest) -> BTreeSet<String> {
     request
         .headers
@@ -145,6 +149,7 @@ fn non_safelisted_headers(request: &GatewayRequest) -> BTreeSet<String> {
         .collect()
 }
 
+/// Return whether `header` is a CORS-safelisted request header.
 fn is_safelisted_header(header: &GatewayHeader) -> bool {
     if matches!(
         header.name.to_ascii_lowercase().as_str(),
@@ -168,12 +173,14 @@ fn is_safelisted_header(header: &GatewayHeader) -> bool {
     )
 }
 
+/// Return whether `name` is a CORS-safelisted response header.
 fn is_safelisted_response_header(name: &str) -> bool {
     SAFE_RESPONSE_HEADERS
         .iter()
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
+/// Collect lowercased response header names explicitly exposed by `Access-Control-Expose-Headers`.
 fn exposed_response_headers(
     request: &GatewayRequest,
     response: &GatewayResponse,
@@ -196,10 +203,12 @@ fn exposed_response_headers(
         .collect()
 }
 
+/// Return whether `name` is a gateway-synthesized response header hidden from cross-origin callers.
 fn is_gateway_internal_response_header(name: &str) -> bool {
     matches!(name, "content-security-policy")
 }
 
+/// Serialize the trusted initiating origin of `request` for CORS checks.
 fn source_origin(request: &GatewayRequest) -> Result<String> {
     request
         .source_origin()
@@ -207,6 +216,7 @@ fn source_origin(request: &GatewayRequest) -> Result<String> {
         .ok_or(CorsFailure::MissingTrustedSourceOrigin.into())
 }
 
+/// Verify that `Access-Control-Allow-Origin` permits `source_origin` under `credentials`.
 fn validate_allowed_origin(
     response: &GatewayResponse,
     source_origin: String,
@@ -223,6 +233,7 @@ fn validate_allowed_origin(
     }
 }
 
+/// Iterate values of all headers in `response` matching `name` case-insensitively.
 fn header_values<'a>(
     response: &'a GatewayResponse,
     name: &'a str,
@@ -234,6 +245,7 @@ fn header_values<'a>(
         .map(|header| header.value.as_str())
 }
 
+/// Return whether any `name` header in `response` equals `expected` after trimming ASCII whitespace.
 fn header_has_token(response: &GatewayResponse, name: &str, expected: &str) -> bool {
     header_values(response, name).any(|value| value.trim().eq_ignore_ascii_case(expected))
 }

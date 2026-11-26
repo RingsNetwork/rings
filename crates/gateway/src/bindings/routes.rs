@@ -6,6 +6,7 @@ use ipnet::IpNet;
 
 use crate::GatewayPlan;
 
+/// Normalize and deduplicate the explicit capture routes declared by `plan`.
 pub(crate) fn capture_routes(plan: &GatewayPlan) -> Vec<IpNet> {
     plan.included_routes
         .iter()

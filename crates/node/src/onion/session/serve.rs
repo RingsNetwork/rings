@@ -294,6 +294,7 @@ struct OnionExitShared<W> {
 /// The interpretation of one world-facing session symbol over the world `W`; see the module
 /// diagram.
 pub(crate) struct OnionExitSessions<W> {
+    /// Shared session table, world adapter, policy, accounting, and link sender.
     shared: Arc<OnionExitShared<W>>,
 }
 

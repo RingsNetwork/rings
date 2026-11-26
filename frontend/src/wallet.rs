@@ -31,11 +31,17 @@ use crate::browser_api::js_set;
 use crate::browser_api::js_string_field;
 use crate::hex;
 
+/// Global property name for the MV3 extension wallet bridge.
 const EXTENSION_WALLET_BRIDGE: &str = "RingsExtensionWalletBridge";
+/// IndexedDB database name storing the persisted WebCrypto P-256 identity.
 const WEBCRYPTO_IDB_DATABASE: &str = "rings-frontend-webcrypto";
+/// IndexedDB object store name holding persisted WebCrypto keys.
 const WEBCRYPTO_IDB_STORE: &str = "keys";
+/// Primary key under which the default WebCrypto P-256 identity record is stored.
 const WEBCRYPTO_IDB_PRIMARY_KEY: &str = "p256-default";
+/// Schema version for the WebCrypto IndexedDB database.
 const WEBCRYPTO_IDB_VERSION: u32 = 1;
+/// Web Locks API lock name serializing concurrent WebCrypto identity initialization across tabs.
 const WEBCRYPTO_INIT_LOCK_NAME: &str = "rings-frontend-webcrypto-init";
 
 /// Account authorization standard selected by the user.
@@ -62,6 +68,7 @@ pub struct WalletAccount {
     pub account: String,
     /// Lower-case Rings account type.
     pub account_type: String,
+    /// Opaque JavaScript provider, extension bridge, or CryptoKey handle used for signing.
     handle: JsValue,
 }
 
@@ -129,6 +136,7 @@ pub async fn connect(kind: WalletKind) -> Result<WalletAccount, String> {
     }
 }
 
+/// Send a `{ method, params }` RPC request to an injected browser wallet provider.
 fn request(provider: &JsValue, method_name: &str, params: JsValue) -> Result<JsValue, String> {
     let body = Object::new();
     js_set(&body, "method", &JsValue::from_str(method_name))?;
@@ -136,10 +144,12 @@ fn request(provider: &JsValue, method_name: &str, params: JsValue) -> Result<JsV
     js_call1(provider, "request", &body.into())
 }
 
+/// Encode raw bytes as a lowercase hexadecimal string.
 fn bytes_to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Decode an optional `0x`-prefixed hexadecimal signature string into bytes.
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let clean = hex.strip_prefix("0x").unwrap_or(hex);
     if !clean.len().is_multiple_of(2) || !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -160,12 +170,14 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
         .map_err(|()| "wallet returned an invalid hex signature".to_string())
 }
 
+/// Decode an unpadded base64url string (as used in JWK coordinates) into bytes.
 fn base64_url_to_bytes(value: &str) -> Result<Vec<u8>, String> {
     URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|error| format!("invalid base64url field: {error}"))
 }
 
+/// Prepend the Rings domain-separation prefix expected by core `secp256r1` verification.
 fn rings_prefixed_message(message: &str) -> Vec<u8> {
     let body = message.as_bytes();
     let mut out = format!("\x19Rings Signed Message:\n{}", body.len()).into_bytes();
@@ -173,6 +185,7 @@ fn rings_prefixed_message(message: &str) -> Vec<u8> {
     out
 }
 
+/// Build the WebCrypto ECDSA P-256 algorithm descriptor object.
 fn ecdsa_algorithm() -> Result<Object, String> {
     let algorithm = Object::new();
     js_set(&algorithm, "name", &JsValue::from_str("ECDSA"))?;
@@ -180,6 +193,7 @@ fn ecdsa_algorithm() -> Result<Object, String> {
     Ok(algorithm)
 }
 
+/// Connect or initialize the persisted browser WebCrypto P-256 identity.
 async fn connect_webcrypto() -> Result<WalletAccount, String> {
     let crypto = js_global_prop("crypto")?;
     let subtle = js_prop(&crypto, "subtle")?;
@@ -190,6 +204,7 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
     with_webcrypto_init_lock(move || connect_webcrypto_inner(subtle)).await
 }
 
+/// Run `op` under an exclusive Web Locks API lock when `navigator.locks` is available.
 async fn with_webcrypto_init_lock<F, Fut>(op: F) -> Result<WalletAccount, String>
 where
     F: FnOnce() -> Fut + 'static,
@@ -203,6 +218,7 @@ where
     with_webcrypto_init_lock_on(maybe_locks, op).await
 }
 
+/// Run `op` using the provided `navigator.locks` handle, falling back to direct execution if unavailable.
 async fn with_webcrypto_init_lock_on<F, Fut>(
     maybe_locks: Option<JsValue>,
     op: F,
@@ -251,6 +267,7 @@ where
         .map_err(|_| "WebCrypto initialization lock released before result".to_string())?
 }
 
+/// Load a verified persisted WebCrypto keypair or atomically generate and persist a fresh one.
 async fn connect_webcrypto_inner(subtle: JsValue) -> Result<WalletAccount, String> {
     let replace_corrupt_account = match inspect_persisted_webcrypto_account().await {
         Ok(PersistedWebCryptoState::Valid(stored)) => return Ok(stored),
@@ -288,6 +305,7 @@ async fn connect_webcrypto_inner(subtle: JsValue) -> Result<WalletAccount, Strin
     }
 }
 
+/// Generate a non-extractable WebCrypto P-256 keypair and export its uncompressed public key.
 async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, String> {
     let usages = Array::new();
     usages.push(&JsValue::from_str("sign"));
@@ -321,13 +339,18 @@ async fn generate_webcrypto_account(subtle: &JsValue) -> Result<WalletAccount, S
     })
 }
 
+/// RAII guard attaching `onsuccess`, `onerror`, and `onblocked` listeners to an `IDBRequest`.
 struct IdbRequestWatch {
+    /// Underlying `IDBRequest` JS object.
     request: JsValue,
+    /// Retained event handler closures cleared on drop.
     _handlers: [Closure<dyn FnMut(Event)>; 3],
+    /// Oneshot receiver delivering the request result or error.
     receiver: oneshot::Receiver<Result<JsValue, String>>,
 }
 
 impl IdbRequestWatch {
+    /// Attach event listeners to `request` and return a watch handle.
     fn new(request: &JsValue) -> Self {
         let (sender, receiver) = oneshot::channel::<Result<JsValue, String>>();
         let outcome = Rc::new(RefCell::new(Some(sender)));
@@ -399,8 +422,11 @@ impl Drop for IdbRequestWatch {
     }
 }
 
+/// RAII guard clearing the `onupgradeneeded` handler on an `IDBOpenDBRequest`.
 struct IdbUpgradeWatch {
+    /// Underlying `IDBOpenDBRequest` JS object.
     open: JsValue,
+    /// Retained upgrade handler closure cleared on drop.
     _handler: Closure<dyn FnMut(Event)>,
 }
 
@@ -414,7 +440,9 @@ impl Drop for IdbUpgradeWatch {
     }
 }
 
+/// RAII guard closing an `IDBDatabase` handle when dropped.
 struct IdbDatabaseGuard {
+    /// Open `IDBDatabase` JS handle.
     db: JsValue,
 }
 
@@ -424,14 +452,20 @@ impl Drop for IdbDatabaseGuard {
     }
 }
 
+/// RAII guard tracking `oncomplete`, `onerror`, and `onabort` on an `IDBTransaction`.
 struct IdbTransactionWatch {
+    /// Underlying `IDBTransaction` JS object.
     transaction: JsValue,
+    /// Retained transaction lifecycle closures cleared on drop.
     _handlers: [Closure<dyn FnMut(Event)>; 3],
+    /// Oneshot receiver notified when the transaction completes, errors, or aborts.
     receiver: oneshot::Receiver<Result<(), String>>,
+    /// Whether the transaction has already settled, avoiding an unnecessary abort on drop.
     settled: bool,
 }
 
 impl IdbTransactionWatch {
+    /// Attach completion, error, and abort listeners to `transaction`.
     fn new(transaction: &JsValue) -> Self {
         let (sender, receiver) = oneshot::channel::<Result<(), String>>();
         let outcome = Rc::new(RefCell::new(Some(sender)));
@@ -486,6 +520,7 @@ impl IdbTransactionWatch {
         }
     }
 
+    /// Await the transaction's commit or failure outcome.
     async fn committed(mut self) -> Result<(), String> {
         let result = (&mut self.receiver)
             .await
@@ -518,6 +553,7 @@ impl Drop for IdbTransactionWatch {
     }
 }
 
+/// Open (and initialize if needed) the IndexedDB database storing the WebCrypto keypair.
 async fn open_webcrypto_idb() -> Result<JsValue, String> {
     let factory = js_global_prop("indexedDB")?;
     if factory.is_undefined() || factory.is_null() {
@@ -563,6 +599,7 @@ async fn open_webcrypto_idb() -> Result<JsValue, String> {
     await_idb_request(&open).await
 }
 
+/// Await an `IDBRequest` until it succeeds, errors, or is blocked.
 async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
     let mut watch = IdbRequestWatch::new(request);
     (&mut watch.receiver)
@@ -570,17 +607,28 @@ async fn await_idb_request(request: &JsValue) -> Result<JsValue, String> {
         .map_err(|_| "IndexedDB request dropped before settling".to_string())?
 }
 
+/// Inspection result for the persisted WebCrypto identity slot in IndexedDB.
 enum PersistedWebCryptoState {
+    /// A persisted record exists and passed signature verification.
     Valid(WalletAccount),
+    /// No record is currently stored at [`WEBCRYPTO_IDB_PRIMARY_KEY`].
     Absent,
-    Corrupt { raw_account: Option<String> },
+    /// A record exists but failed validation or signing verification.
+    Corrupt {
+        /// Raw `account` string read from the corrupt record, if present.
+        raw_account: Option<String>,
+    },
 }
 
+/// Result of an atomic compare-and-initialize IndexedDB transaction.
 enum AtomicWebCryptoInitOutcome {
+    /// The newly generated candidate keypair was written to IndexedDB.
     WroteCandidate,
+    /// Another tab or writer already populated the slot; carries the existing JS record.
     FoundExisting(JsValue),
 }
 
+/// Validate a persisted WebCrypto IndexedDB record by signing and verifying a probe message.
 async fn verify_persisted_webcrypto_record(record: &JsValue) -> Result<WalletAccount, String> {
     let account = js_string_field(record, "account")?;
     let private_key = js_prop(record, "privateKey")?;
@@ -603,6 +651,7 @@ async fn verify_persisted_webcrypto_record(record: &JsValue) -> Result<WalletAcc
     Ok(candidate)
 }
 
+/// Read and verify the persisted WebCrypto identity record from IndexedDB.
 async fn inspect_persisted_webcrypto_account() -> Result<PersistedWebCryptoState, String> {
     let record = {
         let db = IdbDatabaseGuard {
@@ -643,11 +692,16 @@ async fn load_persisted_webcrypto_account() -> Result<Option<WalletAccount>, Str
     }
 }
 
+/// Shared slot retaining the optional `put` request and its success/error closures during atomic init.
 type IdbPutHandlerSlot = Rc<RefCell<Option<(JsValue, [Closure<dyn FnMut(Event)>; 2])>>>;
 
+/// RAII guard clearing `get` and `put` request listeners created during atomic WebCrypto initialization.
 struct IdbAtomicInitWatch {
+    /// Initial `IDBRequest` returned by `objectStore.get`.
     get_req: JsValue,
+    /// Retained success and error closures for `get_req`.
     _get_handlers: [Closure<dyn FnMut(Event)>; 2],
+    /// Optional `objectStore.put` request and its closures, populated if a write was issued.
     put_holder: IdbPutHandlerSlot,
 }
 
@@ -855,6 +909,7 @@ async fn persist_webcrypto_account(account: &WalletAccount) -> Result<(), String
     commit.committed().await
 }
 
+/// Sign a delegation `proof` using the WebCrypto P-256 `private_key` and normalize to low-S.
 async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
     let crypto = js_global_prop("crypto")?;
     let subtle = js_prop(&crypto, "subtle")?;
@@ -875,12 +930,14 @@ async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, S
     normalize_webcrypto_signature(Uint8Array::new(&signature).to_vec())
 }
 
+/// Normalize a raw WebCrypto ECDSA P-256 signature to canonical low-S form.
 fn normalize_webcrypto_signature(signature: Vec<u8>) -> Result<Vec<u8>, String> {
     secp256r1::normalize_signature(&signature)
         .map(|signature| signature.to_vec())
         .map_err(|error| format!("wallet returned an invalid secp256r1 signature: {error}"))
 }
 
+/// Connect an Ethereum EIP-191 account via the extension bridge or an injected EIP-1193 provider.
 async fn connect_eip191() -> Result<WalletAccount, String> {
     if let Some(bridge) = extension_wallet_bridge() {
         return connect_extension_wallet(&bridge, WalletKind::EthereumEip191, "eip191", "eip191")
@@ -909,6 +966,7 @@ async fn connect_eip191() -> Result<WalletAccount, String> {
     })
 }
 
+/// Sign `proof` using Ethereum `personal_sign` or the extension wallet bridge.
 async fn sign_eip191(ethereum: &JsValue, account: &str, proof: &str) -> Result<Vec<u8>, String> {
     if is_extension_wallet_bridge(ethereum) {
         let signed = sign_extension_wallet(ethereum, "eip191", proof, Some(account)).await?;
@@ -929,6 +987,7 @@ async fn sign_eip191(ethereum: &JsValue, account: &str, proof: &str) -> Result<V
     hex_to_bytes(&signature)
 }
 
+/// Locate an injected Solana wallet provider (`window.phantom.solana` or `window.solana`).
 fn solana_provider() -> Result<JsValue, String> {
     let phantom = js_global_prop("phantom").unwrap_or(JsValue::UNDEFINED);
     let nested = if phantom.is_undefined() || phantom.is_null() {
@@ -947,6 +1006,7 @@ fn solana_provider() -> Result<JsValue, String> {
     }
 }
 
+/// Connect a Solana Ed25519 account via the extension bridge or an injected Solana provider.
 async fn connect_ed25519() -> Result<WalletAccount, String> {
     if let Some(bridge) = extension_wallet_bridge() {
         return connect_extension_wallet(&bridge, WalletKind::SolanaEd25519, "ed25519", "ed25519")
@@ -967,6 +1027,7 @@ async fn connect_ed25519() -> Result<WalletAccount, String> {
     })
 }
 
+/// Sign `proof` using Solana `signMessage` or the extension wallet bridge.
 async fn sign_ed25519(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
     if is_extension_wallet_bridge(provider) {
         let signed = sign_extension_wallet(provider, "ed25519", proof, None).await?;
@@ -992,6 +1053,7 @@ async fn sign_ed25519(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String
     ed25519_signature_bytes(&signature)
 }
 
+/// Convert an Ed25519 signature returned as base58, numeric array, or `Uint8Array` into bytes.
 fn ed25519_signature_bytes(signature: &JsValue) -> Result<Vec<u8>, String> {
     if let Some(value) = signature.as_string() {
         return value
@@ -1016,6 +1078,7 @@ fn ed25519_signature_bytes(signature: &JsValue) -> Result<Vec<u8>, String> {
     Ok(Uint8Array::new(signature).to_vec())
 }
 
+/// Return the global extension wallet bridge object if present and callable.
 fn extension_wallet_bridge() -> Option<JsValue> {
     let bridge = js_global_prop(EXTENSION_WALLET_BRIDGE).ok()?;
     if bridge.is_undefined() || bridge.is_null() || !is_extension_wallet_bridge(&bridge) {
@@ -1024,10 +1087,12 @@ fn extension_wallet_bridge() -> Option<JsValue> {
     Some(bridge)
 }
 
+/// Return `true` when `value` exposes callable `connect` and `sign` bridge methods.
 fn is_extension_wallet_bridge(value: &JsValue) -> bool {
     is_callable(value, "connect") && is_callable(value, "sign")
 }
 
+/// Connect a wallet account through the MV3 extension wallet bridge.
 async fn connect_extension_wallet(
     bridge: &JsValue,
     kind: WalletKind,
@@ -1046,6 +1111,7 @@ async fn connect_extension_wallet(
     })
 }
 
+/// Request a signature from the MV3 extension wallet bridge.
 async fn sign_extension_wallet(
     bridge: &JsValue,
     wallet: &str,

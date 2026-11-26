@@ -163,6 +163,7 @@ impl FromStr for IceServer {
     }
 }
 
+/// Strip `pubkey` parameters and canonicalize `transport` query values on an ICE server URI.
 fn normalize_ice_query(raw_query: Option<&str>) -> String {
     let Some(raw_query) = raw_query else {
         return String::new();

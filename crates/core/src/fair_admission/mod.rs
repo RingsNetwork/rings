@@ -6,10 +6,12 @@
 //! memory budget, or wait in resource order ([`ResourceOrderedQueue`]), first
 //! come first served per exhausted resource.
 
+/// Per-class reserved capacity accounting and admission checks.
 mod capacity;
 mod resource_order;
 mod slot_accounting;
 mod slot_roster;
+/// Bounded FIFO wait queue and waiter budget accounting.
 mod wait_queue;
 mod waitlist;
 

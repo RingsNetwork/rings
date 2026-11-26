@@ -212,6 +212,7 @@ pub enum RelayEffect<T> {
 /// used for admission, ownership checks, and duplicate-`Open` rejection.
 #[derive(Clone)]
 pub struct RelayState<T> {
+    /// Registered local service names mapped to their backend targets.
     services: Arc<HashMap<String, T>>,
     /// Persistent live-session index. Cloning a pure state for a data-frame transition is O(1);
     /// session lifecycle steps copy on write.
@@ -243,10 +244,12 @@ impl<T> Default for RelayState<T> {
 }
 
 impl<T> RelayState<T> {
+    /// Returns `true` if the session quota allows admitting another session for `key.peer`.
     fn can_admit_session(&self, key: &SessionKey) -> bool {
         self.session_quota.can_reserve(key.peer).is_ok()
     }
 
+    /// Inserts `key` into the live session set if absent and within per-peer/global quota.
     fn insert_session(&mut self, key: SessionKey) -> bool {
         if self.sessions.contains(&key) {
             return false;
@@ -267,6 +270,7 @@ impl<T> RelayState<T> {
         }
     }
 
+    /// Removes `key` from the live session set and releases its quota slot.
     fn remove_session(&mut self, key: &SessionKey) -> bool {
         if !self.sessions.contains(key) {
             return false;
@@ -284,7 +288,9 @@ impl<T> RelayState<T> {
 /// Transport relay protocol (server side), generic over the service target `T`.
 #[derive(Clone)]
 pub struct Relay<T> {
+    /// Extension namespace (`tcp` or `udp`) for this relay instance.
     namespace: String,
+    /// Transport kind handled by this relay instance.
     kind: TransportKind,
     /// Target type carried by the protocol algebra. Runtime registration is the sole source of
     /// service mappings, so construction owns no second map.
@@ -567,7 +573,9 @@ pub(crate) fn close_frame(
 /// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
 /// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
 pub(crate) struct NativeRelay {
+    /// Shared OS-socket relay session engine.
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
+    /// Bounded off-gate outbox for terminal control frames.
     control_outbox: ControlOutbox,
 }
 
@@ -710,8 +718,11 @@ fn enqueue_feedback<T: Serialize>(
 /// can only act within it, so the handle cannot address an arbitrary namespace even internally.
 #[derive(Clone)]
 pub struct RelayHandle {
+    /// Shared OS-socket relay session engine.
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
+    /// Namespace-scoped capability confined to the `tcp` relay protocol.
     tcp: Scope,
+    /// Namespace-scoped capability confined to the `udp` relay protocol.
     udp: Scope,
 }
 
@@ -800,6 +811,7 @@ impl RelayHandle {
             .await
     }
 
+    /// Binds a local tunnel listener on `local_addr` under `scope` for `peer`'s `service`.
     async fn open_tunnel(
         &self,
         scope: &Scope,

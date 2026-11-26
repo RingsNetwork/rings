@@ -11,6 +11,7 @@ mod cancellation;
 mod finger;
 /// The signaling state of a pending attempt (#947).
 mod handshake;
+/// Per-peer connection lifecycle registry and capacity bounds.
 mod registry;
 
 #[cfg(all(test, feature = "dummy"))]
@@ -95,10 +96,12 @@ pub(super) struct ConnectionLifecycleBoundary {
 /// boundary (an announcement, a retirement under an already held boundary) takes it by
 /// reference, so the compiler checks the precondition.
 pub(super) struct LifecycleHeld<'boundary> {
+    /// Held mutex guard keeping the connection lifecycle boundary locked.
     _guard: std::sync::MutexGuard<'boundary, ()>,
 }
 
 impl ConnectionLifecycleBoundary {
+    /// Create a new unlocked lifecycle boundary with a fresh transition epoch.
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(())),
@@ -161,6 +164,7 @@ pub(crate) struct PendingConnectionAttempt {
 }
 
 impl PendingConnectionAttempt {
+    /// Return the peer DID associated with this connection attempt.
     pub(crate) fn peer(self) -> Did {
         self.peer
     }
@@ -170,11 +174,13 @@ impl PendingConnectionAttempt {
         self.peer == peer
     }
 
+    /// Return the monotonic per-peer generation number of this attempt.
     pub(crate) const fn generation(self) -> u64 {
         self.generation
     }
 }
 
+/// Ownership classification of a backend raw connection relative to the lifecycle registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RawConnectionOwner {
     /// Raw transport belongs to a still-unadmitted logical attempt.
@@ -205,10 +211,12 @@ pub(super) struct PendingTransportConnection {
 }
 
 impl PendingTransportConnection {
+    /// Return the pending connection attempt token owning this transport.
     pub(super) fn attempt(&self) -> PendingConnectionAttempt {
         self.attempt
     }
 
+    /// Return a reference to the underlying raw transport connection.
     pub(super) fn connection(&self) -> &SwarmConnection {
         &self.connection
     }
@@ -224,6 +232,7 @@ impl PendingTransportConnection {
 }
 
 impl SwarmTransport {
+    /// Acquire the connection lifecycle boundary lock.
     fn connection_lifecycle(&self) -> Result<LifecycleHeld<'_>> {
         self.connection_lifecycle.lock()
     }
@@ -262,10 +271,12 @@ impl SwarmTransport {
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
+    /// Snapshot the set of currently active peer connection generations.
     pub(super) fn active_connections(&self) -> Result<ActiveConnectionSet> {
         Ok(self.peer_lifecycles()?.active_connections())
     }
 
+    /// Lock the map of deferred finger-table proofs owned by pending generations.
     fn pending_finger_updates(&self) -> Result<PendingFingerUpdatesGuard<'_>> {
         self.pending_finger_updates
             .lock()
@@ -309,6 +320,7 @@ impl SwarmTransport {
             .map_err(Error::Transport)
     }
 
+    /// Look up the raw backend transport connection for `peer`, if one exists.
     pub(super) fn get_raw_connection(&self, peer: Did) -> Option<SwarmConnection> {
         self.transport
             .dyn_connection(&peer.to_string())
@@ -321,6 +333,7 @@ impl SwarmTransport {
             .ok()
     }
 
+    /// Classify who currently owns any backend raw connection slot for `peer`.
     pub(super) fn raw_connection_owner(&self, peer: Did) -> Result<RawConnectionOwner> {
         Ok(match self.peer_lifecycles()?.state(peer) {
             Some(PeerSlotLifecycle::Pending { attempt, .. }) => {
@@ -448,10 +461,12 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.pending_attempt(peer))
     }
 
+    /// Return `peer`'s current unadmitted (pending or admitting) attempt, if any.
     pub(crate) fn unadmitted_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
         Ok(self.peer_lifecycles()?.unadmitted_attempt(peer))
     }
 
+    /// Return `peer`'s current active connection attempt, if any.
     pub(crate) fn active_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
         Ok(self.peer_lifecycles()?.active_attempt(peer))
     }
@@ -502,6 +517,7 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.admitting_attempt(attempt.peer) == Some(attempt))
     }
 
+    /// Return whether `attempt` is still the current lifecycle record for its peer in any phase.
     pub(crate) fn is_current_connection_attempt(
         &self,
         attempt: PendingConnectionAttempt,
@@ -836,6 +852,7 @@ impl SwarmTransport {
         }
     }
 
+    /// Allocate a backend transport connection for `attempt` and attach `callback` to it.
     async fn create_pending_transport_connection(
         &self,
         attempt: PendingConnectionAttempt,

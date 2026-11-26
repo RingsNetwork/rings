@@ -1,6 +1,7 @@
 use super::rule;
 use super::Theme;
 
+/// Appends topology shell and Chord ring SVG theme rules to `css`.
 pub(super) fn append(css: &mut String, theme: Theme) {
     append_warm_topology_rules(css, ".topology-shell .topology", theme);
     rule(css, ".topology-shell .topology,.topology-shell .chord-topology", &[("border-color", theme.line_strong), ("background", "radial-gradient(circle at 50% 50%, rgba(180, 35, 24, 0.05), transparent 18%), linear-gradient(90deg, rgba(122, 87, 46, 0.055) 1px, transparent 1px), linear-gradient(180deg, rgba(122, 87, 46, 0.045) 1px, transparent 1px), rgba(255, 246, 230, 0.34)"), ("background-size", "auto, 28px 28px, 28px 28px, auto"), ("box-shadow", "inset 0 0 34px rgba(112, 84, 48, 0.04)")]);
@@ -10,6 +11,7 @@ pub(super) fn append(css: &mut String, theme: Theme) {
     )]);
 }
 
+/// Appends warm-palette SVG stroke and fill rules scoped under `selector`.
 fn append_warm_topology_rules(css: &mut String, selector: &str, theme: Theme) {
     rule(css, &format!("{selector} .orbit"), &[(
         "stroke",

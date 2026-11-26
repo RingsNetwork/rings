@@ -44,6 +44,7 @@ impl GatewayHeader {
     }
 }
 
+/// Return whether `byte` is an RFC 9110 HTTP token character (`tchar`).
 fn is_rfc9110_tchar(byte: u8) -> bool {
     byte.is_ascii_alphanumeric()
         || matches!(

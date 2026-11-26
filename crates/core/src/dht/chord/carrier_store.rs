@@ -137,7 +137,9 @@ fn stable_at(version: &EntryVersion) -> u128 {
         .saturating_add(TS_OFFSET_TOLERANCE_MS)
 }
 
+/// Synthetic element digest used to account for the co-register floor slot.
 const CO_REGISTER_DIGEST: ElementDigest = ElementDigest(*b"rings-core:co-register-floor\0\0\0\0");
+/// Synthetic element digest used to account for the data proof bundle slot.
 const PROOF_BUNDLE_DIGEST: ElementDigest = ElementDigest(*b"rings-core:data-proof-bundle\0\0\0\0");
 
 impl RemovalRecord {

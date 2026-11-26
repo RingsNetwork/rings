@@ -108,6 +108,7 @@ pub fn decode_next_server_frame(buf: &mut BytesMut) -> Result<Option<OnionUdpSer
     Ok(Some(frame))
 }
 
+/// Serialize `value` and prefix it with its big-endian 4-byte length.
 fn encode_length_prefixed<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     let body = rings_codec::serialize(value).map_err(|_| Error::InvalidData)?;
     if body.is_empty() || body.len() > MAX_ONION_UDP_FRAME_BYTES {
@@ -120,6 +121,7 @@ fn encode_length_prefixed<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(framed)
 }
 
+/// Decode the next length-prefixed frame from `buf`, returning `Ok(None)` if incomplete.
 fn decode_next_length_prefixed<T: for<'de> Deserialize<'de>>(
     buf: &mut BytesMut,
 ) -> Result<Option<T>> {

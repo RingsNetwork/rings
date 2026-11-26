@@ -130,8 +130,11 @@ pub trait MailDrop: MaybeSendSync {
 
 /// The gateway over a node's DHT, signing manifests with the node's authority.
 pub struct MailGateway {
+    /// Node processor used to query descriptors and write sealed mail entries to the DHT.
     processor: Arc<Processor>,
+    /// Clock used to evaluate descriptor liveness and stamp delivery metadata.
     clock: SharedClock,
+    /// Random number generator used when sealing mail envelopes.
     rng: SharedRng,
 }
 

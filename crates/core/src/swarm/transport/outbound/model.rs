@@ -5,9 +5,12 @@ use std::slice::IterMut;
 pub(in crate::swarm::transport) use crate::message::MessageCategory as TransferClass;
 pub(in crate::swarm::transport) use crate::message::MessageKind as OutboundMessageKind;
 
+/// Whether an outbound send completes after first-frame admission or waits for full delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::swarm::transport) enum OutboundCompletion {
+    /// Complete once the first frame is admitted; remaining frames finish asynchronously.
     Detached,
+    /// Wait for the entire transfer to finish before reporting completion to the caller.
     Tracked,
 }
 

@@ -1,5 +1,7 @@
 //! rings rpc library
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 /// Error types used by the RPC client and handlers.
 pub mod error;

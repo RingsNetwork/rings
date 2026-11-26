@@ -11,23 +11,33 @@ use crate::url::GatewayPrefix;
 /// JavaScript bootstrap template marker used by tests and consumers.
 pub const BOOTSTRAP_MARKER: &str = "__ringsWebviewGateway";
 
+/// Bundled browser runtime shim injected into controlled pages.
 const BROWSER_RUNTIME: &str = include_str!("../browser_runtime.mjs");
+/// Bundled URL and attribute transform helpers shared with the browser runtime.
 const BROWSER_TRANSFORMS: &str = include_str!("../browser_runtime_transforms.mjs");
 
 /// Typed configuration consumed by the browser runtime asset.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BrowserBootstrapConfig<'a> {
+    /// Gateway route prefix used to rewrite runtime URLs.
     prefix: &'a str,
+    /// Target document base URL used to resolve relative references.
     target_base: &'a str,
+    /// Global marker property set once the bootstrap has initialized.
     marker: &'a str,
+    /// Whether `Worker` and `SharedWorker` constructors should be blocked outright.
     block_workers: bool,
+    /// Whether top-level navigation should be delegated to an extension host bridge.
     delegate_navigation: bool,
 }
 
+/// Host environment governing worker blocking and navigation delegation in the bootstrap script.
 #[derive(Clone, Copy)]
 enum BrowserHostPolicy {
+    /// Standard web/sandbox host where workers are blocked.
     Web,
+    /// Browser extension host providing fail-closed navigation and worker bridges.
     Extension,
 }
 
@@ -50,6 +60,7 @@ pub fn bootstrap_script_with_extension_bridge(gateway_prefix: &str, document_url
     bootstrap_script_with_policy(gateway_prefix, document_url, BrowserHostPolicy::Extension)
 }
 
+/// Assemble the full bootstrap script for `gateway_prefix`, `document_url`, and `host_policy`.
 fn bootstrap_script_with_policy(
     gateway_prefix: &str,
     document_url: &Url,

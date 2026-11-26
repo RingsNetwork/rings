@@ -212,7 +212,9 @@ impl RouteEntropy for rings_core::utils::SharedRng {
 /// that each rejection is reported with its cause.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionRouteCandidates {
+    /// Validated live relay hop candidates (excluding the local node).
     pub(in crate::onion) relays: Vec<OnionRouteHop>,
+    /// Validated live exit descriptors for the requested service (excluding the local node).
     pub(in crate::onion) exits: Vec<OnionExitDescriptor>,
 }
 

@@ -52,9 +52,13 @@ const MIN_UDP_PAYLOAD: u16 = 512;
 pub struct DnsAuthority<D>
 where D: Directory
 {
+    /// Delegated DNS zones served by this authority.
     zones: Arc<Zones>,
+    /// Positive and negative answer TTL configuration.
     ttl: AnswerTtl,
+    /// Registry mapping owners to deterministic IPv6 addresses.
     registry: Arc<AddressRegistry<D::Owner>>,
+    /// Directory queried for owner announcements.
     directory: Arc<D>,
 }
 

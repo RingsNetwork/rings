@@ -10,7 +10,9 @@ use serde::Serialize;
 
 use crate::ConfigError;
 
+/// Minimum valid IPv4 MTU (RFC 791).
 const MIN_IPV4_MTU: u32 = 576;
+/// Maximum valid IPv4 packet length in bytes.
 const MAX_IPV4_PACKET: u32 = 65_535;
 /// Minimum link MTU every IPv6 link must carry (RFC 8200 §5). A tunnel sized to it fits any
 /// underlay a node can run on, so it is the MTU a generated plan starts from.
@@ -19,10 +21,13 @@ const IPV6_MINIMUM_LINK_MTU: u16 = 1_280;
 /// address space of RFC 6598 (`100.64.0.0/10`), reserved for carrier-grade NAT, so it collides
 /// neither with the RFC 1918 ranges that LANs and VPNs assign from nor with public unicast space.
 const DEFAULT_INTERFACE_ADDRESS: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 1);
+/// Hard upper bound on concurrently live TCP flows permitted by configuration.
 pub(crate) const MAX_GATEWAY_FLOWS: usize = 16_384;
+/// Maximum per-flow TCP buffer size permitted by configuration (1 MiB).
 const MAX_TCP_BUFFER_BYTES: usize = 1_024 * 1_024;
-// smoltcp receive/transmit buffers plus the two directions of Tokio's duplex bridge.
+/// Multiplier accounting for smoltcp RX/TX buffers plus both directions of the Tokio duplex bridge.
 const FLOW_BUFFER_ALLOCATION_FACTOR: usize = 4;
+/// Hard ceiling on aggregate worst-case flow buffer memory across all live flows (1 GiB).
 const MAX_TOTAL_FLOW_BUFFER_BYTES: usize = 1_024 * 1_024 * 1_024;
 
 /// A validated interface MTU.
@@ -153,6 +158,7 @@ impl GatewayPlan {
         Ok(())
     }
 
+    /// Reject any IPv6 interface address or included route.
     fn validate_ipv4_only(&self) -> Result<(), ConfigError> {
         self.addresses
             .iter()
@@ -165,6 +171,7 @@ impl GatewayPlan {
     }
 }
 
+/// Return whether the union of IPv4 networks in `routes` covers the entire `0.0.0.0/0` space.
 fn captures_entire_ipv4_space(routes: &[IpNet]) -> bool {
     let mut ranges = routes
         .iter()
@@ -209,18 +216,22 @@ pub struct GatewayConfig {
     pub tcp_buffer_bytes: usize,
 }
 
+/// Default maximum number of concurrently live TCP flows.
 const fn default_max_flows() -> usize {
     1_024
 }
 
+/// Default per-flow idle timeout duration (5 minutes).
 const fn default_flow_idle_timeout() -> Duration {
     Duration::from_secs(300)
 }
 
+/// Default per-flow TCP buffer size in bytes (64 KiB).
 const fn default_tcp_buffer_bytes() -> usize {
     64 * 1_024
 }
 
+/// Serde adapter encoding `Duration` values as whole seconds.
 mod duration_seconds {
     use std::time::Duration;
 
@@ -228,11 +239,13 @@ mod duration_seconds {
     use serde::Deserializer;
     use serde::Serializer;
 
+    /// Serialize `value` as whole seconds.
     pub fn serialize<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
         serializer.serialize_u64(value.as_secs())
     }
 
+    /// Deserialize a whole-second integer into a `Duration`.
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where D: Deserializer<'de> {
         u64::deserialize(deserializer).map(Duration::from_secs)

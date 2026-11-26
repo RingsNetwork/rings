@@ -69,11 +69,17 @@ impl GatewayState {
 ///
 /// IO, clocks, packet parsing, and platform operations remain outside this type.
 pub struct GatewayServer {
+    /// Validated runtime configuration and tunnel plan.
     config: GatewayConfig,
+    /// Current lifecycle state of the gateway.
     state: GatewayState,
+    /// Bounded table of concurrently live TCP flows.
     flows: FlowTable,
+    /// Platform-assigned interface name while active, if established.
     interface: Option<String>,
+    /// Latest exit-peer health observation.
     exit: ExitObservation,
+    /// Most recent reason all live flows were reset, if any.
     last_flow_reset: Option<FlowResetReason>,
 }
 

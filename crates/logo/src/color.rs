@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::model::GearModel;
 
+/// Number of discrete steps on the OKLCH lightness search grid.
 const LIGHTNESS_STEPS: u32 = 10_000;
 
 /// A palette construction failure.
@@ -32,11 +33,14 @@ impl Error for ColorError {}
 /// Whether paint is constrained against white or black.
 #[derive(Clone, Copy, Debug)]
 enum Ground {
+    /// White background reference (luminance 1.0).
     Light,
+    /// Black background reference (luminance 0.0).
     Dark,
 }
 
 impl Ground {
+    /// Returns the relative luminance of this background reference.
     const fn luminance(self) -> f64 {
         match self {
             Self::Light => 1.0,
@@ -48,32 +52,45 @@ impl Ground {
 /// A solved palette role and its reproducible color coordinates.
 #[derive(Clone, Debug)]
 pub(crate) struct Paint {
+    /// Quantized lowercase hexadecimal sRGB color string.
     pub(crate) hex: String,
+    /// Solved OKLCH lightness coordinate in `[0, 1]`.
     pub(crate) lightness: f64,
+    /// OKLCH chroma coordinate.
     pub(crate) chroma: f64,
+    /// OKLCH hue angle in degrees.
     pub(crate) hue: f64,
+    /// Achieved WCAG contrast ratio against the target ground.
     pub(crate) contrast: f64,
+    /// Minimum required WCAG contrast ratio for this role.
     pub(crate) target_contrast: f64,
 }
 
 /// Four semantic colors derived from the construction counts.
 #[derive(Clone, Debug)]
 pub(crate) struct Palette {
+    /// High-contrast neutral color for primary mechanical outlines.
     pub(crate) primary: Paint,
+    /// Warm accent color for gear fill, bores, and central glyph.
     pub(crate) accent: Paint,
+    /// Complementary signal color for bore center markers.
     pub(crate) signal: Paint,
+    /// Low-chroma color for geometric construction guides.
     pub(crate) guide: Paint,
 }
 
 impl Palette {
+    /// Solves the semantic palette for a light background.
     pub(crate) fn light(model: &GearModel) -> Result<Self, ColorError> {
         Self::solve(model, Ground::Light)
     }
 
+    /// Solves the semantic palette for a dark background.
     pub(crate) fn dark(model: &GearModel) -> Result<Self, ColorError> {
         Self::solve(model, Ground::Dark)
     }
 
+    /// Derives hues and chromas from `model` and solves each role against `ground`.
     fn solve(model: &GearModel, ground: Ground) -> Result<Self, ColorError> {
         let teeth = f64::from(model.spec.teeth);
         let holes = f64::from(model.spec.hole_count);
@@ -93,6 +110,7 @@ impl Palette {
     }
 }
 
+/// Searches the discrete lightness grid for the first OKLCH color meeting `target_contrast`.
 fn solve_paint(
     role: &'static str,
     ground: Ground,
@@ -124,19 +142,25 @@ fn solve_paint(
     Err(ColorError::UnsatisfiedContrast(role))
 }
 
+/// An 8-bit per channel sRGB color.
 #[derive(Clone, Copy, Debug)]
 struct Srgb {
+    /// Red channel value.
     red: u8,
+    /// Green channel value.
     green: u8,
+    /// Blue channel value.
     blue: u8,
 }
 
 impl Srgb {
+    /// Formats this color as a lowercase `#rrggbb` string.
     fn hex(self) -> String {
         format!("#{:02x}{:02x}{:02x}", self.red, self.green, self.blue)
     }
 }
 
+/// Converts OKLCH coordinates to a clamped 8-bit sRGB color.
 fn oklch_to_srgb(lightness: f64, chroma: f64, hue_degrees: f64) -> Srgb {
     let hue = hue_degrees.to_radians();
     let a = chroma * hue.cos();
@@ -155,6 +179,7 @@ fn oklch_to_srgb(lightness: f64, chroma: f64, hue_degrees: f64) -> Srgb {
     }
 }
 
+/// Applies sRGB gamma encoding and quantizes a linear channel to `u8`.
 fn encode_channel(linear: f64) -> u8 {
     let encoded = if linear <= 0.003_130_8 {
         12.92 * linear
@@ -164,12 +189,14 @@ fn encode_channel(linear: f64) -> u8 {
     (encoded.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
+/// Computes WCAG 2.x relative luminance for an sRGB color.
 fn relative_luminance(color: Srgb) -> f64 {
     0.2126 * decode_channel(color.red)
         + 0.7152 * decode_channel(color.green)
         + 0.0722 * decode_channel(color.blue)
 }
 
+/// Linearizes an 8-bit sRGB channel value.
 fn decode_channel(channel: u8) -> f64 {
     let encoded = f64::from(channel) / 255.0;
     if encoded <= 0.04045 {
@@ -179,6 +206,7 @@ fn decode_channel(channel: u8) -> f64 {
     }
 }
 
+/// Computes the WCAG contrast ratio between two relative luminances.
 fn contrast_ratio(first: f64, second: f64) -> f64 {
     let lighter = first.max(second);
     let darker = first.min(second);

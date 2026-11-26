@@ -204,7 +204,9 @@ impl DelaySampler {
 /// Retry schedule over every managed target: the phase machine keyed by target DID.
 #[derive(Debug)]
 pub(super) struct BootstrapSchedule {
+    /// Current retry phase for each managed bootstrap target DID.
     phases: BTreeMap<Did, TargetPhase>,
+    /// Seeded delay sampler producing burst and jittered slow retry intervals.
     delays: DelaySampler,
 }
 

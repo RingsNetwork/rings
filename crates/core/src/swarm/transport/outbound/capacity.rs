@@ -32,6 +32,7 @@ pub(in crate::swarm::transport) use view::PeerStamp;
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
 /// Slots unavailable to non-control transfers, so topology traffic can always enter the scheduler.
 pub(crate) const OUTBOUND_CONTROL_RESERVED_TRANSFERS: usize = 16;
+/// Minimum per-peer transfer slots reserved for each non-control transfer class.
 pub(super) const OUTBOUND_DATA_RESERVED_TRANSFERS: usize = 8;
 /// Per-class minimum transfer reservations preserved under shared-capacity borrowing.
 const OUTBOUND_TRANSFER_RESERVATIONS: [usize; TransferClass::COUNT] = [
@@ -56,7 +57,9 @@ pub(crate) const OUTBOUND_DATA_TRANSFER_CAPACITY: usize = limit(
 pub(super) const OUTBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Per-peer bytes unavailable to non-control traffic.
 pub(super) const OUTBOUND_PEER_CONTROL_RESERVED_BYTES: usize = 1024 * 1024;
+/// Minimum per-peer retained bytes reserved for each non-control transfer class.
 pub(super) const OUTBOUND_PEER_DATA_RESERVED_BYTES: usize = 1024 * 1024;
+/// Per-peer byte reservations indexed by transfer class.
 const OUTBOUND_PEER_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     retained_wire_bytes(OUTBOUND_PEER_CONTROL_RESERVED_BYTES),
     OUTBOUND_PEER_DATA_RESERVED_BYTES,
@@ -72,16 +75,21 @@ pub(crate) const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
 pub(crate) const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Global bytes unavailable to non-control traffic.
 const OUTBOUND_GLOBAL_CONTROL_RESERVED_BYTES: usize = 2 * 1024 * 1024;
+/// Minimum global retained bytes reserved for each non-control transfer class.
 const OUTBOUND_GLOBAL_DATA_RESERVED_BYTES: usize = 1024 * 1024;
+/// Maximum number of queued capacity waiters allowed across outbound admission queues.
 const OUTBOUND_PENDING_TRANSFER_CAPACITY: usize = OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+/// Global byte reservations indexed by transfer class.
 const OUTBOUND_GLOBAL_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_GLOBAL_CONTROL_RESERVED_BYTES,
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
 ];
+/// Zero-reservation table used when class reservation protection is disabled in simulation.
 const NO_RESERVATIONS: [usize; TransferClass::COUNT] = [0; TransferClass::COUNT];
 
+/// Return whether per-class capacity reservations are currently enforced.
 fn class_reservations_enabled() -> bool {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     {
@@ -93,6 +101,7 @@ fn class_reservations_enabled() -> bool {
     }
 }
 
+/// Return `reservations` when class reservations are enabled, or all zeros otherwise.
 fn active_reservations(
     reservations: &'static [usize; TransferClass::COUNT],
 ) -> &'static [usize; TransferClass::COUNT] {
@@ -103,6 +112,7 @@ fn active_reservations(
     }
 }
 
+/// Return the active per-peer transfer count reservations by class.
 fn transfer_reservations() -> &'static [usize; TransferClass::COUNT] {
     active_reservations(&OUTBOUND_TRANSFER_RESERVATIONS)
 }
@@ -373,14 +383,17 @@ impl ReservationState for GlobalCapacityState {
     }
 }
 
+/// Node-wide outbound byte capacity shared across all peers.
 pub(super) struct GlobalTransferCapacity {
     /// The node's scope. Every transfer holds a global permit, so its `releases` counts every
     /// transfer's release of its peer and global capacity.
     scope: ScopedCapacity<GlobalCapacityState>,
+    /// Shared budget bounding queued capacity waiters across peer and global queues.
     wait_budget: Arc<FairWaitBudget>,
 }
 
 impl GlobalTransferCapacity {
+    /// Create a fresh node-wide outbound transfer capacity tracker.
     pub(super) fn new() -> Self {
         let wait_budget = Arc::new(FairWaitBudget::new(
             OUTBOUND_PENDING_TRANSFER_CAPACITY,
@@ -396,8 +409,10 @@ impl GlobalTransferCapacity {
     }
 }
 
+/// Per-peer outbound transfer count, byte reservations, and completed drain counter.
 #[derive(Clone, Copy)]
 struct PeerCapacityState {
+    /// Counted byte and transfer-slot reservations held for this peer.
     capacity: CountedReservedCapacity<{ TransferClass::COUNT }>,
     /// Transfers of the peer that reached its link and ended: the progress of the link.
     ///
@@ -408,6 +423,7 @@ struct PeerCapacityState {
 }
 
 impl PeerCapacityState {
+    /// Create an empty per-peer capacity state with zero admitted transfers and drains.
     const fn new() -> Self {
         Self {
             capacity: CountedReservedCapacity::new(),
@@ -462,10 +478,12 @@ impl ReservationState for PeerCapacityState {
     }
 }
 
+/// Per-peer outbound transfer capacity paired with the shared node-wide capacity.
 pub(super) struct TransferCapacity {
     /// This peer's scope; its `releases` advance after every release, a half reservation
     /// included.
     peer: ScopedCapacity<PeerCapacityState>,
+    /// Node-wide byte capacity backing every peer permit.
     global: Arc<GlobalTransferCapacity>,
     /// Notified after `PeerCapacityState::drained` grows
     /// ([`TransferCapacityPermit::release_after_progress`]). A transfer that never admitted a
@@ -479,6 +497,7 @@ pub(super) struct TransferCapacity {
 }
 
 impl TransferCapacity {
+    /// Create a per-peer capacity tracker linked to `global`.
     pub(super) fn new(global: Arc<GlobalTransferCapacity>) -> Self {
         let wait_budget = global.wait_budget.clone();
         Self {
@@ -545,6 +564,8 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit::held(peer_permit, global_permit))
     }
 
+    /// Acquire both peer and global capacity for a transfer of `class` and `bytes`, waiting in
+    /// the fair-wait queue when the class's fixed reservation does not cover it.
     pub(super) async fn acquire(
         self: &Arc<Self>,
         peer: Did,
@@ -620,6 +641,7 @@ impl TransferDemand {
 
 /// The outbound capacity one transfer holds until it ends, released when it drops.
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
+    /// Underlying peer/global reservation or sender-bounded token released on drop.
     _share: PermitShare,
 }
 
@@ -629,12 +651,17 @@ enum PermitShare {
     /// the global release, which advances `GlobalTransferCapacity::releases`, follows the peer
     /// release (what a rerouted placement waiting for room reads, #859).
     Held {
+        /// Per-peer transfer and byte reservation.
         _peer: PeerCapacityPermit,
+        /// Node-wide byte reservation.
         _global: GlobalCapacityPermit,
     },
     /// No shared capacity: a transfer its sender's own law bounds (see
     /// `outbound::sender_bounded`).
-    BoundedBySender { _transfer: SenderBoundedTransfer },
+    BoundedBySender {
+        /// Sender-bounded transfer slot released on drop.
+        _transfer: SenderBoundedTransfer,
+    },
 }
 
 impl TransferCapacityPermit {
@@ -691,8 +718,11 @@ enum LinkReach {
     Reached,
 }
 
+/// Guard releasing a single transfer's per-peer capacity reservation on drop.
 struct PeerCapacityPermit {
+    /// Peer capacity tracker from which this permit was reserved.
     capacity: Arc<TransferCapacity>,
+    /// Reserved class and byte demand to release on drop.
     demand: TransferDemand,
     /// Whether the release counts as the link's progress.
     reach: LinkReach,
@@ -715,8 +745,11 @@ impl Drop for PeerCapacityPermit {
     }
 }
 
+/// Guard releasing a single transfer's node-wide byte reservation on drop.
 struct GlobalCapacityPermit {
+    /// Global capacity tracker from which this permit was reserved.
     capacity: Arc<GlobalTransferCapacity>,
+    /// Reserved class and byte demand to release on drop.
     demand: TransferDemand,
 }
 
@@ -739,6 +772,7 @@ const fn limit(
     admissible_capacity(capacity, reservations, class.index())
 }
 
+/// Return the maximum number of concurrent transfers admissible for `class` on a peer.
 pub(super) fn transfer_limit(class: TransferClass) -> usize {
     limit(
         OUTBOUND_TRANSFER_QUEUE_CAPACITY,
@@ -760,6 +794,7 @@ const _: () = {
     assert_production_capacity(TransferClass::Application, maximum_payload_reservation);
 };
 
+/// Compile-time check that every class can admit at least one maximum-sized payload.
 const fn assert_production_capacity(class: TransferClass, maximum_payload_reservation: usize) {
     let peer_bytes = limit(
         OUTBOUND_PEER_BYTE_CAPACITY,
@@ -782,6 +817,7 @@ const fn assert_production_capacity(class: TransferClass, maximum_payload_reserv
     assert!(maximum_payload_reservation <= global_bytes);
 }
 
+/// Build an outbound memory capacity exceeded error for `peer`.
 fn memory_capacity_error(peer: Did, requested_bytes: usize, capacity_bytes: usize) -> Error {
     Error::OutboundTransferMemoryCapacityExceeded {
         peer,
@@ -790,6 +826,7 @@ fn memory_capacity_error(peer: Did, requested_bytes: usize, capacity_bytes: usiz
     }
 }
 
+/// Reject `demand` immediately if it exceeds the peer or global byte limit for its class.
 fn validate_memory_request(peer: Did, demand: TransferDemand) -> Result<()> {
     let bound = PeerCapacityState::byte_limit(demand.class)
         .min(GlobalCapacityState::byte_limit(demand.class));
@@ -802,10 +839,12 @@ fn validate_memory_request(peer: Did, demand: TransferDemand) -> Result<()> {
 /// A strong hold on a peer's [`TransferCapacity`]: the peer registry keeps only a `Weak`, so
 /// the capacity lives as long as some handle or permit anchors it.
 pub(super) struct TransferCapacityAnchor {
+    /// Strong reference keeping the peer's capacity tracker alive.
     _capacity: Arc<TransferCapacity>,
 }
 
 impl TransferCapacityAnchor {
+    /// Create a strong anchor for `capacity`.
     pub(super) fn new(capacity: Arc<TransferCapacity>) -> Self {
         Self {
             _capacity: capacity,

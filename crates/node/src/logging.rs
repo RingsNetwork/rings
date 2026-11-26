@@ -63,8 +63,11 @@ impl std::str::FromStr for LogLevel {
 /// Panic location
 #[derive(Debug, Clone)]
 pub struct PanicLocation {
+    /// Source file path where the panic occurred.
     file: String,
+    /// Source line number where the panic occurred.
     line: String,
+    /// Source column number where the panic occurred.
     column: String,
 }
 
@@ -84,8 +87,11 @@ where T: Into<Location<'a>>
 /// Necessary information for recording panic
 #[derive(Debug, Clone)]
 pub struct PanicData<'a> {
+    /// Panic hook metadata and payload message.
     message: &'a PanicHookInfo<'a>,
+    /// Formatted stack backtrace captured at the panic site.
     backtrace: String,
+    /// Source location of the panic, if reported by the runtime.
     location: Option<PanicLocation>,
 }
 
@@ -120,6 +126,7 @@ impl<'a> fmt::Display for PanicData<'a> {
     }
 }
 
+/// Formats and emits a panic hook event via `tracing::error!`.
 fn log_panic(panic: &PanicHookInfo) {
     let data: PanicData = panic.into();
     tracing::error!("{}", data)

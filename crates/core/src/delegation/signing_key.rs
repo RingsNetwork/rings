@@ -34,13 +34,18 @@ use crate::utils;
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(try_from = "UnverifiedDelegateeKey")]
 pub struct DelegateeKey {
+    /// Verified delegation authorizing `delegatee_secret_key` to act for the delegator.
     delegation: Delegation,
+    /// Delegatee's private key bound to `delegation.delegatee_did()`.
     delegatee_secret_key: SecretKey,
 }
 
+/// Raw deserialization helper validated via [`TryFrom`] before producing a [`DelegateeKey`].
 #[derive(Deserialize)]
 struct UnverifiedDelegateeKey {
+    /// Unverified delegation payload.
     delegation: Delegation,
+    /// Unverified delegatee secret key.
     delegatee_secret_key: SecretKey,
 }
 
@@ -62,6 +67,7 @@ impl FromStr for DelegateeKey {
 }
 
 impl DelegateeKey {
+    /// Construct a [`DelegateeKey`] directly from its parts without re-running verification.
     pub(super) const fn from_parts(
         delegation: Delegation,
         delegatee_secret_key: SecretKey,

@@ -208,6 +208,7 @@ pub enum Error {
     ChannelPoolEmpty,
 }
 
+/// Serialize a [`wasm_bindgen::JsValue`] into a JSON string for error formatting.
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 fn dump_js_value(v: &wasm_bindgen::JsValue) -> String {
     let Ok(s) = js_sys::JSON::stringify(v) else {

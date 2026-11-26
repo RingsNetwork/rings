@@ -13,7 +13,9 @@ use super::Instant;
 /// increments the process-wide slow-lock counters.
 pub const SLOW_ASYNC_LOCK_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Process-wide counter of async lock holds exceeding their slow-lock threshold.
 static SLOW_LOCK_HOLD_COUNT: AtomicU64 = AtomicU64::new(0);
+/// Process-wide counter of async lock waits exceeding their slow-lock threshold.
 static SLOW_LOCK_WAIT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Number of completed async lock holds that reached or exceeded their slow-hold threshold.
@@ -28,9 +30,13 @@ pub fn slow_lock_wait_count() -> u64 {
 
 /// Guard wrapping an async lock guard `G` to observe slow contention waits and long lock holds.
 pub struct SlowLockGuard<G> {
+    /// Underlying async lock guard being observed.
     guard: G,
+    /// Diagnostic lock label emitted in slow-lock warnings.
     name: &'static str,
+    /// Monotonic instant when the underlying lock was acquired.
     acquired_at: Instant,
+    /// Duration threshold above which a wait or hold triggers a warning.
     threshold: Duration,
 }
 

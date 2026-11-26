@@ -40,20 +40,35 @@ const STUN_BINDING_BAD_REQUEST_BODY: [u8; 8] = [
     0x00, 0x00, // reserved
     0x04, 0x00, // class = 4, number = 0 (400 Bad Request)
 ];
+/// Default port for plaintext `turn:` URLs.
 const DEFAULT_TURN_PORT: u16 = 3478;
+/// Default port for TLS `turns:` URLs.
 const DEFAULT_TURNS_PORT: u16 = 5349;
+/// Overall timeout for establishing a TURN TCP or TLS connection.
 const TURN_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Per-resolved-address connect timeout when trying multiple TURN TCP addresses.
 const TURN_TCP_PER_ADDR_CONNECT_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Timeout for reading the remaining body of a framed TURN TCP message.
 const TURN_TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for writing a framed TURN message onto the TCP stream.
 const TURN_TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for delivering a relayed packet back into the local virtual UDP socket.
 const TURN_TCP_LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(200);
+/// Poll interval while draining remaining outbound UDP packets during bridge shutdown.
 const TURN_TCP_UDP_DRAIN_POLL_TIMEOUT: Duration = Duration::from_millis(5);
+/// Maximum time [`TurnTcpBridgeGuard::shutdown`] waits for bridge tasks to drain before hard cancel.
 const TURN_TCP_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+/// Timeout for the loopback UDP probe in [`can_use_os_udp`].
 const OS_UDP_PROBE_TIMEOUT: Duration = Duration::from_millis(50);
+/// Maximum STUN/TURN frame buffer size handled by the local UDP bridge.
 const BRIDGE_UDP_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
+/// Maximum UDP payload length deliverable over an IPv4 loopback socket.
 const MAX_LOCAL_UDP_PAYLOAD_LEN: usize = 65_507;
+/// Bounded outbound packet queue capacity per TURN TCP bridge session.
 const SESSION_QUEUE_CAPACITY: usize = 256;
+/// Maximum concurrent local client sessions kept open by a single bridge task.
 const MAX_BRIDGE_SESSIONS: usize = 8;
+/// Maximum recent STUN transaction IDs cached for local error synthesis.
 const RECENT_STUN_TX_IDS_CAPACITY: usize = 32;
 
 /// Maximum TURN servers gathered per single `RTCPeerConnection` (#1316, #1317).
@@ -64,9 +79,11 @@ const RECENT_STUN_TX_IDS_CAPACITY: usize = 32;
 /// Mismatch` permission-refresh errors every 120s once their idle NAT mappings expire.
 const MAX_TURN_SERVERS_PER_CONNECTION: usize = 1;
 
+/// Global round-robin cursor selecting which TURN server is allocated per connection.
 static TURN_SERVER_ROUND_ROBIN: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+/// Cached result of probing whether OS UDP loopback sockets are usable.
 static CAN_USE_OS_UDP_CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 #[cfg(test)]
@@ -76,13 +93,18 @@ static FORCE_OS_UDP_BLOCKED: std::sync::atomic::AtomicBool =
 /// Guard that keeps any spawned TURN-over-TCP bridge tasks alive for the lifetime of a
 /// native `RTCPeerConnection` and drains queued outbound teardown frames before cancelling.
 pub(crate) struct TurnTcpBridgeGuard {
+    /// Cancellation token stopping inbound relayed packet injection during quiesce.
     inbound_cancel: CancellationToken,
+    /// Cancellation token signaling bridge tasks to drain outbound frames and exit.
     drain_cancel: CancellationToken,
+    /// Hard cancellation token aborting all remaining bridge I/O.
     cancel: CancellationToken,
+    /// Join handles for spawned bridge tasks.
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl TurnTcpBridgeGuard {
+    /// Construct a [`TurnTcpBridgeGuard`] managing `tasks` with the given cancellation tokens.
     fn new(
         inbound_cancel: CancellationToken,
         drain_cancel: CancellationToken,
@@ -128,17 +150,25 @@ impl Drop for TurnTcpBridgeGuard {
 /// Target endpoint for a TCP-based TURN or TURNS server.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct TurnTcpEndpoint {
+    /// Hostname or IP address of the TURN server.
     pub(crate) host: String,
+    /// TCP port of the TURN server.
     pub(crate) port: u16,
+    /// Whether to wrap the TCP connection in TLS (`turns:`).
     pub(crate) use_tls: bool,
 }
 
 /// Prepared ICE server configuration and optional virtual network for a native `RTCPeerConnection`.
 pub(crate) struct PreparedNativeIceConfig {
+    /// Selected `webrtc-rs` ICE server entries.
     pub(crate) ice_servers: Vec<RTCIceServer>,
+    /// Effective ICE transport policy (e.g. `All` or `Relay`).
     pub(crate) ice_transport_policy: RTCIceTransportPolicy,
+    /// Optional virtual network hosting local UDP sockets for TURN-over-TCP bridging.
     pub(crate) vnet: Option<Arc<Net>>,
+    /// Optional lifecycle guard for spawned TURN-over-TCP bridge tasks.
     pub(crate) bridge_guard: Option<TurnTcpBridgeGuard>,
+    /// Whether mDNS candidate gathering should be disabled on this peer connection.
     pub(crate) disable_mdns: bool,
 }
 
@@ -399,6 +429,7 @@ where R: AsyncRead + Unpin {
     .await
 }
 
+/// Probe whether the host OS permits loopback UDP sockets, caching positive results.
 async fn can_use_os_udp() -> bool {
     #[cfg(test)]
     if FORCE_OS_UDP_BLOCKED.load(std::sync::atomic::Ordering::SeqCst) {
@@ -432,6 +463,7 @@ async fn can_use_os_udp() -> bool {
     ok
 }
 
+/// Build a `rustls` [`TlsConnector`] configured with `webpki-roots` for TURNS connections.
 fn build_tls_connector() -> std::io::Result<TlsConnector> {
     let root_store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
@@ -446,8 +478,10 @@ fn build_tls_connector() -> std::io::Result<TlsConnector> {
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// Recent STUN transaction ID cache paired with optional cached credentials for bridge replies.
 type StunTxCache = Arc<SyncMutex<VecDeque<([u8; 12], Option<Vec<u8>>)>>>;
 
+/// Pump framed STUN/TURN traffic bidirectionally between `stream` and the local virtual UDP `bridge_conn`.
 async fn run_stream_io<S>(
     stream: S,
     mut outbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -585,6 +619,7 @@ async fn run_stream_io<S>(
     }
 }
 
+/// Resolve and connect to `endpoint` over TCP, skipping forbidden addresses and applying per-address timeouts.
 async fn connect_turn_tcp_endpoint(endpoint: &TurnTcpEndpoint) -> std::io::Result<TcpStream> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
         .await?
@@ -621,6 +656,7 @@ async fn connect_turn_tcp_endpoint(endpoint: &TurnTcpEndpoint) -> std::io::Resul
     }))
 }
 
+/// Connect one client TURN TCP/TLS session and run its bidirectional stream relay loop.
 async fn run_client_tcp_session(
     endpoint: TurnTcpEndpoint,
     outbound_rx: mpsc::Receiver<Vec<u8>>,
@@ -682,12 +718,17 @@ async fn run_client_tcp_session(
     }
 }
 
+/// Active per-client-address TURN TCP relay session tracked by [`spawn_turn_tcp_bridge`].
 struct BridgeSession {
+    /// Outbound packet sender feeding the session's TCP writer loop.
     tx: mpsc::Sender<Vec<u8>>,
+    /// Per-session cancellation token triggered on eviction or shutdown.
     cancel: CancellationToken,
+    /// Last timestamp this session forwarded a packet, used for LRU eviction.
     last_active: Instant,
 }
 
+/// Spawn a background bridge task multiplexing local virtual UDP sockets onto TCP/TLS sessions to `endpoint`.
 pub(crate) fn spawn_turn_tcp_bridge(
     bridge_conn: Arc<dyn Conn + Send + Sync>,
     endpoint: TurnTcpEndpoint,
@@ -836,6 +877,7 @@ pub(crate) fn select_ice_servers_with_cursor(
     select_ice_servers_with_cursor_and_udp(ice_servers, cursor, true)
 }
 
+/// Select STUN servers and at most one round-robin TURN server according to `cursor` and `os_udp_ok`.
 pub(crate) fn select_ice_servers_with_cursor_and_udp(
     ice_servers: &[IceServer],
     cursor: usize,

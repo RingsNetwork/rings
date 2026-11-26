@@ -58,6 +58,7 @@ pub fn verify(msg: &[u8], address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> 
     }
 }
 
+/// Encode `n` using Bitcoin's CompactSize variable-length integer format.
 fn varint_buf_num(n: u64) -> Vec<u8> {
     if n < 253 {
         vec![n as u8]

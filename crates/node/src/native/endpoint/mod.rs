@@ -5,6 +5,7 @@
 //! [`crate::native::api_auth::ApiListener::required_authorization`], and hands the decoded
 //! request to the route handler as a `DecodedJsonRpc` extension so that no later stage buffers
 //! or parses the body again.
+/// HTTP error type mapping handler failures to status codes.
 mod http_error;
 
 use std::net::SocketAddr;
@@ -48,13 +49,16 @@ use crate::processor::Processor;
 pub struct JsonRpcState<M>
 where M: jsonrpc_core::Middleware<Arc<Processor>>
 {
+    /// Node processor passed as metadata to JSON-RPC handlers.
     processor: Arc<Processor>,
+    /// Configured `jsonrpc_core` dispatcher and middleware stack.
     io_handler: MetaIoHandler<Arc<Processor>, M>,
 }
 
 /// Status state
 #[derive(Clone)]
 pub struct StatusState {
+    /// Node processor queried for node info and operator snapshots.
     processor: Arc<Processor>,
 }
 
@@ -89,13 +93,16 @@ struct ObservabilityStatusResponse {
 /// Gateway status endpoint state.
 #[derive(Clone)]
 pub struct GatewayStatusState {
+    /// Shared handle for reading live gateway status snapshots.
     status: GatewayStatusHandle,
 }
 
 /// Security state of one listener: the node-wide credential policy and the listener's floor.
 #[derive(Clone)]
 struct ListenerSecurity {
+    /// Shared bearer-token and CORS security policy.
     policy: Arc<ApiSecurity>,
+    /// Listener classification determining the authorization floor.
     listener: ApiListener,
 }
 
@@ -125,7 +132,9 @@ impl DecodedJsonRpc {
     }
 }
 
+/// JSON-RPC middleware dispatching external allowlisted methods.
 struct ExternalRpcMiddleware;
+/// JSON-RPC middleware dispatching internal operator control methods.
 struct InternalRpcMiddleware;
 
 /// Run the local JSON-RPC server with an optional foreground-gateway status endpoint.
@@ -204,6 +213,7 @@ fn external_router(processor: Arc<Processor>, security: Arc<ApiSecurity>) -> Rou
     secure_router(router, security, ApiListener::External)
 }
 
+/// Wraps `router` with API authentication, listener-specific CORS, and node-version headers.
 fn secure_router(router: Router, policy: Arc<ApiSecurity>, listener: ApiListener) -> Router {
     let cors = match listener {
         ApiListener::Internal => policy.cors_layer(),
@@ -275,6 +285,7 @@ async fn enforce_api_security(
     next.run(req).await
 }
 
+/// Builds a `401 Unauthorized` response advertising Bearer authentication.
 fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -284,10 +295,12 @@ fn unauthorized() -> Response {
         .into_response()
 }
 
+/// Returns `true` when `req` is a `POST /` JSON-RPC request.
 fn is_jsonrpc_post(req: &Request) -> bool {
     req.method() == Method::POST && req.uri().path() == "/"
 }
 
+/// Returns `true` when `req` declares an `application/json` `Content-Type` media type.
 fn has_json_content_type(req: &Request) -> bool {
     req.headers()
         .get(CONTENT_TYPE)
@@ -296,6 +309,7 @@ fn has_json_content_type(req: &Request) -> bool {
         .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// Dispatches a pre-decoded JSON-RPC request extension through the router's `MetaIoHandler`.
 async fn jsonrpc_io_handler<M>(
     State(state): State<Arc<JsonRpcState<M>>>,
     Extension(DecodedJsonRpc(request)): Extension<DecodedJsonRpc>,
@@ -323,6 +337,7 @@ where
     Ok(JsonResponse(body))
 }
 
+/// Serves `GET /status` in either the full node-info view or compact observability view.
 async fn status_handler(
     Query(query): Query<StatusQuery>,
     State(state): State<Arc<StatusState>>,
@@ -351,6 +366,7 @@ async fn status_handler(
     }
 }
 
+/// Serves `GET /gateway/status` with the latest foreground gateway snapshot.
 async fn gateway_status_handler(
     State(state): State<Arc<GatewayStatusState>>,
 ) -> axum::Json<GatewayStatus> {
@@ -367,6 +383,7 @@ impl IntoResponse for JsonResponse {
     }
 }
 
+/// `jsonrpc_core::Middleware` implementations for internal and external listeners.
 mod jsonrpc_middleware_impl {
     use std::future::Future;
 

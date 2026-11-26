@@ -339,6 +339,7 @@ impl<'a> WireVerification<'a> {
 }
 
 impl<'a> WireHopVerification<'a> {
+    /// Borrow a compact wire view of `hop_verification` deduplicated against `origin_verification`.
     fn view(
         origin_verification: &'a MessageVerification,
         origin_delegation: &DelegationRef<'a>,
@@ -363,6 +364,7 @@ impl<'a> WireHopVerification<'a> {
         }
     }
 
+    /// Reconstruct a full [`MessageVerification`] from this wire view using `origin` and `resolve`.
     fn resolve<E>(
         self,
         origin: &MessageVerification,
@@ -387,6 +389,7 @@ impl<'a> WireHopVerification<'a> {
 }
 
 impl<'a> WireRelay<'a> {
+    /// Borrow a compact wire view of `relay`, eliding `destination` and `next_hop` when redundant.
     fn view(relay: &'a MessageRelay, tx_destination: Did) -> Self {
         let redirected_destination =
             (relay.destination != tx_destination).then_some(relay.destination);
@@ -400,6 +403,7 @@ impl<'a> WireRelay<'a> {
         }
     }
 
+    /// Reconstruct a full [`MessageRelay`] from this compact wire view and `tx_destination`.
     fn into_relay(self, tx_destination: Did) -> MessageRelay {
         let destination = self.redirected_destination.unwrap_or(tx_destination);
         let next_hop = self.intermediate_next_hop.unwrap_or(destination);

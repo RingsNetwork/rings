@@ -11,6 +11,7 @@ use crate::error::WebviewError;
 /// Absolute target URL accepted by the gateway.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct TargetUrl {
+    /// Validated absolute HTTP(S) target URL.
     inner: Url,
 }
 
@@ -59,6 +60,7 @@ impl<'de> Deserialize<'de> for TargetUrl {
 /// Rings-owned route prefix used to serve controlled webview pages.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GatewayPrefix {
+    /// Normalized leading- and trailing-slash route prefix.
     prefix: String,
 }
 
@@ -128,6 +130,7 @@ impl GatewayPrefix {
     }
 }
 
+/// Return whether `value` uses a non-HTTP scheme that must not be rewritten into the gateway.
 fn is_unrewritable_url(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     lower.starts_with("javascript:")

@@ -19,6 +19,7 @@ use std::sync::RwLock;
 /// admission's message limit, or their replay window.
 #[derive(Default)]
 pub(crate) struct DelegatedNamespaces {
+    /// Registered encoded namespace prefixes that delegate this decision.
     prefixes: RwLock<BTreeSet<Vec<u8>>>,
 }
 

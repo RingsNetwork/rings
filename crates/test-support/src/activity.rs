@@ -26,7 +26,9 @@ use crate::with_hang_guard;
 
 /// The activity generation and the tasks waiting for it to advance.
 struct ActivityState {
+    /// Monotonically wrapping counter incremented whenever activity is recorded.
     generation: u64,
+    /// Wakers registered by tasks awaiting the next generation change.
     waiters: Vec<Waker>,
 }
 

@@ -56,6 +56,7 @@ pub async fn send(
     node::send_message(provider, did, namespace, payload.into_bytes()).await
 }
 
+/// Handle an inbound custom namespace message callback from the provider and return the JS result.
 fn handle(
     ctx: &JsValue,
     event: &JsValue,
@@ -73,6 +74,7 @@ fn handle(
     result.into()
 }
 
+/// Decode a JS provider event object into a [`CustomEvent`] for the given namespace.
 fn decode_event(event: &JsValue, namespace: &str) -> Option<CustomEvent> {
     let from = Reflect::get(event, &JsValue::from_str("from"))
         .ok()

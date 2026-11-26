@@ -53,6 +53,7 @@ use crate::sync_lock::lock;
 /// shutdown) leaves no registration behind.
 #[derive(Default)]
 pub(crate) struct Admissions {
+    /// Synchronized table of active per-peer admission waiters.
     state: Mutex<AdmissionsState>,
 }
 
@@ -116,9 +117,13 @@ impl Admissions {
 /// A registered dial waiter: resolves once its peer is admitted, and forgets its registration
 /// on drop.
 pub(crate) struct AdmissionWaiter<'a> {
+    /// Owning admissions rendezvous table to unregister from on drop.
     admissions: &'a Admissions,
+    /// Target peer DID this waiter is awaiting admission for.
     peer: Did,
+    /// Unique registration ticket guarding against forgetting a newer waiter.
     ticket: u64,
+    /// Oneshot receiver resolved when the peer is admitted.
     receiver: oneshot::Receiver<()>,
 }
 
@@ -152,7 +157,9 @@ impl Drop for AdmissionWaiter<'_> {
 /// supervisor is between its drain and its wait is not lost.
 #[derive(Default)]
 pub(crate) struct PeerLosses {
+    /// Distinct peers retired since the supervisor's last drain.
     lost: Mutex<BTreeSet<Did>>,
+    /// Notification primitive waking the supervisor when a loss is recorded.
     wake: Notify,
 }
 
@@ -182,7 +189,9 @@ impl PeerLosses {
 /// [`Backend`]: crate::extension::Backend
 #[derive(Default)]
 pub(crate) struct ReachabilityEvidence {
+    /// Rendezvous for dials waiting on peer admission facts.
     admissions: Admissions,
+    /// Accumulated peer retirement facts waiting for the supervisor.
     losses: PeerLosses,
 }
 

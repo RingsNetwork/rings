@@ -97,6 +97,7 @@ impl Processor {
         }
     }
 
+    /// Runs a single periodic registration task loop until `stop` or `sibling_stop` fires.
     pub(super) async fn registration_task_daemon_with(
         &self,
         task: &dyn RegistrationTask,
@@ -184,6 +185,7 @@ impl Processor {
         }
     }
 
+    /// Runs all configured registration task daemons concurrently until stopped.
     pub(super) async fn registration_daemons_with(&self, stop: StopToken, sibling_stop: StopToken) {
         join_all(
             self.registration_tasks

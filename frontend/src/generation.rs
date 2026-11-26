@@ -10,17 +10,21 @@ use std::rc::Rc;
 /// a finite integer counter eventually wrapping.
 #[derive(Clone, Default)]
 pub(crate) struct GenerationClock {
+    /// Shared cell holding the currently active generation's unique identity allocation.
     current: Rc<RefCell<Rc<()>>>,
 }
 
 /// Proof that an async operation still owns the generation it started in.
 #[derive(Clone)]
 pub(crate) struct GenerationToken {
+    /// Shared cell pointing to the clock's latest active generation identity.
     current: Rc<RefCell<Rc<()>>>,
+    /// Identity allocation captured when this token was minted.
     owner: Rc<()>,
 }
 
 impl GenerationClock {
+    /// Advance the clock to a new generation, invalidating all prior tokens.
     pub(crate) fn bump(&self) -> GenerationToken {
         let owner = Rc::new(());
         *self.current.borrow_mut() = owner.clone();
@@ -30,6 +34,7 @@ impl GenerationClock {
         }
     }
 
+    /// Mint a token bound to the currently active generation without advancing the clock.
     pub(crate) fn token(&self) -> GenerationToken {
         GenerationToken {
             current: self.current.clone(),
@@ -39,6 +44,7 @@ impl GenerationClock {
 }
 
 impl GenerationToken {
+    /// Return `true` if no newer generation has superseded this token.
     pub(crate) fn is_current(&self) -> bool {
         Rc::ptr_eq(&self.current.borrow(), &self.owner)
     }

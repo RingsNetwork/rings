@@ -20,21 +20,31 @@ use crate::error::Result;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) enum PeerSlotLifecycle {
+    /// Handshake is in progress and no data channel has been admitted yet.
     Pending {
+        /// Logical connection generation for this pending handshake.
         attempt: PendingConnectionAttempt,
+        /// Wall-clock timestamp in milliseconds when the slot was reserved.
         started_at_ms: i64,
     },
+    /// Data channel is open and DHT admission is in progress.
     Admitting {
+        /// Logical connection generation currently being admitted.
         attempt: PendingConnectionAttempt,
+        /// Wall-clock timestamp in milliseconds when the slot was originally reserved.
         started_at_ms: i64,
     },
     /// Admitted. The transport announces the admission to the application in the critical
     /// section that activates the record, and the retirement in the one that removes it, so for
     /// every generation `PeerAdmitted ⟺ PeerRetired` announced, in the order decided.
-    Active { attempt: PendingConnectionAttempt },
+    Active {
+        /// Admitted logical connection generation owning the peer slot.
+        attempt: PendingConnectionAttempt,
+    },
 }
 
 impl PeerSlotLifecycle {
+    /// Return the connection generation associated with this lifecycle state.
     pub(in crate::swarm::transport) const fn attempt(self) -> PendingConnectionAttempt {
         match self {
             Self::Pending { attempt, .. }
@@ -72,8 +82,11 @@ impl<T> RetirementOutcome<T> {
     }
 }
 
+/// Mutable capability proving a peer slot is currently in `Admitting` and ready to activate.
 pub(in crate::swarm::transport) struct AdmittingConnection<'state> {
+    /// Mutable reference to the peer's lifecycle slot in the registry.
     state: &'state mut PeerSlotLifecycle,
+    /// Generation expected to transition from `Admitting` to `Active`.
     attempt: PendingConnectionAttempt,
 }
 
@@ -86,13 +99,17 @@ impl AdmittingConnection<'_> {
     }
 }
 
+/// Sub-phase of an unadmitted connection lifecycle slot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::swarm::transport) enum UnadmittedPhase {
+    /// Handshake has not yet entered admission.
     Pending,
+    /// Data channel opened and admission is in flight.
     Admitting,
 }
 
 impl UnadmittedPhase {
+    /// Return a lowercase string label for this unadmitted phase.
     pub(in crate::swarm::transport) const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -101,21 +118,28 @@ impl UnadmittedPhase {
     }
 }
 
+/// Record of an unadmitted peer generation evicted by timeout expiry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::swarm::transport) struct ExpiredUnadmittedPeer {
+    /// Expired connection generation.
     pub(in crate::swarm::transport) attempt: PendingConnectionAttempt,
+    /// Elapsed age in milliseconds at expiry.
     pub(in crate::swarm::transport) age_ms: i64,
+    /// Unadmitted phase the generation occupied when it expired.
     pub(in crate::swarm::transport) phase: UnadmittedPhase,
+    /// Whether the expired generation held an outbound offering handshake slot.
     pub(in crate::swarm::transport) was_offering: bool,
 }
 
 /// Read-only projection of active generations still eligible for data-plane work.
 #[derive(Debug)]
 pub(in crate::swarm::transport) struct ActiveConnectionSet {
+    /// Active connection attempts indexed by peer DID.
     attempts: BTreeMap<Did, PendingConnectionAttempt>,
 }
 
 impl ActiveConnectionSet {
+    /// Look up the active connection attempt for `peer`, if present.
     pub(in crate::swarm::transport) fn attempt(
         &self,
         peer: Did,
@@ -123,6 +147,7 @@ impl ActiveConnectionSet {
         self.attempts.get(&peer).copied()
     }
 
+    /// Iterate over all active connection attempts in deterministic peer order.
     pub(in crate::swarm::transport) fn iter(
         &self,
     ) -> impl Iterator<Item = PendingConnectionAttempt> + '_ {
@@ -137,7 +162,9 @@ impl ActiveConnectionSet {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(test, derive(Hash))]
 pub(in crate::swarm::transport) struct LifecycleBounds {
+    /// Maximum number of peers allowed in `Pending` or `Admitting`.
     pending: usize,
+    /// Maximum number of peers allowed across all lifecycle phases.
     total: usize,
 }
 
@@ -219,11 +246,15 @@ impl ReservationVerdict {
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone, Eq, Hash, PartialEq))]
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry {
+    /// Configured capacity bounds for pending and total peer slots.
     bounds: LifecycleBounds,
+    /// Monotonic counter used to allocate unique connection generations.
     next_generation: u64,
+    /// Current lifecycle phase for each tracked peer.
     peers: BTreeMap<Did, PeerSlotLifecycle>,
     /// The signaling state of every pending record (`Invariant (Signaling)`).
     handshakes: BTreeMap<Did, Handshake>,
+    /// Active generations revoked for new sends while cleanup completes.
     send_terminal: BTreeSet<PendingConnectionAttempt>,
     /// Whether the registry is closed (`Invariant (Closed)`).
     closed: bool,
@@ -326,6 +357,7 @@ impl ConnectionLifecycleRegistry {
         });
     }
 
+    /// Return whether `peer` currently has a lifecycle record in any phase.
     pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
         self.peers.contains_key(&peer)
     }
@@ -359,10 +391,12 @@ impl ConnectionLifecycleRegistry {
         self.bounds = bounds;
     }
 
+    /// Return the current lifecycle state of `peer`, if any.
     pub(in crate::swarm::transport) fn state(&self, peer: Did) -> Option<PeerSlotLifecycle> {
         self.peers.get(&peer).copied()
     }
 
+    /// Return `peer`'s current generation if it is in the `Pending` phase.
     pub(in crate::swarm::transport) fn pending_attempt(
         &self,
         peer: Did,
@@ -375,6 +409,7 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
+    /// Return `peer`'s current generation if it is in `Pending` or `Admitting`.
     pub(in crate::swarm::transport) fn unadmitted_attempt(
         &self,
         peer: Did,
@@ -399,6 +434,7 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
+    /// Return `peer`'s current generation if it is in the `Active` phase.
     pub(in crate::swarm::transport) fn active_attempt(
         &self,
         peer: Did,
@@ -419,6 +455,7 @@ impl ConnectionLifecycleRegistry {
         self.active_attempt(attempt.peer) == Some(attempt)
     }
 
+    /// Return `peer`'s active generation if it has not been marked send-terminal.
     pub(in crate::swarm::transport) fn sendable_attempt(
         &self,
         peer: Did,
@@ -440,6 +477,7 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
+    /// Return whether `attempt` has been marked send-terminal.
     pub(in crate::swarm::transport) fn is_send_terminal(
         &self,
         attempt: PendingConnectionAttempt,
@@ -447,6 +485,7 @@ impl ConnectionLifecycleRegistry {
         self.send_terminal.contains(&attempt)
     }
 
+    /// Snapshot all active generations that are still eligible for new sends.
     pub(in crate::swarm::transport) fn active_connections(&self) -> ActiveConnectionSet {
         ActiveConnectionSet {
             attempts: self
@@ -465,6 +504,7 @@ impl ConnectionLifecycleRegistry {
         }
     }
 
+    /// Snapshot all admitted (`Active`) generations, including those marked send-terminal.
     pub(in crate::swarm::transport) fn admitted_connections(&self) -> ActiveConnectionSet {
         ActiveConnectionSet {
             attempts: self
@@ -504,6 +544,7 @@ impl ConnectionLifecycleRegistry {
         true
     }
 
+    /// Return an [`AdmittingConnection`] handle if `attempt` currently owns an `Admitting` slot.
     pub(in crate::swarm::transport) fn admitting_connection(
         &mut self,
         attempt: PendingConnectionAttempt,
@@ -633,6 +674,7 @@ impl ConnectionLifecycleRegistry {
         self.next_generation = next_generation;
     }
 
+    /// Remove and return all unadmitted generations whose age at `now_ms` meets the pending timeout.
     pub(in crate::swarm::transport) fn expire(
         &mut self,
         now_ms: i64,

@@ -336,6 +336,7 @@ impl FormField {
         UnicodeSegmentation::graphemes(self.value.as_str(), true).count()
     }
 
+    /// Return the UTF-8 byte index corresponding to `grapheme_idx`, or the string length if past the end.
     fn byte_index_at_grapheme(&self, grapheme_idx: usize) -> usize {
         UnicodeSegmentation::grapheme_indices(self.value.as_str(), true)
             .nth(grapheme_idx)
@@ -343,6 +344,7 @@ impl FormField {
             .unwrap_or(self.value.len())
     }
 
+    /// Return the `(start, end)` UTF-8 byte range of the grapheme cluster at `grapheme_idx`.
     fn byte_range_of_grapheme(&self, grapheme_idx: usize) -> Option<(usize, usize)> {
         UnicodeSegmentation::grapheme_indices(self.value.as_str(), true)
             .nth(grapheme_idx)
@@ -523,6 +525,7 @@ impl CommandModal {
         }
     }
 
+    /// Clear the form validation error when it applies to the currently active field (or whole form).
     fn clear_error_if_active(&mut self) {
         if self.error_field.is_none() || self.error_field == Some(self.active_field) {
             self.error = None;
@@ -1011,6 +1014,7 @@ pub enum ClickTarget {
 /// Map of bounding rectangles to [`ClickTarget`]s populated on each frame render.
 #[derive(Clone, Debug, Default)]
 pub struct HitMap {
+    /// Registered `(bounding_rect, click_target)` pairs in draw order.
     regions: Vec<(Rect, ClickTarget)>,
 }
 

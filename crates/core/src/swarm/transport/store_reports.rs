@@ -113,14 +113,18 @@ impl Future for StoreReceipt {
 /// and its receipt's sender.
 #[derive(Debug)]
 struct Pending {
+    /// Remote placement owners that have not yet reported on this operation.
     awaiting: BTreeSet<Did>,
+    /// Quorum state tracking confirmations and rejections for this operation.
     quorum: StoreQuorum,
+    /// Completion channel signaled once the quorum is decided or abandoned.
     done: oneshot::Sender<Result<(), StoreUnconfirmed>>,
 }
 
 /// The reported operations a node awaits (module laws).
 #[derive(Debug, Default)]
 pub(crate) struct StoreReports {
+    /// Pending operations indexed by their digest.
     pending: Mutex<BTreeMap<OperationDigest, Pending>>,
 }
 

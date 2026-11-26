@@ -109,11 +109,14 @@ pub(crate) enum Outbound {
 /// received the datagrams and the originating client's source address (#1213).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct UdpFlowKey {
+    /// Bound local UDP listener address that received the flow.
     pub(crate) listener: SocketAddr,
+    /// Originating local client socket address.
     pub(crate) src: SocketAddr,
 }
 
 impl UdpFlowKey {
+    /// Creates a [`UdpFlowKey`] from a local listener address and client source address.
     pub(crate) const fn new(listener: SocketAddr, src: SocketAddr) -> Self {
         Self { listener, src }
     }
@@ -125,10 +128,15 @@ impl UdpFlowKey {
 /// generation matches its own, so a slow old task can never delete a newer reuse of the same
 /// key (ABA safety).
 struct SessionHandle {
+    /// Bounded channel delivering peer-to-local frames to the session task.
     outbound: mpsc::Sender<Outbound>,
+    /// Token cancelled when the session is torn down.
     cancel: CancellationToken,
+    /// Associated local UDP flow key for cache cleanup, or `None` for TCP sessions.
     udp_flow: Option<UdpFlowKey>,
+    /// Monotonic generation stamp guarding against ABA session teardown.
     generation: u64,
+    /// Timestamp of the most recent local-to-peer activity for idle timeout tracking.
     last_activity: tokio::time::Instant,
 }
 
@@ -166,15 +174,21 @@ enum Pending {
     /// for none), and the hold its owner waits on, if any. The hold travels with the stream, so
     /// it is dropped exactly when the stream is.
     Tcp {
+        /// Accepted local TCP stream awaiting session binding.
         stream: TcpStream,
+        /// Initial bytes forwarded ahead of the stream's payload.
         preamble: Bytes,
+        /// Optional lifetime hold dropped when the stream is released.
         hold: Option<StreamHold>,
     },
     /// A new UDP flow: the shared listener socket, the listener+client flow identity, and the
     /// first datagram (carried so it isn't lost during the round-trip to the core).
     Udp {
+        /// Shared local UDP listener socket for sending return datagrams.
         socket: Arc<UdpSocket>,
+        /// Local listener and client source identity of the UDP flow.
         flow: UdpFlowKey,
+        /// First datagram captured before the flow is activated.
         first: Bytes,
     },
 }
@@ -189,20 +203,26 @@ enum Pending {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum UdpFlowState {
+    /// Flow is reserved under an engine-local pending token awaiting core session minting.
     Pending(u64),
+    /// Flow has been bound to a session key while `Open` and the first datagram are being sent.
     Opening(SessionKey),
+    /// Flow is open and visible to the local-to-peer UDP fast path.
     Active(SessionKey),
 }
 
 impl UdpFlowState {
+    /// Returns `true` if this flow is still pending under `token`.
     fn has_pending_token(&self, token: u64) -> bool {
         matches!(self, Self::Pending(actual) if *actual == token)
     }
 
+    /// Returns `true` if this flow is currently opening for `key`.
     fn is_opening(&self, key: &SessionKey) -> bool {
         matches!(self, Self::Opening(actual) if actual == key)
     }
 
+    /// Returns `true` if this flow is opening or active for `key`.
     fn belongs_to(&self, key: &SessionKey) -> bool {
         matches!(self, Self::Opening(actual) | Self::Active(actual) if actual == key)
     }
@@ -222,10 +242,15 @@ impl UdpFlowState {
 ///   only after `Frame::Open` is admitted.
 #[derive(Default)]
 pub(crate) struct TransportSessions {
+    /// Live relayed sessions indexed by their authenticated [`SessionKey`].
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
+    /// Monotonic allocator for engine-local pending-accept tokens.
     tokens: AtomicU64,
+    /// Monotonic allocator for per-session ABA generation stamps.
     generations: AtomicU64,
+    /// Accepted connections and UDP flows awaiting core session binding.
     pending: Mutex<HashMap<u64, Pending>>,
+    /// Projection from local UDP flow identity to its lifecycle state.
     udp_flows: Mutex<HashMap<UdpFlowKey, UdpFlowState>>,
 }
 
@@ -334,6 +359,7 @@ impl TransportSessions {
         self.finish_close(scope, key, removed).await
     }
 
+    /// Removes and returns the session handle for `key` only if its generation matches `generation`.
     fn remove_if_current(&self, key: &SessionKey, generation: u64) -> Option<SessionHandle> {
         self.map.lock().ok().and_then(|mut map| {
             let current = map.get(key).map(|handle| handle.generation);
@@ -562,6 +588,7 @@ impl TransportSessions {
         Some(token)
     }
 
+    /// Transitions a UDP flow from `Pending(token)` to `Opening(key)`.
     fn promote_udp_flow(&self, flow: UdpFlowKey, token: u64, key: &SessionKey) -> bool {
         let Ok(mut flows) = self.udp_flows.lock() else {
             return false;
@@ -576,6 +603,7 @@ impl TransportSessions {
         true
     }
 
+    /// Transitions a UDP flow from `Opening(key)` to `Active(key)` so the fast path can use it.
     fn activate_udp_flow(&self, flow: UdpFlowKey, key: &SessionKey) -> bool {
         let Ok(mut flows) = self.udp_flows.lock() else {
             return false;
@@ -590,6 +618,7 @@ impl TransportSessions {
         true
     }
 
+    /// Removes `flow` from the UDP flow cache if it is still `Pending(token)`.
     fn remove_udp_flow_for_token(&self, flow: UdpFlowKey, token: u64) {
         if let Ok(mut flows) = self.udp_flows.lock() {
             let remove = flows
@@ -601,6 +630,7 @@ impl TransportSessions {
         }
     }
 
+    /// Removes `flow` from the UDP flow cache if it is currently opening or active for `key`.
     fn remove_udp_flow_for_key(&self, flow: UdpFlowKey, key: &SessionKey) {
         if let Ok(mut flows) = self.udp_flows.lock() {
             let remove = flows.get(&flow).is_some_and(|state| state.belongs_to(key));
@@ -674,6 +704,7 @@ impl TransportSessions {
         }
     }
 
+    /// Returns the outbound sender and current generation stamp for `key`, if live.
     fn sender(&self, key: &SessionKey) -> Option<(mpsc::Sender<Outbound>, u64)> {
         self.map.lock().ok().and_then(|map| {
             map.get(key)
@@ -681,6 +712,7 @@ impl TransportSessions {
         })
     }
 
+    /// Returns the current generation stamp for `key`, if the session is live.
     fn current_generation(&self, key: &SessionKey) -> Option<u64> {
         self.map
             .lock()
@@ -758,11 +790,17 @@ impl TransportSessions {
 /// identity, and its peer→local channel + cancel token. Bundling these keeps the relay
 /// task signatures to `(task, socket)`.
 struct RelayTask {
+    /// Shared relay session table owning this task's registration.
     sessions: Arc<TransportSessions>,
+    /// Namespace-scoped capability for sending frames and injecting teardown.
     scope: Scope,
+    /// Authenticated session identity owned by this task.
     key: SessionKey,
+    /// Receiver for peer-to-local segments, datagrams, and shutdown notices.
     outbound_rx: mpsc::Receiver<Outbound>,
+    /// Cancellation token signalled when the session is closed externally.
     cancel: CancellationToken,
+    /// Generation stamp matching this task's entry in [`TransportSessions`].
     generation: u64,
 }
 

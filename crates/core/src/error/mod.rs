@@ -4,9 +4,12 @@
 pub type Result<T> = std::result::Result<T, Error>;
 
 mod detached_work;
+/// Core error enum definition.
 mod kind;
+/// Error classification and retry policy helpers.
 mod policy;
 mod send_class;
+/// WebAssembly `JsValue` conversions for [`Error`].
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 mod wasm;
 

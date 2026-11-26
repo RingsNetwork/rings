@@ -1,3 +1,5 @@
+//! Node start and disconnect action handlers for the frontend shell.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -29,56 +31,99 @@ use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 use crate::webview;
 
+/// State handles and references needed to start a local or extension node.
 #[derive(Clone)]
 struct StartAction {
+    /// Selected wallet standard for signing in.
     wallet_kind: UseStateHandle<WalletKind>,
+    /// Connected wallet account metadata, if authenticated.
     wallet_account: UseStateHandle<Option<WalletAccount>>,
+    /// Whether a node startup sequence is currently in progress.
     node_starting: UseStateHandle<bool>,
+    /// Shared handle to the running in-page demo node, if any.
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    /// Generation clock used to discard stale async callbacks.
     generation: GenerationClock,
+    /// In-memory dweb site content served by the local node.
     site: dweb::Site,
+    /// Local node DID once started.
     did: UseStateHandle<String>,
+    /// Human-readable status message displayed in the UI.
     status: UseStateHandle<String>,
+    /// Current list of connected peers.
     peers: UseStateHandle<Vec<PeerView>>,
+    /// Configured Rings network identifier.
     network_id: UseStateHandle<String>,
+    /// Configured ICE server URLs.
     ice_servers: UseStateHandle<String>,
+    /// Configured DHT stabilization interval in seconds.
     stabilize_interval: UseStateHandle<String>,
+    /// Configured browser storage namespace.
     storage_name: UseStateHandle<String>,
+    /// Optional HTTP seed endpoint URL to connect on startup.
     seed_url: UseStateHandle<String>,
+    /// Recent custom protocol events received by the node.
     custom_events: UseStateHandle<Vec<custom::CustomEvent>>,
+    /// Currently open shell dialog.
     active_dialog: UseStateHandle<ActiveDialog>,
+    /// Whether the browser WebView gateway is registered and ready.
     webview_ready: UseStateHandle<bool>,
 }
 
+/// Snapshot of user-configured parameters captured when starting a node.
 struct StartRequest {
+    /// Selected wallet standard.
     kind: WalletKind,
+    /// Rings network identifier string.
     network_id: String,
+    /// ICE server list string.
     ice_servers: String,
+    /// Stabilization interval string in seconds.
     stabilize_interval: String,
+    /// Browser storage database name.
     storage_name: String,
+    /// Trimmed seed HTTP endpoint URL.
     seed_url: String,
 }
 
+/// State handles and references needed to stop a node and reset session state.
 #[derive(Clone)]
 struct DisconnectAction {
+    /// Connected wallet account metadata handle.
     wallet_account: UseStateHandle<Option<WalletAccount>>,
+    /// Node startup-in-progress flag handle.
     node_starting: UseStateHandle<bool>,
+    /// Shared handle to the running in-page demo node.
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    /// Generation clock bumped to invalidate in-flight tasks.
     generation: GenerationClock,
+    /// Local node DID handle.
     did: UseStateHandle<String>,
+    /// Human-readable status message handle.
     status: UseStateHandle<String>,
+    /// Connected peer list handle.
     peers: UseStateHandle<Vec<PeerView>>,
+    /// Locally generated SDP offer handle.
     generated_offer: UseStateHandle<String>,
+    /// Remote SDP offer input handle.
     remote_offer: UseStateHandle<String>,
+    /// Locally generated SDP answer handle.
     generated_answer: UseStateHandle<String>,
+    /// Remote SDP answer input handle.
     remote_answer: UseStateHandle<String>,
+    /// Peer link dialog visibility handle.
     link_dialog_open: UseStateHandle<bool>,
+    /// Currently open shell dialog handle.
     active_dialog: UseStateHandle<ActiveDialog>,
+    /// WebView gateway readiness handle.
     webview_ready: UseStateHandle<bool>,
+    /// Registered custom protocol namespaces handle.
     custom_registered: UseStateHandle<Vec<String>>,
+    /// Received custom protocol event log handle.
     custom_events: UseStateHandle<Vec<custom::CustomEvent>>,
 }
 
+/// Builds the wallet-selection, start, and disconnect callbacks for the control sidebar.
 pub(super) fn launch_actions(
     node: &NodeState,
     link: &LinkState,
@@ -133,6 +178,7 @@ pub(super) fn launch_actions(
 }
 
 impl StartAction {
+    /// Creates a click callback that initiates node startup.
     fn callback(self) -> Callback<MouseEvent> {
         Callback::from(move |_| {
             let action = self.clone();
@@ -149,6 +195,7 @@ impl StartAction {
         })
     }
 
+    /// Captures the current form settings into a [`StartRequest`].
     fn request(&self) -> StartRequest {
         StartRequest {
             kind: *self.wallet_kind,
@@ -160,6 +207,7 @@ impl StartAction {
         }
     }
 
+    /// Dispatches startup to either the browser extension bridge or a local in-page node.
     async fn start(self, request: StartRequest, token: GenerationToken) {
         if let Some(bridge) = extension::extension_node_bridge() {
             self.start_extension_node(&bridge, request, token).await;
@@ -168,6 +216,7 @@ impl StartAction {
         }
     }
 
+    /// Starts the background node hosted by the browser extension and polls until ready.
     async fn start_extension_node(
         self,
         bridge: &JsValue,
@@ -194,6 +243,7 @@ impl StartAction {
         }
     }
 
+    /// Polls the extension bridge until background node startup completes or fails.
     async fn poll_extension_node_start(self, bridge: &JsValue, token: GenerationToken) {
         let result = extension::poll_extension_node_start(
             bridge,
@@ -210,6 +260,7 @@ impl StartAction {
         }
     }
 
+    /// Validates settings, authorizes the wallet, builds a local node, and activates it.
     async fn start_local_node(self, request: StartRequest, token: GenerationToken) {
         let settings = match extension::node_settings(
             request.network_id,
@@ -235,6 +286,7 @@ impl StartAction {
             .await;
     }
 
+    /// Connects the requested wallet with a timeout, discarding stale results.
     async fn authorize_account(
         &self,
         kind: WalletKind,
@@ -256,6 +308,7 @@ impl StartAction {
         }
     }
 
+    /// Authorizes a delegatee session and builds the local [`DemoNode`].
     async fn build_local_node(
         &self,
         account: &WalletAccount,
@@ -282,6 +335,7 @@ impl StartAction {
         }
     }
 
+    /// Registers protocols, installs the WebView gateway, publishes node state, and connects the seed.
     async fn activate_local_node(
         self,
         built: DemoNode,
@@ -326,6 +380,7 @@ impl StartAction {
             .await;
     }
 
+    /// Clears and closes a locally built node that became stale before activation finished.
     async fn discard_stale_local_node(&self, built: DemoNode) {
         let stale = {
             let mut node_ref = self.node_ref.borrow_mut();
@@ -344,6 +399,7 @@ impl StartAction {
         let _ = built.close().await;
     }
 
+    /// Registers the dweb and demo custom protocol handlers on a newly built local node.
     fn register_local_protocols(&self, built: &DemoNode, my_did: &str) -> Result<(), String> {
         self.site.borrow_mut().insert(
             "/".to_string(),
@@ -361,6 +417,7 @@ impl StartAction {
         Ok(())
     }
 
+    /// Builds a callback that prepends incoming custom protocol events to the bounded log.
     fn custom_event_handler(&self) -> Callback<custom::CustomEvent> {
         let custom_events = self.custom_events.clone();
         Callback::from(move |event: custom::CustomEvent| {
@@ -371,6 +428,7 @@ impl StartAction {
         })
     }
 
+    /// Connects to the configured seed HTTP endpoint if non-empty.
     async fn connect_seed_if_configured(
         self,
         built: DemoNode,
@@ -389,6 +447,7 @@ impl StartAction {
         }
     }
 
+    /// Synchronizes the peer list after completing an HTTP seed handshake.
     async fn sync_seed_peer(self, built: DemoNode, seed_did: String, token: GenerationToken) {
         if seed_did.trim().is_empty() {
             if token.is_current() {
@@ -411,6 +470,7 @@ impl StartAction {
         .await;
     }
 
+    /// Applies an extension status snapshot to the UI state handles.
     fn apply_extension_snapshot(
         &self,
         snapshot: extension::ExtensionNodeSnapshot,
@@ -427,6 +487,7 @@ impl StartAction {
         )
     }
 
+    /// Records a seed connection error if the generation token is still current.
     fn set_seed_error(&self, token: &GenerationToken, error: String) {
         if token.is_current() {
             self.status
@@ -434,6 +495,7 @@ impl StartAction {
         }
     }
 
+    /// Marks startup as failed and updates the status message if the token is still current.
     fn fail_if_current(&self, token: &GenerationToken, error: String) {
         if token.is_current() {
             self.node_starting.set(false);
@@ -443,10 +505,12 @@ impl StartAction {
 }
 
 impl DisconnectAction {
+    /// Creates a click callback that disconnects the active node.
     fn callback(self) -> Callback<MouseEvent> {
         Callback::from(move |_| self.clone().disconnect())
     }
 
+    /// Dispatches disconnection to either the extension bridge or the local node.
     fn disconnect(self) {
         if let Some(bridge) = extension::extension_node_bridge() {
             self.disconnect_extension_node(bridge);
@@ -455,6 +519,7 @@ impl DisconnectAction {
         }
     }
 
+    /// Requests the browser extension background node to stop and clears session state on success.
     fn disconnect_extension_node(self, bridge: JsValue) {
         let stop_token = self.generation.bump();
         self.node_starting.set(true);
@@ -475,6 +540,7 @@ impl DisconnectAction {
         });
     }
 
+    /// Tears down the local in-page node, clears session state, and closes peer links asynchronously.
     fn disconnect_local_node(self) {
         let was_starting = *self.node_starting;
         let cleanup_token = self.generation.bump();
@@ -500,6 +566,7 @@ impl DisconnectAction {
         });
     }
 
+    /// Resets all node, SDP, custom protocol, and dialog UI state to offline defaults.
     fn clear_session(&self) {
         self.did.set(String::new());
         self.wallet_account.set(None);
@@ -523,6 +590,7 @@ impl DisconnectAction {
     }
 }
 
+/// Disconnects all active peer transports on `provider` with a two-second timeout.
 async fn cleanup_peer_links(provider: &std::sync::Arc<rings_node::provider::Provider>) -> String {
     let cleanup = node::disconnect_all(provider).fuse();
     let timeout = sleep(Duration::from_secs(2)).fuse();
@@ -537,6 +605,7 @@ async fn cleanup_peer_links(provider: &std::sync::Arc<rings_node::provider::Prov
     }
 }
 
+/// Returns the status message shown when disconnecting while no node instance is active.
 fn offline_disconnect_message(was_starting: bool) -> String {
     if was_starting {
         "node start cancelled"

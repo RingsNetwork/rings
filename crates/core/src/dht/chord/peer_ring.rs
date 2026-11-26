@@ -516,28 +516,34 @@ impl PeerRing {
 /// other functions here are its lock, clock, snapshot, commit, and
 /// action-translation helpers.
 impl PeerRing {
+    /// Acquire the mutex serializing topology transitions.
     fn lock_transition(&self) -> Result<MutexGuard<'_, ()>> {
         self.topology_transition
             .lock()
             .map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the finger table.
     fn lock_finger_state(&self) -> Result<MutexGuard<'_, FingerTable>> {
         self.finger.lock().map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the immediate predecessor.
     fn lock_predecessor_state(&self) -> Result<MutexGuard<'_, Option<Did>>> {
         self.predecessor.lock().map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the predecessor list.
     fn lock_predecessors_state(&self) -> Result<MutexGuard<'_, Vec<Did>>> {
         self.predecessors.lock().map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the bridged peer map.
     fn lock_bridged_state(&self) -> Result<MutexGuard<'_, BTreeMap<Did, Did>>> {
         self.bridged.lock().map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the pending stabilization request.
     fn lock_pending_stabilization(
         &self,
     ) -> Result<MutexGuard<'_, Option<topology::StabilizationRequest>>> {
@@ -546,12 +552,14 @@ impl PeerRing {
             .map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the pending successor-sync state.
     fn lock_pending_successor_sync(&self) -> Result<MutexGuard<'_, topology::SuccessorSyncState>> {
         self.pending_successor_sync
             .lock()
             .map_err(|_| Error::LockPoisoned)
     }
 
+    /// Acquire the mutex guarding the pending connect-lookup token queue.
     fn lock_pending_connect_lookup(&self) -> Result<MutexGuard<'_, VecDeque<(Did, uuid::Uuid)>>> {
         self.pending_connect_lookup
             .lock()

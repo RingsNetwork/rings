@@ -74,12 +74,14 @@ use crate::types::OperatorSnapshotDto;
 use crate::types::RecentMessageEventDto;
 use crate::types::SessionKeySnapshotDto;
 
+/// Default per-request HTTP and JSON-RPC timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(6);
 
 /// Maximum response body size (4 MiB) accepted from auxiliary HTTP status endpoints
 /// (`/status?view=observability` and `/gateway/status`).
 const MAX_STATUS_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
+/// Read an HTTP response body up to `max_bytes` and deserialize it as JSON.
 async fn read_bounded_json<T: serde::de::DeserializeOwned>(
     mut response: reqwest::Response,
     max_bytes: usize,
@@ -167,9 +169,13 @@ pub trait NodeClient: Send + Sync {
 
 /// Live HTTP + JSON-RPC client talking to a native `rings-node` internal listener.
 pub struct HttpNodeClient {
+    /// Base URL of the node's internal HTTP/JSON-RPC listener (without trailing slash).
     endpoint_url: String,
+    /// Optional pre-validated `Authorization: Bearer ...` header value.
     auth_header: Option<HeaderValue>,
+    /// Typed JSON-RPC client targeting `endpoint_url`.
     rpc: RpcClient,
+    /// Auxiliary HTTP client for `/status` and `/gateway/status` endpoints.
     http: reqwest::Client,
 }
 
@@ -221,6 +227,7 @@ impl HttpNodeClient {
         })
     }
 
+    /// Build an HTTP header map containing the configured Bearer token, if present.
     fn auth_headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         if let Some(val) = &self.auth_header {
@@ -229,6 +236,7 @@ impl HttpNodeClient {
         headers
     }
 
+    /// Fetch the node's `/status?view=observability` JSON snapshot.
     async fn fetch_observability(&self) -> Result<ObservabilityStatusDto> {
         let url = format!("{}/status?view=observability", self.endpoint_url);
         let response = self
@@ -241,6 +249,7 @@ impl HttpNodeClient {
         read_bounded_json(response, MAX_STATUS_RESPONSE_BYTES).await
     }
 
+    /// Fetch `/gateway/status`, returning `Ok(None)` when the gateway endpoint is not enabled (404).
     async fn fetch_gateway_status(&self) -> Result<Option<GatewayStatusDto>> {
         let url = format!("{}/gateway/status", self.endpoint_url);
         let response = self
@@ -258,6 +267,7 @@ impl HttpNodeClient {
         ))
     }
 
+    /// Paginate through `listPeerMeasurements` up to `MAX_PAGES`, returning records and any truncation warning.
     async fn fetch_all_peer_measurements(
         &self,
     ) -> Result<(Vec<PeerMeasurementInfo>, Option<String>)> {
@@ -308,6 +318,7 @@ impl HttpNodeClient {
 /// Seed document structure compatible with JSON and YAML seed files.
 #[derive(Deserialize)]
 struct SeedDocument {
+    /// Seed peer entries listed in the document.
     peers: Vec<SeedPeer>,
 }
 
@@ -782,6 +793,7 @@ impl NodeClient for HttpNodeClient {
     }
 }
 
+/// Scan local persistent and cache DHT storage tiers for entries matching `exact_topic_key` or `target_entry_did`.
 fn collect_matching_storage_items(
     swarm_opt: Option<&SwarmInfo>,
     exact_topic_key: Option<&str>,
@@ -837,10 +849,15 @@ pub fn now_epoch_ms() -> u128 {
 /// ring state, peer credit metrics, and interactive command responses without requiring a running
 /// daemon.
 pub struct DemoNodeClient {
+    /// Simulated node start timestamp in Unix milliseconds.
     started_at_ms: u128,
+    /// Monotonic tick counter advancing simulated telemetry on each poll.
     tick: AtomicU64,
+    /// Simulated connected peer list.
     peers: Mutex<Vec<PeerInfo>>,
+    /// Simulated `(topic, message)` entries published in the demo session.
     topics: Mutex<Vec<(String, String)>>,
+    /// Simulated locally registered service names.
     services: Mutex<Vec<String>>,
 }
 

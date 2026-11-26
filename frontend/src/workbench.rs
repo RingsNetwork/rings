@@ -17,35 +17,58 @@ use crate::generation::GenerationToken;
 use crate::node::DemoNode;
 use crate::onion;
 
+/// Maximum duration allowed for building an onion route from the workbench.
 const ONION_ROUTE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Maximum duration allowed for completing a proxied onion HTTPS request.
 const ONION_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// Snapshot of the active onion proxy execution target and cancellation token.
 struct OnionProxyBackend {
+    /// Extension node bridge when running inside the MV3 extension shell.
     bridge: Option<wasm_bindgen::JsValue>,
+    /// In-tab browser node handle when running directly in a web page.
     node: Option<DemoNode>,
+    /// Generation token used to discard stale async UI updates.
     token: GenerationToken,
 }
 
+/// State handles updated as an onion proxy HTTP request progresses and completes.
 struct OnionRequestOutputs {
+    /// Display string for the HTTP status code or request state.
     response_status: UseStateHandle<String>,
+    /// Formatted response headers output.
     response_headers: UseStateHandle<String>,
+    /// Response body or error text output.
     response_body: UseStateHandle<String>,
+    /// Summary of the onion route used for the request.
     route_result: UseStateHandle<String>,
+    /// Top-level shell status banner message.
     status: UseStateHandle<String>,
+    /// Generation token used to guard state writes against stale tasks.
     token: GenerationToken,
 }
 
+/// Borrowed Yew state handles for the onion proxy workbench panel.
 pub(crate) struct OnionProxyState<'a> {
+    /// Target HTTPS URL input.
     pub(crate) url: &'a UseStateHandle<String>,
+    /// HTTP method input.
     pub(crate) method: &'a UseStateHandle<String>,
+    /// Raw newline-separated request headers input.
     pub(crate) headers: &'a UseStateHandle<String>,
+    /// Request body text input.
     pub(crate) body: &'a UseStateHandle<String>,
+    /// Rendered onion route summary output.
     pub(crate) route_result: &'a UseStateHandle<String>,
+    /// Rendered HTTP response status output.
     pub(crate) response_status: &'a UseStateHandle<String>,
+    /// Rendered HTTP response headers output.
     pub(crate) response_headers: &'a UseStateHandle<String>,
+    /// Rendered HTTP response body output.
     pub(crate) response_body: &'a UseStateHandle<String>,
 }
 
+/// Render the onion HTTPS proxy workbench panel.
 pub(crate) fn onion_proxy_panel(
     state: OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -70,6 +93,7 @@ pub(crate) fn onion_proxy_panel(
     }
 }
 
+/// Build the click callback that probes an onion route for the current URL input.
 fn onion_route_callback(
     state: &OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -113,6 +137,7 @@ fn onion_route_callback(
     })
 }
 
+/// Build an onion route through either the extension bridge or the in-tab browser node.
 async fn build_onion_route(
     backend: OnionProxyBackend,
     request: onion::OnionProxyRouteRequest,
@@ -131,6 +156,7 @@ async fn build_onion_route(
     .await
 }
 
+/// Build the click callback that dispatches an HTTPS request through the onion proxy.
 fn onion_request_callback(
     state: &OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -174,6 +200,7 @@ fn onion_request_callback(
 }
 
 impl OnionProxyBackend {
+    /// Capture the current extension bridge, local node handle, and generation token.
     fn current(node_ref: &Rc<RefCell<Option<DemoNode>>>, generation: &GenerationClock) -> Self {
         Self {
             bridge: extension::extension_node_bridge(),
@@ -183,6 +210,7 @@ impl OnionProxyBackend {
     }
 }
 
+/// Parse the workbench form fields into an [`onion::OnionProxyHttpRequest`].
 fn onion_http_request(
     url: &UseStateHandle<String>,
     method: &UseStateHandle<String>,
@@ -198,6 +226,7 @@ fn onion_http_request(
     })
 }
 
+/// Reset output fields to an in-flight state before sending an onion proxy request.
 fn prepare_onion_request_outputs(
     status: &UseStateHandle<String>,
     response_status: &UseStateHandle<String>,
@@ -212,6 +241,7 @@ fn prepare_onion_request_outputs(
     route_result.set("Sending request through onion HTTPS proxy...".to_string());
 }
 
+/// Spawn a local async task to execute an onion proxy request and write results to UI state.
 fn spawn_onion_request(
     backend: OnionProxyBackend,
     request: onion::OnionProxyHttpRequest,
@@ -248,6 +278,7 @@ fn spawn_onion_request(
     });
 }
 
+/// Send an onion HTTPS request through either the extension bridge or the in-tab browser node.
 async fn send_onion_request(
     backend: OnionProxyBackend,
     request: onion::OnionProxyHttpRequest,
@@ -266,6 +297,7 @@ async fn send_onion_request(
     .await
 }
 
+/// Render the editable onion proxy request form block.
 fn onion_request_form(
     state: &OnionProxyState<'_>,
     on_route: Callback<MouseEvent>,
@@ -286,6 +318,7 @@ fn onion_request_form(
     }
 }
 
+/// Render the read-only onion proxy result pane.
 fn onion_result_panel(state: &OnionProxyState<'_>) -> Html {
     html! {
         <div class="tool-block">
@@ -300,6 +333,7 @@ fn onion_result_panel(state: &OnionProxyState<'_>) -> Html {
     }
 }
 
+/// Render a read-only labelled textarea with a custom placeholder.
 fn readonly_output(label: &'static str, value: String, placeholder: &'static str) -> Html {
     html! {
         <label class="field payload-output">
@@ -309,6 +343,7 @@ fn readonly_output(label: &'static str, value: String, placeholder: &'static str
     }
 }
 
+/// Render the custom protocol messaging workbench panel.
 pub(crate) fn custom_panel(
     namespace: &UseStateHandle<String>,
     registered: &UseStateHandle<Vec<String>>,
@@ -347,6 +382,7 @@ pub(crate) fn custom_panel(
     }
 }
 
+/// Build the click callback that registers a custom protocol namespace on the active node.
 fn custom_register_callback(
     namespace: &UseStateHandle<String>,
     registered: &UseStateHandle<Vec<String>>,
@@ -382,6 +418,7 @@ fn custom_register_callback(
     })
 }
 
+/// Build the callback that prepends an inbound custom protocol event to the bounded log.
 fn custom_event_callback(
     events: UseStateHandle<Vec<custom::CustomEvent>>,
 ) -> Callback<custom::CustomEvent> {
@@ -393,6 +430,7 @@ fn custom_event_callback(
     })
 }
 
+/// Append a newly registered namespace to UI state and update the status banner.
 fn record_registered_namespace(
     registered: &UseStateHandle<Vec<String>>,
     status: &UseStateHandle<String>,
@@ -404,6 +442,7 @@ fn record_registered_namespace(
     status.set(format!("registered {namespace}"));
 }
 
+/// Build the click callback that sends a custom protocol message to a remote peer.
 fn custom_send_callback(
     namespace: &UseStateHandle<String>,
     peer: &UseStateHandle<String>,
@@ -439,12 +478,17 @@ fn custom_send_callback(
     })
 }
 
+/// Validated outbound custom protocol message assembled from form inputs.
 struct CustomMessage {
+    /// Target protocol namespace.
     namespace: String,
+    /// Destination peer DID.
     did: String,
+    /// Text payload to send.
     payload: String,
 }
 
+/// Validate and assemble a [`CustomMessage`] from the custom-panel form state.
 fn custom_message(
     namespace: &UseStateHandle<String>,
     peer: &UseStateHandle<String>,
@@ -464,6 +508,7 @@ fn custom_message(
     })
 }
 
+/// Render the list of recently received custom protocol events.
 fn custom_events_panel(events: &UseStateHandle<Vec<custom::CustomEvent>>) -> Html {
     html! {
         <div class="tool-block">
@@ -475,6 +520,7 @@ fn custom_events_panel(events: &UseStateHandle<Vec<custom::CustomEvent>>) -> Htm
     }
 }
 
+/// Render one inbound custom protocol event row.
 fn custom_event_item(event: &custom::CustomEvent) -> Html {
     html! {
         <div class="list-item">

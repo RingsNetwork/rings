@@ -129,10 +129,15 @@ pub struct Observation<O, E> {
 /// `π` within the refresh window, or `μ(o)` is not `Present` while `o ∈ dom π`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnnouncementMemory<O> {
+    /// In-memory announcement state keyed by owner (`μ`).
     entries: BTreeMap<O, Entry>,
+    /// Last persisted announcement state keyed by owner (`π`).
     persisted: BTreeMap<O, PersistedEntry>,
+    /// Owners whose in-memory state differs from `persisted` and needs journaling.
     dirty: BTreeSet<O>,
+    /// Freshness, grace, and persistence refresh time windows.
     windows: MemoryWindows,
+    /// Maximum number of owners retained in memory.
     capacity: usize,
 }
 

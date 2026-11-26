@@ -25,6 +25,7 @@ pub enum AdmissionPhase {
 }
 
 impl AdmissionPhase {
+    /// Decode a raw `u8` representation into an [`AdmissionPhase`].
     const fn from_raw(raw: u8) -> Self {
         match raw {
             0 => Self::Pending,
@@ -65,6 +66,7 @@ pub enum AdmissionEvent {
 /// Cloneable atomic shell around [`AdmissionPhase::transition`].
 #[derive(Clone)]
 pub struct AtomicAdmission {
+    /// Shared atomic byte storing the encoded [`AdmissionPhase`].
     state: Arc<AtomicU8>,
 }
 

@@ -82,7 +82,9 @@ pub mod loader {
 
     use crate::seed::Seed;
 
+    /// Maximum payload size in bytes accepted when loading a local or remote resource.
     const MAX_RESOURCE_BYTES: usize = 4 * 1_024 * 1_024;
+    /// Request timeout for fetching a remote resource over HTTP(S).
     const RESOURCE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
     /// Load config from local file or remote url.

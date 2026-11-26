@@ -296,6 +296,7 @@ impl LogicalInbound {
         result
     }
 
+    /// Whether the transaction destination of `payload` is this local node.
     pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
         payload.transaction.destination == self.transport.dht.did
     }

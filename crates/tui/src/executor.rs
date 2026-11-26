@@ -395,6 +395,7 @@ pub async fn execute_node_command(client: &dyn NodeClient, cmd: NodeCommand) -> 
     }
 }
 
+/// Return elapsed milliseconds since `started`, saturating at `u64::MAX`.
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

@@ -16,6 +16,7 @@ pub(super) async fn yield_before_arrival() {
     }
 }
 
+/// Draw a uniform random integer in `[low, high)`, using the seeded controlled RNG when active.
 pub(super) fn random(low: u64, high: u64) -> u64 {
     if let Some(value) = controlled_random(low, high) {
         return value;
@@ -25,6 +26,7 @@ pub(super) fn random(low: u64, high: u64) -> u64 {
     range.sample(&mut rng)
 }
 
+/// Draw a deterministic integer in `[low, high)` from the thread-local controlled RNG if seeded.
 fn controlled_random(low: u64, high: u64) -> Option<u64> {
     CONTROLLED_RNG_STATE.with(|state| {
         let mut current = state.get()?;

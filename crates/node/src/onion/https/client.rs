@@ -119,10 +119,15 @@ where D: serde::Deserializer<'de> {
 /// with its route.
 #[derive(Debug)]
 pub struct OnionHttpsCall {
+    /// Normalized HTTP method (e.g. `GET`, `POST`).
     method: String,
+    /// Normalized request path and optional query string.
     path: String,
+    /// Request header `(name, value)` pairs.
     headers: Vec<(String, String)>,
+    /// Raw request body bytes.
     body: Vec<u8>,
+    /// Onion loop cell class selected for the HTTPS session.
     class: OnionLoopClass,
 }
 

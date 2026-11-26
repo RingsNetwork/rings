@@ -21,7 +21,9 @@ use crate::error::Result;
 /// identity, so a claim whose report was already applied releases nothing.
 #[must_use = "dropping the claim releases the report"]
 pub(crate) struct StabilizationClaim<'ring> {
+    /// The ring whose stabilization state this claim releases on drop.
     ring: &'ring PeerRing,
+    /// The correlation token for the claimed stabilization report.
     request_id: uuid::Uuid,
 }
 
@@ -47,8 +49,11 @@ impl Drop for StabilizationClaim<'_> {
 /// holding it; see [`StabilizationClaim`] for why that matters.
 #[must_use = "dropping the claim releases the report"]
 pub(crate) struct SuccessorSyncClaim<'ring> {
+    /// The ring whose successor-sync state this claim releases on drop.
     ring: &'ring PeerRing,
+    /// The peer that sent the claimed successor-sync report.
     reporter: Did,
+    /// The correlation token for the claimed successor-sync report.
     request_id: uuid::Uuid,
 }
 
@@ -380,6 +385,7 @@ fn ask_connect_lookup(
     pending.push_back((peer, request_id));
 }
 
+/// Remove and consume the pending connect-lookup entry matching `request_id`, returning `true` if found.
 fn take_connect_lookup(
     pending: &mut std::collections::VecDeque<(Did, uuid::Uuid)>,
     request_id: uuid::Uuid,

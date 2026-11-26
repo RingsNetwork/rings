@@ -2,8 +2,10 @@
 
 use std::sync::OnceLock;
 
+/// Generated theme stylesheet rules.
 mod theme;
 
+/// Bundled static structural CSS shared across all views.
 const STRUCTURAL_CSS: &str = concat!(
     include_str!("styles/base.css"),
     "\n",

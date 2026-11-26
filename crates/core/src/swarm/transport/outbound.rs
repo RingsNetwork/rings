@@ -53,17 +53,21 @@ use crate::utils::SharedClock;
 use crate::utils::SystemClock;
 
 mod admission;
+/// Per-peer and node-wide outbound capacity reservation and fair queuing.
 mod capacity;
 mod class_credit;
 mod link_state;
 mod mailbox;
 mod measurement;
+/// Core outbound scheduling classes, completion policies, and per-class indexing.
 mod model;
+/// Per-class FIFO transfer lanes and bounded control-priority scheduler queues.
 mod queue;
 mod sender_bounded;
 mod session_encoding;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 mod simulation_pressure;
+/// Runtime-specific spawning for outbound peer and measurement workers.
 mod spawn;
 #[cfg(test)]
 pub(super) mod test_trace;
@@ -124,12 +128,16 @@ pub(super) use transfer::OutboundTransfer;
 pub(super) use transfer::OutboundTransferRoute;
 use transfer::ShutdownBatch;
 
+/// Transfer paired with its capacity permit so the permit drops before completion senders.
 struct ScheduledTransfer<T = OutboundTransfer, P = TransferCapacityPermit> {
+    /// Owned outbound transfer payload and completion channel.
     transfer: T,
+    /// Capacity permit held for the transfer and released first on drop.
     capacity_permit: Option<P>,
 }
 
 impl<T, P> ScheduledTransfer<T, P> {
+    /// Pair `transfer` with its reserved `capacity_permit`.
     fn new(transfer: T, capacity_permit: P) -> Self {
         Self {
             transfer,
@@ -158,35 +166,55 @@ enum OutboundCommand {
     CancelStopped,
 }
 
+/// Scheduled transfer tagged with its worker-local delivery correlation ID.
 struct QueuedTransfer {
+    /// Monotonic worker-local identifier correlating frame delivery futures.
     id: u64,
+    /// Underlying transfer and capacity permit.
     scheduled: ScheduledTransfer,
 }
 
+/// Completion event produced by an in-flight frame delivery future.
 struct DeliveryEvent {
+    /// Worker-local identifier of the transfer that sent the frame.
     id: u64,
+    /// Scheduling class lane owning the transfer.
     class: TransferClass,
+    /// Outcome or cancellation of the awaited frame delivery.
     result: ChunkSendProgress<Result<()>>,
 }
 
+/// Whether terminating a transfer should advance the scheduler's fairness cursor.
 #[derive(Clone, Copy)]
 enum TerminationFairness {
+    /// Fairness was already charged when the frame was admitted.
     AlreadyAdvanced,
+    /// Charge one scheduling turn for a transfer that failed before frame admission.
     AdvanceFailedAttempt,
 }
 
+/// Next action determined for the worker's currently active transfer.
 enum ActiveFrameStep {
+    /// Transfer stop was requested before encoding the next frame.
     Stopped,
+    /// Frame source is exhausted and the transfer has succeeded.
     Complete,
+    /// Producing or encoding the next frame failed with an error.
     Failed(Error),
+    /// Encoded frame bytes ready to be admitted to the backend transport.
     Send {
+        /// Scheduling class lane for the frame.
         class: TransferClass,
+        /// Whether this frame is the first frame of the transfer.
         before_first_frame: bool,
+        /// Serialized wire bytes to transmit.
         bytes: bytes::Bytes,
+        /// Static context label describing the frame kind for diagnostics.
         context: &'static str,
     },
 }
 
+/// Resolve a cancelled transfer into a caller outcome, preserving initial cancel errors.
 fn resolve_cancelled_transfer(
     before_first_frame: bool,
     reason: ChunkSendCancelReason,
@@ -200,19 +228,24 @@ fn resolve_cancelled_transfer(
     }
 }
 
+/// Cloneable handle for submitting transfers to and cancelling work on one peer's worker.
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
+    /// Shared peer scheduler state and mailbox sender.
     state: Arc<OutboundPeerState>,
 }
 
+/// Shared state backing an [`OutboundPeerHandle`].
 struct OutboundPeerState {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     peer: Did,
+    /// Mailbox sender delivering commands to the peer's outbound worker.
     sender: MailboxSender<OutboundCommand>,
     /// The link's tables, kept across worker replacements under one generation.
     link: PeerLinkState,
-    // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
+    /// Strong lifetime anchor; the peer registry intentionally stores only a `Weak` reference.
     _capacity_anchor: TransferCapacityAnchor,
+    /// Stop authority shared with the peer's worker and its submitted transfers.
     stop: StopSource,
 }
 
@@ -230,6 +263,7 @@ impl OutboundPeerHandle {
         self.state._capacity_anchor.admit_now(peer, class, bytes)
     }
 
+    /// Submit `transfer` with its `capacity_permit` to the peer's outbound worker.
     pub(super) fn submit(
         &self,
         transfer: OutboundTransfer,
@@ -267,6 +301,7 @@ impl OutboundPeerHandle {
         result
     }
 
+    /// Notify the peer's worker to scan for and cancel any stopped queued transfers.
     pub(super) fn cancel_stopped(&self) {
         let _ = self
             .state
@@ -274,12 +309,14 @@ impl OutboundPeerHandle {
             .send_coalesced(OutboundCommand::CancelStopped);
     }
 
+    /// Stop the peer's worker and close its command mailbox.
     fn shutdown(&self) {
         self.state.shutdown();
     }
 }
 
 impl OutboundPeerState {
+    /// Request worker stop and close the command mailbox.
     fn shutdown(&self) {
         self.stop.request_stop();
         self.sender.close();
@@ -292,27 +329,37 @@ impl Drop for OutboundPeerState {
     }
 }
 
+/// Registry managing per-peer outbound workers, capacity trackers, and sender-bounded slots.
 pub(super) struct OutboundSchedulers {
+    /// Synchronized table of active peer workers and weak capacity handles.
     registry: Mutex<OutboundRegistry>,
+    /// Node-wide outbound byte capacity shared across all peers.
     global_capacity: Arc<GlobalTransferCapacity>,
+    /// Optional measurement sink attached to newly spawned peer workers.
     measure: Option<MeasureImpl>,
+    /// Shared clock passed to peer link states for session encoding and leases.
     clock: SharedClock,
     /// Transfers their sender bounds, which hold no shared capacity.
     sender_bounded: SenderBounded,
 }
 
+/// Active peer worker handles and weak per-peer capacity entries.
 #[derive(Default)]
 struct OutboundRegistry {
+    /// Live outbound worker handles keyed by peer DID.
     peers: BTreeMap<Did, OutboundPeerHandle>,
+    /// Weak references to per-peer capacity trackers keyed by peer DID.
     capacities: BTreeMap<Did, Weak<TransferCapacity>>,
 }
 
 impl OutboundRegistry {
+    /// Remove capacity entries whose strong references have all been dropped.
     fn prune_capacities(&mut self) {
         self.capacities
             .retain(|_, capacity| capacity.strong_count() > 0);
     }
 
+    /// Return the existing live capacity tracker for `peer`, or allocate a new one.
     fn capacity(
         &mut self,
         peer: Did,
@@ -334,6 +381,7 @@ impl OutboundSchedulers {
         Self::new_with_clock(measure, Arc::new(SystemClock))
     }
 
+    /// Create an outbound scheduler registry backed by `measure` and `clock`.
     pub(super) fn new_with_clock(measure: Option<MeasureImpl>, clock: SharedClock) -> Self {
         Self {
             registry: Mutex::new(OutboundRegistry::default()),
@@ -344,6 +392,7 @@ impl OutboundSchedulers {
         }
     }
 
+    /// Return the active worker handle for `peer`, spawning a new worker if absent or stopped.
     pub(super) fn handle(&self, peer: Did) -> Result<OutboundPeerHandle> {
         let mut registry = self.lock_registry();
         if let Some(handle) = registry
@@ -386,6 +435,7 @@ impl OutboundSchedulers {
         Ok(handle)
     }
 
+    /// Acquire per-peer and global capacity for `demand`, waiting in the fair queue if needed.
     pub(super) async fn reserve(
         &self,
         peer: Did,
@@ -417,6 +467,7 @@ impl OutboundSchedulers {
             .map(TransferCapacityPermit::bounded_by_sender)
     }
 
+    /// Remove and shut down the outbound worker for `peer`, pruning dead capacity entries.
     pub(super) fn shutdown(&self, peer: Did) {
         let handle = self.lock_registry().peers.remove(&peer);
         if let Some(handle) = handle {
@@ -473,6 +524,7 @@ impl OutboundSchedulers {
             + self.sender_bounded.in_flight_for_test()
     }
 
+    /// Lock the peer registry, recovering the inner guard if poisoned.
     fn lock_registry(&self) -> MutexGuard<'_, OutboundRegistry> {
         self.registry
             .lock()
@@ -492,19 +544,28 @@ impl Drop for OutboundSchedulers {
     }
 }
 
+/// Boxed future awaiting a single in-flight frame delivery and yielding its [`DeliveryEvent`].
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent> + Send>>;
+/// Boxed future awaiting a single in-flight frame delivery and yielding its [`DeliveryEvent`] on wasm.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent>>>;
 
+/// Per-peer background worker driving outbound transfer scheduling and frame delivery.
 struct OutboundWorker {
     #[cfg(test)]
     peer: Did,
+    /// Mailbox receiver delivering submission and cancellation commands.
     receiver: MailboxReceiver<OutboundCommand>,
+    /// Per-class FIFO lanes and fairness scheduler holding runnable and waiting transfers.
     ready: TransferQueues<QueuedTransfer>,
+    /// Transfer currently popped for frame encoding and backend admission.
     active: Option<RunnableTransfer<QueuedTransfer>>,
+    /// Shared session delegation lessee state for encoding outbound frames.
     lessee: SharedDelegationLessee,
+    /// Shared clock used when encoding frames with session leases.
     clock: SharedClock,
+    /// Unordered set of active frame delivery futures.
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     /// The transport credit of each class's lane.
     credits: PerClass<ClassCredit>,
@@ -513,14 +574,20 @@ struct OutboundWorker {
     credit_waits: FuturesUnordered<CreditWaitFuture>,
     /// When a delivery to this peer last settled: the stall deadline's reference.
     delivery_progress: DeliveryProgress,
+    /// Coalesced measurement recorder for sent and failed logical transfers.
     measurements: MeasurementRecorder,
+    /// Stop source signaling shutdown of this worker.
     stop: StopSource,
+    /// Next monotonic transfer correlation ID to assign on enqueue.
     next_id: u64,
+    /// Whether the command mailbox has been closed by its sender.
     input_closed: bool,
+    /// Whether shutdown cleanup has already run for this worker.
     shutdown_complete: bool,
 }
 
 impl OutboundWorker {
+    /// Create a new outbound worker for `peer` using the given mailbox, stop source, and link state.
     fn new(
         receiver: MailboxReceiver<OutboundCommand>,
         stop: StopSource,
@@ -554,6 +621,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Drive the worker event loop until stopped or the command mailbox closes.
     async fn run(mut self) {
         loop {
             if self.stop.is_stop_requested() {
@@ -604,6 +672,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Assign a worker-local ID to `scheduled` and push it into its class lane.
     fn enqueue_transfer(&mut self, scheduled: ScheduledTransfer) {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -641,6 +710,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Finish `transfer` in its lane, release its capacity permit, and publish `result`.
     fn terminate_transfer(
         &mut self,
         transfer: RunnableTransfer<QueuedTransfer>,
@@ -673,10 +743,12 @@ impl OutboundWorker {
         final_result
     }
 
+    /// Finalize `scheduled` with a cancelled outcome, releasing its permit first.
     fn cancel_scheduled_transfer(scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
         Self::finalize_scheduled_transfer(scheduled, Ok(SendCompletionOutcome::Cancelled))
     }
 
+    /// Cancel every transfer in `batch`, releasing all permits before returning results.
     fn cancel_batch(batch: ShutdownBatch<ScheduledTransfer>) -> Vec<FinalTransferResult> {
         batch.finalize(Self::cancel_scheduled_transfer)
     }
@@ -688,6 +760,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Terminate `transfer` with `error` and record a peer send failure measurement if applicable.
     fn fail_transfer(
         &mut self,
         transfer: RunnableTransfer<QueuedTransfer>,
@@ -701,6 +774,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Process a completed frame delivery event, resuming or terminating its waiting transfer.
     fn handle_delivery(&mut self, event: DeliveryEvent) {
         let Some(transfer) = self.ready.take_waiting(event.class, event.id) else {
             debug_assert!(false, "delivery must identify a waiting in-flight transfer");
@@ -727,6 +801,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Drain all queued and waiting transfers from the scheduler lanes.
     fn drain_ready_transfers(&mut self) -> Vec<ScheduledTransfer> {
         self.ready
             .drain_transfers()
@@ -735,6 +810,7 @@ impl OutboundWorker {
             .collect()
     }
 
+    /// Take the currently active transfer, if any, for shutdown cleanup.
     fn drain_active_transfers(&mut self) -> Vec<ScheduledTransfer> {
         self.active
             .take()
@@ -743,10 +819,12 @@ impl OutboundWorker {
             .collect()
     }
 
+    /// Shut down the worker and cancel all owned transfers with no pre-collected results.
     fn shutdown(&mut self) {
         self.shutdown_with_results(Vec::new());
     }
 
+    /// Idempotently close ingress, cancel all active/ready/buffered transfers, and publish results.
     fn shutdown_with_results(&mut self, mut final_results: Vec<FinalTransferResult>) {
         if self.shutdown_complete {
             return;
@@ -763,6 +841,7 @@ impl OutboundWorker {
         Self::publish_released_results(final_results);
     }
 
+    /// Drain any remaining submission commands still buffered in the closed mailbox.
     fn drain_buffered_transfers(&mut self) -> Vec<ScheduledTransfer> {
         let buffered = self
             .receiver
@@ -777,6 +856,7 @@ impl OutboundWorker {
         buffered
     }
 
+    /// Produce and encode the next frame for the active transfer, or determine its terminal step.
     fn prepare_active_frame(&mut self) -> Option<ActiveFrameStep> {
         let runnable = self.active.as_mut()?;
         let class = runnable.class();
@@ -809,6 +889,7 @@ impl OutboundWorker {
         })
     }
 
+    /// Drive one frame admission step for the currently active transfer.
     async fn admit_active_frame(&mut self) {
         let Some(step) = self.prepare_active_frame() else {
             tracing::error!("outbound worker has no active transfer to admit");
@@ -880,6 +961,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Handle the backend admission result for the active transfer during normal operation.
     fn finish_active_admission(
         &mut self,
         class: TransferClass,
@@ -930,6 +1012,7 @@ impl OutboundWorker {
         }
     }
 
+    /// Finalize an active transfer whose admission completed after worker stop was requested.
     fn finalize_stopped_active_admission(
         &mut self,
         before_first_frame: bool,
@@ -964,6 +1047,7 @@ impl OutboundWorker {
         final_results
     }
 
+    /// Construct a boxed future awaiting `delivery` and tagging its outcome with `id` and `class`.
     fn delivery_wait(
         id: u64,
         class: TransferClass,

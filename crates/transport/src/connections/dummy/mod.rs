@@ -46,8 +46,10 @@ use crate::notifier::Notifier;
 use crate::sdp::effective_max_message_size;
 use crate::sync_utils::lock_recover;
 
+/// Deterministic and randomized scheduler yield helpers for dummy arrival jitter.
 mod delay;
 mod event;
+/// Dummy connection retirement fence and cleanup guards.
 mod retirement;
 mod state;
 
@@ -91,12 +93,16 @@ lazy_static! {
     static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
 }
 
+/// One-shot test gate that parks a single dummy delivery future until released.
 struct DeliveryGate {
+    /// Whether a delivery future is currently parked on `notify`.
     waiting: AtomicBool,
+    /// Notification primitive woken by tests to release the parked delivery.
     notify: Notify,
 }
 
 impl DeliveryGate {
+    /// Construct a new unparked [`DeliveryGate`].
     fn new() -> Self {
         Self {
             waiting: AtomicBool::new(false),
@@ -183,7 +189,9 @@ pub mod controlled;
 /// Implements the [ConnectionInterface] trait with no real network.
 #[derive(Clone, Copy)]
 struct DummyConnectionState {
+    /// Simulated WebRTC connection phase.
     webrtc: TransportConnectionState,
+    /// Optional explicit override for data-channel openness used in callback-ordering tests.
     data_channel_open_override: Option<bool>,
 }
 
@@ -205,18 +213,27 @@ impl DummyConnectionState {
     }
 }
 
+/// Handshake role before any offer or answer has been created or accepted.
 const HANDSHAKE_ROLE_FRESH: u8 = 0;
+/// Handshake role after creating a local offer while awaiting a remote answer.
 const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
+/// Handshake role once the offer/answer exchange has completed.
 const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+/// Transient handshake role held while a handshake step is executing.
 const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+/// Terminal handshake role entered if a handshake step fails or is cancelled mid-flight.
 const HANDSHAKE_ROLE_FAILED: u8 = 4;
 
+/// RAII guard that transitions a connection's `handshake_role` to [`HANDSHAKE_ROLE_FAILED`] on drop unless committed.
 struct HandshakeRoleGuard<'a> {
+    /// Atomic handshake role cell being guarded.
     role: &'a AtomicU8,
+    /// Whether [`Self::commit`] has stored the next role.
     committed: bool,
 }
 
 impl<'a> HandshakeRoleGuard<'a> {
+    /// Guard `role` until [`Self::commit`] is called.
     fn new(role: &'a AtomicU8) -> Self {
         Self {
             role,
@@ -224,6 +241,7 @@ impl<'a> HandshakeRoleGuard<'a> {
         }
     }
 
+    /// Store `next_role` and disarm the failure fallback on drop.
     fn commit(mut self, next_role: u8) {
         self.role.store(next_role, Ordering::Release);
         self.committed = true;
@@ -240,16 +258,27 @@ impl Drop for HandshakeRoleGuard<'_> {
 
 /// In-memory connection used by [`DummyTransport`] to model transport events.
 pub struct DummyConnection {
+    /// Unique random identifier indexing this connection in `CONNS`.
     rand_id: String,
+    /// Callback wrapper handling credit flow control and protocol dispatch.
     callback: Arc<InnerTransportCallback>,
+    /// Unbounded channel delivering events to the background event listener task.
     event_sender: mpsc::UnboundedSender<Event>,
+    /// Random identifier of the paired remote dummy connection, once linked.
     remote_rand_id: Arc<Mutex<Option<String>>>,
+    /// Negotiated remote maximum data-channel message size, or `0` if unset.
     remote_max_message_size: AtomicUsize,
+    /// Atomic handshake state encoded using the `HANDSHAKE_ROLE_*` constants.
     handshake_role: AtomicU8,
+    /// Background task draining `event_sender` in uncontrolled mode.
     event_listener: JoinHandle<()>,
+    /// Synchronized simulated WebRTC state and channel-openness override.
     connection_state: Arc<Mutex<DummyConnectionState>>,
+    /// Gate cleared on retirement to stop accepting new events.
     accepting_events: Arc<AtomicBool>,
+    /// Monotone watch sender signaled once physical retirement cleanup finishes.
     physical_close_completed: Arc<watch::Sender<bool>>,
+    /// Tokio runtime handle used to spawn retirement notifications.
     retirement_runtime: tokio::runtime::Handle,
     /// The payload frames of this connection's transport; see
     /// [`DummyTransport::dispatched_payload_frames`].
@@ -259,7 +288,9 @@ pub struct DummyConnection {
 /// [DummyTransport] manages all the [DummyConnection] and
 /// provides methods to create, get and close connections.
 pub struct DummyTransport {
+    /// Raw ICE server string paired with its parsed [`IceServer`] list.
     ice_state: std::sync::RwLock<(String, Vec<IceServer>)>,
+    /// Active dummy connections keyed by peer connection ID.
     pool: Pool<DummyConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -269,6 +300,7 @@ pub struct DummyTransport {
 }
 
 impl DummyConnection {
+    /// Return this dummy connection's unique generation identifier (`rand_id`).
     pub(crate) fn generation_id(&self) -> &str {
         &self.rand_id
     }
@@ -353,10 +385,12 @@ impl DummyConnection {
         })
     }
 
+    /// Capture a [`DummyRetirementFence`] for retiring this connection generation.
     fn retirement_fence(&self) -> DummyRetirementFence {
         DummyRetirementFence::new(self)
     }
 
+    /// Deliver one internal [`Event`] to this connection's callback.
     async fn handle_event(&self, event: Event) {
         match event {
             Event::ConnectionStateChange(state, callback_cid) => {
@@ -400,14 +434,17 @@ impl DummyConnection {
         }
     }
 
+    /// Lock the optional paired remote connection identifier.
     fn remote_rand_id(&self) -> MutexGuard<'_, Option<String>> {
         lock_recover(&self.remote_rand_id)
     }
 
+    /// Lock the simulated connection state.
     fn connection_state(&self) -> MutexGuard<'_, DummyConnectionState> {
         lock_recover(&self.connection_state)
     }
 
+    /// Look up the paired remote [`DummyConnection`] in `CONNS`, if still registered.
     fn remote_conn(&self) -> Option<Arc<DummyConnection>> {
         let cid = self.remote_rand_id().clone()?;
         // The remote may already have been closed and removed from the global
@@ -416,6 +453,7 @@ impl DummyConnection {
         CONNS.get(&cid).map(|c| c.clone())
     }
 
+    /// Record the paired remote connection's `rand_id` extracted from its first line.
     fn set_remote_rand_id(&self, rand_id: String) {
         let peer_id = rand_id
             .lines()
@@ -444,6 +482,7 @@ impl DummyConnection {
         }
     }
 
+    /// Update the simulated connection phase and dispatch lifecycle events if it changed.
     async fn set_connection_state(&self, state: TransportConnectionState) {
         {
             let mut connection_state = self.connection_state();
@@ -469,10 +508,12 @@ impl DummyConnection {
         }
     }
 
+    /// Test hook: overwrite the simulated WebRTC state without emitting callbacks.
     pub(crate) fn force_connection_state_without_callback(&self, state: TransportConnectionState) {
         self.connection_state().webrtc = state;
     }
 
+    /// Test hook: overwrite the simulated data-channel openness without emitting callbacks.
     pub(crate) fn force_data_channel_open_without_callback(&self, open: Option<bool>) {
         self.connection_state().data_channel_open_override = open;
     }
@@ -563,11 +604,15 @@ enum FrameCount {
     Credit,
 }
 
+/// Disposition of an irrevocable dummy send after crossing the permit boundary.
 enum DummySendTarget {
+    /// Admit and enqueue the frame onto the paired remote dummy connection.
     Deliver(Arc<DummyConnection>),
+    /// Simulate a dropped frame without delivering it to the remote connection.
     Drop,
 }
 
+/// Commit an irrevocable dummy send under `connection_state` and return its [`DeliveryFuture`].
 fn complete_irrevocable_send<F: FnOnce()>(
     connection_state: &Arc<Mutex<DummyConnectionState>>,
     data: Bytes,
@@ -617,6 +662,7 @@ fn complete_irrevocable_send<F: FnOnce()>(
     Ok(Box::pin(async { Ok(()) }))
 }
 
+/// Verify the dummy channel is still open, run `dispatch`, and mark `permit` accepted on success.
 fn commit_irrevocable_dispatch<F, T>(
     connection_state: &Arc<Mutex<DummyConnectionState>>,
     permit: IrrevocableSendGuard<F>,

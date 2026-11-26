@@ -48,8 +48,10 @@ use crate::tasks::NodeTasks;
 /// Upper bound on synchronous feedback iterations within one protocol turn.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
+/// Monotonic allocator for unique per-runner identifiers used in re-entrancy checks.
 static NEXT_RUNNER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Allocates a fresh unique identifier for a [`Runner`] instance.
 pub(crate) fn next_runner_id() -> u64 {
     NEXT_RUNNER_ID.fetch_add(1, Ordering::Relaxed)
 }
@@ -61,6 +63,7 @@ thread_local! {
     static ACTIVE_RUNNERS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
 
+/// RAII guard that pops a runner ID from [`ACTIVE_RUNNERS`] when the current poll exits.
 struct ActiveRunnerGuard(u64);
 
 impl Drop for ActiveRunnerGuard {
@@ -74,15 +77,18 @@ impl Drop for ActiveRunnerGuard {
     }
 }
 
+/// Marks `runner_id` as actively polled on the current thread until the guard drops.
 fn enter_active_runner(runner_id: u64) -> ActiveRunnerGuard {
     ACTIVE_RUNNERS.with(|active| active.borrow_mut().push(runner_id));
     ActiveRunnerGuard(runner_id)
 }
 
+/// Returns `true` if `runner_id` is currently executing a transition on this thread.
 fn is_runner_active(runner_id: u64) -> bool {
     ACTIVE_RUNNERS.with(|active| active.borrow().contains(&runner_id))
 }
 
+/// Polls `fut` while marking `runner_id` active on the current thread during each poll.
 async fn with_active_runner<F: Future>(runner_id: u64, fut: F) -> F::Output {
     let mut fut = pin!(fut);
     poll_fn(|cx| {
@@ -95,6 +101,7 @@ async fn with_active_runner<F: Future>(runner_id: u64, fut: F) -> F::Output {
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
 pub(crate) type DynHandler = rings_runtime::maybe_send_sync!(dyn Handler);
 
+/// Synchronized registry mapping namespace names to their type-erased handlers.
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
@@ -121,26 +128,39 @@ pub(crate) trait Handler {
 /// [`Provider`](crate::provider::Provider) is dropped.
 #[derive(Clone)]
 pub(crate) struct Core {
+    /// Weak reference to the owning node [`Processor`] to avoid `Arc` cycles.
     processor: std::sync::Weak<Processor>,
     /// Retained only when constructed standalone via [`Extensions::new`] without an enclosing
     /// [`Provider`](crate::provider::Provider) owning the [`Processor`]. [`Provider`] builds its
     /// registry via [`Extensions::new_weak`] so spawned [`Backend::serve`] / protocol tasks never
     /// form a strong `Arc<Processor>` cycle.
     _standalone_owner: Option<Arc<Processor>>,
+    /// Local node DID.
     did: Did,
+    /// Network identifier of the node's swarm.
     network_id: u32,
+    /// Task supervisor onto which extension and engine tasks are spawned.
     tasks: NodeTasks,
+    /// Shared connection-slot roster exposed by the DHT.
     slot_roster: Arc<rings_core::message::SlotRoster>,
+    /// Configured onion routing role for this node.
     onion_role: crate::onion::OnionRole<crate::onion::OnionExitOffer>,
+    /// Minimum idle cover-traffic floor for onion links.
     onion_idle_floor: crate::onion::circuit::OnionIdleFloor,
+    /// UDP bind and peer-IP admission settings for native onion exits.
     onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
+    /// Process epoch cell for onion circuit keying.
     onion_process_epoch: crate::onion::OnionProcessEpochCell,
+    /// Shared clock injected into the node.
     clock: rings_core::utils::SharedClock,
+    /// Shared RNG injected into the node.
     rng: rings_core::utils::SharedRng,
+    /// Shared map of registered namespace handlers.
     handlers: Arc<HandlerMap>,
 }
 
 impl Core {
+    /// Upgrades the weak [`Processor`] handle, returning an error if the node is closed.
     fn upgrade_processor(&self) -> Result<Arc<Processor>> {
         self.processor
             .upgrade()
@@ -330,7 +350,9 @@ impl Core {
 /// A later [`replace`](Extensions::replace) does not reach a route resolved before it.
 #[derive(Clone)]
 pub(crate) struct Route {
+    /// Router capability passed to the handler during dispatch.
     core: Core,
+    /// Resolved type-erased protocol handler for the namespace.
     handler: Arc<DynHandler>,
 }
 
@@ -358,7 +380,9 @@ impl Route {
 /// and `'static`, so a long-running engine task can keep a copy.
 #[derive(Clone)]
 pub struct Scope {
+    /// Underlying router capability confined to [`Self::namespace`].
     core: Core,
+    /// Namespace this scope is allowed to send and inject under.
     namespace: String,
 }
 
@@ -446,10 +470,12 @@ impl Scope {
 /// reducer. Long-lived engines receive a [`Scope`] explicitly through the crate-private
 /// `EffectScope::lifecycle` handoff, making ownership visible at the effect boundary.
 pub struct EffectScope {
+    /// Namespace-scoped capability backing effect sends and lifecycle handoffs.
     scope: Scope,
 }
 
 impl EffectScope {
+    /// Wraps a namespace [`Scope`] as an [`EffectScope`] for a single effect turn.
     pub(crate) fn new(scope: Scope) -> Self {
         Self { scope }
     }
@@ -487,8 +513,11 @@ impl EffectScope {
 /// turn's effect application and synchronous feedback fixpoint; `state` is a synchronous leaf
 /// mutex held only across [`Protocol::step`] and never across an `.await`.
 struct Runner<P: Protocol, I> {
+    /// Unique identifier used to detect same-task re-entrant transitions.
     runner_id: u64,
+    /// Pure protocol state machine implementation.
     protocol: P,
+    /// Effect interpreter shell for this protocol.
     interpret: I,
     /// Synchronous protocol state (`Law (Lock order): transition_gate ≺ state`, leaf).
     state: Mutex<P::State>,
@@ -549,6 +578,7 @@ where
     P::Effect: MaybeSendSync,
     I: Interpret<Effect = P::Effect> + MaybeSendSync + 'static,
 {
+    /// Returns an error if the current task already holds this runner's transition gate.
     fn ensure_not_reentrant(&self) -> Result<()> {
         if is_runner_active(self.runner_id) {
             return Err(Error::ExtensionError(format!(
@@ -652,6 +682,7 @@ where
 /// serving the core's `ApplicationInbox` see the same table.
 #[derive(Clone)]
 pub struct Extensions {
+    /// Shared router core holding the handler table and node capabilities.
     core: Core,
 }
 
@@ -669,6 +700,7 @@ impl Extensions {
         Self::from_processor_parts(processor, None)
     }
 
+    /// Builds an [`Extensions`] registry from `processor` with an optional strong owner handle.
     fn from_processor_parts(
         processor: &Arc<Processor>,
         standalone_owner: Option<Arc<Processor>>,
@@ -811,6 +843,7 @@ impl Extensions {
         Ok(())
     }
 
+    /// Inserts a protocol runner into the registry, optionally replacing an existing namespace.
     fn insert<P, I>(&self, protocol: P, interpret: I, replace: bool) -> Result<()>
     where
         P: Protocol + MaybeSendSync + 'static,

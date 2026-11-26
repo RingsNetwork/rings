@@ -8,7 +8,9 @@
 pub struct ArmedDropGuard<T, F>
 where F: FnOnce(T)
 {
+    /// Guarded value passed to `action` when fired or dropped.
     value: Option<T>,
+    /// One-shot cleanup callback executed on fire or drop.
     action: Option<F>,
 }
 

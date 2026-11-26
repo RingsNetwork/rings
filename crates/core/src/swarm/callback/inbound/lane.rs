@@ -3,18 +3,26 @@ use rings_transport::core::pool::ChannelLane;
 use crate::message::MessageCategory;
 use crate::message::MessageKind;
 
+/// Total number of inbound lanes (one per [`MessageCategory`] plus chunk reassembly).
 pub(super) const INBOUND_LANE_COUNT: usize = MessageCategory::COUNT + 1;
 
+/// Logical inbound scheduling lane for classified frames and chunk reassembly.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum InboundLane {
+    /// DHT topology and routing control messages.
     DhtControl,
+    /// DHT entry and relay storage messages.
     Storage,
+    /// End-to-end encrypted or direct protocol messages.
     E2e,
+    /// Application-layer custom payloads.
     Application,
+    /// Chunk envelopes awaiting reassembly before classification.
     Reassembly,
 }
 
 impl InboundLane {
+    /// All inbound lanes ordered by their dense array index.
     pub(super) const ALL: [Self; INBOUND_LANE_COUNT] = [
         Self::DhtControl,
         Self::Storage,
@@ -23,6 +31,7 @@ impl InboundLane {
         Self::Reassembly,
     ];
 
+    /// Map a [`MessageCategory`] to its corresponding [`InboundLane`].
     pub(super) const fn from_class(class: MessageCategory) -> Self {
         match class {
             MessageCategory::DhtControl => Self::DhtControl,
@@ -32,6 +41,7 @@ impl InboundLane {
         }
     }
 
+    /// Map a [`MessageKind`] to its [`InboundLane`], routing chunks to [`Self::Reassembly`].
     pub(crate) const fn from_kind(kind: MessageKind) -> Self {
         if kind.is_chunk() {
             return Self::Reassembly;
@@ -39,6 +49,7 @@ impl InboundLane {
         Self::from_class(kind.class())
     }
 
+    /// Return the zero-based dense index of this lane in [`Self::ALL`].
     pub(super) const fn index(self) -> usize {
         match self {
             Self::DhtControl => 0,
@@ -98,6 +109,7 @@ impl InboundLane {
     }
 }
 
+/// Compile-time check that every lane in `lanes` sits at its own [`InboundLane::index`].
 const fn lanes_follow_indices(lanes: &[InboundLane], index: usize) -> bool {
     match lanes.split_first() {
         None => true,

@@ -199,6 +199,7 @@ struct SessionKeyRingState {
 /// of the processor.
 #[derive(Debug)]
 pub(crate) struct SessionKeyRing {
+    /// Synchronized active and retained session key state.
     state: RwLock<SessionKeyRingState>,
 }
 

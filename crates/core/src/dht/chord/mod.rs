@@ -1,8 +1,10 @@
 //! Chord peer-ring model and protocol implementations.
 
+/// Chord routing actions and topology metadata.
 mod action;
 mod carrier_store;
 mod peer_ring;
+/// Chord storage placement, routing, and key namespace definitions.
 mod storage;
 
 pub use action::PeerRingAction;

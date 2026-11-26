@@ -1,3 +1,5 @@
+//! Versioned snapshot serialization types for [`crate::MeasurementLedger`].
+
 use serde::Deserialize;
 use serde::Serialize;
 

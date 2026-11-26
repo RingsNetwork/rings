@@ -852,6 +852,7 @@ impl TelemetryHistory {
     }
 }
 
+/// Push `value` onto `queue`, evicting the oldest element if at `TELEMETRY_HISTORY_CAPACITY`.
 fn push_bounded(queue: &mut VecDeque<u64>, value: u64) {
     if queue.len() >= TELEMETRY_HISTORY_CAPACITY {
         queue.pop_front();

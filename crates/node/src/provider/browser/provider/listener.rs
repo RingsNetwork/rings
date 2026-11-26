@@ -59,7 +59,9 @@ use crate::provider::Provider;
 /// tab closes. Holds the [`Processor`] weakly so it never blocks [`Provider::close`] from
 /// releasing the node's stores, and removes the DOM listener on drop.
 pub(crate) struct PagehideListener {
+    /// Browser window on which the `pagehide` listener is registered.
     window: web_sys::Window,
+    /// Closure retained for the lifetime of the listener and unregistered on drop.
     callback: Closure<dyn FnMut(web_sys::Event)>,
 }
 

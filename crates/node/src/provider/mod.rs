@@ -55,11 +55,13 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::release::StoresReleased;
 
+/// Default timeout bounding each drain phase during [`Provider::close`].
 const CLOSE_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
 
+/// Awaits one shutdown drain phase bounded by `timeout`, logging a warning if the deadline elapses.
 async fn await_close_phase<F>(
     phase_fut: F,
     timeout: std::time::Duration,
@@ -140,13 +142,17 @@ pub struct SigningHorizonSnapshot {
     pub signs_now: bool,
 }
 
+/// Bounded in-memory buffer retaining inbound E2E events until drained by the host.
 #[derive(Default)]
 pub(crate) struct E2eInbox {
+    /// Queued inbound E2E events awaiting drain.
     events: Mutex<Vec<E2eEvent>>,
+    /// Cumulative count of events dropped because `events` reached [`E2E_EVENT_CAPACITY`].
     dropped: AtomicU64,
 }
 
 impl E2eInbox {
+    /// Drains all retained E2E events and returns them alongside the cumulative drop counter.
     pub(crate) fn take(&self) -> Result<TakeE2eEventsResponse> {
         let mut events = self.events.lock().map_err(|_| Error::Lock)?;
         Ok(TakeE2eEventsResponse {
@@ -155,6 +161,7 @@ impl E2eInbox {
         })
     }
 
+    /// Appends an E2E event to the bounded inbox, incrementing `dropped` if at capacity.
     fn push(&self, event: E2eEvent) -> Result<()> {
         let mut events = self.events.lock().map_err(|_| Error::Lock)?;
         if events.len() < E2E_EVENT_CAPACITY {
@@ -181,8 +188,11 @@ impl BackendObserver for E2eInbox {
     }
 }
 
+/// Backend observer that always records E2E events in `e2e_inbox` and optionally forwards to `extra`.
 struct CompositeBackendObserver {
+    /// Built-in bounded inbox retaining inbound E2E messages.
     e2e_inbox: Arc<E2eInbox>,
+    /// Optional caller-supplied observer receiving link facts, E2E messages, and custom envelopes.
     extra: Option<Arc<dyn BackendObserver>>,
 }
 
@@ -207,6 +217,7 @@ impl BackendObserver for CompositeBackendObserver {
     }
 }
 
+/// Converts an inbound E2E [`ApplicationMessage`] into a serializable [`E2eEvent`], or `None` for non-E2E messages.
 fn e2e_event_from_message(message: &ApplicationMessage) -> Result<Option<E2eEvent>> {
     let from = message.from.to_string();
     Ok(Some(match &message.data {
@@ -247,28 +258,35 @@ fn e2e_event_from_message(message: &ApplicationMessage) -> Result<Option<E2eEven
     }))
 }
 
+/// Encodes a 33-byte compressed public key as its canonical JSON string representation.
 fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
     let value = serde_json::to_value(public_key)?;
     value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
 }
 
+/// Serde helper serializing `u128` timestamps as decimal strings while accepting strings or `u64` numbers.
 mod u128_decimal_string {
     use serde::de::Error as _;
     use serde::Deserialize;
     use serde::Deserializer;
     use serde::Serializer;
 
+    /// Untagged JSON input representation accepting either a decimal string or a `u64` integer.
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum StringOrU64 {
+        /// Decimal string representation of a `u128`.
         Str(String),
+        /// Numeric `u64` representation promoted to `u128`.
         Num(u64),
     }
 
+    /// Serializes `value` as a base-10 decimal string.
     pub(super) fn serialize<S: Serializer>(value: &u128, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&value.to_string())
     }
 
+    /// Deserializes a `u128` from either a decimal string or a `u64` JSON number.
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,
     ) -> Result<u128, D::Error> {
@@ -353,6 +371,7 @@ pub struct OnionInvokeRpcResponse {
     pub output_base64: String,
 }
 
+/// Returns whether `method` is a built-in local RPC method reserved by `rings-node`.
 fn is_builtin_local_rpc_method(method: &str) -> bool {
     matches!(
         method,
@@ -379,16 +398,22 @@ pub trait LocalRpcMethod: MaybeSendSync {
 #[allow(dead_code)]
 #[wasm_export]
 pub struct Provider {
+    /// Underlying node processor managing the swarm, DHT, and background daemons.
     processor: Arc<Processor>,
+    /// Internal JSON-RPC handler executing built-in node RPC methods.
     handler: InternalRpcHandler,
+    /// Registry of installed application-layer extension protocols.
     extensions: crate::extension::ext::Extensions,
+    /// Counters recording application envelopes dropped by the backend dispatcher.
     dispatch_drops: Arc<DispatchDrops>,
+    /// Bounded inbox retaining inbound E2E handshake and stream-frame events.
     e2e_inbox: Arc<E2eInbox>,
     /// External local RPC methods installed on this provider.
     custom_rpc: Arc<Mutex<BTreeMap<String, Arc<dyn LocalRpcMethod>>>>,
     /// The onion runtime installed in this provider's registry, shared by its clones; its lock
     /// serializes the check-and-install, so the runtime is installed at most once.
     onion_runtime: Arc<Mutex<Option<OnionRuntime>>>,
+    /// Optional remote JSON-RPC directory endpoint captured for browser onion lookups.
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<BrowserDirectoryEndpoint>>>,
     /// The retained browser inbox and its recipient, shared by provider clones. Law: only a
@@ -400,10 +425,13 @@ pub struct Provider {
     pagehide: Option<std::rc::Rc<browser::provider::listener::PagehideListener>>,
 }
 
+/// Remote JSON-RPC directory endpoint used by browser onion lookups.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 #[derive(Clone)]
 pub(crate) struct BrowserDirectoryEndpoint {
+    /// Base URL of the remote node's JSON-RPC endpoint.
     pub(crate) url: String,
+    /// Optional bearer token authorizing directory RPC requests.
     pub(crate) api_token: Option<Arc<str>>,
 }
 
@@ -677,6 +705,7 @@ impl Provider {
         self.dispatch_drops.counters()
     }
 
+    /// Drains all retained inbound E2E events from the provider's internal inbox.
     pub(crate) fn take_e2e_events_internal(&self) -> Result<TakeE2eEventsResponse> {
         self.e2e_inbox.take()
     }
@@ -687,6 +716,7 @@ impl Provider {
         self.take_e2e_events_internal()
     }
 
+    /// Builds a JSON/JS-safe snapshot of the node's active delegation signing horizon.
     pub(crate) fn signing_horizon_snapshot(&self) -> SigningHorizonSnapshot {
         let now_ms = self.processor.clock().now_ms();
         let horizon = self.processor.signing_horizon();
@@ -772,6 +802,7 @@ impl Provider {
         self.processor.origin_quota_counters()
     }
 
+    /// Flushes all applied measurement updates on the underlying processor.
     pub(crate) async fn flush_measurements(&self) -> Result<()> {
         self.processor.flush_measurements().await
     }
@@ -782,6 +813,7 @@ impl Provider {
         self.processor.registrations_published().await
     }
 
+    /// Performs best-effort voluntary departure on the underlying processor.
     pub(crate) async fn leave_internal(&self) -> Result<()> {
         self.processor.leave().await
     }
@@ -836,6 +868,7 @@ impl Provider {
         self.close_with_drain_timeout(CLOSE_DRAIN_TIMEOUT).await
     }
 
+    /// Runs the full [`Provider::close`] sequence with an explicit per-phase `drain_timeout`.
     pub(crate) async fn close_with_drain_timeout(
         self,
         drain_timeout: std::time::Duration,
@@ -1005,6 +1038,7 @@ impl Provider {
         .await
     }
 
+    /// Mints a new delegated session key for `account` using the supplied `signer`.
     pub(crate) async fn mint_delegatee_key(
         account: String,
         account_type: String,
@@ -1022,6 +1056,7 @@ impl Provider {
         sk_builder.build().map_err(Error::InternalError)
     }
 
+    /// Mints a session key, customizes [`ProcessorConfig`] via `configure`, and constructs a [`Provider`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new_provider_internal_with_config(
         network_id: u32,
@@ -1232,6 +1267,7 @@ impl Provider {
     }
 }
 
+/// Extracts a [`BrowserDirectoryEndpoint`] from a `connectPeerViaHttp` RPC request, if present.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_directory_endpoint_from_rpc(
     method: &str,
@@ -1260,6 +1296,7 @@ fn onion_directory_endpoint_from_rpc(
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 impl Provider {
+    /// Stores or clears the remote directory endpoint used by browser onion lookups.
     pub(crate) fn set_onion_directory_endpoint(
         &self,
         endpoint: Option<BrowserDirectoryEndpoint>,
@@ -1272,6 +1309,7 @@ impl Provider {
         Ok(())
     }
 
+    /// Returns the currently configured remote directory endpoint for browser onion lookups.
     pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<BrowserDirectoryEndpoint>> {
         self.onion_directory_endpoint
             .lock()

@@ -28,6 +28,7 @@ const FINGER_CONVERGENCE_INITIAL_JITTER: Duration = Duration::from_secs(10);
 const FINGER_CONVERGENCE_RESUME_REPHASE_THRESHOLD: Duration = Duration::from_secs(10);
 /// A due finger turn may yield to at most stabilization plus its reserved repair.
 const MAX_FINGER_PRIORITY_DEFERRALS: u8 = 2;
+/// Maintenance phase selected by the stabilization scheduler.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MaintenanceTask {
     /// Run the topology phase: clean peers, notify, start stabilization, and
@@ -121,6 +122,7 @@ fn record_maintenance_phase_for_test(
 ) {
 }
 
+/// Scheduling outcome produced by polling the maintenance schedule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MaintenanceDecision {
     /// The single task selected for this poll, if any.
@@ -512,6 +514,7 @@ fn lease_deadline_ms(phase: FingerConvergencePhase, base_ms: u64) -> Option<u64>
     }
 }
 
+/// Derive the initial FNV-1a jitter seed for finger convergence scheduling from `local` and `entropy`.
 fn finger_jitter_seed(local: crate::dht::Did, entropy: uuid::Uuid) -> u64 {
     local
         .as_bytes()

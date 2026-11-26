@@ -1,10 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![cfg_attr(
     test,
     allow(
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::unwrap_used
     )

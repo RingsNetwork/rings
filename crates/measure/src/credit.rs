@@ -1,3 +1,5 @@
+//! Local byte-credit accounting and aMule-compatible scoring.
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -6,16 +8,23 @@ use crate::Metric;
 use crate::PolicyError;
 use crate::UnixTime;
 
+/// Number of bytes in one mebibyte (2^20), used by the volume-cap formula.
 const BYTES_PER_MEBIBYTE: f64 = 1_048_576.0;
+/// Default aMule activation threshold in received useful bytes.
 const AMULE_ACTIVATION_BYTES: u64 = 1_000_000;
+/// Default aMule peer credit retention window (150 days in seconds).
 const AMULE_RETENTION_SECONDS: u64 = 150 * 24 * 60 * 60;
+/// Minimum neutral credit score multiplier.
 const MINIMUM_SCORE: f64 = 1.0;
+/// Maximum credit score multiplier.
 const MAXIMUM_SCORE: f64 = 10.0;
 
 /// Configuration of the local byte-credit relation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CreditPolicy {
+    /// Minimum useful bytes received from a peer before credit activates.
     activation_bytes: u64,
+    /// Duration in seconds without authenticated observation before expiry.
     retention_seconds: u64,
 }
 
@@ -64,6 +73,7 @@ impl CreditScore {
     /// Neutral credit with no priority multiplier.
     pub const NEUTRAL: Self = Self(MINIMUM_SCORE);
 
+    /// Clamps a raw formula result into `[MINIMUM_SCORE, MAXIMUM_SCORE]`, falling back to neutral if non-finite.
     fn from_formula(value: f64) -> Self {
         let finite = if value.is_finite() {
             value
@@ -82,8 +92,11 @@ impl CreditScore {
 /// Persistent useful-byte totals and observation time for one authenticated peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreditRecord {
+    /// Cumulative useful payload bytes sent to the peer.
     bytes_sent_to_peer: u64,
+    /// Cumulative useful payload bytes received and verified from the peer.
     bytes_received_from_peer: u64,
+    /// Timestamp of the most recent authenticated observation of the peer.
     last_seen: UnixTime,
 }
 
@@ -139,6 +152,7 @@ impl CreditRecord {
         CreditScore::from_formula(ratio.min(volume_cap))
     }
 
+    /// Adds useful sent bytes and advances `last_seen` to `at`.
     pub(crate) fn record_sent(
         &mut self,
         useful_bytes: u64,
@@ -154,6 +168,7 @@ impl CreditRecord {
         Ok(())
     }
 
+    /// Adds useful received bytes and advances `last_seen` to `at`.
     pub(crate) fn record_received(
         &mut self,
         useful_bytes: u64,
@@ -170,12 +185,14 @@ impl CreditRecord {
         Ok(())
     }
 
+    /// Advances `last_seen` to `at` without changing byte counters.
     pub(crate) fn touch(&mut self, at: UnixTime) -> Result<(), MeasureError> {
         self.ensure_not_before_last_seen(at)?;
         self.last_seen = at;
         Ok(())
     }
 
+    /// Returns whether the record has reached `policy.retention_seconds()` at `now`.
     pub(crate) fn is_expired(
         self,
         now: UnixTime,
@@ -190,6 +207,7 @@ impl CreditRecord {
         Ok(age >= policy.retention_seconds())
     }
 
+    /// Rejects timestamps earlier than `self.last_seen` as a clock regression.
     pub(crate) fn ensure_not_before_last_seen(self, at: UnixTime) -> Result<(), MeasureError> {
         if at < self.last_seen {
             return Err(MeasureError::ClockRegression {
@@ -200,6 +218,7 @@ impl CreditRecord {
         Ok(())
     }
 
+    /// Clamps a future `last_seen` timestamp down to `now`, returning whether it changed.
     pub(crate) fn reconcile_clock(&mut self, now: UnixTime) -> bool {
         if self.last_seen <= now {
             return false;

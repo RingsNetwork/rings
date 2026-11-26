@@ -214,6 +214,7 @@ impl OnionRuntime {
         result
     }
 
+    /// Record a route success or timeout outcome against `guard` in entry-guard tracking.
     async fn record_guard_result<T>(&self, guard: rings_core::dht::Did, result: &Result<T>) {
         let outcome = match result {
             Ok(_) => Some(false),
@@ -245,10 +246,12 @@ impl OnionRuntime {
 /// pipelines on both native and browser nodes (#834 Phase 2b).
 #[derive(Clone)]
 pub struct OnionPipelineHandle {
+    /// Shared onion runtime used for invoke registration and pipeline evaluation.
     runtime: OnionRuntime,
 }
 
 impl OnionPipelineHandle {
+    /// Wrap `runtime` in a cross-platform [`OnionPipelineHandle`].
     pub(crate) const fn new(runtime: OnionRuntime) -> Self {
         Self { runtime }
     }

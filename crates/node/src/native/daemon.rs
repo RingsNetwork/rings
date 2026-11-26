@@ -589,6 +589,7 @@ pub async fn await_foreground_exit_with_signal<H: NativeDaemonHooks>(
     )
 }
 
+/// Applies CLI security overrides, initializes the API token file, and builds [`ApiSecurity`].
 fn configure_api_security(
     config_path: &str,
     config: &mut config::Config,
@@ -616,6 +617,7 @@ fn configure_api_security(
     .map_err(Into::into)
 }
 
+/// Normalizes the exit outcome of a foreground service task from `JoinSet::join_next`.
 fn joined_service_result(
     result: Option<Result<anyhow::Result<()>, JoinError>>,
 ) -> anyhow::Result<()> {
@@ -626,6 +628,7 @@ fn joined_service_result(
     }
 }
 
+/// Normalizes a single joined task result, annotating join errors with `task`.
 fn joined_task_result(
     result: Result<anyhow::Result<()>, JoinError>,
     task: &'static str,
@@ -669,6 +672,7 @@ pub async fn await_task_cleanup(
     }
 }
 
+/// Aggregates all foreground run and shutdown cleanup errors into one combined result.
 fn combine_foreground_results(
     primary: anyhow::Result<()>,
     gateway_cleanup: anyhow::Result<()>,
@@ -701,6 +705,7 @@ fn combine_foreground_results(
     }
 }
 
+/// Waits for an OS termination signal (`SIGINT` or, on Unix, `SIGTERM`).
 async fn shutdown_signal() -> anyhow::Result<()> {
     #[cfg(unix)]
     {

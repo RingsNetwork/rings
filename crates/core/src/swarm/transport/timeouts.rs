@@ -1,13 +1,20 @@
 use std::time::Duration;
 
+/// Timeout budgets governing transport send admission, delivery, and connection retirement.
 pub(super) struct TransportTimeoutProfile {
+    /// Maximum time to wait for a send to be accepted by the transport layer.
     pub(super) send_accept: Duration,
+    /// Maximum time to wait for first-frame admission on an outbound payload.
     pub(super) first_frame_admission: Duration,
+    /// Maximum time allowed for an accepted frame to complete delivery.
     pub(super) delivery: Duration,
+    /// Maximum time allowed for a tracked payload send before caller cancellation.
     pub(super) tracked_payload: Duration,
+    /// Maximum time allowed to close and retire a transport connection.
     pub(super) close: Duration,
 }
 
+/// Shortened timeout profile used by native dummy-transport unit tests.
 // The dummy tracked deadline is intentionally shorter than delivery. Tests use
 // that inversion to exercise caller cancellation while a delivery remains pending.
 const DUMMY_NATIVE_TEST_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
@@ -18,6 +25,7 @@ const DUMMY_NATIVE_TEST_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTime
     close: Duration::from_millis(100),
 };
 
+/// Default timeout profile used for production transports.
 const PRODUCTION_TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
     send_accept: Duration::from_secs(5),
     first_frame_admission: rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT,
@@ -26,10 +34,12 @@ const PRODUCTION_TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportT
     close: rings_transport::core::transport::CONNECTION_RETIRE_TIMEOUT,
 };
 
+/// Active timeout profile for the current build configuration.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(super) const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile =
     DUMMY_NATIVE_TEST_TIMEOUT_PROFILE;
 
+/// Active timeout profile for the current build configuration.
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 pub(super) const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile =
     PRODUCTION_TRANSPORT_TIMEOUT_PROFILE;
@@ -38,6 +48,7 @@ pub(super) const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile =
 /// every per-hop delay of this end is judged against.
 pub(crate) const DELIVERY_BOUND: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
 
+/// Verify compile-time ordering invariants required of every timeout profile.
 const fn assert_common_profile_laws(profile: &TransportTimeoutProfile) {
     assert!(profile.send_accept.as_millis() < profile.first_frame_admission.as_millis());
     assert!(

@@ -14,6 +14,7 @@ use crate::links::ProjectLink;
 use crate::links::SiteLink;
 use crate::node::public_seed_endpoint;
 
+/// Render the guide page linking each supported runtime to its first commands and book chapter.
 pub(crate) fn page(navigate_page: Callback<ShellPage>) -> Html {
     html! {
         <section class="site-page guide-page" aria-labelledby="guide-title">
@@ -25,6 +26,7 @@ pub(crate) fn page(navigate_page: Callback<ShellPage>) -> Html {
     }
 }
 
+/// Render the guide page hero heading and introductory lede.
 fn heading_section() -> Html {
     html! {
         <header class="guide-heading">
@@ -37,6 +39,7 @@ fn heading_section() -> Html {
     }
 }
 
+/// Render the grid of supported Rings runtime cards.
 fn runtimes_section(navigate_page: &Callback<ShellPage>) -> Html {
     html! {
         <section class="landing-section" aria-labelledby="guide-runtimes-title">
@@ -51,6 +54,7 @@ fn runtimes_section(navigate_page: &Callback<ShellPage>) -> Html {
     }
 }
 
+/// Render the numbered quick-start steps with copyable commands.
 fn first_steps_section() -> Html {
     html! {
         <section class="landing-section" aria-labelledby="guide-steps-title">
@@ -68,6 +72,7 @@ fn first_steps_section() -> Html {
     }
 }
 
+/// Render the further-reading link strip at the bottom of the guide page.
 fn further_reading_section(navigate_page: &Callback<ShellPage>) -> Html {
     html! {
         <section class="landing-section" aria-labelledby="guide-reading-title">
@@ -84,13 +89,18 @@ fn further_reading_section(navigate_page: &Callback<ShellPage>) -> Html {
 
 /// One way to run a node: what it is, and where to install, run, and read about it.
 struct Runtime {
+    /// Short category eyebrow shown above the card title.
     label: &'static str,
+    /// Runtime card heading.
     title: &'static str,
+    /// Brief description of the runtime.
     body: &'static str,
+    /// Destination links for installing, running, and reading about this runtime.
     links: &'static [SiteLink],
 }
 
 impl Runtime {
+    /// Render this runtime description as a guide card.
     fn render(&self, navigate_page: &Callback<ShellPage>) -> Html {
         html! {
             <article class="guide-card">
@@ -105,6 +115,7 @@ impl Runtime {
     }
 }
 
+/// The four supported Rings runtime cards displayed on the guide page.
 const RUNTIMES: [Runtime; 4] = [
     Runtime {
         label: "Native",
@@ -149,14 +160,20 @@ const RUNTIMES: [Runtime; 4] = [
 
 /// A first step: its commands and the chapter that explains them.
 struct Step {
+    /// Two-digit ordinal label for the step.
     index: &'static str,
+    /// Step heading.
     title: &'static str,
+    /// Short explanation of what the step accomplishes.
     summary: &'static str,
+    /// Command or code snippet rendered in the step's code block.
     code: &'static str,
+    /// Documentation chapter covering this step in detail.
     chapter: Chapter,
 }
 
 impl Step {
+    /// Render this quick-start step with its summary, chapter link, and code block.
     fn render(&self) -> Html {
         html! {
             <article class="guide-step">
@@ -174,6 +191,7 @@ impl Step {
     }
 }
 
+/// Ordered quick-start steps displayed on the guide page.
 const STEPS: [Step; 3] = [
     Step {
         index: "01",
@@ -217,6 +235,7 @@ const STEPS: [Step; 3] = [
     },
 ];
 
+/// Deep-dive documentation and reference links shown in the further-reading section.
 const FURTHER_READING: [SiteLink; 16] = [
     SiteLink::Chapter(Chapter::Tui),
     SiteLink::Chapter(Chapter::Onion),

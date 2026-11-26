@@ -93,6 +93,7 @@ pub struct OnionInvokeDescriptorBody {
 }
 
 impl OnionInvokeDescriptorBody {
+    /// Borrow all signed fields as a serialization view for signing.
     fn body_ref(&self) -> OnionInvokeDescriptorBodyRef<'_> {
         OnionInvokeDescriptorBodyRef {
             did: self.did,
@@ -111,6 +112,7 @@ impl OnionInvokeDescriptorBody {
         }
     }
 
+    /// Serialize the signed body fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
     }
@@ -158,24 +160,39 @@ impl SignedDescriptorBody for OnionInvokeDescriptorBody {
     }
 }
 
+/// Borrowed view of [`OnionInvokeDescriptorBody`] serialized for signing and verification.
 #[derive(Serialize)]
 struct OnionInvokeDescriptorBodyRef<'a> {
+    /// DID of the hosting node/account.
     did: Did,
+    /// Account public key corresponding to `did`.
     public_key: &'a VerificationPublicKey,
+    /// Delegation public key used for Sphinx layer blinding.
     delegatee_public_key: &'a PublicKey<33>,
+    /// Process epoch `e_n` of the registering process.
     process_epoch: OnionProcessEpoch,
+    /// Runtime family of this node.
     node_type: &'a OnlineNodeType,
+    /// Network identifier.
     network_id: u32,
+    /// Closed `invoke` shape `f ∈ Σ_I`.
     shape: &'a OnionInvokeShape,
+    /// Canonical open backend name `ω ∈ Ω`.
     backend: &'a OnionBackendName,
+    /// Signed per-`(node, shape, backend)` quota policy.
     policy: &'a OnionInvokePolicy,
+    /// Process start timestamp in milliseconds since Unix epoch.
     started_at_ms: u128,
+    /// Freshness window `T` in milliseconds.
     fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     expires_at_ms: u128,
+    /// Node software version.
     version: &'a str,
 }
 
 impl OnionInvokeDescriptorBodyRef<'_> {
+    /// Serialize the borrowed descriptor fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         rings_codec::serialize(self).map_err(CoreError::CodecSerialize)
     }
@@ -230,6 +247,7 @@ impl OnionInvokeDescriptor {
         )
     }
 
+    /// Borrow the signed descriptor fields for signature verification.
     fn body_ref(&self) -> OnionInvokeDescriptorBodyRef<'_> {
         OnionInvokeDescriptorBodyRef {
             did: self.did,
@@ -248,6 +266,7 @@ impl OnionInvokeDescriptor {
         }
     }
 
+    /// Serialize the signed descriptor fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
     }
@@ -355,16 +374,24 @@ impl OnionInvokeDescriptorDecodeReport {
 /// Periodic node-layer DHT registration for offered `(shape, backend)` pairs.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionInvokeRegistration {
+    /// Interval between periodic descriptor heartbeats.
     heartbeat_interval: Duration,
+    /// Runtime family advertised by this node.
     node_type: OnlineNodeType,
+    /// Shared cell holding the current process epoch `e_n`.
     process_epoch: OnionProcessEpochCell,
+    /// Process start timestamp in milliseconds since Unix epoch.
     started_at_ms: u128,
+    /// Offered `(shape, backend)` pairs and their policies.
     offer: OnionInvokeOffer,
+    /// Injected clock used for descriptor timestamps.
     clock: SharedClock,
+    /// Underlying DHT heartbeat publisher for invoke descriptors.
     publisher: DhtRegistrationPublisher<Vec<OnionInvokeDescriptor>>,
 }
 
 impl OnionInvokeRegistration {
+    /// Construct a periodic invoke registration publisher using `clock`.
     pub(crate) fn new_with_clock(
         heartbeat_interval: Duration,
         ttl: Duration,

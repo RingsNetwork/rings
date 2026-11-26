@@ -4,15 +4,19 @@ use std::sync::Arc;
 
 use event_listener::Event;
 
+/// Shared inner state backing a [`StopSource`] and its [`StopToken`] clones.
 #[derive(Default)]
 struct StopState {
+    /// Monotonic flag set to `true` once shutdown has been requested.
     requested: AtomicBool,
+    /// Event notified to wake all tasks awaiting shutdown.
     changed: Event,
 }
 
 /// Authority that can request cooperative shutdown for one lifecycle scope.
 #[derive(Clone, Default)]
 pub struct StopSource {
+    /// Shared shutdown state controlled by this source.
     state: Arc<StopState>,
 }
 
@@ -56,6 +60,7 @@ impl std::fmt::Debug for StopSource {
 /// Read-only cooperative shutdown capability for long-running loops.
 #[derive(Clone, Default)]
 pub struct StopToken {
+    /// Shared shutdown state observed by this token.
     state: Arc<StopState>,
 }
 

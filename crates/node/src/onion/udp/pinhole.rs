@@ -17,7 +17,9 @@ pub const MAX_PINHOLE_TTL_MS: u64 = 300_000;
 /// `t <= now_ms` with `t + min(ttl_ms, MAX_PINHOLE_TTL_MS) > now_ms`.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct OnionUdpPinholeTable {
+    /// Maximum number of active peer-IP pinhole entries retained simultaneously.
     max_entries: usize,
+    /// Map from permitted peer IP address to its expiration timestamp in milliseconds.
     entries: BTreeMap<IpAddr, u128>,
 }
 

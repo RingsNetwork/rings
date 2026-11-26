@@ -1,7 +1,10 @@
 //! Connection and transport interfaces with their state and send-admission models.
 
+/// Core transport and connection trait definitions.
 mod interface;
+/// One-send admission permit and irrevocable send guard types.
 mod send;
+/// Coherent connection phase and channel readiness state machine.
 mod state;
 
 pub use interface::custom_frame_wire;

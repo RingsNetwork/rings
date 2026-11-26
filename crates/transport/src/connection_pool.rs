@@ -17,16 +17,24 @@ use crate::error::Result;
 
 /// [Pool] manages all the connections for each peer.
 pub struct Pool<C> {
+    /// Active connections keyed by peer connection ID.
     connections: DashMap<String, Arc<C>>,
 }
 
+/// Outcome of attempting to insert a candidate connection into the pool.
 enum PoolInsertion<C> {
+    /// Candidate was installed as the active connection for the peer.
     Inserted {
+        /// Weak reference to the newly inserted connection.
         connection: ConnectionRef<C>,
+        /// Previous non-live connection displaced by the insertion, if any.
         retired: Option<Arc<C>>,
     },
+    /// Candidate was rejected because a live connection already occupied the peer slot.
     Rejected {
+        /// Rejected candidate connection returned to the caller for cleanup.
         candidate: Arc<C>,
+        /// Rejection error describing the collision.
         error: Error,
     },
 }
@@ -66,6 +74,7 @@ impl<C> Pool<C> {
             .collect()
     }
 
+    /// Insert `conn` under `cid` if the slot is vacant or `current_is_live` returns `false`.
     fn insert_if_replaceable(
         &self,
         cid: &str,
@@ -94,6 +103,7 @@ impl<C> Pool<C> {
         }
     }
 
+    /// Remove and return the pooled connection for `expected` only if it is still the active generation.
     fn take_if_current<R: ?Sized>(&self, expected: &ConnectionRef<R>) -> Option<Arc<C>> {
         match self.connections.entry(expected.cid().to_string()) {
             Entry::Occupied(entry) if expected.points_to(entry.get()) => Some(entry.remove()),

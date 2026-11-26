@@ -225,7 +225,9 @@ where F: Future<Output = Result<T>> {
 /// The stabilization runner.
 #[derive(Clone)]
 pub struct Stabilizer {
+    /// Swarm transport used to send stabilization and repair messages.
     transport: Arc<SwarmTransport>,
+    /// Local Chord peer ring maintained by this stabilizer.
     dht: Arc<PeerRing>,
     /// The layer that owns the application, which interprets the intent to deliver the inbox.
     inbox: SharedInboxDelivery,
@@ -966,6 +968,7 @@ pub(crate) use maintenance::MaintenancePhaseEvent;
 pub(crate) use maintenance::MaintenancePhaseKind;
 /// Liveness probing of admitted peers.
 mod liveness_probe;
+/// Storage repair planning, throttling, and delivery.
 mod storage_repair;
 
 /// Deadline behavior for stabilization sub-steps.
