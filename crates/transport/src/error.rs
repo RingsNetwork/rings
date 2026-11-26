@@ -325,6 +325,60 @@ impl Error {
             | Self::ChannelPoolEmpty => TransportSendFailureClass::Fatal,
         }
     }
+
+    /// Whether an outbound send failure on a peer link is attributable to a broken or
+    /// misbehaving remote link rather than pre-acceptance retirement, caller sizing, or local
+    /// runtime shutdown. Total over all compiled backend variants.
+    pub const fn blames_remote_peer_on_send(&self) -> bool {
+        match self {
+            Self::SendPermitRevoked | Self::LinkCreditClosed(_) => false,
+            Self::MessageNotDelivered(_)
+            | Self::ChannelOpen(_)
+            | Self::ChannelMessage(_)
+            | Self::RemoteHandshakeApplyError(_)
+            | Self::RemoteMaxMessageSizeTooSmall { .. } => true,
+            Self::Backend {
+                class: BackendSendFailureClass::Ambiguous,
+                ..
+            } => true,
+            Self::Backend {
+                class: BackendSendFailureClass::Fatal,
+                ..
+            } => false,
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+            Self::Webrtc(_) | Self::NativeSendCompletionTimeout { .. } => true,
+            #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+            Self::NativeSendTask(_)
+            | Self::NativeSendPanic(_)
+            | Self::NativeSendRuntimeUnavailable
+            | Self::NativeConnectionCloseTask(_)
+            | Self::NativeConnectionRetirementTimeout { .. } => false,
+            #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
+            Self::WebSysWebrtc(_) => true,
+            #[cfg(feature = "dummy")]
+            Self::DummyRemoteConnectionUnavailable | Self::DummyRemoteConnectionClosed => true,
+            #[cfg(feature = "dummy")]
+            Self::DummyIrrevocableSendTaskStopped | Self::DummyConnectionRetiredBeforeDispatch => {
+                false
+            }
+            Self::Codec(_)
+            | Self::IceServer(_)
+            | Self::Timer(_)
+            | Self::SendByteCountOverflow
+            | Self::FrameTooLarge { .. }
+            | Self::LocalHandshakeGenerationError(_)
+            | Self::UnsupportedOperation(_)
+            | Self::UdpPortRange(_)
+            | Self::ConnectionAlreadyExists(_)
+            | Self::ConnectionNotFound(_)
+            | Self::ConnectionReleased(_)
+            | Self::RwLockWrite(_)
+            | Self::RwLockRead(_)
+            | Self::ForeignCredit(_)
+            | Self::CreditPumpUnavailable(_)
+            | Self::ChannelPoolEmpty => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +457,13 @@ mod tests {
                 err.send_failure_class(),
                 TransportSendFailureClass::Fatal,
                 "expected Fatal for {err:?}"
+            );
+        }
+        #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+        {
+            assert!(!Error::NativeSendPanic("boom".to_string()).blames_remote_peer_on_send());
+            assert!(
+                Error::NativeSendCompletionTimeout { timeout_ms: 100 }.blames_remote_peer_on_send()
             );
         }
     }

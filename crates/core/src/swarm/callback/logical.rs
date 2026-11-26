@@ -314,17 +314,9 @@ impl LogicalInbound {
         let local = self.transport.dht.did;
         match message {
             Message::FindSuccessorSend(msg) => Ok(matches!(
-                self.transport.dht.find_successor(msg.did)?,
+                self.message_handler.find_successor_for_query(msg)?,
                 crate::dht::PeerRingAction::Some(did)
-                    if msg.accepts_local_successor(local)
-                        || did == local
-                        || self
-                            .transport
-                            .dht
-                            .successors()
-                            .list()?
-                            .into_iter()
-                            .all(|peer| peer == local)
+                    if msg.accepts_local_successor(local) || did == local
             )),
             Message::FindRelayHolder(msg) => Ok(payload.is_relay_destination_for(local)
                 && matches!(
@@ -346,16 +338,10 @@ impl LogicalInbound {
                     ))
             }
             Message::SearchEntry(msg) => {
-                let query = crate::dht::entry::EntryLookupKey::new(msg.placement, msg.placement);
-                let lookup = self
-                    .transport
+                self.transport
                     .dht
-                    .lookup_placement(query, false, self.transport.now_ms())
-                    .await?;
-                Ok(!matches!(
-                    lookup,
-                    crate::dht::PlacementLookup::Remote { .. }
-                ))
+                    .search_entry_terminates_locally(msg.placement, self.transport.now_ms())
+                    .await
             }
             Message::SyncEntriesWithSuccessor(msg) => Ok(payload.is_relay_destination_for(local)
                 || msg.destination.did() != payload.relay.destination
@@ -840,6 +826,92 @@ mod tests {
         assert_eq!(
             swarm.transport.origin_quota_record_count_for_test().await,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn test_strict_find_successor_to_referenced_peer_does_not_terminate_locally() {
+        let node = crate::tests::default::prepare_node(SecretKey::random()).await;
+        let succ_node = crate::tests::default::prepare_node(SecretKey::random()).await;
+        let swarm = &node.swarm;
+        let succ_swarm = &succ_node.swarm;
+        crate::tests::manually_establish_connection(swarm, succ_swarm).await;
+        crate::tests::default::wait_for_connection_state(
+            &node,
+            succ_swarm.did(),
+            rings_transport::core::transport::TransportConnectionState::Connected,
+        )
+        .await
+        .expect("connected to successor");
+
+        let local_did = swarm.did();
+        let succ_did = succ_swarm.did();
+        let mut pred_h160 = ethereum_types::H160::from(local_did);
+        if let Some(last) = pred_h160.as_bytes_mut().last_mut() {
+            *last = last.wrapping_sub(1);
+        }
+        let pred_did = crate::dht::Did::from(pred_h160);
+        assert_ne!(pred_did, local_did);
+        assert_ne!(pred_did, succ_did);
+
+        *swarm.dht().lock_predecessor().expect("predecessor") = Some(pred_did);
+        swarm
+            .dht()
+            .successors()
+            .update(succ_did)
+            .expect("successor");
+
+        let logical = LogicalInbound::new(swarm.transport.clone());
+        let origin = DelegateeKey::new_with_seckey(&SecretKey::random()).expect("origin");
+        let msg = Message::FindSuccessorSend(crate::message::FindSuccessorSend {
+            did: pred_did,
+            strict: true,
+            then: crate::message::FindSuccessorThen::Report(
+                crate::message::FindSuccessorReportHandler::None,
+            ),
+        });
+        let payload = MessagePayload::new_send_with_sequence(
+            msg.clone(),
+            MessageSigner::new(&origin, TEST_NETWORK_ID),
+            NextHop::toward(local_did),
+            local_did,
+            0,
+            None,
+        )
+        .expect("payload");
+
+        assert!(
+            !logical
+                .terminates_locally(&payload, &msg)
+                .await
+                .expect("terminates_locally"),
+            "strict FindSuccessorSend forwarded to referenced peer must not terminate locally"
+        );
+
+        // Even when the successor list is temporarily empty, if `pred_did` remains referenced in
+        // topology (e.g. via predecessor/finger) `HandleMsg<FindSuccessorSend>` still chooses the
+        // `reset_destination(pred_did)` redirecting branch rather than settling locally.
+        swarm
+            .dht()
+            .successors()
+            .remove(succ_did)
+            .expect("clear successor");
+        assert!(
+            !logical
+                .terminates_locally(&payload, &msg)
+                .await
+                .expect("terminates_locally without successor"),
+            "strict FindSuccessorSend to referenced peer must remain non-terminating when successors empty"
+        );
+
+        // Once no reference or remote successor remains, an isolated node settles locally (`did == local`).
+        *swarm.dht().lock_predecessor().expect("clear predecessor") = None;
+        assert!(
+            logical
+                .terminates_locally(&payload, &msg)
+                .await
+                .expect("terminates_locally when isolated"),
+            "strict FindSuccessorSend on an isolated node with unreferenced target settles locally"
         );
     }
 }
