@@ -1,5 +1,23 @@
+/* The initial document: what a visitor sees until the wasm app mounts, and all a crawler or a
+   no-JS reader ever sees. It mirrors the Yew landing page (src/styles/theme/landing.rs and
+   navigation.rs: the WARM palette, the serif stack, the header, the hero, the cards) so the
+   mount is a hand-off rather than a restyle, and it must stay self-contained: it renders
+   before any script runs. */
+
 :root {
   color-scheme: light;
+  --page: #f3ead8;
+  --page-alt: #fbf4e6;
+  --panel: #fffaf0;
+  --panel-alt: #fff6e6;
+  --line: #dfd0b7;
+  --line-strong: #d7c6aa;
+  --ink: #101828;
+  --ink-soft: #344054;
+  --body: #475467;
+  --muted: #736453;
+  --accent: #b42318;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
 }
 
 * {
@@ -8,104 +26,174 @@
 
 body {
   margin: 0;
+  background: var(--page);
 }
 
 .static-site {
   min-height: 100vh;
-  background: #f3ead8;
-  color: #344054;
-  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Baskerville, "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", Georgia, serif;
+  background: linear-gradient(180deg, var(--page-alt) 0, var(--page-alt) 704px, var(--page) 704px), var(--page);
+  color: var(--ink-soft);
+  font-family: var(--serif);
 }
 
 .static-site h1,
 .static-site h2,
 .static-site h3,
 .static-site p {
-  margin-top: 0;
+  margin: 0;
+  color: var(--ink);
 }
 
-.static-site h1,
-.static-site h2,
-.static-site h3 {
-  color: #101828;
+.static-site p {
+  color: var(--body);
 }
 
 .static-site a {
-  color: #344054;
+  color: var(--ink-soft);
   font-weight: 700;
   text-decoration: none;
 }
 
-.static-site a:hover,
 .static-site a:focus-visible {
-  color: #b42318;
-  text-decoration: underline;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-.static-header,
-.static-footer {
+/* Header: the Yew `.landing-header`. */
+
+.static-header {
+  position: relative;
+  z-index: 3;
   display: flex;
-  width: 100%;
+  min-height: 64px;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
-  padding: 18px 10%;
-  background: #fffaf0;
+  padding: 0 10vw;
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 246, 235, 0.96);
+  box-shadow: 0 1px 0 rgba(17, 24, 39, 0.04);
 }
 
-.static-header {
-  border-bottom: 1px solid #dfd0b7;
+.static-site .static-brand {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
 }
 
-.static-brand,
+.static-brand-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 8px;
+  background: #111827;
+}
+
+.static-brand-mark img {
+  display: block;
+  width: 23px;
+  height: 23px;
+}
+
+.static-brand-name {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.static-brand-name strong {
+  font-size: 0.96rem;
+  letter-spacing: 0.01em;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.static-brand-name span {
+  color: #667085;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.15;
+}
+
 .static-nav,
 .static-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
 }
 
-.static-brand {
-  gap: 10px;
-  color: #101828;
-  font-size: 1rem;
+.static-nav {
+  justify-content: flex-end;
+  gap: 6px;
 }
 
-.static-brand img {
-  display: block;
-}
-
-.static-nav,
-.static-actions {
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.static-nav a,
-.static-actions a {
+.static-site .static-nav a {
+  display: inline-flex;
+  height: 34px;
+  align-items: center;
+  border: 1px solid var(--line-strong);
   border-radius: 8px;
-  padding: 9px 12px;
-  background: #fff6e6;
+  padding: 0 11px;
+  background: var(--panel);
+  color: var(--ink-soft);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  line-height: 1;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
+
+.static-site .static-nav a:hover {
+  border-color: #111827;
+  background: #111827;
+  color: #fff;
+}
+
+/* Hero: the Yew `.landing-hero`, image under a parchment wash. */
 
 .static-hero {
+  position: relative;
   display: grid;
-  min-height: 580px;
+  min-height: 640px;
   align-items: center;
-  padding: 72px 10%;
+  overflow: hidden;
+  padding: 68px 10vw 58px;
+}
+
+.static-hero::before,
+.static-hero::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  pointer-events: none;
+}
+
+.static-hero::before {
+  z-index: 1;
   background:
-    linear-gradient(90deg, rgba(251, 244, 230, 0.97) 0%, rgba(251, 244, 230, 0.9) 40%, rgba(251, 244, 230, 0.38) 72%),
-    url("assets/images/rings-market-hero.png") center / cover no-repeat;
+    linear-gradient(90deg, rgba(251, 244, 230, 0.96) 0%, rgba(251, 244, 230, 0.88) 34%, rgba(251, 244, 230, 0.38) 62%, rgba(251, 244, 230, 0.08) 100%),
+    linear-gradient(180deg, rgba(251, 244, 230, 0.18) 0%, rgba(251, 244, 230, 0.08) 62%, rgba(251, 244, 230, 0.7) 100%);
+}
+
+.static-hero::after {
+  z-index: 0;
+  background: url("assets/images/rings-market-hero.webp") center / cover no-repeat;
 }
 
 .static-hero > div {
+  position: relative;
+  z-index: 2;
   display: grid;
   max-width: 680px;
   gap: 22px;
 }
 
-.static-kicker {
-  margin-bottom: 0;
-  color: #b42318;
+.static-site .static-kicker {
+  color: var(--accent);
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -113,34 +201,74 @@ body {
 }
 
 .static-hero h1 {
-  margin-bottom: 0;
-  font-size: clamp(2.7rem, 7vw, 4rem);
-  line-height: 1.02;
+  max-width: 820px;
+  font-size: 4rem;
+  letter-spacing: -0.015em;
+  line-height: 1.04;
 }
 
-.static-lede {
-  margin-bottom: 0;
+.static-site .static-lede {
+  max-width: 640px;
+  color: var(--ink-soft);
   font-size: 1.08rem;
   line-height: 1.72;
 }
 
-.static-actions .static-primary-action {
-  background: #101828;
+.static-actions {
+  gap: 10px;
+}
+
+.static-site .static-actions a {
+  display: inline-flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  padding: 10px 15px;
+  background: var(--panel);
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.static-site .static-actions a:hover {
+  background: #fff5f4;
+  color: var(--accent);
+}
+
+.static-site .static-actions .static-primary-action {
+  border: 1px solid #111827;
+  background: #111827;
+  color: #fff;
+  box-shadow: 0 12px 28px rgba(17, 24, 39, 0.16);
+}
+
+.static-site .static-actions .static-primary-action:hover {
+  border-color: var(--ink-soft);
+  background: var(--ink-soft);
   color: #fff;
 }
 
+/* Sections and cards: the Yew `.landing-section` and `.landing-feature-card`. */
+
 .static-section {
   display: grid;
-  gap: 16px;
+  gap: 24px;
   margin: 0 10%;
-  border-top: 1px solid #dfd0b7;
-  padding: 52px 0;
+  border-top: 1px solid var(--line);
+  padding: 44px 0;
 }
 
 .static-section > h2 {
   max-width: 760px;
-  margin-bottom: 0;
-  font-size: clamp(1.7rem, 4vw, 2rem);
+  font-size: 2rem;
+  letter-spacing: -0.01em;
+  line-height: 1.14;
+}
+
+.static-section > .static-kicker {
+  margin-bottom: -14px;
 }
 
 .static-feature-grid {
@@ -150,49 +278,221 @@ body {
 }
 
 .static-feature-grid > section {
+  display: grid;
+  min-width: 0;
+  min-height: 248px;
+  grid-template-columns: minmax(220px, 0.92fr) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 20px;
   border: 1px solid #ded0bd;
   border-radius: 8px;
-  padding: 20px;
+  padding: 18px;
   background: #fbf4e8;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+
+.static-feature-grid img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 206px;
+  border-radius: 6px;
+  background: var(--panel-alt);
+  object-fit: cover;
+}
+
+.static-feature-grid section > div {
+  display: grid;
+  align-content: start;
+  gap: 10px;
 }
 
 .static-feature-grid h3 {
-  margin-bottom: 10px;
+  font-size: 1.02rem;
+  line-height: 1.28;
 }
 
 .static-feature-grid p,
 .static-architecture > p:not(.static-kicker) {
-  margin-bottom: 0;
-  line-height: 1.7;
+  max-width: 900px;
+  font-size: 0.95rem;
+  line-height: 1.68;
 }
 
 .static-footer {
-  border-top: 1px solid #dfd0b7;
-  color: #736453;
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  border-top: 1px solid var(--line);
+  padding: 18px 10vw;
+  background: var(--panel);
+  color: var(--muted);
   font-size: 0.78rem;
 }
 
-@media (max-width: 720px) {
-  .static-header,
-  .static-footer {
-    align-items: flex-start;
-    flex-direction: column;
-    padding-right: 6%;
-    padding-left: 6%;
+/* While the wasm app downloads, say so. Only where scripts run: a crawler or a no-JS reader
+   gets this document as the whole page, with nothing pending. The app replaces the body on
+   mount, which removes the indicator with it. */
+
+@media (scripting: enabled) {
+  .static-site::before {
+    position: fixed;
+    z-index: 20;
+    top: 0;
+    left: 0;
+    width: 32%;
+    height: 3px;
+    border-radius: 0 3px 3px 0;
+    background: linear-gradient(90deg, rgba(180, 35, 24, 0), var(--accent));
+    content: "";
+    animation: static-loading-bar 1.6s ease-in-out infinite;
   }
 
+  .static-site::after {
+    position: fixed;
+    z-index: 20;
+    right: 20px;
+    bottom: 20px;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 9px 14px 9px 34px;
+    background: radial-gradient(circle at 18px 50%, var(--accent) 0 4px, transparent 4.5px), var(--panel);
+    box-shadow: 0 10px 24px rgba(17, 24, 39, 0.1);
+    color: var(--muted);
+    content: "Loading the interactive node\2026";
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    animation: static-loading-pill 1.2s ease-in-out infinite alternate;
+  }
+}
+
+@keyframes static-loading-bar {
+  0% {
+    transform: translateX(-100%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+@keyframes static-loading-pill {
+  0% {
+    border-color: var(--line-strong);
+  }
+
+  100% {
+    border-color: var(--accent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .static-site::before,
+  .static-site::after {
+    animation: none;
+  }
+}
+
+/* Breakpoints: the Yew landing's (src/styles/theme/responsive.rs). */
+
+@media (max-width: 1260px) {
+  .static-hero {
+    align-items: start;
+    min-height: 560px;
+    padding: 56px clamp(24px, 5vw, 56px) 48px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .static-feature-grid > section {
+    grid-template-columns: 184px minmax(0, 1fr);
+  }
+
+  .static-feature-grid img {
+    min-height: 178px;
+  }
+}
+
+@media (max-width: 860px) {
+  .static-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 6%;
+  }
+
+  .static-nav {
+    justify-content: flex-start;
+  }
+
+  .static-feature-grid > section {
+    grid-template-columns: 168px minmax(0, 1fr);
+  }
+
+  .static-feature-grid img {
+    min-height: 162px;
+  }
+}
+
+@media (max-width: 720px) {
   .static-hero {
     min-height: 520px;
-    padding-right: 6%;
-    padding-left: 6%;
+    padding: 42px 24px 32px;
+  }
+
+  .static-hero::before {
+    background: linear-gradient(180deg, rgba(251, 244, 230, 0.96) 0%, rgba(251, 244, 230, 0.9) 48%, rgba(251, 244, 230, 0.38) 100%);
+  }
+
+  .static-hero h1 {
+    font-size: 2.55rem;
+  }
+
+  .static-site .static-lede {
+    font-size: 1rem;
   }
 
   .static-section {
     margin-right: 6%;
     margin-left: 6%;
+    padding: 32px 0;
+  }
+
+  .static-section > h2 {
+    font-size: 1.55rem;
   }
 
   .static-feature-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .static-feature-grid > section {
+    grid-template-columns: 204px minmax(0, 1fr);
+  }
+
+  .static-feature-grid img {
+    min-height: 180px;
+  }
+
+  .static-footer {
+    flex-direction: column;
+    padding-right: 6%;
+    padding-left: 6%;
+  }
+}
+
+@media (max-width: 520px) {
+  .static-feature-grid > section {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .static-feature-grid img {
+    height: 208px;
+  }
+
+  .static-hero h1 {
+    font-size: 2.05rem;
   }
 }

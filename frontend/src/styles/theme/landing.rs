@@ -77,7 +77,7 @@ fn append_hero(css: &mut String, theme: Theme) {
         ("pointer-events", "none"),
         (
             "background-image",
-            "url(\"assets/images/rings-market-hero.png\")",
+            "url(\"assets/images/rings-market-hero.webp\")",
         ),
         ("background-position", "center"),
         ("background-size", "cover"),

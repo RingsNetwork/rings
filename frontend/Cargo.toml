@@ -43,6 +43,73 @@ yew = { version = "0.21", features = ["csr"] }
 rings-test-support = { path = "../crates/test-support", features = ["swarm-observer"] }
 wasm-bindgen-test = "=0.3.71"
 
+# The shipped wasm (rings.rs and the extension package): Trunk selects this profile for
+# `trunk build --release` through `data-cargo-profile-release` in index.html. This crate is
+# its own workspace, so the root workspace's `[profile.release]` does not reach it; without
+# this profile the bundle shipped unstripped, without LTO, and over 20 MB. It is a profile of
+# its own, rather than `[profile.release]`, so `cargo test --release` in QACI keeps the cheap
+# default release codegen instead of paying fat LTO per test binary.
+#
+# Size dominates first paint, so the bundle optimizes for size (`z`, then `wasm-opt -Oz`:
+# 22.3 MB → 7.3 MB raw, 5.8 MB → 2.9 MB gzip at the time of writing); the crates that run every
+# signature, hash, onion layer and frame stay at `opt-level = 3`, so the browser node does not
+# trade cryptographic throughput for download bytes.
+[profile.web-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.web-release.package.rings-aez]
+opt-level = 3
+
+[profile.web-release.package.rings-codec]
+opt-level = 3
+
+[profile.web-release.package.lz4_flex]
+opt-level = 3
+
+[profile.web-release.package.aes]
+opt-level = 3
+
+[profile.web-release.package.chacha20]
+opt-level = 3
+
+[profile.web-release.package.sha2]
+opt-level = 3
+
+[profile.web-release.package.k256]
+opt-level = 3
+
+[profile.web-release.package.p256]
+opt-level = 3
+
+[profile.web-release.package.primeorder]
+opt-level = 3
+
+[profile.web-release.package.elliptic-curve]
+opt-level = 3
+
+[profile.web-release.package.crypto-bigint]
+opt-level = 3
+
+[profile.web-release.package.curve25519-dalek]
+opt-level = 3
+
+[profile.web-release.package.ed25519-dalek]
+opt-level = 3
+
+[profile.web-release.package.ark-ff]
+opt-level = 3
+
+[profile.web-release.package.ark-ec]
+opt-level = 3
+
+[profile.web-release.package.ark-bls12-381]
+opt-level = 3
+
 [lints.rust]
 missing_docs = "deny"
 warnings = "deny"

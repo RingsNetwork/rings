@@ -9,6 +9,9 @@
     <link data-trunk rel="copy-dir" href="assets" />
     <link data-trunk rel="copy-file" href="rings-webview-service-worker.js" />
     <link data-trunk rel="css" href="static-shell.css" />
+    <!-- The hero image is the initial document's largest paint; fetch it before the stylesheet
+         that names it is parsed, ahead of the wasm the app waits on. -->
+    <link rel="preload" as="image" type="image/webp" href="/assets/images/rings-market-hero.webp" fetchpriority="high" />
     <!-- At the site's root, where crawlers and browsers look for them, and absolute, so the
          404.html copy of this shell finds them at any depth. The IndexNow key proves that the
          pings deploy-pages.yml sends after each deploy are the site's own. -->
@@ -174,8 +177,11 @@
     <main id="static-project-introduction" class="static-site" data-static-project-introduction>
       <header class="static-header">
         <a class="static-brand" href="https://rings.rs/" aria-label="Rings Network home">
-          <img src="assets/icons/rings.svg" alt="" width="36" height="36" />
-          <span>Rings Network</span>
+          <span class="static-brand-mark"><img src="assets/icons/rings.svg" alt="" width="23" height="23" /></span>
+          <span class="static-brand-name">
+            <strong>Rings Network</strong>
+            <span>A P2P network for the sovereign age.</span>
+          </span>
         </a>
         <nav class="static-nav" aria-label="Project resources">
           <a href="https://rings.rs/#guide">Guide</a>
@@ -206,20 +212,32 @@
           <h2 id="static-features-title">One network layer across browser and native peers.</h2>
           <div class="static-feature-grid">
             <section>
-              <h3>Browser-native peers and TURN</h3>
-              <p>Rings runs natively inside browser tabs via WebAssembly and web_sys, and on Linux, macOS, and Windows hosts via the same Rust node stack. Direct WebRTC datachannels carry peer traffic across UDP and TCP TURN traversal, including stateless signature-authenticated TURN and multi-hop Onion TURN over onion::udp.</p>
+              <img src="assets/images/feature-network-background.webp" alt="" width="1484" height="1060" loading="lazy" decoding="async" />
+              <div>
+                <h3>Browser-native peers and TURN</h3>
+                <p>Rings runs natively inside browser tabs via WebAssembly and web_sys, and on Linux, macOS, and Windows hosts via the same Rust node stack. Direct WebRTC datachannels carry peer traffic across UDP and TCP TURN traversal, including stateless signature-authenticated TURN and multi-hop Onion TURN over onion::udp.</p>
+              </div>
             </section>
             <section>
-              <h3>DID identity and cryptography</h3>
-              <p>Rings authenticates peers using decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—bridging WebCrypto P-256, MetaMask, Phantom, C FFI signers, and JSON-RPC daemons with IndexedDB store persistence.</p>
+              <img src="assets/images/feature-did-identity.webp" alt="" width="1484" height="1060" loading="lazy" decoding="async" />
+              <div>
+                <h3>DID identity and cryptography</h3>
+                <p>Rings authenticates peers using decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—bridging WebCrypto P-256, MetaMask, Phantom, C FFI signers, and JSON-RPC daemons with IndexedDB store persistence.</p>
+              </div>
             </section>
             <section>
-              <h3>Structured peer routing</h3>
-              <p>Rings organizes peers on a range-proved Chord DHT ring with O(log N) finger-table convergence, non-transitive gap-bridge routing, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation across independent overlays.</p>
+              <img src="assets/images/feature-peer-routing.webp" alt="" width="1484" height="1060" loading="lazy" decoding="async" />
+              <div>
+                <h3>Structured peer routing</h3>
+                <p>Rings organizes peers on a range-proved Chord DHT ring with O(log N) finger-table convergence, non-transitive gap-bridge routing, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation across independent overlays.</p>
+              </div>
             </section>
             <section>
-              <h3>Protocol and onion runtime</h3>
-              <p>Rings isolates protocols in pure state machines executed by a capability-scoped interpreter shell over a decoupled multi-step transport and LZ4-compressed binary wire protocol, alongside Sphinx/AEZ onion loops serving TCP, UDP, HTTPS, and Kleisli invoke pipelines.</p>
+              <img src="assets/images/feature-protocol-runtime.webp" alt="" width="1484" height="1060" loading="lazy" decoding="async" />
+              <div>
+                <h3>Protocol and onion runtime</h3>
+                <p>Rings isolates protocols in pure state machines executed by a capability-scoped interpreter shell over a decoupled multi-step transport and LZ4-compressed binary wire protocol, alongside Sphinx/AEZ onion loops serving TCP, UDP, HTTPS, and Kleisli invoke pipelines.</p>
+              </div>
             </section>
           </div>
         </section>
@@ -239,5 +257,11 @@
     </main>
     <script src="/assets/webview-host.js"></script>
     <script src="/assets/webview-overlay.js"></script>
+    <!-- Release builds use Cargo.toml's size-optimized `web-release` profile and run wasm-opt
+         over the bundle: the wasm is what the visitor waits on before the app mounts. The
+         wasm-opt features are the ones rustc enables by default for wasm32-unknown-unknown;
+         wasm-opt rejects a module that uses a feature it was not told about. Trunk emits the
+         loader script where this link stands, so it stays after the static document. -->
+    <link data-trunk rel="rust" href="Cargo.toml" data-cargo-profile-release="web-release" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types --enable-multivalue" />
   </body>
 </html>
