@@ -49,12 +49,14 @@ pub(crate) enum DataProofKey {
 }
 
 impl DataProofKey {
+    /// Return the attributed writer DID covered by this proof key.
     pub(crate) const fn actor(self) -> Did {
         match self {
             Self::Register(actor) | Self::Add(_, actor) | Self::Remove(_, actor) => actor,
         }
     }
 
+    /// Return whether this proof key attests an element addition.
     pub(crate) const fn is_element_add(self) -> bool {
         matches!(self, Self::Add(_, _))
     }
@@ -63,21 +65,30 @@ impl DataProofKey {
 /// Operation kind attested by a [`DataMutationClaim`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) enum DataMutationOpKind {
+    /// Full-carrier overwrite reset.
     Reset,
+    /// Element-set append.
     Append,
+    /// Element retraction / tombstone.
     Retract,
 }
 
 /// Fixed-size Merkle batch claim signed inside a [`SignedDataMutation`] (#1220).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) struct DataMutationClaim {
+    /// Target entry key DID.
     pub(crate) did: Did,
+    /// Mutation operation kind attested by this batch claim.
     pub(crate) kind: DataMutationOpKind,
+    /// Entry version issued for this mutation batch.
     pub(crate) version: EntryVersion,
+    /// Number of leaves committed by `merkle_root`.
     pub(crate) leaf_count: u32,
+    /// Keccak-256 Merkle root over the batch's elements or retracted dots.
     pub(crate) merkle_root: [u8; 32],
 }
 
+/// Domain-separated Merkle leaf hash for an element digest (`0x01 || digest`).
 fn merkle_leaf_element(digest: [u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 33];
     buf[0] = 0x01;
@@ -85,6 +96,7 @@ fn merkle_leaf_element(digest: [u8; 32]) -> [u8; 32] {
     keccak256(&buf)
 }
 
+/// Domain-separated Merkle leaf hash for a retracted [`EntryDot`] (`0x02 || dot`).
 fn merkle_leaf_dot(dot: EntryDot) -> [u8; 32] {
     let mut buf = [0u8; 65];
     buf[0] = 0x02;
@@ -96,6 +108,7 @@ fn merkle_leaf_dot(dot: EntryDot) -> [u8; 32] {
     keccak256(&buf)
 }
 
+/// Domain-separated Merkle internal node hash (`0x03 || left || right`).
 fn merkle_parent_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
     let mut buf = [0u8; 65];
     buf[0] = 0x03;
@@ -104,6 +117,7 @@ fn merkle_parent_hash(left: [u8; 32], right: [u8; 32]) -> [u8; 32] {
     keccak256(&buf)
 }
 
+/// Compute the Merkle root and per-leaf inclusion sibling branches for `leaves`.
 fn compute_merkle_tree(leaves: &[[u8; 32]]) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
     if leaves.is_empty() {
         return ([0u8; 32], Vec::new());
@@ -143,6 +157,7 @@ fn compute_merkle_tree(leaves: &[[u8; 32]]) -> ([u8; 32], Vec<Vec<[u8; 32]>>) {
     (root, branches)
 }
 
+/// Verify that `leaf_hash` at `leaf_index` in a tree of `leaf_count` leaves reconstructs `expected_root`.
 fn verify_merkle_inclusion(
     leaf_hash: [u8; 32],
     leaf_index: u32,
@@ -178,29 +193,45 @@ fn verify_merkle_inclusion(
 /// Cryptographic author attestation over a Swarm-originated [`EntryKind::Data`] mutation (#1220).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedDataMutation {
+    /// Proof slot key identifying the attested mutation and actor.
     pub(crate) key: DataProofKey,
+    /// Signed batch claim covering this mutation.
     pub(crate) claim: DataMutationClaim,
+    /// Leaf index of this item inside `claim.merkle_root`.
     pub(crate) leaf_index: u32,
+    /// Specific retracted dot attested when retracting by dot.
     pub(crate) witness_dot: Option<EntryDot>,
+    /// Merkle inclusion sibling hashes from `leaf_index` to `claim.merkle_root`.
     pub(crate) merkle_siblings: Vec<[u8; 32]>,
+    /// Cryptographic message verification signing `claim`.
     pub(crate) proof: MessageVerification,
 }
 
+/// Deduplicated wire representation of a bundle of [`SignedDataMutation`] proofs.
 #[derive(Serialize, Deserialize)]
 struct WireProofBundle {
+    /// Unique `(claim, verification)` pairs shared across items in the bundle.
     batches: Vec<(DataMutationClaim, MessageVerification)>,
+    /// Per-mutation proof items referencing entries in `batches`.
     items: Vec<WireProofItem>,
 }
 
+/// Compact wire item referencing a shared batch in [`WireProofBundle`].
 #[derive(Serialize, Deserialize)]
 struct WireProofItem {
+    /// Proof slot key identifying the attested mutation and actor.
     key: DataProofKey,
+    /// Index into [`WireProofBundle::batches`] for this item's claim and signature.
     batch_index: u32,
+    /// Leaf index of this item inside the batch Merkle tree.
     leaf_index: u32,
+    /// Specific retracted dot attested when retracting by dot.
     witness_dot: Option<EntryDot>,
+    /// Merkle inclusion sibling hashes for this leaf.
     merkle_siblings: Vec<[u8; 32]>,
 }
 
+/// Serialize `proofs` into a deduplicated [`WireProofBundle`] byte payload.
 pub(super) fn encode_proof_bundle(proofs: &[SignedDataMutation]) -> Result<Vec<u8>> {
     let mut batches: Vec<(DataMutationClaim, MessageVerification)> = Vec::new();
     let mut batch_indices: BTreeMap<(DataMutationClaim, [u8; 32]), usize> = BTreeMap::new();
@@ -289,6 +320,7 @@ pub(super) fn encode_proof_bundle_bounded(
     best
 }
 
+/// Deserialize a [`WireProofBundle`] byte payload back into [`SignedDataMutation`] records.
 pub(super) fn decode_proof_bundle(raw: &[u8]) -> Result<Vec<SignedDataMutation>> {
     let bundle =
         rings_codec::deserialize::<WireProofBundle>(raw).map_err(Error::CodecDeserialize)?;
@@ -342,16 +374,19 @@ impl Ord for SignedDataMutation {
 }
 
 impl SignedDataMutation {
+    /// Return the effective [`EntryVersion`] attested by this proof (witness dot version if set, else claim version).
     fn effective_version(&self) -> EntryVersion {
         self.witness_dot.map_or(self.claim.version, |d| d.version)
     }
 
+    /// Return whether this proof attests the register reset `floor`.
     pub(crate) fn matches_register(&self, floor: EntryVersion) -> bool {
         self.key == DataProofKey::Register(floor.actor)
             && self.claim.kind == DataMutationOpKind::Reset
             && self.claim.version == floor
     }
 
+    /// Return whether this proof attests adding `digest` at `dot`.
     pub(crate) fn matches_add(&self, digest: ElementDigest, dot: EntryDot) -> bool {
         self.key == DataProofKey::Add(digest, dot.version.actor)
             && matches!(
@@ -369,6 +404,7 @@ impl SignedDataMutation {
             )
     }
 
+    /// Return whether this proof attests removing `digest` at `remove_dot`.
     pub(crate) fn matches_remove(&self, digest: ElementDigest, remove_dot: EntryDot) -> bool {
         let actor = remove_dot.version.actor;
         if self.key != DataProofKey::Remove(digest, actor)
@@ -406,6 +442,7 @@ impl SignedDataMutation {
         }
     }
 
+    /// Verify that this proof's claim fields and Merkle witness are structurally valid for `carrier`.
     fn verify_claim_structure(&self, carrier: &Entry) -> Result<()> {
         if self.claim.did != carrier.did {
             return Err(Error::DataEntryWriteUnauthorized);
@@ -525,12 +562,24 @@ impl<'a> RetractionWitness<'a> {
 /// Algebraic classification of a verified data-topic write claim issued by `writer`.
 enum DataProvenance<'a> {
     /// Full-carrier reset (`Overwrite`) authored by `writer`.
-    Reset { entry: &'a Entry, writer: Did },
+    Reset {
+        /// Incoming reset entry.
+        entry: &'a Entry,
+        /// Attributed author DID.
+        writer: Did,
+    },
     /// Element-set append (`Extend`) authored by `writer`.
-    Append { entry: &'a Entry, writer: Did },
+    Append {
+        /// Incoming delta entry.
+        entry: &'a Entry,
+        /// Attributed author DID.
+        writer: Did,
+    },
     /// Element retraction (`Tombstone`) authored by `writer` under `witness`.
     Retract {
+        /// Witness identifying which elements or dots are retracted.
         witness: RetractionWitness<'a>,
+        /// Attributed author DID.
         writer: Did,
     },
 }
@@ -882,6 +931,7 @@ impl Entry {
             .any(|proof| proof.key.actor() == actor)
     }
 
+    /// Whether `self` carries a verified cryptographic register proof matching `floor`.
     fn has_signed_register_proof(&self, floor: EntryVersion) -> bool {
         self.crdt
             .proofs
@@ -889,6 +939,7 @@ impl Entry {
             .any(|proof| proof.matches_register(floor))
     }
 
+    /// Whether `self` carries a verified cryptographic remove proof matching `(element, remove_dot)`.
     fn has_signed_remove_proof(&self, element: ElementDigest, remove_dot: EntryDot) -> bool {
         self.crdt
             .proofs
@@ -1006,6 +1057,7 @@ impl Entry {
             })
     }
 
+    /// Verify structural CRDT invariants required for a synced or fetched data entry.
     fn validate_data_sync_structure(&self) -> Result<()> {
         if self.crdt.dots.len() != self.data.len() {
             return Err(Error::DataEntryWriteUnauthorized);
@@ -1038,6 +1090,7 @@ impl Entry {
         Ok(())
     }
 
+    /// Verify that a synced reset `floor` has a valid signed proof or operation witness against `live`.
     fn floor_witness_valid_on_live(&self, floor: EntryVersion, live: &Self) -> bool {
         if live.has_signed_proof_for(floor.actor) {
             return self.has_signed_register_proof(floor);

@@ -56,7 +56,9 @@ use rings_runtime::TimerError;
 
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
+/// Storage key for the complete versioned measurement ledger snapshot.
 const SNAPSHOT_KEY: &str = "MeasurementLedger";
+/// Storage key for the compacted provisional-evidence snapshot checkpoint.
 const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence";
 /// Prefix for sequentially numbered incremental evidence log entries.
 const EVIDENCE_DELTA_KEY_PREFIX: &str = "ProvisionalEvidenceDelta/";
@@ -67,14 +69,19 @@ const EVIDENCE_DELTA_COMPACTION_THRESHOLD: usize = 512;
 fn evidence_delta_key(sequence: u64) -> String {
     format!("{EVIDENCE_DELTA_KEY_PREFIX}{sequence:020}")
 }
+/// Channel capacity for coalescing persistence worker wake signals.
 const PERSISTENCE_WAKE_CAPACITY: usize = 1;
+/// Number of back-to-back attempts to persist the final snapshot during shutdown.
 const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
+/// Fallback interval in seconds between retention pruning passes when no earlier boundary exists.
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
+/// Minimum debounce interval between coalesced measurement ledger writes in tests.
 #[cfg(test)]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 // Measurement-ledger mutations are coalesced over this interval. Provisional
 // evidence admission uses the same serialization lock but commits separately
 // before returning success.
+/// Minimum debounce interval between coalesced measurement ledger writes.
 #[cfg(not(test))]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 // One window for tests and production. Controlled-clock unit tests advance the clock by
@@ -84,6 +91,7 @@ const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 // is cumulative, so under live keepalive traffic an epoch boundary between a send and a
 // later read could reset `evidence.sent` to 0 even though credit had grown — a flaky
 // `evidence.sent >= 1`. A production-sized window is never crossed within a test.
+/// Reliability epoch window duration in seconds.
 #[allow(
     clippy::unwrap_used,
     reason = "the non-zero integer literal is validated during const evaluation"
@@ -99,6 +107,7 @@ pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
     )
 }
 
+/// Returns the reliability policy applied to peer measurement observations.
 const fn reliability_policy() -> ReliabilityPolicy {
     ReliabilityPolicy::from_nonzero_window(RELIABILITY_WINDOW, 1, peer_quality_thresholds())
 }
@@ -169,7 +178,9 @@ impl KvStorageInterface<EvidenceStorageEntry<Did>> for UnavailableEvidenceStorag
 /// Runtime identity that owns one persisted provisional-evidence collection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EvidenceCollectorIdentity {
+    /// Overlay network identifier owning the persisted evidence.
     network_id: u32,
+    /// Local provider account DID owning the persisted evidence.
     provider_account: Did,
 }
 
@@ -183,9 +194,11 @@ impl EvidenceCollectorIdentity {
     }
 }
 
+/// Shared handle to the measurement snapshot key-value store.
 type SharedMeasureStorage =
     Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<MeasurementSnapshot<Did>>)>;
 
+/// Shared handle to the provisional-evidence key-value store.
 type SharedEvidenceStorage =
     Arc<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<EvidenceStorageEntry<Did>>)>;
 
@@ -222,14 +235,19 @@ pub enum MeasureRuntimeError {
 /// One runtime lock serializes both write paths. The algorithm, time projection,
 /// pruning, and snapshot schemas remain in `rings-measure`.
 pub struct PeriodicMeasure {
+    /// Shared measurement and evidence runtime state.
     state: Arc<MeasureState>,
+    /// Bounded signal channel waking the background persistence worker.
     persistence_wake: mpsc::Sender<()>,
     /// Resolves once the state, with its stores, is dropped (see `MeasureState::_released`).
     released: oneshot::Receiver<Infallible>,
 }
 
+/// Shared state coordinated between [`PeriodicMeasure`] callers and the persistence worker.
 struct MeasureState {
+    /// Backing store for complete measurement ledger snapshots.
     storage: SharedMeasureStorage,
+    /// Backing store for provisional-evidence deltas and checkpoints.
     evidence_storage: SharedEvidenceStorage,
     /// Uncompacted delta count that triggers background snapshot compaction.
     evidence_compaction_threshold: usize,
@@ -242,6 +260,7 @@ struct MeasureState {
     evidence_turns: WriteTurnQueue,
     /// Waiters coalescing behind the active or next explicit [`PeriodicMeasure::flush`] pass.
     pending_flushes: Mutex<Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>>>,
+    /// Clock providing wall-clock seconds for ledger transitions.
     clock: Arc<dyn MeasureClock>,
     /// The executor captured at construction, which owns persistence and flush work.
     spawner: Spawner,
@@ -258,17 +277,24 @@ struct MeasureState {
 /// across I/O or triggering slow-async-lock warnings.
 #[derive(Default)]
 struct WriteTurnQueue {
+    /// Synchronized queue state tracking active ownership and FIFO waiters.
     state: Mutex<WriteTurnState>,
 }
 
+/// Internal FIFO queue state for [`WriteTurnQueue`].
 #[derive(Default)]
 struct WriteTurnState {
+    /// Whether a writer currently holds the turn.
     active: bool,
+    /// Monotonic identifier assigned to queued waiters for cancel cleanup.
     next_id: u64,
+    /// Queued waiters awaiting turn handoff in FIFO order.
     waiters: VecDeque<(u64, oneshot::Sender<()>)>,
 }
 
+/// RAII guard holding an exclusive write turn on a [`WriteTurnQueue`].
 struct WriteTurnGuard<'a> {
+    /// Queue to release when this guard is dropped.
     queue: &'a WriteTurnQueue,
 }
 
@@ -278,10 +304,15 @@ impl Drop for WriteTurnGuard<'_> {
     }
 }
 
+/// Cancel-safe waiter registration for acquiring a [`WriteTurnQueue`] turn.
 struct PendingTurn<'a> {
+    /// Queue being awaited.
     queue: &'a WriteTurnQueue,
+    /// Unique identifier for removing this waiter if cancelled before handoff.
     id: u64,
+    /// Oneshot receiver notified when the turn is handed off.
     rx: oneshot::Receiver<()>,
+    /// Whether the turn has already been transferred to the caller.
     acquired: bool,
 }
 
@@ -307,6 +338,7 @@ impl Drop for PendingTurn<'_> {
 }
 
 impl WriteTurnQueue {
+    /// Acquires the next exclusive write turn in FIFO order.
     async fn acquire(&self) -> WriteTurnGuard<'_> {
         loop {
             let mut pending = {
@@ -334,6 +366,7 @@ impl WriteTurnQueue {
         }
     }
 
+    /// Hands the turn to the next live waiter, or marks the queue idle if none remain.
     fn release_turn(&self) {
         loop {
             let waiter = {
@@ -362,8 +395,11 @@ impl MeasureState {
     }
 }
 
+/// In-memory measurement ledger, provisional evidence store, and persistence tracking flags.
 struct RuntimeLedger {
+    /// Active peer measurement ledger.
     ledger: MeasurementLedger<Did>,
+    /// Active provisional-evidence store.
     evidence: ProvisionalEvidenceStore<Did>,
     /// Last durable view while an admission write is in flight, so read-only evidence queries
     /// need only the synchronous `runtime` lock without observing uncommitted state.
@@ -372,17 +408,26 @@ struct RuntimeLedger {
     next_evidence_delta_seq: u64,
     /// Uncompacted `(sequence, key)` entries currently persisted in `evidence_storage`.
     pending_evidence_deltas: Vec<(u64, String)>,
+    /// Whether the measurement ledger has unpersisted mutations.
     dirty: bool,
+    /// Whether a ledger snapshot write is currently in flight.
     persisting: bool,
+    /// Whether the ledger was mutated while a snapshot write was in flight.
     mutated_while_persisting: bool,
+    /// Whether provisional evidence requires a snapshot checkpoint write.
     evidence_dirty: bool,
+    /// Whether an evidence snapshot write is currently in flight.
     evidence_persisting: bool,
+    /// Whether provisional evidence was mutated while a snapshot write was in flight.
     evidence_mutated_while_persisting: bool,
+    /// Most recent wall-clock timestamp observed by the ledger, used to detect clock regressions.
     last_clock: UnixTime,
+    /// Earliest wall-clock timestamp at which the next retention pruning pass is due.
     next_prune_at: UnixTime,
 }
 
 impl RuntimeLedger {
+    /// Returns the last durably committed provisional-evidence view.
     fn committed_evidence(&self) -> &ProvisionalEvidenceStore<Did> {
         self.committed_evidence_override
             .as_deref()
@@ -391,10 +436,13 @@ impl RuntimeLedger {
 }
 
 // Boundary: the adapter supplies wall-clock seconds to the pure state relation.
+/// Clock abstraction supplying Unix timestamps in seconds to [`PeriodicMeasure`].
 trait MeasureClock: Send + Sync {
+    /// Returns the current wall-clock time in seconds since the Unix epoch.
     fn now(&self) -> UnixTime;
 }
 
+/// Adapter exposing a [`SharedClock`] as a [`MeasureClock`].
 struct SharedMeasureClock(SharedClock);
 
 impl MeasureClock for SharedMeasureClock {
@@ -655,6 +703,7 @@ impl PeriodicMeasure {
         }
     }
 
+    /// Signals the background persistence worker that dirty state is ready to flush.
     fn wake_persistence(&self) {
         let mut sender = self.persistence_wake.clone();
         match sender.try_send(()) {
@@ -665,8 +714,11 @@ impl PeriodicMeasure {
     }
 }
 
+/// Drop guard that clears in-flight ledger persistence flags if the write future is cancelled.
 struct LedgerPersistGuard<'a> {
+    /// Shared measurement state whose flags are cleared on drop.
     state: &'a MeasureState,
+    /// Whether cancellation cleanup should run on drop.
     armed: bool,
 }
 
@@ -680,8 +732,11 @@ impl Drop for LedgerPersistGuard<'_> {
     }
 }
 
+/// Drop guard that clears in-flight evidence persistence flags if the write future is cancelled.
 struct EvidencePersistGuard<'a> {
+    /// Shared measurement state whose flags are cleared on drop.
     state: &'a MeasureState,
+    /// Whether cancellation cleanup should run on drop.
     armed: bool,
 }
 
@@ -695,8 +750,11 @@ impl Drop for EvidencePersistGuard<'_> {
     }
 }
 
+/// Drop guard that wakes the background persistence worker if an evidence admission is cancelled.
 struct EvidenceAdmissionCancelGuard<'a> {
+    /// Wake channel for the persistence worker.
     wake: &'a mpsc::Sender<()>,
+    /// Whether the wake signal should be sent on drop.
     armed: bool,
 }
 
@@ -709,16 +767,21 @@ impl Drop for EvidenceAdmissionCancelGuard<'_> {
     }
 }
 
+/// Drop guard ensuring coalesced flush waiters are drained if the flush task is cancelled.
 struct PendingFlushGuard {
+    /// Shared measurement state holding queued flush waiters.
     state: Arc<MeasureState>,
+    /// Whether remaining waiters should be drained on drop.
     armed: bool,
 }
 
 impl PendingFlushGuard {
+    /// Creates an armed guard for the queued flush waiters in `state`.
     const fn new(state: Arc<MeasureState>) -> Self {
         Self { state, armed: true }
     }
 
+    /// Takes all currently queued flush waiters and disarms the drop guard.
     fn take_waiters(&mut self) -> Vec<oneshot::Sender<Result<(), MeasureRuntimeError>>> {
         let waiters = std::mem::take(&mut *lock_or_recover(&self.state.pending_flushes));
         self.armed = false;
@@ -735,6 +798,7 @@ impl Drop for PendingFlushGuard {
     }
 }
 
+/// Clones a `rings_core::error::Error` for fan-out to multiple coalesced flush waiters.
 fn clone_core_error(error: &rings_core::error::Error) -> rings_core::error::Error {
     use rings_core::error::Error as CoreError;
     match error {
@@ -766,6 +830,7 @@ fn clone_core_error(error: &rings_core::error::Error) -> rings_core::error::Erro
     }
 }
 
+/// Clones a [`MeasureRuntimeError`] so every coalesced flush waiter receives the failure.
 fn clone_runtime_error(error: &MeasureRuntimeError) -> MeasureRuntimeError {
     match error {
         MeasureRuntimeError::Storage(core_err) => {
@@ -782,6 +847,7 @@ fn clone_runtime_error(error: &MeasureRuntimeError) -> MeasureRuntimeError {
     }
 }
 
+/// Executes one coalesced flush pass and broadcasts its result to all queued waiters.
 async fn run_coalesced_flush(mut pending_guard: PendingFlushGuard) {
     let state = Arc::clone(&pending_guard.state);
     let ledger_turn = state.ledger_turns.acquire().await;
@@ -809,6 +875,7 @@ async fn run_coalesced_flush(mut pending_guard: PendingFlushGuard) {
     }
 }
 
+/// Persists a measurement ledger snapshot while the caller holds the ledger write turn.
 async fn persist_ledger_with_turn(
     state: &MeasureState,
     only_if_dirty: bool,
@@ -914,6 +981,7 @@ async fn measurement_delay(duration: Duration) -> Result<(), MeasureRuntimeError
     Ok(sleep(duration).await?)
 }
 
+/// Computes the next timestamp at which expired credit records should be pruned.
 fn next_prune_time(ledger: &MeasurementLedger<Did>, now: UnixTime) -> UnixTime {
     ledger
         .next_retention_boundary(CreditPolicy::amule())
@@ -922,6 +990,7 @@ fn next_prune_time(ledger: &MeasurementLedger<Did>, now: UnixTime) -> UnixTime {
         })
 }
 
+/// Reconciles ledger timestamps when wall-clock time regresses below `runtime.last_clock`.
 fn reconcile_runtime_clock(
     runtime: &mut RuntimeLedger,
     now: UnixTime,
@@ -945,6 +1014,7 @@ fn reconcile_runtime_clock(
     Ok(true)
 }
 
+/// Performs clock reconciliation and due retention pruning on `runtime`, returning whether state became dirty.
 fn maintain_runtime(runtime: &mut RuntimeLedger, now: UnixTime) -> Result<bool, MeasureError> {
     let mut persistence_required = reconcile_runtime_clock(runtime, now)?;
     if now < runtime.next_prune_at {
@@ -961,6 +1031,7 @@ fn maintain_runtime(runtime: &mut RuntimeLedger, now: UnixTime) -> Result<bool, 
     Ok(persistence_required)
 }
 
+/// Marks the measurement ledger dirty and notes concurrent mutation if a write is in flight.
 fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
     runtime.dirty = true;
     if runtime.persisting {
@@ -968,6 +1039,7 @@ fn mark_runtime_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
+/// Marks provisional evidence dirty and notes concurrent mutation if a write is in flight.
 fn mark_evidence_dirty(runtime: &mut RuntimeLedger) {
     runtime.evidence_dirty = true;
     if runtime.evidence_persisting {
@@ -1156,6 +1228,7 @@ fn restore_evidence_from_entries(
     })
 }
 
+/// Verifies that a persisted provisional-evidence record matches `collector` and its signed receipt.
 fn valid_persisted_evidence(
     record: &ProvisionalEvidenceRecord<Did>,
     collector: EvidenceCollectorIdentity,
@@ -1187,6 +1260,7 @@ fn valid_persisted_evidence(
             .is_ok_and(|digest| digest.into_bytes() == record.digest().into_bytes())
 }
 
+/// Verifies that a persisted replay marker belongs to `collector` and has consistent pair metadata.
 fn valid_persisted_replay_marker(
     marker: &EvidenceReplayMarker<Did>,
     collector: EvidenceCollectorIdentity,
@@ -1196,6 +1270,7 @@ fn valid_persisted_replay_marker(
         && marker.pair().beneficiary() == marker.freshness().beneficiary()
 }
 
+/// Clears ledger persistence tracking flags after a snapshot write completes.
 fn finish_ledger_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.persisting = false;
     if succeeded && !runtime.mutated_while_persisting {
@@ -1204,6 +1279,7 @@ fn finish_ledger_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.mutated_while_persisting = false;
 }
 
+/// Clears evidence persistence tracking flags and committed-view override after a checkpoint write.
 fn finish_evidence_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.evidence_persisting = false;
     if succeeded {
@@ -1215,6 +1291,7 @@ fn finish_evidence_persist(runtime: &mut RuntimeLedger, succeeded: bool) {
     runtime.evidence_mutated_while_persisting = false;
 }
 
+/// Emits warnings for any peers whose measurements could not be pruned.
 fn log_prune_failures(report: &rings_measure::PruneReport<Did>) {
     for failure in report.failures() {
         tracing::warn!(
@@ -1225,12 +1302,14 @@ fn log_prune_failures(report: &rings_measure::PruneReport<Did>) {
     }
 }
 
+/// Acquires `mutex`, recovering the inner value if a previous holder panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Background loop coalescing dirty measurement writes and retrying failed persists until shutdown.
 async fn run_persistence_worker(state: Arc<MeasureState>, mut receiver: mpsc::Receiver<()>) {
     let mut retrying = false;
     loop {
@@ -1256,11 +1335,13 @@ async fn run_persistence_worker(state: Arc<MeasureState>, mut receiver: mpsc::Re
     persist_final_with_retries(&state).await;
 }
 
+/// Waits out the default persistence debounce window or returns `false` if the wake channel closes.
 async fn wait_for_debounce_or_close(receiver: &mut mpsc::Receiver<()>) -> bool {
     wait_for_debounce_or_close_with_delay(receiver, measurement_delay(PERSISTENCE_MIN_INTERVAL))
         .await
 }
 
+/// Waits for `delay` while draining extra wake signals, returning `false` if `receiver` closes first.
 async fn wait_for_debounce_or_close_with_delay(
     receiver: &mut mpsc::Receiver<()>,
     delay: impl std::future::Future<Output = Result<(), MeasureRuntimeError>>,
@@ -1283,10 +1364,12 @@ async fn wait_for_debounce_or_close_with_delay(
     }
 }
 
+/// Waits out the retry backoff window or returns `false` if the wake channel closes.
 async fn wait_for_retry_or_close(receiver: &mut mpsc::Receiver<()>) -> bool {
     wait_for_retry_or_close_with_delay(receiver, measurement_delay(PERSISTENCE_MIN_INTERVAL)).await
 }
 
+/// Waits for `delay` before retrying a failed persist, falling back to the next wake signal on timer errors.
 async fn wait_for_retry_or_close_with_delay(
     receiver: &mut mpsc::Receiver<()>,
     delay: impl std::future::Future<Output = Result<(), MeasureRuntimeError>>,
@@ -1320,6 +1403,7 @@ async fn wait_for_retry_or_close_with_delay(
     }
 }
 
+/// Performs bounded back-to-back final persistence attempts during worker shutdown.
 async fn persist_final_with_retries(state: &MeasureState) {
     // Shutdown retries are deliberately back-to-back: this path must remain
     // bounded and can recover immediate backend races, but must not add another
@@ -1339,6 +1423,7 @@ async fn persist_final_with_retries(state: &MeasureState) {
     }
 }
 
+/// Logs an error if the persistence debounce timer failed to fire.
 fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
     if let Err(error) = result {
         tracing::error!(%error, "failed to debounce measurement persistence");

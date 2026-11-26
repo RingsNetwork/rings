@@ -1,3 +1,5 @@
+//! TURN admission policies and cryptographic authentication handler.
+
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -55,20 +57,28 @@ impl TurnAdmissionPolicy {
     }
 }
 
+/// Key identifying a previously verified TURN authentication claim in the cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CacheEntry {
+    /// Verified delegation digest.
     Delegation(DelegationDigest),
+    /// Keccak-256 digest of a verified direct-account username claim.
     DirectAccount([u8; 32]),
 }
 
+/// Bounded FIFO cache of previously verified TURN authentication claims.
 #[derive(Debug)]
 struct VerifiedAuthCache {
+    /// Maximum number of cached entries retained before oldest eviction.
     capacity: usize,
+    /// Insertion order queue used to evict the oldest entry at capacity.
     order: VecDeque<CacheEntry>,
+    /// Lookup set of currently cached verified entries.
     set: BTreeSet<CacheEntry>,
 }
 
 impl VerifiedAuthCache {
+    /// Constructs an empty cache bounded to `capacity` entries.
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -77,10 +87,12 @@ impl VerifiedAuthCache {
         }
     }
 
+    /// Returns whether `entry` is currently present in the cache.
     fn contains(&self, entry: &CacheEntry) -> bool {
         self.set.contains(entry)
     }
 
+    /// Inserts `entry`, evicting the oldest entry if the cache is at capacity.
     fn insert(&mut self, entry: CacheEntry) {
         if self.capacity == 0 || self.set.contains(&entry) {
             return;
@@ -105,9 +117,13 @@ impl VerifiedAuthCache {
 /// using `server_key` to derive `credential`, checks [`TurnAdmissionPolicy`], and derives the
 /// RFC 5389 long-term key `MD5(username : realm : credential)`.
 pub struct DelegationAuthHandler {
+    /// Admission policy governing which verified identities may allocate relays.
     policy: TurnAdmissionPolicy,
+    /// Server secp256k1 secret key used for ECDH credential derivation and ticket signing.
     server_key: SecretKey,
+    /// Clock used to validate delegation and session-ticket expiry.
     clock: SharedClock,
+    /// Bounded cache skipping redundant signature recovery for known claims.
     cache: Mutex<VerifiedAuthCache>,
 }
 

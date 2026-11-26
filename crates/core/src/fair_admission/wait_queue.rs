@@ -8,19 +8,27 @@ use std::task::Waker;
 
 use crate::lifecycle::epoch::Epoch;
 
+/// Mutable counters guarded by [`FairWaitBudget`].
 #[derive(Default)]
 struct FairWaitBudgetState {
+    /// Current number of active waiters holding a budget permit.
     waiters: usize,
+    /// Current total cost reserved by active waiters.
     cost: usize,
 }
 
+/// Shared waiter-count and retained-cost budget for one or more [`FairWaitQueue`] instances.
 pub(crate) struct FairWaitBudget {
+    /// Synchronized usage counters.
     state: Mutex<FairWaitBudgetState>,
+    /// Maximum concurrent waiters allowed.
     max_waiters: usize,
+    /// Maximum cumulative waiter cost allowed.
     max_cost: usize,
 }
 
 impl FairWaitBudget {
+    /// Create a budget allowing at most `max_waiters` waiters and `max_cost` total cost.
     pub(crate) fn new(max_waiters: usize, max_cost: usize) -> Self {
         Self {
             state: Mutex::new(FairWaitBudgetState::default()),
@@ -37,6 +45,7 @@ impl FairWaitBudget {
         self.try_acquire(cost)
     }
 
+    /// Try to reserve one waiter slot and `cost` from this budget.
     fn try_acquire(self: &Arc<Self>, cost: usize) -> Option<FairWaitBudgetPermit> {
         let mut state = self
             .state
@@ -56,8 +65,11 @@ impl FairWaitBudget {
     }
 }
 
+/// RAII permit accounting for one queued waiter's share of a [`FairWaitBudget`].
 pub(super) struct FairWaitBudgetPermit {
+    /// Budget to credit when this permit is dropped.
     budget: Arc<FairWaitBudget>,
+    /// Cost reserved by this permit.
     cost: usize,
 }
 
@@ -73,20 +85,29 @@ impl Drop for FairWaitBudgetPermit {
     }
 }
 
+/// Queue entry representing one waiting caller.
 struct FairWaiterEntry {
+    /// Monotonic identifier matching the corresponding [`FairWaiter`].
     id: u64,
+    /// Latest task waker registered when the waiter was polled.
     waker: Option<Waker>,
+    /// Whether this front waiter has been armed to retry admission on its next poll.
     armed: bool,
+    /// Held budget permit released when the entry leaves the queue.
     _budget: FairWaitBudgetPermit,
 }
 
+/// Mutable FIFO waiter queue state.
 #[derive(Default)]
 struct FairWaitQueueState {
+    /// Next waiter identifier to assign.
     next_id: u64,
+    /// FIFO queue of waiting callers.
     queue: VecDeque<FairWaiterEntry>,
 }
 
 impl FairWaitQueueState {
+    /// Arm the front waiter if not already armed and return its waker for notification.
     fn arm_front(&mut self) -> Option<Waker> {
         let waiter = self.queue.front_mut()?;
         if waiter.armed {
@@ -97,20 +118,27 @@ impl FairWaitQueueState {
     }
 }
 
+/// Bounded FIFO wait queue ensuring waiters are admitted in order without starving behind new arrivals.
 pub(crate) struct FairWaitQueue {
+    /// Synchronized FIFO waiter queue.
     state: Mutex<FairWaitQueueState>,
+    /// Budget capping total queued waiters and retained cost.
     budget: Arc<FairWaitBudget>,
     /// Advanced whenever a waiter leaves the queue, admitted or cancelled: the event after
     /// which an unqueued admission may pass again.
     departures: Epoch,
 }
 
+/// Immediate outcome of attempting admission through [`FairWaitQueue::admit_or_wait`].
 pub(super) enum FairAdmission<T> {
+    /// Admission succeeded immediately without queuing.
     Ready(T),
+    /// Caller was enqueued and must poll the returned [`FairWaiter`].
     Waiting(FairWaiter),
 }
 
 impl FairWaitQueue {
+    /// Create an empty wait queue bounded by `budget`.
     pub(crate) fn with_budget(budget: Arc<FairWaitBudget>) -> Self {
         Self {
             state: Mutex::new(FairWaitQueueState::default()),
@@ -133,6 +161,7 @@ impl FairWaitQueue {
         &self.departures
     }
 
+    /// Arm and wake the front waiter, if any, so it can retry admission.
     pub(crate) fn wake_front(&self) {
         let waker = self
             .state
@@ -144,6 +173,7 @@ impl FairWaitQueue {
         }
     }
 
+    /// Attempt `attempt` only when no waiters are queued; otherwise return `blocked_error`.
     pub(crate) fn try_admit_unqueued<T, E>(
         &self,
         blocked_error: E,
@@ -159,6 +189,7 @@ impl FairWaitQueue {
         attempt()
     }
 
+    /// Try immediate admission when the queue is empty, or enqueue a [`FairWaiter`] charged `cost`.
     pub(super) fn admit_or_wait<T, E>(
         self: &Arc<Self>,
         cost: usize,
@@ -191,6 +222,7 @@ impl FairWaitQueue {
     }
 }
 
+/// Acquire a resource fairly through `queue`, waiting in FIFO order if immediate admission fails.
 pub(crate) async fn acquire_fair<T>(
     queue: &Arc<FairWaitQueue>,
     cost: usize,
@@ -212,13 +244,18 @@ pub(crate) async fn acquire_fair<T>(
     }
 }
 
+/// Handle representing a caller queued in a [`FairWaitQueue`]; dropping it cancels the reservation.
 pub(super) struct FairWaiter {
+    /// Owning wait queue.
     queue: Arc<FairWaitQueue>,
+    /// Unique identifier of this waiter's queue entry.
     id: u64,
+    /// Whether this waiter is still active and needs cancellation on drop.
     active: bool,
 }
 
 impl FairWaiter {
+    /// Poll for admission once this waiter reaches the front of the queue and is armed.
     pub(super) fn poll<T>(
         &mut self,
         context: &mut Context<'_>,
@@ -257,6 +294,7 @@ impl FairWaiter {
         Poll::Ready(Some(value))
     }
 
+    /// Remove this waiter from the queue if still active and wake the next front waiter if needed.
     fn cancel(&mut self) {
         if !self.active {
             return;

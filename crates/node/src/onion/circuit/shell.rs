@@ -119,8 +119,10 @@ pub(crate) trait OnionInterpretation: MaybeSendSync {
 /// delegates intermediate `(shape, backend)` pairs in `Σ_I × Ω` to [`OnionInvokeRegistry`].
 #[derive(Default)]
 pub(crate) struct OnionAlgebra {
+    /// Registered world-facing service interpretations keyed by service name.
     interpretations:
         BTreeMap<OnionServiceName, Box<rings_runtime::maybe_send_sync!(dyn OnionInterpretation)>>,
+    /// Shared registry for intermediate `invoke` evaluations.
     invokes: OnionInvokeRegistry,
 }
 

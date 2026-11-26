@@ -48,7 +48,9 @@ pub enum OnionProxyTargetError {
 /// Host/port target requested through an onion proxy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionProxyTarget {
+    /// Normalized lowercase hostname or IP address literal.
     host: String,
+    /// Non-zero destination port number.
     port: u16,
 }
 
@@ -147,11 +149,15 @@ async fn resolve_target_addresses(target: &OnionProxyTarget) -> Result<Vec<Socke
         .collect())
 }
 
+/// Result of filtering a DNS resolution snapshot down to publicly routable exit addresses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg(any(test, rings_native))]
 enum PublicAddressSelection {
+    /// DNS resolution returned no addresses.
     Empty,
+    /// DNS resolution returned only non-public addresses.
     Denied,
+    /// De-duplicated publicly routable addresses selected for egress.
     Public(Vec<SocketAddr>),
 }
 

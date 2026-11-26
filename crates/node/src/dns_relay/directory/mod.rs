@@ -68,6 +68,7 @@ fn announcement_in(
 
 /// The directory over a node's DHT.
 pub struct DhtDirectory {
+    /// Node processor used to query service descriptors from the DHT.
     processor: Arc<Processor>,
 }
 

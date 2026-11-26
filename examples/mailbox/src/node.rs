@@ -28,6 +28,7 @@ use rings_node::provider::Provider;
 use thiserror::Error;
 use tokio::task::JoinSet;
 
+/// Maximum duration waited for embedded node tasks and processor shutdown to complete.
 const NODE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why the node could not start or close cleanly.
@@ -45,6 +46,7 @@ pub enum NodeError {
 pub struct EmbeddedNode {
     /// The processor.
     pub processor: Arc<Processor>,
+    /// Cooperative cancellation source used to signal shutdown to node tasks.
     stop: StopSource,
     /// The application inbox, the bootstrap supervisor and the listener.
     pub tasks: JoinSet<()>,

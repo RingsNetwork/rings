@@ -207,7 +207,9 @@ impl OnionProcessEpochCell {
     }
 }
 
+/// Default interval in seconds between onion-exit DHT descriptor heartbeats.
 const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Default TTL in seconds for published onion-exit DHT descriptors.
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
 /// Message family of the onion-exit descriptor signature.
 const ONION_EXIT_DESCRIPTOR_DOMAIN_TAG: DomainTag = domain_tag!("rings-node:onion-exit-descriptor");
@@ -467,6 +469,7 @@ impl OnionExitPolicy {
     }
 }
 
+/// Parse a list of raw target strings into canonical [`OnionExitTarget`] patterns.
 fn parse_exit_targets(targets: Vec<String>) -> Result<Vec<OnionExitTarget>> {
     targets
         .into_iter()
@@ -505,6 +508,7 @@ pub struct OnionExitDescriptorBody {
 }
 
 impl OnionExitDescriptorBody {
+    /// Borrow all signed fields as a serialization view for signing.
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         OnionExitDescriptorBodyRef {
             did: self.did,
@@ -522,6 +526,7 @@ impl OnionExitDescriptorBody {
         }
     }
 
+    /// Serialize the signed body fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
     }
@@ -568,23 +573,37 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
     }
 }
 
+/// Borrowed view of [`OnionExitDescriptorBody`] serialized for signing and verification.
 #[derive(Serialize)]
 struct OnionExitDescriptorBodyRef<'a> {
+    /// DID of the exit node/account.
     did: Did,
+    /// Account public key corresponding to `did`.
     public_key: &'a VerificationPublicKey,
+    /// Delegation public key used for Sphinx layer blinding.
     delegatee_public_key: &'a PublicKey<33>,
+    /// Process epoch `e_n` of the registering process.
     process_epoch: OnionProcessEpoch,
+    /// Runtime family of this exit node.
     node_type: &'a OnlineNodeType,
+    /// Network identifier.
     network_id: u32,
+    /// Service exposed by this descriptor.
     service: &'a OnionServiceName,
+    /// Signed exit policy.
     policy: &'a OnionExitPolicy,
+    /// Process start timestamp in milliseconds since Unix epoch.
     started_at_ms: u128,
+    /// Freshness window `T` in milliseconds.
     fresh_for_ms: u64,
+    /// Lease end `ℓ` in milliseconds since Unix epoch.
     expires_at_ms: u128,
+    /// Node software version.
     version: &'a str,
 }
 
 impl OnionExitDescriptorBodyRef<'_> {
+    /// Serialize the borrowed descriptor fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         rings_codec::serialize(self).map_err(CoreError::CodecSerialize)
     }
@@ -639,6 +658,7 @@ impl OnionExitDescriptor {
         )
     }
 
+    /// Borrow the signed descriptor fields for signature verification.
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         let Self {
             did,
@@ -673,6 +693,7 @@ impl OnionExitDescriptor {
         }
     }
 
+    /// Serialize the signed descriptor fields into canonical signing bytes.
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
     }
@@ -793,12 +814,19 @@ impl OnionExitDescriptorDecodeReport {
 /// Periodic node-layer registration for onion exit policy.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionExitRegistration {
+    /// Interval between periodic descriptor heartbeats.
     heartbeat_interval: Duration,
+    /// Runtime family advertised by this exit node.
     node_type: OnlineNodeType,
+    /// Shared cell holding the current process epoch `e_n`.
     process_epoch: OnionProcessEpochCell,
+    /// Injected clock used for descriptor timestamps.
     clock: SharedClock,
+    /// Process start timestamp in milliseconds since Unix epoch.
     started_at_ms: u128,
+    /// Offered exit services and their shared exit policy.
     offer: OnionExitOffer,
+    /// Underlying DHT heartbeat publisher for exit descriptors.
     publisher: DhtRegistrationPublisher<Vec<OnionExitDescriptor>>,
 }
 
@@ -821,6 +849,7 @@ impl OnionExitRegistration {
         )
     }
 
+    /// Construct a periodic exit registration publisher using `clock`.
     pub(crate) fn new_with_clock(
         heartbeat_interval: Duration,
         ttl: Duration,
@@ -855,6 +884,7 @@ impl OnionExitRegistration {
             .collect()
     }
 
+    /// Build and sign a single [`OnionExitDescriptor`] for `service` under `terms`.
     fn descriptor_for_service(
         &self,
         context: &RegistrationContext<'_>,

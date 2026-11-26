@@ -151,7 +151,9 @@ async fn truncate_file(path: &Path, len: u64) -> Result<(), std::io::Error> {
 /// A batch of encoded journal records to append in one write.
 #[derive(Default)]
 pub(crate) struct JournalBatch {
+    /// Newline-delimited JSON records buffered for a single append.
     text: String,
+    /// Number of records contained in `text`.
     records: usize,
 }
 
@@ -162,8 +164,11 @@ pub(crate) struct JournalBatch {
 ///   Law: replay(log ++ [r]) = apply(replay(log), r);  replay(compact(m)) = m
 /// ```
 pub(crate) struct Journal {
+    /// On-disk path of the JSONL journal file.
     path: PathBuf,
+    /// Count of valid records currently stored in the journal file.
     records: usize,
+    /// Deferred truncation byte offset if a torn EOF record could not be truncated on open.
     pending_truncate: Option<u64>,
 }
 

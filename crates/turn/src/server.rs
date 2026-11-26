@@ -1,3 +1,5 @@
+//! Embedded RFC 5766 TURN server supporting UDP and TCP client listeners.
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -123,39 +125,69 @@ use crate::relay_backend::TurnDatagramRelayFactory;
 use crate::relay_backend::TurnFiveTupleKey;
 use crate::relay_backend::TurnRelayCloseHandle;
 
+/// Maximum inbound STUN/TURN datagram buffer size in bytes.
 const INBOUND_MTU: usize = STUN_HEADER_BYTES + (u16::MAX as usize);
+/// Size of a STUN attribute type-length header in bytes.
 const STUN_ATTR_HEADER_BYTES: usize = 4;
+/// IANA protocol number for TCP client listeners.
 const PROTO_TCP: Protocol = Protocol(6);
+/// Bounded outbound data queue depth per allocation worker.
 const MAX_ALLOCATION_OUTBOUND_QUEUE: usize = 64;
+/// Bounded pinhole/control job queue depth per allocation worker.
 const MAX_ALLOCATION_CONTROL_QUEUE: usize = 16;
+/// Timeout for a single relayed UDP send to a peer.
 const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+/// Timeout for backend pinhole/control operations on a relay socket.
 const RELAY_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounded channel capacity for framed packets arriving from TCP clients.
 const TCP_INBOUND_QUEUE_CAPACITY: usize = 256;
+/// Bounded priority control-response write queue per TCP client.
 const TCP_PEER_CONTROL_QUEUE_CAPACITY: usize = 64;
+/// Bounded relayed-data write queue per TCP client.
 const TCP_PEER_WRITE_QUEUE_CAPACITY: usize = 64;
+/// Maximum queued outbound bytes buffered for a single TCP client.
 const MAX_TCP_PEER_QUEUED_BYTES: usize = 256 * 1024;
+/// Maximum queued outbound bytes buffered across all TCP clients combined.
 const MAX_TCP_TOTAL_QUEUED_BYTES: usize = 16 * 1024 * 1024;
+/// Upper cap on concurrent accepted TURN-over-TCP client connections.
 const MAX_TCP_CONNECTIONS_CAP: usize = 512;
+/// Backoff duration after a transient TCP accept error.
 const TCP_ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(20);
+/// Maximum wait for the first TURN frame on a newly accepted TCP connection.
 const TCP_INITIAL_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+/// Maximum frames an unauthenticated TCP client may send before being closed.
 const MAX_UNAUTHENTICATED_TCP_FRAMES: usize = 8;
+/// Timeout for reading the remaining body of a framed TCP STUN/TURN message.
 const TCP_FRAME_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+/// Timeout for writing a framed TURN response or indication to a TCP client.
 const TCP_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Maximum permitted TURN allocation lifetime (RFC 5766 default cap).
 const MAXIMUM_ALLOCATION_LIFETIME: Duration = Duration::from_secs(3600);
+/// Maximum idle read timeout for an authenticated TCP client connection.
 const TCP_IDLE_READ_TIMEOUT: Duration = MAXIMUM_ALLOCATION_LIFETIME;
+/// RFC 5766 lifetime of a TURN peer permission (5 minutes).
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(300);
+/// Lifetime of an issued STUN/TURN authentication nonce.
 const NONCE_LIFETIME: Duration = Duration::from_secs(3600);
+/// Maximum completed `Refresh(0)` deletion transaction IDs cached per 5-tuple.
 const MAX_DELETION_TXS_PER_TUPLE: usize = 16;
 
+/// Relay datagram socket wrapper that enforces [`RelayPeerPolicy`] on send and receive.
 struct PolicyRelayConn {
+    /// Advertised relayed address exposed to the TURN client.
     relayed_addr: SocketAddr,
+    /// Underlying UDP socket, cleared once close begins.
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
+    /// Policy filtering permitted remote peer addresses.
     peer_policy: RelayPeerPolicy,
+    /// Notification waking any blocked `recv_datagram` call on close.
     closed_notify: Notify,
+    /// Serializes receive calls and synchronizes socket teardown.
     recv_lock: Mutex<()>,
 }
 
 impl PolicyRelayConn {
+    /// Wraps `inner` with `peer_policy` enforcement and advertised `relayed_addr`.
     fn new(
         relayed_addr: SocketAddr,
         inner: Arc<dyn Conn + Send + Sync>,
@@ -170,6 +202,7 @@ impl PolicyRelayConn {
         }
     }
 
+    /// Clones the underlying socket handle or returns an error if already closed.
     fn clone_inner(&self) -> webrtc_util::Result<Arc<dyn Conn + Send + Sync>> {
         self.inner
             .lock()
@@ -178,6 +211,7 @@ impl PolicyRelayConn {
             .ok_or_else(|| webrtc_util::Error::Other("relay socket closed".to_string()))
     }
 
+    /// Closes this relay socket immediately, waiting for any active receive to exit.
     async fn close(&self) -> webrtc_util::Result<()> {
         let taken = <Self as TurnDatagramRelay>::begin_close(self);
         <Self as TurnDatagramRelay>::finish_close(self, taken).await;
@@ -254,13 +288,18 @@ impl TurnDatagramRelay for PolicyRelayConn {
     }
 }
 
+/// Local UDP relay socket factory enforcing [`RelayAddressConfig`] and [`RelayPeerPolicy`].
 struct PolicyRelayAddressGenerator {
+    /// Configured relay IP and port-binding strategy.
     relay: RelayAddressConfig,
+    /// Peer address policy attached to each created relay socket.
     peer_policy: RelayPeerPolicy,
+    /// Virtual/OS network handle used to bind UDP relay sockets.
     net: Arc<Net>,
 }
 
 impl PolicyRelayAddressGenerator {
+    /// Creates a new relay address generator for `relay` and `peer_policy`.
     fn new(relay: RelayAddressConfig, peer_policy: RelayPeerPolicy) -> Self {
         Self {
             relay,
@@ -269,6 +308,7 @@ impl PolicyRelayAddressGenerator {
         }
     }
 
+    /// Binds a single UDP relay socket on `(bind_ip, port)` and wraps it in [`PolicyRelayConn`].
     async fn bind_port(
         &self,
         use_ipv4: bool,
@@ -289,6 +329,7 @@ impl PolicyRelayAddressGenerator {
         Ok((policy_conn, relay_addr))
     }
 
+    /// Allocates a relay socket matching `use_ipv4` and optional even-port parity.
     async fn allocate_relay_conn(
         &self,
         use_ipv4: bool,
@@ -395,10 +436,13 @@ impl TurnDatagramRelayFactory for PolicyRelayAddressGenerator {
     }
 }
 
+/// Per-allocation table mapping RFC 5766 channel numbers to `(peer_addr, expires_at_ms)`.
 struct ChannelBindingTable {
+    /// Active channel bindings keyed by channel number.
     bindings: HashMap<ChannelNumber, (SocketAddr, u128)>,
 }
 
+/// Shared cache of recently completed `Refresh(0)` deletion responses keyed by client 5-tuple.
 type CompletedDeletionCache = Arc<Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>>;
 
 /// Result of reserving a TURN relay session on a [`TurnServer`] (#1292).
@@ -412,42 +456,70 @@ pub struct TurnSessionReservation {
     pub server_pubkey: PublicKey<33>,
 }
 
+/// Control-plane job queued onto an allocation worker to authorize peer IPs and reply.
 struct AllocationPinholeJob {
+    /// Client socket address to which the response must be sent.
     src_addr: SocketAddr,
+    /// Peer IP addresses to open pinholes for on the relay backend.
     peer_ips: Vec<IpAddr>,
+    /// Original STUN request used to build an error response on backend failure.
     req_msg: Message,
+    /// Message-integrity key for signing error responses.
     mi_key: Vec<u8>,
+    /// Pre-encoded success response to send once backend pinhole installation succeeds.
     success_response: Option<Vec<u8>>,
 }
 
+/// Receiving halves of the per-allocation data and control queues passed to the worker task.
 struct AllocationWorkerReceivers {
+    /// Outbound client-to-peer datagrams waiting to be sent over the relay socket.
     outbound_data_rx: mpsc::Receiver<(Vec<u8>, SocketAddr)>,
+    /// Serialized pinhole/control jobs for this allocation.
     control_rx: mpsc::Receiver<AllocationPinholeJob>,
 }
 
+/// Failure modes when reserving a slot in an allocation's pinhole control queue.
 enum PinholeEnqueueError {
+    /// The bounded control queue is currently full.
     Full,
+    /// The allocation worker has already shut down.
     Closed,
 }
 
+/// Runtime state and handles for one active TURN relay allocation.
 struct ManagedAllocation {
+    /// Monotonic identifier correlating this runtime allocation with [`TurnAllocationCore`].
     open_id: u64,
+    /// RFC 5766 5-tuple identifying the client-server transport association.
     five_tuple: FiveTuple,
+    /// Canonical key derived from `five_tuple` for [`TurnAllocationCore`] lookups.
     tuple_key: TurnFiveTupleKey,
+    /// Authenticated STUN `USERNAME` that owns this allocation.
     username: String,
+    /// Relayed address advertised to the client.
     relay_addr: SocketAddr,
+    /// Client-facing listener socket used to send responses and relayed indications.
     client_conn: Arc<dyn Conn + Send + Sync>,
+    /// Peer-facing datagram relay handle.
     relay_conn: Arc<dyn TurnDatagramRelay>,
+    /// Active RFC 5766 channel bindings for this allocation.
     channels: SyncMutex<ChannelBindingTable>,
+    /// Sender for outbound datagrams queued to the allocation worker.
     outbound_data_tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
+    /// Sender for serialized pinhole/control jobs queued to the allocation worker.
     control_tx: mpsc::Sender<AllocationPinholeJob>,
+    /// Watch channel signaling allocation shutdown to its worker tasks.
     closed_tx: watch::Sender<bool>,
+    /// Watch channel publishing updated allocation expiry deadlines.
     expiry_tx: watch::Sender<Instant>,
+    /// Optional TCP peer watch channel marking the connection as authenticated by `open_id`.
     tcp_authenticated_tx: Option<watch::Sender<Option<u64>>>,
+    /// Semaphore permit bounding concurrent live relay sockets, released on close.
     relay_permit: SyncMutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl ManagedAllocation {
+    /// Constructs a new [`ManagedAllocation`] and its paired worker channel receivers.
     #[allow(clippy::too_many_arguments)]
     fn new(
         open_id: u64,
@@ -493,14 +565,17 @@ impl ManagedAllocation {
         )
     }
 
+    /// Returns a public [`AllocationInfo`] summary of this allocation.
     fn info(&self) -> AllocationInfo {
         AllocationInfo::new(self.five_tuple, self.username.clone(), self.relay_addr)
     }
 
+    /// Updates the allocation's expiry timer to `Instant::now() + lifetime`.
     fn refresh_timer(&self, lifetime: Duration) {
         let _ = self.expiry_tx.send_replace(Instant::now() + lifetime);
     }
 
+    /// Marks the allocation closed and detaches the underlying relay socket for async teardown.
     fn begin_close(&self) -> TurnRelayCloseHandle {
         let _ = self.closed_tx.send_replace(true);
         if let Some(ref tx) = self.tcp_authenticated_tx {
@@ -518,6 +593,7 @@ impl ManagedAllocation {
         self.relay_conn.begin_close()
     }
 
+    /// Completes asynchronous relay socket teardown and releases the concurrency permit.
     async fn finish_close(&self, taken: TurnRelayCloseHandle) {
         self.relay_conn.finish_close(taken).await;
         let _ = self
@@ -527,14 +603,17 @@ impl ManagedAllocation {
             .take();
     }
 
+    /// Receives one datagram from a remote peer over this allocation's relay socket.
     async fn recv_payload_from_peer(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         self.relay_conn.recv_datagram(buf).await
     }
 
+    /// Attempts to enqueue a client payload for non-blocking delivery to `target`.
     fn enqueue_payload_to_peer(&self, payload: &[u8], target: SocketAddr) {
         let _ = self.outbound_data_tx.try_send((payload.to_vec(), target));
     }
 
+    /// Attempts to reserve a slot in the allocation's serialized pinhole control queue.
     fn try_reserve_pinhole_slot(
         &self,
     ) -> std::result::Result<mpsc::Permit<'_, AllocationPinholeJob>, PinholeEnqueueError> {
@@ -544,6 +623,7 @@ impl ManagedAllocation {
         })
     }
 
+    /// Checks whether binding `channel` to `peer` conflicts with an existing non-expired binding.
     fn has_channel_conflict(&self, channel: ChannelNumber, peer: SocketAddr, now_ms: u128) -> bool {
         let mut table = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
         table.bindings.retain(|_, (_, exp)| *exp > now_ms);
@@ -553,6 +633,7 @@ impl ManagedAllocation {
         })
     }
 
+    /// Installs or refreshes the channel binding `(channel, peer)` with `channel_timeout`.
     fn commit_channel_binding(
         &self,
         channel: ChannelNumber,
@@ -568,6 +649,7 @@ impl ManagedAllocation {
         );
     }
 
+    /// Returns the active channel number bound to inbound `peer`, if any.
     fn matching_inbound_channel(&self, peer: SocketAddr, now_ms: u128) -> Option<ChannelNumber> {
         let mut table = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
         table.bindings.retain(|_, (_, exp)| *exp > now_ms);
@@ -577,6 +659,7 @@ impl ManagedAllocation {
             .find_map(|(&ch, &(bound_peer, _))| (bound_peer == peer).then_some(ch))
     }
 
+    /// Returns the remote peer address bound to outbound `channel`, if still active.
     fn outbound_channel_peer(&self, channel: ChannelNumber, now_ms: u128) -> Option<SocketAddr> {
         let mut table = self.channels.lock().unwrap_or_else(PoisonError::into_inner);
         table.bindings.retain(|_, (_, exp)| *exp > now_ms);
@@ -584,17 +667,26 @@ impl ManagedAllocation {
     }
 }
 
+/// Synchronized server-wide registry pairing [`TurnAllocationCore`] with live runtime allocations.
 struct ServerAllocationBook {
+    /// Pure deterministic state machine tracking capacity, reservations, pending opens, and active allocations.
     core: TurnAllocationCore,
+    /// Active runtime allocations indexed by `open_id`.
     by_open_id: HashMap<u64, Arc<ManagedAllocation>>,
+    /// Active runtime allocations indexed by client 5-tuple.
     by_tuple: HashMap<FiveTuple, Arc<ManagedAllocation>>,
+    /// Cached `Allocate` success responses for idempotent retransmission handling.
     allocate_responses: HashMap<FiveTuple, (TransactionId, Vec<u8>)>,
+    /// Cancellation senders for in-flight asynchronous relay opens keyed by `open_id`.
     pending_cancels: HashMap<u64, watch::Sender<bool>>,
+    /// Set of `open_id`s whose asynchronous relay open has been cancelled.
     cancelling_open_ids: HashSet<u64>,
+    /// Semaphore bounding concurrent live relay sockets to `max_allocations`.
     relay_permits: Arc<Semaphore>,
 }
 
 impl ServerAllocationBook {
+    /// Creates an empty allocation book with the specified capacity limits.
     fn new(
         max_allocations: usize,
         max_reservations: usize,
@@ -616,6 +708,7 @@ impl ServerAllocationBook {
         }
     }
 
+    /// Signals cancellation for each in-flight relay open in `open_ids`.
     fn cancel_pending_open_ids(&mut self, open_ids: &[u64]) {
         for &open_id in open_ids {
             if let Some(cancel_tx) = self.pending_cancels.remove(&open_id) {
@@ -625,6 +718,7 @@ impl ServerAllocationBook {
         }
     }
 
+    /// Removes and returns the runtime allocations matching `open_ids`.
     fn take_open_ids(&mut self, open_ids: &[u64]) -> Vec<Arc<ManagedAllocation>> {
         let mut out = Vec::with_capacity(open_ids.len());
         for &open_id in open_ids {
@@ -643,16 +737,19 @@ impl ServerAllocationBook {
         out
     }
 
+    /// Prunes expired reservations and allocations at `now_ms`, returning expired runtime allocations.
     fn prune_and_take_expired(&mut self, now_ms: u128) -> Vec<Arc<ManagedAllocation>> {
         let evicted = self.core.prune_expired(now_ms);
         self.take_open_ids(&evicted)
     }
 
+    /// Prunes only expired active allocations at `now_ms`, returning them for cleanup.
     fn prune_expired_allocations_and_take(&mut self, now_ms: u128) -> Vec<Arc<ManagedAllocation>> {
         let evicted = self.core.prune_expired_allocations(now_ms);
         self.take_open_ids(&evicted)
     }
 
+    /// Prunes expired allocations and looks up the active allocation for `five_tuple`.
     fn get_active(
         &mut self,
         five_tuple: &FiveTuple,
@@ -663,6 +760,7 @@ impl ServerAllocationBook {
         (found, expired)
     }
 
+    /// Returns the expected owner username for an existing allocation or matching `Allocate` retransmission.
     fn expected_owner_for_request(
         &self,
         five_tuple: &FiveTuple,
@@ -690,13 +788,18 @@ impl ServerAllocationBook {
     }
 }
 
+/// Outbound framed TCP packet accounted against per-peer and global byte budgets.
 struct QueuedTcpFrame {
+    /// Framed STUN/TURN or ChannelData bytes ready to write to the TCP stream.
     bytes: Vec<u8>,
+    /// Shared per-peer queued byte counter decremented on drop.
     peer_queued_bytes: Arc<AtomicUsize>,
+    /// Shared global queued byte counter decremented on drop.
     total_queued_bytes: Arc<AtomicUsize>,
 }
 
 impl QueuedTcpFrame {
+    /// Reserves byte budget for `bytes` and returns a tracked frame, or `None` if a cap is exceeded.
     fn try_reserve(
         bytes: Vec<u8>,
         peer_queued_bytes: &Arc<AtomicUsize>,
@@ -735,38 +838,61 @@ impl Drop for QueuedTcpFrame {
     }
 }
 
+/// Active TURN-over-TCP peer connection state stored in [`TcpPeerMap`].
 #[derive(Clone)]
 struct TcpPeerEntry {
+    /// Monotonic connection identifier distinguishing reconnections on the same remote address.
     conn_id: u64,
+    /// Priority write queue for STUN/TURN control responses.
     control_tx: mpsc::Sender<QueuedTcpFrame>,
+    /// Write queue for relayed Data indications and ChannelData frames.
     data_tx: mpsc::Sender<QueuedTcpFrame>,
+    /// Atomic counter of outbound bytes currently queued for this peer.
     peer_queued_bytes: Arc<AtomicUsize>,
+    /// Watch channel indicating whether this connection owns an authenticated allocation `open_id`.
     authenticated_tx: watch::Sender<Option<u64>>,
+    /// Watch channel signaling the connection task to evict and close.
     evict_tx: watch::Sender<bool>,
 }
 
+/// Coordination state used to drain a replaced TCP connection sharing the same remote address.
 #[derive(Clone)]
 struct TcpPeerHandoff {
+    /// Identifier of the connection being handed off.
     conn_id: u64,
+    /// Watch sender used to request immediate eviction of the older connection.
     evict_tx: watch::Sender<bool>,
+    /// Watch receiver that becomes `true` once the older connection has finished cleanup.
     done_rx: watch::Receiver<bool>,
 }
 
+/// Map of active TCP client connections keyed by remote socket address.
 type TcpPeerMap = HashMap<SocketAddr, TcpPeerEntry>;
+/// Map of in-flight TCP connection handoffs keyed by remote socket address.
 type TcpPeerHandoffMap = HashMap<SocketAddr, TcpPeerHandoff>;
+/// Map of disconnect-acknowledgement waiters keyed by remote socket address.
 type TcpDisconnectAckMap = HashMap<SocketAddr, VecDeque<tokio::sync::oneshot::Sender<()>>>;
 
+/// Multiplexed TURN-over-TCP listener presenting a datagram-like [`Conn`] interface to the server loop.
 struct TcpTurnListenerConn {
+    /// Bound local TCP listener address.
     local_addr: SocketAddr,
+    /// Inbound queue of deframed STUN/TURN messages tagged with client socket address.
     inbound_rx: Mutex<mpsc::Receiver<(Vec<u8>, SocketAddr)>>,
+    /// Active TCP client connections keyed by remote address.
     peers: Arc<SyncMutex<TcpPeerMap>>,
+    /// Global count of queued outbound bytes across all TCP peers.
     total_queued_bytes: Arc<AtomicUsize>,
+    /// Waiters notified after a TCP peer's disconnect sentinel has been processed.
     disconnect_acks: Arc<SyncMutex<TcpDisconnectAckMap>>,
+    /// Shutdown signal broadcast to the accept loop and all TCP peer tasks.
     shutdown_tx: watch::Sender<bool>,
+    /// Join handle for the background TCP accept loop task.
     accept_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl TcpTurnListenerConn {
+    /// Spawns the TCP accept loop for `listener` and returns the multiplexed listener handle.
     fn spawn(
         listener: TcpListener,
         local_addr: SocketAddr,
@@ -1129,6 +1255,7 @@ impl TcpTurnListenerConn {
         })
     }
 
+    /// Looks up the active connection ID and authentication watch channel for `peer_addr`.
     fn peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
         self.peers
             .lock()
@@ -1137,6 +1264,7 @@ impl TcpTurnListenerConn {
             .map(|entry| (entry.conn_id, entry.authenticated_tx.clone()))
     }
 
+    /// Encodes and enqueues `buf` for delivery to `target`, optionally checking `expected_conn_id`.
     fn send_to_peer_conn(
         &self,
         buf: &[u8],
@@ -1198,6 +1326,7 @@ impl TcpTurnListenerConn {
         Ok(buf.len())
     }
 
+    /// Signals the oldest disconnect waiter for `peer_addr` that its teardown sentinel was handled.
     fn notify_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
         let maybe_tx = {
             let mut guard = self
@@ -1278,13 +1407,18 @@ impl Conn for TcpTurnListenerConn {
     }
 }
 
+/// Wrapper around a UDP or TCP client listener socket with controlled shutdown semantics.
 struct RecordingConn {
+    /// Underlying listener socket, cleared when `shutdown_listener` is invoked.
     inner: SyncMutex<Option<Arc<dyn Conn + Send + Sync>>>,
+    /// Bound local address cached so `local_addr()` works after close.
     local_addr: SocketAddr,
+    /// Transport protocol (`PROTO_UDP` or `PROTO_TCP`) served by this listener.
     protocol: Protocol,
 }
 
 impl RecordingConn {
+    /// Wraps a UDP client listener socket.
     fn new(inner: Arc<dyn Conn + Send + Sync>, local_addr: SocketAddr) -> Self {
         Self {
             inner: SyncMutex::new(Some(inner)),
@@ -1293,6 +1427,7 @@ impl RecordingConn {
         }
     }
 
+    /// Wraps a multiplexed TCP client listener socket.
     fn new_tcp(inner: Arc<dyn Conn + Send + Sync>, local_addr: SocketAddr) -> Self {
         Self {
             inner: SyncMutex::new(Some(inner)),
@@ -1301,12 +1436,14 @@ impl RecordingConn {
         }
     }
 
+    /// Looks up the active TCP connection ID and auth watch channel for `peer_addr`, if TCP.
     fn tcp_peer_context(&self, peer_addr: SocketAddr) -> Option<(u64, watch::Sender<Option<u64>>)> {
         let inner = self.clone_inner().ok()?;
         let tcp_conn = inner.as_any().downcast_ref::<TcpTurnListenerConn>()?;
         tcp_conn.peer_context(peer_addr)
     }
 
+    /// Sends `buf` to a specific TCP peer connection matching `expected_conn_id`.
     fn send_to_tcp_peer_conn(
         &self,
         buf: &[u8],
@@ -1320,6 +1457,7 @@ impl RecordingConn {
         tcp_conn.send_to_peer_conn(buf, target, Some(expected_conn_id))
     }
 
+    /// Acknowledges completion of disconnect cleanup for a TCP peer, if backed by TCP.
     fn notify_tcp_peer_disconnect_processed(&self, peer_addr: SocketAddr) {
         if let Ok(inner) = self.clone_inner() {
             if let Some(tcp_conn) = inner.as_any().downcast_ref::<TcpTurnListenerConn>() {
@@ -1328,6 +1466,7 @@ impl RecordingConn {
         }
     }
 
+    /// Clones the underlying listener handle or returns an error if already shut down.
     fn clone_inner(&self) -> webrtc_util::Result<Arc<dyn Conn + Send + Sync>> {
         self.inner
             .lock()
@@ -1336,6 +1475,7 @@ impl RecordingConn {
             .ok_or_else(|| webrtc_util::Error::Other("TURN listener closed".to_string()))
     }
 
+    /// Returns whether `shutdown_listener` has already detached the underlying socket.
     fn is_closed(&self) -> bool {
         self.inner
             .lock()
@@ -1343,6 +1483,7 @@ impl RecordingConn {
             .is_none()
     }
 
+    /// Detaches and closes the underlying client listener socket.
     async fn shutdown_listener(&self) {
         let taken = self
             .inner
@@ -1403,8 +1544,11 @@ impl Conn for RecordingConn {
     }
 }
 
+/// [`Conn`] adapter pinning outbound sends for a TCP allocation to one connection ID.
 struct ScopedTcpPeerConn {
+    /// Shared listener wrapper backing the TCP multiplexer.
     recording: Arc<RecordingConn>,
+    /// Connection ID that must match the active peer entry when sending.
     conn_id: u64,
 }
 
@@ -1448,6 +1592,7 @@ impl Conn for ScopedTcpPeerConn {
     }
 }
 
+/// Generates a random 128-bit hexadecimal STUN/TURN authentication nonce.
 fn generate_nonce() -> String {
     let mut bytes = [0u8; 16];
     rand::thread_rng().fill(&mut bytes);
@@ -1458,6 +1603,7 @@ fn generate_nonce() -> String {
     out
 }
 
+/// Evicts expired nonces and trims the nonce table to fit within `max_nonces`.
 async fn prune_and_bound_nonces(
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     max_nonces: usize,
@@ -1489,10 +1635,12 @@ async fn prune_and_bound_nonces(
     }
 }
 
+/// Rounds a STUN attribute value length up to the nearest 4-byte boundary.
 const fn padded_attr_value_len(len: usize) -> usize {
     (len + 3) & !3
 }
 
+/// Truncates `m`'s attribute list and raw buffer to retain only the first `keep_count` attributes.
 fn truncate_message_attributes(m: &mut Message, keep_count: usize) {
     if m.attributes.0.len() <= keep_count {
         return;
@@ -1544,6 +1692,7 @@ fn sanitize_authenticated_message(m: &mut Message) -> bool {
     true
 }
 
+/// Verifies that every `XOR-PEER-ADDRESS` attribute in `m` is permitted by `peer_policy`.
 fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bool {
     let ignore_port = m.typ.method == METHOD_CREATE_PERMISSION;
     for attr in &m.attributes.0 {
@@ -1574,6 +1723,7 @@ fn check_message_peer_addresses(m: &Message, peer_policy: RelayPeerPolicy) -> bo
     true
 }
 
+/// Sends an unauthenticated STUN error response with `code`, `reason`, and `FINGERPRINT`.
 async fn send_unauthenticated_error(
     conn: &Arc<dyn Conn + Send + Sync>,
     dst: SocketAddr,
@@ -1602,6 +1752,7 @@ async fn send_unauthenticated_error(
     }
 }
 
+/// Allocates a client-bound nonce and sends a 401/438 STUN challenge error response.
 #[allow(clippy::too_many_arguments)]
 async fn issue_nonce_challenge(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -1643,6 +1794,7 @@ async fn issue_nonce_challenge(
     }
 }
 
+/// Validates nonce, credentials, and `MESSAGE-INTEGRITY` for an incoming TURN request.
 #[allow(clippy::too_many_arguments)]
 async fn authenticate_turn_request(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -1739,6 +1891,7 @@ async fn authenticate_turn_request(
     Some((username_attr, verified_auth, key))
 }
 
+/// Sends a `MESSAGE-INTEGRITY`-signed STUN error response with optional `UNKNOWN-ATTRIBUTES`.
 async fn send_authenticated_error(
     conn: &Arc<dyn Conn + Send + Sync>,
     dst: SocketAddr,
@@ -1775,6 +1928,7 @@ async fn send_authenticated_error(
     }
 }
 
+/// Sends a signed 403 Forbidden error response for a disallowed peer address.
 async fn send_forbidden_error(
     conn: &Arc<dyn Conn + Send + Sync>,
     dst: SocketAddr,
@@ -1793,6 +1947,7 @@ async fn send_forbidden_error(
     .await;
 }
 
+/// Returns whether the configured relay bind IP is IPv4.
 const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
     match *relay {
         RelayAddressConfig::None { bind_ip }
@@ -1801,6 +1956,7 @@ const fn relay_bind_ip_is_ipv4(relay: &RelayAddressConfig) -> bool {
     }
 }
 
+/// Extracts the local bind IP address from a [`RelayAddressConfig`].
 const fn relay_bind_ip(relay: &RelayAddressConfig) -> IpAddr {
     match *relay {
         RelayAddressConfig::None { bind_ip }
@@ -1809,12 +1965,14 @@ const fn relay_bind_ip(relay: &RelayAddressConfig) -> IpAddr {
     }
 }
 
+/// Clamps a requested TURN allocation lifetime into `[DEFAULT_LIFETIME, MAXIMUM_ALLOCATION_LIFETIME]`.
 fn clamp_allocation_lifetime(requested: Duration) -> Duration {
     requested
         .min(MAXIMUM_ALLOCATION_LIFETIME)
         .max(DEFAULT_LIFETIME)
 }
 
+/// Detaches and asynchronously closes every allocation in `removed`.
 async fn close_allocations(removed: Vec<Arc<ManagedAllocation>>) {
     if removed.is_empty() {
         return;
@@ -1834,13 +1992,19 @@ async fn close_allocations(removed: Vec<Arc<ManagedAllocation>>) {
     .await;
 }
 
+/// Cached response for a completed `Refresh(0)` deletion to answer retransmissions idempotently.
 struct CompletedDeletionEntry {
+    /// Authenticated username that performed the deletion.
     username: String,
+    /// STUN transaction ID of the completed `Refresh(0)` request.
     transaction_id: TransactionId,
+    /// Pre-encoded 200 Refresh Success response bytes.
     response_raw: Vec<u8>,
+    /// Timestamp when the deletion completed, used for cache expiry.
     completed_at: Instant,
 }
 
+/// Evicts nonces for `five_tuple` created at or before `cutoff`.
 async fn evict_nonces_up_to(
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
     five_tuple: FiveTuple,
@@ -1850,6 +2014,7 @@ async fn evict_nonces_up_to(
     guard.retain(|_, (owner_tuple, created_at)| *owner_tuple != five_tuple || *created_at > cutoff);
 }
 
+/// Prunes expired and excess entries from `completed_deletions` and evicts their stale nonces.
 async fn prune_completed_deletions(
     completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
@@ -1898,6 +2063,7 @@ async fn prune_completed_deletions(
     }
 }
 
+/// Looks up a cached `Refresh(0)` deletion response matching `(five_tuple, username, transaction_id)`.
 async fn find_completed_deletion(
     completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
@@ -1915,6 +2081,7 @@ async fn find_completed_deletion(
         .map(|e| e.response_raw.clone())
 }
 
+/// Records a completed `Refresh(0)` deletion response in the bounded per-tuple cache.
 async fn record_completed_deletion(
     completed_deletions: &Mutex<HashMap<FiveTuple, VecDeque<CompletedDeletionEntry>>>,
     nonces: &Mutex<HashMap<String, (FiveTuple, Instant)>>,
@@ -1947,6 +2114,7 @@ async fn record_completed_deletion(
     }
 }
 
+/// Returns whether `msg` is a `Refresh` request carrying a zero `LIFETIME` attribute.
 fn is_zero_lifetime_refresh(msg: &Message) -> bool {
     if msg.typ.method != METHOD_REFRESH || !msg.contains(ATTR_LIFETIME) {
         return false;
@@ -1955,6 +2123,7 @@ fn is_zero_lifetime_refresh(msg: &Message) -> bool {
     lt.get_from(msg).is_ok() && lt.0.is_zero()
 }
 
+/// Removes and closes `alloc` if its `open_id` is still the active entry for its 5-tuple.
 async fn remove_allocation_if_current(
     book: &SyncMutex<ServerAllocationBook>,
     alloc: &Arc<ManagedAllocation>,
@@ -1973,6 +2142,7 @@ async fn remove_allocation_if_current(
     close_allocations(removed).await;
 }
 
+/// Expires and closes `alloc` if it is still current and its deadline has elapsed.
 async fn try_expire_allocation_if_current(
     book: &SyncMutex<ServerAllocationBook>,
     alloc: &Arc<ManagedAllocation>,
@@ -1998,6 +2168,7 @@ async fn try_expire_allocation_if_current(
     true
 }
 
+/// Prunes expired allocations, closes them, and returns the active allocation for `five_tuple`.
 async fn get_active_allocation(
     book: &SyncMutex<ServerAllocationBook>,
     five_tuple: &FiveTuple,
@@ -2011,6 +2182,7 @@ async fn get_active_allocation(
     found
 }
 
+/// Per-allocation task forwarding permitted peer datagrams back to the client until expiry or close.
 async fn relay_packet_handler(
     alloc: Arc<ManagedAllocation>,
     book: Arc<SyncMutex<ServerAllocationBook>>,
@@ -2098,6 +2270,7 @@ async fn relay_packet_handler(
     remove_allocation_if_current(&book, &alloc).await;
 }
 
+/// Per-allocation worker serializing pinhole control operations and outbound peer datagram sends.
 async fn allocation_outbound_worker(
     alloc: Arc<ManagedAllocation>,
     book: Arc<SyncMutex<ServerAllocationBook>>,
@@ -2172,6 +2345,7 @@ async fn allocation_outbound_worker(
     }
 }
 
+/// Completes an asynchronous relay backend allocation, installs it in `book`, and replies to the client.
 #[allow(clippy::too_many_arguments)]
 async fn complete_async_allocate_open(
     book: Arc<SyncMutex<ServerAllocationBook>>,
@@ -2347,6 +2521,7 @@ async fn complete_async_allocate_open(
     }
 }
 
+/// Processes an authenticated RFC 5766 `Allocate` request and initiates relay creation.
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_allocate(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -2737,6 +2912,7 @@ async fn handle_authenticated_allocate(
     }
 }
 
+/// Processes an authenticated RFC 5766 `Refresh` request, updating lifetime or deleting the allocation.
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_refresh(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -2857,6 +3033,7 @@ async fn handle_authenticated_refresh(
     }
 }
 
+/// Processes an authenticated RFC 5766 `CreatePermission` request for one or more peer IPs.
 async fn handle_authenticated_create_permission(
     conn: &Arc<dyn Conn + Send + Sync>,
     book: &SyncMutex<ServerAllocationBook>,
@@ -3051,6 +3228,7 @@ async fn handle_authenticated_create_permission(
     });
 }
 
+/// Processes an authenticated RFC 5766 `ChannelBind` request, installing permission and channel mapping.
 #[allow(clippy::too_many_arguments)]
 async fn handle_authenticated_channel_bind(
     conn: &Arc<dyn Conn + Send + Sync>,
@@ -3240,6 +3418,7 @@ async fn handle_authenticated_channel_bind(
     });
 }
 
+/// Cancels all pending opens and closes every active allocation during server shutdown.
 async fn shutdown_all_allocations(book: &SyncMutex<ServerAllocationBook>) {
     let removed = {
         let mut guard = book.lock().unwrap_or_else(PoisonError::into_inner);
@@ -3255,6 +3434,7 @@ async fn shutdown_all_allocations(book: &SyncMutex<ServerAllocationBook>) {
     close_allocations(removed).await;
 }
 
+/// Collects concrete local interface addresses to bind when listening on an unspecified wildcard IP.
 fn collect_concrete_listener_candidates(
     use_ipv4: bool,
     extra_local_ips: &[IpAddr],
@@ -3292,6 +3472,7 @@ fn collect_concrete_listener_candidates(
     candidates
 }
 
+/// Binds matching UDP and TCP TURN client listener sockets on `listen_addr`.
 async fn bind_listener_sockets(
     listen_addr: SocketAddr,
     extra_local_ips: &[IpAddr],
@@ -3468,17 +3649,29 @@ async fn bind_listener_sockets(
 
 /// A running Rings TURN server backed by [`DelegationAuthHandler`].
 pub struct TurnServer {
+    /// Bound local listener socket address.
     local_addr: SocketAddr,
+    /// Connectable address advertised to clients in TURN URLs and session reservations.
     advertised_addr: SocketAddr,
+    /// STUN/TURN authentication realm.
     realm: String,
+    /// Cryptographic authentication and admission handler.
     auth_handler: Arc<DelegationAuthHandler>,
+    /// Shared clock used for allocation expiry, permissions, and ticket timestamps.
     clock: SharedClock,
+    /// Maximum concurrent unclaimed session reservations.
     max_reservations: usize,
+    /// Upper bound on session reservation lifetimes.
     max_reservation_ttl: Duration,
+    /// Shared allocation state machine and active runtime allocation registry.
     book: Arc<SyncMutex<ServerAllocationBook>>,
+    /// Active STUN/TURN authentication nonces keyed by nonce string.
     nonces: Arc<Mutex<HashMap<String, (FiveTuple, Instant)>>>,
+    /// Gate signaling paused listener tasks to begin accepting and reading packets.
     start_tx: watch::Sender<bool>,
+    /// Shutdown signal broadcast to the main read loop and listener tasks.
     shutdown_tx: watch::Sender<bool>,
+    /// Watch receiver that becomes `true` once server teardown completes.
     done_rx: watch::Receiver<bool>,
 }
 
@@ -3501,6 +3694,7 @@ impl TurnServer {
         let _ = self.start_tx.send_replace(true);
     }
 
+    /// Validates `config`, binds UDP/TCP listeners, and spawns the server read loop with `initially_running`.
     async fn start_with_gate(config: TurnServerConfig, initially_running: bool) -> Result<Self> {
         config.relay.validate()?;
         if let Some(advertised_ip) = config.advertised_ip {
@@ -3610,6 +3804,7 @@ impl TurnServer {
         })
     }
 
+    /// Main server supervisor task spawning per-listener reader loops and coordinating shutdown.
     #[allow(clippy::too_many_arguments)]
     async fn read_loop(
         listeners: Vec<Arc<RecordingConn>>,

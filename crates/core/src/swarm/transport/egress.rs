@@ -142,7 +142,9 @@ impl Discipline for ProbeAnswer {
 /// send meets the peer, depends on `D`.
 #[derive(Clone, Copy)]
 pub(crate) struct Egress<'transport, D> {
+    /// Underlying transport used to dispatch outbound payloads.
     transport: &'transport SwarmTransport,
+    /// Zero-sized marker selecting the queue-admission discipline.
     discipline: PhantomData<D>,
 }
 

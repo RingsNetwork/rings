@@ -20,11 +20,16 @@ use crate::error::Result;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TransportReadiness(TransportReadinessState);
 
+/// Classified transport readiness state pairing a phase with its coherent snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TransportReadinessState {
+    /// Transport is connecting or connected and the data channel is open.
     Ready(ConnectionStateSnapshot),
+    /// Transport is connecting or connected, waiting for the data channel to open.
     AwaitingChannel(ConnectionStateSnapshot),
+    /// Transport is not yet connected or is transiently disconnected.
     Recovering(ConnectionStateSnapshot),
+    /// Transport has reached a terminal failed or closed state.
     Terminal(ConnectionStateSnapshot),
 }
 
@@ -56,14 +61,17 @@ impl TransportReadiness {
         Self::from_snapshot(ConnectionStateSnapshot::new(state, channel_open))
     }
 
+    /// Return whether the connection is ready to make forward progress.
     pub(crate) const fn can_make_progress(self) -> bool {
         matches!(self.0, TransportReadinessState::Ready(_))
     }
 
+    /// Return whether the connection has reached a terminal failed or closed state.
     pub(crate) const fn is_terminal(self) -> bool {
         matches!(self.0, TransportReadinessState::Terminal(_))
     }
 
+    /// Return the underlying coherent connection state snapshot.
     const fn snapshot(self) -> ConnectionStateSnapshot {
         match self.0 {
             TransportReadinessState::Ready(snapshot)
@@ -73,14 +81,17 @@ impl TransportReadiness {
         }
     }
 
+    /// Return the underlying WebRTC/transport connection state.
     pub(crate) const fn state(self) -> TransportConnectionState {
         self.snapshot().state()
     }
 
+    /// Return whether the data channel was open in this snapshot.
     pub(crate) const fn channel_open(self) -> bool {
         self.snapshot().channel_open()
     }
 
+    /// Return a short snake-case label describing this readiness state.
     pub(crate) const fn as_str(self) -> &'static str {
         match self.0 {
             TransportReadinessState::Ready(_) => "ready",
@@ -90,6 +101,7 @@ impl TransportReadiness {
         }
     }
 
+    /// Succeed if ready to make progress, or return `Error::TransportNotReady`.
     pub(crate) fn ensure_can_make_progress(self) -> Result<()> {
         if self.can_make_progress() {
             return Ok(());
@@ -102,6 +114,7 @@ impl TransportReadiness {
 }
 
 impl SwarmConnection {
+    /// Snapshot and classify the current transport readiness of this connection.
     pub(crate) fn readiness(&self) -> TransportReadiness {
         TransportReadiness::from_snapshot(self.connection.connection_state_snapshot())
     }

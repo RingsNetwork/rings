@@ -74,9 +74,13 @@ pub const CREDIT_RESEND_PAUSE: Duration = Duration::from_secs(1);
 /// automatically requeued onto the lane's outbox so the peer's sender can never stall permanently.
 #[derive(Debug)]
 pub struct CreditFrame {
+    /// Wire-encoded `TransportMessage::Signal` payload.
     wire: Bytes,
+    /// Credit lane index this control frame belongs to.
     index: CreditIndex,
+    /// Pending cumulative credit signal, cleared once [`Self::mark_sent`] is called.
     signal: Option<LaneSignal>,
+    /// Weak reference back to the connection's credit state for requeue on drop.
     link: Weak<LinkCredit>,
 }
 
@@ -114,6 +118,7 @@ impl Drop for CreditFrame {
 /// keep retired connections or callbacks alive.
 #[derive(Clone, Debug)]
 pub struct IdleLaneChecker {
+    /// Weak handle to the connection's link-credit state.
     link: Weak<LinkCredit>,
 }
 
@@ -149,8 +154,11 @@ struct PeerStateQueue {
 
 /// Wraps a transport callback with handling bound to one connection.
 pub struct InnerTransportCallback {
+    /// Connection identifier (peer DID) bound to this callback wrapper.
     pub(super) cid: Arc<str>,
+    /// Underlying protocol callback receiving admitted messages and lifecycle events.
     pub(super) callback: BoxedTransportCallback,
+    /// Notifier woken whenever data-channel open/close or terminal state changes occur.
     data_channel_state_notifier: Notifier,
     /// Per-lane credit flow control of this connection.
     link_credit: Arc<LinkCredit>,
@@ -160,10 +168,12 @@ pub struct InnerTransportCallback {
     /// Arrival-ordered FIFO of peer-connection state transitions.
     #[cfg(rings_transport_runtime)]
     peer_states: Mutex<PeerStateQueue>,
+    /// Packed atomic worker-active flag and pending count for invalid-frame reporting.
     #[cfg(any(test, rings_transport_runtime))]
     pub(super) invalid_frame_report_state: AtomicUsize,
 }
 
+/// Generate shared-pointer (`Arc` or `Rc`) inbound frame and peer-state dispatch methods.
 #[cfg(rings_transport_runtime)]
 macro_rules! define_shared_inbound_frame_paths {
     ($shared:ident) => {
@@ -529,6 +539,7 @@ impl InnerTransportCallback {
         self.on_channel_open_with_cid(&self.cid).await;
     }
 
+    /// Wake channel-state waiters and forward an `on_channel_open` event for `cid`.
     pub(crate) async fn on_channel_open_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
         if let Err(e) = self.callback.on_channel_open(cid).await {
@@ -541,6 +552,7 @@ impl InnerTransportCallback {
         self.on_channel_close_with_cid(&self.cid).await;
     }
 
+    /// Wake channel-state waiters and forward an `on_channel_close` event for `cid`.
     pub(crate) async fn on_channel_close_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
         if let Err(e) = self.callback.on_channel_close(cid).await {
@@ -642,6 +654,7 @@ impl InnerTransportCallback {
         }
     }
 
+    /// Enqueue a peer-connection state transition and return `true` if the caller must start draining.
     #[cfg(rings_transport_runtime)]
     fn enqueue_peer_state(&self, state: TransportConnectionState) -> bool {
         let mut queue = lock_recover(&self.peer_states);
@@ -649,6 +662,7 @@ impl InnerTransportCallback {
         !mem::replace(&mut queue.draining, true)
     }
 
+    /// Drain queued peer-connection state transitions in arrival order until the queue is empty.
     #[cfg(rings_transport_runtime)]
     async fn drain_peer_states(&self) {
         let mut drainer = PeerStateDrainer {
@@ -684,6 +698,7 @@ impl InnerTransportCallback {
         self.on_connection_state_change_with_cid(&self.cid, s).await;
     }
 
+    /// Close link credit on terminal transitions, wake waiters, and forward the state change for `cid`.
     pub(crate) async fn on_connection_state_change_with_cid(
         &self,
         cid: &str,
@@ -702,12 +717,15 @@ impl InnerTransportCallback {
 /// Exclusive claim of a running drainer task over [`PeerStateQueue`].
 #[cfg(rings_transport_runtime)]
 struct PeerStateDrainer<'a> {
+    /// Callback owning the peer-state queue being drained.
     callback: &'a InnerTransportCallback,
+    /// Whether the drainer cleanly observed an empty queue and released the draining flag.
     finished: bool,
 }
 
 #[cfg(rings_transport_runtime)]
 impl PeerStateDrainer<'_> {
+    /// Pop the next queued peer state, releasing the drainer claim when the queue becomes empty.
     fn next(&mut self) -> Option<TransportConnectionState> {
         let mut queue = lock_recover(&self.callback.peer_states);
         let next = queue.states.pop_front();

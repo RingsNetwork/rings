@@ -59,7 +59,9 @@ use crate::extension::protocols::outbox::OverlayOutbox;
 /// A JS handler effect: send `payload` to `to` over the overlay, under the protocol's own
 /// namespace (the scope decides the namespace — a handler cannot choose another).
 pub struct JsSend {
+    /// Destination peer DID for the overlay message.
     to: Did,
+    /// Payload bytes emitted by the JS handler.
     payload: Bytes,
 }
 
@@ -73,8 +75,11 @@ pub struct JsSend {
 /// reading wall-clock time/entropy, mutating external JS objects, or performing synchronous host
 /// I/O during `step`. See the [module documentation](self) for the full isolation boundary.
 pub struct JsProtocol {
+    /// Protocol namespace under which this JS handler is registered.
     namespace: String,
+    /// Initial JS state value returned by [`Protocol::init`].
     initial: JsValue,
+    /// JavaScript transition callback `(ctx, event) => { state, effects }`.
     handler: Function,
 }
 
@@ -125,6 +130,7 @@ impl Protocol for JsProtocol {
 /// asynchronous outbox so outbound network I/O never blocks `Runner::transition_gate`.
 #[derive(Default)]
 pub struct JsShell {
+    /// Bounded asynchronous per-peer outbox for outbound JS effects.
     outbox: OverlayOutbox,
 }
 

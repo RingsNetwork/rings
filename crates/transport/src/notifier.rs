@@ -18,6 +18,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
+/// Shared one-shot wake state and registered task wakers for a [`Notifier`].
 #[derive(Default)]
 struct NotifierState {
     /// Indicates whether state has woken.
@@ -34,6 +35,7 @@ struct NotifierState {
 pub struct Notifier(Arc<Mutex<NotifierState>>);
 
 impl Notifier {
+    /// Lock the inner [`NotifierState`], recovering from mutex poisoning.
     fn state(&self) -> MutexGuard<'_, NotifierState> {
         lock_recover(&self.0)
     }

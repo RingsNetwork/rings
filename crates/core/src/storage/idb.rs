@@ -181,6 +181,7 @@ struct StoredRow {
 }
 
 impl StoredRow {
+    /// Return this row's accounted wire byte length, measuring legacy rows lacking `byte_len`.
     fn accounted_bytes(&self) -> Result<u64> {
         let len = match self.byte_len {
             Some(len) => len,
@@ -196,7 +197,9 @@ const MAX_LEGACY_WIRE_DEPTH: usize = 128;
 /// Adapter that serializes a legacy structured-clone `JsValue` payload through the Rings wire
 /// codec so pre-`byte_len` schema-v2 rows can be measured and migrated on open.
 struct LegacyJsWireValue<'a> {
+    /// Borrowed JavaScript value to serialize.
     value: &'a JsValue,
+    /// Current recursion depth used to enforce [`MAX_LEGACY_WIRE_DEPTH`].
     depth: usize,
 }
 
@@ -330,6 +333,7 @@ impl serde::Serialize for LegacyJsWireValue<'_> {
     }
 }
 
+/// Measure the canonical Rings wire byte length of a legacy `(key, JsValue)` entry.
 fn measure_legacy_wire_bytes(key: &str, data: &JsValue) -> Result<u32> {
     let bytes = rings_codec::serialize(&(key, LegacyJsWireValue {
         value: data,
@@ -339,6 +343,7 @@ fn measure_legacy_wire_bytes(key: &str, data: &JsValue) -> Result<u32> {
     u32::try_from(bytes.len()).map_err(|_| Error::StorageCountOverflow)
 }
 
+/// Measure the canonical Rings wire byte length of a `(key, value)` entry.
 fn measure_wire_bytes<V: Serialize>(key: &str, value: &V) -> Result<u32> {
     let bytes = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
     u32::try_from(bytes.len()).map_err(|_| Error::StorageCountOverflow)
@@ -653,6 +658,7 @@ impl IdbStorage {
         Self::open_internal(row_capacity, Some(byte_capacity), name, authority).await
     }
 
+    /// Open an IndexedDB store with `row_capacity`, optional `byte_capacity`, and `authority`.
     async fn open_internal(
         row_capacity: u32,
         byte_capacity: Option<u32>,
@@ -698,6 +704,7 @@ impl IdbStorage {
         self.scope_with_durability(mode, durability)
     }
 
+    /// Open a transaction over both object stores using an explicit `durability` mode.
     fn scope_with_durability(
         &self,
         mode: IdbTransactionMode,

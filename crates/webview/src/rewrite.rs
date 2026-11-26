@@ -27,22 +27,31 @@ use self::budget::BoundedString;
 use self::srcset::visit_srcset_candidates;
 use self::srcset::SrcsetCandidate;
 
+/// Maximum nested `iframe[srcdoc]` recursion depth permitted during HTML rewriting.
 const MAX_SRCDOC_NESTING_DEPTH: u8 = 8;
 
 /// Context required to rewrite one target document or stylesheet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewriteContext {
+    /// Route prefix used to encode rewritten upstream URLs.
     gateway_prefix: GatewayPrefix,
+    /// Base URL of the document or stylesheet being rewritten.
     document_url: Url,
+    /// Optional runtime bootstrap script injected into HTML/XHTML documents.
     bootstrap_script: Option<String>,
+    /// Serialization syntax used when wrapping the injected bootstrap script.
     bootstrap_serialization: BootstrapSerialization,
+    /// Current `iframe[srcdoc]` nesting depth.
     srcdoc_depth: u8,
 }
 
+/// Markup serialization mode for injected bootstrap `<script>` elements.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum BootstrapSerialization {
+    /// Standard HTML `<script>` element text.
     #[default]
     Html,
+    /// XML-safe XHTML `<script>` element wrapped in a CDATA section.
     Xhtml,
 }
 
@@ -79,6 +88,7 @@ impl RewriteContext {
         self.rewrite_html_with_limit(html, usize::MAX)
     }
 
+    /// Rewrite one HTML or XHTML document body while enforcing an output byte budget `limit`.
     pub(crate) fn rewrite_html_with_limit(&self, html: &str, limit: usize) -> Result<String> {
         let bootstrap = self
             .bootstrap_script
@@ -159,6 +169,7 @@ impl RewriteContext {
         self.rewrite_css_with_limit(css, usize::MAX)
     }
 
+    /// Rewrite one CSS stylesheet body while enforcing an output byte budget `limit`.
     pub(crate) fn rewrite_css_with_limit(&self, css: &str, limit: usize) -> Result<String> {
         let imports = rewrite_css_imports(css, self, limit)?;
         rewrite_css_urls(&imports, self, limit)
@@ -218,6 +229,7 @@ impl RewriteContext {
         })
     }
 
+    /// Resolve and rewrite one URL attribute or CSS reference against `self.document_url`.
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
         self.gateway_prefix
             .rewrite_url_value(&self.document_url, value)
@@ -236,16 +248,24 @@ fn map_html_rewrite_error(error: RewritingError) -> WebviewError {
     }
 }
 
+/// Mutable per-document state threaded through `lol_html` element and style handlers.
 struct HtmlRewriteState<'a> {
+    /// Gateway route prefix used to encode rewritten URLs.
     gateway_prefix: &'a GatewayPrefix,
+    /// Effective base URL updated at most once by the first `<base href>`.
     current_base: RefCell<Url>,
+    /// Whether a `<base href>` element has already updated `current_base`.
     base_href_seen: Cell<bool>,
+    /// Optional raw bootstrap script propagated into nested `srcdoc` frames.
     bootstrap_script: Option<&'a str>,
+    /// Maximum rewritten output size in bytes.
     output_limit: usize,
+    /// Current `iframe[srcdoc]` recursion depth.
     srcdoc_depth: u8,
 }
 
 impl<'a> HtmlRewriteState<'a> {
+    /// Initialize HTML rewriting state for one document pass.
     fn new(
         gateway_prefix: &'a GatewayPrefix,
         document_url: Url,
@@ -263,6 +283,7 @@ impl<'a> HtmlRewriteState<'a> {
         }
     }
 
+    /// Resolve and encode `value` against the current document base URL within `output_limit`.
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
         let base = self.current_base.borrow();
         self.gateway_prefix
@@ -271,6 +292,7 @@ impl<'a> HtmlRewriteState<'a> {
             .transpose()
     }
 
+    /// Resolve a `<base href>` attribute, updating `current_base` on the first occurrence.
     fn rewrite_base_href(&self, value: &str) -> Result<Option<String>> {
         let base = self.current_base.borrow().clone();
         let Some(target) = self.gateway_prefix.resolve_url_value(&base, value)? else {
@@ -283,12 +305,14 @@ impl<'a> HtmlRewriteState<'a> {
         bounded_value(self.gateway_prefix.encode(&target), self.output_limit).map(Some)
     }
 
+    /// Rewrite inline CSS or `<style>` text against the current document base URL.
     fn rewrite_css(&self, css: &str) -> Result<String> {
         let base = self.current_base.borrow().clone();
         RewriteContext::new(self.gateway_prefix.clone(), base)
             .rewrite_css_with_limit(css, self.output_limit)
     }
 
+    /// Recursively rewrite an `iframe[srcdoc]` HTML payload while enforcing `MAX_SRCDOC_NESTING_DEPTH`.
     fn rewrite_srcdoc(&self, html: &str) -> Result<String> {
         if self.srcdoc_depth >= MAX_SRCDOC_NESTING_DEPTH {
             return Err(WebviewError::SrcdocNestingLimit {
@@ -304,12 +328,14 @@ impl<'a> HtmlRewriteState<'a> {
         context.rewrite_html_with_limit(html, self.output_limit)
     }
 
+    /// Rewrite a `<meta http-equiv="refresh">` content attribute against the current base URL.
     fn rewrite_refresh(&self, value: &str) -> Result<String> {
         let base = self.current_base.borrow();
         rewrite_refresh_value_with_limit(value, &base, self.gateway_prefix, self.output_limit)
     }
 }
 
+/// Rewrite URL-bearing, `srcset`, `srcdoc`, `style`, and `<meta refresh>` attributes on `element`.
 fn rewrite_html_element<H>(
     element: &mut Element<'_, '_, H>,
     state: &HtmlRewriteState<'_>,
@@ -367,6 +393,7 @@ where
     Ok(())
 }
 
+/// Buffer `<style>` text chunks and emit rewritten CSS on the final chunk of the text node.
 fn rewrite_style_text(
     text: &mut TextChunk<'_>,
     state: &HtmlRewriteState<'_>,
@@ -386,6 +413,7 @@ fn rewrite_style_text(
     Ok(())
 }
 
+/// Return whether an SVG element tag must be stripped because it can execute scripts or embed content.
 fn is_forbidden_svg_tag(tag: &str) -> bool {
     tag.eq_ignore_ascii_case("script")
         || tag.eq_ignore_ascii_case("foreignobject")
@@ -398,6 +426,7 @@ fn is_forbidden_svg_tag(tag: &str) -> bool {
         || tag.eq_ignore_ascii_case("animatetransform")
 }
 
+/// Strip `on*` event handlers and `javascript:` links from an SVG element.
 fn sanitize_svg_element_attributes<H>(
     element: &mut Element<'_, '_, H>,
 ) -> std::result::Result<(), Box<dyn Error + Send + Sync>>
@@ -427,6 +456,7 @@ where H: HandlerTypes {
     Ok(())
 }
 
+/// Return whether lowercased attribute `name` holds a single URL value.
 fn is_url_attribute(name: &str) -> bool {
     matches!(
         name,
@@ -442,10 +472,12 @@ fn is_url_attribute(name: &str) -> bool {
     )
 }
 
+/// Return whether lowercased attribute `name` holds a `srcset` candidate list.
 fn is_srcset_attribute(name: &str) -> bool {
     matches!(name, "srcset" | "imagesrcset")
 }
 
+/// Rewrite every candidate URL in a `srcset` or `imagesrcset` attribute value.
 fn rewrite_srcset_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<String> {
     let mut out = BoundedString::new(value.len(), state.output_limit);
     let mut first = true;
@@ -482,6 +514,7 @@ fn rewrite_url_list_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<S
     Ok(rewritten.finish())
 }
 
+/// Find the first ASCII case-insensitive occurrence of `pattern` outside CSS comments, strings, and `url(...)` values.
 fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) -> Option<usize> {
     let pattern = pattern.as_bytes();
     (!pattern.is_empty()).then_some(())?;
@@ -560,6 +593,7 @@ fn find_ascii_case_insensitive_outside_css_comments(input: &str, pattern: &str) 
     None
 }
 
+/// Rewrite all CSS `url(...)` references in `input` within output byte budget `limit`.
 fn rewrite_css_urls(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
     let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
@@ -602,12 +636,17 @@ fn rewrite_css_urls(input: &str, ctx: &RewriteContext, limit: usize) -> Result<S
     Ok(output.finish())
 }
 
+/// Termination outcome when scanning inside a CSS `url(...)` argument.
 enum CssUrlEnd {
+    /// Byte offset of the matching closing parenthesis `)`.
     Close(usize),
+    /// Byte offset of a nested `url(` encountered before any closing parenthesis.
     Nested(usize),
+    /// Input ended before a closing parenthesis was found.
     Missing,
 }
 
+/// Locate the closing parenthesis or nested `url(` after an opening `url(` token.
 fn find_css_url_end(input: &str) -> CssUrlEnd {
     let mut quote = None;
     let mut escaped = false;
@@ -635,6 +674,7 @@ fn find_css_url_end(input: &str) -> CssUrlEnd {
     CssUrlEnd::Missing
 }
 
+/// Trim whitespace and extract any matching outer quote character from a CSS `url(...)` argument.
 fn trim_css_url(raw_value: &str) -> (Option<char>, &str) {
     let trimmed = raw_value.trim();
     if let Some(value) = trimmed
@@ -652,6 +692,7 @@ fn trim_css_url(raw_value: &str) -> (Option<char>, &str) {
     }
 }
 
+/// Rewrite string-form CSS `@import "..."` rules in `input` within output byte budget `limit`.
 fn rewrite_css_imports(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
     let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
@@ -705,6 +746,7 @@ pub(crate) fn rewrite_refresh_value(
     rewrite_refresh_value_with_limit(value, base_url, gateway_prefix, usize::MAX)
 }
 
+/// Rewrite a Refresh header or `<meta http-equiv="refresh">` value within byte budget `limit`.
 fn rewrite_refresh_value_with_limit(
     value: &str,
     base_url: &Url,
@@ -751,6 +793,7 @@ fn rewrite_refresh_value_with_limit(
     Ok(output.finish())
 }
 
+/// Find the byte offset of the `url=` parameter key in a Refresh value, case-insensitively.
 fn find_refresh_url_key(value: &str) -> Option<usize> {
     let mut rest = value;
     let mut offset = 0_usize;
@@ -774,6 +817,7 @@ fn find_refresh_url_key(value: &str) -> Option<usize> {
     None
 }
 
+/// Split a Refresh URL target into its optional quote delimiter, target URL slice, and trailing suffix.
 fn split_refresh_target(raw_target: &str) -> (Option<char>, &str, &str) {
     if let Some(quote) = raw_target
         .chars()
@@ -793,6 +837,7 @@ fn split_refresh_target(raw_target: &str) -> (Option<char>, &str, &str) {
     (None, target, suffix)
 }
 
+/// Find the first ASCII case-insensitive byte offset of `pattern` in `input`.
 fn find_ascii_case_insensitive(input: &str, pattern: &str) -> Option<usize> {
     let pattern = pattern.as_bytes();
     (!pattern.is_empty()).then_some(())?;
@@ -802,6 +847,7 @@ fn find_ascii_case_insensitive(input: &str, pattern: &str) -> Option<usize> {
         .position(|candidate| candidate.eq_ignore_ascii_case(pattern))
 }
 
+/// Split `input` at byte `index`, returning a render error if `index` is not a UTF-8 boundary.
 fn split_at_checked(input: &str, index: usize) -> Result<(&str, &str)> {
     let Some(before) = input.get(..index) else {
         return Err(WebviewError::Render(format!(
@@ -816,6 +862,7 @@ fn split_at_checked(input: &str, index: usize) -> Result<(&str, &str)> {
     Ok((before, after))
 }
 
+/// Format an inline `<script>` tag for the bootstrap runtime in HTML or XHTML syntax.
 fn bootstrap_tag(script: &str, serialization: BootstrapSerialization) -> String {
     let source = match serialization {
         BootstrapSerialization::Html => script.to_string(),

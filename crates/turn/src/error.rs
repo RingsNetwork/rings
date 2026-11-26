@@ -1,3 +1,5 @@
+//! Error and result types for the TURN server and authentication handler.
+
 use rings_core::dht::Did;
 
 /// Error type for [`crate::TurnServer`] and [`crate::DelegationAuthHandler`].

@@ -33,6 +33,7 @@ use crate::error::Result;
 /// The application's outstanding successor lookups, by transaction.
 #[derive(Default)]
 pub(crate) struct ApplicationLookups {
+    /// Map from transaction ID to the oneshot sender awaiting its successor report.
     pending: Mutex<HashMap<uuid::Uuid, oneshot::Sender<Did>>>,
 }
 
@@ -73,8 +74,11 @@ impl ApplicationLookups {
 /// The application bounds the wait itself; dropping the handle withdraws the lookup, and a
 /// report arriving later is dropped by core.
 pub struct SuccessorReport {
+    /// Transaction ID identifying this routed successor lookup.
     tx_id: uuid::Uuid,
+    /// Oneshot receiver resolved when the successor report arrives.
     receiver: oneshot::Receiver<Did>,
+    /// Weak reference to the lookup table used to withdraw the entry on drop.
     lookups: Weak<ApplicationLookups>,
 }
 

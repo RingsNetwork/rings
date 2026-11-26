@@ -111,12 +111,19 @@ pub(crate) enum OnionInvokeDrop {
     /// Evaluation finished after `release_at_ms = arr + L(f)` (L4: never release late).
     #[error("invoke completed at {completed_at_ms} ms past release deadline {release_at_ms} ms")]
     Overrun {
+        /// Timestamp in milliseconds when evaluation completed.
         completed_at_ms: u128,
+        /// Scheduled release deadline `arr + L(f)` in milliseconds.
         release_at_ms: u128,
     },
     /// Output length did not match `W(f)` (L3: fail closed, never truncate or improperly pad).
     #[error("invoke output of {actual} bytes does not match W(f) = {expected} bytes")]
-    OutputWidth { actual: usize, expected: usize },
+    OutputWidth {
+        /// Actual byte length produced by the backend.
+        actual: usize,
+        /// Expected byte length `W(f)` required by the shape.
+        expected: usize,
+    },
     /// SURB expired at or before `release_at_ms`.
     #[error("invoke SURB expires before release deadline")]
     Expired,
@@ -168,18 +175,26 @@ pub(crate) fn complete_invoke(
     })
 }
 
+/// Registered intermediate `invoke` backend paired with its quota policy.
 struct RegisteredInvoke {
+    /// Quota and concurrency policy applied to this `(shape, backend)` entry.
     policy: OnionInvokePolicy,
+    /// Backend implementation invoked for matching cells.
     backend: Arc<rings_runtime::maybe_send_sync!(dyn OnionInvokeBackend)>,
 }
 
 /// Shared `(shape, backend)` interpretation table of one node's Σ-algebra (#834 D2).
 #[derive(Clone)]
 pub(crate) struct OnionInvokeRegistry {
+    /// Advertised policies from the node's invoke offer.
     offered_policies: Arc<BTreeMap<(OnionInvokeShape, OnionBackendName), OnionInvokePolicy>>,
+    /// Registered backend handlers keyed by `(shape, backend)`.
     entries: Arc<RwLock<BTreeMap<(OnionInvokeShape, OnionBackendName), RegisteredInvoke>>>,
+    /// Quota and concurrency accounting for active invocations.
     accounting: OnionInvokeAccounting,
+    /// Outbound link sender used to emit sealed reply cells.
     link_sender: OnionLinkSender,
+    /// Injected clock used for SURB expiry checks.
     clock: SharedClock,
 }
 
@@ -190,6 +205,7 @@ impl Default for OnionInvokeRegistry {
 }
 
 impl OnionInvokeRegistry {
+    /// Create an empty registry configured with an optional advertised offer, link sender, and clock.
     pub(crate) fn new_with_clock(
         offer: Option<&OnionInvokeOffer>,
         link_sender: OnionLinkSender,
@@ -342,6 +358,7 @@ impl OnionInvokeRegistry {
     }
 }
 
+/// Evaluate `call` while holding `_lease`, enforcing the constant `L(f)` release deadline.
 async fn run_invoke_under_lease(
     _lease: OnionInvokeLease,
     backend_impl: Arc<rings_runtime::maybe_send_sync!(dyn OnionInvokeBackend)>,
@@ -396,6 +413,7 @@ async fn run_invoke_under_lease(
     Some(prepared)
 }
 
+/// Construct the map lookup key for `(shape, backend)`.
 const fn shape_key(
     shape: OnionInvokeShape,
     backend: OnionBackendName,

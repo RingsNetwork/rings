@@ -41,7 +41,9 @@ pub struct EstablishedTunnel<D, L> {
 /// Callers may inspect the error and retry [`TunnelControl::teardown`] with the returned lease.
 /// Dropping the failure does not promise cleanup.
 pub struct TeardownFailure<L> {
+    /// Retained linear lease that may be retried for cleanup.
     lease: L,
+    /// Platform error returned by the failed teardown attempt.
     error: GatewayError,
 }
 
@@ -138,6 +140,7 @@ impl UnsupportedTunnelControl {
         Self
     }
 
+    /// Build the canonical platform error for targets without native packet bindings.
     fn unsupported() -> GatewayError {
         GatewayError::Platform {
             operation: "native-gateway-platform",

@@ -294,12 +294,21 @@ impl ReplayTables {
 #[derive(Serialize)]
 enum StoredStreamRef<'a> {
     /// A sender stream and the last sequence its lease covers.
-    Sender { key: &'a StreamKey, leased: u64 },
+    Sender {
+        /// Stream key identifying the sender sequence table entry.
+        key: &'a StreamKey,
+        /// Highest sequence number covered by the durable lease.
+        leased: u64,
+    },
     /// A receiver stream, its window, its relay custody and its charge.
     Receiver {
+        /// Stream key identifying the receiver replay window.
         key: &'a StreamKey,
+        /// Accepted sequence window state.
         state: &'a SequenceState,
+        /// Relay custody metadata retained for this stream.
         custody: &'a RelayCustody,
+        /// Principal charge accounting for this stream's slot.
         charge: &'a StreamCharge,
     },
 }
@@ -308,13 +317,22 @@ enum StoredStreamRef<'a> {
 #[derive(Deserialize)]
 enum StoredStream {
     /// A sender stream and the last sequence its lease covers.
-    Sender { key: StreamKey, leased: u64 },
+    Sender {
+        /// Stream key identifying the sender sequence table entry.
+        key: StreamKey,
+        /// Highest sequence number covered by the durable lease.
+        leased: u64,
+    },
     /// A receiver stream and its window, boxed so the decoded sender variant stays small; a box
     /// encodes as its contents, so the record is that of [`StoredStreamRef::Receiver`].
     Receiver {
+        /// Stream key identifying the receiver replay window.
         key: StreamKey,
+        /// Boxed accepted sequence window state.
         state: Box<SequenceState>,
+        /// Relay custody metadata retained for this stream.
         custody: RelayCustody,
+        /// Principal charge accounting for this stream's slot.
         charge: StreamCharge,
     },
 }
@@ -480,6 +498,7 @@ enum Contribution {
 }
 
 impl RestoredStream {
+    /// Return the replay table and stream key identifying this restored stream.
     const fn table_and_key(&self) -> (ReplayTable, &StreamKey) {
         match self {
             Self::Sender(key, _) => (ReplayTable::Sender, key),

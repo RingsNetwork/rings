@@ -81,17 +81,21 @@ pub type Ristretto255ElGamal = ElGamal<Point<Ristretto255>>;
 
 /// ElGamal public key `h = xg` over one cyclic module carrier.
 pub struct ElGamalPublicKey<Element: CyclicModule> {
+    /// Underlying public group element.
     element: Element,
 }
 
 /// ElGamal secret scalar `x` over one cyclic module carrier.
 pub struct ElGamalSecretKey<Element: CyclicModule> {
+    /// Underlying secret scalar.
     scalar: Element::Scalar,
 }
 
 /// ElGamal key pair over one cyclic module carrier.
 pub struct ElGamalKeyPair<Element: CyclicModule> {
+    /// Secret scalar component.
     secret: ElGamalSecretKey<Element>,
+    /// Corresponding public group element component.
     public: ElGamalPublicKey<Element>,
 }
 

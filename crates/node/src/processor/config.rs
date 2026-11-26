@@ -34,6 +34,7 @@ pub type SessionRotationCommit = Box<dyn FnOnce()>;
 pub type NetworkParametersFactory =
     Arc<dyn Fn(&serde_json::Value) -> Result<Arc<dyn NodeNetworkParameters>> + Send + Sync>;
 
+/// Returns an empty JSON object used as the default `params` for a [`NetworkConfigDescriptor`].
 fn default_empty_network_params() -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
@@ -107,6 +108,7 @@ fn derive_account_ice_servers(spec: &str, account_key: &SigningSecretKey) -> Res
     account_key.sign_ice_servers(spec).map_err(Error::CoreError)
 }
 
+/// Instantiates the platform's built-in transport (or dummy transport when enabled) using `signed_credentials`.
 fn instantiate_builtin_transport(
     config: &TransportNetworkConfig,
     signed_credentials: &str,
@@ -220,7 +222,9 @@ impl NodeNetworkParameters for TransportNetworkConfig {
 /// TURN credentials).
 #[derive(Clone, Debug)]
 pub struct WebrtcNetworkParameters {
+    /// Underlying ICE/TURN and UDP port-range transport configuration.
     config: TransportNetworkConfig,
+    /// Signing mode used to generate TURN credentials.
     credential_mode: TurnCredentialMode,
 }
 
@@ -290,19 +294,24 @@ impl NodeNetworkParameters for WebrtcNetworkParameters {
     }
 }
 
+/// Serialized parameter payload for the built-in `"webrtc"` (and `"dummy"`) network descriptor.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WebrtcDescriptorParams {
+    /// Semicolon-separated ICE/STUN/TURN server URLs.
     #[serde(default)]
     ice_servers: String,
+    /// Optional external IP or hostname advertised to peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     external_address: Option<String>,
+    /// Optional inclusive lower bound of the WebRTC UDP port range.
     #[serde(
         default,
         alias = "webrtc_udp_port_min",
         skip_serializing_if = "Option::is_none"
     )]
     udp_port_min: Option<u16>,
+    /// Optional inclusive upper bound of the WebRTC UDP port range.
     #[serde(
         default,
         alias = "webrtc_udp_port_max",
@@ -311,6 +320,7 @@ struct WebrtcDescriptorParams {
     udp_port_max: Option<u16>,
 }
 
+/// Converts a [`TransportNetworkConfig`] into a `"webrtc"` [`NetworkConfigDescriptor`].
 fn webrtc_descriptor_from_config(config: &TransportNetworkConfig) -> NetworkConfigDescriptor {
     let range = config.udp_port_range();
     let params = serde_json::to_value(WebrtcDescriptorParams {
@@ -362,6 +372,7 @@ impl NodeNetworkParameters for DummyNetworkParameters {
     }
 }
 
+/// Returns the process-global registry mapping transport kind names to parameter factories.
 fn network_transport_registry() -> &'static RwLock<BTreeMap<String, NetworkParametersFactory>> {
     static REGISTRY: OnceLock<RwLock<BTreeMap<String, NetworkParametersFactory>>> = OnceLock::new();
     REGISTRY.get_or_init(|| {
@@ -731,6 +742,7 @@ pub struct ProcessorConfigSerialized {
     pub(crate) remote_rpc_proxy_url: Option<String>,
 }
 
+/// Parses an optional `(min, max)` UDP port pair, rejecting half-specified or inverted ranges.
 pub(crate) fn parse_udp_port_range(
     min: Option<u16>,
     max: Option<u16>,
@@ -742,6 +754,7 @@ pub(crate) fn parse_udp_port_range(
     }
 }
 
+/// Validates that `positions_per_peer` does not exceed the DHT virtual-node limit per owner.
 pub(in crate::processor) fn validate_dht_virtual_nodes(positions_per_peer: u16) -> Result<()> {
     if VirtualNodeConfig::positions_per_owner_within_limit(positions_per_peer) {
         return Ok(());

@@ -22,7 +22,9 @@ const ONION_SESSION_FAILED: &str = "the onion session failed closed";
 
 /// Native connector that maps one captured target to one Rings Onion TCP stream.
 pub struct NativeOnionGatewayConnector {
+    /// Node processor used to resolve directory state and build onion routes.
     processor: Arc<Processor>,
+    /// Native onion circuit runtime handle used to open TCP sessions.
     onion: NativeOnionCircuitHandle,
 }
 
@@ -33,6 +35,7 @@ impl NativeOnionGatewayConnector {
         Self { processor, onion }
     }
 
+    /// Convert an onion routing or session error for `flow` into [`GatewayError::OnionUnavailable`].
     fn onion_error(flow: FlowId, error: impl std::fmt::Display) -> GatewayError {
         GatewayError::OnionUnavailable {
             target: flow.target,

@@ -12,6 +12,7 @@ use crate::callback::link_credit::CreditPermit;
 use crate::core::pool::ChannelLane;
 use crate::core::transport::TransportConnectionState;
 
+/// Boxed error type returned by [`TransportCallback`] methods.
 type CallbackError = Box<dyn std::error::Error>;
 
 /// One inbound payload whose transport envelope was decoded and which took its place in its
@@ -20,9 +21,13 @@ type CallbackError = Box<dyn std::error::Error>;
 /// Only the transport admission layer can construct this value. Public transport
 /// adapters can therefore dispatch messages only after synchronous admission.
 pub struct AdmittedInboundMessage<'a> {
+    /// Connection identifier (peer DID) from which the message arrived.
     cid: &'a str,
+    /// Decoded custom transport payload bytes.
     payload: Bytes,
+    /// Channel lane whose credit window admitted this frame.
     lane: ChannelLane,
+    /// Credit lease released once downstream processing takes ownership.
     credit: InboundCreditLease,
 }
 
@@ -77,6 +82,7 @@ impl<'a> AdmittedInboundMessage<'a> {
 /// cannot be cloned, so a downstream bounded queue can use it as a precise handoff witness:
 /// the peer's sender waits on this lane exactly as long as the protocol holds its frames.
 pub struct InboundCreditLease {
+    /// Underlying credit permit returned to the lane window on drop.
     _permit: CreditPermit,
 }
 

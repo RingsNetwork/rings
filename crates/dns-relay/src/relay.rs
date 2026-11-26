@@ -99,8 +99,11 @@ where
     D: Directory,
     F: Forward<Owner = D::Owner>,
 {
+    /// Authoritative DNS handler backed by the cached directory.
     authority: DnsAuthority<Recall<D>>,
+    /// Socket addresses on which the DNS server listens.
     dns_listen: Vec<SocketAddr>,
+    /// TCP ingress forwarding connections to resolved owners.
     ingress: Ingress<Recall<D>, F>,
 }
 

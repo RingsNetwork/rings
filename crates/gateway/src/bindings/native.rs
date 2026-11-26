@@ -62,10 +62,12 @@ impl NativeTunnelOptions {
 
 /// Complete-IP-packet adapter around the cross-platform native TUN device.
 pub struct NativePacketIo {
+    /// Underlying async TUN/utun/Wintun device handle.
     device: tun_rs::AsyncDevice,
 }
 
 impl NativePacketIo {
+    /// Wrap an initialized `tun_rs::AsyncDevice` as a `NativePacketIo`.
     pub(crate) fn new(device: tun_rs::AsyncDevice) -> Self {
         Self { device }
     }
@@ -128,19 +130,26 @@ impl PacketIo for NativePacketIo {
 
 /// Linear route-cleanup capability returned by native tunnel establishment.
 pub struct NativeTunnelLease {
+    /// Monotonic lease identifier paired with `NativeTunnelControl::active`.
     id: u64,
 }
 
+/// Active tunnel lease state tracked by `NativeTunnelControl`.
 struct ActiveTunnel {
+    /// Lease identifier owned by the currently active tunnel.
     id: u64,
+    /// Installed OS routes to delete in reverse order on teardown.
     routes: Vec<Route>,
 }
 
+/// Exclusive advisory file lock guarding the durable route ledger namespace.
 struct RouteLedgerLock {
+    /// Open lock file kept alive for the lifetime of the controller.
     _file: File,
 }
 
 impl RouteLedgerLock {
+    /// Create or open the ledger lock file and acquire a non-blocking exclusive lock.
     fn acquire(ledger_path: &Path) -> Result<Self, GatewayError> {
         ensure_ledger_parent(ledger_path)?;
         let lock_path = route_ledger_lock_path(ledger_path);
@@ -180,10 +189,15 @@ impl RouteLedgerLock {
 
 /// Desktop tunnel controller with durable, reverse-order route cleanup.
 pub struct NativeTunnelControl {
+    /// Platform route table handle used to list, add, and delete capture routes.
     manager: RouteManager,
+    /// Caller-supplied interface and ledger options.
     options: NativeTunnelOptions,
+    /// Exclusive lock preventing concurrent controllers from sharing the same route ledger.
     _ledger_lock: RouteLedgerLock,
+    /// Currently established tunnel lease and its installed routes, if any.
     active: Option<ActiveTunnel>,
+    /// Next monotonic lease identifier to allocate on establish.
     next_lease_id: u64,
 }
 
@@ -216,6 +230,7 @@ impl NativeTunnelControl {
         self.cleanup_stale_routes(&mut routes)
     }
 
+    /// Establish the native packet device and journaled capture routes for `plan`.
     fn establish_inner(
         &mut self,
         plan: &GatewayPlan,
@@ -304,6 +319,7 @@ impl NativeTunnelControl {
         })
     }
 
+    /// Record `route` in the write-ahead ledger before installing it in the OS route table.
     fn install_route(
         &mut self,
         route: Route,
@@ -323,6 +339,7 @@ impl NativeTunnelControl {
         )
     }
 
+    /// Delete `routes` in reverse order, updating the durable ledger after each step.
     fn cleanup_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         while let Some(route) = routes.pop() {
             if let Err(error) = self.delete_route_if_present(&route) {
@@ -335,6 +352,7 @@ impl NativeTunnelControl {
         remove_ledger(&self.options.route_ledger_path)
     }
 
+    /// Delete `route` from the OS table, treating an already-absent route as success.
     fn delete_route_if_present(&mut self, route: &Route) -> Result<(), GatewayError> {
         match self.manager.delete(route) {
             Ok(()) => Ok(()),
@@ -343,11 +361,13 @@ impl NativeTunnelControl {
         }
     }
 
+    /// Clean up stale routes recorded from an interrupted lease on non-macOS platforms.
     #[cfg(not(target_os = "macos"))]
     fn cleanup_stale_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         self.cleanup_routes(routes)
     }
 
+    /// Verify ownership and delete stale routes recorded from an interrupted lease on macOS.
     #[cfg(target_os = "macos")]
     fn cleanup_stale_routes(&mut self, routes: &mut Vec<Route>) -> Result<(), GatewayError> {
         let existing_routes = self
@@ -386,17 +406,24 @@ impl NativeTunnelControl {
     }
 }
 
+/// Classification of a stale journaled route against the current macOS routing table.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Eq, PartialEq)]
 enum StaleRouteOwnership {
+    /// No route for this destination prefix exists anymore.
     Absent,
+    /// Exactly one matching route exists and still matches the journaled interface identity.
     Owned,
+    /// Another route with a different interface or gateway now occupies this prefix.
     Conflict {
+        /// Interface index of the conflicting route, if known.
         existing_interface_index: Option<u32>,
+        /// Interface name of the conflicting route, if known.
         existing_interface_name: Option<String>,
     },
 }
 
+/// Determine whether a journaled macOS route is absent, still owned, or replaced by another route.
 #[cfg(target_os = "macos")]
 fn stale_route_ownership(recorded: &Route, existing_routes: &[Route]) -> StaleRouteOwnership {
     let mut exact = existing_routes.iter().filter(|existing| {
@@ -420,6 +447,7 @@ fn stale_route_ownership(recorded: &Route, existing_routes: &[Route]) -> StaleRo
     }
 }
 
+/// Return whether `existing` matches the interface, gateway, and scope recorded for `recorded`.
 #[cfg(target_os = "macos")]
 fn same_route_cleanup_identity(recorded: &Route, existing: &Route) -> bool {
     recorded.if_index().is_some()
@@ -431,6 +459,7 @@ fn same_route_cleanup_identity(recorded: &Route, existing: &Route) -> bool {
         && recorded.if_scope() == existing.if_scope()
 }
 
+/// Build a `StaleRouteOwnership::Conflict` from a conflicting kernel route.
 #[cfg(target_os = "macos")]
 fn stale_route_conflict(existing: &Route) -> StaleRouteOwnership {
     StaleRouteOwnership::Conflict {
@@ -439,6 +468,7 @@ fn stale_route_conflict(existing: &Route) -> StaleRouteOwnership {
     }
 }
 
+/// Reject establishment if any existing kernel route shadows a requested capture prefix.
 fn ensure_capture_destinations_available(
     existing_routes: &[Route],
     capture_routes: &[IpNet],
@@ -458,10 +488,12 @@ fn ensure_capture_destinations_available(
     Ok(())
 }
 
+/// Return whether `existing` is an equal or more-specific route within `capture`.
 fn route_shadows_capture(existing: &Route, capture: &IpNet) -> bool {
     existing.prefix() >= capture.prefix_len() && capture.contains(&existing.destination())
 }
 
+/// Persist `route` to the write-ahead ledger before invoking `add`, rolling back on failure.
 fn journal_then_add_route<J, A>(
     route: Route,
     installed: &mut Vec<Route>,
@@ -539,28 +571,44 @@ impl TunnelControl for NativeTunnelControl {
     }
 }
 
+/// On-disk JSON journal of routes installed for the active or interrupted tunnel lease.
 #[derive(Debug, Deserialize, Serialize)]
 struct RouteLedger {
+    /// Routes recorded in installation order.
     routes: Vec<RouteRecord>,
 }
 
+/// Serializable representation of one platform `Route` stored in the route ledger.
 #[derive(Debug, Deserialize, Serialize)]
 struct RouteRecord {
+    /// Destination network address.
     destination: IpAddr,
+    /// Destination CIDR prefix length.
     prefix: u8,
+    /// Optional next-hop gateway address.
     gateway: Option<IpAddr>,
+    /// Optional interface name.
     interface_name: Option<String>,
+    /// Optional numeric interface index.
     interface_index: Option<u32>,
+    /// Optional route metric (Linux and Windows).
     metric: Option<u32>,
+    /// Optional Linux routing table identifier.
     table: Option<u8>,
+    /// Optional Linux preferred source address.
     preferred_source: Option<IpAddr>,
+    /// Optional Linux source-based routing address.
     source: Option<IpAddr>,
+    /// Optional Linux source-based routing prefix length.
     source_prefix: Option<u8>,
+    /// Optional Windows 64-bit interface LUID.
     luid: Option<u64>,
+    /// Whether the route is interface-scoped on macOS.
     interface_scope: bool,
 }
 
 impl RouteRecord {
+    /// Snapshot a platform `Route` into a portable `RouteRecord`.
     fn from_route(route: &Route) -> Self {
         Self {
             destination: route.destination(),
@@ -599,6 +647,7 @@ impl RouteRecord {
         }
     }
 
+    /// Reconstruct a platform `Route` from this serialized ledger record.
     fn into_route(self) -> Route {
         let mut route = Route::new(self.destination, self.prefix);
         if let Some(gateway) = self.gateway {
@@ -638,6 +687,7 @@ impl RouteRecord {
     }
 }
 
+/// Build a platform capture route targeting `network` on the established tunnel interface.
 fn capture_route(network: IpNet, interface_index: u32, interface_name: &str) -> Route {
     let route = Route::new(network.network(), network.prefix_len()).with_if_index(interface_index);
     #[cfg(target_os = "macos")]
@@ -649,21 +699,25 @@ fn capture_route(network: IpNet, interface_index: u32, interface_name: &str) -> 
     route
 }
 
+/// Apply Linux-specific `tun_rs::DeviceBuilder` settings.
 #[cfg(target_os = "linux")]
 fn configure_builder(builder: DeviceBuilder, options: &NativeTunnelOptions) -> DeviceBuilder {
     super::unix::linux::configure(builder, options)
 }
 
+/// Apply macOS-specific `tun_rs::DeviceBuilder` settings.
 #[cfg(target_os = "macos")]
 fn configure_builder(builder: DeviceBuilder, options: &NativeTunnelOptions) -> DeviceBuilder {
     super::unix::macos::configure(builder, options)
 }
 
+/// Apply Windows-specific `tun_rs::DeviceBuilder` settings.
 #[cfg(target_os = "windows")]
 fn configure_builder(builder: DeviceBuilder, options: &NativeTunnelOptions) -> DeviceBuilder {
     super::windows::configure(builder, options)
 }
 
+/// Load any persisted lease routes from the ledger (and Windows backup, if present).
 fn read_lease(path: &Path) -> Result<Option<Vec<Route>>, GatewayError> {
     let routes = read_ledger_file(path)?.unwrap_or_default();
     #[cfg(target_os = "windows")]
@@ -685,6 +739,7 @@ fn read_lease(path: &Path) -> Result<Option<Vec<Route>>, GatewayError> {
     }
 }
 
+/// Read and decode one JSON route ledger file, returning `Ok(None)` when absent.
 fn read_ledger_file(path: &Path) -> Result<Option<Vec<Route>>, GatewayError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -705,6 +760,7 @@ fn read_ledger_file(path: &Path) -> Result<Option<Vec<Route>>, GatewayError> {
     ))
 }
 
+/// Atomically persist `routes` to the durable route ledger, or remove the ledger when empty.
 fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
     if routes.is_empty() {
         return remove_ledger(path);
@@ -739,6 +795,7 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
         .map_err(|error| GatewayError::platform("commit-route-ledger", error))
 }
 
+/// Create parent directories for the route ledger path if they do not exist.
 fn ensure_ledger_parent(path: &Path) -> Result<(), GatewayError> {
     if let Some(parent) = path
         .parent()
@@ -750,12 +807,14 @@ fn ensure_ledger_parent(path: &Path) -> Result<(), GatewayError> {
     Ok(())
 }
 
+/// Derive the advisory lock file path corresponding to a route ledger path.
 fn route_ledger_lock_path(path: &Path) -> PathBuf {
     let mut lock_path = path.as_os_str().to_os_string();
     lock_path.push(".lock");
     PathBuf::from(lock_path)
 }
 
+/// Remove the route ledger file (and Windows backup file, when applicable).
 fn remove_ledger(path: &Path) -> Result<(), GatewayError> {
     let primary = remove_ledger_file(path);
     #[cfg(target_os = "windows")]
@@ -772,6 +831,7 @@ fn remove_ledger(path: &Path) -> Result<(), GatewayError> {
     }
 }
 
+/// Remove a single ledger file, ignoring `NotFound`.
 fn remove_ledger_file(path: &Path) -> Result<(), GatewayError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -780,11 +840,13 @@ fn remove_ledger_file(path: &Path) -> Result<(), GatewayError> {
     }
 }
 
+/// Derive the Windows backup ledger path used during crash-safe replacement.
 #[cfg(target_os = "windows")]
 fn ledger_backup_path(path: &Path) -> PathBuf {
     path.with_extension("bak")
 }
 
+/// Replace the primary route ledger on Windows via a backup file so crashes remain recoverable.
 #[cfg(target_os = "windows")]
 fn commit_windows_ledger(path: &Path, temporary: &Path) -> Result<(), GatewayError> {
     let backup = ledger_backup_path(path);
@@ -814,6 +876,7 @@ fn commit_windows_ledger(path: &Path, temporary: &Path) -> Result<(), GatewayErr
     remove_ledger_file(&backup)
 }
 
+/// Return whether an OS route-deletion error indicates the route is already absent.
 fn route_is_absent(error: &std::io::Error) -> bool {
     if error.kind() == ErrorKind::NotFound {
         return true;

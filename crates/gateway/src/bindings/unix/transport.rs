@@ -22,9 +22,12 @@ use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
 use crate::GatewayError;
 
+/// Maximum serialized JSON frame size accepted by the Unix helper protocol (64 KiB).
 pub(super) const MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Single-byte marker accompanying the `SCM_RIGHTS` control message before each response frame.
 const RESPONSE_MARKER: u8 = 0x52;
 
+/// Write one length-delimited JSON `UnixConfigRequest` frame to `stream`.
 pub(crate) fn write_request(
     stream: &mut UnixStream,
     request: &UnixConfigRequest,
@@ -32,6 +35,7 @@ pub(crate) fn write_request(
     write_frame(stream, request, "write-helper-request")
 }
 
+/// Read an optional length-delimited JSON `UnixConfigRequest` frame in unit tests.
 #[cfg(test)]
 pub(crate) fn read_request(
     stream: &mut UnixStream,
@@ -39,6 +43,7 @@ pub(crate) fn read_request(
     read_optional_frame(stream, "read-helper-request")
 }
 
+/// Send the response marker (with an optional `SCM_RIGHTS` FD) followed by the JSON response frame.
 pub(crate) fn send_response(
     stream: &mut UnixStream,
     response: &UnixConfigResponse,
@@ -67,6 +72,7 @@ pub(crate) fn send_response(
     write_frame(stream, response, "write-helper-response")
 }
 
+/// Receive the response marker, any transferred `SCM_RIGHTS` descriptor, and the JSON response frame.
 pub(crate) fn receive_response(
     stream: &mut UnixStream,
 ) -> Result<(UnixConfigResponse, Option<OwnedFd>), GatewayError> {
@@ -119,6 +125,7 @@ pub(crate) fn receive_response(
     Ok((response, descriptor))
 }
 
+/// Serialize `value` as JSON and write it with a 4-byte big-endian length prefix.
 fn write_frame<T: Serialize>(
     stream: &mut UnixStream,
     value: &T,
@@ -143,6 +150,7 @@ fn write_frame<T: Serialize>(
         .map_err(|error| GatewayError::platform(operation, error))
 }
 
+/// Read one length-delimited JSON frame from `stream`, returning `Ok(None)` on clean EOF.
 fn read_optional_frame<T: DeserializeOwned>(
     stream: &mut UnixStream,
     operation: &'static str,
@@ -167,6 +175,7 @@ fn read_optional_frame<T: DeserializeOwned>(
     decode_frame(stream, length, operation).map(Some)
 }
 
+/// Read one required length-delimited JSON frame from `stream`, failing on EOF.
 fn read_required_frame<T: DeserializeOwned>(
     stream: &mut UnixStream,
     operation: &'static str,
@@ -177,6 +186,7 @@ fn read_required_frame<T: DeserializeOwned>(
     })
 }
 
+/// Read and deserialize a JSON frame body whose 4-byte big-endian length prefix is `length`.
 fn decode_frame<T: DeserializeOwned>(
     stream: &mut UnixStream,
     length: [u8; 4],

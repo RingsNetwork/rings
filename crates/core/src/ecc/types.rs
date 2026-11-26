@@ -14,6 +14,7 @@ use crate::error::Result;
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub struct PublicKey<const SIZE: usize>(pub [u8; SIZE]);
 
+/// Serde visitor for deserializing [`PublicKey`] from Base58Check strings or fixed byte tuples.
 struct PublicKeyVisitor<const SIZE: usize>;
 
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {

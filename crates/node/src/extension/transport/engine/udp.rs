@@ -104,6 +104,7 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     relay_udp_connected_with_idle(task, socket, RELAY_IDLE_TIMEOUT).await;
 }
 
+/// Relays datagrams bidirectionally on a connected server-side UDP socket until idle or closed.
 async fn relay_udp_connected_with_idle(
     task: RelayTask,
     socket: UdpSocket,
@@ -184,6 +185,7 @@ pub(super) fn spawn_udp_sendto(
     spawner.spawn(relay_udp_sendto(task, socket, dest, RELAY_IDLE_TIMEOUT));
 }
 
+/// Forwards peer datagrams back to `dest` on a shared client-side UDP socket until idle or closed.
 async fn relay_udp_sendto(
     task: RelayTask,
     socket: Arc<UdpSocket>,
@@ -246,6 +248,7 @@ pub(super) async fn bind_connected_udp(addr: SocketAddr) -> Option<UdpSocket> {
     Some(socket)
 }
 
+/// Copies the received prefix `buffer[..received]` into a [`Bytes`] buffer if in bounds.
 fn received_bytes(buffer: &[u8], received: usize) -> Option<Bytes> {
     buffer.get(..received).map(Bytes::copy_from_slice)
 }

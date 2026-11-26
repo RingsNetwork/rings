@@ -23,10 +23,14 @@ use crate::domain_tag;
 use crate::ecc::keccak256;
 use crate::error::Result;
 
+/// Canonical wire prefix prepended to serialized provisional service claims.
 const CLAIM_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-CLAIM\0";
+/// Canonical wire prefix prepended to serialized provisional service receipts.
 const RECEIPT_WIRE_PREFIX: &[u8] = b"RINGS-PROVISIONAL-SERVICE-RECEIPT\0";
+/// Signature domain tag for provider attestations on provisional service claims.
 const PROVIDER_DOMAIN: super::DomainTag =
     domain_tag!("rings-core:service-receipt:provisional:provider");
+/// Signature domain tag for beneficiary attestations on provisional service claims.
 const BENEFICIARY_DOMAIN: super::DomainTag =
     domain_tag!("rings-core:service-receipt:provisional:beneficiary");
 
@@ -179,6 +183,7 @@ impl ProvisionalServiceClaim {
         signer.sign_at(BENEFICIARY_DOMAIN, &self.canonical_bytes()?, ts_ms)
     }
 
+    /// Verify that `signer` targets this claim's network and represents `expected`.
     fn require_signer(
         &self,
         signer: MessageSigner<&crate::delegation::DelegateeKey>,
@@ -197,6 +202,7 @@ impl ProvisionalServiceClaim {
         Ok(())
     }
 
+    /// Verify a role `attestation` over this claim's canonical bytes under `domain` for `expected_account`.
     fn verify_role_attestation(
         &self,
         attestation: &MessageVerification,
@@ -597,6 +603,7 @@ pub enum ServiceReceiptError {
     TranscriptDigestMismatch,
 }
 
+/// Serialize `value` with `prefix` prepended for domain-separated canonical encoding.
 fn encode_prefixed<T: Serialize>(
     prefix: &[u8],
     value: &T,
@@ -612,6 +619,7 @@ fn encode_prefixed<T: Serialize>(
     Ok(bytes)
 }
 
+/// Deserialize a `prefix`-framed value and verify its round-trip canonical encoding.
 fn decode_prefixed<T>(prefix: &[u8], bytes: &[u8]) -> std::result::Result<T, ServiceReceiptError>
 where T: serde::de::DeserializeOwned + Serialize {
     let body = bytes

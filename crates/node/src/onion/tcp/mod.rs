@@ -47,6 +47,7 @@ use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRouteError;
 
+/// Duplex stream adapter bridging an onion TCP session to `tokio::io`.
 mod duplex;
 mod pump;
 

@@ -14,43 +14,66 @@ use crate::FlowId;
 use crate::GatewayError;
 use crate::OnionStreamConnector;
 
+/// Bounded capacity of the per-flow command channel from the runtime into a bridge task.
 const FLOW_COMMAND_CAPACITY: usize = 2;
 
+/// Command sent from the gateway runtime to an active flow's Onion stream bridge.
 #[derive(Debug)]
 pub(super) enum BridgeCommand {
+    /// Forward client-originated TCP bytes into the Onion stream.
     Data(Vec<u8>),
+    /// Half-close the Onion stream write direction after the client sends FIN.
     CloseWrite,
 }
 
+/// Asynchronous event emitted by a flow's Onion stream bridge back to the gateway runtime.
 pub(super) enum BridgeEvent {
     /// The stream opened; its probe names every later end of the flow (`crate::reset`).
     Opened {
+        /// Flow identifier whose upstream Onion stream opened.
         flow: FlowId,
+        /// Probe reporting how the upstream Onion stream terminates.
         probe: BoxOnionStreamProbe,
     },
+    /// Upstream bytes read from the Onion stream awaiting TCP transmission.
     Data {
+        /// Flow identifier receiving downstream data.
         flow: FlowId,
+        /// Payload chunk read from the Onion stream.
         bytes: Vec<u8>,
+        /// Backpressure acknowledgement signaled once TCP accepts `bytes`.
         consumed: oneshot::Sender<()>,
     },
+    /// Reusable client upload buffer returned after its bytes finish writing to the Onion stream.
     ClientBuffer {
+        /// Flow identifier owning the returned buffer.
         flow: FlowId,
+        /// Cleared buffer ready for reuse by the runtime.
         buffer: Vec<u8>,
     },
+    /// The upstream Onion stream reached EOF on its read half.
     PeerClosed(FlowId),
+    /// The bridge completed shutting down its write half toward the Onion stream.
     WriteClosed(FlowId),
+    /// Opening or pumping the Onion stream failed with a fatal flow error.
     Failed {
+        /// Flow identifier that failed.
         flow: FlowId,
+        /// Underlying gateway error describing the failure.
         error: GatewayError,
     },
 }
 
+/// Runtime-owned handle controlling one spawned per-flow Onion bridge task.
 pub(super) struct BridgeHandle {
+    /// Bounded command sender feeding client uploads and write-close requests.
     commands: mpsc::Sender<BridgeCommand>,
+    /// Join handle for the spawned bridge task, aborted on drop.
     task: tokio::task::JoinHandle<()>,
 }
 
 impl BridgeHandle {
+    /// Attempt to enqueue `command` without blocking the gateway event loop.
     pub(super) fn try_send(
         &self,
         command: BridgeCommand,
@@ -58,6 +81,7 @@ impl BridgeHandle {
         self.commands.try_send(command)
     }
 
+    /// Abort the underlying bridge task immediately.
     pub(super) fn abort(self) {
         self.task.abort();
     }
@@ -69,6 +93,7 @@ impl Drop for BridgeHandle {
     }
 }
 
+/// Spawn a bounded bidirectional bridge task connecting `flow` to `connector`.
 pub(super) fn spawn_bridge(
     flow: FlowId,
     connector: Arc<dyn OnionStreamConnector>,
@@ -90,16 +115,28 @@ pub(super) fn spawn_bridge(
     BridgeHandle { commands, task }
 }
 
+/// In-flight client-to-Onion write operation polled incrementally inside `run_bridge`.
 enum PendingUpload {
-    Data { bytes: Vec<u8>, written: usize },
+    /// Partially written client byte chunk awaiting duplex buffer space.
+    Data {
+        /// Client payload bytes being written.
+        bytes: Vec<u8>,
+        /// Number of bytes from `bytes` already written to the duplex stream.
+        written: usize,
+    },
+    /// Pending write-half shutdown toward the Onion stream.
     Shutdown,
 }
 
+/// Completion outcome of polling `PendingUpload` against the duplex writer.
 enum UploadPoll {
+    /// Number of bytes written in the latest `poll_write`.
     Wrote(usize),
+    /// Write-half `poll_shutdown` completed.
     ShutDown,
 }
 
+/// Await the runtime's consumption acknowledgement when one download chunk is in flight.
 async fn poll_pending_consumption(
     pending: &mut Option<oneshot::Receiver<()>>,
 ) -> Result<(), oneshot::error::RecvError> {
@@ -109,6 +146,7 @@ async fn poll_pending_consumption(
     }
 }
 
+/// Drive the active `PendingUpload` forward on `writer`, or pend forever when idle.
 async fn poll_pending_upload(
     writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
     pending: Option<&PendingUpload>,
@@ -129,6 +167,7 @@ async fn poll_pending_upload(
     }
 }
 
+/// Open the upstream Onion stream and pump bidirectional data and half-close events until completion.
 async fn run_bridge(
     flow: FlowId,
     connector: Arc<dyn OnionStreamConnector>,
@@ -282,6 +321,7 @@ async fn run_bridge(
     }
 }
 
+/// Emit a `BridgeEvent::Failed` wrapping a stream I/O error for `flow`.
 async fn send_stream_error(
     events: &mpsc::Sender<BridgeEvent>,
     flow: FlowId,
@@ -299,6 +339,7 @@ async fn send_stream_error(
     .await;
 }
 
+/// Best-effort delivery of `event` to the gateway runtime, ignoring receiver drop.
 async fn send_event(events: &mpsc::Sender<BridgeEvent>, event: BridgeEvent) {
     let _ = events.send(event).await;
 }

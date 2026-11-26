@@ -17,6 +17,7 @@ use crate::error::Result;
 use crate::onion::native::NativeOnionCircuitHandle;
 use crate::processor::Processor;
 
+/// Maximum byte length accepted for an incoming HTTP CONNECT request header.
 const MAX_CONNECT_HEADER_BYTES: usize = 8192;
 /// Default deadline for receiving a complete CONNECT header.
 pub const DEFAULT_CONNECT_HEADER_TIMEOUT_SECS: u64 = 10;
@@ -54,6 +55,7 @@ impl OnionHttpProxyOptions {
         }
     }
 
+    /// Validate that connection limits and header timeout are strictly positive.
     fn validate(&self) -> Result<()> {
         if self.max_connections == 0 {
             return Err(Error::InvalidConfig(
@@ -108,6 +110,7 @@ pub async fn run_onion_http_proxy(
     }
 }
 
+/// Handle a single accepted HTTP CONNECT client stream by opening and relaying an onion TCP session.
 async fn handle_connect(
     mut stream: TcpStream,
     processor: Arc<Processor>,
@@ -138,6 +141,7 @@ const fn connect_status(opened: bool) -> &'static str {
     }
 }
 
+/// Read and parse the target authority from an incoming HTTP CONNECT header within `header_timeout`.
 async fn read_connect_target(
     stream: &mut TcpStream,
     header_timeout: Duration,
@@ -159,6 +163,7 @@ async fn read_connect_target(
     parse_connect_request_line(request_line)
 }
 
+/// Read bytes from `stream` until `\r\n\r\n`, rejecting headers larger than [`MAX_CONNECT_HEADER_BYTES`].
 async fn read_http_header(stream: &mut TcpStream) -> Result<Vec<u8>> {
     let mut header = Vec::new();
     let mut byte = [0_u8; 1];
@@ -181,6 +186,7 @@ async fn read_http_header(stream: &mut TcpStream) -> Result<Vec<u8>> {
     )))
 }
 
+/// Parse an HTTP `CONNECT authority HTTP/x.y` request line into an [`OnionProxyTarget`].
 fn parse_connect_request_line(request_line: &str) -> Result<OnionProxyTarget> {
     let mut parts = request_line.split_whitespace();
     let method = parts
@@ -212,6 +218,7 @@ fn parse_connect_request_line(request_line: &str) -> Result<OnionProxyTarget> {
     OnionProxyTarget::parse_authority(authority)
 }
 
+/// Write a minimal `HTTP/1.1 <status>` response with empty headers to `stream`.
 async fn write_proxy_response(stream: &mut TcpStream, status: &str) -> Result<()> {
     let response = format!("HTTP/1.1 {status}\r\n\r\n");
     stream

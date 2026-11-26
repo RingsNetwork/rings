@@ -15,6 +15,7 @@ use crate::dht::topology;
 use crate::dht::Did;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 
+/// Domain separation prefix mixed into SHA-1 virtual-node derivation.
 const VIRTUAL_NODE_DOMAIN: &[u8] = b"rings:vnode";
 
 /// Maximum virtual storage positions derived per physical owner.
@@ -82,6 +83,7 @@ impl VirtualNodeConfig {
         positions_per_owner <= MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
     }
 
+    /// Clamp `positions_per_owner` to [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`].
     const fn bounded_positions_per_owner(positions_per_owner: u16) -> u16 {
         if positions_per_owner > MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER {
             MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
@@ -122,7 +124,9 @@ impl VirtualNode {
 /// Storage-owner registry for derived virtual positions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StorageVirtualNodes {
+    /// Virtual-node derivation parameters for this registry.
     config: VirtualNodeConfig,
+    /// Set of physical peer DIDs currently registered as storage owners.
     owners: BTreeSet<Did>,
 }
 
@@ -174,6 +178,7 @@ impl StorageVirtualNodes {
             .map(|position| position.owner_did)
     }
 
+    /// Derive all configured virtual positions for a single physical `owner_did`.
     fn derive_owner_positions(&self, owner_did: Did) -> Vec<VirtualNode> {
         (0..self.config.positions_per_owner())
             .map(|index| VirtualNode::derive(self.config.network_id(), owner_did, index))

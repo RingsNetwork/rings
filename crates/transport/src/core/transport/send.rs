@@ -11,13 +11,17 @@ pub const IRREVOCABLE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25
 /// Maximum cleanup interval after a connection generation becomes terminal.
 pub const CONNECTION_RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Predicate checked at the backend's final cancellable send boundary.
 #[cfg(target_family = "wasm")]
 type SendPermitPredicate = dyn Fn() -> bool;
+/// Thread-safe predicate checked at the backend's final cancellable send boundary.
 #[cfg(not(target_family = "wasm"))]
 type SendPermitPredicate = dyn Fn() -> bool + Send + Sync;
 
+/// Guard callback invoked to linearize an irrevocable send claim.
 #[cfg(target_family = "wasm")]
 type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>);
+/// Thread-safe guard callback invoked to linearize an irrevocable send claim.
 #[cfg(not(target_family = "wasm"))]
 type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>) + Send + Sync;
 
@@ -29,8 +33,11 @@ type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>) + Send + S
 /// holds, so the backend must not start its send primitive. The backend marks
 /// acceptance only after its send primitive confirms queue admission.
 pub struct SendPermit {
+    /// Higher-level authorization predicate checked before crossing the irrevocable boundary.
     predicate: Arc<SendPermitPredicate>,
+    /// Linearization hook executed around marking the send irrevocable.
     irrevocable_guard: Arc<SendPermitIrrevocableGuard>,
+    /// Shared atomic admission state machine for this send.
     state: AtomicAdmission,
     /// The lane credit the send is made under, when the caller reserved it ahead of the send.
     credit: Option<LaneCreditReservation>,
@@ -38,11 +45,13 @@ pub struct SendPermit {
 
 /// One-use capability that linearizes backend admission with an external guard.
 pub struct SendPermitClaim<'a> {
+    /// Borrowed admission state transitioned to irrevocable during linearization.
     state: &'a AtomicAdmission,
 }
 
 /// Proof that a backend crossed the final cancellation-safe send boundary.
 pub struct IrrevocableSendPermit {
+    /// Shared admission state awaiting final acceptance or rollback.
     state: AtomicAdmission,
 }
 
@@ -53,14 +62,18 @@ pub struct AcceptedSendPermit(());
 /// RAII guard that retires a connection generation when an irrevocable send fails or is dropped
 /// before reaching [`Self::mark_accepted`].
 pub struct IrrevocableSendGuard<F: FnOnce()> {
+    /// Shared acceptance observer checked on drop.
     acceptance: SendAcceptance,
+    /// Irrevocable permit consumed when [`Self::mark_accepted`] succeeds.
     permit: Option<IrrevocableSendPermit>,
+    /// Retirement callback invoked on drop if the send was not accepted.
     retire: Option<F>,
 }
 
 /// Shared observation of whether a one-send permit reached its linearization point.
 #[derive(Clone)]
 pub struct SendAcceptance {
+    /// Underlying atomic admission phase for the tracked send.
     state: AtomicAdmission,
 }
 

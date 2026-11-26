@@ -15,12 +15,16 @@ use super::InnerTransportCallback;
 #[cfg(any(test, rings_transport_runtime))]
 use crate::core::drop_guard::ArmedDropGuard;
 
+/// Maximum number of pending invalid-frame notifications coalesced in the backlog.
 #[cfg(any(test, rings_transport_runtime))]
 pub(super) const INVALID_FRAME_REPORT_BACKLOG_CAPACITY: usize = 256;
+/// Maximum number of invalid-frame notifications dispatched before yielding to the executor.
 #[cfg(any(test, rings_transport_runtime))]
 pub(super) const INVALID_FRAME_REPORT_QUANTUM: usize = 32;
+/// High-bit flag in `invalid_frame_report_state` indicating an active drainer task.
 #[cfg(any(test, rings_transport_runtime))]
 const INVALID_FRAME_WORKER_ACTIVE: usize = 1 << (usize::BITS - 1);
+/// Bitmask extracting the pending invalid-frame notification count from `invalid_frame_report_state`.
 #[cfg(any(test, rings_transport_runtime))]
 const INVALID_FRAME_REPORT_COUNT_MASK: usize = INVALID_FRAME_WORKER_ACTIVE - 1;
 
@@ -29,11 +33,13 @@ const _: () = {
     assert!(INVALID_FRAME_REPORT_BACKLOG_CAPACITY <= INVALID_FRAME_REPORT_COUNT_MASK);
 };
 
+/// Clear the active-worker bit and pending count when a drainer task aborts or drops unexpectedly.
 #[cfg(any(test, rings_transport_runtime))]
 fn release_invalid_frame_worker(state: &AtomicUsize) {
     state.swap(0, Ordering::AcqRel);
 }
 
+/// Yield once to the async executor between invalid-frame reporting quanta.
 #[cfg(any(test, rings_transport_runtime))]
 async fn yield_invalid_frame_report_worker() {
     let mut yielded = false;
@@ -50,6 +56,7 @@ async fn yield_invalid_frame_report_worker() {
 }
 
 impl InnerTransportCallback {
+    /// Increment the saturating invalid-frame backlog and return `true` if the caller must spawn a drainer.
     #[cfg(any(test, rings_transport_runtime))]
     pub(super) fn queue_invalid_inbound_frame(&self) -> bool {
         self.invalid_frame_report_state
@@ -63,6 +70,7 @@ impl InnerTransportCallback {
             .unwrap_or(false)
     }
 
+    /// Decrement one pending invalid-frame notification from the backlog, returning `false` if empty.
     #[cfg(any(test, rings_transport_runtime))]
     fn take_invalid_inbound_frame(&self) -> bool {
         self.invalid_frame_report_state
@@ -72,6 +80,7 @@ impl InnerTransportCallback {
             .is_ok()
     }
 
+    /// Atomically clear the active-worker flag if no pending invalid-frame notifications remain.
     #[cfg(any(test, rings_transport_runtime))]
     fn release_invalid_frame_worker_if_idle(&self) -> bool {
         self.invalid_frame_report_state
@@ -81,6 +90,7 @@ impl InnerTransportCallback {
             .is_ok()
     }
 
+    /// Drain queued invalid-frame notifications in bounded quanta until the backlog is empty.
     #[cfg(any(test, rings_transport_runtime))]
     pub(super) async fn drain_invalid_inbound_frames(&self) {
         let mut active_guard = ArmedDropGuard::new(

@@ -130,13 +130,18 @@ impl<X, I> OnionRole<X, I> {
     into = "Vec<SerializedOnionInvokeEntry>"
 )]
 pub struct OnionInvokeOffer {
+    /// Offered `(shape, backend)` pairs mapped to their quota policies.
     entries: BTreeMap<(OnionInvokeShape, OnionBackendName), OnionInvokePolicy>,
 }
 
+/// Flat serde entry representation for one `(shape, backend, policy)` item in [`OnionInvokeOffer`].
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 struct SerializedOnionInvokeEntry {
+    /// Closed `invoke` shape `f ∈ Σ_I`.
     shape: OnionInvokeShape,
+    /// Canonical open backend name `ω ∈ Ω`.
     backend: OnionBackendName,
+    /// Quota policy for this `(shape, backend)` entry.
     #[serde(default)]
     policy: OnionInvokePolicy,
 }
@@ -221,7 +226,9 @@ impl OnionInvokeOffer {
 /// is an exit a client can route to. The services are a set, so each is registered once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionExitOffer {
+    /// Non-empty set of world-facing exit services advertised by this node.
     services: BTreeSet<OnionServiceName>,
+    /// Shared exit policy governing all advertised services.
     policy: OnionExitPolicy,
 }
 

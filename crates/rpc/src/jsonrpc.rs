@@ -65,8 +65,10 @@ pub enum RpcError {
 /// A wrap `Result` contains ClientError.
 type Result<T> = std::result::Result<T, RpcError>;
 
+/// Default timeout applied to native JSON-RPC HTTP requests.
 pub(crate) const DEFAULT_RPC_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30);
+/// Maximum number of bytes accepted in a single JSON-RPC HTTP response body.
 pub(crate) const MAX_RPC_RESPONSE_BYTES: usize = 16 * 1_024 * 1_024;
 
 impl Client {
@@ -158,6 +160,7 @@ impl Client {
         serde_json::from_value(result).map_err(|e| RpcError::ParseError(e.to_string(), Box::new(e)))
     }
 
+    /// Serializes a JSON-RPC request, sends it over the configured transport, and decodes the single-response result.
     async fn do_jsonrpc_request(&self, req: &jsonrpc_core::Request) -> Result<serde_json::Value> {
         let body = serde_json::to_string(req).map_err(|e| RpcError::Client(e.to_string()))?;
 

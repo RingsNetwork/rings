@@ -29,7 +29,9 @@ use crate::error::Result;
 /// Once the connection generation is retired from the pool and dropped, operations return
 /// [`Error::ConnectionReleased`].
 pub struct ConnectionRef<C: ?Sized = DynConnection> {
+    /// Connection identifier (peer DID) this reference is bound to.
     cid: String,
+    /// Weak pointer to the pooled connection generation.
     conn: Weak<C>,
 }
 

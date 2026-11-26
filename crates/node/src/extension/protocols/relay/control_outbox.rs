@@ -17,17 +17,24 @@ use crate::sync_lock::lock;
 #[cfg(test)]
 use crate::test_support::BlockingSendProbe;
 
+/// Maximum number of in-flight relay terminal control sends across all peers.
 const MAX_PENDING_RELAY_CONTROL_SENDS: usize = 64;
+/// Maximum number of in-flight relay terminal control sends allowed for a single peer.
 const MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER: usize = 4;
 
+/// Pending terminal relay control frame waiting to be sent off-gate.
 struct ControlSend {
+    /// Namespace-scoped sender used to transmit the frame.
     scope: Scope,
+    /// Destination peer DID for the control frame.
     to: Did,
+    /// Encoded relay control frame payload.
     payload: Bytes,
     #[cfg(test)]
     test_hook: Option<Arc<ControlSendTestHook>>,
 }
 
+/// Sends a single relay terminal control frame and invokes optional test hooks.
 async fn apply_control_send(control: ControlSend) {
     #[cfg(test)]
     if let Some(hook) = control.test_hook.as_ref() {
@@ -95,12 +102,16 @@ impl ControlSendTestHook {
     }
 }
 
+/// RAII permit reserving one slot in the relay control outbox quota for `peer`.
 struct ControlPermit {
+    /// Shared per-peer and global quota tracker.
     budget: Arc<Mutex<PeerQuota>>,
+    /// Peer whose quota slot is held until this permit is dropped.
     peer: Did,
 }
 
 impl ControlPermit {
+    /// Reserves a control-send quota slot for `peer` or returns an admission error.
     fn acquire(budget: Arc<Mutex<PeerQuota>>, peer: Did) -> crate::error::Result<Self> {
         lock(budget.as_ref())?
             .reserve(peer)
@@ -120,7 +131,9 @@ impl Drop for ControlPermit {
     }
 }
 
+/// Bounded off-gate scheduler for unordered relay terminal control frames.
 pub(super) struct ControlOutbox {
+    /// Shared quota enforcing global and per-peer in-flight send limits.
     budget: Arc<Mutex<PeerQuota>>,
     #[cfg(test)]
     test_hook: Option<Arc<ControlSendTestHook>>,
@@ -151,6 +164,7 @@ impl ControlOutbox {
         }
     }
 
+    /// Acquires a quota permit and spawns a task to send a relay control frame to `to`.
     pub(super) fn enqueue(
         &self,
         scope: Scope,

@@ -1,5 +1,6 @@
 //! Shared hexadecimal parsing helpers.
 
+/// Convert a single ASCII hexadecimal byte to its 4-bit numeric value.
 pub(crate) fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),

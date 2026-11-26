@@ -312,6 +312,7 @@ impl App {
         }
     }
 
+    /// Recompute cached in-flight command and refresh counters from `in_flight_requests`.
     fn sync_in_flight_counters(&mut self) {
         self.in_flight_commands = self.in_flight_requests.len();
         self.has_refresh_in_flight = self
@@ -320,6 +321,7 @@ impl App {
             .any(|&k| k == InFlightKind::Refresh);
     }
 
+    /// Return whether at least one mutating RPC request is currently in flight.
     fn has_mutating_in_flight(&self) -> bool {
         self.in_flight_requests
             .values()
@@ -353,6 +355,7 @@ impl App {
         }
     }
 
+    /// Enqueue `command` for execution, coalescing refreshes and rejecting when the queue is full.
     fn enqueue_command(&mut self, command: NodeCommand) -> std::result::Result<(), String> {
         if matches!(command, NodeCommand::RefreshSnapshot { .. }) {
             self.enqueue_refresh();
@@ -1133,6 +1136,7 @@ impl App {
         }
     }
 
+    /// Process a keyboard event while a modal form dialog is open.
     fn handle_modal_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -1392,6 +1396,7 @@ impl App {
         }
     }
 
+    /// Load the currently selected execution log entry into the command output panel.
     fn load_selected_log_into_output(&mut self) {
         if let Some(entry) = self.action_logs.get(self.selected_log_idx) {
             self.last_command_output = Some(entry.formatted_output());
@@ -1399,6 +1404,7 @@ impl App {
         }
     }
 
+    /// Move execution log selection upward by `step` rows and sync the output panel.
     fn step_log_selection_up(&mut self, step: usize) {
         self.selected_log_idx = self.selected_log_idx.saturating_sub(step);
         self.clamp_selections();
@@ -1407,6 +1413,7 @@ impl App {
         self.load_selected_log_into_output();
     }
 
+    /// Move execution log selection downward by `step` rows and sync the output panel.
     fn step_log_selection_down(&mut self, step: usize) {
         self.selected_log_idx = self.selected_log_idx.saturating_add(step);
         self.clamp_selections();
@@ -1415,6 +1422,7 @@ impl App {
         self.load_selected_log_into_output();
     }
 
+    /// Select table row `row` in the currently active tab and clamp indices.
     fn select_row(&mut self, row: usize) {
         match self.active_tab {
             TabId::Overview | TabId::Monitor => {
@@ -1443,6 +1451,7 @@ impl App {
         self.clamp_selections();
     }
 
+    /// Move the active tab's selection or scroll position upward by one step.
     fn move_selection_up(&mut self) {
         if self.focused_toolbar_idx.is_some() {
             self.focused_toolbar_idx = None;
@@ -1481,6 +1490,7 @@ impl App {
         self.clamp_selections();
     }
 
+    /// Move the active tab's selection or scroll position downward by one step.
     fn move_selection_down(&mut self) {
         if self.focused_toolbar_idx.is_some() {
             self.focused_toolbar_idx = None;
@@ -1522,6 +1532,7 @@ impl App {
         self.clamp_selections();
     }
 
+    /// Move focus or subtab selection to the left in the active view.
     fn move_selection_left(&mut self) {
         if let Some(idx) = self.focused_toolbar_idx {
             let len = ButtonId::TOOLBAR.len();
@@ -1554,6 +1565,7 @@ impl App {
         }
     }
 
+    /// Move focus or subtab selection to the right in the active view.
     fn move_selection_right(&mut self) {
         if let Some(idx) = self.focused_toolbar_idx {
             let len = ButtonId::TOOLBAR.len();
@@ -1588,6 +1600,7 @@ impl App {
         }
     }
 
+    /// Clamp all table selection indices and scroll offsets to current snapshot bounds.
     fn clamp_selections(&mut self) {
         let peer_rows = self.snapshot.peer_traffic_rows();
         let peer_len = peer_rows.len();

@@ -61,7 +61,9 @@ use crate::online::ONLINE_NODES_TOPIC;
 use crate::processor::stoppable_storage_error;
 use crate::processor::Processor;
 
+/// Default interval in seconds between online-node presence heartbeats.
 const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Default freshness TTL in seconds for online-node presence descriptors.
 const DEFAULT_ONLINE_NODE_TTL_SECS: u64 = 90;
 
 /// Default online-node registry heartbeat interval in seconds.
@@ -217,7 +219,9 @@ pub fn validate_schedule(
 /// The context exposes only the node facts and DHT publication operation that a
 /// registry needs. The task does not own the processor.
 pub struct RegistrationContext<'a> {
+    /// Borrowed node processor executing DHT appends and supplying identity metadata.
     processor: &'a Processor,
+    /// Cooperative stop token cancelling in-flight registration storage operations.
     stop: StopToken,
     /// When set, every append asks its owners for a store report (#866), and its receipt is
     /// kept here for the daemon.
@@ -225,10 +229,12 @@ pub struct RegistrationContext<'a> {
 }
 
 impl<'a> RegistrationContext<'a> {
+    /// Creates a registration context borrowing `processor` with a never-stopping token.
     pub(crate) fn new(processor: &'a Processor) -> Self {
         Self::new_with_stop(processor, StopToken::never())
     }
 
+    /// Creates a registration context borrowing `processor` bounded by `stop`.
     pub(crate) const fn new_with_stop(processor: &'a Processor, stop: StopToken) -> Self {
         Self {
             processor,
@@ -409,10 +415,15 @@ where D: SignedDescriptor + RegistryElement + Clone
 /// re-appends.
 #[derive(Clone, Debug)]
 struct HeldLease<S> {
+    /// Lease freshness window and expiry timestamp for the held descriptors.
     terms: LeaseTerms,
+    /// Delegatee public key that signed the held descriptors.
     delegatee_public_key: PublicKey<33>,
+    /// Canonical unsigned descriptor body bytes used to detect field changes.
     bodies: Vec<Vec<u8>>,
+    /// Signed descriptor values published under this lease.
     descriptors: S,
+    /// Pre-encoded DHT entry elements re-appended on every heartbeat.
     elements: Vec<Bytes>,
 }
 
@@ -432,6 +443,7 @@ struct HeldLease<S> {
 /// ```
 #[derive(Clone, Debug)]
 pub struct DhtRegistrationPublisher<S> {
+    /// DHT registry topic string where descriptors are appended.
     topic: String,
     /// The renewal margin `2I`: a lease is renewed once fewer than two heartbeats remain in it.
     renewal_margin_ms: u128,
@@ -558,14 +570,20 @@ pub trait RegistrationTask: MaybeSendSync {
 /// Online-node registry task.
 #[derive(Clone, Debug)]
 pub struct OnlineNodeRegistration {
+    /// Interval between periodic online-node descriptor heartbeats.
     heartbeat_interval: Duration,
+    /// Runtime family advertised in the published online-node descriptor.
     node_type: OnlineNodeType,
+    /// Clock used to timestamp descriptor publication and lease evaluation.
     clock: SharedClock,
+    /// Process start timestamp in Unix epoch milliseconds.
     started_at_ms: u128,
+    /// Optional external endpoint hint advertised in the descriptor.
     endpoint_hint: Option<String>,
     /// The process epoch this node registers `relay` at, if it relays (#834 D2): read at every
     /// heartbeat, so a renewed epoch is published by the next one.
     onion_relay: Option<OnionProcessEpochCell>,
+    /// DHT publisher managing heartbeat cadence and lease renewal.
     publisher: DhtRegistrationPublisher<[OnlineNodeDescriptor; 1]>,
 }
 

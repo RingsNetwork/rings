@@ -9,8 +9,10 @@ use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
 
+/// Delays (in milliseconds) between successive `listPeers` polls after a handshake.
 pub(crate) const PEER_SETTLE_DELAYS_MS: &[u64] = &[0, 1_000, 2_000, 4_000];
 
+/// Poll `listPeers` on a short backoff schedule after a handshake until peers appear or attempts finish.
 pub(crate) async fn sync_peers_after_handshake(
     node: DemoNode,
     peers: UseStateHandle<Vec<PeerView>>,
@@ -50,6 +52,7 @@ pub(crate) async fn sync_peers_after_handshake(
     }
 }
 
+/// Format a status message combining the handshake `context` with the visible peer `count`.
 pub(crate) fn peer_sync_status(context: &str, count: usize) -> String {
     match count {
         0 => format!("{context}; no peers visible yet"),
@@ -58,6 +61,7 @@ pub(crate) fn peer_sync_status(context: &str, count: usize) -> String {
     }
 }
 
+/// Update a waiting peer-sync status string once at least one peer becomes visible.
 pub(crate) fn refresh_waiting_peer_status(current: &str, count: usize) -> Option<String> {
     if count == 0 {
         return None;

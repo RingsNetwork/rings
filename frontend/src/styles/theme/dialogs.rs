@@ -1,6 +1,7 @@
 use super::rule;
 use super::Theme;
 
+/// Appends dialog and modal theme rules to `css`.
 pub(super) fn append(css: &mut String, theme: Theme) {
     rule(
         css,

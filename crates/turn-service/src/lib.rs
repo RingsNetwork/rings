@@ -1,11 +1,13 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 #![cfg_attr(
     test,
     allow(
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::unwrap_used
     )
@@ -258,6 +260,7 @@ pub fn validate_turn_service_endpoint(
     Ok(canonical_url)
 }
 
+/// Parse an explicit port suffix from a URL authority string (supporting bracketed IPv6 literals).
 fn authority_explicit_port(authority: &str) -> Option<u16> {
     let port_str = if let Some(rest) = authority.strip_prefix('[') {
         let (_, after_bracket) = rest.split_once(']')?;
@@ -489,9 +492,13 @@ impl TurnServiceDescriptor {
 /// Validated configuration for announcing a node's TURN relay service in the DHT (#1292).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TurnServiceOffer {
+    /// Canonicalized public TURN listener URL.
     turn_url: String,
+    /// TURN server's compressed secp256k1 public key for ECDH credentials.
     server_pubkey: PublicKey<33>,
+    /// Interval between DHT lease republication heartbeats.
     heartbeat_interval: Duration,
+    /// Freshness window (TTL) advertised for each published descriptor.
     ttl: Duration,
 }
 
@@ -556,7 +563,9 @@ impl TurnServiceOffer {
 /// [`TURN_SERVICES_TOPIC`] (#1292).
 #[derive(Clone, Debug)]
 pub struct TurnServiceRegistration {
+    /// Validated TURN service offer being advertised.
     offer: TurnServiceOffer,
+    /// Underlying DHT registration publisher managing periodic heartbeats.
     publisher: DhtRegistrationPublisher<[TurnServiceDescriptor; 1]>,
 }
 
@@ -717,6 +726,7 @@ pub enum TurnTicketOutcome {
     Rejected(TurnTicketRejection),
 }
 
+/// Serialize `value` with a 2-byte big-endian length prefix and zero-pad it to `exact_width`.
 fn encode_fixed_frame<T: Serialize>(value: &T, exact_width: usize) -> Result<Vec<u8>> {
     let payload = rings_codec::serialize(value)
         .map_err(|e| Error::CoreError(rings_core::error::Error::CodecSerialize(e)))?;
@@ -740,6 +750,7 @@ fn encode_fixed_frame<T: Serialize>(value: &T, exact_width: usize) -> Result<Vec
     Ok(out)
 }
 
+/// Validate exact frame width and zero padding, then deserialize the length-prefixed payload.
 fn decode_fixed_frame<T: for<'de> Deserialize<'de>>(frame: &[u8], exact_width: usize) -> Result<T> {
     if frame.len() != exact_width {
         return Err(Error::InvalidConfig(format!(
@@ -826,6 +837,7 @@ impl std::fmt::Debug for AcquiredTurnTicket {
     }
 }
 
+/// Replace the password component of a TURN ICE URL with `<redacted>` for safe debug output.
 fn redact_ice_url_password(ice_url: &str) -> String {
     let Some((scheme, rest)) = ice_url.split_once("://") else {
         return "<redacted>".to_string();
@@ -846,6 +858,7 @@ pub fn turn_ticket_pipeline() -> Result<rings_node::onion::OnionInvokePipeline> 
     Ok(stage.into_pipeline())
 }
 
+/// Verify a `turn.ticket` response against `turn_descriptor` and derive ready-to-use TURN ICE credentials.
 fn verify_and_build_acquired_ticket(
     ephemeral_client_key: &SecretKey,
     turn_descriptor: &TurnServiceDescriptor,
@@ -897,7 +910,9 @@ fn verify_and_build_acquired_ticket(
 /// Client-side state for an in-flight `turn.ticket` request prepared for `rings-node`'s generic
 /// `"onionInvoke"` RPC (`librings_node` FFI or `rings-node` browser WASM).
 pub struct PendingTurnTicketAttempt {
+    /// Ephemeral client secret key used to derive ECDH TURN credentials from the issued ticket.
     ephemeral_client_key: SecretKey,
+    /// Candidate validated TURN service descriptors keyed by `(did, process_epoch)`.
     services: BTreeMap<(Did, OnionProcessEpoch), TurnServiceDescriptor>,
 }
 
@@ -1024,6 +1039,7 @@ pub async fn acquire_turn_ticket_over_route(
     .await
 }
 
+/// Acquire and verify a TURN ticket over `route`, sampling the arrival timestamp via `sample_now_ms`.
 async fn acquire_turn_ticket_over_route_with_now(
     pipeline_handle: &OnionPipelineHandle,
     route: &OnionPipelineRoute,
@@ -1141,7 +1157,9 @@ pub async fn request_turn_ticket(
     pending.complete(&invoke_resp, provider.processor().clock().now_ms())
 }
 
+/// Local RPC handler implementing `"lookupTurnServices"`.
 struct LookupTurnServicesRpc {
+    /// Weak reference to the provider's processor used to query the DHT.
     provider_processor: std::sync::Weak<Processor>,
 }
 
@@ -1162,8 +1180,11 @@ impl LocalRpcMethod for LookupTurnServicesRpc {
     }
 }
 
+/// Local RPC handler implementing `"requestTurnTicket"`.
 struct RequestTurnTicketRpc {
+    /// Weak reference to the processor used for service discovery and clock access.
     processor: std::sync::Weak<Processor>,
+    /// Onion pipeline handle used to invoke `turn.ticket` over a Sphinx loop.
     pipeline: OnionPipelineHandle,
 }
 
@@ -1263,6 +1284,7 @@ pub fn wasm_request_turn_ticket(
 ))]
 #[derive(Clone)]
 pub struct TurnTicketInvokeBackend {
+    /// Local TURN server instance that reserves and signs ticket sessions.
     server: Arc<rings_turn::TurnServer>,
 }
 
@@ -1466,6 +1488,7 @@ impl std::fmt::Debug for TurnServiceConfig {
     }
 }
 
+/// Default TURN listener socket address (`0.0.0.0:3478`).
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1477,6 +1500,7 @@ const fn default_turn_listen_addr() -> SocketAddr {
     )
 }
 
+/// Default TURN authentication realm.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1485,6 +1509,7 @@ fn default_turn_realm() -> String {
     rings_turn::DEFAULT_TURN_REALM.to_string()
 }
 
+/// Default maximum number of active STUN/TURN authentication nonces.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1493,6 +1518,7 @@ const fn default_turn_max_nonces() -> usize {
     rings_turn::DEFAULT_MAX_NONCES
 }
 
+/// Default maximum number of concurrent TURN allocations.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1501,6 +1527,7 @@ const fn default_turn_max_allocations() -> usize {
     rings_turn::DEFAULT_MAX_ALLOCATIONS
 }
 
+/// Default maximum number of pending TURN ticket reservations.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1509,6 +1536,7 @@ const fn default_turn_max_reservations() -> usize {
     rings_turn::DEFAULT_MAX_RESERVATIONS
 }
 
+/// Default maximum reservation TTL in seconds for issued TURN tickets.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1517,6 +1545,7 @@ const fn default_turn_max_reservation_ttl_secs() -> u64 {
     rings_turn::DEFAULT_MAX_RESERVATION_TTL.as_secs()
 }
 
+/// Default maximum number of peer permissions per TURN allocation.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1525,6 +1554,7 @@ const fn default_turn_max_permissions_per_allocation() -> usize {
     rings_turn::DEFAULT_MAX_PERMISSIONS_PER_ALLOCATION
 }
 
+/// Default DHT registration heartbeat interval in seconds.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1533,6 +1563,7 @@ const fn default_turn_heartbeat_interval_secs() -> u64 {
     30
 }
 
+/// Default DHT descriptor TTL in seconds.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1541,6 +1572,7 @@ const fn default_turn_ttl_secs() -> u64 {
     90
 }
 
+/// Default setting for whether the TURN service issues anonymous tickets over `turn.ticket`.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1757,6 +1789,7 @@ impl TurnServiceDaemonConfig {
     }
 }
 
+/// Merge `turn_invoke` into the builder's configured onion role, requiring relay advertisement.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1787,6 +1820,7 @@ fn apply_turn_invoke_offer_to_builder(
     Ok(builder.onion_role(role))
 }
 
+/// Combine two [`OnionInvokeOffer`] tables into a single validated offer.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
@@ -1802,15 +1836,21 @@ fn merge_invoke_offers(
     OnionInvokeOffer::new(entries)
 }
 
+/// Native daemon lifecycle hooks wiring TURN server registration, ticket issuance, and onion UDP relaying.
 #[cfg(all(
     any(feature = "native", feature = "dummy"),
     not(target_family = "wasm")
 ))]
 struct TurnDaemonHooks {
+    /// Running TURN relay server managed alongside the daemon.
     turn_server: Arc<rings_turn::TurnServer>,
+    /// Validated TURN service offer published to the DHT.
     offer: TurnServiceOffer,
+    /// Optional `turn.ticket` invoke offer merged into the node's onion role.
     turn_invoke: Option<OnionInvokeOffer>,
+    /// Policy governing ticket issuance invocations.
     ticket_invoke_policy: OnionInvokePolicy,
+    /// Optional multi-hop onion UDP relay factory bound once the processor starts.
     onion_udp_factory: Option<Arc<OnionUdpRelayFactory>>,
 }
 

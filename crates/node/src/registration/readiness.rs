@@ -53,6 +53,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Whether each registration task of a node is stored at its owners (module laws).
 pub(crate) struct RegistrationReadiness {
+    /// Per-task readiness latches indexed in registration task order.
     latches: Vec<Latch>,
 }
 

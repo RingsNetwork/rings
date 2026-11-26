@@ -82,6 +82,7 @@ pub enum DetachedError {
 /// down, work handed to its spawner is dropped unpolled — see [`Spawner::spawn`].
 #[derive(Clone, Debug)]
 pub struct Spawner {
+    /// Handle to the Tokio runtime that executes spawned tasks.
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     handle: tokio::runtime::Handle,
 }

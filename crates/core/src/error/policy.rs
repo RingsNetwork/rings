@@ -3,6 +3,7 @@ use super::Error;
 use super::SendClass;
 
 impl Error {
+    /// Wrap an unexpected [`crate::dht::PeerRingAction`] in [`Error::PeerRingUnexpectedAction`].
     pub(crate) fn unexpected_peer_ring_action(action: crate::dht::PeerRingAction) -> Self {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }

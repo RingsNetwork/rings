@@ -81,6 +81,7 @@ use crate::swarm::transport::SwarmTransport;
 
 /// Delivery of this node's inbox to the application inbox.
 pub(crate) struct SwarmInboxDelivery {
+    /// Backing swarm transport used to deliver and retire inbox elements.
     transport: Arc<SwarmTransport>,
 }
 

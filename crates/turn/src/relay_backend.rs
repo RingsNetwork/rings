@@ -238,13 +238,21 @@ pub struct ActiveAllocationSpec {
 /// functions.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TurnAllocationCore {
+    /// Maximum concurrent allocations (including pending opens and unclaimed reservations).
     max_allocations: usize,
+    /// Maximum concurrent unclaimed session reservations.
     max_reservations: usize,
+    /// Maximum active peer permissions per allocation.
     max_permissions_per_allocation: usize,
+    /// Whether the server has entered shutdown and rejects new opens/reservations.
     shutting_down: bool,
+    /// Monotonic identifier assigned to each pending asynchronous relay open.
     next_open_id: u64,
+    /// Unclaimed session ticket reservations keyed by ticket ID with expiry timestamp in ms.
     reservations: BTreeMap<[u8; 16], u128>,
+    /// In-flight asynchronous `Allocate` opens keyed by client 5-tuple.
     pending_opens: BTreeMap<TurnFiveTupleKey, PendingAllocateSpec>,
+    /// Live TURN allocations keyed by client 5-tuple.
     active_allocations: BTreeMap<TurnFiveTupleKey, ActiveAllocationSpec>,
 }
 

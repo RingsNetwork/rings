@@ -72,8 +72,11 @@ pub(super) struct Ready {
 /// One direction's reorder state; see the module laws.
 #[derive(Debug, Default)]
 pub(super) struct StreamReorder {
+    /// Next contiguous sequence number expected to be written.
     next: u64,
+    /// Out-of-order future segments buffered ahead of `next`.
     ahead: BTreeMap<u64, Bytes>,
+    /// Total segment count announced by the peer's half-close, if received.
     fin: Option<u64>,
 }
 

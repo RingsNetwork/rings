@@ -153,8 +153,11 @@ pub struct Copied {
 
 /// The store's state: the catalog and every mailbox's model.
 struct State {
+    /// Next identifiers to allocate for mailboxes and UID validity values.
     next: Next,
+    /// Ordered catalog entries for all existing mailboxes.
     listed: Vec<Listed>,
+    /// In-memory mailbox models keyed by mailbox identifier.
     mailboxes: BTreeMap<MailboxId, Mailbox>,
 }
 
@@ -181,9 +184,13 @@ pub fn same_mailbox_name(a: &str, b: &str) -> bool {
 
 /// The mailbox store.
 pub struct Store {
+    /// Root directory storing the catalog and per-mailbox data files.
     dir: PathBuf,
+    /// Synchronized in-memory catalog and mailbox state.
     state: Mutex<State>,
+    /// Broadcast channel notifying subscribers when a mailbox changes.
     changes: broadcast::Sender<MailboxId>,
+    /// Maximum permitted message size in bytes.
     max_message_size: usize,
 }
 

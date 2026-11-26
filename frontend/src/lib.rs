@@ -4,6 +4,8 @@
 //! APIs are reached through `js_sys`/`wasm_bindgen`; MV3 glue code is kept in
 //! strict TypeScript and compiled into ignored generated output.
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 mod app;
 mod browser_api;

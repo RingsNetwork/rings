@@ -1,3 +1,5 @@
+//! Native `reqwest`-based HTTPS exit transport implementation.
+
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -13,6 +15,7 @@ use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::resolve_public_target;
 
+/// Default per-request timeout applied to native HTTPS exit fetches.
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Return whether the native exit, rather than the onion client, owns this request header.
@@ -44,6 +47,7 @@ impl NativeHttpsEgress {
     }
 }
 
+/// Resolve `target` to public addresses and execute `request` against `url` with response-size limits.
 pub(super) async fn execute_https_request(
     url: &str,
     target: &OnionProxyTarget,
@@ -66,6 +70,7 @@ pub(super) async fn execute_https_request(
     .await
 }
 
+/// Format a `reqwest` failure with `context` as [`Error::HttpRequestError`].
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {
     if error.is_timeout() {
         Error::HttpRequestError(format!("{context}: timed out"))
@@ -74,6 +79,7 @@ fn native_http_error(context: &str, error: reqwest::Error) -> Error {
     }
 }
 
+/// Execute `request` against `url` over pinned `egress` addresses within `timeout` and `max_body_bytes`.
 pub(super) async fn native_fetch_with_timeout(
     url: &str,
     request: &OnionHttpsRequest,

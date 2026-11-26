@@ -84,6 +84,7 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
+/// Render the top header bar showing connection status, node identity, and endpoint metadata.
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let (status_badge, status_color) = match &app.connection_state {
         ConnectionState::Connecting => (" CONNECTING ", Color::Yellow),
@@ -176,6 +177,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
+/// Render the clickable view tab bar and register its hit regions.
 fn render_tab_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -212,6 +214,7 @@ fn render_tab_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the quick command button toolbar and register button hit regions.
 fn render_button_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -263,6 +266,7 @@ fn render_button_toolbar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the Overview tab containing status cards, traffic totals, and peer summaries.
 fn render_overview_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let constraints = if area.height < 18 {
         [
@@ -332,6 +336,7 @@ fn render_overview_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the compact connected peers table on the Overview tab.
 fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let peer_rows = app.snapshot.peer_traffic_rows();
     let header = Row::new(vec![
@@ -397,6 +402,7 @@ fn render_overview_connected_peers(frame: &mut Frame<'_>, app: &App, area: Rect)
     frame.render_widget(table, area);
 }
 
+/// Render the hosted virtual nodes and registered services summary on the Overview tab.
 fn render_overview_service_consumers(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let vnodes = app.snapshot.hosted_vnode_rows();
     let svcs = if app.registered_services.is_empty() {
@@ -465,6 +471,7 @@ fn render_overview_service_consumers(frame: &mut Frame<'_>, app: &App, area: Rec
     frame.render_widget(table, area);
 }
 
+/// Render the node health and Chord DHT status card.
 fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let obs = app.snapshot.observability.as_ref();
     let health = obs.map(|o| &o.health);
@@ -638,6 +645,7 @@ fn render_health_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render the session delegation key card with remaining TTL gauge.
 fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -710,6 +718,7 @@ fn render_session_key_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
+/// Render the gateway probe status and mailbox queue depth card.
 fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let mb_opt = app.snapshot.observability.as_ref().map(|o| o.mailboxes);
 
@@ -821,6 +830,7 @@ fn render_gateway_and_mailbox_card(frame: &mut Frame<'_>, app: &App, area: Rect)
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render the message throughput and failure totals card.
 fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_h = area.height.saturating_sub(2);
     let lines = match app.snapshot.observability.as_ref().map(|o| o.messages) {
@@ -927,6 +937,7 @@ fn render_message_totals_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render the DHT lookup latency and success summary card.
 fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_h = area.height.saturating_sub(2);
     let lookups = app.snapshot.observability.as_ref().map(|o| &o.dht_lookups);
@@ -1039,6 +1050,7 @@ fn render_lookup_summary_card(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Render the Monitor tab with traffic sparklines, lookup histogram, and recent events.
 fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let constraints = if area.height < 20 {
         [
@@ -1142,6 +1154,7 @@ fn render_monitor_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the DHT lookup latency distribution bar chart.
 fn render_lookup_histogram(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(lookups) = app.snapshot.observability.as_ref().map(|o| &o.dht_lookups) else {
         let block = Block::default()
@@ -1209,6 +1222,7 @@ fn render_lookup_histogram(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
+/// Render the scrollable table of recent node message events.
 fn render_recent_events_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let events = app
         .snapshot
@@ -1319,6 +1333,7 @@ fn render_recent_events_table(frame: &mut Frame<'_>, app: &mut App, area: Rect) 
     register_table_row_hits(&mut app.hit_map, area, event_count, state.offset());
 }
 
+/// Render the Peers tab showing peer transport traffic and hosted VNode entries.
 fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1502,6 +1517,7 @@ fn render_peers_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the DHT & Storage tab with Chord ring topology and storage subtabs.
 fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let compact = area.height < 18;
     let chunks = Layout::default()
@@ -1871,6 +1887,7 @@ fn render_dht_storage_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the Directory tab displaying discovered services and onion relay records.
 fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2098,6 +2115,7 @@ fn render_directory_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the Commands tab with the command workbench grid, output panel, and log history.
 fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let top_len = if area.height < 18 { 9 } else { 11 };
     let chunks = Layout::default()
@@ -2251,6 +2269,7 @@ fn render_commands_tab(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Render the execution history table of recent RPC command invocations.
 fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let log_count = app.action_logs.len();
     let rows = app
@@ -2331,6 +2350,7 @@ fn render_recent_command_logs_panel(frame: &mut Frame<'_>, app: &mut App, area: 
     register_log_row_hits(&mut app.hit_map, area, log_count, state.offset());
 }
 
+/// Render the bottom status footer bar showing active RPC count and keybinding hints.
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let busy = if app.in_flight_commands > 0 {
         format!(" [RUNNING {} RPC(s)...] ", app.in_flight_commands)
@@ -2377,6 +2397,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Render an interactive modal form dialog centered over `area`.
 fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area: Rect) {
     let height = u16::try_from(modal.fields.len().saturating_mul(3).saturating_add(7))
         .unwrap_or(16)
@@ -2514,6 +2535,7 @@ fn render_modal(frame: &mut Frame<'_>, app: &mut App, modal: &CommandModal, area
     }
 }
 
+/// Render the centered keyboard shortcuts and mouse controls help overlay.
 fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let rect = centered_rect(78, 22, area);
     frame.render_widget(Clear, rect);
@@ -2621,6 +2643,7 @@ fn render_help_overlay(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(visible_lines).block(block), rect);
 }
 
+/// Build a [`TableState`] clamped to `row_count`, synchronizing the persisted scroll `offset`.
 fn stateful_table_state(selected: usize, row_count: usize, offset: &mut usize) -> TableState {
     if row_count == 0 {
         *offset = 0;
@@ -2635,6 +2658,7 @@ fn stateful_table_state(selected: usize, row_count: usize, offset: &mut usize) -
         .with_offset(*offset)
 }
 
+/// Register mouse hit targets for visible data rows of a generic table widget.
 fn register_table_row_hits(
     hit_map: &mut crate::action::HitMap,
     table_area: Rect,
@@ -2664,6 +2688,7 @@ fn register_table_row_hits(
     }
 }
 
+/// Register mouse hit targets for visible rows of the command execution log table.
 fn register_log_row_hits(
     hit_map: &mut crate::action::HitMap,
     table_area: Rect,
@@ -2937,6 +2962,7 @@ pub fn format_compact_count(count: u64) -> String {
     }
 }
 
+/// Format a millisecond latency value as a compact human-readable duration string.
 fn format_compact_latency_ms(ms: f64) -> String {
     if !ms.is_finite() || ms < 0.0 {
         "-".to_string()
@@ -2955,6 +2981,7 @@ fn format_compact_latency_ms(ms: f64) -> String {
     }
 }
 
+/// Compute a centered rectangle of at most `width` by `height` inside `area`.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
@@ -2968,6 +2995,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
+/// Format a styled `label: value` key-value line for status cards.
 fn kv_line<'a>(label: &'a str, value: &str, color: Color) -> Line<'a> {
     Line::from(vec![
         Span::styled(format!(" {label:<18} "), Style::default().fg(Color::Gray)),

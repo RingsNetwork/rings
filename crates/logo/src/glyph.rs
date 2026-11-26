@@ -17,6 +17,7 @@ pub(crate) struct Circle {
 }
 
 impl Circle {
+    /// Returns the point at offset `(x, y)` relative to the circle center.
     fn point_at_offset(self, x: f64, y: f64) -> Point {
         Point {
             x: self.center.x + x,
@@ -157,6 +158,7 @@ impl GlyphGeometry {
     }
 }
 
+/// Constructs the dominant vertical stem bounds from one Pacioli unit.
 fn stem(unit: f64) -> StemGeometry {
     StemGeometry {
         left: -19.0 * unit / 6.0,
@@ -164,6 +166,7 @@ fn stem(unit: f64) -> StemGeometry {
     }
 }
 
+/// Constructs the three tangent circles forming the bracketed serifs.
 fn serifs(square_half: f64, unit: f64, stem: StemGeometry) -> SerifGeometry {
     let radius = 2.0 * unit / 3.0;
     let left_center_x = -square_half + radius;
@@ -193,6 +196,7 @@ fn serifs(square_half: f64, unit: f64, stem: StemGeometry) -> SerifGeometry {
     }
 }
 
+/// Constructs a serif circle tangent to `stem_edge` and the cap line `-cap`.
 fn cap_circle(
     center_x: f64,
     center_y: f64,
@@ -219,6 +223,7 @@ fn cap_circle(
     }
 }
 
+/// Constructs a serif circle tangent to `stem_edge` and `baseline`.
 fn baseline_circle(
     center_x: f64,
     center_y: f64,
@@ -245,6 +250,7 @@ fn baseline_circle(
     }
 }
 
+/// Constructs the eccentric outer and inner bowl circles and key tangencies.
 fn bowl(unit: f64) -> BowlGeometry {
     let outer = Circle {
         center: Point {
@@ -276,6 +282,7 @@ fn bowl(unit: f64) -> BowlGeometry {
     }
 }
 
+/// Constructs the curved outer and inner contours of the tapered R leg.
 fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     let diagonal_start = Point { x: 0.0, y: 0.0 };
     let outer_end = Point {
@@ -336,6 +343,7 @@ fn leg(square_half: f64, unit: f64, bowl: BowlGeometry) -> LegGeometry {
     }
 }
 
+/// Computes the circle tangent to the 3:4 inner leg line at `tangent` and passing through `tip`.
 fn tip_rounding_circle(tangent: Point, tip: Point) -> Circle {
     let normal = Point {
         x: 4.0 / 5.0,
@@ -357,6 +365,7 @@ fn tip_rounding_circle(tangent: Point, tip: Point) -> Circle {
     }
 }
 
+/// Computes the fillet circle tangent externally to `bowl` at `root` and internally to `outer`.
 fn outer_root_rounding(bowl: Circle, outer: Circle, root: Point) -> Circle {
     let normal = Point {
         x: (root.x - bowl.center.x) / bowl.radius,
@@ -380,6 +389,7 @@ fn outer_root_rounding(bowl: Circle, outer: Circle, root: Point) -> Circle {
     }
 }
 
+/// Computes the point of internal tangency between `outer` and `inner`.
 fn internal_tangent_point(outer: Circle, inner: Circle) -> Point {
     let centers = Point {
         x: inner.center.x - outer.center.x,

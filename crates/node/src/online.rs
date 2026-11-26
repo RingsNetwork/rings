@@ -101,6 +101,7 @@ pub struct OnlineNodeDescriptorBody {
 }
 
 impl OnlineNodeDescriptorBody {
+    /// Borrows this body's signable fields for canonical serialization.
     fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {
         OnlineNodeDescriptorBodyRef {
             did: self.did,
@@ -119,6 +120,7 @@ impl OnlineNodeDescriptorBody {
         }
     }
 
+    /// Serializes this body into the canonical byte payload covered by the descriptor signature.
     fn signing_data(&self) -> Result<Vec<u8>> {
         self.body_ref().signing_data()
     }
@@ -166,24 +168,39 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
     }
 }
 
+/// Borrowed projection of [`OnlineNodeDescriptorBody`] used for canonical signature serialization.
 #[derive(Serialize)]
 struct OnlineNodeDescriptorBodyRef<'a> {
+    /// DID of the node/account.
     did: Did,
+    /// Account public key corresponding to `did`.
     public_key: &'a VerificationPublicKey,
+    /// Delegation public key used for encrypted onion relay frames.
     delegatee_public_key: &'a PublicKey<33>,
+    /// Runtime family of this node.
     node_type: &'a OnlineNodeType,
+    /// Network identifier.
     network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
     storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
     dht_virtual_nodes: u16,
+    /// Typed capabilities of this node process.
     capabilities: OnlineNodeCapabilities,
+    /// Optional endpoint hint.
     endpoint_hint: &'a Option<String>,
+    /// Process start timestamp in milliseconds since Unix epoch.
     started_at_ms: u128,
+    /// Freshness window in milliseconds.
     fresh_for_ms: u64,
+    /// Lease expiry timestamp in milliseconds since Unix epoch.
     expires_at_ms: u128,
+    /// Node software version string.
     version: &'a str,
 }
 
 impl OnlineNodeDescriptorBodyRef<'_> {
+    /// Serializes the borrowed descriptor fields into canonical signing bytes.
     fn signing_data(&self) -> Result<Vec<u8>> {
         rings_codec::serialize(self).map_err(Error::CodecSerialize)
     }
@@ -240,6 +257,7 @@ impl OnlineNodeDescriptor {
         )
     }
 
+    /// Borrows this descriptor's signable fields for signature verification.
     fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {
         let Self {
             did,
@@ -276,6 +294,7 @@ impl OnlineNodeDescriptor {
         }
     }
 
+    /// Serializes this descriptor's signable fields into canonical signing bytes.
     fn signing_data(&self) -> Result<Vec<u8>> {
         self.body_ref().signing_data()
     }

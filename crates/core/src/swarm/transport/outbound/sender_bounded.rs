@@ -25,7 +25,10 @@ use crate::dht::Did;
 pub(crate) enum SenderBound {
     /// A liveness probe of the peer's connection `generation`: the probe clock admits one
     /// outstanding per peer generation, and the probe rides that generation's connection only.
-    Probe { generation: u64 },
+    Probe {
+        /// Connection generation this probe is pinned to.
+        generation: u64,
+    },
     /// A probe's answer to its next hop, the prober: one in flight per next hop.
     Answer,
 }
@@ -34,6 +37,7 @@ pub(crate) enum SenderBound {
 /// many such transfers are in flight, so quiescence probes see them.
 #[derive(Default)]
 pub(in crate::swarm::transport) struct SenderBounded {
+    /// Next-hop peers that currently have an in-flight probe answer.
     answers: Arc<Mutex<BTreeSet<Did>>>,
     #[cfg(test)]
     in_flight: Arc<std::sync::atomic::AtomicUsize>,

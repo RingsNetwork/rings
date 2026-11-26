@@ -1,4 +1,5 @@
 //! Message and MessageHandler
+/// Message serialization, compression, and decoding helpers.
 mod encoder;
 pub use encoder::Decoder;
 pub use encoder::Encoded;
@@ -17,6 +18,7 @@ pub(crate) use effects::yield_core_actor_step;
 #[cfg(all(test, feature = "wasm", target_family = "wasm"))]
 pub(crate) use effects::CORE_ACTOR_BROWSER_YIELD_INTERVAL;
 
+/// Signed message payload envelopes, transactions, and wire framing.
 mod payload;
 pub(crate) use payload::may_start_compressed_payload;
 pub(crate) use payload::DelegationRef;
@@ -119,6 +121,7 @@ pub use crate::swarm::storage_api::ChordStorageInterface;
 pub use crate::swarm::storage_api::ChordStorageInterfaceCacheChecker;
 pub use crate::swarm::storage_api::ScopedStorage;
 
+/// Relay paths, hop budgets, and signature verification protocols.
 mod protocols;
 pub(crate) use protocols::verify_message_under;
 pub use protocols::DomainTag;

@@ -40,12 +40,17 @@ type SymbolKey = (OnionInvokeShape, OnionBackendName);
 /// Shared quota gate for all `(shape, backend)` registrations on one node (#834 D2).
 #[derive(Clone, Default)]
 pub(crate) struct OnionInvokeAccounting {
+    /// Per-`(shape, backend)` concurrency and rate-limit buckets.
     buckets: Arc<Mutex<BTreeMap<SymbolKey, Arc<Mutex<InvokeBucket>>>>>,
 }
 
+/// Concurrency and sliding-minute rate-limit state for one `(shape, backend)` bucket.
 struct InvokeBucket {
+    /// Active concurrency slots tracked globally and per previous hop.
     concurrency: PeerQuota,
+    /// Start timestamp in milliseconds of the current one-minute rate window.
     window_start_ms: u128,
+    /// Number of invocations admitted during the current rate window.
     invocations_this_window: u64,
 }
 
@@ -63,6 +68,7 @@ impl Default for InvokeBucket {
 }
 
 impl InvokeBucket {
+    /// Reset the per-minute invocation counter when `now_ms` enters a new window.
     fn refresh_window(&mut self, now_ms: u128) {
         if now_ms.saturating_sub(self.window_start_ms) >= INVOKE_LIMIT_WINDOW_MS {
             self.window_start_ms = now_ms;
@@ -74,7 +80,9 @@ impl InvokeBucket {
 /// RAII lease held for the lifetime of one admitted `invoke` evaluation (including its `L(f)`
 /// release wait); dropping it frees its concurrency slot.
 pub(crate) struct OnionInvokeLease {
+    /// Quota bucket owning the reserved concurrency slot.
     bucket: Arc<Mutex<InvokeBucket>>,
+    /// Previous-hop peer DID against which the slot was reserved.
     previous_hop: Did,
 }
 
@@ -140,6 +148,7 @@ impl OnionInvokeAccounting {
     }
 }
 
+/// Clamp `requested` concurrency to `hard_limit`, treating `0` as the hard limit.
 const fn effective_limit(requested: u32, hard_limit: u32) -> u32 {
     if requested == 0 || requested > hard_limit {
         hard_limit

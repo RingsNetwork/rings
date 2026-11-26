@@ -19,16 +19,23 @@ use crate::utils::ManualClock;
 use crate::utils::SharedClock;
 use crate::utils::SharedRng;
 
+/// Version-4 nibble bits for generated UUIDs.
 const UUID_VERSION_4: u8 = 0x40;
+/// RFC 4122 variant bits for generated UUIDs.
 const UUID_RFC4122_VARIANT: u8 = 0x80;
 
+/// Thread-local deterministic clock and RNG state active under a [`DummySimulationGuard`].
 struct DummySimulationState {
+    /// Manual clock driving overridden epoch timestamps.
     clock: ManualClock,
+    /// Shared seeded RNG exposed to protocol components.
     rng: SharedRng,
+    /// Separate seeded RNG used for ambient entropy and UUID overrides.
     ambient_rng: StdRng,
 }
 
 impl DummySimulationState {
+    /// Create a fresh simulation state seeded from `seed` starting at `initial_epoch_ms`.
     fn new(seed: u64, initial_epoch_ms: u128) -> Self {
         let mixed = rings_transport::connections::dummy_controlled::mix_seed(seed);
         Self {
@@ -60,8 +67,11 @@ pub enum DummySimulationError {
 /// and UUID generation on the current thread while also exposing explicit [`SharedClock`] and
 /// [`SharedRng`] handles that can be injected into builders and protocol drivers.
 pub struct DummySimulationGuard {
+    /// Manual clock installed for this guard's lifetime.
     clock: ManualClock,
+    /// Seeded shared RNG installed for this guard's lifetime.
     rng: SharedRng,
+    /// Marker preventing the guard from being sent across threads (`!Send`, `!Sync`).
     _current_thread: PhantomData<Rc<()>>,
 }
 
@@ -141,6 +151,7 @@ pub fn epoch_ms_override() -> Option<u128> {
     STATE.with(|slot| slot.borrow().as_ref().map(|state| state.clock.now_ms()))
 }
 
+/// Fill `dest` from the active thread-local ambient RNG, returning `false` if no guard is active.
 pub(crate) fn try_fill_entropy_bytes(dest: &mut [u8]) -> bool {
     STATE.with(|slot| {
         let mut borrow = slot.borrow_mut();
@@ -152,6 +163,7 @@ pub(crate) fn try_fill_entropy_bytes(dest: &mut [u8]) -> bool {
     })
 }
 
+/// Generate a deterministic v4 UUID from the active simulation seam, if one is installed.
 pub(crate) fn next_uuid_override() -> Option<uuid::Uuid> {
     let mut bytes = [0_u8; 16];
     if !try_fill_entropy_bytes(&mut bytes) {

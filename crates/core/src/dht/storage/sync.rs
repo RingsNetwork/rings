@@ -32,15 +32,18 @@ pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_CHANNEL_MESSAGE_SIZE / 4;
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
     MAX_PAYLOAD_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
 
+/// Return the serialized wire size of `value` in bytes.
 fn serialized_wire_size<T: Serialize>(value: &T) -> Result<usize> {
     let bytes = rings_codec::serialized_size(value).map_err(Error::CodecSerialize)?;
     usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)
 }
 
+/// Checked addition of two wire byte sizes, returning [`Error::MessageSizeOverflow`] on overflow.
 fn add_wire_cost(total: usize, next: usize) -> Result<usize> {
     total.checked_add(next).ok_or(Error::MessageSizeOverflow)
 }
 
+/// Return the fixed envelope and empty-message wire byte overhead of a `SyncEntriesWithSuccessor` batch.
 fn sync_entries_fixed_wire_cost() -> Result<usize> {
     let empty_message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::OwnershipHandoff,
@@ -53,6 +56,7 @@ fn sync_entries_fixed_wire_cost() -> Result<usize> {
     )
 }
 
+/// Return the serialized wire byte cost of one [`PlacedEntry`].
 fn placed_entry_wire_cost(placed: &PlacedEntry) -> Result<usize> {
     serialized_wire_size(placed)
 }
@@ -66,6 +70,7 @@ pub(super) fn sync_entries_batch_wire_cost(data: &[PlacedEntry]) -> Result<usize
     Ok(cost)
 }
 
+/// Partition `data` into ordered batches whose serialized wire cost fits within `max_batch_bytes`.
 pub(super) fn sync_entries_batches(
     data: Vec<PlacedEntry>,
     max_batch_bytes: usize,
@@ -254,6 +259,7 @@ impl PeerRing {
         .await
     }
 
+    /// Emit ownership-handoff sync actions for relay carriers no longer held by this node under `segment`.
     fn hand_off_relay_carriers_with_segment(
         &self,
         items: Vec<(StorageKey, Entry)>,
@@ -295,6 +301,7 @@ impl PeerRing {
         Did::cmp_from_observer(self.did, key, head) == std::cmp::Ordering::Greater
     }
 
+    /// Emit additive anti-entropy repair copies for entries whose observed virtual-node owner is remote.
     fn copy_entries_to_observed_virtual_storage_owners(
         &self,
         all_items: Vec<(StorageKey, Entry)>,

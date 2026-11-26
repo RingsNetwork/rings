@@ -246,6 +246,7 @@ impl OnionUdpBindConfig {
     }
 }
 
+/// Extract an IP address literal from a raw IP, socket address, or URL endpoint hint.
 fn parse_ip_from_endpoint_hint(raw: &str) -> Option<IpAddr> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -267,31 +268,39 @@ fn parse_ip_from_endpoint_hint(raw: &str) -> Option<IpAddr> {
 /// amplifier while leaving headroom for bidirectional real-time media bursts.
 pub const MAX_OUTBOUND_DATAGRAMS_PER_SEC: u32 = 2_048;
 
+/// Maximum time allowed for binding a UDP exit socket during session open.
 #[cfg(rings_native)]
 const UDP_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timing quantum in milliseconds to which UDP open responses are rounded.
 #[cfg(rings_native)]
 const UDP_OPEN_RESPONSE_QUANTUM_MS: u128 = 250;
 
+/// Maximum ephemeral bind attempts when searching for an even UDP port.
 #[cfg(rings_native)]
 const MAX_EVEN_PORT_EPHEMERAL_TRIES: usize = 64;
 
+/// Receive buffer size in bytes for inbound OS UDP datagrams.
 #[cfg(rings_native)]
 const MAX_UDP_RECV_DATAGRAM_BYTES: usize = MAX_ONION_UDP_PAYLOAD_BYTES;
 
+/// Maximum buffered reassembly bytes permitted on the exit write half.
 #[cfg(rings_native)]
 const MAX_WRITER_REASSEMBLY_BYTES: usize =
     (MAX_ONION_UDP_FRAME_BYTES + ONION_UDP_FRAME_LEN_BYTES) * 4;
 
+/// Maximum buffered reassembly bytes permitted on the client read half.
 #[cfg(rings_native)]
 const MAX_READER_REASSEMBLY_BYTES: usize =
     (MAX_ONION_UDP_FRAME_BYTES + ONION_UDP_FRAME_LEN_BYTES) * 4;
 
+/// Wrap `reason` in [`Error::OnionRouteError`] with [`OnionRouteError::UdpTarget`].
 #[cfg(rings_native)]
 fn udp_target(reason: String) -> Error {
     Error::OnionRouteError(OnionRouteError::UdpTarget(reason))
 }
 
+/// Compute the next quantized release deadline after `opened_at` for an open response at `now`.
 #[cfg(rings_native)]
 fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
     let elapsed_ms = now.saturating_duration_since(opened_at).as_millis();
@@ -303,12 +312,14 @@ fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
         .unwrap_or(now)
 }
 
+/// Convert a peer `SocketAddr` into an [`OnionProxyTarget`] for exit-policy matching.
 #[cfg(rings_native)]
 fn socket_addr_target(addr: SocketAddr) -> Option<OnionProxyTarget> {
     let host = addr.ip().to_string();
     OnionProxyTarget::new(&host, addr.port()).ok()
 }
 
+/// Bind a local OS [`UdpSocket`] honoring `mode`'s address family, even-port constraint, and `config`.
 #[cfg(rings_native)]
 async fn bind_udp_socket(mode: OnionUdpBindMode, config: &OnionUdpBindConfig) -> Result<UdpSocket> {
     let bind_ip: IpAddr = if mode.is_ipv6() {
@@ -365,9 +376,13 @@ async fn bind_udp_socket(mode: OnionUdpBindMode, config: &OnionUdpBindConfig) ->
 /// Native OS socket world of an `onion::udp` exit.
 #[cfg(rings_native)]
 pub(crate) struct OnionUdpWorld {
+    /// Exit policy enforced on bind modes and per-datagram peer addresses.
     policy: OnionExitPolicy,
+    /// Byte accounting shared across exit sessions.
     accounting: OnionExitAccounting,
+    /// Bind address, port range, and advertised IP configuration.
     config: OnionUdpBindConfig,
+    /// Injected clock for pinhole expiry and outbound rate limiting.
     clock: SharedClock,
 }
 
@@ -388,6 +403,7 @@ impl OnionUdpWorld {
         }
     }
 
+    /// Bind an OS UDP socket for `target`'s bind mode and construct the paired reader and writer halves.
     async fn bind_session(
         &self,
         target: &OnionProxyTarget,
@@ -436,15 +452,19 @@ impl OnionUdpWorld {
     }
 }
 
+/// Per-second outbound datagram counter enforcing [`MAX_OUTBOUND_DATAGRAMS_PER_SEC`].
 #[cfg(rings_native)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OutboundDatagramWindow {
+    /// Active 1-second clock bucket (`now_ms / 1_000`).
     second: u128,
+    /// Number of outbound datagrams admitted during `second`.
     count: u32,
 }
 
 #[cfg(rings_native)]
 impl OutboundDatagramWindow {
+    /// Admit one outbound datagram at `now_ms`, returning `false` if the per-second cap is reached.
     fn try_admit(&mut self, now_ms: u128) -> bool {
         let sec = now_ms / 1_000;
         if self.second != sec {
@@ -463,14 +483,23 @@ impl OutboundDatagramWindow {
 /// pinhole-admitted [`OnionUdpServerFrame::RecvDatagram`] frames.
 #[cfg(rings_native)]
 pub(crate) struct OnionUdpReader {
+    /// Shared bound OS UDP socket.
     socket: Arc<UdpSocket>,
+    /// Externally advertised local socket address.
     local_addr: SocketAddr,
+    /// Exit policy enforced on inbound peer addresses.
     policy: OnionExitPolicy,
+    /// Shared exit byte accounting.
     accounting: OnionExitAccounting,
+    /// Bind and peer-IP admission configuration.
     config: OnionUdpBindConfig,
+    /// Injected clock for pinhole expiry checks.
     clock: SharedClock,
+    /// Shared inbound peer-IP pinhole table.
     pinholes: Arc<SyncMutex<OnionUdpPinholeTable>>,
+    /// Encoded frame bytes waiting to be drained by `read`.
     pending: Bytes,
+    /// Scratch buffer for receiving OS UDP datagrams.
     recv_buf: Vec<u8>,
 }
 
@@ -478,13 +507,21 @@ pub(crate) struct OnionUdpReader {
 /// pinholes and sending [`OnionUdpClientFrame::SendDatagram`] payloads.
 #[cfg(rings_native)]
 pub(crate) struct OnionUdpWriter {
+    /// Shared bound OS UDP socket.
     socket: Arc<UdpSocket>,
+    /// Externally advertised local socket address.
     local_addr: SocketAddr,
+    /// Exit policy enforced on outbound peer addresses.
     policy: OnionExitPolicy,
+    /// Bind and peer-IP admission configuration.
     config: OnionUdpBindConfig,
+    /// Injected clock for pinhole expiry and rate limiting.
     clock: SharedClock,
+    /// Shared inbound peer-IP pinhole table.
     pinholes: Arc<SyncMutex<OnionUdpPinholeTable>>,
+    /// Reassembly buffer for length-prefixed client frames.
     buffer: BytesMut,
+    /// Per-second outbound datagram rate limiter.
     rate_window: OutboundDatagramWindow,
 }
 
@@ -620,9 +657,12 @@ impl OnionWorldWriter for OnionUdpWriter {
     }
 }
 
+/// Owned receive half and frame reassembly buffer for a [`NativeOnionUdpSession`].
 #[cfg(rings_native)]
 struct UdpSessionReaderState {
+    /// Underlying onion stream receiver.
     receiver: OnionStreamReceiver,
+    /// Reassembly buffer for length-prefixed server frames.
     buffer: BytesMut,
 }
 
@@ -634,13 +674,17 @@ struct UdpSessionReaderState {
 /// framing error) call [`Self::retire`] so dead stream halves are dropped immediately.
 #[cfg(rings_native)]
 struct SlotLease<'a, T> {
+    /// Backing mutex-guarded slot to restore `value` into on drop.
     slot: &'a SyncMutex<Option<T>>,
+    /// Session closure flag checked before restoring `value`.
     closed: &'a AtomicBool,
+    /// Leased value, or `None` once retired or restored.
     value: Option<T>,
 }
 
 #[cfg(rings_native)]
 impl<'a, T> SlotLease<'a, T> {
+    /// Take the value out of `slot` unless `closed` is set or the slot is already empty.
     fn acquire(slot: &'a SyncMutex<Option<T>>, closed: &'a AtomicBool) -> Result<Option<Self>> {
         if closed.load(Ordering::SeqCst) {
             if let Ok(mut guard) = lock(slot) {
@@ -658,6 +702,7 @@ impl<'a, T> SlotLease<'a, T> {
         }))
     }
 
+    /// Drop the leased value permanently without restoring it to `slot`.
     fn retire(&mut self) {
         let _ = self.value.take();
     }
@@ -686,12 +731,19 @@ impl<T> Drop for SlotLease<'_, T> {
 /// Client handle to an opened `onion::udp` datagram session whose exit has bound an OS UDP socket.
 #[cfg(rings_native)]
 pub struct NativeOnionUdpSession {
+    /// Externally reachable socket address reported by the exit's `Bound` frame.
     local_addr: SocketAddr,
+    /// Whether this session has been closed locally.
     closed: AtomicBool,
+    /// Notifier woken on [`Self::close`] to interrupt parked readers and writers.
     closed_notify: Notify,
+    /// Async mutex serializing outbound frame sends.
     send_gate: AsyncMutex<()>,
+    /// Slot holding the stream sender when idle.
     sender_slot: SyncMutex<Option<OnionStreamSender>>,
+    /// Async mutex serializing inbound frame receives.
     recv_gate: AsyncMutex<()>,
+    /// Slot holding the stream receiver and reassembly buffer when idle.
     receiver_slot: SyncMutex<Option<UdpSessionReaderState>>,
 }
 
@@ -837,6 +889,7 @@ impl NativeOnionUdpSession {
         self.closed_notify.notify_waiters();
     }
 
+    /// Send one length-prefixed client frame over the onion stream, aborting if the session closes.
     async fn send_framed(&self, framed: Bytes) -> Result<()> {
         let _guard = self.send_gate.lock().await;
         let Some(mut lease) = SlotLease::acquire(&self.sender_slot, &self.closed)? else {
@@ -866,12 +919,14 @@ impl NativeOnionUdpSession {
         Ok(())
     }
 
+    /// Take and drop the idle stream sender if currently present in `sender_slot`.
     fn drop_sender_slot(&self) {
         if let Ok(mut slot) = lock(&self.sender_slot) {
             let _ = slot.take();
         }
     }
 
+    /// Take and drop the idle stream receiver state if currently present in `receiver_slot`.
     fn drop_receiver_slot(&self) {
         if let Ok(mut slot) = lock(&self.receiver_slot) {
             let _ = slot.take();

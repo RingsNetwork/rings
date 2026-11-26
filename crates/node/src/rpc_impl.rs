@@ -30,7 +30,9 @@ use crate::remote_endpoint::RemoteRpcEndpoint;
 use crate::seed::validate_seed_peers;
 use crate::seed::Seed;
 
+/// Default page size when `listPeerMeasurements` omits `limit`.
 const DEFAULT_PEER_MEASUREMENT_PAGE_SIZE: u32 = 100;
+/// Maximum page size accepted by `listPeerMeasurements`.
 const MAX_PEER_MEASUREMENT_PAGE_SIZE: u32 = 1_000;
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
@@ -362,6 +364,7 @@ impl HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse> for Pr
     }
 }
 
+/// Validates and decodes the cursor and bounded page size of a `listPeerMeasurements` request.
 fn peer_measurement_page_request(
     request: &ListPeerMeasurementsRequest,
 ) -> Result<(Option<Did>, NonZeroUsize)> {
@@ -396,6 +399,7 @@ fn s2d(s: &str) -> Result<Did> {
     Did::from_str(s).map_err(|_| Error::invalid_params(format!("Invalid Did: {s}")))
 }
 
+/// Parses a base58-multibase or hex-encoded compressed secp256k1 public key, or returns `InvalidParams`.
 fn s2pk(s: &str) -> Result<PublicKey<33>> {
     PublicKey::try_from_b58m(s)
         .or_else(|_| PublicKey::from_hex_string(s))

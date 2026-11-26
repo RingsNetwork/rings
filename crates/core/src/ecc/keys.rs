@@ -33,6 +33,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::SystemEntropy;
 
+/// Build the domain-separated transcript `algorithm || 0x00 || raw_bytes` for non-recoverable keys.
 fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
     let mut out = algorithm.as_bytes().to_vec();
     out.push(0);
@@ -40,6 +41,7 @@ fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Derive a 20-byte [`PublicKeyAddress`] from a domain-separated public key transcript.
 pub(crate) fn domain_separated_address(algorithm: &str, raw_bytes: &[u8]) -> PublicKeyAddress {
     PublicKeyAddress::from_slice(&keccak256(&public_key_transcript(algorithm, raw_bytes))[12..])
 }
@@ -261,6 +263,7 @@ impl VerificationPublicKey {
         public_key_transcript(self.algorithm().as_str(), self.raw_bytes())
     }
 
+    /// Derive the domain-separated 20-byte address for this verification key.
     fn domain_separated_address(&self) -> PublicKeyAddress {
         domain_separated_address(self.algorithm().as_str(), self.raw_bytes())
     }
@@ -505,6 +508,7 @@ impl SigningSecretKey {
     }
 }
 
+/// Derive the compressed 33-byte secp256r1 public key corresponding to `secret_key`.
 fn secp256r1_public_key(secret_key: &SecretKey) -> Result<PublicKey<33>> {
     let sk_bytes: elliptic_curve::FieldBytes<p256::NistP256> = secret_key.into();
     let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
@@ -516,6 +520,7 @@ fn secp256r1_public_key(secret_key: &SecretKey) -> Result<PublicKey<33>> {
     PublicKey::from_u8(uncompressed)
 }
 
+/// Decode a Base58Check-encoded public key requiring an exact `SIZE`-byte payload.
 fn public_key_from_b58m_exact<const SIZE: usize>(value: &str) -> Result<PublicKey<SIZE>> {
     let bytes = crate::base58_check::decode(value).map_err(|_| Error::PublicKeyBadFormat)?;
     PublicKey::from_exact_u8(&bytes)

@@ -7,32 +7,51 @@ use crate::error::Result;
 use crate::types::GatewayRequest;
 use crate::types::GatewayRequestKind;
 
+/// Maximum raw byte length accepted for one `Set-Cookie` header value.
 const MAX_COOKIE_BYTES: usize = 4_096;
+/// Maximum total number of cookies retained across all partitions.
 const MAX_COOKIES: usize = 4_096;
+/// Maximum number of cookies retained within a single top-level site partition.
 const MAX_COOKIES_PER_PARTITION: usize = 180;
 
+/// One cookie stored in the virtual partitioned cookie jar.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredCookie {
+    /// Schemeful top-level site partition owning this cookie.
     partition: CookiePartitionKey,
+    /// Cookie name.
     name: String,
+    /// Cookie value.
     value: String,
+    /// Normalized lowercase domain attribute or host name.
     domain: String,
+    /// Whether the cookie applies only to the exact origin host.
     host_only: bool,
+    /// Normalized cookie path prefix.
     path: String,
+    /// Whether the cookie requires an HTTPS transport.
     secure: bool,
+    /// Optional Unix-epoch expiration timestamp in milliseconds.
     expires_at: Option<i64>,
+    /// Effective `SameSite` policy for cross-site requests.
     same_site: SameSite,
 }
 
+/// Unique identity of a stored cookie within its partition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CookieKey {
+    /// Schemeful top-level site partition.
     partition: CookiePartitionKey,
+    /// Cookie name.
     name: String,
+    /// Normalized domain scope.
     domain: String,
+    /// Normalized path scope.
     path: String,
 }
 
 impl StoredCookie {
+    /// Build the lookup key identifying this cookie in the jar.
     fn key(&self) -> CookieKey {
         CookieKey {
             partition: self.partition.clone(),
@@ -44,6 +63,7 @@ impl StoredCookie {
 }
 
 impl CookieKey {
+    /// Return whether `cookie` has the same partition, name, domain, and path as this key.
     fn matches(&self, cookie: &StoredCookie) -> bool {
         self.partition == cookie.partition
             && self.name == cookie.name
@@ -56,32 +76,48 @@ impl CookieKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CookiePartitionKey(String);
 
+/// Parsed `SameSite` attribute governing cross-site cookie attachment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SameSite {
+    /// Send only on same-site requests.
     Strict,
+    /// Send on same-site requests and safe top-level navigations.
     Lax,
+    /// Send on both same-site and cross-site HTTPS requests.
     None,
 }
 
+/// Result of parsing and validating one `Set-Cookie` header.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SetCookieOutcome {
+    /// Discard the header without modifying stored state.
     Ignore,
+    /// Delete any existing cookie matching the key.
     Remove(CookieKey),
+    /// Insert or replace the stored cookie.
     Upsert(StoredCookie),
 }
 
+/// Request attributes consulted when selecting cookies for an outgoing `Cookie` header.
 struct CookieRequestContext<'a> {
+    /// Target URL receiving the request.
     target: &'a Url,
+    /// Top-level site partition for the request.
     partition: CookiePartitionKey,
+    /// Trusted initiating page URL, if any.
     source: Option<&'a Url>,
+    /// HTTP request method.
     method: &'a str,
+    /// Whether the request is a top-level document navigation.
     top_level_navigation: bool,
+    /// Browser request class.
     kind: GatewayRequestKind,
 }
 
 /// Virtual cookie jar double-keyed by top-level site and target origin/domain/path.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CookieJar {
+    /// Cookies currently held in insertion order for bounded eviction.
     cookies: Vec<StoredCookie>,
 }
 
@@ -111,6 +147,7 @@ impl CookieJar {
         self.store_set_cookie_in_partition_at(partition, &request.target, set_cookie, now)
     }
 
+    /// Apply one `Set-Cookie` header within `partition` at timestamp `now`.
     fn store_set_cookie_in_partition_at(
         &mut self,
         partition: CookiePartitionKey,
@@ -163,6 +200,7 @@ impl CookieJar {
         Ok(())
     }
 
+    /// Return whether an existing `Secure` cookie blocks an insecure origin from modifying `name`.
     fn has_conflicting_secure_cookie(
         &self,
         partition: &CookiePartitionKey,
@@ -178,6 +216,7 @@ impl CookieJar {
         })
     }
 
+    /// Remove any stored cookie matching `key`.
     fn remove_cookie(&mut self, key: &CookieKey) {
         self.cookies.retain(|cookie| !key.matches(cookie));
     }
@@ -218,6 +257,7 @@ impl CookieJar {
         )
     }
 
+    /// Assemble the `Cookie` header value for all unexpired cookies matching `context`.
     fn cookie_header_matching(
         &self,
         context: CookieRequestContext<'_>,
@@ -267,6 +307,7 @@ impl CookieJar {
     }
 }
 
+/// Parse and validate one `Set-Cookie` header into a jar mutation decision.
 fn evaluate_set_cookie(
     partition: CookiePartitionKey,
     origin: &Url,
@@ -404,6 +445,7 @@ fn accepted_cookie_domain(origin: &Url, value: &str) -> Option<String> {
     Some(domain)
 }
 
+/// Return whether `host` equals `domain` or is a dot-delimited subdomain of `domain`.
 fn host_domain_matches(host: &str, domain: &str) -> bool {
     host == domain
         || host
@@ -434,6 +476,7 @@ impl CookieJar {
     }
 }
 
+/// Return whether `cookie` applies to `host` under host-only or domain-matching rules.
 fn domain_matches(cookie: &StoredCookie, host: &str) -> bool {
     if cookie.host_only {
         return cookie.domain == host;
@@ -441,12 +484,14 @@ fn domain_matches(cookie: &StoredCookie, host: &str) -> bool {
     host == cookie.domain || host.ends_with(format!(".{}", cookie.domain).as_str())
 }
 
+/// Return whether `cookie` has expired at or before timestamp `now`.
 fn cookie_expired(cookie: &StoredCookie, now: i64) -> bool {
     cookie
         .expires_at
         .is_some_and(|expires_at| expires_at <= now)
 }
 
+/// Return whether `cookie`'s `SameSite` policy allows sending it for the given request context.
 fn same_site_allows_cookie(
     cookie: &StoredCookie,
     source: Option<&Url>,
@@ -471,6 +516,7 @@ fn same_site_allows_cookie(
         && is_safe_navigation_method(method)
 }
 
+/// Return whether `source` and `target` share the same scheme and registrable site.
 fn same_site(source: &Url, target: &Url) -> bool {
     source.scheme() == target.scheme()
         && site_for_same_site(source)
@@ -478,6 +524,7 @@ fn same_site(source: &Url, target: &Url) -> bool {
             .is_some_and(|(source, target)| source.eq_ignore_ascii_case(target.as_str()))
 }
 
+/// Extract the registrable domain or IP literal used for schemeful same-site checks.
 fn site_for_same_site(url: &Url) -> Option<String> {
     match url.host()? {
         Host::Domain(host) => domain_site_for_same_site(host),
@@ -486,6 +533,7 @@ fn site_for_same_site(url: &Url) -> Option<String> {
     }
 }
 
+/// Derive the top-level site partition key for `request`.
 fn cookie_partition_for_request(request: &GatewayRequest) -> Result<CookiePartitionKey> {
     let top_level =
         if request.kind == GatewayRequestKind::Navigation && request.top_level_navigation {
@@ -496,11 +544,13 @@ fn cookie_partition_for_request(request: &GatewayRequest) -> Result<CookiePartit
     cookie_partition_for_url(top_level)
 }
 
+/// Derive the schemeful site partition key for `url`.
 fn cookie_partition_for_url(url: &Url) -> Result<CookiePartitionKey> {
     let site = site_for_same_site(url).ok_or(CookieFailure::MissingOriginHost)?;
     Ok(CookiePartitionKey(format!("{}://{site}", url.scheme())))
 }
 
+/// Normalize a domain host to its lowercase registrable site name.
 fn domain_site_for_same_site(host: &str) -> Option<String> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
@@ -514,14 +564,17 @@ fn domain_site_for_same_site(host: &str) -> Option<String> {
     )
 }
 
+/// Return whether `method` is a safe navigation method permitted for `SameSite=Lax` cookies.
 fn is_safe_navigation_method(method: &str) -> bool {
     matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
 }
 
+/// Convert a `Max-Age` duration in seconds into saturating milliseconds.
 fn max_age_millis(seconds: i64) -> i64 {
     seconds.saturating_mul(1_000)
 }
 
+/// RFC 9110 HTTP-date format strings accepted for cookie `Expires` attributes.
 const HTTP_DATE_FORMATS: [&str; 3] = [
     "%a, %d %b %Y %H:%M:%S GMT",
     "%A, %d-%b-%y %H:%M:%S GMT",
@@ -539,6 +592,7 @@ fn parse_http_date_millis(value: &str) -> Option<i64> {
         .map(|date| date.and_utc().timestamp_millis())
 }
 
+/// Return whether `request_path` matches `cookie_path` per RFC 6265 path-matching rules.
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
     if request_path == cookie_path {
         return true;
@@ -549,6 +603,7 @@ fn path_matches(cookie_path: &str, request_path: &str) -> bool {
     cookie_path.ends_with('/') || rest.starts_with('/')
 }
 
+/// Compute the RFC 6265 default cookie path from a request URL path.
 fn default_cookie_path(path: &str) -> String {
     if !path.starts_with('/') {
         return "/".to_string();

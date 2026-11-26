@@ -21,10 +21,13 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
+/// Transport callback implementation and connection lifecycle handlers.
 mod inner;
 mod link_stage;
+/// Connection-independent logical inbound dispatch and replay admission.
 mod logical;
 mod pre_admission;
+/// Per-connection inbound frame verification, gating, and reassembly coordination.
 mod processor;
 
 pub(crate) use inbound::InboundCapacity;
@@ -70,6 +73,7 @@ use pre_admission::PreAdmissionHold;
 /// needs nothing of the connection stage (reassembly, the connection's gates); its transaction
 /// is admitted by the delivery itself.
 pub(crate) struct LocalDelivery {
+    /// Logical inbound pipeline used to dispatch locally drained payloads.
     pipeline: LogicalInbound,
 }
 
@@ -125,7 +129,9 @@ pub(crate) fn max_on_message_recursion_depth_for_test() -> usize {
 /// [`LocalDelivery`] runs it alone.
 #[derive(Clone)]
 pub(super) struct LogicalInbound {
+    /// Backing swarm transport for routing, admission, and observation.
     transport: Arc<SwarmTransport>,
+    /// Protocol message handler dispatching decoded messages.
     message_handler: MessageHandler,
 }
 
@@ -163,11 +169,14 @@ pub(crate) struct WeakLogical(Weak<SwarmTransport>);
 /// per-connection state, so binding changes only how the logical stage is reached.
 #[derive(Clone)]
 pub(super) struct InboundProcessor<L = LogicalInbound> {
+    /// Logical stage handle (either weak or bound for one event).
     logical: L,
     /// The connection's reassembler, whose open messages hold the mailbox charges their first
     /// chunks took (#932).
     reassembler: Arc<FuturesMutex<MessageReassembler<Option<inbound::HeldCharge>>>>,
+    /// Clock used for chunk reassembly freshness and expiration sweeps.
     reassembly_clock: ReassemblyClock,
+    /// Pending connection attempt bound to this callback, if any.
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
     /// Verified frames that arrived before this end admitted the connection; bounded by the
     /// per-peer inbound capacity (32 frames). A held frame keeps its transport credit, so this
@@ -189,8 +198,11 @@ pub(super) struct InboundProcessor<L = LogicalInbound> {
 /// raw bytes, the uncompressed frame length for memory accounting, and the transport capacity
 /// they occupy until the inbound actor releases it.
 pub(super) struct InboundFrameLease {
+    /// Raw wire bytes delivered by the transport.
     bytes: Bytes,
+    /// Uncompressed wire byte length used for inbound memory accounting.
     uncompressed_bytes: usize,
+    /// Transport credit lease returned when the frame finishes processing.
     transport_credit: Option<InboundCreditLease>,
     /// The transport lane the frame arrived on, whose credit it took.
     carrier: Option<ChannelLane>,
@@ -204,8 +216,11 @@ pub(super) struct InboundFrameLease {
 /// The peer's authentication is not kept: it is judged as of delivery, when the handshake it
 /// was waiting for has been admitted.
 struct HeldInboundFrame {
+    /// Authenticated peer DID that sent the frame.
     peer: Did,
+    /// Pre-verified and decoded frame payload and classification.
     prepared: PreparedInboundFrame,
+    /// Raw frame bytes and transport credit lease kept while held.
     lease: InboundFrameLease,
 }
 
@@ -246,16 +261,23 @@ enum InboundGate {
 /// reaches its transport weakly (`L = WeakLogical`, the default; the release law of
 /// [`WeakLogical`]) and acts on each event as the [`BoundCallback`] for that event.
 pub(crate) struct SwarmTransportCallback<L = WeakLogical> {
+    /// Per-connection inbound processor holding reassembly and admission state.
     processor: InboundProcessor<L>,
+    /// Mailbox handle for submitting verified frames to the inbound actor.
     inbound: InboundMailbox,
 }
 
 /// The callback of one connection bound to its transport for the span of one event.
 type BoundCallback = SwarmTransportCallback<LogicalInbound>;
 
+/// Verified and classified inbound frame ready to be queued or held.
 pub(super) struct PreparedInboundFrame {
+    /// Verified message payload envelope.
     payload: MessagePayload,
+    /// Decoded inner protocol message.
     message: Message,
+    /// Discriminant classifying `message`.
     kind: MessageKind,
+    /// Inbound scheduling lane assigned to this frame.
     lane: InboundLane,
 }

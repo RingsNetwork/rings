@@ -8,6 +8,7 @@
 //! awaits is triggered by an event, never by a duration.
 
 pub(crate) mod epoch;
+/// Cooperative shutdown source and token primitives.
 mod stop;
 
 pub use stop::StopSource;

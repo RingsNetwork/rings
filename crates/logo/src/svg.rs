@@ -10,10 +10,12 @@ use crate::model::GearModel;
 use crate::model::InnerLobe;
 use crate::model::Point;
 
+/// Renders the logo SVG with a fixed single-theme palette.
 pub(crate) fn render_fixed(model: &GearModel, palette: &Palette, ground: &str) -> String {
     render_svg(model, fixed_style(palette), ground)
 }
 
+/// Renders the logo SVG with CSS media queries adapting between light and dark palettes.
 pub(crate) fn render_adaptive(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let style = format!(
         ".gear-fill{{fill:{}}}.primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
@@ -36,6 +38,7 @@ pub(crate) fn render_adaptive(model: &GearModel, light: &Palette, dark: &Palette
     render_svg(model, style, "adaptive background")
 }
 
+/// Renders the Open Graph social preview card SVG embedding the mark.
 pub(crate) fn render_social_card(model: &GearModel, palette: &Palette) -> String {
     let logo = embedded_logo(model, palette);
     format!(
@@ -82,6 +85,7 @@ pub(crate) fn render_social_card(model: &GearModel, palette: &Palette) -> String
     )
 }
 
+/// Renders the nested `<svg>` emblem placed inside the social card.
 fn embedded_logo(model: &GearModel, palette: &Palette) -> String {
     let radius = viewbox_radius(model);
     let size = 2.0 * radius;
@@ -98,6 +102,7 @@ fn embedded_logo(model: &GearModel, palette: &Palette) -> String {
     )
 }
 
+/// Formats inline CSS rules for a single fixed palette.
 fn fixed_style(palette: &Palette) -> String {
     format!(
         ".gear-fill{{fill:{}}}.primary{{stroke:{}}}.accent{{stroke:{}}}.accent-fill{{fill:{}}}\
@@ -111,6 +116,7 @@ fn fixed_style(palette: &Palette) -> String {
     )
 }
 
+/// Renders a standalone 1024x1024 SVG document with the supplied CSS style block.
 fn render_svg(model: &GearModel, style: String, ground: &str) -> String {
     let tooth = tooth_path(model);
     let geometry = geometry_fragment(model);
@@ -130,6 +136,7 @@ fn render_svg(model: &GearModel, style: String, ground: &str) -> String {
     )
 }
 
+/// Renders all layered SVG geometry groups for the mark.
 fn geometry_fragment(model: &GearModel) -> String {
     let mut output = String::new();
     append_gear_fill(&mut output, model);
@@ -139,6 +146,7 @@ fn geometry_fragment(model: &GearModel) -> String {
     output
 }
 
+/// Appends the dashed geometric construction guide lines, circles, and polygon.
 fn append_construction_guides(output: &mut String, model: &GearModel) {
     let module = model.spec.module;
     let holes = f64::from(model.spec.hole_count);
@@ -215,6 +223,7 @@ fn append_construction_guides(output: &mut String, model: &GearModel) {
     output.push_str("</g>\n");
 }
 
+/// Appends the primary-stroked gear teeth and inner ring outline.
 fn append_mechanical_outline(output: &mut String, model: &GearModel) {
     let _ = writeln!(
         output,
@@ -233,6 +242,7 @@ fn append_mechanical_outline(output: &mut String, model: &GearModel) {
     output.push_str("</g>\n");
 }
 
+/// Appends the bore outlines, central R glyph, and bore center signal dots.
 fn append_marks(output: &mut String, model: &GearModel) {
     let holes = f64::from(model.spec.hole_count);
     let _ = writeln!(
@@ -264,6 +274,7 @@ fn append_marks(output: &mut String, model: &GearModel) {
     output.push_str("</g>\n");
 }
 
+/// Appends the even-odd filled gear body path with inner ring and bore cutouts.
 fn append_gear_fill(output: &mut String, model: &GearModel) {
     let _ = writeln!(
         output,
@@ -273,6 +284,7 @@ fn append_gear_fill(output: &mut String, model: &GearModel) {
     output.push_str("</g>\n");
 }
 
+/// Appends an origin-centered dashed `<circle>` element.
 fn append_circle(output: &mut String, radius: f64, dash: f64, gap: f64) {
     let _ = writeln!(
         output,
@@ -283,6 +295,7 @@ fn append_circle(output: &mut String, radius: f64, dash: f64, gap: f64) {
     );
 }
 
+/// Appends the mother square, diagonals, and construction circles for the central R.
 fn append_glyph_guides(output: &mut String, glyph: GlyphGeometry) {
     let side = 2.0 * glyph.square_half;
     let guide_opacity = glyph.thin_stroke_width / glyph.stroke_width;
@@ -320,6 +333,7 @@ fn append_glyph_guides(output: &mut String, glyph: GlyphGeometry) {
     output.push_str("  </g>\n");
 }
 
+/// Returns the five construction circles drawn as guides for the central R.
 fn glyph_construction_circles(glyph: GlyphGeometry) -> [Circle; 5] {
     [
         glyph.bowl.outer,
@@ -330,6 +344,7 @@ fn glyph_construction_circles(glyph: GlyphGeometry) -> [Circle; 5] {
     ]
 }
 
+/// Appends a positioned `<circle>` element with the given indentation prefix.
 fn append_positioned_circle(output: &mut String, circle: Circle, indent: &str) {
     let _ = writeln!(
         output,
@@ -340,6 +355,7 @@ fn append_positioned_circle(output: &mut String, circle: Circle, indent: &str) {
     );
 }
 
+/// Appends the filled central R glyph group using the even-odd fill rule.
 fn append_glyph(output: &mut String, glyph: GlyphGeometry) {
     let _ = writeln!(
         output,
@@ -349,10 +365,12 @@ fn append_glyph(output: &mut String, glyph: GlyphGeometry) {
     output.push_str("</g>\n");
 }
 
+/// Combines the outer silhouette and inner counter subpaths of the R glyph.
 fn glyph_path(glyph: GlyphGeometry) -> String {
     format!("{} {}", outer_silhouette_path(glyph), counter_path(glyph))
 }
 
+/// Builds the SVG path data for the continuous outer silhouette of the R glyph.
 fn outer_silhouette_path(glyph: GlyphGeometry) -> String {
     let leg = glyph.leg;
     let inner = leg.inner;
@@ -399,6 +417,7 @@ fn outer_silhouette_path(glyph: GlyphGeometry) -> String {
     )
 }
 
+/// Builds the SVG path data for the enclosed counter of the R bowl.
 fn counter_path(glyph: GlyphGeometry) -> String {
     format!(
         "M {},{} H {} A {} {} 0 0 1 {} H {} Z",
@@ -412,6 +431,7 @@ fn counter_path(glyph: GlyphGeometry) -> String {
     )
 }
 
+/// Builds the SVG path data for a single canonical gear tooth centered at top.
 fn tooth_path(model: &GearModel) -> String {
     let center = -std::f64::consts::PI / 2.0;
     let mut commands = String::new();
@@ -419,11 +439,15 @@ fn tooth_path(model: &GearModel) -> String {
     commands
 }
 
+/// Controls whether a contour fragment starts with an explicit `M` command.
 enum ContourStart {
+    /// Emit an initial `M` move-to command.
     Move,
+    /// Continue directly from the previous path point.
     Connected,
 }
 
+/// Appends one involute tooth contour centered at polar angle `center`.
 fn append_tooth_contour(
     commands: &mut String,
     model: &GearModel,
@@ -481,6 +505,7 @@ fn append_tooth_contour(
     );
 }
 
+/// Builds the combined outer gear, inner ring, and bore cutout SVG path.
 fn gear_body_path(model: &GearModel) -> String {
     let first_center = -std::f64::consts::PI / 2.0;
     let mut commands = String::new();
@@ -502,6 +527,7 @@ fn gear_body_path(model: &GearModel) -> String {
     commands
 }
 
+/// Builds the closed SVG path for the inner ring and its bracketed bore lobes.
 fn inner_ring_path(model: &GearModel) -> String {
     let mut lobes = model.inner_lobes();
     let mut commands = String::new();
@@ -528,6 +554,7 @@ fn inner_ring_path(model: &GearModel) -> String {
     commands
 }
 
+/// Appends one bracketed inner lobe contour to `commands`.
 fn append_lobe(commands: &mut String, model: &GearModel, lobe: InnerLobe, start: ContourStart) {
     if let ContourStart::Move = start {
         let _ = write!(commands, "M {}", command_point(lobe.before));
@@ -543,6 +570,7 @@ fn append_lobe(commands: &mut String, model: &GearModel, lobe: InnerLobe, start:
     );
 }
 
+/// Appends a closed circular cutout subpath centered at `center` with `radius`.
 fn append_cutout_circle(commands: &mut String, center: Point, radius: f64) {
     let right = Point {
         x: center.x + radius,
@@ -565,6 +593,7 @@ fn append_cutout_circle(commands: &mut String, center: Point, radius: f64) {
     );
 }
 
+/// Formats the bore centers as a space-separated SVG polygon `points` attribute.
 fn polygon_points(model: &GearModel) -> String {
     model
         .holes()
@@ -573,10 +602,12 @@ fn polygon_points(model: &GearModel) -> String {
         .join(" ")
 }
 
+/// Formats a Cartesian point as `x,y` for SVG path commands.
 fn command_point(point: Point) -> String {
     format!("{},{}", format_number(point.x), format_number(point.y))
 }
 
+/// Formats the key-value construction metadata embedded in SVG `<metadata>`.
 fn metadata(model: &GearModel) -> String {
     let glyph = model.glyph();
     format!(
@@ -625,10 +656,12 @@ fn metadata(model: &GearModel) -> String {
     )
 }
 
+/// Computes the half-width of the symmetric SVG viewBox.
 fn viewbox_radius(model: &GearModel) -> f64 {
     model.outer_radius + 2.0 * model.hole_radius
 }
 
+/// Renders the machine-readable JSON specification of geometry and palettes.
 pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Palette) -> String {
     let glyph = model.glyph();
     let base = format!(
@@ -678,7 +711,9 @@ pub(crate) fn render_specification(model: &GearModel, light: &Palette, dark: &Pa
     insert_inner_ring_spec(base, model)
 }
 
+/// Inserts the `gear_inner_profile` JSON section before the `glyph` section.
 fn insert_inner_ring_spec(base: String, model: &GearModel) -> String {
+    /// JSON key prefix locating where the inner ring profile section is inserted.
     const GLYPH_MARKER: &str = "  \"glyph\": {";
     let profile = format!(
         concat!(
@@ -715,6 +750,7 @@ fn insert_inner_ring_spec(base: String, model: &GearModel) -> String {
     base.replacen(GLYPH_MARKER, &profile, 1)
 }
 
+/// Serializes a semantic palette as a formatted JSON object.
 fn palette_json(palette: &Palette) -> String {
     format!(
         "{{\n      \"primary\": {},\n      \"accent\": {},\n      \"gear_fill\": {},\n      \"signal\": {},\n      \"guide\": {}\n    }}",
@@ -726,6 +762,7 @@ fn palette_json(palette: &Palette) -> String {
     )
 }
 
+/// Serializes a single solved paint role as a compact JSON object.
 fn paint_json(paint: &Paint) -> String {
     format!(
         "{{\"hex\": \"{}\", \"oklch\": [{}, {}, {}], \"contrast\": {}, \"target\": {}}}",
@@ -738,6 +775,7 @@ fn paint_json(paint: &Paint) -> String {
     )
 }
 
+/// Formats a floating-point number to at most six decimal places without trailing zeros.
 fn format_number(value: f64) -> String {
     let normalized = if value.abs() < 0.000_000_5 {
         0.0

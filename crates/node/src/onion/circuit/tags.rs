@@ -62,10 +62,15 @@ pub(crate) enum OnionReplyDropped {
     SessionGone,
 }
 
+/// Consumer waiting for a returning onion reply cell.
 enum OnionReplyTarget {
+    /// Persistent session reply sink.
     Session(OnionReplySink),
+    /// One-shot Kleisli pipeline caller awaiting a fixed-width reply payload.
     OneShot {
+        /// Expected reply width `W(fₙ)` in bytes.
         expected_bytes: usize,
+        /// Channel receiving the opened reply payload.
         sender: oneshot::Sender<Vec<u8>>,
     },
 }
@@ -118,6 +123,7 @@ impl OnionClientTags {
         })
     }
 
+    /// Purge expired tags at `now_ms` and insert a new tag entry for `target`.
     fn insert_entry(
         &self,
         now_ms: u128,

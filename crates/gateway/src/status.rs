@@ -106,16 +106,19 @@ pub struct GatewayStatus {
 /// packet forwarding fail.
 #[derive(Clone)]
 pub struct GatewayStatusHandle {
+    /// Shared latest status snapshot updated exclusively by the runtime.
     inner: Arc<RwLock<GatewayStatus>>,
 }
 
 impl GatewayStatusHandle {
+    /// Create a status handle initialized with `status`.
     pub(crate) fn new(status: GatewayStatus) -> Self {
         Self {
             inner: Arc::new(RwLock::new(status)),
         }
     }
 
+    /// Replace the published status snapshot, recovering from lock poisoning if needed.
     pub(crate) fn publish(&self, status: GatewayStatus) {
         match self.inner.write() {
             Ok(mut current) => *current = status,

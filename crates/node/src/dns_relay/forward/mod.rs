@@ -69,8 +69,11 @@ pub enum ForwardError {
 
 /// The forward over a node's TCP relay.
 pub struct RelayForward {
+    /// Handle to the TCP relay used to forward connections to remote peers.
     relay: RelayHandle,
+    /// Local node DID used to identify connections targeting this node.
     own: Did,
+    /// Local socket addresses served directly by this node, keyed by port.
     own_targets: BTreeMap<u16, SocketAddr>,
 }
 

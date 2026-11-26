@@ -90,10 +90,12 @@ impl OnionWidthClass {
         }
     }
 
+    /// Return the zero-based table index of this width class in [`Self::ALL`].
     const fn index(self) -> usize {
         self as usize
     }
 
+    /// Parse a width token (`"32"`, `"64"`, `"256"`, `"1024"`, `"16384"`) into an [`OnionWidthClass`].
     fn parse_token(token: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -138,6 +140,7 @@ impl OnionInputType {
         }
     }
 
+    /// Return the zero-based table index of this input sort in [`Self::ALL`].
     const fn index(self) -> usize {
         match self {
             Self::Unit => 0,
@@ -145,6 +148,7 @@ impl OnionInputType {
         }
     }
 
+    /// Parse an input token (`"0"` or a width token) into an [`OnionInputType`].
     fn parse_token(token: &str) -> Option<Self> {
         if token == "0" {
             return Some(Self::Unit);
@@ -205,10 +209,12 @@ impl OnionLatencyClass {
         }
     }
 
+    /// Return the zero-based table index of this latency class in [`Self::ALL`].
     const fn index(self) -> usize {
         self as usize
     }
 
+    /// Parse a latency token (`"10ms"`, `"100ms"`, `"500ms"`, `"2000ms"`) into an [`OnionLatencyClass`].
     fn parse_token(token: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -228,8 +234,11 @@ pub(crate) const INVOKE_SHAPES: usize =
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct OnionInvokeShape {
+    /// Carried input sort `In_f`.
     input: OnionInputType,
+    /// Carried output width class `Out_f`.
     output: OnionWidthClass,
+    /// Release latency class `L(f)`.
     latency: OnionLatencyClass,
 }
 
@@ -309,12 +318,14 @@ impl OnionInvokeShape {
         })
     }
 
+    /// Return the zero-based table index of this shape in `0..INVOKE_SHAPES`.
     pub(crate) const fn index(self) -> usize {
         let outputs = OnionWidthClass::ALL.len();
         let latencies = OnionLatencyClass::ALL.len();
         (self.input.index() * outputs + self.output.index()) * latencies + self.latency.index()
     }
 
+    /// Decode an [`OnionInvokeShape`] from its zero-based index in `0..INVOKE_SHAPES`.
     pub(crate) fn from_index(index: usize) -> Option<Self> {
         if index >= INVOKE_SHAPES {
             return None;
@@ -391,6 +402,7 @@ impl OnionBackendName {
     }
 }
 
+/// Return whether `byte` is allowed in a canonical [`OnionBackendName`] (`[a-z0-9._-]`).
 const fn is_backend_name_byte(byte: u8) -> bool {
     byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
 }

@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use crate::utils::ManualClock;
 use crate::utils::SharedClock;
 
+/// Clock source used for chunk reassembly freshness and expiry checks.
 #[derive(Clone)]
 pub(in crate::swarm::callback) enum ReassemblyClock {
     /// Read the current Unix epoch timestamp in milliseconds from the ambient system clock.
@@ -22,11 +23,13 @@ pub(in crate::swarm::callback) enum ReassemblyClock {
 }
 
 impl ReassemblyClock {
+    /// Construct a clock backed by the ambient system clock.
     #[allow(dead_code)]
     pub(in crate::swarm::callback) const fn system() -> Self {
         Self::System
     }
 
+    /// Construct a clock backed by an injected [`SharedClock`].
     pub(in crate::swarm::callback) fn from_clock(clock: SharedClock) -> Self {
         Self::Injected(clock)
     }
@@ -36,6 +39,7 @@ impl ReassemblyClock {
         Self::Injected(Arc::new(ManualClock::from_shared(now_ms)))
     }
 
+    /// Return the current epoch timestamp in milliseconds.
     pub(in crate::swarm::callback) fn now_ms(&self) -> u128 {
         match self {
             Self::System => crate::utils::get_epoch_ms(),

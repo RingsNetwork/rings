@@ -86,6 +86,7 @@ mod send_runtime;
 mod test_close_actor;
 #[cfg(test)]
 mod test_send_lifecycle;
+/// Local UDP-to-TCP/TLS TURN bridge for native WebRTC connections.
 mod turn_tcp;
 
 use host_candidates::append_sdp_extra_host_candidates;
@@ -108,7 +109,9 @@ use send_runtime::NativeRetirementFence;
 use turn_tcp::prepare_native_ice_config;
 use turn_tcp::TurnTcpBridgeGuard;
 
+/// Timeout in seconds when waiting for all outbound WebRTC data channels to open.
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
+/// Timeout in seconds for ICE candidate gathering during offer/answer creation.
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// Delay before the responder starts outbound ICE connectivity checks in [`WebrtcConnection::answer_offer`]
 /// after local candidate gathering finishes, giving the out-of-band HTTP `answerOffer` response
@@ -134,8 +137,11 @@ const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100)
 /// later message's bytes.
 #[derive(Clone)]
 struct TrackedChannel {
+    /// Underlying `webrtc-rs` SCTP data channel.
     channel: Arc<RTCDataChannel>,
+    /// Per-channel byte-flush delivery tracker driven by `bufferedamountlow`.
     delivery: Arc<DeliveryTracker>,
+    /// Lock serializing sends and enqueued byte accounting on `channel`.
     send_lock: Arc<Mutex<()>>,
 }
 
@@ -256,18 +262,27 @@ impl ChannelPool<TrackedChannel> {
 #[cfg(test)]
 mod test_send_cancellation;
 
+/// Handshake role before any offer or answer has been created or accepted.
 const HANDSHAKE_ROLE_FRESH: u8 = 0;
+/// Handshake role after creating a local offer while awaiting a remote answer.
 const HANDSHAKE_ROLE_INITIATOR_AWAITING_ANSWER: u8 = 1;
+/// Handshake role once the offer/answer exchange has completed.
 const HANDSHAKE_ROLE_ESTABLISHED: u8 = 2;
+/// Transient handshake role held while a handshake step is executing.
 const HANDSHAKE_ROLE_IN_PROGRESS: u8 = 3;
+/// Terminal handshake role entered if a handshake step fails or is cancelled mid-flight.
 const HANDSHAKE_ROLE_FAILED: u8 = 4;
 
+/// RAII guard that transitions a connection's `handshake_role` to [`HANDSHAKE_ROLE_FAILED`] on drop unless committed.
 struct HandshakeRoleGuard<'a> {
+    /// Atomic handshake role cell being guarded.
     role: &'a AtomicU8,
+    /// Whether [`Self::commit`] has stored the next role.
     committed: bool,
 }
 
 impl<'a> HandshakeRoleGuard<'a> {
+    /// Guard `role` until [`Self::commit`] is called.
     fn new(role: &'a AtomicU8) -> Self {
         Self {
             role,
@@ -275,6 +290,7 @@ impl<'a> HandshakeRoleGuard<'a> {
         }
     }
 
+    /// Store `next_role` and disarm the failure fallback on drop.
     fn commit(mut self, next_role: u8) {
         self.role.store(next_role, Ordering::Release);
         self.committed = true;
@@ -292,24 +308,40 @@ impl Drop for HandshakeRoleGuard<'_> {
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
+    /// Current `webrtc-rs` peer connection, swappable during pre-negotiation ICE refresh.
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
+    /// Snapshot of ICE servers configured on the current `webrtc_conn`.
     configured_ice_servers: std::sync::RwLock<Vec<IceServer>>,
+    /// Shared transport-level `(raw, parsed)` ICE server state for detecting credential rotations.
     transport_ice_state: Arc<std::sync::RwLock<(String, Vec<IceServer>)>>,
+    /// Optional external IP/address advertised in NAT 1:1 host candidates.
     external_address: Option<String>,
+    /// Optional ephemeral UDP port range for ICE sockets.
     udp_port_range: Option<UdpPortRange>,
+    /// Set once offer/answer negotiation starts, preventing further peer-connection swaps.
     negotiation_started: AtomicBool,
+    /// Atomic handshake state encoded using the `HANDSHAKE_ROLE_*` constants.
     handshake_role: AtomicU8,
+    /// Async lock serializing ICE reconfiguration, negotiation start, and physical close.
     reconfigure_lock: Arc<Mutex<()>>,
+    /// Pool of outbound SCTP data channels paired with delivery trackers.
     webrtc_data_channel: Arc<ChannelPool<TrackedChannel>>,
+    /// Notifier woken on data-channel open/close and terminal connection transitions.
     webrtc_data_channel_state_notifier: Notifier,
+    /// Coherent connection phase and outbound channel readiness cell.
     connection_state: ConnectionStateCell,
+    /// Cancellation token aborting deferred candidate injection and background waits on close.
     cancel_token: CancellationToken,
+    /// Send-admission retirement fence coordinated with close and failed sends.
     retirement_fence: NativeRetirementFence,
+    /// Additional host candidate lines appended to gathered SDP.
     sdp_extra_host_candidates: std::sync::RwLock<Vec<String>>,
+    /// Optional TURN-over-TCP bridge lifecycle guard associated with `webrtc_conn`.
     turn_tcp_bridge: Arc<std::sync::Mutex<Option<TurnTcpBridgeGuard>>>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
+    /// Single-flight physical-close coordinator and completion witness writer.
     physical_close_completed: PhysicalCloseCompletion,
     /// The connection's callback: its credit gates every custom send.
     callback: Arc<InnerTransportCallback>,
@@ -318,18 +350,26 @@ pub struct WebrtcConnection {
 /// Reconstructible close-error representation that preserves [`TransportSendFailureClass`].
 #[derive(Clone)]
 enum SharedCloseFailureKind {
+    /// Captured `webrtc-rs` error message.
     Webrtc(String),
+    /// Native physical retirement timed out after `timeout_ms` milliseconds.
     NativeConnectionRetirementTimeout {
+        /// Retirement timeout duration in milliseconds.
         timeout_ms: u128,
     },
+    /// Tokio runtime was unavailable when attempting to spawn the close task.
     NativeSendRuntimeUnavailable,
+    /// Generic backend error preserving its [`BackendSendFailureClass`].
     Backend {
+        /// Preserved send-failure classification.
         class: BackendSendFailureClass,
+        /// Formatted error message.
         message: String,
     },
 }
 
 impl SharedCloseFailureKind {
+    /// Extract a cloneable [`SharedCloseFailureKind`] from a concrete [`Error`].
     fn from_error(error: &Error) -> Self {
         match error {
             Error::Webrtc(err) => Self::Webrtc(err.to_string()),
@@ -355,6 +395,7 @@ impl SharedCloseFailureKind {
         }
     }
 
+    /// Reconstruct an equivalent [`Error`] from this cloneable failure kind.
     fn into_error(self) -> Error {
         match self {
             Self::Webrtc(message) => Error::Webrtc(webrtc::error::Error::new(message)),
@@ -377,11 +418,14 @@ impl SharedCloseFailureKind {
 /// without requiring [`Error`] to be globally `Clone`.
 #[derive(Clone)]
 struct SharedCloseFailure {
+    /// Original [`Error`] taken by the first waiter to observe the failure.
     primary: Arc<std::sync::Mutex<Option<Error>>>,
+    /// Cloneable fallback used to reconstruct an equivalent [`Error`] for subsequent waiters.
     fallback: SharedCloseFailureKind,
 }
 
 impl SharedCloseFailure {
+    /// Wrap `error` so the first waiter takes it directly and later waiters reconstruct it.
     fn from_error(error: Error) -> Self {
         let fallback = SharedCloseFailureKind::from_error(&error);
         Self {
@@ -390,6 +434,7 @@ impl SharedCloseFailure {
         }
     }
 
+    /// Take the original [`Error`] if still present, otherwise reconstruct it from `fallback`.
     fn into_error(self) -> Error {
         if let Some(error) = lock_recover(&self.primary).take() {
             return error;
@@ -398,13 +443,19 @@ impl SharedCloseFailure {
     }
 }
 
+/// Handle to the single-flight detached physical-close task for a connection generation.
 struct SharedCloseTask {
+    /// Watch receiver broadcasting `Some(result)` once the detached close task finishes.
     outcome_rx: watch::Receiver<Option<std::result::Result<(), SharedCloseFailure>>>,
+    /// Join handle of the detached close task, used to detect task panics or aborts.
     join_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+/// Shared state backing [`PhysicalCloseCompletion`].
 struct PhysicalCloseState {
+    /// Monotone watch sender set to `true` once `RTCPeerConnection::close()` succeeds.
     completed: Arc<watch::Sender<bool>>,
+    /// Lazily spawned single-flight close task shared by all close waiters.
     task: std::sync::Mutex<Option<SharedCloseTask>>,
 }
 
@@ -500,9 +551,13 @@ impl PhysicalCloseCompletion {
 /// [`std::sync::RwLock`] so concurrent readers never observe torn `(raw, parsed)` state across a
 /// credential rotation.
 pub struct WebrtcTransport {
+    /// Synchronized `(raw_credentials, parsed_ice_servers)` shared with active connections.
     ice_state: Arc<std::sync::RwLock<(String, Vec<IceServer>)>>,
+    /// Optional external IP/address advertised in NAT 1:1 host candidates.
     external_address: Option<String>,
+    /// Optional ephemeral UDP port range for ICE sockets.
     udp_port_range: Option<UdpPortRange>,
+    /// Active native WebRTC connections keyed by peer connection ID.
     pool: Pool<WebrtcConnection>,
     /// The frames this node lends its connections' lanes, shared by every connection.
     frame_pool: NodeFramePool,
@@ -512,6 +567,7 @@ pub struct WebrtcTransport {
 }
 
 impl WebrtcConnection {
+    /// Construct a [`WebrtcConnection`] wrapping a freshly created `RTCPeerConnection` and its channels.
     #[allow(clippy::too_many_arguments)]
     fn new(
         webrtc_conn: RTCPeerConnection,
@@ -551,6 +607,7 @@ impl WebrtcConnection {
         }
     }
 
+    /// Clone the current `Arc<RTCPeerConnection>` handle.
     fn webrtc_conn(&self) -> Arc<RTCPeerConnection> {
         Arc::clone(
             &self
@@ -560,11 +617,13 @@ impl WebrtcConnection {
         )
     }
 
+    /// Acquire `reconfigure_lock` and rebuild the peer connection if transport ICE servers changed.
     async fn refresh_ice_servers(&self) -> Result<()> {
         let _guard = self.reconfigure_lock.lock().await;
         self.refresh_ice_servers_locked().await
     }
 
+    /// Rebuild the pre-negotiation peer connection if transport ICE servers differ from `configured_ice_servers`.
     async fn refresh_ice_servers_locked(&self) -> Result<()> {
         if self.cancel_token.is_cancelled()
             || self.connection_state.snapshot().state() == TransportConnectionState::Closed
@@ -730,6 +789,7 @@ impl WebrtcConnection {
         self.physical_close_completed.witness()
     }
 
+    /// Fence further sends, quiesce any TURN TCP bridge inbound traffic, and wake channel waiters.
     fn request_close(&self) {
         self.retirement_fence.request();
         if let Some(guard) = self
@@ -747,6 +807,7 @@ impl WebrtcConnection {
         self.callback.close_link_credit();
     }
 
+    /// Wait for ICE gathering to finish (or time out) and return the gathered local SDP string.
     async fn webrtc_gather(
         &self,
         mut gathering_complete_promise: mpsc::Receiver<()>,
@@ -901,6 +962,7 @@ impl WebrtcTransport {
     }
 }
 
+/// Construct a `webrtc-rs` [`EphemeralUDP`] socket allocator bounded to `range`.
 fn ephemeral_udp_for_range(range: UdpPortRange) -> Result<EphemeralUDP> {
     EphemeralUDP::new(range.min(), range.max()).map_err(|e| {
         Error::UdpPortRange(format!(
@@ -911,6 +973,7 @@ fn ephemeral_udp_for_range(range: UdpPortRange) -> Result<EphemeralUDP> {
     })
 }
 
+/// Apply an optional [`UdpPortRange`] to `setting` before building a `webrtc-rs` API.
 fn set_udp_network_range(
     setting: &mut webrtc::api::setting_engine::SettingEngine,
     range: Option<UdpPortRange>,
@@ -921,6 +984,7 @@ fn set_udp_network_range(
     Ok(())
 }
 
+/// Create a new native `RTCPeerConnection` using `transport`'s current ICE and network settings.
 async fn create_peer_connection(
     transport: &WebrtcTransport,
 ) -> Result<(
@@ -950,6 +1014,7 @@ async fn create_peer_connection(
     ))
 }
 
+/// Create a native `RTCPeerConnection` with explicit ICE servers, external address, and UDP range.
 async fn create_peer_connection_with_config(
     ice_servers: &[IceServer],
     external_address: Option<&str>,
@@ -1044,6 +1109,7 @@ impl FrameSink for WebrtcConnection {
 }
 
 impl WebrtcConnection {
+    /// Create a local WebRTC offer, gather ICE candidates, and return the resulting SDP.
     async fn create_offer_sdp(&self) -> Result<String> {
         let gathering_complete_promise = {
             let _guard = self.reconfigure_lock.lock().await;
@@ -1061,6 +1127,7 @@ impl WebrtcConnection {
         self.webrtc_gather(gathering_complete_promise).await
     }
 
+    /// Apply a remote offer SDP, gather local answer candidates, and return the answer SDP.
     async fn answer_offer_sdp(&self, offer: String) -> Result<String> {
         tracing::debug!("answer_offer, offer: {offer:?}");
         // Read the negotiated limit from the SDP text, but record it only after the *whole* answer
@@ -1094,6 +1161,7 @@ impl WebrtcConnection {
         Ok(local_sdp)
     }
 
+    /// Apply a remote answer SDP and record the negotiated SCTP maximum message size.
     async fn accept_answer_sdp(&self, answer: String) -> Result<()> {
         tracing::debug!("accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer)?;
@@ -1226,6 +1294,7 @@ impl ConnectionInterface for WebrtcConnection {
     }
 }
 
+/// Spawn a detached task that feeds deferred remote ICE candidates into `webrtc_conn` after [`WEBRTC_ANSWER_CHECK_START_DELAY`].
 fn schedule_deferred_remote_candidates(
     webrtc_conn: Arc<RTCPeerConnection>,
     deferred_candidates: Vec<String>,
@@ -1253,6 +1322,7 @@ fn schedule_deferred_remote_candidates(
     });
 }
 
+/// Quiesce the TURN TCP bridge, close the active `RTCPeerConnection`, and shut down the bridge under `reconfigure_lock`.
 async fn close_native_connection_under_reconfigure_lock(
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
@@ -1284,6 +1354,7 @@ async fn close_native_connection_under_reconfigure_lock(
     result
 }
 
+/// Drive single-flight physical teardown of a reconfigurable native connection through `physical_close_completed`.
 async fn close_reconfigurable_native_connection(
     reconfigure_lock: Arc<Mutex<()>>,
     webrtc_conn: Arc<std::sync::RwLock<Arc<RTCPeerConnection>>>,
@@ -1317,6 +1388,7 @@ async fn close_native_connection(
     .await
 }
 
+/// Execute `close` via `physical_close_completed`'s single-flight task on `runtime`.
 async fn run_native_close_with_witness(
     runtime: &tokio::runtime::Handle,
     close: impl Future<Output = Result<()>> + Send + 'static,
@@ -1352,6 +1424,7 @@ async fn close_failed_native_send(
     .await
 }
 
+/// Close a failed native connection with a bounded [`NATIVE_CONNECTION_RETIRE_TIMEOUT`] wait.
 async fn close_failed_native_send_with_witness(
     runtime: &tokio::runtime::Handle,
     close: impl Future<Output = Result<()>> + Send + 'static,
@@ -1367,6 +1440,7 @@ async fn close_failed_native_send_with_witness(
     })?
 }
 
+/// Register the `on_data_channel` handler to admit and dispatch frames from remote-created channels.
 fn wire_received_data_channels(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
@@ -1419,6 +1493,7 @@ fn wire_received_data_channels(
     }));
 }
 
+/// Register the `on_peer_connection_state_change` handler to update `connection_state` and notify `inner_cb`.
 fn wire_peer_connection_state(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
@@ -1455,6 +1530,7 @@ async fn wire_delivery_events(channel: &Arc<RTCDataChannel>, delivery: &Arc<Deli
     }));
 }
 
+/// Create and wire all outbound lane data channels with delivery trackers and open/close callbacks.
 async fn build_outbound_data_channels(
     webrtc_conn: &RTCPeerConnection,
     channel_pool: &Arc<ChannelPool<TrackedChannel>>,
@@ -1515,6 +1591,7 @@ async fn build_outbound_data_channels(
     Ok(channels)
 }
 
+/// Build all outbound data channels for `webrtc_conn` and install them into `channel_pool`.
 async fn create_outbound_data_channels(
     webrtc_conn: &RTCPeerConnection,
     channel_pool: &Arc<ChannelPool<TrackedChannel>>,

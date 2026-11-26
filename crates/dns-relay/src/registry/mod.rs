@@ -60,13 +60,17 @@ struct BookRecord {
 
 /// The book and its journal, under one lock.
 struct Persisted<O> {
+    /// In-memory address-to-owner book.
     book: AddressBook<O>,
+    /// Append-only journal backing `book`.
     journal: Journal,
 }
 
 /// The address map of a running relay, with its book kept on disk.
 pub struct AddressRegistry<O> {
+    /// Deterministic IPv6 prefix and HMAC key plan.
     plan: AddressPlan,
+    /// Synchronized address book and journal state.
     persisted: Mutex<Persisted<O>>,
 }
 

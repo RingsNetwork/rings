@@ -15,6 +15,7 @@ pub mod observer;
 pub(crate) mod session_link;
 /// The Swarm's storage API, at the application boundary.
 pub mod storage_api;
+/// Swarm transport facade, connection management, and message sending.
 pub(crate) mod transport;
 
 use std::num::NonZeroUsize;
@@ -902,6 +903,8 @@ impl Swarm {
             .await
     }
 
+    /// Verify a remote `ConnectNodeReport` handshake step and apply it to the pending generation,
+    /// or to `expected` only, returning the next signed continuation offer if the handshake continues.
     async fn accept_answer_step_with(
         &self,
         expected: Option<PendingConnectionAttempt>,
@@ -1051,8 +1054,11 @@ impl Swarm {
 /// and regress the signing horizon before Phase 2 commits.
 #[must_use = "dropping SwarmRotationCommit without calling .commit() discards the prepared key rotation"]
 pub struct SwarmRotationCommit<'a> {
+    /// Bound swarm whose delegatee key will be updated on commit.
     swarm: &'a Swarm,
+    /// Rotation exclusion guard held until the commit completes or is dropped.
     _rotation_guard: std::sync::MutexGuard<'a, ()>,
+    /// Pre-validated delegatee key to install on commit.
     next_key: DelegateeKey,
 }
 

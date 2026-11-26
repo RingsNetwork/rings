@@ -15,10 +15,12 @@ use crate::controls::ShellPage;
 use crate::extension;
 use crate::webview;
 
+/// Returns the initial shell page resolved from the current browser URL.
 pub(super) fn initial_shell_page() -> ShellPage {
     current_shell_route().page
 }
 
+/// Returns the initial active dialog resolved from the current browser URL.
 pub(super) fn initial_shell_dialog() -> ActiveDialog {
     current_shell_route().dialog
 }
@@ -26,10 +28,13 @@ pub(super) fn initial_shell_dialog() -> ActiveDialog {
 /// The shell state a URL addresses.
 #[derive(Clone, Copy)]
 pub(super) struct ShellRoute {
+    /// Target top-level shell page.
     pub(super) page: ShellPage,
+    /// Target dialog overlay within the shell.
     pub(super) dialog: ActiveDialog,
 }
 
+/// Resolves the current shell route, forcing the console page in extension mode.
 pub(super) fn current_shell_route() -> ShellRoute {
     let route = routed_shell_route();
     if extension::extension_node_bridge().is_some() {
@@ -46,6 +51,7 @@ pub(super) fn current_shell_route() -> ShellRoute {
     })
 }
 
+/// Parses the shell route from the browser window's pathname and URL hash.
 fn routed_shell_route() -> Option<ShellRoute> {
     let location = web_sys::window()?.location();
     let pathname = location.pathname().ok()?;
@@ -59,10 +65,12 @@ fn routed_shell_route() -> Option<ShellRoute> {
     route_for_hash(hash.as_str())
 }
 
+/// Returns whether a URL pathname targets the WebView shell or gateway.
 fn is_webview_path(pathname: &str) -> bool {
     pathname == "/webview" || pathname.starts_with(webview::GATEWAY_PREFIX)
 }
 
+/// Maps a URL hash fragment to its corresponding shell route.
 fn route_for_hash(hash: &str) -> Option<ShellRoute> {
     match hash.trim_start_matches('#').trim_start_matches('/') {
         "" | "home" => Some(ShellRoute {
@@ -93,6 +101,7 @@ fn route_for_hash(hash: &str) -> Option<ShellRoute> {
     }
 }
 
+/// Navigates to a top-level shell page, clearing any open dialog and updating history.
 pub(super) fn navigate_shell_page(
     page: ShellPage,
     active_page: &UseStateHandle<ShellPage>,
@@ -107,6 +116,7 @@ pub(super) fn navigate_shell_page(
     active_dialog.set(ActiveDialog::None);
 }
 
+/// Opens a console dialog and synchronizes the URL fragment and shell state.
 pub(super) fn open_shell_dialog(
     dialog: ActiveDialog,
     active_page: &UseStateHandle<ShellPage>,
@@ -122,6 +132,7 @@ pub(super) fn open_shell_dialog(
     active_dialog.set(dialog);
 }
 
+/// Closes the currently open dialog and updates the browser history entry.
 pub(super) fn close_shell_dialog(
     active_page: &UseStateHandle<ShellPage>,
     active_dialog: &UseStateHandle<ActiveDialog>,
@@ -135,6 +146,7 @@ pub(super) fn close_shell_dialog(
     active_dialog.set(ActiveDialog::None);
 }
 
+/// Removes any dialog fragment from the current URL without changing page state.
 pub(super) fn clear_shell_dialog_route() {
     let route = current_shell_route();
     if route.dialog.is_open() {
@@ -142,6 +154,7 @@ pub(super) fn clear_shell_dialog_route() {
     }
 }
 
+/// Pushes or replaces the browser history URL for the given shell page and dialog.
 fn write_shell_route(page: ShellPage, dialog: ActiveDialog, replace: bool) {
     let Some(window) = web_sys::window() else {
         return;
@@ -162,6 +175,7 @@ fn write_shell_route(page: ShellPage, dialog: ActiveDialog, replace: bool) {
     }
 }
 
+/// Builds the relative URL (path, query, and hash) for a shell page and dialog.
 fn shell_route_url(window: &Window, page: ShellPage, dialog: ActiveDialog) -> Option<String> {
     let location = window.location();
     let mut target = location.pathname().ok()?;
@@ -187,6 +201,7 @@ fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'stati
     }
 }
 
+/// Returns the browser window's current pathname, query string, and hash concatenated.
 fn current_path_search_hash(window: &Window) -> Option<String> {
     let location = window.location();
     let mut current = location.pathname().ok()?;

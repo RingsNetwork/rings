@@ -95,8 +95,11 @@ enum State {
 
 /// One IMAP session.
 pub struct Session {
+    /// Shared mailbox store backing this session.
     store: Arc<Store>,
+    /// Credentials required to authenticate the session.
     credentials: Credentials,
+    /// Current IMAP protocol state of the session.
     state: State,
 }
 

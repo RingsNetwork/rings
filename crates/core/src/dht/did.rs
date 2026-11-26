@@ -71,6 +71,7 @@ use crate::error::Result;
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Hash)]
 pub struct Did(H160);
 
+/// Serde visitor for deserializing a [`Did`] from its binary newtype encoding.
 struct DidNewtypeVisitor;
 
 impl<'de> serde::de::Visitor<'de> for DidNewtypeVisitor {
@@ -152,10 +153,13 @@ impl TryFrom<HashStr> for Did {
 }
 
 impl Did {
+    /// Bit width of the 160-bit Chord ring identifier.
     const BITS: usize = 160;
 
+    /// Byte length of the canonical big-endian DID representation.
     const BYTE_LEN: usize = 20;
 
+    /// Additive identity (`0x00..00`) of the 160-bit ring.
     const ZERO: Self = Self(H160([0u8; Self::BYTE_LEN]));
 
     /// Whether this identity is the default zero identity (`0x00..00`).
@@ -163,10 +167,12 @@ impl Did {
         *self == Self::ZERO
     }
 
+    /// Construct a [`Did`] from 20 big-endian bytes.
     fn from_be_bytes(bytes: [u8; Self::BYTE_LEN]) -> Self {
         Self(H160::from(bytes))
     }
 
+    /// Return this [`Did`] as 20 big-endian bytes.
     fn to_be_bytes(self) -> [u8; Self::BYTE_LEN] {
         self.0.to_fixed_bytes()
     }
@@ -209,9 +215,10 @@ impl Did {
         Self::from_be_bytes(bytes)
     }
 
-    // Type: `NonZeroU32` makes a zero denominator unrepresentable.
-    // Post: result is `floor(2^160 * numerator / denominator) mod 2^160`.
-    // Invariant: `remainder < denominator` before and after every bit step.
+    /// Compute the 160-bit dyadic fraction `floor(2^160 * numerator / denominator) mod 2^160`.
+    ///
+    /// Type: `NonZeroU32` makes a zero denominator unrepresentable.
+    /// Invariant: `remainder < denominator` before and after every bit step.
     fn dyadic_fraction(numerator: u32, denominator: NonZeroU32) -> Self {
         let denominator = u64::from(denominator.get());
         let mut remainder = u64::from(numerator) % denominator;
@@ -228,9 +235,11 @@ impl Did {
         Self::from_be_bytes(bytes)
     }
 
-    // Post: result = (self + rhs) mod 2^160.
-    // Preservation: carry beyond the most-significant byte is discarded, which
-    // is exactly quotienting by the 160-bit ring modulus.
+    /// Add two DIDs modulo `2^160`.
+    ///
+    /// Post: `result = (self + rhs) mod 2^160`.
+    /// Preservation: carry beyond the most-significant byte is discarded, which
+    /// is exactly quotienting by the 160-bit ring modulus.
     fn add_mod(self, rhs: Self) -> Self {
         let lhs = self.to_be_bytes();
         let rhs = rhs.to_be_bytes();
@@ -252,9 +261,10 @@ impl Did {
         Self::from_be_bytes(out)
     }
 
-    // Post: result = -self mod 2^160.
-    // Preservation: two's-complement over exactly 20 bytes computes the
-    // additive inverse in `Z / 2^160`; zero maps to zero.
+    /// Compute the additive inverse `-self mod 2^160`.
+    ///
+    /// Preservation: two's-complement over exactly 20 bytes computes the
+    /// additive inverse in `Z / 2^160`; zero maps to zero.
     fn additive_inverse(self) -> Self {
         let mut out = self.to_be_bytes();
         for byte in &mut out {
@@ -371,9 +381,11 @@ impl Sub for Did {
     }
 }
 
-// Pre: `bytes` encodes a 160-bit big-endian ring element.
-// Post: if `bit < 160`, the corresponding bit is set; otherwise `bytes` is
-// unchanged.
+/// Set bit `bit` (0 = LSB) in a 160-bit big-endian ring element.
+///
+/// Pre: `bytes` encodes a 160-bit big-endian ring element.
+/// Post: if `bit < 160`, the corresponding bit is set; otherwise `bytes` is
+/// unchanged.
 fn set_ring_bit(bytes: &mut [u8; Did::BYTE_LEN], bit: usize) {
     let Some(byte) = (Did::BYTE_LEN - 1).checked_sub(bit / 8) else {
         return;

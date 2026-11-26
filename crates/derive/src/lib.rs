@@ -1,4 +1,6 @@
 //! Procedural macros shared by Rings crates.
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 extern crate proc_macro;
 use proc_macro::TokenStream;

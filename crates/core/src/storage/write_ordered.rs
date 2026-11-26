@@ -16,15 +16,20 @@ use std::collections::BTreeMap;
 /// One stored value with the write sequence that placed it.
 #[derive(Debug)]
 struct Slot<V> {
+    /// Monotonic write sequence number assigned when this key was last written.
     written: u64,
+    /// Stored value for the key.
     value: V,
 }
 
 /// A map ordered by write recency.
 #[derive(Debug)]
 pub(crate) struct WriteOrderedMap<V> {
+    /// Primary key-to-slot index.
     slots: BTreeMap<String, Slot<V>>,
+    /// Inverse recency index mapping write sequence numbers back to keys.
     order: BTreeMap<u64, String>,
+    /// Strictly increasing write sequence counter.
     clock: u64,
 }
 

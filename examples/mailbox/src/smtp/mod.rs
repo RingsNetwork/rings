@@ -344,9 +344,13 @@ impl SmtpService {
 /// headers the sink will prepend, and whether it grew past the session's bound, in which case it
 /// holds nothing.
 struct Body {
+    /// Streaming SMTP `DATA` decoder handling dot-unstuffing and termination.
     receiver: DataReceiver,
+    /// Accumulated message body bytes read so far.
     bytes: Vec<u8>,
+    /// Byte length of trace headers that the sink will prepend.
     trace_bytes: usize,
+    /// Whether the body exceeded the session's size limit and was discarded.
     oversize: bool,
 }
 
@@ -362,9 +366,13 @@ enum Turn {
 
 /// One connection's session and the parsers it reads with.
 struct Conversation {
+    /// Protocol state machine for this SMTP connection.
     session: Session,
+    /// Remote socket address of the connected client.
     client: SocketAddr,
+    /// Incremental SMTP command parser.
     requests: RequestReceiver,
+    /// Active `DATA` body accumulation state, if currently receiving a message body.
     body: Option<Body>,
 }
 

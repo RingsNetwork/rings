@@ -119,6 +119,7 @@ impl NativeGatewayConfig {
 /// A config document consisting of the `gateway:` section alone.
 #[derive(Serialize)]
 struct GatewaySection<'a> {
+    /// Borrowed gateway configuration serialized under the `gateway:` YAML key.
     gateway: &'a NativeGatewayConfig,
 }
 
@@ -166,14 +167,17 @@ where D: serde::Deserializer<'de> {
         .map_err(serde::de::Error::custom)
 }
 
+/// Default interval in seconds between gateway exit-availability refreshes.
 const fn default_gateway_status_refresh_secs() -> u64 {
     DEFAULT_GATEWAY_STATUS_REFRESH_SECS
 }
 
+/// Default path for the gateway route ledger file under `~/.rings`.
 fn default_gateway_route_ledger_path() -> String {
     get_storage_location(".rings", "gateway-routes.json")
 }
 
+/// Default path for the privileged Unix gateway helper socket under `~/.rings`.
 fn default_gateway_unix_helper_socket() -> String {
     get_storage_location(".rings", "gateway-helper.sock")
 }

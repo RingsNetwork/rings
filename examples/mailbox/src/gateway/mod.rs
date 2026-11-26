@@ -42,6 +42,7 @@ use crate::smtp::SmtpService;
 /// The gateway over the DHT side `mail`: a node's (`rings_node::mail::gateway::MailGateway`), or
 /// a test's stand-in.
 pub struct Gateway {
+    /// Backing mail drop implementation used to look up recipients and deliver envelopes.
     mail: Arc<dyn MailDrop>,
 }
 

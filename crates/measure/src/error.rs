@@ -1,3 +1,5 @@
+//! Error types for measurement policies, transitions, and snapshots.
+
 use thiserror::Error;
 
 use crate::Metric;

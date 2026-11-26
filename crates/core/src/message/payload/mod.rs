@@ -502,6 +502,7 @@ impl MessagePayload {
         self.verify_hop_at(network_id, get_epoch_ms())
     }
 
+    /// Verify the current hop's carrier signature under `PAYLOAD_DOMAIN_TAG` at `at_ms` using `authorization`.
     pub(crate) fn verify_hop_under_at(
         &self,
         network_id: u32,

@@ -292,18 +292,22 @@ pub(super) struct RunnableTransfer<T> {
 }
 
 impl<T> RunnableTransfer<T> {
+    /// Return the transfer class of this runnable transfer.
     pub(super) const fn class(&self) -> TransferClass {
         self.class
     }
 
+    /// Borrow the underlying transfer item.
     pub(super) fn item(&self) -> &T {
         &self.item
     }
 
+    /// Mutably borrow the underlying transfer item.
     pub(super) fn item_mut(&mut self) -> &mut T {
         &mut self.item
     }
 
+    /// Consume the handle and return its transfer class and item.
     pub(super) fn into_parts(self) -> (TransferClass, T) {
         (self.class, self.item)
     }
@@ -316,8 +320,11 @@ impl<T> RunnableTransfer<T> {
 /// receiver's credit never takes the worker from another lane, and the classes stay isolated as
 /// their transport lanes are.
 pub(super) struct TransferQueues<T> {
+    /// Per-class transfer lanes holding in-flight windows and queued backlogs.
     lanes: PerClass<TransferLane<T>>,
+    /// Index into `LOWER_CLASSES` where the next lower-class round-robin scan begins.
     lower_cursor: usize,
+    /// Number of consecutive control frames admitted since the last lower-class frame.
     consecutive_control: usize,
     /// In-flight transfers allowed per lane.
     window: usize,
@@ -357,6 +364,7 @@ impl<T> TransferQueues<T> {
         self.lane(class).in_flight()
     }
 
+    /// Enqueue `item` into the lane for `class`.
     pub(super) fn push(&mut self, class: TransferClass, item: T) {
         let window = self.window;
         self.lane_mut(class).enqueue(item, window);
@@ -432,10 +440,12 @@ impl<T> TransferQueues<T> {
             .make_runnable(transfer.slot, transfer.item);
     }
 
+    /// Account for a frame admitted for `class` in the fairness scheduler.
     pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
         self.advance_fairness(class);
     }
 
+    /// Update the control burst counter and lower-class round-robin cursor after a turn for `class`.
     fn advance_fairness(&mut self, class: TransferClass) {
         if class == TransferClass::DhtControl {
             self.consecutive_control = self.consecutive_control.saturating_add(1);
@@ -464,6 +474,7 @@ impl<T> TransferQueues<T> {
         self.finish_transfer(transfer)
     }
 
+    /// Drain all transfers owned across every class lane.
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {
         self.lanes
             .values_mut()
@@ -481,10 +492,12 @@ impl<T> TransferQueues<T> {
             .collect()
     }
 
+    /// Borrow the lane for `class`.
     fn lane(&self, class: TransferClass) -> &TransferLane<T> {
         &self.lanes[class]
     }
 
+    /// Mutably borrow the lane for `class`.
     fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
         &mut self.lanes[class]
     }
@@ -501,6 +514,7 @@ impl<T> TransferQueues<T> {
     }
 }
 
+/// Return whether the bounded control burst protection is currently enabled.
 fn bounded_control_burst_enabled() -> bool {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     {

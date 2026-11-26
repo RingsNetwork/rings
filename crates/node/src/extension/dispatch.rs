@@ -109,9 +109,13 @@ pub(crate) enum DispatchDrop {
 /// [`Provider`](crate::provider::Provider), which reads it, and the backends serving it.
 #[derive(Debug, Default)]
 pub(crate) struct DispatchDrops {
+    /// Number of custom messages that failed envelope decoding.
     undecodable: AtomicU64,
+    /// Number of envelopes targeting an unregistered namespace.
     unregistered: AtomicU64,
+    /// Number of envelopes refused because the namespace queue was full.
     queue_full: AtomicU64,
+    /// Number of envelopes refused because no worker served the namespace queue.
     unserved: AtomicU64,
 }
 
@@ -183,13 +187,22 @@ impl DispatchDrops {
 enum Queued {
     /// An envelope from `from`, holding `weight` encoded bytes until its dispatch ends.
     Envelope {
+        /// Resolved protocol route for the envelope's namespace.
         route: Route,
+        /// Verified sender DID of the envelope.
         from: Did,
+        /// Decoded payload slice to dispatch.
         payload: Bytes,
+        /// Encoded byte weight reserved in the queue until dispatch finishes.
         weight: usize,
     },
     /// A fact about the link to one peer.
-    Fact { route: Route, fact: LinkFact },
+    Fact {
+        /// Resolved protocol route that will observe the link fact.
+        route: Route,
+        /// Link lifecycle or drop fact to deliver.
+        fact: LinkFact,
+    },
 }
 
 /// Monotonic position of an item in one [`NamespaceQueue`].
@@ -220,14 +233,17 @@ struct PeerFacts {
 }
 
 impl PeerFacts {
+    /// Returns the position of the most recent queued admission or retirement fact.
     fn last_lifecycle(&self) -> Option<Position> {
         self.lifecycle.back().map(|(at, _)| *at)
     }
 
+    /// Returns the total number of queued control facts for this peer.
     fn len(&self) -> usize {
         self.lifecycle.len() + self.drops.len()
     }
 
+    /// Returns `true` when no control facts are queued for this peer.
     fn is_empty(&self) -> bool {
         self.lifecycle.is_empty() && self.drops.is_empty()
     }
@@ -269,6 +285,7 @@ impl Queue {
         self.envelopes < NAMESPACE_QUEUE_CAPACITY && admits(self.weight, weight)
     }
 
+    /// Appends `queued` at the next monotonic position and returns that position.
     fn append(&mut self, queued: Queued) -> Position {
         let at = self.next;
         self.next = at.saturating_add(1);
@@ -276,6 +293,7 @@ impl Queue {
         at
     }
 
+    /// Enqueues an envelope if the queue is served and within capacity, returning any parked waker.
     fn push_envelope(
         &mut self,
         route: Route,
@@ -301,6 +319,7 @@ impl Queue {
         Ok(self.waker.take())
     }
 
+    /// Releases one completed or cancelled envelope's count and byte weight from the queue.
     fn release_envelope(&mut self, weight: usize) {
         if !self.unserved {
             self.envelopes = self.envelopes.saturating_sub(1);
@@ -308,6 +327,7 @@ impl Queue {
         }
     }
 
+    /// Records a peer link fact with per-peer coalescing, returning the transition and any waker.
     fn record_fact(&mut self, route: Route, fact: LinkFact) -> (FactTransition, Option<Waker>) {
         if self.unserved {
             return (FactTransition::Unserved, None);
@@ -411,6 +431,7 @@ impl Queue {
         result
     }
 
+    /// Pops the earliest queued item and updates the envelope and per-peer fact indices.
     fn take(&mut self) -> Option<Queued> {
         let (at, queued) = self.items.pop_first()?;
         match &queued {
@@ -449,11 +470,13 @@ impl Queue {
         Some(queued)
     }
 
+    /// Marks the producer side closed and returns any parked worker waker.
     fn close_sender(&mut self) -> Option<Waker> {
         self.closed = true;
         self.waker.take()
     }
 
+    /// Marks the receiver side unserved and clears all queued state.
     fn close_receiver(&mut self) {
         self.unserved = true;
         self.items.clear();
@@ -465,8 +488,10 @@ impl Queue {
     }
 }
 
+/// Synchronized wrapper around a namespace's [`Queue`].
 #[derive(Default)]
 struct Shared {
+    /// Mutex-protected queue state shared between producer and worker.
     queue: Mutex<Queue>,
 }
 
@@ -479,17 +504,21 @@ impl Shared {
 
 /// Producer handle for one namespace's queue.
 struct NamespaceQueue {
+    /// Shared queue state synchronized with the namespace worker.
     shared: Arc<Shared>,
 }
 
 /// Worker handle for one namespace's queue.
 struct NamespaceReceiver {
+    /// Shared queue state synchronized with the producer.
     shared: Arc<Shared>,
 }
 
 /// Releases an envelope's count and byte weight once `Route::dispatch` finishes or is cancelled.
 struct EnvelopePermit {
+    /// Shared queue state whose accounting is updated on drop.
     shared: Arc<Shared>,
+    /// Encoded byte weight reserved for the in-flight envelope.
     weight: usize,
 }
 
@@ -514,6 +543,7 @@ impl Drop for NamespaceReceiver {
     }
 }
 
+/// Creates a paired producer and worker handle for a single namespace queue.
 fn channel() -> (NamespaceQueue, NamespaceReceiver) {
     let shared = Arc::new(Shared::default());
     (
@@ -525,6 +555,7 @@ fn channel() -> (NamespaceQueue, NamespaceReceiver) {
 }
 
 impl NamespaceReceiver {
+    /// Waits for and returns the next queued item, or `None` once closed and drained.
     async fn next(&self) -> Option<Queued> {
         poll_fn(|cx| {
             let mut queue = self.shared.lock();
@@ -543,9 +574,13 @@ impl NamespaceReceiver {
 
 /// The dispatch queue of every namespace that has received an envelope or link fact.
 pub(super) struct NamespaceQueues {
+    /// Shared extension registry core used to resolve routes and spawn workers.
     core: Core,
+    /// Active per-namespace producer queues keyed by namespace name.
     queues: HashMap<String, NamespaceQueue>,
+    /// Cumulative drop counters shared with the provider.
     drops: Arc<DispatchDrops>,
+    /// Stop token that terminates all spawned namespace workers.
     stop: StopToken,
 }
 
@@ -610,6 +645,7 @@ impl NamespaceQueues {
 }
 
 impl NamespaceQueue {
+    /// Enqueues an envelope onto this namespace queue and wakes the worker if parked.
     fn submit_envelope(
         &self,
         route: Route,

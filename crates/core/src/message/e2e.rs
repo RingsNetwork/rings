@@ -65,12 +65,19 @@ pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
 /// Default plaintext bytes per encrypted E2E stream frame.
 pub const DEFAULT_E2E_PLAINTEXT_FRAME_LEN: usize = E2E_PLAINTEXT_BLOCK_LEN * 16;
 
+/// Byte length of the ChaCha20-Poly1305 AEAD key.
 const E2E_AEAD_KEY_LEN: usize = 32;
+/// Byte length of the ChaCha20-Poly1305 AEAD nonce.
 const E2E_AEAD_NONCE_LEN: usize = 12;
+/// Byte length of the Poly1305 authentication tag.
 const E2E_AEAD_TAG_LEN: usize = 16;
+/// HKDF salt for E2E ECIES v1 key derivation.
 const E2E_ECIES_SALT: &[u8] = b"rings-core:e2e-ecies-v1:salt";
+/// HKDF info label for E2E ECIES v1 ChaCha20-Poly1305 key/nonce expansion.
 const E2E_ECIES_INFO: &[u8] = b"rings-core:e2e-ecies-v1:chacha20poly1305";
+/// Domain tag prefix bound into E2E ECIES v1 associated authenticated data.
 const E2E_ECIES_AAD_TAG: &[u8] = b"rings-core:e2e-ecies-v1:aad";
+/// Fixed byte length of the serialized E2E ECIES v1 AAD buffer.
 const E2E_ECIES_AAD_LEN: usize = E2E_ECIES_AAD_TAG.len() + 16 + 33 + 33 + 33 + 8 + 1;
 
 /// Identifier shared by all frames of one encrypted E2E stream.
@@ -107,43 +114,66 @@ pub struct E2eStreamFrame {
     pub ciphertext: Vec<u8>,
 }
 
+/// Borrowed slice of plaintext paired with its end-of-stream flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct E2ePlaintextFrame<'a> {
+    /// Plaintext bytes for this frame.
     plaintext: &'a [u8],
+    /// Whether this frame terminates the stream.
     is_final: bool,
 }
 
+/// Iterator slicing a plaintext buffer into [`E2ePlaintextFrame`] items, including an empty final frame for empty inputs.
 struct E2ePlaintextFrames<'a> {
+    /// Peekable slice chunks iterator over the input plaintext.
     chunks: std::iter::Peekable<std::slice::Chunks<'a, u8>>,
+    /// Whether the original input slice was empty.
     plaintext_is_empty: bool,
+    /// Whether the synthetic empty final frame has already been yielded.
     emitted_empty_final: bool,
 }
 
 /// Lazy iterator that encrypts one E2E stream frame per iteration.
 pub struct E2eStreamFrames<'a, R: RngCore> {
+    /// Source iterator yielding plaintext slices and final markers.
     plaintext_frames: E2ePlaintextFrames<'a>,
+    /// Stateful stream encryptor tracking sequence numbers and keys.
     encryptor: E2eStreamEncryptor,
+    /// Random number generator used to sample per-frame ephemeral keys.
     rng: R,
 }
 
 /// Stateful streaming encryptor for direct ElGamal body frames.
 pub struct E2eStreamEncryptor {
+    /// Stream identifier bound into every emitted frame.
     stream_id: E2eStreamId,
+    /// Sender's compressed secp256k1 public key.
     sender_public_key: PublicKey<33>,
+    /// Recipient's compressed secp256k1 public key.
     recipient_public_key: PublicKey<33>,
+    /// Next frame sequence number to emit.
     next_sequence: u64,
+    /// Whether a final frame has already been emitted.
     closed: bool,
 }
 
 /// Stateful streaming decryptor for direct ElGamal body frames.
 pub struct E2eStreamDecryptor {
+    /// Expected stream identifier for all frames in this stream.
     stream_id: E2eStreamId,
+    /// Expected authenticated sender DID.
     expected_sender: Did,
+    /// Recipient's secp256k1 secret key for ECDH decryption.
     recipient_secret_key: SecretKey,
+    /// Next contiguous frame sequence number awaiting decryption.
     next_sequence: u64,
+    /// Observed sequence number of the final frame, once received.
     final_sequence: Option<u64>,
+    /// Whether the final frame has been decrypted and released.
     seen_final: bool,
+    /// Maximum out-of-order distance ahead of `next_sequence` buffered in `pending_frames`.
     reorder_window: u64,
+    /// Out-of-order frames buffered by sequence number until gaps arrive.
     pending_frames: BTreeMap<u64, E2eStreamFrame>,
     /// How long the stream may go without progress before it is stalled.
     stall_deadline: Duration,
@@ -152,13 +182,17 @@ pub struct E2eStreamDecryptor {
     progress_ms: u128,
 }
 
+/// Classification of a validated inbound E2E stream frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FrameAcceptance {
+    /// Frame is new and should be buffered and decrypted when contiguous.
     New,
+    /// Frame is an idempotent duplicate of an already-seen frame.
     Duplicate,
 }
 
 impl<'a> E2ePlaintextFrames<'a> {
+    /// Create a frame iterator over `plaintext` with chunks of at most `max_plaintext_frame_len` bytes.
     fn new(plaintext: &'a [u8], max_plaintext_frame_len: usize) -> Self {
         Self {
             chunks: plaintext.chunks(max_plaintext_frame_len.max(1)).peekable(),
@@ -284,6 +318,7 @@ impl E2eStreamEncryptor {
         self.encrypt_frame(plaintext, true, rng)
     }
 
+    /// Encrypt one [`E2ePlaintextFrame`], dispatching to [`Self::encrypt_final`] or [`Self::encrypt_next`].
     fn encrypt_plaintext_frame(
         &mut self,
         frame: E2ePlaintextFrame<'_>,
@@ -296,6 +331,7 @@ impl E2eStreamEncryptor {
         }
     }
 
+    /// Encrypt `plaintext` into the next [`E2eStreamFrame`], marking the stream closed if `is_final`.
     fn encrypt_frame(
         &mut self,
         plaintext: &[u8],
@@ -434,6 +470,7 @@ impl E2eStreamDecryptor {
         self.decrypt_ready_frames()
     }
 
+    /// Validate `frame`'s stream ID, sender, sequence bounds, and final-frame invariants.
     fn validate_frame(&self, frame: &E2eStreamFrame) -> Result<FrameAcceptance> {
         if frame.stream_id != self.stream_id {
             return Err(Error::E2eStreamIdMismatch {
@@ -491,6 +528,7 @@ impl E2eStreamDecryptor {
         Ok(FrameAcceptance::New)
     }
 
+    /// Decrypt and drain all contiguous pending frames starting from `self.next_sequence`.
     fn decrypt_ready_frames(&mut self) -> Result<Vec<u8>> {
         let mut plaintext = Vec::new();
         let recipient_public_key = self.recipient_secret_key.pubkey();
@@ -515,12 +553,14 @@ impl E2eStreamDecryptor {
         Ok(plaintext)
     }
 
+    /// Return whether any buffered pending frame has a sequence strictly greater than `sequence`.
     fn has_pending_frame_after(&self, sequence: u64) -> bool {
         self.pending_frames
             .last_key_value()
             .is_some_and(|(pending_sequence, _)| *pending_sequence > sequence)
     }
 
+    /// Return whether `frame` falls within the already-decrypted sequence range.
     fn is_consumed_duplicate(&self, frame: &E2eStreamFrame) -> bool {
         if frame.sequence < self.next_sequence {
             return true;
@@ -532,11 +572,13 @@ impl E2eStreamDecryptor {
                 .is_some_and(|final_sequence| frame.sequence <= final_sequence)
     }
 
+    /// Return whether `sequence` lies beyond the configured reorder window from `self.next_sequence`.
     fn exceeds_reorder_window(&self, sequence: u64) -> bool {
         sequence.saturating_sub(self.next_sequence) > self.reorder_window
     }
 }
 
+/// Perform ECDH key agreement and ChaCha20-Poly1305 AEAD decryption for one [`E2eStreamFrame`].
 fn decrypt_ecies_frame(
     frame: &E2eStreamFrame,
     recipient_public_key: PublicKey<33>,
@@ -562,11 +604,15 @@ fn decrypt_ecies_frame(
         .map_err(|_| Error::MessageDecryptionFailed("E2E AEAD open failed".to_string()))
 }
 
+/// Zeroized AEAD key and nonce material derived from an ECDH shared secret via HKDF-SHA256.
 struct E2eDerivedMaterial {
+    /// 32-byte ChaCha20-Poly1305 key.
     key: Zeroizing<[u8; E2E_AEAD_KEY_LEN]>,
+    /// 12-byte ChaCha20-Poly1305 nonce.
     nonce: Zeroizing<[u8; E2E_AEAD_NONCE_LEN]>,
 }
 
+/// Derive the per-frame ChaCha20-Poly1305 key and nonce from `shared_secret` using HKDF-SHA256.
 fn derive_e2e_key_and_nonce(
     shared_secret: &[u8],
     encrypt_side: bool,
@@ -589,6 +635,7 @@ fn derive_e2e_key_and_nonce(
     Ok(E2eDerivedMaterial { key, nonce })
 }
 
+/// Assemble the fixed-length associated authenticated data binding stream metadata to a frame.
 fn e2e_ecies_aad(
     stream_id: E2eStreamId,
     sender_public_key: PublicKey<33>,
@@ -618,6 +665,7 @@ fn e2e_ecies_aad(
     aad
 }
 
+/// Construct an [`E2ePlaintextFrames`] iterator over `plaintext`.
 fn plaintext_stream_frames(
     plaintext: &[u8],
     max_plaintext_frame_len: usize,
@@ -710,11 +758,13 @@ pub fn ensure_public_key_matches_did(public_key: PublicKey<33>, expected: Did) -
     }
 }
 
+/// Validate that `public_key` decodes to a valid secp256k1 curve point.
 fn ensure_valid_public_key(public_key: PublicKey<33>) -> Result<()> {
     let _: Point<Secp256k1> = public_key.try_into()?;
     Ok(())
 }
 
+/// Increment a frame sequence counter, failing with [`Error::E2eFrameSequenceOverflow`] on overflow.
 fn next_sequence(sequence: u64) -> Result<u64> {
     sequence
         .checked_add(1)

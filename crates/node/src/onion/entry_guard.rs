@@ -26,15 +26,20 @@ use super::OnionRouteHop;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Storage key prefix for persisted local entry-guard snapshots.
 const ENTRY_GUARD_KEY_PREFIX: &str = "rings-node:onion-entry-guards";
+/// Default number of entry guards maintained per network.
 const DEFAULT_ENTRY_GUARD_COUNT: usize = 3;
 /// Maximum lifetime a persisted entry guard is retained before rotation (30 days).
 const ENTRY_GUARD_ROTATION_LIFETIME_MS: u128 = 30 * 24 * 60 * 60 * 1_000;
 /// Grace window a persisted entry guard may remain absent from live snapshots before eviction
 /// (24 hours).
 const ENTRY_GUARD_UNREACHABLE_GRACE_MS: u128 = 24 * 60 * 60 * 1_000;
+/// High-bit tag indicating a packed guard timestamp includes an unreachable-since value.
 const PACKED_UNREACHABLE_TAG: u128 = 1_u128 << 127;
+/// Bitmask for the low 64 bits storing `selected_at_ms` in compact serialization.
 const PACKED_LOW_64_MASK: u128 = u64::MAX as u128;
+/// Bitmask for the 63-bit `unreachable_since_ms` field in compact serialization.
 const PACKED_HIGH_63_MASK: u128 = (1_u128 << 63) - 1;
 
 /// Serialized local entry-guard snapshot.
@@ -44,7 +49,9 @@ const PACKED_HIGH_63_MASK: u128 = (1_u128 << 63) - 1;
 /// should not construct or interpret guard state directly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OnionEntryGuardState {
+    /// Network identifier this guard set belongs to.
     network_id: u32,
+    /// Persisted guard records in selection order.
     guards: Vec<OnionEntryGuardRecord>,
 }
 
@@ -52,17 +59,25 @@ pub struct OnionEntryGuardState {
 pub type OnionEntryGuardStorage =
     Box<rings_runtime::maybe_send_sync!(dyn KvStorageInterface<OnionEntryGuardState>)>;
 
+/// Persisted metadata for a single selected onion entry guard.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct OnionEntryGuardRecord {
+    /// Peer DID of the entry guard.
     did: Did,
+    /// Epoch timestamp in milliseconds when this guard was first selected.
     selected_at_ms: u128,
+    /// Epoch timestamp in milliseconds when this guard was first observed unreachable.
     unreachable_since_ms: Option<u128>,
 }
 
+/// Human-readable serde representation of [`OnionEntryGuardRecord`].
 #[derive(Deserialize, Serialize)]
 struct HumanReadableGuardRecord {
+    /// Peer DID of the entry guard.
     did: Did,
+    /// Epoch timestamp in milliseconds when this guard was first selected.
     selected_at_ms: u128,
+    /// Epoch timestamp in milliseconds when this guard was first observed unreachable.
     #[serde(default)]
     unreachable_since_ms: Option<u128>,
 }
@@ -120,34 +135,48 @@ impl<'de> Deserialize<'de> for OnionEntryGuardRecord {
     }
 }
 
+/// Set of active entry-guard DIDs permitted for route selection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OnionEntryGuardSet {
+    /// Active guard peer DIDs.
     dids: BTreeSet<Did>,
 }
 
 impl OnionEntryGuardSet {
+    /// Return whether `did` is in the active entry-guard set.
     pub(crate) fn contains(&self, did: Did) -> bool {
         self.dids.contains(&did)
     }
 }
 
+/// Number of consecutive circuit timeouts before a guard is evicted and cooled down.
 pub(crate) const ENTRY_GUARD_MAX_CONSECUTIVE_TIMEOUTS: u8 = 3;
+/// Duration in milliseconds an evicted guard remains in cooldown before re-selection.
 pub(crate) const ENTRY_GUARD_TIMEOUT_COOLDOWN_MS: u128 = 5 * 60 * 1_000;
 
+/// In-memory tracking of consecutive route timeouts and active cooldown windows per guard.
 #[derive(Default)]
 struct GuardTimeoutState {
+    /// Consecutive timeout count keyed by `(network_id, guard_did)`.
     consecutive_timeouts: BTreeMap<(u32, Did), u8>,
+    /// Cooldown expiration timestamp in milliseconds keyed by `(network_id, guard_did)`.
     cooldown_until_ms: BTreeMap<(u32, Did), u128>,
 }
 
+/// Persistent manager for local onion entry-guard selection, rotation, and timeout eviction.
 pub(crate) struct OnionEntryGuards {
+    /// Durable cache backend storing [`OnionEntryGuardState`] snapshots.
     storage: OnionEntryGuardStorage,
+    /// Optional local node DID used to namespace storage keys.
     local_did: Option<Did>,
+    /// Desired number of persisted entry guards per network.
     target_guard_count: usize,
+    /// Synchronized in-memory timeout and cooldown tracker.
     timeout_state: std::sync::Mutex<GuardTimeoutState>,
 }
 
 impl OnionEntryGuards {
+    /// Create a guard manager namespaced to `local_did` with the default target guard count.
     pub(crate) fn new_for_did(storage: OnionEntryGuardStorage, local_did: Did) -> Self {
         Self {
             storage,
@@ -170,6 +199,7 @@ impl OnionEntryGuards {
         }
     }
 
+    /// Build the storage key for `network_id` and this node's optional `local_did`.
     fn state_key(&self, network_id: u32) -> String {
         entry_guard_state_key_for_did(network_id, self.local_did)
     }
@@ -262,6 +292,7 @@ impl OnionEntryGuards {
         .await
     }
 
+    /// Reconcile and persist the entry-guard set for `network_id` at `now_ms`, returning the active guard DIDs.
     pub(crate) async fn select_relay_guards_at(
         &self,
         network_id: u32,
@@ -315,6 +346,7 @@ impl OnionEntryGuards {
         Ok(next.set)
     }
 
+    /// Write `state` to local storage under `key` only if it differs from `previous`.
     async fn persist_if_changed(
         &self,
         key: &str,
@@ -328,17 +360,23 @@ impl OnionEntryGuards {
     }
 }
 
+/// Output of reconciling persisted entry guards against the current eligible relay set.
 struct ReconciledGuards {
+    /// Previously persisted state loaded from storage, if any.
     previous: Option<OnionEntryGuardState>,
+    /// Updated guard state to persist.
     state: OnionEntryGuardState,
+    /// Active guard DIDs to allow for the current route selection.
     set: OnionEntryGuardSet,
 }
 
 impl OnionEntryGuardRecord {
+    /// Return whether this guard has not yet exceeded its rotation lifetime at `now_ms`.
     fn is_within_rotation_lifetime(&self, now_ms: u128) -> bool {
         now_ms.saturating_sub(self.selected_at_ms) < ENTRY_GUARD_ROTATION_LIFETIME_MS
     }
 
+    /// Reconcile this guard record against `eligible_dids` at `now_ms`, returning `None` if rotated or evicted.
     fn reconciled_at(&self, now_ms: u128, eligible_dids: &BTreeSet<Did>) -> Option<Self> {
         if !self.is_within_rotation_lifetime(now_ms) {
             return None;
@@ -363,6 +401,7 @@ impl OnionEntryGuardRecord {
     }
 }
 
+/// Sample one quality-weighted DID from `eligible_dids` not matched by `excluded`.
 fn pick_next_weighted_candidate(
     eligible_dids: &BTreeSet<Did>,
     excluded: impl Fn(Did) -> bool,
@@ -378,6 +417,7 @@ fn pick_next_weighted_candidate(
         .and_then(|index| remaining.get(index).copied())
 }
 
+/// Reconcile `previous` guard records against `eligible_dids`, refilling up to `target_guard_count`.
 fn reconcile_guard_state(
     network_id: u32,
     previous: Option<OnionEntryGuardState>,
@@ -452,6 +492,7 @@ fn reconcile_guard_state(
     }
 }
 
+/// Filter `relays` to permitted first-hop DIDs, preferring non-degraded peers when available.
 fn eligible_guard_dids(
     relays: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
@@ -479,6 +520,7 @@ fn entry_guard_state_key(network_id: u32) -> String {
     entry_guard_state_key_for_did(network_id, None)
 }
 
+/// Format the local storage key for `network_id` and an optional `local_did`.
 fn entry_guard_state_key_for_did(network_id: u32, local_did: Option<Did>) -> String {
     match local_did {
         Some(did) => format!("{ENTRY_GUARD_KEY_PREFIX}:network:{network_id}:did:{did}"),

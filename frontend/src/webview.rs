@@ -36,6 +36,7 @@ use wasm_bindgen::JsValue;
 
 use crate::onion;
 
+/// Browser Service Worker gateway bridge and popup helpers.
 mod browser_gateway;
 #[cfg(test)]
 use self::browser_gateway::browser_request_id;
@@ -44,9 +45,13 @@ pub(crate) use self::browser_gateway::install_browser_gateway;
 pub(crate) use self::browser_gateway::open_webview_popup;
 pub(crate) use self::browser_gateway::register_browser_gateway;
 
+/// Controlled URL path prefix served by the Rings WebView gateway.
 pub(crate) const GATEWAY_PREFIX: &str = "/webview/";
+/// Maximum number of concurrent onion-proxied gateway requests allowed per node.
 const MAX_CONCURRENT_GATEWAY_REQUESTS: usize = 6;
+/// Maximum number of pending gateway requests allowed to wait for an execution slot.
 const MAX_QUEUED_GATEWAY_REQUESTS: usize = 32;
+/// Inline bootstrap snippet that injects the WebView debug overlay into top-level documents.
 const WEBVIEW_OVERLAY_LOADER: &str = r#"
 (() => {
   "use strict";
@@ -67,6 +72,7 @@ const WEBVIEW_OVERLAY_LOADER: &str = r#"
 })();
 "#;
 
+/// Decodes a Service Worker request object, dispatches it through `gateway`, and encodes the JS response.
 pub(crate) async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
     let request = match browser_host_request(&request) {
         Ok(request) => request,
@@ -87,6 +93,7 @@ pub(crate) async fn dispatch_browser_request(gateway: WebviewNode, request: JsVa
     }
 }
 
+/// Parses a JavaScript gateway request payload into a typed [`WebviewHostRequest`].
 fn browser_host_request(value: &JsValue) -> Result<WebviewHostRequest, String> {
     let requested = parse_url(
         crate::browser_api::js_string_field(value, "requested")?,
@@ -132,10 +139,12 @@ fn browser_host_request(value: &JsValue) -> Result<WebviewHostRequest, String> {
     Ok(request.with_credentials(credentials))
 }
 
+/// Parses a raw URL string and prefixes parse errors with `field`.
 fn parse_url(value: String, field: &str) -> Result<Url, String> {
     Url::parse(value.as_str()).map_err(|error| format!("{field}: {error}"))
 }
 
+/// Extracts and validates the optional `credentials` mode from a JS request object.
 fn browser_credentials(value: &JsValue) -> Result<GatewayCredentials, String> {
     let credentials = crate::browser_api::js_prop(value, "credentials")?;
     if credentials.is_null() || credentials.is_undefined() {
@@ -153,10 +162,12 @@ fn browser_credentials(value: &JsValue) -> Result<GatewayCredentials, String> {
     }
 }
 
+/// Parses a [`TargetUrl`] string and prefixes parse errors with `field`.
 fn parse_target(value: String, field: &str) -> Result<TargetUrl, String> {
     TargetUrl::parse(value.as_str()).map_err(|error| format!("{field}: {error}"))
 }
 
+/// Reads an optional [`TargetUrl`] property named `field` from a JS object.
 fn optional_target(value: &JsValue, field: &str) -> Result<Option<TargetUrl>, String> {
     let target = crate::browser_api::js_prop(value, field)?;
     if target.is_null() || target.is_undefined() {
@@ -168,6 +179,7 @@ fn optional_target(value: &JsValue, field: &str) -> Result<Option<TargetUrl>, St
         .transpose()
 }
 
+/// Extracts and validates the optional `headers` array from a JS request object.
 fn browser_headers(value: &JsValue) -> Result<Vec<GatewayHeader>, String> {
     let headers = crate::browser_api::js_prop(value, "headers")?;
     if headers.is_null() || headers.is_undefined() {
@@ -187,6 +199,7 @@ fn browser_headers(value: &JsValue) -> Result<Vec<GatewayHeader>, String> {
     Ok(result)
 }
 
+/// Extracts the optional binary `body` bytes from a JS request object.
 fn browser_body(value: &JsValue) -> Result<Vec<u8>, String> {
     let body = crate::browser_api::js_prop(value, "body")?;
     if body.is_null() || body.is_undefined() {
@@ -195,6 +208,7 @@ fn browser_body(value: &JsValue) -> Result<Vec<u8>, String> {
     Ok(Uint8Array::new(&body).to_vec())
 }
 
+/// Serializes a successful [`GatewayResponse`] into the JS object expected by the Service Worker.
 fn browser_response(response: GatewayResponse) -> JsValue {
     let value = Object::new();
     let headers = Array::new();
@@ -216,6 +230,7 @@ fn browser_response(response: GatewayResponse) -> JsValue {
     value.into()
 }
 
+/// Serializes a 302 redirect response pointing to `location` for the Service Worker.
 fn browser_redirect(location: &str) -> JsValue {
     let value = Object::new();
     let headers = Array::new();
@@ -229,6 +244,7 @@ fn browser_redirect(location: &str) -> JsValue {
     value.into()
 }
 
+/// Serializes a gateway error response using the default code and summary for `status`.
 fn browser_failure(status: u16, error: String) -> JsValue {
     browser_failure_with(
         status,
@@ -238,6 +254,7 @@ fn browser_failure(status: u16, error: String) -> JsValue {
     )
 }
 
+/// Serializes a structured gateway error payload for the Service Worker bridge.
 fn browser_failure_with(status: u16, code: &str, summary: &str, error: String) -> JsValue {
     let value = Object::new();
     let _ok = crate::browser_api::js_set(&value, "ok", &JsValue::FALSE);
@@ -249,6 +266,7 @@ fn browser_failure_with(status: u16, code: &str, summary: &str, error: String) -
     value.into()
 }
 
+/// Converts a [`WebviewError`] transport or gateway failure into a JS error response object.
 fn browser_transport_failure(error: WebviewError) -> JsValue {
     match error {
         WebviewError::GatewayFailure(failure) => browser_failure_with(
@@ -272,6 +290,7 @@ fn browser_transport_failure(error: WebviewError) -> JsValue {
     }
 }
 
+/// Maps an [`onion::OnionProxyError`] into a structured [`WebviewError::GatewayFailure`].
 fn onion_gateway_failure(error: onion::OnionProxyError) -> WebviewError {
     let code = match error.kind() {
         onion::OnionProxyFailureKind::Generic => GatewayFailureCode::GatewayTransportFailed,
@@ -285,6 +304,7 @@ fn onion_gateway_failure(error: onion::OnionProxyError) -> WebviewError {
     ))
 }
 
+/// Returns the default machine-readable error code for an HTTP `status`.
 fn default_failure_code(status: u16) -> &'static str {
     match status {
         400 => "invalid_webview_request",
@@ -296,6 +316,7 @@ fn default_failure_code(status: u16) -> &'static str {
     }
 }
 
+/// Returns the default human-readable error summary for an HTTP `status`.
 fn default_failure_summary(status: u16) -> &'static str {
     match status {
         400 => "Invalid WebView request.",
@@ -310,13 +331,21 @@ fn default_failure_summary(status: u16) -> &'static str {
 /// A browser request captured by the Rings-controlled WebView host.
 #[derive(Clone, Debug)]
 pub struct WebviewHostRequest {
+    /// Captured URL requested by the browser or controlled page.
     requested: Url,
+    /// Initiating controlled document target URL, if applicable.
     source_target: Option<TargetUrl>,
+    /// HTTP request method (for example, `GET` or `POST`).
     method: String,
+    /// Forwarded HTTP request headers.
     headers: Vec<GatewayHeader>,
+    /// Raw HTTP request body bytes.
     body: Vec<u8>,
+    /// Classification of the browser request (navigation, subresource, fetch, or XHR).
     kind: GatewayRequestKind,
+    /// Fetch credentials mode controlling cookie inclusion.
     credentials: GatewayCredentials,
+    /// Whether this request is a top-level document navigation.
     top_level_navigation: bool,
 }
 
@@ -399,6 +428,7 @@ impl WebviewHostRequest {
         )
     }
 
+    /// Constructs a [`WebviewHostRequest`] with default credentials and navigation flags.
     fn new(
         requested: Url,
         source_target: Option<TargetUrl>,
@@ -419,6 +449,7 @@ impl WebviewHostRequest {
         }
     }
 
+    /// Constructs a runtime (`fetch` or `xhr`) request bound to `source_target`.
     fn runtime(
         requested: Url,
         source_target: TargetUrl,
@@ -430,21 +461,25 @@ impl WebviewHostRequest {
         Self::new(requested, Some(source_target), method, headers, body, kind)
     }
 
+    /// Sets the credentials mode for this request.
     fn with_credentials(mut self, credentials: GatewayCredentials) -> Self {
         self.credentials = credentials;
         self
     }
 
+    /// Sets the initiating controlled page target for this request.
     fn with_source_target(mut self, source_target: Option<TargetUrl>) -> Self {
         self.source_target = source_target;
         self
     }
 
+    /// Sets whether this request represents a top-level document navigation.
     fn with_top_level_navigation(mut self, top_level_navigation: bool) -> Self {
         self.top_level_navigation = top_level_navigation;
         self
     }
 
+    /// Converts this host request into a [`GatewayRequest`] targeting `target`.
     fn into_gateway_request(self, target: TargetUrl) -> GatewayRequest {
         let source_target = self.source_target.map(TargetUrl::into_url);
         GatewayRequest {
@@ -478,6 +513,7 @@ pub enum WebviewHostOutcome {
 /// Clones share one cookie jar and a bounded number of concurrent onion requests.
 #[derive(Clone)]
 pub struct WebviewNode {
+    /// Shared gateway host state backed by the onion transport.
     host: Rc<WebviewGatewayHost<OnionGatewayTransport>>,
 }
 
@@ -512,6 +548,7 @@ impl WebviewNode {
         self.host.handle(request).await
     }
 
+    /// Builds a [`WebviewNode`] for `controlled_origin` with the given `request_bootstrap` generator.
     fn new(
         provider: Arc<Provider>,
         controlled_origin: Url,
@@ -534,15 +571,20 @@ impl WebviewNode {
     }
 }
 
+/// Core routing, admission-control, and gateway dispatch state parameterized by transport `T`.
 struct WebviewGatewayHost<T> {
+    /// Route policy deciding whether requests are controlled, redirected, served, or rejected.
     policy: GatewayRoutePolicy,
+    /// Concurrent gateway executor managing cookie state and HTML/URL rewriting.
     gateway: ConcurrentWebviewGateway<T>,
+    /// Bounded concurrency and queue limiter protecting the local node.
     limiter: GatewayRequestLimiter,
 }
 
 impl<T> WebviewGatewayHost<T>
 where T: GatewayTransport
 {
+    /// Routes and executes a captured [`WebviewHostRequest`] under admission control.
     async fn handle(&self, request: WebviewHostRequest) -> WebviewResult<WebviewHostOutcome> {
         match self.policy.route(
             &request.requested,
@@ -568,19 +610,27 @@ where T: GatewayTransport
     }
 }
 
+/// Single-threaded async semaphore with a bounded FIFO waiter queue for gateway requests.
 #[derive(Clone)]
 struct GatewayRequestLimiter {
+    /// Shared interior-mutable permit count and waiter queue.
     state: Rc<RefCell<GatewayRequestLimiterState>>,
 }
 
+/// Mutable permit accounting and pending waiter queue for [`GatewayRequestLimiter`].
 struct GatewayRequestLimiterState {
+    /// Number of immediately available concurrency permits.
     available: usize,
+    /// Maximum number of requests allowed to wait in `waiters`.
     maximum_waiters: usize,
+    /// FIFO queue of waiting callers awaiting a released permit.
     waiters: VecDeque<GatewayRequestWaiter>,
 }
 
+/// Error returned when a request cannot be admitted to [`GatewayRequestLimiter`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GatewayRequestAdmissionError {
+    /// Waiter queue has reached its configured capacity.
     QueueFull,
 }
 
@@ -592,20 +642,30 @@ impl std::fmt::Display for GatewayRequestAdmissionError {
     }
 }
 
+/// Entry representing one task waiting in [`GatewayRequestLimiterState::waiters`].
 struct GatewayRequestWaiter {
+    /// Unique allocation identity used to remove this waiter on cancellation.
     owner: Rc<()>,
+    /// Flag set to `true` once a permit has been handed off to `sender`.
     granted: Rc<Cell<bool>>,
+    /// Oneshot channel notified when a permit is transferred to this waiter.
     sender: oneshot::Sender<()>,
 }
 
+/// Drop guard that cancels a queued waiter or releases a granted permit if dropped early.
 struct GatewayRequestWaiterGuard {
+    /// Parent limiter owning the waiter queue.
     limiter: GatewayRequestLimiter,
+    /// Waiter identity matching [`GatewayRequestWaiter::owner`].
     owner: Rc<()>,
+    /// Shared flag recording whether a permit was already handed off to this waiter.
     granted: Rc<Cell<bool>>,
+    /// Whether dropping this guard should perform cleanup.
     armed: bool,
 }
 
 impl GatewayRequestWaiterGuard {
+    /// Disarms the guard once ownership of the granted permit has been transferred.
     fn disarm(&mut self) {
         self.armed = false;
     }
@@ -625,6 +685,7 @@ impl Drop for GatewayRequestWaiterGuard {
 }
 
 impl GatewayRequestLimiter {
+    /// Creates a limiter with `maximum` concurrent permits and up to `maximum_waiters` queued callers.
     fn new(maximum: usize, maximum_waiters: usize) -> Self {
         Self {
             state: Rc::new(RefCell::new(GatewayRequestLimiterState {
@@ -635,6 +696,7 @@ impl GatewayRequestLimiter {
         }
     }
 
+    /// Acquires a concurrency permit, waiting in FIFO order or failing if the queue is full.
     async fn acquire(&self) -> Result<GatewayRequestPermit, GatewayRequestAdmissionError> {
         loop {
             let waiting = {
@@ -675,6 +737,7 @@ impl GatewayRequestLimiter {
         }
     }
 
+    /// Removes the queued waiter identified by `owner`, if still present.
     fn cancel_waiter(&self, owner: &Rc<()>) {
         self.state
             .borrow_mut()
@@ -682,6 +745,7 @@ impl GatewayRequestLimiter {
             .retain(|waiter| !Rc::ptr_eq(&waiter.owner, owner));
     }
 
+    /// Releases a permit to the next live waiter, or increments `available` if none remain.
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         while let Some(waiter) = state.waiters.pop_front() {
@@ -695,7 +759,9 @@ impl GatewayRequestLimiter {
     }
 }
 
+/// RAII permit that releases one concurrency slot back to [`GatewayRequestLimiter`] on drop.
 struct GatewayRequestPermit {
+    /// Limiter to notify when this permit is dropped.
     limiter: GatewayRequestLimiter,
 }
 
@@ -705,7 +771,9 @@ impl Drop for GatewayRequestPermit {
     }
 }
 
+/// [`GatewayTransport`] implementation forwarding HTTP requests over the Rings onion proxy.
 struct OnionGatewayTransport {
+    /// Local Rings node provider used to route onion HTTP requests.
     provider: Arc<Provider>,
 }
 
@@ -781,6 +849,7 @@ impl GatewayTransport for OnionGatewayTransport {
     }
 }
 
+/// Returns `true` when requests of `kind` should emit onion route debug entries.
 fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
     matches!(
         kind,
@@ -788,17 +857,27 @@ fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
     )
 }
 
+/// Structured onion routing telemetry forwarded to the WebView debug console.
 struct OnionDebugEvent<'a> {
+    /// Summary message displayed in the debug log entry.
     message: &'a str,
+    /// Log severity level (for example, `info` or `error`).
     level: &'a str,
+    /// Target URL requested through the onion proxy.
     target: &'a str,
+    /// Initiating controlled document URL, if available.
     source_target: Option<&'a str>,
+    /// Gateway request classification.
     kind: GatewayRequestKind,
+    /// Selected onion circuit metadata on success.
     route: Option<&'a onion::OnionProxyRoute>,
+    /// Error message when onion routing failed.
     error: Option<&'a str>,
+    /// Elapsed round-trip duration in milliseconds.
     duration_ms: f64,
 }
 
+/// Sends an [`OnionDebugEvent`] to `RingsWebviewHost.recordDebugEntry` if available.
 fn emit_onion_debug(event: OnionDebugEvent<'_>) {
     let Ok(bridge) = crate::browser_api::js_global_prop("RingsWebviewHost") else {
         return;
@@ -846,6 +925,7 @@ fn emit_onion_debug(event: OnionDebugEvent<'_>) {
     let _ = Reflect::apply(&record, &bridge, &args);
 }
 
+/// Returns the lowercase string label for a [`GatewayRequestKind`].
 fn gateway_kind_label(kind: GatewayRequestKind) -> &'static str {
     match kind {
         GatewayRequestKind::Navigation => "navigation",
@@ -855,6 +935,7 @@ fn gateway_kind_label(kind: GatewayRequestKind) -> &'static str {
     }
 }
 
+/// Builds the browser-shell bootstrap script, appending the debug overlay loader on top-level navigations.
 fn web_shell_bootstrap(request: &GatewayRequest) -> String {
     let bootstrap = bootstrap_script(GATEWAY_PREFIX, &request.target);
     if request.top_level_navigation {
@@ -864,10 +945,12 @@ fn web_shell_bootstrap(request: &GatewayRequest) -> String {
     }
 }
 
+/// Builds the MV3 extension bootstrap script with the extension bridge enabled.
 fn extension_webview_bootstrap(request: &GatewayRequest) -> String {
     bootstrap_script_with_extension_bridge(GATEWAY_PREFIX, &request.target)
 }
 
+/// Returns `true` if `origin` uses an `http://` or `https://` scheme.
 fn is_http_origin(origin: &str) -> bool {
     origin.starts_with("http://") || origin.starts_with("https://")
 }

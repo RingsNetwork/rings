@@ -99,9 +99,12 @@ use crate::registration::RegistrationTask;
 use crate::release::StoresReleased;
 use crate::tasks::NodeTasks;
 
+/// Default deadline for flushing measurement snapshots during graceful shutdown.
 const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Builder for constructing a configured [`Processor`].
 mod builder;
+/// Processor, transport, and serialized network configuration types.
 mod config;
 /// Handshakes: by DID over the overlay, and over a peer's HTTP endpoint.
 pub(crate) mod handshake;
@@ -159,9 +162,13 @@ pub struct Processor {
     /// The process epoch `e_n` carried by every onion symbol this process registers (#834 D2):
     /// drawn fresh at process start, renewed only by the onion admission state.
     onion_process_epoch: OnionProcessEpochCell,
+    /// Persistent onion entry-guard selection state shared across circuits.
     onion_entry_guards: Arc<OnionEntryGuards>,
+    /// Interval between Chord ring stabilization ticks.
     stabilize_interval: Duration,
+    /// Online-node presence registration definition for this processor.
     online_node_registration: OnlineNodeRegistration,
+    /// Optional periodic peer measurement and provisional-evidence tracker.
     measure: Option<Arc<PeriodicMeasure>>,
     /// The release witnesses of the file stores this processor is built over (#1085).
     stores_released: StoresReleased,
@@ -176,6 +183,7 @@ pub struct Processor {
     onion_idle_floor: OnionIdleFloor,
     /// Socket binding and peer-IP admission settings for native `onion::udp` exits.
     onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
+    /// Periodic DHT registration tasks driven by the listener generation.
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     /// Whether each registration task is stored at its owners (#866), in task order.
     registration_readiness: Arc<RegistrationReadiness>,
@@ -216,6 +224,7 @@ impl Processor {
         self.swarm.rng()
     }
 
+    /// Returns the currently active delegated session key for this processor.
     pub(crate) fn delegatee_key(&self) -> DelegateeKey {
         self.session_keys.current()
     }
@@ -321,11 +330,13 @@ impl Processor {
         self.stores_released.clone()
     }
 
+    /// Borrows this processor's onion entry-guard state.
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn onion_entry_guards(&self) -> &OnionEntryGuards {
         self.onion_entry_guards.as_ref()
     }
 
+    /// Returns a shared handle to this processor's onion entry-guard state.
     pub(crate) fn onion_entry_guards_arc(&self) -> Arc<OnionEntryGuards> {
         Arc::clone(&self.onion_entry_guards)
     }
@@ -351,6 +362,7 @@ impl Processor {
         self.onion_process_epoch.clone()
     }
 
+    /// Builds a [`RegistrationContext`] borrowing this processor for descriptor publication.
     fn registration_context(&self) -> RegistrationContext<'_> {
         RegistrationContext::new(self)
     }
@@ -559,6 +571,7 @@ impl Processor {
         .collect()
     }
 
+    /// Fetches `entry_key` from the DHT and returns the updated cache view without a caller stop token.
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
         let stop = StopToken::never();
         self.fetch_storage_entry_with_stop(entry_key, &stop).await
@@ -744,6 +757,7 @@ impl Processor {
             .await
     }
 
+    /// Flushes all applied measurement updates bounded by `timeout`.
     pub(crate) async fn flush_measurements_with_timeout(&self, timeout: Duration) -> Result<()> {
         if let Some(measure) = &self.measure {
             measure.flush_with_timeout(timeout).await?;
@@ -801,6 +815,7 @@ impl Processor {
         self.close_with_timeout(MEASUREMENT_FLUSH_TIMEOUT).await
     }
 
+    /// Closes the node's swarm and flushes measurements, bounding departure and flush by `timeout`.
     pub(crate) async fn close_with_timeout(&self, timeout: Duration) -> Result<()> {
         {
             let leave = self.leave();

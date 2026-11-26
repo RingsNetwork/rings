@@ -19,79 +19,132 @@ use crate::node::PeerView;
 use crate::node::SEED_ENDPOINTS;
 use crate::peer_sync;
 
+/// Role taken during a manual SDP handshake.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SdpMode {
+    /// Creates an offer for a remote DID and later accepts the remote answer.
     Initiator,
+    /// Accepts a remote offer and produces an answer to send back.
     Responder,
 }
 
+/// Active tab inside the peer connection dialog.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum LinkTab {
+    /// Out-of-band manual SDP offer/answer exchange.
     ManualSdp,
+    /// Direct connection via a seed node's HTTP endpoint.
     HttpEndpoint,
 }
 
+/// Borrowed reactive state handles backing the peer link control and dialog.
 pub(crate) struct ConnectState<'a> {
+    /// Seed HTTP endpoint URL input.
     pub(crate) http_endpoint: &'a UseStateHandle<String>,
+    /// Remote peer DID input for creating an SDP offer.
     pub(crate) sdp_remote_did: &'a UseStateHandle<String>,
+    /// Locally generated SDP offer payload.
     pub(crate) generated_offer: &'a UseStateHandle<String>,
+    /// Remote SDP offer payload entered by the responder.
     pub(crate) remote_offer: &'a UseStateHandle<String>,
+    /// Locally generated SDP answer payload.
     pub(crate) generated_answer: &'a UseStateHandle<String>,
+    /// Remote SDP answer payload entered by the initiator.
     pub(crate) remote_answer: &'a UseStateHandle<String>,
+    /// Selected manual SDP role.
     pub(crate) sdp_mode: &'a UseStateHandle<SdpMode>,
+    /// Whether the peer connection modal dialog is open.
     pub(crate) link_dialog_open: &'a UseStateHandle<bool>,
+    /// Active tab in the peer connection dialog.
     pub(crate) link_tab: &'a UseStateHandle<LinkTab>,
+    /// Whether the floating `+` launcher button should be hidden behind another modal.
     pub(crate) launcher_hidden: bool,
 }
 
+/// Owned view model passed into the peer connection dialog renderer.
 struct ConnectDialogView {
+    /// Currently selected dialog tab.
     active_tab: LinkTab,
+    /// Currently selected manual SDP role.
     active_sdp_mode: SdpMode,
+    /// Seed HTTP endpoint URL state handle.
     http_endpoint: UseStateHandle<String>,
+    /// Remote peer DID state handle.
     sdp_remote_did: UseStateHandle<String>,
+    /// Locally generated SDP offer state handle.
     generated_offer: UseStateHandle<String>,
+    /// Remote SDP offer state handle.
     remote_offer: UseStateHandle<String>,
+    /// Locally generated SDP answer state handle.
     generated_answer: UseStateHandle<String>,
+    /// Remote SDP answer state handle.
     remote_answer: UseStateHandle<String>,
+    /// Shared status message state handle.
     status: UseStateHandle<String>,
 }
 
+/// Event callbacks wired to the peer connection dialog controls.
 struct ConnectDialogActions {
+    /// Switches the dialog to the manual SDP tab.
     set_manual_sdp: Callback<MouseEvent>,
+    /// Switches the dialog to the HTTP endpoint tab.
     set_http_endpoint: Callback<MouseEvent>,
+    /// Switches manual SDP mode to initiator.
     set_initiator: Callback<MouseEvent>,
+    /// Switches manual SDP mode to responder.
     set_responder: Callback<MouseEvent>,
+    /// Closes the peer connection dialog.
     close_dialog: Callback<MouseEvent>,
+    /// Connects to the entered seed HTTP endpoint.
     on_http_connect: Callback<MouseEvent>,
+    /// Generates an SDP offer for the entered remote DID.
     on_create_offer: Callback<MouseEvent>,
+    /// Generates an SDP answer for the pasted remote offer.
     on_answer_offer: Callback<MouseEvent>,
+    /// Accepts the pasted remote SDP answer to complete the handshake.
     on_accept_answer: Callback<MouseEvent>,
 }
 
+/// Active node backend targeted by peer connection operations.
 enum NodeBackend {
+    /// Background node controlled via the browser extension bridge.
     Extension {
+        /// JavaScript bridge handle for the extension background node.
         bridge: JsValue,
+        /// Generation token guarding against stale UI updates.
         token: GenerationToken,
     },
+    /// In-page [`DemoNode`] running directly in the current window.
     Local {
+        /// Running local demo node instance.
         node: DemoNode,
+        /// Generation token guarding against stale UI updates.
         token: GenerationToken,
     },
 }
 
+/// Deferred peer-list and status update produced by a successful handshake operation.
 enum PeerUpdate {
+    /// Full peer and status snapshot returned by the extension bridge.
     Snapshot {
+        /// Snapshot payload returned by the extension backend.
         snapshot: extension::ExtensionNodeSnapshot,
+        /// Generation token checked before applying the snapshot.
         token: GenerationToken,
     },
+    /// Post-handshake peer synchronization task for a local node.
     Local {
+        /// Local demo node to query for updated peers.
         node: DemoNode,
+        /// Generation token checked during peer synchronization.
         token: GenerationToken,
+        /// Status prefix describing the completed handshake step.
         context: &'static str,
     },
 }
 
 impl NodeBackend {
+    /// Resolves the active backend (extension bridge or local node), or returns an error if offline.
     fn current(
         node_ref: &Rc<RefCell<Option<DemoNode>>>,
         generation: &GenerationClock,
@@ -112,6 +165,7 @@ impl NodeBackend {
             .ok_or_else(|| "start the node first".to_string())
     }
 
+    /// Connects the node to a seed peer via its HTTP signaling endpoint.
     async fn connect_http(self, endpoint: String) -> Result<PeerUpdate, String> {
         match self {
             Self::Extension { bridge, token } => {
@@ -132,6 +186,7 @@ impl NodeBackend {
         }
     }
 
+    /// Creates a manual WebRTC SDP offer targeting `remote_did`.
     async fn create_offer(self, remote_did: String) -> Result<String, String> {
         match self {
             Self::Extension { bridge, .. } => {
@@ -141,6 +196,7 @@ impl NodeBackend {
         }
     }
 
+    /// Processes a remote SDP offer and returns the local SDP answer.
     async fn answer_offer(self, offer: String) -> Result<String, String> {
         match self {
             Self::Extension { bridge, .. } => {
@@ -150,6 +206,7 @@ impl NodeBackend {
         }
     }
 
+    /// Accepts a remote SDP answer to complete an initiator handshake.
     async fn accept_answer(self, answer: String) -> Result<PeerUpdate, String> {
         match self {
             Self::Extension { bridge, token } => {
@@ -169,6 +226,7 @@ impl NodeBackend {
 }
 
 impl PeerUpdate {
+    /// Applies the peer update to the UI handles if its generation token is still current.
     async fn apply(self, peers: UseStateHandle<Vec<PeerView>>, status: UseStateHandle<String>) {
         match self {
             Self::Snapshot { snapshot, token } => {
@@ -191,6 +249,7 @@ impl PeerUpdate {
     }
 }
 
+/// Trims `value` and returns `empty_message` as an error if the result is empty.
 fn required_input(value: String, empty_message: &'static str) -> Result<String, String> {
     let value = value.trim().to_string();
     if value.is_empty() {
@@ -200,6 +259,7 @@ fn required_input(value: String, empty_message: &'static str) -> Result<String, 
     }
 }
 
+/// Renders the floating peer-connect launcher button and, when open, the connection modal.
 pub(crate) fn link_control(
     state: ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -261,6 +321,7 @@ pub(crate) fn link_control(
     }
 }
 
+/// Builds the click callback that connects to a seed HTTP endpoint.
 fn http_connect_callback(
     state: &ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -295,6 +356,7 @@ fn http_connect_callback(
     })
 }
 
+/// Builds the click callback that generates a manual SDP offer for the entered remote DID.
 fn create_offer_callback(
     state: &ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -326,6 +388,7 @@ fn create_offer_callback(
     })
 }
 
+/// Builds the click callback that answers a pasted remote SDP offer.
 fn answer_offer_callback(
     state: &ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -357,6 +420,7 @@ fn answer_offer_callback(
     })
 }
 
+/// Builds the click callback that accepts a pasted remote SDP answer.
 fn accept_answer_callback(
     state: &ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -390,11 +454,13 @@ fn accept_answer_callback(
     })
 }
 
+/// Builds a click callback that sets the active manual [`SdpMode`].
 fn sdp_mode_callback(sdp_mode: &UseStateHandle<SdpMode>, mode: SdpMode) -> Callback<MouseEvent> {
     let sdp_mode = sdp_mode.clone();
     Callback::from(move |_| sdp_mode.set(mode))
 }
 
+/// Builds a click callback that opens or closes the peer connection dialog.
 fn link_dialog_callback(
     link_dialog_open: &UseStateHandle<bool>,
     open: bool,
@@ -403,11 +469,13 @@ fn link_dialog_callback(
     Callback::from(move |_| link_dialog_open.set(open))
 }
 
+/// Builds a click callback that selects the active [`LinkTab`].
 fn link_tab_callback(link_tab: &UseStateHandle<LinkTab>, tab: LinkTab) -> Callback<MouseEvent> {
     let link_tab = link_tab.clone();
     Callback::from(move |_| link_tab.set(tab))
 }
 
+/// Clones handles from [`ConnectState`] into an owned [`ConnectDialogView`].
 fn connect_dialog_view(
     state: &ConnectState<'_>,
     status: UseStateHandle<String>,
@@ -425,6 +493,7 @@ fn connect_dialog_view(
     }
 }
 
+/// Renders the peer connection modal dialog with manual SDP and HTTP seed tabs.
 fn connect_dialog(view: ConnectDialogView, actions: ConnectDialogActions) -> Html {
     html! {
         <div class="modal-shell">
@@ -489,6 +558,7 @@ fn connect_dialog(view: ConnectDialogView, actions: ConnectDialogActions) -> Htm
     }
 }
 
+/// Renders the tab navigation bar switching between manual SDP and HTTP endpoint modes.
 fn link_dialog_tabs(
     active: LinkTab,
     set_manual_sdp: Callback<MouseEvent>,
@@ -512,6 +582,7 @@ fn link_dialog_tabs(
     }
 }
 
+/// Renders the segmented control switching between initiator and responder SDP roles.
 fn sdp_mode_switch(
     active: SdpMode,
     set_initiator: Callback<MouseEvent>,
@@ -535,6 +606,7 @@ fn sdp_mode_switch(
     }
 }
 
+/// Renders the three-step manual SDP initiator workflow.
 fn sdp_initiator_flow(
     remote_did: UseStateHandle<String>,
     generated_offer: UseStateHandle<String>,
@@ -570,6 +642,7 @@ fn sdp_initiator_flow(
     }
 }
 
+/// Renders the two-step manual SDP responder workflow.
 fn sdp_responder_flow(
     remote_offer: UseStateHandle<String>,
     generated_answer: UseStateHandle<String>,
@@ -593,6 +666,7 @@ fn sdp_responder_flow(
     }
 }
 
+/// Renders a numbered step container in the manual SDP exchange flow.
 fn sdp_step(index: &'static str, title: &'static str, body: Html) -> Html {
     html! {
         <div class="sdp-step">
@@ -605,6 +679,7 @@ fn sdp_step(index: &'static str, title: &'static str, body: Html) -> Html {
     }
 }
 
+/// Renders a numbered read-only SDP payload step with a clipboard copy action.
 fn sdp_output_step(
     index: &'static str,
     title: &'static str,

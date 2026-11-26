@@ -51,8 +51,12 @@ const MEMORY_FILE: &str = "announcements.jsonl";
 /// Threshold above which waiting on or holding `Recall::persisted` logs a warning.
 const SLOW_PERSISTED_LOCK_THRESHOLD: Duration = Duration::from_millis(500);
 
+/// Guard around `Recall::persisted` that logs a warning if held longer than
+/// [`SLOW_PERSISTED_LOCK_THRESHOLD`].
 struct SlowPersistedGuard<'a, O> {
+    /// Underlying mutex guard for the persisted memory and journal.
     guard: tokio::sync::MutexGuard<'a, Persisted<O>>,
+    /// Timestamp when the lock was acquired.
     acquired_at: Instant,
 }
 
@@ -148,7 +152,9 @@ impl MemoryRecord {
 
 /// The memory and its journal, under one lock.
 struct Persisted<O> {
+    /// In-memory announcement cache and dirty tracking.
     memory: AnnouncementMemory<O>,
+    /// Append-only JSONL journal backing `memory`.
     journal: Journal,
 }
 
@@ -208,8 +214,11 @@ where O: Owner
 pub struct Recall<D>
 where D: Directory
 {
+    /// Underlying directory queried on cache misses or refreshes.
     directory: Arc<D>,
+    /// Synchronized announcement memory and its on-disk journal.
     persisted: Mutex<Persisted<D::Owner>>,
+    /// Concurrency budget limiting in-flight upstream directory lookups.
     budget: Semaphore,
 }
 
@@ -241,6 +250,7 @@ where D: Directory
         })
     }
 
+    /// Acquire the persisted state lock, warning if acquisition or hold time is slow.
     async fn lock_persisted(&self) -> SlowPersistedGuard<'_, D::Owner> {
         let wait_started = Instant::now();
         let guard = self.persisted.lock().await;

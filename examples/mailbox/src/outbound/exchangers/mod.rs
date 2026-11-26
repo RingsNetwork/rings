@@ -102,6 +102,7 @@ pub fn exchange_hosts(
 
 /// The exchangers DNS names, found with a resolver.
 pub struct DnsExchangers {
+    /// Asynchronous DNS resolver used for MX and address lookups.
     resolver: TokioResolver,
 }
 

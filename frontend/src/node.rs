@@ -50,7 +50,9 @@ pub struct DemoNode {
     pub provider: Arc<Provider>,
     /// Controlled webview gateway attached through an HTTP(S) host or the extension adapter.
     pub webview: Option<WebviewNode>,
+    /// Handle to the background listen/stabilize loop for this provider.
     listener: ProviderListener,
+    /// Retained JS protocol handler closures freed when the node closes.
     protocol_handlers: Rc<RefCell<Vec<ProtocolHandlerClosure>>>,
 }
 
@@ -153,6 +155,7 @@ pub enum WebviewHost {
     Extension,
 }
 
+/// Scope an IndexedDB storage namespace to a specific delegator DID.
 fn scoped_storage_name(base: &str, did: rings_node::prelude::rings_core::dht::Did) -> String {
     let trimmed = base.trim();
     if trimmed.is_empty() {
@@ -315,6 +318,7 @@ pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, Strin
     Ok(out)
 }
 
+/// Send an internal JSON-RPC request to the local browser provider.
 async fn request(provider: &Arc<Provider>, method: &str, params: Value) -> Result<Value, String> {
     provider
         .request_internal(method.to_string(), params)
@@ -322,6 +326,7 @@ async fn request(provider: &Arc<Provider>, method: &str, params: Value) -> Resul
         .map_err(|error| format!("rpc {method} failed: {error}"))
 }
 
+/// Build a JSON object from `(key, value)` string pairs.
 fn obj(fields: &[(&str, &str)]) -> Value {
     let mut map = serde_json::Map::with_capacity(fields.len());
     for &(key, value) in fields {
@@ -330,6 +335,7 @@ fn obj(fields: &[(&str, &str)]) -> Value {
     Value::Object(map)
 }
 
+/// Extract a required string field from a JSON value.
 fn get_string(value: &Value, field: &str) -> Result<String, String> {
     value
         .get(field)

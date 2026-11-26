@@ -66,7 +66,9 @@ const DIAL_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `BootstrapPort` over a live processor: routed probe plus admitted HTTP handshake.
 pub(crate) struct ProcessorPort {
+    /// Live node processor used for routed probes and HTTP handshakes.
     processor: Arc<Processor>,
+    /// Shared admission and loss evidence populated by the backend observer.
     evidence: Arc<ReachabilityEvidence>,
 }
 

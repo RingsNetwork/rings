@@ -57,36 +57,64 @@ use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 
+/// Runtime message target identifier for the MV3 offscreen node document.
 const EXTENSION_NODE_TARGET: &str = "rings.node.offscreen";
+/// Runtime message type to start the background node.
 const EXTENSION_NODE_START: &str = "rings.node.start";
+/// Runtime message type to stop the background node.
 const EXTENSION_NODE_STOP: &str = "rings.node.stop";
+/// Runtime message type to query the background node status snapshot.
 const EXTENSION_NODE_STATUS: &str = "rings.node.status";
+/// Runtime message type to connect to a seed HTTP endpoint.
 const EXTENSION_NODE_CONNECT_HTTP: &str = "rings.node.connectHttp";
+/// Runtime message type to create a WebRTC SDP offer.
 const EXTENSION_NODE_CREATE_OFFER: &str = "rings.node.createOffer";
+/// Runtime message type to answer a WebRTC SDP offer.
 const EXTENSION_NODE_ANSWER_OFFER: &str = "rings.node.answerOffer";
+/// Runtime message type to accept a WebRTC SDP answer.
 const EXTENSION_NODE_ACCEPT_ANSWER: &str = "rings.node.acceptAnswer";
+/// Runtime message type to resolve an onion proxy route.
 const EXTENSION_NODE_ONION_ROUTE: &str = "rings.node.onionProxyRoute";
+/// Runtime message type to execute an onion proxy HTTP request.
 const EXTENSION_NODE_ONION_REQUEST: &str = "rings.node.onionProxyRequest";
+/// Runtime message type to dispatch a controlled browser WebView request.
 const EXTENSION_NODE_WEBVIEW_REQUEST: &str = "rings.node.webviewRequest";
+/// Storage key for the selected wallet kind.
 pub(crate) const SETTING_WALLET_KIND: &str = "rings.frontend.walletKind";
+/// Storage key for the Rings network ID.
 pub(crate) const SETTING_NETWORK_ID: &str = "rings.frontend.networkId";
+/// Storage key for the ICE server list.
 pub(crate) const SETTING_ICE_SERVERS: &str = "rings.frontend.iceServers";
+/// Storage key for the DHT stabilization interval in seconds.
 pub(crate) const SETTING_STABILIZE_INTERVAL: &str = "rings.frontend.stabilizeInterval";
+/// Storage key for the IndexedDB storage name.
 pub(crate) const SETTING_STORAGE_NAME: &str = "rings.frontend.storageName";
+/// Storage key for the default seed node URL.
 pub(crate) const SETTING_SEED_URL: &str = "rings.frontend.seedUrl";
+/// Storage key for the manual HTTP peer-connect endpoint.
 pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.frontend.httpEndpoint";
 
 // Preserve settings saved before the browser demo was renamed to frontend.
+/// Legacy storage key for the selected wallet kind.
 pub(crate) const LEGACY_SETTING_WALLET_KIND: &str = "rings.node-demo.walletKind";
+/// Legacy storage key for the Rings network ID.
 pub(crate) const LEGACY_SETTING_NETWORK_ID: &str = "rings.node-demo.networkId";
+/// Legacy storage key for the ICE server list.
 pub(crate) const LEGACY_SETTING_ICE_SERVERS: &str = "rings.node-demo.iceServers";
+/// Legacy storage key for the DHT stabilization interval in seconds.
 pub(crate) const LEGACY_SETTING_STABILIZE_INTERVAL: &str = "rings.node-demo.stabilizeInterval";
+/// Legacy storage key for the IndexedDB storage name.
 pub(crate) const LEGACY_SETTING_STORAGE_NAME: &str = "rings.node-demo.storageName";
+/// Legacy storage key for the default seed node URL.
 pub(crate) const LEGACY_SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
+/// Legacy storage key for the manual HTTP peer-connect endpoint.
 pub(crate) const LEGACY_SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
+/// Maximum duration to wait for wallet account connection.
 pub(crate) const WALLET_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Maximum duration to wait for session delegation authorization or storage startup.
 pub(crate) const SESSION_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Load a persisted setting from `key`, migrating any value stored under `legacy_key`.
 pub(crate) fn load_setting_with_legacy(key: &str, legacy_key: &str) -> Option<String> {
     load_setting(key).or_else(|| {
         let value = load_setting(legacy_key)?;
@@ -95,29 +123,46 @@ pub(crate) fn load_setting_with_legacy(key: &str, legacy_key: &str) -> Option<St
     })
 }
 
+/// Mutable state owned by the MV3 offscreen [`HeadlessNode`] component.
 struct HeadlessNodeState {
+    /// Active running node instance, if started.
     node: Option<DemoNode>,
+    /// Partially initialized node kept for cleanup if startup is cancelled.
     starting_node: Option<DemoNode>,
+    /// Oneshot sender used to cancel an in-flight node startup.
     start_cancel_tx: Option<oneshot::Sender<()>>,
+    /// Wallet account metadata authorized for the running node.
     wallet_account: Option<WalletAccount>,
+    /// Cached list of connected peers.
     peers: Vec<PeerView>,
+    /// Whether a node start attempt is currently in progress.
     starting: bool,
+    /// Number of start requests waiting for prior storage release to complete.
     waiting_start_count: usize,
+    /// Number of in-flight storage initialization operations.
     building_storage_count: usize,
+    /// Number of in-flight storage close/release operations.
     closing_storage_count: usize,
+    /// Error message from the most recent failed start attempt, if any.
     start_error: Option<String>,
+    /// Human-readable status message reported in snapshots.
     message: String,
+    /// Monotonic generation clock invalidating stale async node operations.
     generation: GenerationClock,
 }
 
 impl HeadlessNodeState {
+    /// Return `true` while an older node instance is still closing or releasing IndexedDB storage.
     fn is_releasing_storage(&self) -> bool {
         self.closing_storage_count > 0 || (!self.starting && self.building_storage_count > 0)
     }
 }
 
+/// Active [`DemoNode`] handle paired with the generation token active when it was borrowed.
 struct HeadlessDemoNode {
+    /// Cloned handle to the running background node.
     node: DemoNode,
+    /// Generation token used to detect concurrent stop/restart cancellation.
     generation: GenerationToken,
 }
 
@@ -198,6 +243,7 @@ pub fn headless_node() -> Html {
     html! {}
 }
 
+/// Parse user-entered runtime setting strings into a validated [`NodeSettings`].
 pub(crate) fn node_settings(
     network_id: String,
     ice_servers: String,
@@ -220,9 +266,12 @@ pub(crate) fn node_settings(
     })
 }
 
+/// Validation errors returned when parsing [`NodeSettings`] from text inputs.
 #[derive(Debug)]
 pub(crate) enum NodeSettingsError {
+    /// Failed to parse the network ID as a `u32`.
     NetworkId(ParseIntError),
+    /// Failed to parse the stabilization interval as a `u64`.
     StabilizeInterval(ParseIntError),
 }
 
@@ -245,6 +294,7 @@ impl std::error::Error for NodeSettingsError {
     }
 }
 
+/// Dispatch an incoming `chrome.runtime` message targeted at the offscreen background node.
 async fn handle_headless_node_message(
     state: Rc<RefCell<HeadlessNodeState>>,
     message_type: String,
@@ -268,6 +318,7 @@ async fn handle_headless_node_message(
     }
 }
 
+/// Start the offscreen background node asynchronously and return an immediate status snapshot.
 async fn start_headless_node(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -355,6 +406,7 @@ async fn start_headless_node(
     .await
 }
 
+/// Drive [`start_headless_node_inner`] to completion and record its final status or error.
 async fn run_headless_node_start(
     state: Rc<RefCell<HeadlessNodeState>>,
     generation: GenerationToken,
@@ -386,6 +438,7 @@ async fn run_headless_node_start(
     }
 }
 
+/// Race `fut` against a cancellation oneshot, returning `None` if cancelled first.
 async fn race_with_cancel<T, F>(cancel_rx: &mut oneshot::Receiver<()>, fut: F) -> Option<T>
 where F: Future<Output = T> {
     let fut = fut.fuse();
@@ -397,6 +450,7 @@ where F: Future<Output = T> {
     }
 }
 
+/// Close and release storage for a node that was initialized during a failed or cancelled start.
 async fn close_uninstalled_starting_node(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
@@ -421,6 +475,7 @@ async fn close_uninstalled_starting_node(
     }
 }
 
+/// Execute the full background node startup sequence with cancellation and generation guards.
 async fn start_headless_node_inner(
     state: Rc<RefCell<HeadlessNodeState>>,
     generation: GenerationToken,
@@ -532,6 +587,7 @@ async fn start_headless_node_inner(
     Ok(message)
 }
 
+/// Convert [`ExtensionStartSettings`] into validated [`NodeSettings`].
 fn headless_node_settings(settings: &ExtensionStartSettings) -> Result<NodeSettings, String> {
     node_settings(
         settings.network_id.clone(),
@@ -542,6 +598,7 @@ fn headless_node_settings(settings: &ExtensionStartSettings) -> Result<NodeSetti
     .map_err(|error| error.to_string())
 }
 
+/// Connect a wallet account of `wallet_kind` with [`WALLET_CONNECT_TIMEOUT`].
 async fn authorize_headless_account(wallet_kind: WalletKind) -> Result<WalletAccount, String> {
     operation_timeout(
         "account authorization",
@@ -551,6 +608,7 @@ async fn authorize_headless_account(wallet_kind: WalletKind) -> Result<WalletAcc
     .await
 }
 
+/// Authorize a session delegatee key for `account` with [`SESSION_AUTH_TIMEOUT`].
 async fn authorize_headless_delegatee(
     account: &WalletAccount,
 ) -> Result<rings_node::prelude::rings_core::delegation::DelegateeKey, String> {
@@ -562,6 +620,7 @@ async fn authorize_headless_delegatee(
     .await
 }
 
+/// Open the browser node and IndexedDB storage in extension host mode with [`SESSION_AUTH_TIMEOUT`].
 async fn open_headless_node(
     delegatee_key: rings_node::prelude::rings_core::delegation::DelegateeKey,
     node_settings: NodeSettings,
@@ -574,6 +633,7 @@ async fn open_headless_node(
     .await
 }
 
+/// Register the default dweb site and custom demo namespace handlers on `built`.
 fn register_headless_protocols(built: &DemoNode, my_did: &str) -> Result<(), String> {
     let site = Rc::new(RefCell::new(dweb::default_site()));
     site.borrow_mut().insert(
@@ -594,6 +654,7 @@ fn register_headless_protocols(built: &DemoNode, my_did: &str) -> Result<(), Str
     Ok(())
 }
 
+/// Commit the newly started node, wallet account, and peer list into `state` if `generation` is current.
 fn install_headless_node(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
@@ -612,6 +673,7 @@ fn install_headless_node(
     state.node = Some(built.clone());
 }
 
+/// Optionally connect the newly opened node to `seed_url` and settle its initial peer list.
 async fn connect_headless_seed(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
@@ -659,6 +721,7 @@ async fn connect_headless_seed(
     Ok(race_with_cancel(cancel_rx, seed_future).await)
 }
 
+/// Stop the background node (or cancel an in-flight start), disconnect peers, and release storage.
 async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsValue, String> {
     let (node, was_starting, cancel_tx, stop_generation) = {
         let mut state = state.borrow_mut();
@@ -721,6 +784,7 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
     headless_snapshot_js(false, String::new(), &[], None, message, false, None)
 }
 
+/// Connect the running background node to a seed HTTP endpoint from `message`.
 async fn connect_headless_node_http(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -740,6 +804,7 @@ async fn connect_headless_node_http(
     .await
 }
 
+/// Create a WebRTC SDP offer for the remote DID specified in `message`.
 async fn create_headless_offer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -754,6 +819,7 @@ async fn create_headless_offer(
     Ok(result.into())
 }
 
+/// Answer an incoming WebRTC SDP offer carried in `message`.
 async fn answer_headless_offer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -768,6 +834,7 @@ async fn answer_headless_offer(
     Ok(result.into())
 }
 
+/// Accept a remote WebRTC SDP answer carried in `message` and return an updated snapshot.
 async fn accept_headless_answer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -784,6 +851,7 @@ async fn accept_headless_answer(
     .await
 }
 
+/// Resolve an onion proxy route on the background node from a JS request message.
 async fn route_headless_onion_proxy(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -797,6 +865,7 @@ async fn route_headless_onion_proxy(
     route.to_js()
 }
 
+/// Execute an onion proxy HTTP request on the background node from a JS request message.
 async fn request_headless_onion_proxy(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
@@ -810,6 +879,7 @@ async fn request_headless_onion_proxy(
     response.to_js()
 }
 
+/// Dispatch a controlled browser WebView request through the background node's WebView gateway.
 async fn request_headless_webview(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: JsValue,
@@ -821,6 +891,7 @@ async fn request_headless_webview(
     Ok(response)
 }
 
+/// Clone the active [`DemoNode`] and its current generation token, or error if offline.
 fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<HeadlessDemoNode, String> {
     let state = state.borrow();
     Ok(HeadlessDemoNode {
@@ -832,6 +903,7 @@ fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<Headless
     })
 }
 
+/// Extract a required non-empty trimmed string field from a JS runtime message.
 fn required_message_field(
     message: &JsValue,
     field: &'static str,
@@ -845,6 +917,7 @@ fn required_message_field(
     }
 }
 
+/// Advance the generation clock and mark the background node as starting.
 fn begin_headless_start(
     state: &Rc<RefCell<HeadlessNodeState>>,
     message: String,
@@ -860,6 +933,7 @@ fn begin_headless_start(
     generation
 }
 
+/// Update startup status fields in `state` only if `generation` is still current.
 fn set_headless_starting_for_generation(
     state: &Rc<RefCell<HeadlessNodeState>>,
     generation: &GenerationToken,
@@ -876,6 +950,7 @@ fn set_headless_starting_for_generation(
     state.message = message;
 }
 
+/// Return an error if `generation` has been superseded by a stop or restart.
 fn ensure_headless_generation_current(generation: &GenerationToken) -> Result<(), String> {
     if generation.is_current() {
         Ok(())
@@ -884,6 +959,7 @@ fn ensure_headless_generation_current(generation: &GenerationToken) -> Result<()
     }
 }
 
+/// Run an async `operation` with a `timeout`, returning a labelled timeout error if it expires.
 pub(crate) async fn operation_timeout<T, F>(
     label: &'static str,
     timeout: Duration,
@@ -901,6 +977,7 @@ where
     }
 }
 
+/// Return `message` if non-empty, otherwise a default active/offline status string.
 fn retained_headless_message(message: String, online: bool) -> String {
     if !message.trim().is_empty() {
         return message;
@@ -912,6 +989,7 @@ fn retained_headless_message(message: String, online: bool) -> String {
     }
 }
 
+/// Query peers from `node`, optionally polling across settle delays until peers appear.
 async fn settle_headless_peers(
     node: &DemoNode,
     initial_peers: Vec<PeerView>,
@@ -955,6 +1033,7 @@ async fn settle_headless_peers(
     (peers, message)
 }
 
+/// Refresh peer state when online and serialize a JS status snapshot of the background node.
 async fn headless_node_snapshot(
     state: Rc<RefCell<HeadlessNodeState>>,
     context: String,
@@ -1036,15 +1115,23 @@ async fn headless_node_snapshot(
     )
 }
 
+/// Borrowed inputs used to build a retained JS snapshot without querying live peers.
 struct HeadlessSnapshotState<'a> {
+    /// Active node handle, if started.
     node: Option<&'a DemoNode>,
+    /// Cached connected peers slice.
     peers: &'a [PeerView],
+    /// Authorized wallet account, if any.
     account: Option<&'a WalletAccount>,
+    /// Status message to report.
     message: String,
+    /// Whether startup is currently in progress.
     starting: bool,
+    /// Startup error message, if any.
     start_error: Option<&'a str>,
 }
 
+/// Build a JS status snapshot directly from the currently retained [`HeadlessNodeState`].
 fn retained_live_headless_snapshot_js(state: &HeadlessNodeState) -> Result<JsValue, String> {
     let snapshot = HeadlessSnapshotState {
         node: state.node.as_ref(),
@@ -1057,6 +1144,7 @@ fn retained_live_headless_snapshot_js(state: &HeadlessNodeState) -> Result<JsVal
     retained_headless_snapshot_js(snapshot)
 }
 
+/// Serialize a [`HeadlessSnapshotState`] into the JS snapshot object returned to the side panel.
 fn retained_headless_snapshot_js(state: HeadlessSnapshotState<'_>) -> Result<JsValue, String> {
     let online = state.node.is_some() && !state.starting;
     let did = state
@@ -1077,6 +1165,7 @@ fn retained_headless_snapshot_js(state: HeadlessSnapshotState<'_>) -> Result<JsV
     )
 }
 
+/// Construct the JS object representation of a background node status snapshot.
 fn headless_snapshot_js(
     online: bool,
     did: String,
@@ -1111,6 +1200,7 @@ fn headless_snapshot_js(
     Ok(snapshot.into())
 }
 
+/// Convert a slice of [`PeerView`] items into a JS array of `{ did, state }` objects.
 fn peer_views_js(peers: &[PeerView]) -> JsValue {
     let array = Array::new();
     for peer in peers {
@@ -1122,6 +1212,7 @@ fn peer_views_js(peers: &[PeerView]) -> JsValue {
     array.into()
 }
 
+/// Decode [`ExtensionStartSettings`] from a JS settings object, applying canonical defaults.
 fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
     ExtensionStartSettings {
         network_id: js_string_field(value, "networkId").unwrap_or_else(|_| "1".to_string()),
@@ -1135,10 +1226,12 @@ fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
     }
 }
 
+/// Invoke the `chrome.runtime` `sendResponse` callback with an encoded [`runtime_response`].
 fn send_node_response(send_response: Function, response: Result<JsValue, String>) {
     let _sent = send_response.call1(&JsValue::NULL, &runtime_response(response));
 }
 
+/// Verify that a `chrome.runtime.onMessage` sender belongs to this extension's runtime ID.
 fn is_trusted_extension_sender(sender: &JsValue) -> bool {
     let Ok(sender_id) = js_string_field(sender, "id") else {
         return false;
@@ -1153,6 +1246,7 @@ fn is_trusted_extension_sender(sender: &JsValue) -> bool {
     !runtime_id.is_empty() && sender_id == runtime_id
 }
 
+/// Encode a Rust `Result<JsValue, String>` into `{ ok: true, result }` or `{ ok: false, error }`.
 fn runtime_response(response: Result<JsValue, String>) -> JsValue {
     let object = Object::new();
     match response {

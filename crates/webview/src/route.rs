@@ -15,7 +15,9 @@ use crate::url::TargetUrl;
 /// request is forwarded through the controlled gateway origin.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayRoutePolicy {
+    /// Local origin controlled by the Rings webview host.
     controlled_origin: Url,
+    /// Path prefix under `controlled_origin` that encodes upstream target URLs.
     gateway_prefix: GatewayPrefix,
 }
 
@@ -64,6 +66,7 @@ impl GatewayRoutePolicy {
         self.route_target(requested_url, target)
     }
 
+    /// Decode or validate the upstream target URL for `requested_url`.
     fn target_from_requested_url(
         &self,
         requested_url: &Url,
@@ -91,6 +94,7 @@ impl GatewayRoutePolicy {
         TargetUrl::parse(requested_url.as_str())
     }
 
+    /// Return whether `target` should be served directly or redirected into the controlled origin.
     fn route_target(&self, requested_url: &Url, target: TargetUrl) -> Result<GatewayRoute> {
         if self.is_controlled_url(requested_url) {
             return Ok(GatewayRoute::Serve(target));
@@ -98,10 +102,12 @@ impl GatewayRoutePolicy {
         Ok(GatewayRoute::Redirect(self.gateway_url(target.as_url())?))
     }
 
+    /// Return whether `url` matches this policy's controlled origin.
     fn is_controlled_url(&self, url: &Url) -> bool {
         url.origin() == self.controlled_origin.origin()
     }
 
+    /// Return whether `url` points inside this policy's gateway path prefix.
     fn is_gateway_url(&self, url: &Url) -> bool {
         url.path().starts_with(self.gateway_prefix.as_str())
     }
@@ -127,6 +133,7 @@ pub enum GatewayRouteRejection {
     MissingRuntimeSourceTarget,
 }
 
+/// Return whether `url` is a valid root HTTP(S) origin with no credentials, path, query, or fragment.
 fn is_controlled_origin(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
         && url.host_str().is_some()
@@ -137,6 +144,7 @@ fn is_controlled_origin(url: &Url) -> bool {
         && url.fragment().is_none()
 }
 
+/// Return whether a runtime `fetch` or `XHR` request is missing its trusted initiating-frame target.
 fn runtime_request_lacks_source_target(
     source_target: Option<&TargetUrl>,
     kind: GatewayRequestKind,

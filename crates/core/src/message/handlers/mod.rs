@@ -49,7 +49,9 @@ pub mod storage;
 /// forks protocol state or transfers ownership.
 #[derive(Clone)]
 pub struct MessageHandler {
+    /// Shared swarm transport for sending messages and managing connections.
     transport: Arc<SwarmTransport>,
+    /// Shared local Chord peer ring.
     dht: Arc<PeerRing>,
 }
 
@@ -181,6 +183,7 @@ impl MessageHandler {
         self.run_effects([CoreEffect::connect_dht_peer(peer)]).await
     }
 
+    /// Join a routable `peer` into the local DHT and dispatch any resulting topology events.
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/test_dht_convergence.rs).
@@ -196,6 +199,7 @@ impl MessageHandler {
         Ok(())
     }
 
+    /// Commit a pending connection `attempt` into the DHT and dispatch any resulting topology events.
     pub(crate) async fn admit_dht_attempt(
         &self,
         attempt: PendingConnectionAttempt,
@@ -216,6 +220,7 @@ impl MessageHandler {
         Ok(true)
     }
 
+    /// Disconnect or retire `attempt` from the DHT and trigger storage repair if a slot was vacated.
     pub(crate) async fn leave_dht_attempt(&self, attempt: PendingConnectionAttempt) -> Result<()> {
         let removal = match self.transport.disconnect_attempt(attempt).await? {
             Some(removal) => Some(removal),

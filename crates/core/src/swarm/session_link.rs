@@ -155,15 +155,20 @@ pub(crate) const fn expired_within_grace(expires_at_ms: u128, now_ms: u128) -> b
 /// satisfies `entry.digest = entry.delegation.digest()`.
 #[derive(Debug)]
 struct DelegationTable<A> {
+    /// Entries ordered from least to most recently inserted or referenced.
     entries: VecDeque<TableEntry<A>>,
+    /// Maximum number of entries retained in this table.
     capacity: usize,
 }
 
 /// One delegation the table holds.
 #[derive(Debug)]
 struct TableEntry<A> {
+    /// Digest uniquely identifying `delegation`.
     digest: DelegationDigest,
+    /// Cached delegation record.
     delegation: Delegation,
+    /// End-specific lease or sender annotation associated with this entry.
     annotation: A,
 }
 
@@ -269,6 +274,7 @@ impl DelegationTable<Lease> {
 /// never matters, and a stale one never shortens the lease held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Lease {
+    /// Epoch timestamp in milliseconds when this lease expires.
     until_ms: u128,
 }
 
@@ -329,6 +335,7 @@ impl Lease {
 pub(crate) struct DelegationLessee {
     /// The connection generation the table belongs to; `None` until the first frame.
     generation: Option<u64>,
+    /// Delegations sent inline on this link and any leases granted by the peer.
     sent: DelegationTable<Option<Lease>>,
 }
 
@@ -482,6 +489,7 @@ pub(crate) enum Resolution {
 /// The receiving end of one link: the delegations it has carried inline, each under the lease
 /// this end granted. See the module documentation for the laws.
 pub(crate) struct DelegationLessor {
+    /// Delegations cached from inline frames together with the leases granted for them.
     leases: DelegationTable<Lease>,
 }
 

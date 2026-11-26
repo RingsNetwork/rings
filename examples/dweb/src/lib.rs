@@ -8,6 +8,8 @@
 //!
 //! Wire: a `dweb` message is JSON — `{"kind":"req","path":"/"}` or
 //! `{"kind":"res","path":"/","body":"<html…>"}`.
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -46,21 +48,33 @@ use yew::prelude::*;
 enum DwebMsg {
     /// Fetch `path` from the peer's hosted site.
     #[serde(rename = "req")]
-    Req { path: String },
+    Req {
+        /// Requested page path.
+        path: String,
+    },
     /// The peer's answer for `path`.
     #[serde(rename = "res")]
-    Res { path: String, body: String },
+    Res {
+        /// Page path corresponding to the response.
+        path: String,
+        /// Rendered HTML body for the requested path.
+        body: String,
+    },
 }
 
 /// The site this node hosts: `path -> html`.
 type Site = Rc<RefCell<HashMap<String, String>>>;
 
+/// Running browser-side dweb node handle and its listener abort control.
 struct DwebNode {
+    /// Rings provider driving messaging and peer connections.
     provider: Arc<Provider>,
+    /// Abort handle that stops the background message listener loop.
     listen_abort: AbortHandle,
 }
 
 impl DwebNode {
+    /// Stop the background message listener loop.
     fn stop(&self) {
         self.listen_abort.abort();
     }
@@ -204,6 +218,7 @@ async fn fetch_path(provider: Arc<Provider>, peer: String, path: String) -> Resu
     .map_err(|e| format!("send failed: {e:?}"))
 }
 
+/// Extract the current string value from an HTML input event.
 fn input_value(e: &InputEvent) -> String {
     e.target_unchecked_into::<HtmlInputElement>().value()
 }

@@ -82,10 +82,12 @@ const OPEN_SHARES: Shares = Shares {
     custody: 0,
 };
 
+/// Compute the retained memory reservation for a wire frame of `bytes`.
 pub(super) const fn memory_reservation(bytes: usize) -> usize {
     retained_wire_bytes(bytes)
 }
 
+/// Construct an [`Error::InboundPeerMemoryCapacityExceeded`] for `peer` and `requested_bytes`.
 pub(super) fn peer_memory_capacity_error(peer: Option<Did>, requested_bytes: usize) -> Error {
     Error::InboundPeerMemoryCapacityExceeded {
         peer,
@@ -94,6 +96,7 @@ pub(super) fn peer_memory_capacity_error(peer: Option<Did>, requested_bytes: usi
     }
 }
 
+/// Validate that `requested_bytes` fits within the per-peer inbound byte budget.
 pub(super) fn validate_peer_memory_request(
     peer: Option<Did>,
     requested_bytes: usize,
@@ -104,6 +107,7 @@ pub(super) fn validate_peer_memory_request(
     Ok(())
 }
 
+/// Validate that `requested_bytes` fits within the admissible mailbox byte budget for `lane`.
 pub(super) fn validate_memory_request(lane: InboundLane, requested_bytes: usize) -> Result<()> {
     let limit = admissible_capacity(
         INBOUND_MAILBOX_BYTE_CAPACITY,
@@ -119,13 +123,16 @@ pub(super) fn validate_memory_request(lane: InboundLane, requested_bytes: usize)
     Ok(())
 }
 
+/// Node-wide counted and byte-bounded capacity ledger across all inbound lanes.
 #[derive(Clone, Copy)]
 struct InboundCapacityState(CountedReservedCapacity<INBOUND_LANE_COUNT>);
 
 impl InboundCapacityState {
+    /// Create an empty node-wide inbound capacity ledger.
     const fn new() -> Self {
         Self(CountedReservedCapacity::new())
     }
+    /// Attempt to reserve one event and `bytes` on `lane`.
     fn try_reserve(
         &mut self,
         lane: InboundLane,
@@ -141,6 +148,7 @@ impl InboundCapacityState {
             &INBOUND_RESERVED_BYTES,
         )
     }
+    /// Release one event and `bytes` previously reserved on `lane`.
     fn release(&mut self, lane: InboundLane, bytes: usize) {
         self.0.release(lane.index(), bytes);
     }
@@ -156,12 +164,15 @@ impl InboundCapacityState {
     }
 }
 
+/// Per-peer fixed reservation table (zero reserved slots; all per-peer capacity is shared).
 const PEER_RESERVATION: [usize; 1] = [0];
 
+/// Per-peer counted and byte-bounded inbound capacity ledger.
 #[derive(Clone, Copy, Default)]
 struct InboundPeerCapacityState(CountedReservedCapacity<1>);
 
 impl InboundPeerCapacityState {
+    /// Attempt to reserve one event and `bytes` against this peer's budget.
     fn try_reserve(
         &mut self,
         bytes: usize,
@@ -177,10 +188,12 @@ impl InboundPeerCapacityState {
         )
     }
 
+    /// Release one event and `bytes` previously reserved against this peer's budget.
     fn release(&mut self, bytes: usize) {
         self.0.release(0, bytes);
     }
 
+    /// Return whether this peer currently has zero admitted inbound events.
     const fn is_idle(self) -> bool {
         self.0.admitted_count() == 0
     }
@@ -299,8 +312,11 @@ fn inbound_resources(resources: [Option<InboundResource>; 5]) -> InboundResource
     resources.into_iter().flatten()
 }
 
+/// Shared inbound admission ledger coordinating node-wide, per-peer, and open-message budgets.
 pub(crate) struct InboundCapacity {
+    /// Node-wide per-lane event and byte reservations.
     state: Mutex<InboundCapacityState>,
+    /// Per-peer event and byte reservations keyed by authenticated peer DID.
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
     /// The open-message table `O`: the bytes open messages hold, by the slot that introduced
     /// them (load-bounds paper, Def. 6). Its lock is a leaf, taken after the others.
@@ -317,6 +333,7 @@ pub(crate) struct InboundCapacity {
 }
 
 impl InboundCapacity {
+    /// Create a fresh [`InboundCapacity`] with empty budgets and waiter queues.
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(InboundCapacityState::new()),

@@ -1,7 +1,9 @@
 //! Runtime boundary for pure local peer measurement algorithms.
 #![deny(missing_docs)]
 
+/// Behaviour judgement trait and default implementation.
 mod behaviour;
+/// Peer quality metrics, thresholds, and ordering helpers.
 mod quality;
 
 pub use behaviour::BehaviourJudgement;

@@ -1,8 +1,10 @@
 //! Utils for ring-core.
 
+/// UUID generation helpers honoring active simulation overrides.
 mod id;
 mod rng;
 mod slow_lock;
+/// Wall-clock, monotonic instant, sleep, and read-clock floor helpers.
 mod time;
 
 pub(crate) use id::new_uuid;

@@ -36,9 +36,11 @@ pub(super) enum Arrival<F> {
 /// The frames held for one connection awaiting admission.
 #[derive(Debug)]
 pub(super) struct PreAdmissionHold<F> {
+    /// Held frames waiting for admission or for an active drain to finish.
     queue: VecDeque<F>,
     /// One drainer is releasing held frames; arrivals queue behind them.
     draining: bool,
+    /// Maximum number of frames retained before overflowing.
     capacity: usize,
 }
 

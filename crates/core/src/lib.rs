@@ -58,18 +58,21 @@
 //! cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 //! ```
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 #![cfg_attr(
     test,
     allow(
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::unwrap_used
     )
 )]
 
 pub mod algebra;
+/// Base58Check encoding and decoding helpers.
 mod base58_check;
 pub mod delegation;
 pub mod dht;

@@ -64,8 +64,11 @@ pub trait BackendObserver: Send + Sync {
 /// Every message the backend drops is counted in the provider's
 /// [`dispatch_drop_counters`](Provider::dispatch_drop_counters).
 pub struct Backend {
+    /// Shared registry of protocol routes and node tasks.
     extensions: Extensions,
+    /// Cumulative counters for dropped inbound envelopes.
     drops: Arc<DispatchDrops>,
+    /// Optional observer for link facts, E2E messages, and raw custom envelopes.
     observer: Option<Arc<dyn BackendObserver>>,
 }
 
