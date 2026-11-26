@@ -68,7 +68,7 @@ Lookup correlation identifiers and mailbox identifiers are never exported.
 
 ```json
 {
-  "version": "1.0.0-pre.11",
+  "version": "1.0.0-pre.12",
   "observability": {
     "schema_version": 1,
     "generated_at_ms": 1700000060000,
