@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::future::Future;
-use std::ops::Deref;
 use std::pin::pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -511,7 +510,9 @@ impl EffectScope {
 ///
 /// Law (Lock order): `transition_gate ≺ state`. `transition_gate` is non-reentrant and spans the
 /// turn's effect application and synchronous feedback fixpoint; `state` is a synchronous leaf
-/// mutex held only across [`Protocol::step`] and never across an `.await`.
+/// mutex taken only briefly to move `P::State` out before [`Protocol::step`] and restore it
+/// immediately after, so neither `.await` nor foreign callbacks (such as Wasm `JsProtocol::step`)
+/// ever execute with `state` locked.
 struct Runner<P: Protocol, I> {
     /// Unique identifier used to detect same-task re-entrant transitions.
     runner_id: u64,
@@ -519,8 +520,8 @@ struct Runner<P: Protocol, I> {
     protocol: P,
     /// Effect interpreter shell for this protocol.
     interpret: I,
-    /// Synchronous protocol state (`Law (Lock order): transition_gate ≺ state`, leaf).
-    state: Mutex<P::State>,
+    /// Synchronous protocol state slot (`Law (Lock order): transition_gate ≺ state`, leaf).
+    state: Mutex<Option<P::State>>,
     /// Non-reentrant per-runner turn linearization gate (`Law (Lock order): transition_gate ≺ state`).
     transition_gate: AsyncMutex<()>,
     #[cfg(all(test, rings_native))]
@@ -529,6 +530,24 @@ struct Runner<P: Protocol, I> {
     after_commit_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(all(test, rings_native))]
     before_gate_wait_for_test: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+}
+
+/// Panic-safe checkout guard ensuring `Runner::state` is restored even if `Protocol::step` unwinds.
+struct CheckedOutState<'a, S> {
+    /// Target state mutex on the runner.
+    slot: &'a Mutex<Option<S>>,
+    /// Checked-out protocol state held outside the mutex during `step`.
+    current: Option<S>,
+}
+
+impl<S> Drop for CheckedOutState<'_, S> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.current.take() {
+            if let Ok(mut guard) = self.slot.lock() {
+                *guard = Some(previous);
+            }
+        }
+    }
 }
 
 #[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
@@ -631,19 +650,28 @@ where
                 }
                 feedback_budget -= 1;
 
-                // Pure region: a brief synchronous state fold. No await crosses `state`; the
-                // feedback queue makes every same-turn effect result part of this fold before a
-                // competing inbound can begin its own transition.
+                // Pure region: a brief synchronous state fold. `self.state` is unlocked before
+                // `Protocol::step` runs (so foreign callbacks such as Wasm `JsProtocol::step`
+                // never execute under the mutex) and restored immediately after.
                 let effects = {
-                    let mut guard = lock(&self.state)?;
+                    let checked_out = {
+                        let mut guard = lock(&self.state)?;
+                        guard.take().ok_or(Error::Lock)?
+                    };
+                    let mut restore = CheckedOutState {
+                        slot: &self.state,
+                        current: Some(checked_out),
+                    };
                     let Transition { state, effects } = self.protocol.step(
                         Ctx {
                             did: core.did(),
-                            state: guard.deref(),
+                            state: restore.current.as_ref().ok_or(Error::Lock)?,
                         },
                         event,
                     );
-                    *guard = state;
+                    restore.current = None;
+                    let mut guard = lock(&self.state)?;
+                    *guard = Some(state);
                     effects
                 };
 
@@ -781,7 +809,7 @@ impl Extensions {
     {
         let namespace = protocol.namespace().to_string();
         let delegates = Delegation::of(&protocol);
-        let state = Mutex::new(protocol.init());
+        let state = Mutex::new(Some(protocol.init()));
         let runner: Arc<DynHandler> = Arc::new(Runner {
             runner_id: next_runner_id(),
             protocol,

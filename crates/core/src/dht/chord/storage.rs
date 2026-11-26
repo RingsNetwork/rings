@@ -671,6 +671,33 @@ impl PeerRing {
         }
     }
 
+    /// Whether an inbound single-placement `SearchEntry` for `placement` settles locally at
+    /// `now_ms` (`!matches!(lookup_placement(..., false, now_ms), PlacementLookup::Remote { .. })`),
+    /// decided without pre-admission storage write-backs or duplicate storage reads when topology
+    /// alone determines ownership.
+    pub(crate) async fn search_entry_terminates_locally(
+        &self,
+        placement: Did,
+        now_ms: u128,
+    ) -> Result<bool> {
+        match self.find_storage_owner(placement)? {
+            PeerRingAction::Some(owner) => {
+                if owner == self.did || !self.storage_virtual_nodes_enabled()? {
+                    return Ok(true);
+                }
+                let Some(store) = self.carrier_storage(EntryKind::Data) else {
+                    return Ok(false);
+                };
+                let key = StorageKey::new(EntryKind::Data, placement).to_string();
+                Ok(live_entry(&store, &key, now_ms, Projection::ReturnedOnly)
+                    .await?
+                    .is_some_and(|value| value.bound_live_at(now_ms)))
+            }
+            PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => Ok(false),
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
     /// Look up every placement of `entry_key`.
     ///
     /// When `query_all_placements` is `false` (used by remote single-placement `SearchEntry`

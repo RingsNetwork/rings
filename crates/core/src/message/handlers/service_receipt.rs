@@ -226,9 +226,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
     /// Execute one classified [`ProbeEffect`].
     async fn run(&self, effect: ProbeEffect<'_>) -> Result<()> {
         match effect {
-            ProbeEffect::RejectNonDirect => Err(Error::InvalidMessage(
-                "probe transcript messages must be delivered directly without relaying".to_string(),
-            )),
+            ProbeEffect::RejectNonDirect => Err(Error::NonDirectProbeTranscript),
             ProbeEffect::RespondToRequest { ctx, request } => {
                 self.respond_to_request(ctx, request).await
             }

@@ -1,5 +1,6 @@
 //! This module contains the IceServer structure.
 
+use std::fmt;
 use std::str::FromStr;
 
 use serde::Deserialize;
@@ -24,7 +25,7 @@ pub enum IceCredentialType {
 ///
 /// In order to create Connection correctly, each Connection needs to implement the conversion
 /// from IceServer to its underlying library parameters.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct IceServer {
     /// Urls is an array of URIs that can be used as STUN and TURN servers.
     pub urls: Vec<String>,
@@ -34,6 +35,22 @@ pub struct IceServer {
     pub credential: String,
     /// CredentialType indicates which type of credential the ICEAgent will use.
     pub credential_type: IceCredentialType,
+}
+
+impl fmt::Debug for IceServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let credential = if self.credential.is_empty() {
+            ""
+        } else {
+            "<redacted>"
+        };
+        f.debug_struct("IceServer")
+            .field("urls", &self.urls)
+            .field("username", &self.username)
+            .field("credential", &credential)
+            .field("credential_type", &self.credential_type)
+            .finish()
+    }
 }
 
 impl IceServer {
@@ -98,7 +115,7 @@ pub(crate) fn parse_ice_servers_or_warn(config: &str, transport: &str) -> Vec<Ic
 impl Default for IceServer {
     fn default() -> Self {
         Self {
-            urls: ["stun://stun.l.google.com:19302".to_string()].to_vec(),
+            urls: ["stun:stun.l.google.com:19302".to_string()].to_vec(),
             username: String::default(),
             credential: String::default(),
             credential_type: IceCredentialType::default(),

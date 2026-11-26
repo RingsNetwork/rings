@@ -264,7 +264,8 @@ impl Error {
             | Self::CodecDeserialize(_) | Self::BadHexInCache(_) | Self::BadCHexInCache
             | Self::BadArrayInCache(_) | Self::MessageEncryptionFailed(_)
             | Self::MessageDecryptionFailed(_) | Self::AeadWrappedKeyBlockCount { .. }
-            | Self::InvalidMessage(_) | Self::NestedChunkMessage | Self::InvalidChunkMessage
+            | Self::InvalidMessage(_) | Self::NonDirectProbeTranscript
+            | Self::NestedChunkMessage | Self::InvalidChunkMessage
             | Self::MessageTooLarge(_) | Self::MessageSizeOverflow
             | Self::PeerMaxMessageSizeTooSmall(_) | Self::HandshakeAboveMax(_)
             // connection lifecycle
