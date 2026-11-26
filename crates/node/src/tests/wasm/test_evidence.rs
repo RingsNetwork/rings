@@ -69,7 +69,7 @@ async fn storages(name: &str) -> (MeasureStorage, EvidenceStorage) {
     let measure = IdbStorage::new_with_cap_and_name(2, &measure_name)
         .await
         .unwrap();
-    let evidence = IdbStorage::new_with_cap_and_name(2, &evidence_name)
+    let evidence = IdbStorage::new_with_cap_and_name(1024, &evidence_name)
         .await
         .unwrap();
     (

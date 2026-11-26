@@ -27,6 +27,7 @@ use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
+use crate::dht::StorageSyncPurpose;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
@@ -215,6 +216,7 @@ pub struct SwarmTransport {
     #[cfg(test)]
     inbound_tap: InboundTap,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
+    storage_repair_cooldowns: Mutex<StorageRepairCooldowns>,
     outbound_schedulers: OutboundSchedulers,
     /// The node's watcher of every detached send's first-frame admission.
     admission_watcher: payload_send::AdmissionWatcher,
@@ -241,6 +243,17 @@ struct MeasuredDisconnect {
 const CANDIDATE_DIAL_BACKOFF_BASE_MS: i64 = 30_000;
 const CANDIDATE_DIAL_BACKOFF_MAX_MS: i64 = 300_000;
 const CANDIDATE_DIAL_BACKOFF_CAPACITY: usize = 64;
+
+/// Cooldown before resending the same steady-state [`StorageSyncPurpose::AdditiveRepair`]
+/// delivery when topology has not changed.
+pub(crate) const STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS: i64 = 180_000;
+const STORAGE_REPAIR_COOLDOWN_MAX_ENTRIES: usize = 512;
+
+#[derive(Debug, Default)]
+struct StorageRepairCooldowns {
+    topology_epoch: u64,
+    sent: BTreeMap<StorageSyncDeliveryCursor, i64>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CandidateDialBackoff {
@@ -338,6 +351,7 @@ impl SwarmTransport {
             #[cfg(test)]
             inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
+            storage_repair_cooldowns: Mutex::new(StorageRepairCooldowns::default()),
             outbound_schedulers: OutboundSchedulers::new_with_clock(measure.clone(), clock.clone()),
             admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -501,6 +515,83 @@ impl SwarmTransport {
             .map_err(|_| Error::LockPoisoned)?;
         *cursor = Some(scheduled);
         Ok(())
+    }
+
+    /// Whether steady-state [`StorageSyncPurpose::AdditiveRepair`] for `cursor` is still inside
+    /// its unchanged-topology rebroadcast cooldown at `(topology_epoch, now_ms)`.
+    ///
+    /// [`StorageSyncPurpose::OwnershipHandoff`] is never throttled, and advancing
+    /// `topology_epoch` clears all cooldown entries immediately.
+    pub(crate) fn is_storage_repair_cooled_down(
+        &self,
+        cursor: &StorageSyncDeliveryCursor,
+        topology_epoch: u64,
+        now_ms: i64,
+    ) -> Result<bool> {
+        if cursor.purpose() != StorageSyncPurpose::AdditiveRepair {
+            return Ok(false);
+        }
+        let mut cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if cooldowns.topology_epoch != topology_epoch {
+            cooldowns.sent.clear();
+            cooldowns.topology_epoch = topology_epoch;
+            return Ok(false);
+        }
+        Ok(cooldowns.sent.get(cursor).is_some_and(|&sent_at| {
+            now_ms >= sent_at
+                && now_ms.saturating_sub(sent_at) < STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS
+        }))
+    }
+
+    /// Record that steady-state [`StorageSyncPurpose::AdditiveRepair`] for `cursor` was sent at
+    /// `(topology_epoch, now_ms)`, pruning expired entries and bounding table size.
+    pub(crate) fn record_storage_repair_sent(
+        &self,
+        cursor: StorageSyncDeliveryCursor,
+        topology_epoch: u64,
+        now_ms: i64,
+    ) -> Result<()> {
+        if cursor.purpose() != StorageSyncPurpose::AdditiveRepair {
+            return Ok(());
+        }
+        let mut cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if cooldowns.topology_epoch != topology_epoch {
+            cooldowns.sent.clear();
+            cooldowns.topology_epoch = topology_epoch;
+        }
+        cooldowns.sent.retain(|_, &mut sent_at| {
+            now_ms >= sent_at
+                && now_ms.saturating_sub(sent_at) < STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS
+        });
+        if cooldowns.sent.len() >= STORAGE_REPAIR_COOLDOWN_MAX_ENTRIES
+            && !cooldowns.sent.contains_key(&cursor)
+        {
+            if let Some(oldest) = cooldowns
+                .sent
+                .iter()
+                .min_by_key(|(_, &sent_at)| sent_at)
+                .map(|(key, _)| key.clone())
+            {
+                cooldowns.sent.remove(&oldest);
+            }
+        }
+        cooldowns.sent.insert(cursor, now_ms);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_repair_cooldown_len_for_test(&self) -> Result<usize> {
+        let cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(cooldowns.sent.len())
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

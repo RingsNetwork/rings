@@ -1,9 +1,11 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rings_core::delegation::DelegateeKey;
 use rings_core::error::Error as CoreError;
 use rings_core::message::MessageSigner;
 use rings_core::message::ProvisionalEpoch;
@@ -12,6 +14,7 @@ use rings_core::message::ProvisionalServiceReceipt;
 use rings_core::storage::file::FileStorage;
 use rings_core::storage::KvStorageInterface;
 use rings_core::storage::MemStorage;
+use rings_core::storage::RecordAuthority;
 
 use super::*;
 
@@ -30,22 +33,25 @@ struct ManualMeasureClock {
 struct FailingEvidenceStorage;
 
 #[async_trait]
-impl KvStorageInterface<EvidenceSnapshot<Did>> for FailingEvidenceStorage {
-    async fn get(&self, _key: &str) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+impl KvStorageInterface<EvidenceStorageEntry<Did>> for FailingEvidenceStorage {
+    async fn get(
+        &self,
+        _key: &str,
+    ) -> rings_core::error::Result<Option<EvidenceStorageEntry<Did>>> {
         Ok(None)
     }
 
     async fn put(
         &self,
         _key: &str,
-        _value: &EvidenceSnapshot<Did>,
+        _value: &EvidenceStorageEntry<Did>,
     ) -> rings_core::error::Result<()> {
         Err(CoreError::ServiceIOError(std::io::Error::other(
             "store unavailable",
         )))
     }
 
-    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceStorageEntry<Did>)>> {
         Ok(Vec::new())
     }
 
@@ -59,6 +65,58 @@ impl KvStorageInterface<EvidenceSnapshot<Did>> for FailingEvidenceStorage {
 
     async fn count(&self) -> rings_core::error::Result<u32> {
         Ok(0)
+    }
+}
+
+#[derive(Clone, Default)]
+struct MapEvidenceStorage {
+    entries: Arc<std::sync::Mutex<BTreeMap<String, EvidenceStorageEntry<Did>>>>,
+    puts: Arc<AtomicU64>,
+    removes: Arc<AtomicU64>,
+}
+
+impl MapEvidenceStorage {
+    fn snapshot_entries(&self) -> BTreeMap<String, EvidenceStorageEntry<Did>> {
+        lock_or_recover(&self.entries).clone()
+    }
+}
+
+#[async_trait]
+impl KvStorageInterface<EvidenceStorageEntry<Did>> for MapEvidenceStorage {
+    async fn get(&self, key: &str) -> rings_core::error::Result<Option<EvidenceStorageEntry<Did>>> {
+        Ok(lock_or_recover(&self.entries).get(key).cloned())
+    }
+
+    async fn put(
+        &self,
+        key: &str,
+        value: &EvidenceStorageEntry<Did>,
+    ) -> rings_core::error::Result<()> {
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        lock_or_recover(&self.entries).insert(key.to_string(), value.clone());
+        Ok(())
+    }
+
+    async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceStorageEntry<Did>)>> {
+        Ok(lock_or_recover(&self.entries)
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect())
+    }
+
+    async fn remove(&self, key: &str) -> rings_core::error::Result<()> {
+        self.removes.fetch_add(1, Ordering::SeqCst);
+        lock_or_recover(&self.entries).remove(key);
+        Ok(())
+    }
+
+    async fn clear(&self) -> rings_core::error::Result<()> {
+        lock_or_recover(&self.entries).clear();
+        Ok(())
+    }
+
+    async fn count(&self) -> rings_core::error::Result<u32> {
+        Ok(u32::try_from(lock_or_recover(&self.entries).len()).unwrap_or(u32::MAX))
     }
 }
 
@@ -76,20 +134,13 @@ impl MeasureClock for ManualMeasureClock {
     }
 }
 
-fn provisional_evidence_fixture(
+fn make_evidence_record_for_provider(
+    provider: &DelegateeKey,
+    observed_at_seconds: u64,
     tag: u8,
-) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
-    let provider = rings_core::delegation::DelegateeKey::new_with_seckey(
-        &rings_core::ecc::SecretKey::random(),
-    )
-    .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
-    let beneficiary = rings_core::delegation::DelegateeKey::new_with_seckey(
-        &rings_core::ecc::SecretKey::random(),
-    )
-    .unwrap_or_else(|error| panic!("beneficiary delegation must build: {error}"));
-    let observed_at_ms = rings_core::utils::get_epoch_ms();
-    let observed_at_seconds = u64::try_from(observed_at_ms / 1_000)
-        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+) -> ProvisionalEvidenceRecord<Did> {
+    let beneficiary = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("beneficiary delegation must build: {error}"));
     let claim = ProvisionalServiceClaim::probe(
         7,
         provider.delegator_did(),
@@ -100,7 +151,7 @@ fn provisional_evidence_fixture(
         [tag.wrapping_add(2); 32],
     );
     let provider_attestation = claim
-        .sign_provider(MessageSigner::new(&provider, 7))
+        .sign_provider(MessageSigner::new(provider, 7))
         .unwrap_or_else(|error| panic!("provider attestation must sign: {error}"));
     let beneficiary_attestation = claim
         .sign_beneficiary(MessageSigner::new(&beneficiary, 7))
@@ -111,7 +162,7 @@ fn provisional_evidence_fixture(
         beneficiary_attestation,
     )
     .unwrap_or_else(|error| panic!("receipt must assemble: {error}"));
-    let record = ProvisionalEvidenceRecord::new(
+    ProvisionalEvidenceRecord::new(
         rings_measure::EvidenceAccountPair::new(claim.provider_account, claim.beneficiary_account),
         rings_measure::EvidenceFreshnessKey::new(
             claim.network_id,
@@ -130,8 +181,19 @@ fn provisional_evidence_fixture(
             .unwrap_or_else(|error| panic!("receipt must encode: {error}")),
         UnixTime::from_secs(observed_at_seconds),
         claim.epoch.slot.saturating_sub(1),
-    );
-    let collector = EvidenceCollectorIdentity::new(claim.network_id, claim.provider_account);
+    )
+}
+
+fn provisional_evidence_fixture(
+    tag: u8,
+) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let observed_at_ms = rings_core::utils::get_epoch_ms();
+    let observed_at_seconds = u64::try_from(observed_at_ms / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let record = make_evidence_record_for_provider(&provider, observed_at_seconds, tag);
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
     (record, collector)
 }
 
@@ -217,7 +279,10 @@ async fn startup_rejects_foreign_network_and_provider_snapshot_records() {
             .admit(record.clone())
             .unwrap_or_else(|error| panic!("foreign fixture must enter its raw snapshot: {error}"));
         evidence_storage
-            .put(EVIDENCE_SNAPSHOT_KEY, &snapshot_store.snapshot())
+            .put(EVIDENCE_SNAPSHOT_KEY, &EvidenceStorageEntry::Snapshot {
+                compacted_through_sequence: 0,
+                snapshot: snapshot_store.snapshot(),
+            })
             .await
             .unwrap_or_else(|error| panic!("foreign snapshot must persist: {error}"));
 
@@ -398,25 +463,27 @@ async fn evidence_reads_do_not_block_or_observe_uncommitted_state_during_slow_pu
     }
 
     #[async_trait]
-    impl KvStorageInterface<EvidenceSnapshot<Did>> for BlockingEvidenceStorage {
+    impl KvStorageInterface<EvidenceStorageEntry<Did>> for BlockingEvidenceStorage {
         async fn get(
             &self,
             _key: &str,
-        ) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
+        ) -> rings_core::error::Result<Option<EvidenceStorageEntry<Did>>> {
             Ok(None)
         }
 
         async fn put(
             &self,
             _key: &str,
-            _value: &EvidenceSnapshot<Did>,
+            _value: &EvidenceStorageEntry<Did>,
         ) -> rings_core::error::Result<()> {
             self.entered.notify_waiters();
             self.release.notified().await;
             Ok(())
         }
 
-        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, EvidenceStorageEntry<Did>)>> {
             Ok(Vec::new())
         }
 
@@ -493,7 +560,7 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
 
     #[derive(Clone)]
     struct ControlledEvidenceStorage {
-        committed: Arc<std::sync::Mutex<Option<EvidenceSnapshot<Did>>>>,
+        entries: Arc<std::sync::Mutex<BTreeMap<String, EvidenceStorageEntry<Did>>>>,
         park_after_commit: Arc<AtomicBool>,
         fail_next_put: Arc<AtomicBool>,
         entered: Arc<tokio::sync::Notify>,
@@ -501,32 +568,25 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
     }
 
     #[async_trait]
-    impl KvStorageInterface<EvidenceSnapshot<Did>> for ControlledEvidenceStorage {
+    impl KvStorageInterface<EvidenceStorageEntry<Did>> for ControlledEvidenceStorage {
         async fn get(
             &self,
-            _key: &str,
-        ) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
-            Ok(self
-                .committed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone())
+            key: &str,
+        ) -> rings_core::error::Result<Option<EvidenceStorageEntry<Did>>> {
+            Ok(lock_or_recover(&self.entries).get(key).cloned())
         }
 
         async fn put(
             &self,
-            _key: &str,
-            value: &EvidenceSnapshot<Did>,
+            key: &str,
+            value: &EvidenceStorageEntry<Did>,
         ) -> rings_core::error::Result<()> {
             if self.fail_next_put.swap(false, Ordering::SeqCst) {
                 return Err(CoreError::ServiceIOError(std::io::Error::other(
                     "store unavailable",
                 )));
             }
-            *self
-                .committed
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(value.clone());
+            lock_or_recover(&self.entries).insert(key.to_string(), value.clone());
             if self.park_after_commit.swap(false, Ordering::SeqCst) {
                 self.entered.notify_waiters();
                 self.release.notified().await;
@@ -534,84 +594,38 @@ async fn test_cancelled_committed_admission_survives_subsequent_failed_admission
             Ok(())
         }
 
-        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
-            Ok(Vec::new())
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, EvidenceStorageEntry<Did>)>> {
+            Ok(lock_or_recover(&self.entries)
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
         }
 
-        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+        async fn remove(&self, key: &str) -> rings_core::error::Result<()> {
+            lock_or_recover(&self.entries).remove(key);
             Ok(())
         }
 
         async fn clear(&self) -> rings_core::error::Result<()> {
+            lock_or_recover(&self.entries).clear();
             Ok(())
         }
 
         async fn count(&self) -> rings_core::error::Result<u32> {
-            Ok(0)
+            Ok(u32::try_from(lock_or_recover(&self.entries).len()).unwrap_or(u32::MAX))
         }
     }
 
-    let provider = rings_core::delegation::DelegateeKey::new_with_seckey(
-        &rings_core::ecc::SecretKey::random(),
-    )
-    .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
     let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
-    let make_record = |tag: u8| {
-        let beneficiary = rings_core::delegation::DelegateeKey::new_with_seckey(
-            &rings_core::ecc::SecretKey::random(),
-        )
-        .unwrap_or_else(|error| panic!("beneficiary delegation must build: {error}"));
-        let observed_at_seconds = 10_u64;
-        let claim = ProvisionalServiceClaim::probe(
-            7,
-            provider.delegator_did(),
-            beneficiary.delegator_did(),
-            ProvisionalEpoch::from_unix_seconds(observed_at_seconds),
-            *rings_core::ecc::SecretKey::random().ser(),
-            [tag.wrapping_add(1); 32],
-            [tag.wrapping_add(2); 32],
-        );
-        let provider_attestation = claim
-            .sign_provider(MessageSigner::new(&provider, 7))
-            .unwrap_or_else(|error| panic!("provider attestation must sign: {error}"));
-        let beneficiary_attestation = claim
-            .sign_beneficiary(MessageSigner::new(&beneficiary, 7))
-            .unwrap_or_else(|error| panic!("beneficiary attestation must sign: {error}"));
-        let receipt = ProvisionalServiceReceipt::new(
-            claim.clone(),
-            provider_attestation,
-            beneficiary_attestation,
-        )
-        .unwrap_or_else(|error| panic!("receipt must assemble: {error}"));
-        ProvisionalEvidenceRecord::new(
-            rings_measure::EvidenceAccountPair::new(
-                claim.provider_account,
-                claim.beneficiary_account,
-            ),
-            rings_measure::EvidenceFreshnessKey::new(
-                claim.network_id,
-                claim.beneficiary_account,
-                claim.epoch.slot,
-                claim.nonce,
-            ),
-            EvidenceDigest::new(
-                receipt
-                    .digest()
-                    .unwrap_or_else(|error| panic!("receipt must hash: {error}"))
-                    .into_bytes(),
-            ),
-            receipt
-                .canonical_bytes()
-                .unwrap_or_else(|error| panic!("receipt must encode: {error}")),
-            UnixTime::from_secs(observed_at_seconds),
-            claim.epoch.slot.saturating_sub(1),
-        )
-    };
-    let record_a = make_record(11);
-    let record_b = make_record(21);
+    let record_a = make_evidence_record_for_provider(&provider, 10, 11);
+    let record_b = make_evidence_record_for_provider(&provider, 10, 21);
 
     let storage = ControlledEvidenceStorage {
-        committed: Arc::new(std::sync::Mutex::new(None)),
+        entries: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         park_after_commit: Arc::new(AtomicBool::new(true)),
         fail_next_put: Arc::new(AtomicBool::new(false)),
         entered: Arc::new(tokio::sync::Notify::new()),
@@ -727,48 +741,6 @@ async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger(
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CountingEvidenceStorage {
-        puts: Arc<AtomicU64>,
-        snapshot: Arc<std::sync::Mutex<Option<EvidenceSnapshot<Did>>>>,
-    }
-
-    #[async_trait]
-    impl KvStorageInterface<EvidenceSnapshot<Did>> for CountingEvidenceStorage {
-        async fn get(
-            &self,
-            _key: &str,
-        ) -> rings_core::error::Result<Option<EvidenceSnapshot<Did>>> {
-            Ok(lock_or_recover(&self.snapshot).clone())
-        }
-
-        async fn put(
-            &self,
-            _key: &str,
-            value: &EvidenceSnapshot<Did>,
-        ) -> rings_core::error::Result<()> {
-            self.puts.fetch_add(1, Ordering::SeqCst);
-            *lock_or_recover(&self.snapshot) = Some(value.clone());
-            Ok(())
-        }
-
-        async fn get_all(&self) -> rings_core::error::Result<Vec<(String, EvidenceSnapshot<Did>)>> {
-            Ok(Vec::new())
-        }
-
-        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
-            Ok(())
-        }
-
-        async fn clear(&self) -> rings_core::error::Result<()> {
-            Ok(())
-        }
-
-        async fn count(&self) -> rings_core::error::Result<u32> {
-            Ok(0)
-        }
-    }
-
     let (record, collector) = provisional_evidence_fixture(12);
     let ledger_storage = GatedLedgerStorage {
         gate_next: Arc::new(AtomicBool::new(true)),
@@ -776,7 +748,7 @@ async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger(
         release: Arc::new(tokio::sync::Notify::new()),
         writes: Arc::new(AtomicU64::new(0)),
     };
-    let evidence_storage = CountingEvidenceStorage::default();
+    let evidence_storage = MapEvidenceStorage::default();
     let measure = Arc::new(
         PeriodicMeasure::new_with_clock_and_evidence(
             Box::new(ledger_storage.clone()),
@@ -818,6 +790,8 @@ async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger(
         .unwrap_or_else(|error| panic!("flush task must join: {error}"))
         .unwrap_or_else(|error| panic!("ledger flush must finish: {error}"));
     assert_eq!(ledger_storage.writes.load(Ordering::SeqCst), 1);
+    // Explicit `flush()` compacts pending incremental deltas into a single Snapshot checkpoint.
+    assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 2);
 
     // Mutate only the measurement ledger and run persist_pending_once; clean evidence_storage
     // must not be rewritten.
@@ -834,5 +808,444 @@ async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger(
         .await
         .unwrap_or_else(|error| panic!("ledger-only persist must succeed: {error}"));
     assert_eq!(ledger_storage.writes.load(Ordering::SeqCst), 2);
-    assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 1);
+    assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn incremental_admissions_write_deltas_and_survive_restart_without_flush() {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let r1 = make_evidence_record_for_provider(&provider, now_secs, 1);
+    let r2 = make_evidence_record_for_provider(&provider, now_secs, 2);
+    let r3 = make_evidence_record_for_provider(&provider, now_secs, 3);
+    let r4 = make_evidence_record_for_provider(&provider, now_secs, 4);
+
+    let evidence_storage = MapEvidenceStorage::default();
+    let measure = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+    for record in [r1.clone(), r2.clone(), r3.clone()] {
+        let report = measure
+            .admit_provisional_evidence(record)
+            .await
+            .unwrap_or_else(|error| panic!("delta admission must succeed: {error}"));
+        assert_eq!(report.admission(), EvidenceAdmission::Admitted);
+    }
+
+    let entries = evidence_storage.snapshot_entries();
+    assert!(!entries.contains_key(EVIDENCE_SNAPSHOT_KEY));
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries.keys().cloned().collect::<Vec<_>>(), vec![
+        evidence_delta_key(1),
+        evidence_delta_key(2),
+        evidence_delta_key(3),
+    ]);
+
+    // Simulate crash recovery without calling `flush()` or `close()`: drop the live instance and
+    // reopen from the delta entries alone.
+    drop(measure);
+    let restored = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must restore from deltas: {error}"));
+
+    let page = restored
+        .provisional_evidence_page(None, nonzero_usize(10))
+        .await
+        .unwrap_or_else(|error| panic!("restored evidence page must project: {error}"));
+    let mut restored_digests: Vec<_> = page.records().iter().map(|r| r.digest()).collect();
+    restored_digests.sort();
+    let mut expected_digests = vec![r1.digest(), r2.digest(), r3.digest()];
+    expected_digests.sort();
+    assert_eq!(restored_digests, expected_digests);
+    assert_eq!(restored.provisional_evidence_counters().await.admitted(), 3);
+
+    // Next admission after restart must continue monotonically at sequence 4 (never overwrite 1).
+    let report4 = restored
+        .admit_provisional_evidence(r4)
+        .await
+        .unwrap_or_else(|error| panic!("post-restart delta admission must succeed: {error}"));
+    assert_eq!(report4.admission(), EvidenceAdmission::Admitted);
+    let after_restart_entries = evidence_storage.snapshot_entries();
+    assert!(after_restart_entries.contains_key(&evidence_delta_key(4)));
+    assert_eq!(after_restart_entries.len(), 4);
+}
+
+#[tokio::test]
+async fn delta_compaction_triggers_at_threshold_and_prunes_compacted_keys() {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let records: Vec<_> = (1..=5_u8)
+        .map(|tag| make_evidence_record_for_provider(&provider, now_secs, tag))
+        .collect();
+
+    let evidence_storage = MapEvidenceStorage::default();
+    let measure = PeriodicMeasure::new_with_clock_evidence_and_threshold(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+        3,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+    // Admit 3 records to hit threshold = 3.
+    for record in &records[..3] {
+        assert_eq!(
+            measure
+                .admit_provisional_evidence(record.clone())
+                .await
+                .unwrap_or_else(|error| panic!("admission must commit: {error}"))
+                .admission(),
+            EvidenceAdmission::Admitted
+        );
+    }
+    assert!(lock_or_recover(&measure.state.runtime).evidence_dirty);
+
+    // Next admission immediately compacts dirty delta log into a Snapshot checkpoint and prunes
+    // the compacted delta keys (1..=3).
+    assert_eq!(
+        measure
+            .admit_provisional_evidence(records[3].clone())
+            .await
+            .unwrap_or_else(|error| panic!("compacting admission must commit: {error}"))
+            .admission(),
+        EvidenceAdmission::Admitted
+    );
+
+    let entries = evidence_storage.snapshot_entries();
+    assert_eq!(entries.len(), 1);
+    match entries.get(EVIDENCE_SNAPSHOT_KEY) {
+        Some(EvidenceStorageEntry::Snapshot {
+            compacted_through_sequence,
+            snapshot,
+        }) => {
+            assert_eq!(*compacted_through_sequence, 3);
+            assert_eq!(snapshot.records.len(), 4);
+        }
+        other => panic!("expected compacted Snapshot entry, got {other:?}"),
+    }
+
+    // Reopening from the compacted snapshot preserves sequence monotonicity so the next admission
+    // writes at sequence >= 4 rather than resetting to 1.
+    drop(measure);
+    let reopened = PeriodicMeasure::new_with_clock_evidence_and_threshold(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+        3,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must reopen cleanly: {error}"));
+    assert_eq!(
+        reopened
+            .admit_provisional_evidence(records[4].clone())
+            .await
+            .unwrap_or_else(|error| panic!("post-compaction admission must succeed: {error}"))
+            .admission(),
+        EvidenceAdmission::Admitted
+    );
+    let after = evidence_storage.snapshot_entries();
+    assert!(after.contains_key(EVIDENCE_SNAPSHOT_KEY));
+    assert!(after.contains_key(&evidence_delta_key(4)));
+    assert_eq!(reopened.provisional_evidence_counters().await.admitted(), 5);
+}
+
+#[tokio::test]
+async fn startup_skips_stale_deltas_left_after_compaction_crash() {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let r1 = make_evidence_record_for_provider(&provider, now_secs, 1);
+    let r2 = make_evidence_record_for_provider(&provider, now_secs, 2);
+    let r3 = make_evidence_record_for_provider(&provider, now_secs, 3);
+
+    let mut base_store = ProvisionalEvidenceStore::new(EvidenceLimits::default());
+    base_store
+        .admit(r1.clone())
+        .unwrap_or_else(|error| panic!("r1 must enter base snapshot: {error}"));
+    base_store
+        .admit(r2.clone())
+        .unwrap_or_else(|error| panic!("r2 must enter base snapshot: {error}"));
+
+    let evidence_storage = MapEvidenceStorage::default();
+    evidence_storage
+        .put(EVIDENCE_SNAPSHOT_KEY, &EvidenceStorageEntry::Snapshot {
+            compacted_through_sequence: 2,
+            snapshot: base_store.snapshot(),
+        })
+        .await
+        .unwrap_or_else(|error| panic!("snapshot must seed: {error}"));
+    for (seq, rec) in [(1_u64, r1), (2_u64, r2), (3_u64, r3)] {
+        evidence_storage
+            .put(
+                &evidence_delta_key(seq),
+                &EvidenceStorageEntry::Delta(EvidenceAdmissionDelta {
+                    schema_version: EVIDENCE_SNAPSHOT_VERSION,
+                    sequence: seq,
+                    record: rec,
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("delta must seed: {error}"));
+    }
+
+    let restored = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("restore with stale deltas must succeed: {error}"));
+
+    let counters = restored.provisional_evidence_counters().await;
+    assert_eq!(counters.admitted(), 3);
+    assert_eq!(
+        counters.duplicates(),
+        0,
+        "stale deltas <= compacted_through_sequence must not be replayed as duplicates"
+    );
+    assert!(lock_or_recover(&restored.state.runtime).evidence_dirty);
+
+    // Running persistence compacts delta 3 and removes stale delta keys 1, 2, 3.
+    persist_pending_once(&restored.state)
+        .await
+        .unwrap_or_else(|error| panic!("cleanup persist must succeed: {error}"));
+    let cleaned = evidence_storage.snapshot_entries();
+    assert_eq!(cleaned.len(), 1);
+    match cleaned.get(EVIDENCE_SNAPSHOT_KEY) {
+        Some(EvidenceStorageEntry::Snapshot {
+            compacted_through_sequence,
+            snapshot,
+        }) => {
+            assert_eq!(*compacted_through_sequence, 3);
+            assert_eq!(snapshot.records.len(), 3);
+        }
+        other => panic!("expected compacted snapshot after cleanup, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn startup_isolates_foreign_or_corrupt_delta_while_preserving_valid_neighbors() {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let foreign_provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("foreign provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let r1 = make_evidence_record_for_provider(&provider, now_secs, 1);
+    let foreign_r2 = make_evidence_record_for_provider(&foreign_provider, now_secs, 2);
+    let r3 = make_evidence_record_for_provider(&provider, now_secs, 3);
+
+    let evidence_storage = MapEvidenceStorage::default();
+    for (seq, rec) in [
+        (1_u64, r1.clone()),
+        (2_u64, foreign_r2),
+        (3_u64, r3.clone()),
+    ] {
+        evidence_storage
+            .put(
+                &evidence_delta_key(seq),
+                &EvidenceStorageEntry::Delta(EvidenceAdmissionDelta {
+                    schema_version: EVIDENCE_SNAPSHOT_VERSION,
+                    sequence: seq,
+                    record: rec,
+                }),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("delta must seed: {error}"));
+    }
+
+    let restored = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("restore must isolate foreign delta: {error}"));
+
+    let counters = restored.provisional_evidence_counters().await;
+    assert_eq!(counters.admitted(), 2);
+    assert_eq!(counters.rejected_records(), 1);
+    assert_eq!(counters.rejected_replay_markers(), 1);
+    let page = restored
+        .provisional_evidence_page(None, nonzero_usize(10))
+        .await
+        .unwrap_or_else(|error| panic!("page must project: {error}"));
+    let mut restored_digests: Vec<_> = page.records().iter().map(|r| r.digest()).collect();
+    restored_digests.sort();
+    let mut expected_digests = vec![r1.digest(), r3.digest()];
+    expected_digests.sort();
+    assert_eq!(restored_digests, expected_digests);
+}
+
+#[tokio::test]
+async fn explicit_flush_compacts_pending_deltas_into_snapshot() {
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let r1 = make_evidence_record_for_provider(&provider, now_secs, 1);
+    let r2 = make_evidence_record_for_provider(&provider, now_secs, 2);
+    let r3 = make_evidence_record_for_provider(&provider, now_secs, 3);
+
+    let evidence_storage = MapEvidenceStorage::default();
+    let measure = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+    for record in [r1, r2] {
+        assert_eq!(
+            measure
+                .admit_provisional_evidence(record)
+                .await
+                .unwrap_or_else(|error| panic!("admission must commit: {error}"))
+                .admission(),
+            EvidenceAdmission::Admitted
+        );
+    }
+    assert!(!evidence_storage
+        .snapshot_entries()
+        .contains_key(EVIDENCE_SNAPSHOT_KEY));
+
+    measure
+        .flush()
+        .await
+        .unwrap_or_else(|error| panic!("explicit flush must compact pending deltas: {error}"));
+
+    let flushed = evidence_storage.snapshot_entries();
+    assert_eq!(flushed.len(), 1);
+    match flushed.get(EVIDENCE_SNAPSHOT_KEY) {
+        Some(EvidenceStorageEntry::Snapshot {
+            compacted_through_sequence,
+            snapshot,
+        }) => {
+            assert_eq!(*compacted_through_sequence, 2);
+            assert_eq!(snapshot.records.len(), 2);
+        }
+        other => panic!("expected Snapshot checkpoint after flush, got {other:?}"),
+    }
+
+    drop(measure);
+    let reopened = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        Box::new(evidence_storage.clone()),
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("reopen after flush must succeed: {error}"));
+    assert_eq!(reopened.provisional_evidence_counters().await.admitted(), 2);
+    reopened
+        .admit_provisional_evidence(r3)
+        .await
+        .unwrap_or_else(|error| panic!("post-flush admission must succeed: {error}"));
+    assert!(evidence_storage
+        .snapshot_entries()
+        .contains_key(&evidence_delta_key(3)));
+}
+
+#[tokio::test]
+async fn legacy_bare_evidence_snapshot_file_is_retired_cleanly_on_startup() {
+    let temp_dir =
+        std::env::temp_dir().join(format!("rings-legacy-evidence-{}", uuid::Uuid::new_v4()));
+    let temp_path = temp_dir
+        .to_str()
+        .unwrap_or_else(|| panic!("temp dir path must be UTF-8"))
+        .to_string();
+    let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
+        .unwrap_or_else(|error| panic!("provider delegation must build: {error}"));
+    let collector = EvidenceCollectorIdentity::new(7, provider.delegator_did());
+    let now_secs = u64::try_from(rings_core::utils::get_epoch_ms() / 1_000)
+        .unwrap_or_else(|_| panic!("current observation time must fit whole seconds"));
+    let legacy_record = make_evidence_record_for_provider(&provider, now_secs, 1);
+    let fresh_record = make_evidence_record_for_provider(&provider, now_secs, 2);
+
+    // Seed a legacy bare `EvidenceSnapshot<Did>` file at `EVIDENCE_SNAPSHOT_KEY` using the
+    // production `RecordAuthority::Disposable` policy.
+    {
+        let legacy_file_store = FileStorage::new_with_cap_path_and_authority(
+            1024 * 1024,
+            temp_path.clone(),
+            RecordAuthority::Disposable,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("legacy file storage must open: {error}"));
+        let mut legacy_store = ProvisionalEvidenceStore::new(EvidenceLimits::default());
+        legacy_store
+            .admit(legacy_record)
+            .unwrap_or_else(|error| panic!("legacy fixture must enter store: {error}"));
+        KvStorageInterface::<EvidenceSnapshot<Did>>::put(
+            &legacy_file_store,
+            EVIDENCE_SNAPSHOT_KEY,
+            &legacy_store.snapshot(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("legacy snapshot must write: {error}"));
+    }
+
+    let upgraded_storage: EvidenceStorage = Box::new(
+        FileStorage::new_with_cap_path_and_authority(
+            1024 * 1024,
+            temp_path.clone(),
+            RecordAuthority::Disposable,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("upgraded file storage must reopen: {error}")),
+    );
+    let restored = PeriodicMeasure::new_with_clock_and_evidence(
+        Box::new(MemStorage::new()),
+        upgraded_storage,
+        Some(collector),
+        Arc::new(ManualMeasureClock::new(now_secs)),
+    )
+    .await
+    .unwrap_or_else(|error| panic!("disposable store must retire legacy bare snapshot: {error}"));
+    assert!(restored
+        .provisional_evidence_page(None, nonzero_usize(4))
+        .await
+        .unwrap_or_else(|error| panic!("page must project: {error}"))
+        .records()
+        .is_empty());
+    assert_eq!(
+        restored
+            .admit_provisional_evidence(fresh_record)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "fresh admission after legacy retirement must commit: {error}"
+            ))
+            .admission(),
+        EvidenceAdmission::Admitted
+    );
+    restored.close().await;
+    let _ = std::fs::remove_dir_all(&temp_dir);
 }
