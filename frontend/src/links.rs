@@ -19,18 +19,31 @@ macro_rules! docs_url {
 /// Project resources outside the book.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ProjectLink {
+    /// Engineering blog on `rings.rs/blog/`.
     Blog,
+    /// Documentation book root on `rings.rs/docs/`.
     Docs,
+    /// GitHub repository for Rings Network.
     Repository,
+    /// Rings Network whitepaper PDF.
     Whitepaper,
+    /// GitHub releases page.
     Releases,
+    /// `rings-node` package page on crates.io.
     CratesIo,
+    /// `@ringsnetwork/rings-node` package page on npm.
     Npm,
+    /// Security model and policy document.
     Security,
+    /// Project roadmap document.
     Roadmap,
+    /// GitHub Sponsors page for Rings Network.
     Sponsor,
+    /// AGPL-3.0-only license text.
     License,
+    /// Machine-readable `llms.txt` index on `rings.rs`.
     LlmsTxt,
+    /// Official Rings Network X (Twitter) account.
     XAccount,
 }
 
@@ -43,6 +56,7 @@ impl ProjectLink {
     /// destinations the landing page does not lead to on its own.
     pub(crate) const HEADER: [Self; 3] = [Self::Blog, Self::Docs, Self::Whitepaper];
 
+    /// Display text rendered inside the anchor for this resource.
     fn label(self) -> &'static str {
         match self {
             Self::Blog => "Blog",
@@ -61,6 +75,7 @@ impl ProjectLink {
         }
     }
 
+    /// Absolute URL of this project resource.
     pub(crate) fn href(self) -> &'static str {
         match self {
             Self::Blog => "https://rings.rs/blog/",
@@ -92,28 +107,48 @@ impl ProjectLink {
 /// chapter is a destination in its own right.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Chapter {
+    /// Installing the native `rings` daemon.
     InstallNativeNode,
+    /// Hosting and operating a native node.
     HostNativeNode,
+    /// Command-line interface reference.
     Cli,
+    /// `rings-tui` terminal dashboard guide.
     Tui,
+    /// Operator metrics, logs, and observability guide.
     OperatorObservability,
+    /// Native TUN gateway setup and operation.
     NativeGateway,
+    /// Authoritative DNS relay and IPv6 ingress guide.
     DnsRelay,
+    /// Stateless TURN and Onion TURN server guide.
     TurnServer,
+    /// DID mailbox and stateless SMTP gateway guide.
     MailGateway,
+    /// Building and embedding the WebAssembly node.
     BuildForWasm,
+    /// Browser node console and Chrome extension guide.
     BrowserNode,
+    /// Embedding a Rings node via the C FFI (`rings.h`).
     Ffi,
+    /// JSON-RPC API reference.
     JsonRpc,
+    /// `config.yaml` configuration reference.
     ConfigYaml,
+    /// System architecture overview.
     Architecture,
+    /// Sphinx/AEZ onion routing and Kleisli invoke pipelines.
     Onion,
+    /// Binary wire protocol specification.
     WireProtocol,
+    /// Decoupled transport abstraction guide.
     Transport,
+    /// Documentation index tailored for AI agents.
     ForAgents,
 }
 
 impl Chapter {
+    /// Display text rendered inside the anchor for this chapter.
     fn label(self) -> &'static str {
         match self {
             Self::InstallNativeNode => "Install",
@@ -138,6 +173,7 @@ impl Chapter {
         }
     }
 
+    /// Absolute URL of this documentation book chapter.
     pub(crate) fn href(self) -> &'static str {
         match self {
             Self::InstallNativeNode => docs_url!("install-a-native-node.html"),
@@ -173,12 +209,16 @@ impl Chapter {
 /// (`render : SiteLink × Class → Html`); pages navigate in place, the rest open outside.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum SiteLink {
+    /// An in-shell page navigated via `ShellPage`.
     Page(ShellPage),
+    /// An external project resource.
     Project(ProjectLink),
+    /// A chapter of the documentation book.
     Chapter(Chapter),
 }
 
 impl SiteLink {
+    /// Render this link as an in-shell button or external anchor with the given CSS `class`.
     pub(crate) fn render(self, class: &'static str, navigate_page: &Callback<ShellPage>) -> Html {
         match self {
             Self::Page(page) => page.button(class, false, navigate_page),

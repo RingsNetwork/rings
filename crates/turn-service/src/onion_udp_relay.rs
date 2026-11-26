@@ -26,7 +26,9 @@ use rings_turn::TurnRelayCloseHandle;
 
 /// One TURN allocation's datagram relay backed by a multi-hop `onion::udp` session.
 pub struct OnionUdpRelayBackend {
+    /// Active multi-hop onion UDP session handling relayed datagrams.
     session: Arc<NativeOnionUdpSession>,
+    /// Policy governing which peer IP addresses are permitted for relay traffic.
     peer_policy: RelayPeerPolicy,
 }
 
@@ -109,8 +111,11 @@ impl TurnDatagramRelay for OnionUdpRelayBackend {
 /// [`TurnDatagramRelayFactory`] opening a fresh multi-hop `onion::udp` session per TURN
 /// allocation.
 pub struct OnionUdpRelayFactory {
+    /// Late-bound weak processor reference and native onion circuit handle.
     runtime: SyncMutex<Option<(Weak<Processor>, NativeOnionCircuitHandle)>>,
+    /// Onion loop class used when opening new relay circuits.
     loop_class: OnionLoopClass,
+    /// Policy applied to relayed peer addresses on created sessions.
     peer_policy: RelayPeerPolicy,
 }
 

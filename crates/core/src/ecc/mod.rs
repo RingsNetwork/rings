@@ -29,6 +29,7 @@ pub mod keys;
 pub mod prime_order;
 /// Signature schemes used by DID identity and provider login.
 pub mod signers;
+/// Fixed-width compressed [`PublicKey`] type and serialization adapters.
 mod types;
 use elliptic_curve::sec1::FromSec1Point;
 use elliptic_curve::sec1::Sec1Point;
@@ -207,6 +208,7 @@ impl ToString for SecretKey {
     }
 }
 
+/// Serde visitor for deserializing hex-encoded [`SecretKey`] strings.
 struct SecretKeyVisitor;
 
 impl<'de> serde::de::Visitor<'de> for SecretKeyVisitor {
@@ -235,6 +237,7 @@ impl Serialize for SecretKey {
     }
 }
 
+/// Derive the Ethereum-style 20-byte address from a 33-byte public key.
 fn public_key_address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
     let hash = match TryInto::<K256PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
@@ -250,16 +253,19 @@ fn public_key_address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
     PublicKeyAddress::from_slice(&hash[12..])
 }
 
+/// Derive the Ethereum-style 20-byte address from a [`SecretKey`].
 fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
     secret_key.pubkey().address()
 }
 
 impl SecretKey {
+    /// Construct a [`SecretKey`] from raw 32-byte big-endian scalar bytes.
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
         let key = K256SecretKey::from_slice(&bytes).map_err(|_| Error::PrivateKeyBadFormat)?;
         Ok(Self(key))
     }
 
+    /// Return the underlying secp256k1 scalar value.
     pub(crate) fn secp256k1_scalar(&self) -> K256Scalar {
         *self.0.to_nonzero_scalar()
     }

@@ -55,12 +55,14 @@ impl InboundProcessor {
         }
     }
 
+    /// Sweep expired incomplete reassemblies at `now_ms` and charge receive failures to the peer.
     pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
         let credit = self.carrier_credit();
         let expired = self.reassembler.lock().await.sweep_at(now_ms, credit);
         self.record_expired_reassembly_failures(None, expired).await;
     }
 
+    /// Record `count` authenticated receive failures for expired incomplete reassemblies.
     async fn record_expired_reassembly_failures(
         &self,
         fallback_peer: Option<crate::dht::Did>,
@@ -92,14 +94,17 @@ impl InboundProcessor {
 /// The reassembler's own state, which the inbound actor tends whether or not it holds the
 /// transport bound.
 impl<L> InboundProcessor<L> {
+    /// Return whether the reassembler currently holds any incomplete messages.
     pub(super) async fn has_pending_reassembly(&self) -> bool {
         self.reassembler.lock().await.has_pending()
     }
 
+    /// Prepare pending reassembly state for connection close, returning whether any remains.
     pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
         self.reassembler.lock().await.prepare_for_close()
     }
 
+    /// Discard pending reassembly state after the close cleanup timer fails to arm.
     pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
         self.reassembler
             .lock()
@@ -108,13 +113,19 @@ impl<L> InboundProcessor<L> {
     }
 }
 
+/// Verified and admitted logical message produced when a chunk completes reassembly.
 struct ReassembledEvent {
+    /// Decoded and verified outer message payload.
     payload: crate::message::MessagePayload,
+    /// Decoded inner logical message.
     message: crate::message::Message,
+    /// Target logical lane for dispatching the reassembled message.
     lane: InboundLane,
+    /// Whether the final transaction was admitted by the replay window.
     admitted_final: bool,
 }
 
+/// Advance chunk reassembly for `event`, returning a logical [`InboundEvent`] if reassembly completed.
 pub(super) async fn process_chunk_event(
     processor: &InboundProcessor,
     mut event: InboundEvent,
@@ -142,6 +153,7 @@ pub(super) async fn process_chunk_event(
     None
 }
 
+/// Feed one chunk event into the reassembler and validate any completed logical message.
 async fn advance_chunk_event(
     processor: &InboundProcessor,
     event: &mut InboundEvent,
@@ -254,6 +266,7 @@ async fn advance_chunk_event(
     }))
 }
 
+/// Extract the prepared [`crate::chunk::Chunk`] from `prepared_message`.
 fn take_prepared_chunk(
     prepared_message: &mut Option<crate::message::Message>,
 ) -> Result<crate::chunk::Chunk> {

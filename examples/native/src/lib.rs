@@ -1,3 +1,7 @@
+//! Helpers and example protocol for the native Rings example.
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
+
 use std::fmt;
 
 use bytes::Bytes;

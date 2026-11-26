@@ -46,7 +46,9 @@ use crate::utils::Instant;
 
 mod barrier;
 mod capacity;
+/// Inbound lane classification and carrier-lane mapping.
 mod lane;
+/// Inbound chunk reassembly execution and expiration sweeping.
 mod reassembly;
 mod reassembly_clock;
 mod ticket;
@@ -80,6 +82,7 @@ use self::ticket::InboundSender;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 use self::ticket::InboundTicket;
 
+/// Select the element of a per-lane array corresponding to `$lane`.
 macro_rules! inbound_lane_entry {
     ($lanes:expr, $lane:expr) => {{
         let [control, storage, e2e, application, reassembly] = $lanes;
@@ -101,19 +104,24 @@ const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
 const INBOUND_RESERVED_TRANSFERS_PER_LANE: usize = 16;
 /// One maximum transport frame fits each lane's byte reservation after decoding.
 const INBOUND_RESERVED_BYTES_PER_LANE: usize = 1024 * 1024;
+/// Per-lane reserved event counts indexed by [`InboundLane::index`].
 const INBOUND_RESERVED_TRANSFERS: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_TRANSFERS_PER_LANE; INBOUND_LANE_COUNT];
+/// Per-lane reserved byte budgets indexed by [`InboundLane::index`].
 const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_BYTES_PER_LANE; INBOUND_LANE_COUNT];
 /// Per-peer share prevents one connection from occupying the node-wide actor.
 const INBOUND_PEER_CAPACITY: usize = 32;
 const _: () =
     assert!((rings_transport::core::pool::CHANNEL_POOL_SIZE as usize) < INBOUND_PEER_CAPACITY);
+/// Maximum decoded byte weight retained simultaneously for a single peer.
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
+/// Interval between periodic reassembly expiration sweeps in dummy test builds.
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
+/// Interval between periodic reassembly expiration sweeps.
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 /// Where the drainer that handed an event over learns its logical outcome.
@@ -146,34 +154,53 @@ enum InboundCompletion {
     /// Reply with the outcome once the event's logical processing is done.
     Await(InboundReply),
     /// Nobody awaits: a failure is logged against `peer`.
-    LogHeld { peer: Did },
+    LogHeld {
+        /// Peer DID to associate with logged failures.
+        peer: Did,
+    },
 }
 
+/// Sequenced inbound frame admitted to the actor and awaiting lane execution.
 struct InboundEvent {
+    /// Monotonic ingress sequence number assigned by [`InboundSender`].
     sequence: u64,
+    /// Parsed remote peer DID, if available.
     peer: Option<Did>,
+    /// Authentication status of `peer` at ingress.
     authentication: Authentication,
+    /// Verified outer message payload.
     payload: MessagePayload,
+    /// Pre-decoded inner protocol message, if already decoded before queuing.
     prepared_message: Option<crate::message::Message>,
+    /// Logical scheduling lane that executes this event.
     lane: InboundLane,
     /// Whether final transaction admission was already committed before entering the lane.
     admitted_final: bool,
     /// The transport lane the frame arrived on; a chunk's carrier is checked against its
     /// message once reassembled.
     carrier: Option<ChannelLane>,
+    /// Uncompressed wire byte length of the frame.
     wire_bytes: usize,
+    /// Capacity permit held until this event finishes executing.
     permit: InboundCapacityPermit,
+    /// Completion channel or logging target for the event's logical outcome.
     completion: InboundCompletion,
 }
 
+/// Verified inbound frame and transport lease ready to be admitted into [`InboundMailbox`].
 pub(super) struct InboundSubmission {
+    /// Parsed remote peer DID, if available.
     peer: Option<Did>,
+    /// Authentication status of `peer` at ingress.
     authentication: Authentication,
+    /// Pre-verified and classified frame payload.
     prepared: PreparedInboundFrame,
+    /// Raw transport frame bytes and credit lease.
     lease: InboundFrameLease,
 }
 
 impl InboundSubmission {
+    /// Construct a new [`InboundSubmission`] from its peer metadata, lease, and prepared frame.
     pub(super) const fn new(
         peer: Option<Did>,
         authentication: Authentication,
@@ -190,15 +217,20 @@ impl InboundSubmission {
 }
 
 impl InboundEvent {
+    /// Return the [`InboundLane`] assigned to this event.
     const fn lane(&self) -> InboundLane {
         self.lane
     }
 }
 
+/// Handle for admitting verified frames to a connection's [`InboundActor`].
 #[derive(Clone)]
 pub(crate) struct InboundMailbox {
+    /// Sequenced command sender feeding the inbound actor.
     sender: Arc<Mutex<InboundSender>>,
+    /// Shared node-wide and per-peer inbound capacity ledger.
     capacity: Arc<InboundCapacity>,
+    /// Whether the detached inbound actor task was successfully spawned.
     actor_available: bool,
     /// Bumped after each raw transport lease is released at the core handoff.
     handoffs: Arc<GenerationWitness>,
@@ -209,6 +241,7 @@ pub(crate) struct InboundMailbox {
 }
 
 impl InboundMailbox {
+    /// Spawn the detached [`InboundActor`] for `processor` and return its mailbox handle.
     pub(super) fn spawn(
         processor: InboundProcessor<WeakLogical>,
         capacity: Arc<InboundCapacity>,
@@ -233,6 +266,7 @@ impl InboundMailbox {
         }
     }
 
+    /// Admit `submission` into its lane and await its logical processing outcome.
     pub(super) async fn submit_prepared(
         &self,
         processor: &InboundProcessor,
@@ -249,6 +283,7 @@ impl InboundMailbox {
         }
     }
 
+    /// Admit a held `submission` into its lane without awaiting logical completion.
     pub(super) async fn submit_prepared_detached(
         &self,
         processor: &InboundProcessor,
@@ -260,6 +295,7 @@ impl InboundMailbox {
             .await
     }
 
+    /// Verify that the inbound actor was spawned and its command channel is still open.
     fn ensure_actor_available(&self) -> Result<()> {
         if !self.actor_available {
             return Err(Error::InboundMailboxRuntimeUnavailable);
@@ -275,6 +311,7 @@ impl InboundMailbox {
         Ok(())
     }
 
+    /// Reserve inbound capacity, commit any non-chunk final admission, and enqueue the event.
     async fn enqueue_to_lane(
         &self,
         processor: &InboundProcessor,
@@ -445,16 +482,22 @@ pub(super) const fn peer_capacity() -> usize {
     INBOUND_PEER_CAPACITY
 }
 
+/// Per-lane sequence-ordered queues held by [`InboundActor`].
 struct InboundQueues {
+    /// Queued entries for each [`InboundLane`], ordered by sequence number.
     lanes: [VecDeque<InboundQueueEntry>; INBOUND_LANE_COUNT],
 }
 
+/// One sequence slot in an [`InboundQueues`] lane, holding either a pending reservation or a ready event.
 struct InboundQueueEntry {
+    /// Monotonic ingress sequence number for ordering within the lane.
     sequence: u64,
+    /// Ready event once delivered, or `None` while only a pending reservation exists.
     event: Option<InboundEvent>,
 }
 
 impl InboundQueues {
+    /// Create empty queues for all inbound lanes.
     fn new() -> Self {
         Self {
             lanes: std::array::from_fn(|_| VecDeque::new()),
@@ -471,6 +514,7 @@ impl InboundQueues {
         });
     }
 
+    /// Insert `event` into its lane queue in sequence order, filling any matching pending slot.
     fn push_ready(&mut self, event: InboundEvent) {
         let queue = inbound_lane_entry!(&mut self.lanes, event.lane());
         if let Some(entry) = queue
@@ -496,12 +540,14 @@ impl InboundQueues {
         }
     }
 
+    /// Pop and return the front event of `lane` if it is ready.
     fn pop(&mut self, lane: InboundLane) -> Option<InboundEvent> {
         let queue = inbound_lane_entry!(&mut self.lanes, lane);
         queue.front()?.event.as_ref()?;
         queue.pop_front()?.event
     }
 
+    /// Return the sequence number at the front of `lane`, if non-empty.
     fn front_sequence(&self, lane: InboundLane) -> Option<u64> {
         inbound_lane_entry!(&self.lanes, lane)
             .front()
@@ -509,14 +555,20 @@ impl InboundQueues {
     }
 }
 
+/// Completion report returned by an executing inbound lane task.
 struct InboundTaskCompletion {
+    /// Lane that finished executing.
     lane: InboundLane,
+    /// Sequence number of the completed event.
     sequence: u64,
+    /// Follow-up logical event produced when a chunk completed reassembly.
     next: Option<InboundEvent>,
 }
 
+/// Boxed future representing one executing inbound lane task on non-WASM targets.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 type InboundTaskFuture = Pin<Box<dyn Future<Output = InboundTaskCompletion> + Send>>;
+/// Boxed future representing one executing inbound lane task on WASM targets.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 type InboundTaskFuture = Pin<Box<dyn Future<Output = InboundTaskCompletion>>>;
 
@@ -527,20 +579,30 @@ type InboundTaskFuture = Pin<Box<dyn Future<Output = InboundTaskCompletion>>>;
 /// [`WeakLogical`]): each event and each cleanup pass binds it, and a pass that finds the
 /// transport gone stops the actor, since nothing it holds can be delivered any more.
 struct InboundActor {
+    /// Weak handle to the connection's inbound processor.
     processor: InboundProcessor<WeakLogical>,
+    /// Command receiver fed by [`InboundMailbox`].
     receiver: mpsc::UnboundedReceiver<InboundCommand>,
+    /// Per-lane sequence-ordered event queues.
     queues: InboundQueues,
+    /// Currently executing per-lane event futures.
     active: FuturesUnordered<InboundTaskFuture>,
+    /// Sequence number currently executing in each lane, if any.
     active_lanes: [Option<u64>; INBOUND_LANE_COUNT],
     /// The reassembly events not yet completed, which order the later frames of their category.
     unfinished: UnfinishedReassembly,
+    /// Clock used to judge reassembly expiration during cleanup sweeps.
     reassembly_clock: ReassemblyClock,
+    /// Next monotonic instant at which to run a reassembly expiration sweep.
     next_reassembly_cleanup: Instant,
+    /// Whether the command receiver has observed channel closure.
     input_closed: bool,
+    /// Generation counter bumped after each completed reassembly cleanup pass.
     cleanup_passes: Arc<GenerationWitness>,
 }
 
 impl InboundActor {
+    /// Create a new [`InboundActor`] for `processor` reading commands from `receiver`.
     fn new(
         processor: InboundProcessor<WeakLogical>,
         receiver: mpsc::UnboundedReceiver<InboundCommand>,
@@ -561,6 +623,7 @@ impl InboundActor {
         }
     }
 
+    /// Run the actor loop until its mailbox closes and close-time reassembly cleanup finishes.
     async fn run(mut self) {
         loop {
             let cleanup_due = self.reassembly_cleanup_delay().is_zero();
@@ -600,6 +663,7 @@ impl InboundActor {
         }
     }
 
+    /// Drain up to [`INBOUND_COMMAND_DRAIN_BUDGET`] queued commands without blocking.
     fn drain_available(&mut self) {
         for _ in 0..INBOUND_COMMAND_DRAIN_BUDGET {
             match self.receiver.try_recv() {
@@ -643,6 +707,7 @@ impl InboundActor {
         }
     }
 
+    /// Wait for either the next inbound command or the reassembly cleanup timer when idle.
     async fn wait_for_input(&mut self) -> bool {
         let cleanup_delay = self.reassembly_cleanup_delay();
         let input = self.receiver.next().fuse();
@@ -657,6 +722,7 @@ impl InboundActor {
         }
     }
 
+    /// Run reassembly cleanup when the timer fires, or discard reassembly state if timer scheduling failed.
     async fn handle_reassembly_cleanup_timer(&mut self, completed: bool) -> bool {
         if completed {
             return self.cleanup_expired_reassembly().await;
@@ -668,6 +734,7 @@ impl InboundActor {
         false
     }
 
+    /// Return the remaining duration until the next scheduled reassembly cleanup sweep.
     fn reassembly_cleanup_delay(&self) -> Duration {
         self.next_reassembly_cleanup
             .saturating_duration_since(Instant::now())
@@ -686,6 +753,7 @@ impl InboundActor {
         true
     }
 
+    /// Cancel queued work on mailbox close and sweep any remaining pending reassemblies until expiry.
     async fn finish_reassembly_after_close(&mut self) {
         // Preserve the old shutdown contract for queued/application work: all
         // unfinished futures and their permits are cancelled immediately.
@@ -717,6 +785,7 @@ impl InboundActor {
         }
     }
 
+    /// Process a command received from the mailbox channel, or mark the channel closed on `None`.
     fn handle_input(&mut self, command: Option<InboundCommand>) {
         match command {
             Some(command) => self.handle_command(command),
@@ -724,6 +793,7 @@ impl InboundActor {
         }
     }
 
+    /// Apply one [`InboundCommand`] to the actor's lane queues and reassembly barrier.
     fn handle_command(&mut self, command: InboundCommand) {
         match command {
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -753,6 +823,7 @@ impl InboundActor {
         }
     }
 
+    /// Record completion of an executing lane task and enqueue any follow-up reassembled event.
     fn handle_completion(&mut self, completion: InboundTaskCompletion) {
         let active = inbound_lane_entry!(&mut self.active_lanes, completion.lane);
         if active.take() != Some(completion.sequence) {
@@ -818,6 +889,7 @@ fn arrival_charge(
     }
 }
 
+/// Execute one [`InboundEvent`] on its lane, binding `processor` for the span of the event.
 async fn process_event(
     processor: InboundProcessor<WeakLogical>,
     event: InboundEvent,

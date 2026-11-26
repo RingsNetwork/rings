@@ -33,6 +33,7 @@ use crate::online::OnlineNodeDescriptor;
 /// Route-building request for a 1..=4 stage `invoke` Kleisli pipeline (#834 D4a, Phase 2b).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionPipelineRouteRequest {
+    /// Requested `(shape, backend)` pairs in pipeline stage order.
     symbols: Vec<(OnionInvokeShape, OnionBackendName)>,
 }
 
@@ -69,8 +70,11 @@ impl OnionPipelineRouteRequest {
 /// Selected guard-closed loop route for an `n`-stage `invoke` Kleisli pipeline (#834 D4c, D5, L7).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionPipelineRoute {
+    /// `(shape, backend)` pairs matched by each stage of the pipeline.
     symbols: Vec<(OnionInvokeShape, OnionBackendName)>,
+    /// Guard-closed loop hop assignment covering relays and symbol hops.
     hops: OnionLoop<OnionRouteHop>,
+    /// Signed `invoke` descriptors selected for each symbol hop in stage order.
     descriptors: Vec<OnionInvokeDescriptor>,
 }
 
@@ -119,7 +123,9 @@ impl OnionPipelineRoute {
 /// Live registrants for multi-stage `invoke` route selection.
 #[derive(Clone, Debug)]
 pub(crate) struct OnionPipelineRouteCandidates {
+    /// Validated live relay hop candidates (excluding the local node).
     pub(in crate::onion) relays: Vec<OnionRouteHop>,
+    /// Validated live `invoke` descriptors (excluding the local node).
     pub(in crate::onion) invokes: Vec<OnionInvokeDescriptor>,
 }
 

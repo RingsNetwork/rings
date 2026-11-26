@@ -99,15 +99,19 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream, preamble: Byte
 /// continuously polled while `local_write` is backpressured (#1201).
 #[derive(Default)]
 struct OutboundWrites {
+    /// FIFO queue of contiguous byte chunks waiting to be written to the local socket.
     segments: VecDeque<Bytes>,
+    /// Whether the write half of the local socket should be shut down once `segments` drains.
     shutting_down: bool,
 }
 
 impl OutboundWrites {
+    /// Returns `true` when no bytes are queued and no shutdown is pending.
     fn is_idle(&self) -> bool {
         self.segments.is_empty() && !self.shutting_down
     }
 
+    /// Appends newly contiguous segments and records whether the peer half-closed the stream.
     fn enqueue(&mut self, ready: Ready) {
         for bytes in ready.segments {
             if !bytes.is_empty() {
@@ -119,6 +123,7 @@ impl OutboundWrites {
         }
     }
 
+    /// Advances the front segment cursor by `written` bytes, popping it when fully written.
     fn advance(&mut self, written: usize) {
         if let Some(front) = self.segments.front_mut() {
             if written >= front.len() {
@@ -130,12 +135,17 @@ impl OutboundWrites {
     }
 }
 
+/// Outcome of one non-blocking write or shutdown step on the local TCP socket.
 enum WriteStep {
+    /// Wrote the specified number of bytes from the front segment.
     Wrote(usize),
+    /// Completed shutting down the write half of the local socket.
     ShutDown,
+    /// Encountered a write error or zero-byte write on the local socket.
     Failed,
 }
 
+/// Performs one write or shutdown step against `local_write` from `outbound_writes`.
 async fn step_outbound_write<W: AsyncWrite + Unpin>(
     local_write: &mut W,
     outbound_writes: &OutboundWrites,

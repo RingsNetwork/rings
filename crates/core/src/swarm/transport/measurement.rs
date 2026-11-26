@@ -20,6 +20,7 @@ use crate::measure::PeerQuality;
 use crate::message::ProvisionalServiceReceipt;
 
 impl SwarmTransport {
+    /// Verify and admit a provisional service receipt into measurement evidence storage.
     pub(crate) async fn admit_provisional_receipt(
         &self,
         receipt: &ProvisionalServiceReceipt,
@@ -78,6 +79,7 @@ impl SwarmTransport {
         }
     }
 
+    /// Record a measurement `event` for `peer` with the given `authentication` level.
     pub(super) async fn record_peer_measurement(
         &self,
         peer: Did,

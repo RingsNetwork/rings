@@ -7,6 +7,7 @@ use crate::types::GatewayRequest;
 use crate::types::GatewayResponse;
 use crate::url::GatewayPrefix;
 
+/// Return the bundled gateway Content-Security-Policy header value.
 fn gateway_content_security_policy() -> &'static str {
     include_str!("../gateway-content-security-policy.txt").trim_end()
 }
@@ -14,17 +15,23 @@ fn gateway_content_security_policy() -> &'static str {
 /// Header policy for controlled webview documents.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeaderPolicy {
+    /// Route prefix used when rewriting redirect and refresh URLs.
     gateway_prefix: GatewayPrefix,
 }
 
+/// Policy decision for one upstream response header.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum HeaderAction {
+    /// Remove the header from the normalized response.
     Drop,
+    /// Forward the header unchanged.
     Keep(GatewayHeader),
+    /// Forward a rewritten replacement header.
     Replace(GatewayHeader),
 }
 
 impl HeaderAction {
+    /// Extract the emitted header, if this action retains one.
     fn into_header(self) -> Option<GatewayHeader> {
         match self {
             Self::Drop => None,
@@ -88,6 +95,7 @@ impl HeaderPolicy {
     }
 }
 
+/// Classify one upstream response header as dropped, kept, or rewritten.
 fn classify_response_header(
     target: &Url,
     gateway_prefix: &GatewayPrefix,
@@ -135,6 +143,7 @@ pub(crate) fn should_forward_request_header(name: &str) -> bool {
     )
 }
 
+/// Return whether an upstream response header must be stripped by gateway policy.
 fn should_strip_response_header(name: &str) -> bool {
     const STRIPPED: &[&str] = &[
         "connection",

@@ -42,20 +42,24 @@ use crate::online::OnlineNodeCapabilities;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 
+/// Serializes `value` into a `serde_json::Value`.
 fn json_value(value: impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(Error::SerdeJsonError)
 }
 
+/// Deserializes a `serde_json::Value` into `T`.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 fn from_json_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Error::SerdeJsonError)
 }
 
+/// Parses a string representation of a [`Did`].
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 fn did_from_string(value: &str) -> Result<Did> {
     Did::from_str(value).map_err(Error::CoreError)
 }
 
+/// Maps an internal [`OnlineNodeType`] to its RPC DTO [`OnlineNodeTypeInfo`].
 fn online_node_type_info(node_type: OnlineNodeType) -> OnlineNodeTypeInfo {
     match node_type {
         OnlineNodeType::Browser => OnlineNodeTypeInfo::Browser,
@@ -64,6 +68,7 @@ fn online_node_type_info(node_type: OnlineNodeType) -> OnlineNodeTypeInfo {
     }
 }
 
+/// Maps an RPC DTO [`OnlineNodeTypeInfo`] back to an internal [`OnlineNodeType`].
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 fn online_node_type_from_info(node_type: OnlineNodeTypeInfo) -> OnlineNodeType {
     match node_type {
@@ -73,10 +78,12 @@ fn online_node_type_from_info(node_type: OnlineNodeTypeInfo) -> OnlineNodeType {
     }
 }
 
+/// Converts a millisecond `u128` descriptor timestamp to `u64` for RPC DTO encoding.
 fn descriptor_timestamp_ms(value: u128) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::InvalidData)
 }
 
+/// Converts an [`OnlineNodeDescriptor`] into its RPC DTO [`OnlineNodeDescriptorInfo`].
 pub(crate) fn online_node_descriptor_info(
     descriptor: OnlineNodeDescriptor,
 ) -> Result<OnlineNodeDescriptorInfo> {
@@ -106,6 +113,7 @@ pub(crate) fn online_node_descriptor_info(
     })
 }
 
+/// Converts a sequence of [`OnlineNodeDescriptor`] values into RPC DTOs.
 pub(crate) fn online_node_descriptor_infos(
     descriptors: impl IntoIterator<Item = OnlineNodeDescriptor>,
 ) -> Result<Vec<OnlineNodeDescriptorInfo>> {
@@ -115,6 +123,7 @@ pub(crate) fn online_node_descriptor_infos(
         .collect()
 }
 
+/// Converts an [`OnionExitPolicy`] into its RPC DTO [`OnionExitPolicyInfo`].
 fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
     OnionExitPolicyInfo {
         allowed_targets: policy
@@ -132,6 +141,7 @@ fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
     }
 }
 
+/// Parses an RPC DTO [`OnionExitPolicyInfo`] back into a validated [`OnionExitPolicy`].
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_exit_policy_from_info(policy: OnionExitPolicyInfo) -> Result<OnionExitPolicy> {
     Ok(OnionExitPolicy {
@@ -150,6 +160,7 @@ fn onion_exit_policy_from_info(policy: OnionExitPolicyInfo) -> Result<OnionExitP
     })
 }
 
+/// Converts an [`OnionExitDescriptor`] into its RPC DTO [`OnionExitDescriptorInfo`].
 pub(crate) fn onion_exit_descriptor_info(
     descriptor: OnionExitDescriptor,
 ) -> Result<OnionExitDescriptorInfo> {
@@ -171,6 +182,7 @@ pub(crate) fn onion_exit_descriptor_info(
     })
 }
 
+/// Converts a sequence of [`OnionExitDescriptor`] values into RPC DTOs.
 pub(crate) fn onion_exit_descriptor_infos(
     descriptors: impl IntoIterator<Item = OnionExitDescriptor>,
 ) -> Result<Vec<OnionExitDescriptorInfo>> {
@@ -180,6 +192,7 @@ pub(crate) fn onion_exit_descriptor_infos(
         .collect()
 }
 
+/// Decodes an RPC DTO [`OnlineNodeDescriptorInfo`] into an [`OnlineNodeDescriptor`].
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn online_node_descriptor_from_info(
     descriptor: OnlineNodeDescriptorInfo,
@@ -210,6 +223,7 @@ pub(crate) fn online_node_descriptor_from_info(
     })
 }
 
+/// Decodes and filters remote online-node DTOs, retaining only descriptors live at `now_ms` for `network_id`.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn online_node_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnlineNodeDescriptorInfo>,
@@ -256,6 +270,7 @@ pub(crate) fn onion_exit_descriptor_from_info(
     })
 }
 
+/// Decodes and filters remote onion-exit DTOs, retaining only descriptors live at `now_ms` for `network_id`.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn onion_exit_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnionExitDescriptorInfo>,
@@ -269,6 +284,7 @@ pub(crate) fn onion_exit_descriptors_from_infos(
         .collect()
 }
 
+/// Converts [`PeerQualityEvidence`] counters into its RPC DTO [`PeerMeasurementCountersInfo`].
 fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurementCountersInfo {
     PeerMeasurementCountersInfo {
         connected: evidence.connected,
@@ -280,6 +296,7 @@ fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurem
     }
 }
 
+/// Converts a [`PeerMeasurement`] into its RPC DTO [`PeerMeasurementInfo`].
 pub(crate) fn peer_measurement_info(measurement: PeerMeasurement) -> Result<PeerMeasurementInfo> {
     // RPC message fields retain protobuf presence; each retained peer has credit.
     let credit = measurement.credit;
@@ -302,12 +319,14 @@ pub(crate) fn peer_measurement_info(measurement: PeerMeasurement) -> Result<Peer
     })
 }
 
+/// Converts an optional [`PeerMeasurement`] into an optional RPC DTO.
 pub(crate) fn optional_peer_measurement_info(
     measurement: Option<PeerMeasurement>,
 ) -> Result<Option<PeerMeasurementInfo>> {
     measurement.map(peer_measurement_info).transpose()
 }
 
+/// Converts a sequence of [`PeerMeasurement`] values into RPC DTOs.
 pub(crate) fn peer_measurement_infos(
     measurements: impl IntoIterator<Item = PeerMeasurement>,
 ) -> Result<Vec<PeerMeasurementInfo>> {

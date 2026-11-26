@@ -39,11 +39,14 @@ use crate::core::transport::TransportConnectionState;
 /// Atomic observation of the current thread's controlled delivery queue.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DeliverySnapshot {
+    /// Number of events currently queued in controlled delivery.
     pending: usize,
+    /// Monotonic queue generation incremented on every enqueue or removal.
     generation: u64,
 }
 
 impl DeliverySnapshot {
+    /// Construct a [`DeliverySnapshot`] from `pending` count and queue `generation`.
     pub(super) const fn new(pending: usize, generation: u64) -> Self {
         Self {
             pending,
@@ -70,13 +73,18 @@ impl DeliverySnapshot {
 /// Stable observation of one event waiting in the controlled queue.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuedDelivery {
+    /// Monotonic enqueue sequence number.
     sequence: u64,
+    /// Target dummy connection identifier.
     connection_id: String,
+    /// Inspected kind and payload metadata of the queued event.
     kind: QueuedDeliveryKind,
+    /// Virtual timestamp in milliseconds when the event was enqueued.
     enqueued_virtual_ms: u64,
 }
 
 impl QueuedDelivery {
+    /// Construct a [`QueuedDelivery`] observation from its metadata fields.
     pub(super) fn new(
         sequence: u64,
         connection_id: String,
@@ -470,6 +478,7 @@ pub async fn deliver_sequence(sequence: u64) -> bool {
     deliver_entry(entry).await
 }
 
+/// Dispatch one removed controlled-delivery entry to its target dummy connection.
 async fn deliver_entry(entry: Option<super::ControlledDeliveryEntry>) -> bool {
     let Some(super::ControlledDeliveryEntry {
         connection_id: rand_id,

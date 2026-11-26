@@ -310,3 +310,69 @@ fn admit_rejects_mismatched_pair_and_freshness_beneficiary() {
     assert_eq!(store.replay_floor(), 0);
     assert_eq!(store.counters().rejected_records(), 1);
 }
+
+/// Verify that incremental delta replay restores valid records in sequence order while
+/// isolating corrupted or invalid records from valid neighbors.
+#[test]
+fn replay_persisted_delta_restores_valid_and_isolates_invalid_records() -> Result<(), EvidenceError>
+{
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+
+    let random_nonce = || -> [u8; 32] {
+        let hasher = RandomState::new();
+        std::array::from_fn(|index| hasher.hash_one(index) as u8)
+    };
+    let make_record = |digest: u8, observed: u64| {
+        ProvisionalEvidenceRecord::new(
+            EvidenceAccountPair::new(1, 2),
+            EvidenceFreshnessKey::new(1, 2, 10, random_nonce()),
+            EvidenceDigest::new([digest; 32]),
+            vec![digest; 8],
+            UnixTime::from_secs(observed),
+            9,
+        )
+    };
+
+    let mut store = ProvisionalEvidenceStore::new(limits(2, 64, 2, 64));
+    let r1 = make_record(1, 10);
+    let r2 = make_record(2, 11);
+    let r3 = make_record(3, 12);
+
+    let rep1 = store.replay_persisted_delta(
+        EvidenceAdmissionDelta {
+            schema_version: EVIDENCE_SNAPSHOT_VERSION,
+            sequence: 1,
+            record: r1.clone(),
+        },
+        |_| true,
+    )?;
+    assert_eq!(rep1, EvidenceLoadReport::default());
+
+    let rep_bad = store.replay_persisted_delta(
+        EvidenceAdmissionDelta {
+            schema_version: EVIDENCE_SNAPSHOT_VERSION,
+            sequence: 2,
+            record: r2,
+        },
+        |_| false,
+    )?;
+    assert_eq!(rep_bad.rejected_records(), 1);
+    assert_eq!(rep_bad.rejected_replay_markers(), 1);
+
+    let rep3 = store.replay_persisted_delta(
+        EvidenceAdmissionDelta {
+            schema_version: EVIDENCE_SNAPSHOT_VERSION,
+            sequence: 3,
+            record: r3.clone(),
+        },
+        |_| true,
+    )?;
+    assert_eq!(rep3, EvidenceLoadReport::default());
+
+    assert_eq!(store.page(None, nonzero(4)).records(), &[r1, r3]);
+    assert_eq!(store.counters().admitted(), 2);
+    assert_eq!(store.counters().rejected_records(), 1);
+    assert_eq!(store.counters().rejected_replay_markers(), 1);
+    Ok(())
+}

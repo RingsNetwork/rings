@@ -66,6 +66,7 @@ impl Clock for SystemClock {
 /// Deterministic, caller-driven [`Clock`] for unit tests and trace replay.
 #[derive(Clone, Debug)]
 pub struct ManualClock {
+    /// Shared cell holding the current simulated timestamp in milliseconds.
     now_ms: Arc<Mutex<u128>>,
 }
 
@@ -130,7 +131,9 @@ impl Clock for ManualClock {
 /// breaking Byzantine retirement safety, so this floor complements OS/NTP resynchronization.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ClockFloor {
+    /// Last `(wall_ms, monotonic_ms)` anchor pair used to project monotonic elapsed time.
     anchor: Option<(u128, u128)>,
+    /// Highest Byzantine-safe lower bound derived from admitted HLC timestamps.
     observed_hlc_floor_ms: u128,
 }
 
@@ -143,6 +146,7 @@ impl ClockFloor {
         }
     }
 
+    /// Project the anchored wall-clock estimate forward to `monotonic_ms`, if anchored.
     fn monotonic_floor_ms(&self, monotonic_ms: u128) -> Option<u128> {
         self.anchor.map(|(anchor_wall_ms, anchor_mono_ms)| {
             anchor_wall_ms.saturating_add(monotonic_ms.saturating_sub(anchor_mono_ms))

@@ -101,6 +101,7 @@ impl Iterator for TimeoutSegments {
     }
 }
 
+/// Browser `setTimeout`-backed sleep implementation for WASM targets.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 mod browser {
     use std::cell::Cell;
@@ -119,22 +120,31 @@ mod browser {
     use crate::global::global;
     use crate::global::Global;
 
+    /// Shared completion state bridged between the JS timer callback and [`BrowserTimeout`].
     struct TimeoutShared {
+        /// Whether the host `setTimeout` callback has already fired.
         fired: Cell<bool>,
+        /// Waker registered by the most recent poll, woken when the timer fires.
         waker: RefCell<Option<Waker>>,
     }
 
     /// A one-shot browser `setTimeout` future whose [`Drop`] cancels the host timer and frees its
     /// [`Closure`] whenever the wait ends before the timeout fires.
     struct BrowserTimeout {
+        /// Host global scope (`Window` or `WorkerGlobalScope`) owning the timer API.
         scope: Global,
+        /// Delay duration in milliseconds passed to `setTimeout`.
         millis: i32,
+        /// Active host timer handle returned by `setTimeout`, if scheduled.
         handle: Option<i32>,
+        /// JS closure kept alive until the timer fires or is cancelled on drop.
         callback: Option<Closure<dyn FnMut()>>,
+        /// Shared state updated by the JS callback and observed during polling.
         shared: Rc<TimeoutShared>,
     }
 
     impl BrowserTimeout {
+        /// Create an unscheduled [`BrowserTimeout`] for `millis` milliseconds on the current global scope.
         fn new(millis: i32) -> Result<Self, TimerError> {
             let scope = global().ok_or(TimerError::NoGlobalScope)?;
             Ok(Self {

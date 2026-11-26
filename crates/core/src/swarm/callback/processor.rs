@@ -27,6 +27,7 @@ use crate::swarm::session_link::DelegationLessor;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
+/// Log diagnostic details when an inbound message fails cryptographic verification or has expired.
 fn log_inbound_verification_failure(
     peer: Option<Did>,
     payload: &MessagePayload,
@@ -169,6 +170,7 @@ impl<L> InboundProcessor<L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Acquire the mutex guarding this connection's pre-admission frame hold.
     pub(super) fn pre_admission(
         &self,
     ) -> std::sync::MutexGuard<'_, PreAdmissionHold<HeldInboundFrame>> {
@@ -185,6 +187,7 @@ impl<L> InboundProcessor<L> {
         }
     }
 
+    /// Return the pending connection attempt bound to this processor, if any.
     pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
         *self
             .pending_attempt
@@ -192,6 +195,7 @@ impl<L> InboundProcessor<L> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Bind the pending connection attempt associated with this processor.
     pub(super) fn set_pending_attempt(&self, attempt: PendingConnectionAttempt) {
         *self
             .pending_attempt
@@ -201,6 +205,7 @@ impl<L> InboundProcessor<L> {
 }
 
 impl InboundProcessor {
+    /// Evaluate whether inbound frames from `peer` are admitted, held, superseded, or refused.
     pub(super) async fn pending_connection_gate(
         &self,
         peer: Option<Did>,
@@ -255,6 +260,7 @@ impl InboundProcessor {
             .is_none_or(|attempt| self.logical.transport.is_active_connection_attempt(attempt))
     }
 
+    /// Decode `msg` within `max_uncompressed_wire_bytes` and verify its transaction and payload signatures.
     pub(super) async fn decode_verified_payload(
         &self,
         peer: Option<Did>,
@@ -284,6 +290,7 @@ impl InboundProcessor {
         Ok((payload, uncompressed_bytes))
     }
 
+    /// Re-check liveness of a previously verified payload against the current clock.
     pub(super) async fn validate_preverified_payload(
         &self,
         peer: Option<Did>,
@@ -302,6 +309,7 @@ impl InboundProcessor {
         Ok(())
     }
 
+    /// Re-validate liveness of `payload` and record its useful byte count as received from `peer`.
     pub(super) async fn accept_verified_logical_message(
         &self,
         peer: Option<Did>,

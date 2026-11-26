@@ -182,8 +182,11 @@ pub(super) struct Refusal<T> {
 /// - a reopened lane keeps its emission clock for `V`, so closing and reopening a link never
 ///   lets an emission start early (Budget safety holds across generations).
 pub(super) struct OrderedSendState<T> {
+    /// Global and per-peer pending cell quota tracker.
     pub(super) quota: PeerQuota,
+    /// Total queued and in-flight cell bytes across all lanes.
     pub(super) pending_bytes: usize,
+    /// Active outbound lanes keyed by direct peer DID.
     pub(super) lanes: HashMap<Did, PeerLane<T>>,
     /// The epoch of the next lane opened.
     pub(super) next_epoch: u64,
@@ -232,6 +235,7 @@ impl<T> OrderedSendState<T> {
         self.open_with_participation(peer, now_us, false)
     }
 
+    /// Open `peer`'s lane at `now_us` with initial participation flag `participates_by_default`.
     fn open_with_participation(
         &mut self,
         peer: Did,

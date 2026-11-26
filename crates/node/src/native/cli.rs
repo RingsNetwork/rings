@@ -43,6 +43,7 @@ type Output<T> = anyhow::Result<ClientOutput<T>>;
 
 /// Wrap json_client send request between nodes or browsers.
 pub struct Client {
+    /// Underlying JSON-RPC client used to send requests to the node endpoint.
     client: RpcClient,
 }
 
@@ -50,7 +51,9 @@ pub struct Client {
 pub struct ClientOutput<T> {
     /// Output data.
     pub result: T,
+    /// Human-readable representation formatted for CLI stdout.
     display: String,
+    /// Optional operator guidance printed to stderr without polluting stdout.
     stderr_notice: Option<String>,
 }
 

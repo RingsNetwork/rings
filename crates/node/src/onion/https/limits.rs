@@ -1,11 +1,15 @@
+//! Response size limits, status validation, and cancellation helpers for HTTPS exits.
+
 use super::*;
 
+/// Compute the effective HTTPS response body byte limit capped by the default exit cap.
 pub(super) fn https_response_body_limit(remaining_policy_bytes: Option<u64>) -> u64 {
     remaining_policy_bytes.map_or(DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES, |remaining| {
         remaining.min(DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES)
     })
 }
 
+/// Validate a JS numeric HTTP status code and convert it to a `u16` in `100..=999`.
 #[cfg(any(test, rings_browser))]
 pub(super) fn checked_status_code(status: f64) -> Result<u16> {
     if !status.is_finite() || status.fract() != 0.0 || !(100.0..=999.0).contains(&status) {
@@ -29,10 +33,12 @@ pub(super) fn headers_bytes(headers: &[(String, String)]) -> Result<u64> {
     )
 }
 
+/// Convert a `usize` byte count into `u64`, failing with [`Error::InvalidData`] on overflow.
 fn usize_to_u64(value: usize) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::InvalidData)
 }
 
+/// Reject a response whose `Content-Length` header exceeds `max_body_bytes`.
 pub(super) fn reject_content_length_over_limit(
     headers: &[(String, String)],
     max_body_bytes: u64,
@@ -89,9 +95,13 @@ pub(super) trait FetchCancelTarget {
 /// whenever the owning Rust future is dropped or returns early with an error before [`Self::disarm`].
 #[cfg(any(test, rings_browser))]
 pub(super) struct FetchCancellationGuard<T: FetchCancelTarget> {
+    /// Underlying abort/stream cancellation target.
     target: T,
+    /// Unconsumed response body stream, if obtained.
     body: Option<T::Body>,
+    /// Locked response body reader, if acquired.
     reader: Option<T::Reader>,
+    /// Whether dropping this guard should cancel the fetch and stream.
     armed: bool,
 }
 

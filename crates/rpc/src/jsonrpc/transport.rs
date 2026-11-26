@@ -167,6 +167,7 @@ mod browser {
     use super::Result;
     use super::RpcError;
 
+    /// Core future and polling types re-exported for manual timeout racing.
     mod futures_lite_or_pin {
         pub(super) use core::future::Future;
         pub(super) use core::pin::Pin;
@@ -181,6 +182,7 @@ mod browser {
         fn fetch(request: &web_sys::Request) -> std::result::Result<js_sys::Promise, JsValue>;
     }
 
+    /// Build a transport error, redacting detail when the request carried an auth token.
     fn transport_error(has_token: bool, detail: impl Into<String>) -> RpcError {
         if has_token {
             RpcError::BrowserTransport
@@ -189,6 +191,7 @@ mod browser {
         }
     }
 
+    /// Race `future` against [`DEFAULT_RPC_REQUEST_TIMEOUT`], aborting `abort_controller` on expiry.
     async fn race_with_abort_timeout<F, T>(
         future: F,
         abort_controller: &web_sys::AbortController,

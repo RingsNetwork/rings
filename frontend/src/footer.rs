@@ -15,6 +15,7 @@ use crate::controls::ShellPage;
 use crate::links::ProjectLink;
 use crate::links::SiteLink;
 
+/// Render the site footer with brand statement, link columns, legal notices, and copyright line.
 pub(crate) fn site_footer(navigate_page: Callback<ShellPage>) -> Html {
     html! {
         <footer class="site-footer" aria-label="Site footer">
@@ -47,15 +48,19 @@ fn current_year() -> u32 {
     js_sys::Date::new_0().get_full_year()
 }
 
+/// Short project description shown beneath the brand wordmark in the footer.
 const BRAND_STATEMENT: &str = "A peer-to-peer network for the sovereign age. Browser tabs and native daemons join one overlay, find each other by DID, and talk over direct WebRTC datachannels routed by a Chord DHT.";
 
 /// A footer column: a heading over its destinations.
 struct Column {
+    /// Column heading label.
     title: &'static str,
+    /// Ordered list of links rendered under this column.
     links: &'static [SiteLink],
 }
 
 impl Column {
+    /// Render this footer column as a labelled `<nav>` list.
     fn render(&self, navigate_page: &Callback<ShellPage>) -> Html {
         html! {
             <nav class="site-footer-column" aria-label={self.title}>
@@ -70,6 +75,7 @@ impl Column {
     }
 }
 
+/// The three navigation columns rendered in the site footer.
 const COLUMNS: [Column; 3] = [
     Column {
         title: "Product",
@@ -106,11 +112,14 @@ const COLUMNS: [Column; 3] = [
 
 /// A standing declaration: its heading and its statement.
 struct Notice {
+    /// Short heading for the declaration.
     title: &'static str,
+    /// Explanatory body text for the declaration.
     body: &'static str,
 }
 
 impl Notice {
+    /// Render this declaration as a definition-list entry.
     fn render(&self) -> Html {
         html! {
             <div class="site-footer-notice">
@@ -121,6 +130,7 @@ impl Notice {
     }
 }
 
+/// Standing legal, security, and privacy notices displayed in the site footer.
 const NOTICES: [Notice; 5] = [
     Notice {
         title: "License",

@@ -19,10 +19,14 @@ thread_local! {
     static BROWSER_GATEWAY: RefCell<Option<BrowserGatewayBinding>> = const { RefCell::new(None) };
 }
 
+/// Active JS-to-Rust gateway closure bindings and in-flight request table.
 struct BrowserGatewayBinding {
+    /// JS callback invoked by the Service Worker to dispatch a gateway request.
     // This closure must outlive every Service Worker request sent to the active node.
     _handler: Closure<dyn FnMut(JsValue, JsValue) -> Promise>,
+    /// JS callback invoked by the Service Worker to cancel an in-flight request.
     _cancel: Closure<dyn FnMut(JsValue) -> bool>,
+    /// Map of active gateway request IDs to their cancellation handles.
     pending: Rc<RefCell<BTreeMap<u64, PendingBrowserGatewayRequest>>>,
 }
 
@@ -35,8 +39,11 @@ impl Drop for BrowserGatewayBinding {
     }
 }
 
+/// Ownership token and abort handle for an in-flight browser gateway request.
 struct PendingBrowserGatewayRequest {
+    /// Unique allocation token identifying the active future for this request ID.
     owner: Rc<()>,
+    /// Abort handle used to cancel the in-flight gateway dispatch future.
     abort: AbortHandle,
 }
 
@@ -134,6 +141,7 @@ pub(crate) fn install_browser_gateway(gateway: Option<WebviewNode>) -> Result<bo
     Ok(true)
 }
 
+/// Parses and validates a positive JavaScript safe-integer gateway request ID.
 pub(super) fn browser_request_id(value: &JsValue) -> Result<u64, String> {
     let value = value
         .as_f64()

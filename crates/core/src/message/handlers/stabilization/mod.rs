@@ -61,6 +61,7 @@ impl HandleMsg<Leave> for MessageHandler {
 }
 
 impl MessageHandler {
+    /// Verify that a `NotifyPredecessorSend` claims the same DID as the transaction origin.
     fn verified_notify_predecessor_origin(
         &self,
         ctx: &MessagePayload,

@@ -45,10 +45,15 @@
 //!
 //! [`DelegationBuilder`] and [`DelegateeKey`] are exported to WebAssembly environments.
 
+/// External account identity representation.
 mod account;
+/// Builder for assembling a [`DelegateeKey`] from an external signature.
 mod builder;
+/// Canonical delegation digest computation.
 mod digest;
+/// Delegation payload, verification, and authorization types.
 mod model;
+/// Verified delegatee signing and decryption key.
 mod signing_key;
 
 pub use account::Account;

@@ -189,8 +189,11 @@ enum RemoveStep {
 /// record names marked present (the presence law; empty for a disposable store).
 #[derive(Debug, Default)]
 struct FileIndex {
+    /// Known record file lengths keyed by file name in write-recency order.
     files: WriteOrderedMap<u64>,
+    /// Total byte length across all tracked files in `files`.
     used_bytes: u64,
+    /// Record names currently witnessed on disk (empty for disposable stores).
     witnessed: BTreeSet<String>,
 }
 
@@ -227,6 +230,7 @@ impl FileIndex {
 /// A shared handle on the synchronous store, whose file system work every operation runs on
 /// the blocking pool (the execution law).
 pub struct FileStorage {
+    /// Shared synchronous store executed on the blocking pool.
     store: Arc<FileStore>,
     /// Resolves once `store` is released (the release law, `release`).
     released: StoreRelease,
@@ -234,9 +238,13 @@ pub struct FileStorage {
 
 /// The synchronous store behind a [`FileStorage`]: every method blocks on the file system.
 struct FileStore {
+    /// Root directory holding record files and witness markers.
     root: PathBuf,
+    /// Maximum total bytes retained across record files.
     capacity: u64,
+    /// Durability and presence authority configured for this store.
     authority: RecordAuthority,
+    /// Synchronized in-memory index of known files and witnessed names.
     index: RwLock<FileIndex>,
     /// The exclusive lock of `root`, held while the store lives (the ownership law, `lock`).
     lock: lock::DirectoryLock,

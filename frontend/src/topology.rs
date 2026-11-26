@@ -6,22 +6,32 @@ use yew::prelude::*;
 use crate::hex;
 use crate::node::PeerView;
 
+/// Byte length of a 160-bit Chord ring identifier.
 const CHORD_ID_BYTES: usize = 20;
+/// Bit width of a Chord ring identifier.
 const CHORD_ID_BITS: usize = CHORD_ID_BYTES * 8;
+/// Hexadecimal character length of a full Chord identifier.
 const CHORD_HEX_CHARS: usize = CHORD_ID_BYTES * 2;
+/// Maximum number of characters rendered on the first line of the active DID readout.
 const ACTIVE_DID_LINE_LENGTH: usize = 21;
+/// Width in SVG units of the active node DID readout box.
 const ACTIVE_DID_LABEL_WIDTH: f64 = 176.0;
+/// Height in SVG units of the active node DID readout box.
 const ACTIVE_DID_LABEL_HEIGHT: f64 = 42.0;
 
+/// Renders the Chord topology SVG component for `did` and its known `peers`.
 pub(crate) fn view(did: &str, peers: &[PeerView]) -> Html {
     html! {
         <Topology did={did.to_string()} peers={peers.to_vec()} />
     }
 }
 
+/// Properties passed to the [`Topology`] Yew component.
 #[derive(Properties, Clone, PartialEq)]
 struct TopologyProps {
+    /// Local node DID placed on the Chord ring.
     did: String,
+    /// Remote peer snapshots to plot alongside the local node.
     peers: Vec<PeerView>,
 }
 
@@ -62,14 +72,19 @@ fn topology_component(props: &TopologyProps) -> Html {
     }
 }
 
+/// SVG viewport geometry for the Chord ring diagram.
 #[derive(Clone, Copy)]
 struct TopologyLayout {
+    /// Horizontal center of the ring in SVG coordinates.
     center_x: f64,
+    /// Vertical center of the ring in SVG coordinates.
     center_y: f64,
+    /// Primary ring radius in SVG units.
     radius: f64,
 }
 
 impl TopologyLayout {
+    /// Creates the default 420x420 Chord ring layout.
     fn new() -> Self {
         let width = 420.0;
         let height = 420.0;
@@ -80,19 +95,26 @@ impl TopologyLayout {
         }
     }
 
+    /// Builds an open circular orbit path offset from the primary ring radius.
     fn orbit(self, offset: f64) -> String {
         open_orbit_path(self.center_x, self.center_y, self.radius + offset)
     }
 }
 
+/// Derived Chord ring graph used to render the topology diagram.
 struct TopologyModel {
+    /// Sorted local and remote nodes positioned on the ring.
     nodes: Vec<ChordNode>,
+    /// Inferred clockwise successor edges around the ring.
     successor_edges: Vec<InferredEdge>,
+    /// Inferred Chord finger-table shortcut links.
     finger_links: Vec<InferredFinger>,
+    /// Predecessor and successor DIDs surrounding the local node, if available.
     local_context: Option<(String, String)>,
 }
 
 impl TopologyModel {
+    /// Computes the sorted ring nodes, edges, finger links, and local neighbor context.
     fn new(did: &str, peers: &[PeerView]) -> Self {
         let nodes = chord_nodes(did, peers);
         Self {
@@ -104,14 +126,21 @@ impl TopologyModel {
     }
 }
 
+/// Shared rendering parameters and interactive selection state for ring nodes.
 struct TopologyRenderState {
+    /// SVG ring geometry.
     layout: TopologyLayout,
+    /// Total number of nodes plotted on the ring.
     node_count: usize,
+    /// Whether remote peer short-DID labels should be shown around the ring.
     show_remote_labels: bool,
+    /// Currently pinned node DID, if any.
     active_did: Option<String>,
+    /// State handle updated when the user pins or unpins a node.
     pinned_node: UseStateHandle<Option<String>>,
 }
 
+/// Renders the decorative outer, primary, inner, and scan orbit paths.
 fn topology_orbits(layout: TopologyLayout) -> Html {
     let main_orbit = layout.orbit(0.0);
     html! {
@@ -124,6 +153,7 @@ fn topology_orbits(layout: TopologyLayout) -> Html {
     }
 }
 
+/// Renders the topology title, visible node count, and `0 / 2^160` origin marker.
 fn topology_caption(layout: TopologyLayout, node_count: usize) -> Html {
     html! {
         <>
@@ -134,12 +164,14 @@ fn topology_caption(layout: TopologyLayout, node_count: usize) -> Html {
     }
 }
 
+/// Renders all inferred successor arcs along the ring perimeter.
 fn successor_paths(layout: TopologyLayout, nodes: &[ChordNode], edges: &[InferredEdge]) -> Html {
     html! {
         { for edges.iter().filter_map(|edge| successor_path(layout, nodes, edge)) }
     }
 }
 
+/// Renders one inferred successor arc and its animated flow overlay.
 fn successor_path(
     layout: TopologyLayout,
     nodes: &[ChordNode],
@@ -173,12 +205,14 @@ fn successor_path(
     })
 }
 
+/// Renders all inferred Chord finger-table curves inside the ring.
 fn finger_paths(layout: TopologyLayout, nodes: &[ChordNode], edges: &[InferredFinger]) -> Html {
     html! {
         { for edges.iter().filter_map(|edge| finger_path(layout, nodes, edge)) }
     }
 }
 
+/// Renders one inferred finger curve and its staggered flow overlay.
 fn finger_path(layout: TopologyLayout, nodes: &[ChordNode], edge: &InferredFinger) -> Option<Html> {
     let (source, target) = edge.endpoints(nodes)?;
     let tone = finger_tone(source, edge);
@@ -202,6 +236,7 @@ fn finger_path(layout: TopologyLayout, nodes: &[ChordNode], edge: &InferredFinge
     })
 }
 
+/// Returns the CSS tone class (`primary`, `local`, or `remote`) for a finger link.
 fn finger_tone(source: &ChordNode, edge: &InferredFinger) -> &'static str {
     if source.is_local {
         if edge.exponent == 159 {
@@ -214,6 +249,7 @@ fn finger_tone(source: &ChordNode, edge: &InferredFinger) -> &'static str {
     }
 }
 
+/// Computes a deterministic CSS `animation-delay` style for a finger flow overlay.
 fn finger_flow_delay(edge: &InferredFinger) -> String {
     format!(
         "animation-delay: -{}ms;",
@@ -221,6 +257,7 @@ fn finger_flow_delay(edge: &InferredFinger) -> String {
     )
 }
 
+/// Renders the central `RINGS` identifier-space core emblem.
 fn topology_core(layout: TopologyLayout) -> Html {
     html! {
         <>
@@ -230,6 +267,7 @@ fn topology_core(layout: TopologyLayout) -> Html {
     }
 }
 
+/// Renders curved `PRED` and `SUCC` labels for the local node's ring neighbors.
 fn local_context_labels(layout: TopologyLayout, local_context: Option<&(String, String)>) -> Html {
     let Some((predecessor, successor)) = local_context else {
         return html! {};
@@ -242,12 +280,14 @@ fn local_context_labels(layout: TopologyLayout, local_context: Option<&(String, 
     }
 }
 
+/// Renders all node marker groups around the ring.
 fn topology_nodes(render: &TopologyRenderState, nodes: &[ChordNode]) -> Html {
     html! {
         { for nodes.iter().enumerate().map(|(index, node)| topology_node_group(render, index, node)) }
     }
 }
 
+/// Renders a single clickable node circle, optional active halo, index, and DID label.
 fn topology_node_group(render: &TopologyRenderState, index: usize, node: &ChordNode) -> Html {
     let (x, y) = polar_point(
         render.layout.center_x,
@@ -286,6 +326,7 @@ fn topology_node_group(render: &TopologyRenderState, index: usize, node: &ChordN
     }
 }
 
+/// Builds the click callback that pins or unpins `did` without clearing the canvas.
 fn pin_node_callback(
     pinned_node: &UseStateHandle<Option<String>>,
     did: String,
@@ -297,6 +338,7 @@ fn pin_node_callback(
     })
 }
 
+/// Toggles `did` as the pinned selection, clearing it if already selected.
 fn toggle_pinned_did(current: &Option<String>, did: &str) -> Option<String> {
     if current.as_deref() == Some(did) {
         None
@@ -305,6 +347,7 @@ fn toggle_pinned_did(current: &Option<String>, did: &str) -> Option<String> {
     }
 }
 
+/// Renders the centered node index (`L` for local, 1-based rank for remote peers).
 fn node_index_label(node: &ChordNode, index: usize, node_count: usize, x: f64, y: f64) -> Html {
     if !node.is_local && node_count > 16 {
         return html! {};
@@ -320,6 +363,7 @@ fn node_index_label(node: &ChordNode, index: usize, node_count: usize, x: f64, y
     }
 }
 
+/// Renders the abbreviated DID label positioned outside a ring node.
 fn node_did_label(node: &ChordNode, show_remote_labels: bool, x: f64, y: f64) -> Html {
     if !node.is_local && !show_remote_labels {
         return html! {};
@@ -331,6 +375,7 @@ fn node_did_label(node: &ChordNode, show_remote_labels: bool, x: f64, y: f64) ->
     }
 }
 
+/// Renders the full DID callout overlay for the currently pinned node, if any.
 fn active_node_overlay(render: &TopologyRenderState, nodes: &[ChordNode]) -> Html {
     render
         .active_did
@@ -348,6 +393,7 @@ fn active_node_overlay(render: &TopologyRenderState, nodes: &[ChordNode]) -> Htm
         .unwrap_or_else(|| html! {})
 }
 
+/// Renders a placeholder label when no valid DIDs are present on the ring.
 fn empty_topology_label(layout: TopologyLayout, empty: bool) -> Html {
     if !empty {
         return html! {};
@@ -359,45 +405,62 @@ fn empty_topology_label(layout: TopologyLayout, empty: bool) -> Html {
     }
 }
 
+/// A local or remote node mapped onto the 160-bit Chord identifier ring.
 #[derive(Clone)]
 struct ChordNode {
+    /// Full DID string for the node.
     did: String,
+    /// Connection state string (`local`, `connected`, etc.).
     state: String,
+    /// Big-endian 160-bit identifier derived from `did`.
     id: [u8; CHORD_ID_BYTES],
+    /// Angular position on the SVG circle in radians.
     angle: f64,
+    /// Whether this node represents the local Rings node.
     is_local: bool,
 }
 
+/// Directed edge between two node indices in the sorted ring list.
 struct InferredEdge {
+    /// Index of the source node in the sorted node slice.
     source: usize,
+    /// Index of the target node in the sorted node slice.
     target: usize,
 }
 
+/// Inferred Chord finger link annotated with its power-of-two offset exponent.
 struct InferredFinger {
+    /// Underlying directed source-to-target node index pair.
     edge: InferredEdge,
+    /// Power-of-two exponent `k` in `id + 2^k` used to infer the finger target.
     exponent: usize,
 }
 
 impl InferredEdge {
+    /// Resolves the source and target [`ChordNode`] references from `nodes`.
     fn endpoints<'a>(&self, nodes: &'a [ChordNode]) -> Option<(&'a ChordNode, &'a ChordNode)> {
         Some((nodes.get(self.source)?, nodes.get(self.target)?))
     }
 }
 
 impl InferredFinger {
+    /// Returns the source node index.
     fn source(&self) -> usize {
         self.edge.source
     }
 
+    /// Returns the target node index.
     fn target(&self) -> usize {
         self.edge.target
     }
 
+    /// Resolves the source and target [`ChordNode`] references from `nodes`.
     fn endpoints<'a>(&self, nodes: &'a [ChordNode]) -> Option<(&'a ChordNode, &'a ChordNode)> {
         self.edge.endpoints(nodes)
     }
 }
 
+/// Builds the deduplicated, identifier-sorted list of [`ChordNode`]s for the ring.
 fn chord_nodes(did: &str, peers: &[PeerView]) -> Vec<ChordNode> {
     let mut nodes = Vec::new();
     if let Some(id) = did_identifier(did) {
@@ -427,6 +490,7 @@ fn chord_nodes(did: &str, peers: &[PeerView]) -> Vec<ChordNode> {
     nodes
 }
 
+/// Builds the cyclic list of clockwise successor edges for `node_count` sorted nodes.
 fn inferred_successor_edges(node_count: usize) -> Vec<InferredEdge> {
     if node_count < 2 {
         return Vec::new();
@@ -439,6 +503,7 @@ fn inferred_successor_edges(node_count: usize) -> Vec<InferredEdge> {
         .collect()
 }
 
+/// Infers high-order Chord finger links for each node in the sorted ring.
 fn inferred_finger_links(nodes: &[ChordNode]) -> Vec<InferredFinger> {
     if nodes.len() < 4 {
         return Vec::new();
@@ -467,6 +532,7 @@ fn inferred_finger_links(nodes: &[ChordNode]) -> Vec<InferredFinger> {
     links
 }
 
+/// Returns the `(predecessor, successor)` DIDs adjacent to the local node on the ring.
 fn local_chord_context(nodes: &[ChordNode]) -> Option<(String, String)> {
     if nodes.len() < 2 {
         return None;
@@ -483,6 +549,7 @@ fn local_chord_context(nodes: &[ChordNode]) -> Option<(String, String)> {
     Some((predecessor.did.clone(), successor.did.clone()))
 }
 
+/// Returns the SVG CSS classes for a ring node based on locality and connection state.
 fn node_class(node: &ChordNode) -> &'static str {
     if node.is_local {
         return "ring-node local-node";
@@ -494,6 +561,7 @@ fn node_class(node: &ChordNode) -> &'static str {
     }
 }
 
+/// Computes the SVG circle radius for a node based on locality and ring density.
 fn node_radius(node: &ChordNode, node_count: usize) -> f64 {
     if node.is_local {
         return if node_count > 16 { 14.0 } else { 18.0 };
@@ -505,6 +573,7 @@ fn node_radius(node: &ChordNode, node_count: usize) -> f64 {
     }
 }
 
+/// Finds the index of the first node whose identifier is `>= target_id`, wrapping to `0`.
 fn first_successor_index(nodes: &[ChordNode], target_id: &[u8; CHORD_ID_BYTES]) -> usize {
     nodes
         .iter()
@@ -512,6 +581,7 @@ fn first_successor_index(nodes: &[ChordNode], target_id: &[u8; CHORD_ID_BYTES]) 
         .unwrap_or(0)
 }
 
+/// Adds `2^exponent` to a 160-bit big-endian identifier with wrap-around modulo `2^160`.
 fn chord_add_power_of_two(id: &[u8; CHORD_ID_BYTES], exponent: usize) -> [u8; CHORD_ID_BYTES] {
     let mut out = *id;
     if exponent >= CHORD_ID_BITS {
@@ -534,6 +604,7 @@ fn chord_add_power_of_two(id: &[u8; CHORD_ID_BYTES], exponent: usize) -> [u8; CH
     out
 }
 
+/// Parses a hex DID string into a left-padded low-160-bit Chord identifier.
 fn did_identifier(did: &str) -> Option<[u8; CHORD_ID_BYTES]> {
     let hex_value = did.trim().strip_prefix("0x").unwrap_or(did.trim());
     if hex_value.is_empty()
@@ -563,6 +634,7 @@ fn did_identifier(did: &str) -> Option<[u8; CHORD_ID_BYTES]> {
     Some(id)
 }
 
+/// Maps a 160-bit Chord identifier to a clockwise angle starting at the top of the ring.
 fn chord_angle(id: &[u8; CHORD_ID_BYTES]) -> f64 {
     let mut fraction = 0.0;
     let mut scale = 1.0 / 256.0;
@@ -573,6 +645,7 @@ fn chord_angle(id: &[u8; CHORD_ID_BYTES]) -> f64 {
     fraction * std::f64::consts::TAU - std::f64::consts::FRAC_PI_2
 }
 
+/// Converts polar coordinates `(radius, angle)` around `(center_x, center_y)` to Cartesian `(x, y)`.
 fn polar_point(center_x: f64, center_y: f64, radius: f64, angle: f64) -> (f64, f64) {
     (
         center_x + radius * angle.cos(),
@@ -580,6 +653,7 @@ fn polar_point(center_x: f64, center_y: f64, radius: f64, angle: f64) -> (f64, f
     )
 }
 
+/// Builds a clockwise SVG elliptical arc path along the ring between two angles.
 fn ring_arc_path(
     center_x: f64,
     center_y: f64,
@@ -606,6 +680,7 @@ fn ring_arc_path(
     )
 }
 
+/// Builds a nearly full circular SVG arc leaving a small gap at the top `0 / 2^160` marker.
 fn open_orbit_path(center_x: f64, center_y: f64, radius: f64) -> String {
     let gap = 0.72;
     let top = -std::f64::consts::FRAC_PI_2;
@@ -619,6 +694,7 @@ fn open_orbit_path(center_x: f64, center_y: f64, radius: f64) -> String {
     )
 }
 
+/// Builds an SVG circular arc path between `source_angle` and `target_angle` with the given `sweep`.
 fn arc_path(
     center_x: f64,
     center_y: f64,
@@ -649,6 +725,7 @@ fn arc_path(
     )
 }
 
+/// Renders `label` character-by-character along a lower arc inside the ring.
 fn ring_peer_label(
     class_name: &'static str,
     label: String,
@@ -688,6 +765,7 @@ fn ring_peer_label(
     }
 }
 
+/// Renders the full two-line DID callout box and pointer anchored to a pinned node.
 fn active_node_label(
     node: &ChordNode,
     center_x: f64,
@@ -755,6 +833,7 @@ fn active_node_label(
     }
 }
 
+/// Builds a cubic Bezier SVG path curving inward for a finger link of order `exponent`.
 fn finger_curve_path(
     center_x: f64,
     center_y: f64,
@@ -785,14 +864,17 @@ fn finger_curve_path(
     )
 }
 
+/// Returns the clockwise angular distance in `[0, TAU)` from `source_angle` to `target_angle`.
 fn clockwise_delta(source_angle: f64, target_angle: f64) -> f64 {
     (target_angle - source_angle).rem_euclid(std::f64::consts::TAU)
 }
 
+/// Formats a floating-point coordinate to two decimal places for SVG attributes.
 fn svg_num(value: f64) -> String {
     format!("{value:.2}")
 }
 
+/// Abbreviates a long DID string into `prefix...suffix` form for compact labels.
 pub(crate) fn short_did(did: &str) -> String {
     if did.len() <= 14 {
         return did.to_string();
@@ -809,6 +891,7 @@ pub(crate) fn short_did(did: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
+/// Splits a DID string into two lines for the pinned node readout box.
 fn split_did_label(did: &str) -> (String, String) {
     let mut chars = did.chars();
     let first_line: String = chars.by_ref().take(ACTIVE_DID_LINE_LENGTH).collect();

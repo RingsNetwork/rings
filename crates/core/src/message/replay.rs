@@ -175,6 +175,7 @@ const _: () = assert!(REORDER_WINDOW == TRANSACTION_REPLAY_WINDOW as u64);
 /// frame still missing this long after a later one arrived as lost; one that has seen
 /// [`REORDER_WINDOW`] later frames of it has lost it, since the replay window refuses it.
 pub const REORDER_DEADLINE: Duration = DELIVERY_BOUND.saturating_mul(4);
+/// Maximum distance below `high` whose sequence digest is retained in [`SequenceState`].
 const TRANSACTION_REPLAY_BACKTRACK: u64 = 31;
 /// Account-to-destination pairs whose four class streams one runtime retains in full.
 const TRANSACTION_REPLAY_PAIR_CAPACITY: usize = 4096;
@@ -198,11 +199,13 @@ mod persisted_did {
 
     use crate::dht::Did;
 
+    /// Serialize a [`Did`] as its 42-character `0x`-prefixed hex [`H160`] representation.
     pub(super) fn serialize<S>(did: &Did, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: Serializer {
         H160::from(*did).serialize(serializer)
     }
 
+    /// Deserialize a [`Did`] from its 42-character `0x`-prefixed hex [`H160`] representation.
     pub(super) fn deserialize<'de, D>(deserializer: D) -> std::result::Result<Did, D::Error>
     where D: Deserializer<'de> {
         H160::deserialize(deserializer).map(Did::from)
@@ -279,11 +282,14 @@ pub struct TransactionForkEvidence {
 /// `high.saturating_sub(31)`. Slots below sequence zero are necessarily empty.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SequenceState {
+    /// Highest sequence number observed so far on this stream.
     high: u64,
+    /// Fixed-width sliding window of accepted transaction digests ending at `high`.
     accepted: [Option<TransactionDigest>; TRANSACTION_REPLAY_WINDOW],
 }
 
 impl SequenceState {
+    /// Initialize a new sequence window with its first accepted `(sequence, digest)` pair.
     fn first(sequence: u64, digest: TransactionDigest) -> Self {
         let mut accepted = [None; TRANSACTION_REPLAY_WINDOW];
         if let Some(slot) = accepted.last_mut() {
@@ -305,6 +311,7 @@ impl SequenceState {
         self.high.saturating_sub(TRANSACTION_REPLAY_BACKTRACK)
     }
 
+    /// Return whether the window satisfies its structural invariants (unused low slots empty, `high` populated).
     fn is_valid(&self) -> bool {
         let retained_slots = self
             .high
@@ -317,6 +324,7 @@ impl SequenceState {
             && self.accepted.last().is_some_and(Option::is_some)
     }
 
+    /// Slide the window forward to `sequence` and record `digest` at the new high-water slot.
     fn advance(&mut self, sequence: u64, digest: TransactionDigest) {
         let gap = sequence.saturating_sub(self.high);
         if gap >= REORDER_WINDOW {
@@ -334,6 +342,7 @@ impl SequenceState {
         }
     }
 
+    /// Classify and update a `sequence <= self.high` observation within the retained replay window.
     fn observe_retained(&mut self, sequence: u64, digest: TransactionDigest) -> SequenceVerdict {
         let distance = self.high.saturating_sub(sequence);
         let Ok(distance) = usize::try_from(distance) else {
@@ -475,11 +484,17 @@ pub struct ReplayCounters {
 /// The atomic cells behind [`ReplayCounters`].
 #[derive(Default)]
 struct ReplayCounterState {
+    /// Count of exact-digest duplicate transactions rejected as replays.
     replay: AtomicU64,
+    /// Count of conflicting-digest sequence forks rejected.
     fork: AtomicU64,
+    /// Count of transactions older than the retained replay window.
     stale: AtomicU64,
+    /// Count of replay persistence failures encountered during commit.
     persistence_failure: AtomicU64,
+    /// Count of corrupt or missing replay records skipped on restore.
     unrestorable_record: AtomicU64,
+    /// Count of operations refused because their stream record could not be restored.
     unavailable_stream: AtomicU64,
 }
 
@@ -532,13 +547,19 @@ pub(crate) struct TransactionReplay {
     storage: Option<ReplayStorage>,
     /// The receiver table's slot accounting (load-bounds paper, Law 2).
     accounting: TableAccounting,
+    /// Mutex serializing speculative replay and quota transitions and journal updates.
     state: Mutex<TransactionAdmissionState>,
+    /// Monotonic instant recorded when this replay runtime was constructed.
     started_at: Instant,
+    /// Injected clock capability used for quota refills and admission timestamps.
     clock: SharedClock,
+    /// Atomic counters tracking replay verdicts and persistence failures.
     counters: ReplayCounterState,
+    /// Atomic counters tracking origin-quota verdicts.
     quota_counters: OriginQuotaCounterState,
 }
 
+/// Speculative in-memory replay, quota, and group-commit journal state guarded by [`TransactionReplay::state`].
 struct TransactionAdmissionState {
     /// The replay store, restored once on the first operation and cached from then on; its
     /// tables are the speculative ones (the group-commit law).

@@ -98,7 +98,9 @@ pub struct StoredMail {
 
 /// An inbox over a key-value store: each mail under `mail-<mail id>`.
 pub struct KvInbox<K> {
+    /// Backing key-value store persisting filed mail items.
     store: K,
+    /// Clock used to record `filed_at_ms` timestamps.
     clock: SharedClock,
 }
 
@@ -248,22 +250,33 @@ enum OpeningAction {
     /// Already processed under a retained previous key; record `opened` under the active key (and
     /// the retained key when `opened_by` is present) without incrementing `PollReport`.
     AlreadyHandledByRetained {
+        /// Storage key for the retained delegatee key's `opened` record, if applicable.
         retained_opened_record: Option<String>,
+        /// Storage key for the active delegatee key's `opened` record.
         active_opened_record: String,
     },
     /// Unreadable by all held keys and not previously handled; increment `unreadable` and record
     /// `opened` under the active key.
-    Unreadable { active_opened_record: String },
+    Unreadable {
+        /// Storage key for the active delegatee key's `opened` record.
+        active_opened_record: String,
+    },
     /// Decrypted, but `Message-ID` was already filed; increment `duplicates` and record `opened`.
     Duplicate {
+        /// Storage key for the retained delegatee key's `opened` record, if opened by a retained key.
         retained_opened_record: Option<String>,
+        /// Storage key for the active delegatee key's `opened` record.
         active_opened_record: String,
     },
     /// Decrypted and fresh; file into `inbox`, record `filed`, and record `opened`.
     FileNew {
+        /// Decrypted mail payload to file into the inbox.
         mail: OpenedMail,
+        /// Storage key for the `filed` deduplication record.
         filed_record: String,
+        /// Storage key for the retained delegatee key's `opened` record, if opened by a retained key.
         retained_opened_record: Option<String>,
+        /// Storage key for the active delegatee key's `opened` record.
         active_opened_record: String,
     },
 }
@@ -334,10 +347,15 @@ fn classify_opening(
 /// A recipient: a node reading its own mail topic into `inbox`, keeping its records in
 /// `records`.
 pub struct Recipient<I, K> {
+    /// Node processor used to fetch mail entries and access decryption keys.
     processor: Arc<Processor>,
+    /// Inbox destination where newly decrypted mail is filed.
     inbox: I,
+    /// Persistent key-value store tracking opened and filed mail records.
     records: K,
+    /// Configured interval between periodic mail polls.
     interval: Duration,
+    /// Maximum duration allowed for a single poll before timing out.
     poll_timeout: Duration,
     /// Serializes this recipient's polls so each observes the previous poll's filing records.
     poll_lock: Mutex<()>,
@@ -426,6 +444,7 @@ where
         }
     }
 
+    /// Executes a single serialized poll cycle against the recipient's mail topic.
     async fn poll_inner(&self, stop: &StopToken) -> Result<PollReport, RecipientError<I::Error>> {
         let _poll_guard = rings_core::utils::SlowLockGuard::acquire(
             "Recipient::poll_lock",

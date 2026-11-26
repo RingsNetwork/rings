@@ -690,3 +690,21 @@ fn probe_offer_judges_embedded_transaction_sessions_at_observation_time() -> Res
     );
     Ok(())
 }
+
+/// Regression test verifying [`ProbeRequest::from_rng`] samples distinct random nonces from `rng`.
+#[test]
+fn probe_request_from_rng_draws_distinct_nonces() {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let mut rng = StdRng::seed_from_u64(42);
+    let epoch = ProvisionalEpoch::from_unix_seconds(1_700_000_000);
+    let first = ProbeRequest::from_rng(epoch, &mut rng);
+    let second = ProbeRequest::from_rng(epoch, &mut rng);
+
+    assert_eq!(first.epoch, epoch);
+    assert_eq!(second.epoch, epoch);
+    assert_ne!(first.nonce, [0_u8; 32]);
+    assert_ne!(second.nonce, [0_u8; 32]);
+    assert_ne!(first.nonce, second.nonce);
+}

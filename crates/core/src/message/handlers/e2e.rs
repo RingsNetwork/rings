@@ -11,6 +11,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+/// Return a forward effect if `ctx` is not addressed to `local`, or `None` for local handling.
 fn e2e_local_or_forward_effects<'payload>(
     local: crate::dht::Did,
     ctx: &'payload MessagePayload,
@@ -22,6 +23,7 @@ fn e2e_local_or_forward_effects<'payload>(
     }
 }
 
+/// Forward an E2E message if it is addressed elsewhere, otherwise run `local_effects`.
 async fn run_e2e_local_or_forward<'payload>(
     handler: &MessageHandler,
     ctx: &'payload MessagePayload,
@@ -34,6 +36,7 @@ async fn run_e2e_local_or_forward<'payload>(
     handler.run_effects(local_effects()?).await
 }
 
+/// Verify an inbound [`E2eHandshakeRequest`] and build the [`E2eHandshakeResponse`] send effect.
 fn e2e_handshake_response_effect<'payload>(
     ctx: &MessagePayload,
     msg: &E2eHandshakeRequest,

@@ -4,6 +4,7 @@ use yew::prelude::*;
 
 use crate::styles;
 
+/// Default initial target URL exposed to the controlled WebView overlay.
 const DEFAULT_TARGET: &str = "https://example.com/";
 
 /// Render only the local page surface. The browser chrome and debug console are

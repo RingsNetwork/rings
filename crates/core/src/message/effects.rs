@@ -62,6 +62,7 @@ async fn yield_executor_once() {
     .await;
 }
 
+/// Number of core actor steps between browser `MessageChannel` event-loop yields on wasm.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) const CORE_ACTOR_BROWSER_YIELD_INTERVAL: u8 = 32;
 
@@ -74,14 +75,18 @@ thread_local! {
     static CLEARED_BROWSER_TASK_YIELD_HANDLERS: Cell<usize> = const { Cell::new(0) };
 }
 
+/// RAII guard that owns a browser `MessageChannel` and clears its `onmessage` handler on drop.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 struct BrowserTaskYieldGuard {
+    /// Message channel whose ports schedule a fresh macrotask turn.
     channel: web_sys::MessageChannel,
+    /// Closure registered on `port1.onmessage` until dropped.
     _callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
 }
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 impl BrowserTaskYieldGuard {
+    /// Attach `callback` to `channel.port1` and return a guard that cleans it up on drop.
     fn new(
         channel: web_sys::MessageChannel,
         callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
@@ -97,6 +102,7 @@ impl BrowserTaskYieldGuard {
         }
     }
 
+    /// Post a null message on `port2` to trigger a macrotask callback on `port1`.
     fn post(&self) -> std::result::Result<(), JsValue> {
         self.channel.port2().post_message(&JsValue::NULL)
     }
@@ -131,6 +137,7 @@ pub(crate) async fn yield_core_actor_step() {
     }
 }
 
+/// Increment the wasm step counter and return `true` when a browser macrotask yield is due.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 fn browser_task_yield_due() -> bool {
     CORE_ACTOR_STEPS_SINCE_BROWSER_YIELD.with(|steps| {
@@ -145,6 +152,7 @@ fn browser_task_yield_due() -> bool {
     })
 }
 
+/// Yield to the browser event loop across one `MessageChannel` macrotask boundary.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) async fn yield_browser_task() {
     let Ok(channel) = web_sys::MessageChannel::new() else {
@@ -454,6 +462,7 @@ impl<'payload> CoreEffect<'payload> {
     }
 }
 
+/// Build a direct `FindSuccessorSend` effect to `next` for `did` unless `next == did`.
 fn find_successor_effect<'payload>(
     next: Did,
     did: Did,
@@ -536,6 +545,7 @@ pub(crate) fn lower_dht_action_with_id<'payload>(
 
 /// Interpreter from `CoreEffect` into the current transport implementation.
 pub(crate) struct CoreEffectInterpreter<'handler> {
+    /// Swarm transport used to dispatch lowered protocol effects.
     transport: &'handler Arc<SwarmTransport>,
 }
 
@@ -545,6 +555,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
         Self { transport }
     }
 
+    /// Return whether `peer` is the local node or already has a live connection.
     fn connection_is_satisfied(&self, peer: Did) -> bool {
         peer == self.transport.dht.did || self.transport.get_connection(peer).is_some()
     }
@@ -694,6 +705,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
         }
     }
 
+    /// Initiate a detached connection to a DHT candidate `peer` unless already connected or backed off.
     async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
         if self.connection_is_satisfied(peer) || self.transport.is_candidate_dial_backed_off(peer) {
             return Ok(());
@@ -758,6 +770,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
     }
 }
 
+/// Extract the connect-lookup correlation UUID from a `FindSuccessorSend` connect request, if any.
 fn connect_lookup_request_id(msg: &Message) -> Option<uuid::Uuid> {
     match msg {
         Message::FindSuccessorSend(FindSuccessorSend {

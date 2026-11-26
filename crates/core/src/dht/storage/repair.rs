@@ -86,6 +86,7 @@ use crate::dht::Did;
 use crate::error::Result;
 use crate::fair_admission::Principal;
 
+/// Append non-empty leaf actions from `action` into `actions`, flattening `MultiActions`.
 fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
     match action {
         PeerRingAction::None => {}
@@ -99,6 +100,7 @@ fn push_action(actions: &mut Vec<PeerRingAction>, action: PeerRingAction) {
 }
 
 impl PeerRing {
+    /// Join `entry` locally or emit an additive-repair copy action for `placement_key`.
     async fn copy_entry_to_placement(
         &self,
         now_ms: u128,
@@ -137,6 +139,7 @@ impl PeerRing {
         }
     }
 
+    /// Repair a single observed lookup `miss` by joining locally or emitting a targeted additive copy.
     async fn copy_entry_to_observed_miss(
         &self,
         now_ms: u128,
@@ -170,6 +173,7 @@ impl PeerRing {
         }
     }
 
+    /// Republish a single local `entry` across all affine placements for `redundancy`.
     async fn republish_entry(
         &self,
         now_ms: u128,

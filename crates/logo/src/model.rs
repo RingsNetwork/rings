@@ -285,6 +285,7 @@ impl GearModel {
     }
 }
 
+/// Computes the tangent point from `endpoint` to a circle centered at `(0, center_y)`.
 fn tangent_to_circle(endpoint: Point, center_y: f64, radius: f64) -> Point {
     let offset_x = endpoint.x;
     let offset_y = endpoint.y - center_y;
@@ -297,6 +298,7 @@ fn tangent_to_circle(endpoint: Point, center_y: f64, radius: f64) -> Point {
     }
 }
 
+/// Rotates local `(tangential, radial)` lobe coordinates into Cartesian space at `phase`.
 fn oriented_point(phase: f64, tangential: f64, radial: f64) -> Point {
     Point {
         x: radial * phase.cos() - tangential * phase.sin(),
@@ -304,21 +306,34 @@ fn oriented_point(phase: f64, tangential: f64, radial: f64) -> Point {
     }
 }
 
+/// Candidate radii bundled for geometric invariant validation.
 #[derive(Clone, Copy)]
 struct Radii {
+    /// Pitch circle radius.
     pitch: f64,
+    /// Involute base circle radius.
     base: f64,
+    /// Outer addendum circle radius.
     outer: f64,
+    /// Inner dedendum root circle radius.
     root: f64,
+    /// Central aperture radius.
     aperture: f64,
+    /// Bore polygon circumradius.
     hole_orbit: f64,
+    /// Individual bore radius.
     hole: f64,
+    /// Inner ring radius between bore lobes.
     inner_ring: f64,
+    /// Tangential half-span of each inner lobe.
     lobe_half_span: f64,
+    /// Orbit radius of each lobe tip center.
     lobe_tip_orbit: f64,
+    /// Circular tip radius of each inner lobe.
     lobe_tip: f64,
 }
 
+/// Verifies all geometric ordering, clearance, and sampling invariants.
 fn validate(spec: &Spec, radii: Radii, flank_samples: u32) -> Result<(), GeometryError> {
     if !spec.teeth.is_multiple_of(spec.hole_count) {
         return Err(GeometryError::IncommensurateBorePhase);

@@ -81,6 +81,7 @@ fn join_placements(results: Vec<Result<()>>) -> Result<()> {
     Err(error)
 }
 
+/// Assert that a completed storage action resolved to [`PeerRingAction::None`].
 fn finish_storage_action(act: PeerRingAction) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
@@ -88,6 +89,7 @@ fn finish_storage_action(act: PeerRingAction) -> Result<()> {
     }
 }
 
+/// Forward a storage message by resetting its relay destination to `next`.
 async fn reset_storage_relay_destination(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -131,6 +133,7 @@ async fn cache_lookup_reply(
     cache_lookup_reply_at(transport, resource, redundancy, entry, transport.now_ms()).await
 }
 
+/// Cache `entry` at `now_ms` and mark the lookup round answered if the cache serves it at the read epoch.
 async fn cache_lookup_reply_at(
     transport: &SwarmTransport,
     resource: Did,
@@ -181,6 +184,7 @@ pub(crate) async fn admit_storage_lookup_reply(
     Ok(())
 }
 
+/// Return whether `act` contains any remote `FindEntry` lookup leaf.
 fn action_has_remote_fetch(act: &PeerRingAction) -> bool {
     match act {
         PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindEntry(_)) => true,
@@ -213,6 +217,7 @@ pub(crate) async fn handle_storage_fetch_act(
     .await
 }
 
+/// Recursively execute storage-fetch actions, seeding local hits and dispatching remote lookups.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 async fn handle_storage_fetch_act_inner(
@@ -658,6 +663,7 @@ pub(crate) async fn remove_relay_elements_at(
     handle_storage_store_act(transport.clone(), action, Attempts::Single).await
 }
 
+/// Validate a `SyncEntriesWithSuccessor` destination and resolve its next hop, or `None` if local.
 fn next_hop_for_sync_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -677,6 +683,7 @@ fn next_hop_for_sync_entries(
     handler.dht.next_hop_for_storage_sync(msg.destination)
 }
 
+/// Send a [`SyncEntriesWithSuccessorReport`] acknowledging durably persisted `acks`.
 async fn report_synced_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,

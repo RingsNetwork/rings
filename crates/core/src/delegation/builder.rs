@@ -12,11 +12,17 @@ use crate::utils;
 /// Builds a [`DelegateeKey`] from an external account authorization.
 #[wasm_export]
 pub struct DelegationBuilder {
+    /// Ephemeral secp256k1 secret key generated for the delegatee.
     delegatee_secret_key: SecretKey,
+    /// Encoded delegator account identifier (e.g. address or public key).
     delegator_entity: String,
+    /// Lowercase signature algorithm name for the delegator account.
     delegator_type: String,
+    /// Requested delegation time-to-live in milliseconds.
     ttl_ms: u64,
+    /// Creation timestamp in Unix epoch milliseconds.
     ts_ms: u128,
+    /// Delegator signature bytes over the unsigned delegation proof.
     delegator_signature: Vec<u8>,
 }
 

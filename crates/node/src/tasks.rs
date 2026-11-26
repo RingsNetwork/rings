@@ -41,7 +41,9 @@ use rings_runtime::TaskSet;
 /// The stop and the task set of one node, shared by every clone of its processor.
 #[derive(Clone, Default)]
 pub(crate) struct NodeTasks {
+    /// Cooperative stop source shared by all tasks belonging to this node.
     stop: StopSource,
+    /// Set tracking live background tasks owned by this node until drained.
     tasks: TaskSet,
 }
 
@@ -49,7 +51,9 @@ pub(crate) struct NodeTasks {
 /// anything for its task, so a missing executor claims nothing.
 #[derive(Clone)]
 pub(crate) struct NodeSpawner {
+    /// Node task tracker registering each spawned task.
     tasks: NodeTasks,
+    /// Captured runtime executor on which tasks are spawned.
     spawner: Spawner,
 }
 

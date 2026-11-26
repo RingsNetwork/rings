@@ -18,13 +18,17 @@ type PeerOperationLock = Arc<AsyncMutex<()>>;
 /// some lease on it lives, so the map is bounded by the peers with an operation in progress.
 #[derive(Default)]
 pub(super) struct PeerOperationLocks {
+    /// Active per-peer async mutexes keyed by peer DID.
     locks: Mutex<BTreeMap<Did, PeerOperationLock>>,
 }
 
 /// A claim on one peer's operation lock; dropping the last lease on a peer removes its lock.
 pub(super) struct PeerOperationLease<'locks> {
+    /// Owning lock table pruned when this lease is dropped.
     locks: &'locks PeerOperationLocks,
+    /// Peer whose operation lock is leased.
     peer: Did,
+    /// Shared async mutex serializing operations for `peer`.
     operation: PeerOperationLock,
 }
 

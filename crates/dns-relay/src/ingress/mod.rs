@@ -95,8 +95,11 @@ impl Default for AdmissionLimits {
 /// ```
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Admission<O> {
+    /// Configured total and per-owner concurrency limits.
     limits: AdmissionLimits,
+    /// Total number of connections currently in flight.
     live: usize,
+    /// Active connection count per bound owner.
     per_owner: BTreeMap<O, usize>,
 }
 
@@ -167,6 +170,7 @@ where O: Owner
 struct EnteredSlot<O>
 where O: Owner
 {
+    /// Shared admission tracker; `None` once promoted to a [`BoundSlot`].
     admission: Option<Arc<Mutex<Admission<O>>>>,
 }
 
@@ -175,7 +179,9 @@ where O: Owner
 struct BoundSlot<O>
 where O: Owner
 {
+    /// Shared admission tracker updated when this slot drops.
     admission: Arc<Mutex<Admission<O>>>,
+    /// Owner whose per-owner slot is held by this connection.
     owner: O,
 }
 
@@ -242,8 +248,11 @@ where O: Owner
 
 /// Where a connection goes: `route` in the module doc.
 struct Route<O> {
+    /// Destination owner resolved from the target IPv6 address.
     owner: O,
+    /// Destination port being connected to.
     port: NonZeroU16,
+    /// Proxy protocol header mode negotiated for this port.
     proxy: ProxyProtocol,
 }
 
@@ -253,11 +262,17 @@ where
     D: Directory,
     F: Forward<Owner = D::Owner>,
 {
+    /// Local IPv6 address on which ingress sockets bind.
     listen: Ipv6Addr,
+    /// Set of TCP ports accepted by this ingress.
     ports: BTreeSet<NonZeroU16>,
+    /// Address registry mapping destination IPv6 addresses back to owners.
     registry: Arc<AddressRegistry<D::Owner>>,
+    /// Directory consulted to verify announced ports and proxy modes.
     directory: Arc<D>,
+    /// Backend forwarder that carries accepted streams to their owner.
     forward: Arc<F>,
+    /// Shared concurrency admission controller.
     admission: Arc<Mutex<Admission<D::Owner>>>,
 }
 

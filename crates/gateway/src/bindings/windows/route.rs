@@ -34,16 +34,24 @@ use windows_sys::Win32::Networking::WinSock::SOCKADDR_INET;
 /// Windows route fields needed by the cross-platform route transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Route {
+    /// Destination network address.
     destination: IpAddr,
+    /// Destination CIDR prefix length in bits.
     prefix: u8,
+    /// Optional next-hop gateway address.
     gateway: Option<IpAddr>,
+    /// Optional interface alias name.
     if_name: Option<String>,
+    /// Optional numeric interface index.
     if_index: Option<u32>,
+    /// Optional route metric.
     metric: Option<u32>,
+    /// Optional 64-bit Windows interface LUID.
     luid: Option<u64>,
 }
 
 impl Route {
+    /// Construct a route targeting `destination/prefix` with no optional attributes set.
     pub(crate) fn new(destination: IpAddr, prefix: u8) -> Self {
         Self {
             destination,
@@ -56,59 +64,72 @@ impl Route {
         }
     }
 
+    /// Return the destination network address.
     pub(crate) fn destination(&self) -> IpAddr {
         self.destination
     }
 
+    /// Return the destination CIDR prefix length.
     pub(crate) fn prefix(&self) -> u8 {
         self.prefix
     }
 
+    /// Return the optional next-hop gateway address.
     pub(crate) fn gateway(&self) -> Option<IpAddr> {
         self.gateway
     }
 
+    /// Return the optional interface alias name.
     pub(crate) fn if_name(&self) -> Option<&String> {
         self.if_name.as_ref()
     }
 
+    /// Return the optional numeric interface index.
     pub(crate) fn if_index(&self) -> Option<u32> {
         self.if_index
     }
 
+    /// Return the optional route metric.
     pub(crate) fn metric(&self) -> Option<u32> {
         self.metric
     }
 
+    /// Return the optional 64-bit interface LUID.
     pub(crate) fn luid(&self) -> Option<u64> {
         self.luid
     }
 
+    /// Set the next-hop gateway address.
     pub(crate) fn with_gateway(mut self, gateway: IpAddr) -> Self {
         self.gateway = Some(gateway);
         self
     }
 
+    /// Set the interface alias name.
     pub(crate) fn with_if_name(mut self, name: String) -> Self {
         self.if_name = Some(name);
         self
     }
 
+    /// Set the numeric interface index.
     pub(crate) fn with_if_index(mut self, index: u32) -> Self {
         self.if_index = Some(index);
         self
     }
 
+    /// Set the route metric.
     pub(crate) fn with_metric(mut self, metric: u32) -> Self {
         self.metric = Some(metric);
         self
     }
 
+    /// Set the 64-bit interface LUID.
     pub(crate) fn with_luid(mut self, luid: u64) -> Self {
         self.luid = Some(luid);
         self
     }
 
+    /// Resolve and verify consistency between `if_name` and `if_index`.
     fn checked_index(&self) -> io::Result<Option<u32>> {
         let name_index = self.if_name.as_deref().map(if_name_to_index).transpose()?;
         if let (Some(index), Some(resolved)) = (self.if_index, name_index) {
@@ -125,6 +146,7 @@ impl Route {
         Ok(self.if_index.or(name_index))
     }
 
+    /// Validate prefix length, address-family agreement, and interface identity.
     fn validate(&self) -> io::Result<()> {
         let max_prefix = if self.destination.is_ipv4() { 32 } else { 128 };
         if self.prefix > max_prefix {
@@ -150,10 +172,12 @@ impl Route {
 pub(crate) struct RouteManager;
 
 impl RouteManager {
+    /// Construct a stateless Windows IP Helper route manager.
     pub(crate) fn new() -> io::Result<Self> {
         Ok(Self)
     }
 
+    /// List all IPv4 and IPv6 forwarding-table destination prefixes from the kernel.
     pub(crate) fn list(&mut self) -> io::Result<Vec<Route>> {
         let mut table = ptr::null_mut::<MIB_IPFORWARD_TABLE2>();
         // SAFETY: IP Helper initializes `table` on success; the returned allocation is wrapped
@@ -179,12 +203,14 @@ impl RouteManager {
         Ok(rows.iter().filter_map(route_destination_from_row).collect())
     }
 
+    /// Install `route` into the Windows IP forwarding table.
     pub(crate) fn add(&mut self, route: &Route) -> io::Result<()> {
         let row = route_to_row(route)?;
         // SAFETY: `row` is fully initialized by `route_to_row` for CreateIpForwardEntry2.
         status_to_result(unsafe { CreateIpForwardEntry2(&row) })
     }
 
+    /// Delete `route` from the Windows IP forwarding table.
     pub(crate) fn delete(&mut self, route: &Route) -> io::Result<()> {
         let row = route_to_row(route)?;
         // SAFETY: `row` is fully initialized by `route_to_row` for DeleteIpForwardEntry2.
@@ -192,6 +218,7 @@ impl RouteManager {
     }
 }
 
+/// RAII owner for a `MIB_IPFORWARD_TABLE2` allocation released with `FreeMibTable`.
 struct OwnedRouteTable(*mut MIB_IPFORWARD_TABLE2);
 
 impl Drop for OwnedRouteTable {
@@ -202,6 +229,7 @@ impl Drop for OwnedRouteTable {
     }
 }
 
+/// Convert a Win32 error code returned by IP Helper into an `io::Result`.
 fn status_to_result(status: WIN32_ERROR) -> io::Result<()> {
     if status == ERROR_SUCCESS {
         Ok(())
@@ -212,11 +240,13 @@ fn status_to_result(status: WIN32_ERROR) -> io::Result<()> {
     }
 }
 
+/// Extract a destination `Route` from a raw `MIB_IPFORWARD_ROW2` table row.
 fn route_destination_from_row(row: &MIB_IPFORWARD_ROW2) -> Option<Route> {
     let destination = sockaddr_to_ip(&row.DestinationPrefix.Prefix)?;
     Some(Route::new(destination, row.DestinationPrefix.PrefixLength))
 }
 
+/// Validate and serialize `route` into an initialized `MIB_IPFORWARD_ROW2`.
 fn route_to_row(route: &Route) -> io::Result<MIB_IPFORWARD_ROW2> {
     route.validate()?;
     // SAFETY: `InitializeIpForwardEntry` requires a writable row and supplies Windows defaults;
@@ -243,6 +273,7 @@ fn route_to_row(route: &Route) -> io::Result<MIB_IPFORWARD_ROW2> {
     Ok(row)
 }
 
+/// Decode an IPv4 or IPv6 address from a Windows `SOCKADDR_INET` union.
 fn sockaddr_to_ip(address: &SOCKADDR_INET) -> Option<IpAddr> {
     // SAFETY: `si_family` is the shared discriminant of SOCKADDR_INET. The matching union member
     // is read only after checking that discriminant, and IN_ADDR/IN6_ADDR are plain byte storage.
@@ -265,6 +296,7 @@ fn sockaddr_to_ip(address: &SOCKADDR_INET) -> Option<IpAddr> {
     }
 }
 
+/// Write `ip` and its address family discriminant into a `SOCKADDR_INET`.
 fn write_sockaddr(address: &mut SOCKADDR_INET, ip: IpAddr) {
     // SAFETY: the family discriminant and corresponding union member are written together. Both
     // Windows address structures are byte-for-byte representations of the supplied octets.
@@ -284,6 +316,7 @@ fn write_sockaddr(address: &mut SOCKADDR_INET, ip: IpAddr) {
     }
 }
 
+/// Set only the address family discriminant on a zeroed `SOCKADDR_INET`.
 fn set_sockaddr_family(address: &mut SOCKADDR_INET, family_source: IpAddr) {
     address.si_family = if family_source.is_ipv4() {
         AF_INET
@@ -292,6 +325,7 @@ fn set_sockaddr_family(address: &mut SOCKADDR_INET, family_source: IpAddr) {
     };
 }
 
+/// Resolve a Windows interface alias name to its numeric interface index.
 fn if_name_to_index(name: &str) -> io::Result<u32> {
     let encoded = name
         .encode_utf16()
@@ -304,6 +338,7 @@ fn if_name_to_index(name: &str) -> io::Result<u32> {
     luid_to_index(&luid)
 }
 
+/// Convert a numeric Windows interface index to its `NET_LUID_LH`.
 fn index_to_luid(index: u32) -> io::Result<NET_LUID_LH> {
     // SAFETY: `luid` is writable and initialized by Windows on successful return.
     let mut luid: NET_LUID_LH = unsafe { std::mem::zeroed() };
@@ -312,6 +347,7 @@ fn index_to_luid(index: u32) -> io::Result<NET_LUID_LH> {
     Ok(luid)
 }
 
+/// Convert a `NET_LUID_LH` to its numeric Windows interface index.
 fn luid_to_index(luid: &NET_LUID_LH) -> io::Result<u32> {
     let mut index = 0;
     // SAFETY: `luid` is initialized and `index` is a valid writable output pointer.
@@ -319,12 +355,14 @@ fn luid_to_index(luid: &NET_LUID_LH) -> io::Result<u32> {
     Ok(index)
 }
 
+/// Reinterpret a `NET_LUID_LH` union as its raw 64-bit integer value.
 #[cfg(test)]
 fn luid_to_u64(luid: NET_LUID_LH) -> u64 {
     // SAFETY: NET_LUID_LH is the Windows SDK's transparent 64-bit LUID union.
     unsafe { std::mem::transmute::<NET_LUID_LH, u64>(luid) }
 }
 
+/// Reinterpret a raw 64-bit LUID integer as a Windows `NET_LUID_LH` union.
 fn u64_to_luid(luid: u64) -> NET_LUID_LH {
     // SAFETY: NET_LUID_LH is the Windows SDK's transparent 64-bit LUID union.
     unsafe { std::mem::transmute::<u64, NET_LUID_LH>(luid) }

@@ -74,7 +74,9 @@ pub(crate) enum OperateRoute {
 /// Law: `StorageKey::from_str(&key.to_string()) == Ok(key)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct StorageKey {
+    /// Entry kind selecting the storage namespace.
     kind: EntryKind,
+    /// Ring placement DID for this carrier.
     placement: Did,
 }
 

@@ -98,9 +98,11 @@ enum Refusal {
 
 /// One queued item: the delivery, the weight it holds, and the signal its taking fires.
 struct Queued {
+    /// Queued application message or swarm event.
     delivery: ApplicationDelivery,
     /// The weight admitted with a message; zero for a fact.
     weight: usize,
+    /// Optional completion signal fired when the application takes this item.
     consumed: Option<oneshot::Sender<()>>,
 }
 
@@ -132,6 +134,7 @@ type Position = u64;
 
 /// The state both ends share under one lock.
 struct Queue {
+    /// Current claim lifecycle state of the application inbox.
     claim: Claim,
     /// Whether core dropped its outlet: no item will ever be added.
     closed: bool,
@@ -312,6 +315,7 @@ impl Queue {
 
 /// The queue and its wake-up.
 struct Shared {
+    /// Mutex-protected inbox queue state.
     queue: Mutex<Queue>,
     /// Notified when an item is added or the outlet closes.
     ready: Event,
@@ -326,6 +330,7 @@ impl Shared {
 
 /// Core's end of the inbox. Held by the transport; never waits on the application.
 pub(crate) struct ApplicationOutlet {
+    /// Shared queue state and wake-up event.
     shared: Arc<Shared>,
 }
 
@@ -406,6 +411,7 @@ impl ApplicationOutlet {
 
 /// Weight reserved in the inbox, returned when dropped unless a message took it over.
 struct HeldWeight {
+    /// Shared queue state from which weight was reserved.
     shared: Arc<Shared>,
     /// The weight still held; zero once a queued message holds it instead.
     weight: usize,
@@ -423,7 +429,9 @@ impl Drop for HeldWeight {
 /// Room for one message, reserved in the inbox together with the message it holds: filling it
 /// never waits, and the weight queued is the weight reserved, by construction.
 pub(crate) struct InboxRoom {
+    /// Reserved weight guard released on drop unless transferred to the queue.
     held: HeldWeight,
+    /// Message paired with the reserved weight.
     message: ApplicationMessage,
 }
 
@@ -457,6 +465,7 @@ impl Drop for ApplicationOutlet {
 /// Claimed once through `Swarm::application_inbox`. Dropping it releases the inbox: from then on
 /// core discards live application data and leaves stored mail stored.
 pub struct ApplicationInbox {
+    /// Shared queue state and wake-up event.
     shared: Arc<Shared>,
 }
 

@@ -175,6 +175,7 @@ impl OverlaySend {
 /// their own cell to leave.
 #[derive(Clone)]
 pub(crate) struct OnionLinkSender {
+    /// Shared lane queues, quotas, and emission clocks guarded by a mutex.
     state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
     /// The idle floor of every link.
     floor: OnionIdleFloor,
@@ -388,6 +389,7 @@ struct OnionLaneWait<T> {
 }
 
 impl<T> OnionLaneWait<T> {
+    /// Create an armed wait guard for `peer`'s lane space wakeup channel.
     fn new(
         state: Arc<Mutex<OrderedSendState<T>>>,
         peer: Did,
@@ -401,6 +403,7 @@ impl<T> OnionLaneWait<T> {
         }
     }
 
+    /// Wait until queue space is signalled on the lane's wakeup channel.
     async fn wait(&mut self) {
         if let Some(space) = self.space.as_mut() {
             if space.await.is_ok() {

@@ -17,6 +17,7 @@ enum CancellationScope {
     Unadmitted,
 }
 
+/// State captured when retiring an unadmitted connection prior to closing its transport.
 struct RetiredPendingConnection {
     /// Whether the retired record owned a pending slot in [`Handshake::Offering`].
     was_offering: bool,
@@ -144,6 +145,7 @@ impl SwarmTransport {
         Ok(true)
     }
 
+    /// Log cancellation and close the raw transport released by `retired`, if it is still current.
     async fn finish_cancelled_connection(
         &self,
         attempt: PendingConnectionAttempt,
@@ -162,6 +164,7 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Remove `attempt` from the lifecycle registry under `scope` and capture its transport for closing.
     fn retire_pending_connection_for_close(
         &self,
         attempt: PendingConnectionAttempt,

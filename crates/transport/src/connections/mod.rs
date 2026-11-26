@@ -55,10 +55,13 @@ macro_rules! delegate_to_callback {
     };
 }
 
+/// In-memory deterministic test transport backend.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod dummy;
+/// Native `webrtc-rs` transport backend.
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 mod native_webrtc;
+/// Browser `web-sys` WebRTC transport backend.
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 mod web_sys_webrtc;
 
@@ -85,6 +88,7 @@ pub use crate::connections::web_sys_webrtc::WebSysWebrtcTransport;
 ))]
 #[derive(Clone)]
 pub struct PhysicalCloseWitness {
+    /// Monotone watch channel set to `true` once physical teardown completes.
     completed: tokio::sync::watch::Receiver<bool>,
 }
 

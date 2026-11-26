@@ -45,21 +45,30 @@ impl StorageRepairOutcome {
     }
 }
 
+/// Reason why a storage-repair delivery was deferred instead of sent immediately.
 #[derive(Clone, Copy, Debug)]
 enum StorageRepairDeferReason {
+    /// No next-hop route could be resolved for the destination.
     MissingNextHop,
+    /// The resolved next hop does not have an active admitted attempt.
     NextHopNotAdmitted,
+    /// The admitted next hop currently has no live transport connection.
     NextHopTransportMissing,
+    /// The next hop's transport is not yet ready to make forward progress.
     NextHopTransportNotReady(TransportReadiness),
 }
 
+/// Outcome of attempting to dispatch a single storage-repair delivery.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepairDeliveryResult {
+    /// The repair delivery was handed to the transport.
     Sent,
+    /// The repair delivery was deferred for a later pass.
     Deferred,
 }
 
 impl StorageRepairDeferReason {
+    /// Return a static log-friendly label for this defer reason.
     const fn as_str(self) -> &'static str {
         match self {
             Self::MissingNextHop => "missing_next_hop",
@@ -69,6 +78,7 @@ impl StorageRepairDeferReason {
         }
     }
 
+    /// Return the underlying transport readiness when deferred due to readiness.
     const fn transport_readiness(self) -> Option<TransportReadiness> {
         match self {
             Self::NextHopTransportNotReady(readiness) => Some(readiness),
@@ -82,11 +92,19 @@ impl StorageRepairDeferReason {
 const CHAIN_PROBE_PERIOD_MS: u64 = CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS.unsigned_abs();
 
 impl Stabilizer {
+    /// Plan, throttle, and dispatch storage-repair deliveries produced by DHT stabilization.
     async fn handle_storage_repair_action(
         &self,
         act: PeerRingAction,
     ) -> Result<StorageRepairOutcome> {
-        let deliveries = self.storage_repair_window(act.coalesced_storage_sync_deliveries()?)?;
+        let topology_epoch = self.dht.topology_epoch().current();
+        let now_ms = self.transport.now_ms_i64();
+        let eligible = self.filter_cooled_down_deliveries(
+            act.coalesced_storage_sync_deliveries()?,
+            topology_epoch,
+            now_ms,
+        )?;
+        let deliveries = self.storage_repair_window(eligible)?;
         if deliveries.is_empty() {
             tracing::debug!(
                 target: "rings_core::dht::stabilization",
@@ -106,7 +124,10 @@ impl Stabilizer {
         let mut sent = 0usize;
         let mut deferred = 0usize;
         for planned in deliveries {
-            match self.send_planned_storage_repair(planned).await? {
+            match self
+                .send_planned_storage_repair(planned, topology_epoch, now_ms)
+                .await?
+            {
                 RepairDeliveryResult::Sent => sent = sent.saturating_add(1),
                 RepairDeliveryResult::Deferred => deferred = deferred.saturating_add(1),
             }
@@ -125,10 +146,35 @@ impl Stabilizer {
         Ok(StorageRepairOutcome::Complete)
     }
 
+    /// Filter out repair deliveries still inside their unchanged-topology rebroadcast cooldown.
+    fn filter_cooled_down_deliveries(
+        &self,
+        deliveries: Vec<StorageSyncDelivery>,
+        topology_epoch: u64,
+        now_ms: i64,
+    ) -> Result<Vec<StorageSyncDelivery>> {
+        let mut eligible = Vec::with_capacity(deliveries.len());
+        for delivery in deliveries {
+            if !self.transport.is_storage_repair_cooled_down(
+                &delivery.cursor_key(),
+                topology_epoch,
+                now_ms,
+            )? {
+                eligible.push(delivery);
+            }
+        }
+        Ok(eligible)
+    }
+
+    /// Resolve the next hop for `delivery`, send it through tracked storage sync, and record the
+    /// repair cooldown only when the message was actually dispatched (`StorageSyncOutcome::Sent`).
     async fn send_planned_storage_repair(
         &self,
         delivery: StorageSyncDelivery,
+        topology_epoch: u64,
+        now_ms: i64,
     ) -> Result<RepairDeliveryResult> {
+        let cursor = delivery.cursor_key();
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         let purpose = msg.purpose;
         let destination = msg.destination;
@@ -149,6 +195,8 @@ impl Stabilizer {
         );
         match self.transport.send_storage_sync_tracked(msg).await {
             Ok(StorageSyncOutcome::Sent(tx_id)) => {
+                self.transport
+                    .record_storage_repair_sent(cursor, topology_epoch, now_ms)?;
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
                 crate::simulation::record_repair_entries(entries);
                 tracing::debug!(
@@ -199,6 +247,7 @@ impl Stabilizer {
         }
     }
 
+    /// Emit a structured debug log when a storage-repair delivery is deferred.
     fn log_storage_repair_deferred(
         &self,
         destination: crate::dht::StorageSyncDestination,
@@ -218,6 +267,7 @@ impl Stabilizer {
         );
     }
 
+    /// Select a bounded, cursor-rotating window of storage-repair deliveries for this step.
     fn storage_repair_window(
         &self,
         deliveries: Vec<StorageSyncDelivery>,
@@ -260,6 +310,7 @@ impl Stabilizer {
         Ok(selected)
     }
 
+    /// Check whether `next_hop` is admitted and transport-ready, returning a defer reason if not.
     fn storage_repair_defer_reason(
         &self,
         next_hop: Option<Did>,
@@ -631,6 +682,199 @@ mod tests {
             Did::from(2u32),
             Did::from(1u32)
         ]);
+        Ok(())
+    }
+
+    /// Build coalesced `OwnershipHandoff` deliveries for cooldown exemption tests.
+    fn handoff_deliveries(values: &[u32]) -> Result<Vec<StorageSyncDelivery>> {
+        let actions = values
+            .iter()
+            .copied()
+            .map(|value| {
+                let destination = StorageSyncDestination::PhysicalOwner(Did::from(value));
+                let entry = live_entry(Did::from(value + 100), vec![], EntryKind::Data);
+                PeerRingAction::sync_entries_for_handoff(destination, vec![PlacedEntry::new(
+                    destination.did(),
+                    entry,
+                )])
+            })
+            .collect();
+        PeerRingAction::MultiActions(actions).coalesced_storage_sync_deliveries()
+    }
+
+    /// Verify additive-repair cooldown suppression, expiration, epoch reset, and handoff exemption.
+    #[test]
+    fn test_repair_cooldown_suppresses_unchanged_topology_expires_and_resets_on_epoch() -> Result<()>
+    {
+        use crate::swarm::transport::STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS;
+        use crate::utils::ManualClock;
+
+        let clock = Arc::new(ManualClock::new(1_000_000));
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                crate::tests::test_transport("stun://stun.l.google.com:19302"),
+                Box::new(MemStorage::new()),
+                session,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .clock(clock.clone())
+            .build(),
+        );
+        let stabilizer = swarm.stabilizer();
+        let repair_action = PeerRingAction::MultiActions(vec![
+            PeerRingAction::sync_entries_for_repair(
+                StorageSyncDestination::PlacementKey(Did::from(1u32)),
+                vec![PlacedEntry::new(
+                    Did::from(1u32),
+                    live_entry(Did::from(101u32), vec![], EntryKind::Data),
+                )],
+            ),
+            PeerRingAction::sync_entries_for_repair(
+                StorageSyncDestination::PlacementKey(Did::from(2u32)),
+                vec![PlacedEntry::new(
+                    Did::from(2u32),
+                    live_entry(Did::from(102u32), vec![], EntryKind::Data),
+                )],
+            ),
+        ]);
+        let deliveries = repair_action.clone().coalesced_storage_sync_deliveries()?;
+        let epoch0 = swarm.dht().topology_epoch().current();
+        let now_ms = swarm.transport.now_ms_i64();
+
+        // Recording only delivery[0] cools delivery[0] while leaving delivery[1] eligible.
+        swarm
+            .transport
+            .record_storage_repair_sent(deliveries[0].cursor_key(), epoch0, now_ms)?;
+        let filtered = stabilizer.filter_cooled_down_deliveries(
+            repair_action.clone().coalesced_storage_sync_deliveries()?,
+            epoch0,
+            now_ms,
+        )?;
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].cursor_key(), deliveries[1].cursor_key());
+
+        // Still inside cooldown just before expiry boundary.
+        clock.set(
+            1_000_000 + u128::try_from(STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS - 1).unwrap_or(0),
+        );
+        let before_expiry = swarm.transport.now_ms_i64();
+        let filtered_before = stabilizer.filter_cooled_down_deliveries(
+            repair_action.clone().coalesced_storage_sync_deliveries()?,
+            epoch0,
+            before_expiry,
+        )?;
+        assert_eq!(filtered_before.len(), 1);
+
+        // Once cooldown elapses, both deliveries become eligible again.
+        clock.set(1_000_000 + u128::try_from(STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS).unwrap_or(0));
+        let at_expiry = swarm.transport.now_ms_i64();
+        let filtered_at_expiry = stabilizer.filter_cooled_down_deliveries(
+            repair_action.clone().coalesced_storage_sync_deliveries()?,
+            epoch0,
+            at_expiry,
+        )?;
+        assert_eq!(filtered_at_expiry.len(), 2);
+
+        // Re-record delivery[0], then advance topology_epoch: cooldown clears immediately.
+        swarm.transport.record_storage_repair_sent(
+            deliveries[0].cursor_key(),
+            epoch0,
+            at_expiry,
+        )?;
+        let peer: Did = SecretKey::random().address().into();
+        let _ = swarm.dht().admit_connected(peer, None)?;
+        let epoch1 = swarm.dht().topology_epoch().current();
+        assert!(epoch1 > epoch0);
+        let filtered_new_epoch = stabilizer.filter_cooled_down_deliveries(
+            repair_action.coalesced_storage_sync_deliveries()?,
+            epoch1,
+            at_expiry,
+        )?;
+        assert_eq!(filtered_new_epoch.len(), 2);
+
+        // OwnershipHandoff deliveries are never throttled by cooldown.
+        let handoff = handoff_deliveries(&[3, 4])?;
+        for item in &handoff {
+            swarm
+                .transport
+                .record_storage_repair_sent(item.cursor_key(), epoch1, at_expiry)?;
+        }
+        assert_eq!(
+            stabilizer
+                .filter_cooled_down_deliveries(handoff, epoch1, at_expiry)?
+                .len(),
+            2
+        );
+        Ok(())
+    }
+
+    /// Verify that the tracked repair cooldown table never exceeds its bounded entry cap.
+    #[test]
+    fn test_repair_cooldown_map_is_bounded() -> Result<()> {
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                crate::tests::test_transport("stun://stun.l.google.com:19302"),
+                Box::new(MemStorage::new()),
+                session,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .build(),
+        );
+        let epoch = swarm.dht().topology_epoch().current();
+        for i in 1..=600u32 {
+            let delivery = PeerRingAction::sync_entries_for_repair(
+                StorageSyncDestination::PlacementKey(Did::from(i)),
+                vec![PlacedEntry::new(
+                    Did::from(i),
+                    live_entry(Did::from(i), vec![], EntryKind::Data),
+                )],
+            )
+            .coalesced_storage_sync_deliveries()?
+            .pop()
+            .ok_or_else(|| crate::error::Error::InvalidMessage("expected delivery".to_string()))?;
+            swarm.transport.record_storage_repair_sent(
+                delivery.cursor_key(),
+                epoch,
+                10_000 + i64::from(i),
+            )?;
+        }
+        assert_eq!(swarm.transport.storage_repair_cooldown_len_for_test()?, 512);
+        Ok(())
+    }
+
+    /// Verify that a deferred repair delivery does not enter the rebroadcast cooldown table.
+    #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_family = "wasm"), tokio::test)]
+    async fn test_deferred_repair_delivery_is_not_recorded_in_cooldown() -> Result<()> {
+        let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                crate::tests::test_transport("stun://stun.l.google.com:19302"),
+                Box::new(MemStorage::new()),
+                session,
+            )
+            .replay_storage(crate::tests::volatile_replay_storage())
+            .build(),
+        );
+        let stabilizer = swarm.stabilizer();
+        let peer: Did = SecretKey::random().address().into();
+        let _ = swarm.dht().admit_connected(peer, None)?;
+        let delivery = PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PhysicalOwner(peer),
+            vec![PlacedEntry::new(
+                peer,
+                live_entry(peer, vec![], EntryKind::Data),
+            )],
+        );
+        // No transport connection exists to `peer`, so delivery is Deferred.
+        let outcome = stabilizer.handle_storage_repair_action(delivery).await?;
+        assert_eq!(outcome, StorageRepairOutcome::Deferred);
+        assert_eq!(swarm.transport.storage_repair_cooldown_len_for_test()?, 0);
         Ok(())
     }
 }

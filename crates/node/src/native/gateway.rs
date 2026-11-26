@@ -37,19 +37,26 @@ use crate::processor::Processor;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::util::expand_home;
 
+/// Platform-specific tunnel control backend used by [`NativeGatewayRunner`].
 #[cfg(target_os = "windows")]
 type PlatformTunnelControl = NativeTunnelControl;
+/// Platform-specific tunnel control backend used by [`NativeGatewayRunner`].
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 type PlatformTunnelControl = UnixTunnelControl;
+/// Platform-specific tunnel control backend used by [`NativeGatewayRunner`].
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 type PlatformTunnelControl = UnsupportedTunnelControl;
 
+/// Maximum allowed interval in seconds for refreshing gateway exit availability.
 const MAX_STATUS_REFRESH_SECS: u64 = 30;
 
 /// Prepared foreground gateway with a status capability available before platform setup.
 pub struct NativeGatewayRunner {
+    /// Node processor used to query live Onion exit availability.
     processor: Arc<Processor>,
+    /// Underlying gateway packet-forwarding runtime.
     runtime: GatewayRuntime,
+    /// Validated native gateway configuration.
     config: NativeGatewayConfig,
 }
 
@@ -84,6 +91,7 @@ impl NativeGatewayRunner {
         self.run_inner(stop, Some(started)).await
     }
 
+    /// Establishes the TUN device, runs the packet loop and exit-availability updater, and tears down.
     async fn run_inner(
         mut self,
         stop: StopToken,
@@ -138,6 +146,7 @@ impl NativeGatewayRunner {
         combine_gateway_results(runtime_result, updater_result, cleanup_result)
     }
 
+    /// Constructs the Windows tunnel controller from gateway configuration and environment.
     #[cfg(target_os = "windows")]
     fn platform_control(&self) -> anyhow::Result<PlatformTunnelControl> {
         let ledger = expand_home(&self.config.route_ledger_path)?;
@@ -154,18 +163,21 @@ impl NativeGatewayRunner {
         NativeTunnelControl::new(options).map_err(Into::into)
     }
 
+    /// Constructs the Unix privileged-helper tunnel controller.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn platform_control(&self) -> anyhow::Result<PlatformTunnelControl> {
         let socket_path = expand_home(&self.config.unix_helper_socket)?;
         Ok(UnixTunnelControl::new(UnixTunnelOptions::new(socket_path)))
     }
 
+    /// Constructs a stub tunnel controller for unsupported platforms.
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     fn platform_control(&self) -> anyhow::Result<PlatformTunnelControl> {
         Ok(UnsupportedTunnelControl::new())
     }
 }
 
+/// Validates that `seconds` is within `1..=MAX_STATUS_REFRESH_SECS`.
 fn validate_status_refresh_secs(seconds: u64) -> Result<(), GatewayError> {
     if seconds == 0 || seconds > MAX_STATUS_REFRESH_SECS {
         return Err(GatewayError::Platform {
@@ -178,6 +190,7 @@ fn validate_status_refresh_secs(seconds: u64) -> Result<(), GatewayError> {
     Ok(())
 }
 
+/// Finalizes tunnel device cleanup, intentionally leaking `device` if route teardown failed.
 fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
     runtime: &mut GatewayRuntime,
     device: D,
@@ -204,6 +217,7 @@ fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
     }
 }
 
+/// Resolves the optional Wintun DLL path, preferring config over the environment variable.
 #[cfg(any(test, target_os = "windows"))]
 fn select_wintun_dll_path(
     configured: Option<&str>,
@@ -217,20 +231,31 @@ fn select_wintun_dll_path(
     selected.map(expand_home).transpose()
 }
 
+/// Parameters for the periodic Onion exit-availability refresh task.
 struct GatewayRefresh {
+    /// Node processor queried for advertised Onion TCP exits.
     processor: Arc<Processor>,
+    /// Control handle used to push exit observations into the gateway runtime.
     gateway: GatewayControlHandle,
+    /// Polling interval between exit-availability checks.
     interval: Duration,
+    /// External stop token cancelling the gateway.
     stop: StopToken,
+    /// Stop token fired once the packet data-plane loop exits.
     runtime_done: StopToken,
+    /// Stop source signalled if the status updater loses its control channel.
     updater_failed: StopSource,
 }
 
+/// Event that woke [`wait_for_refresh`].
 enum RefreshWake {
+    /// Refresh interval elapsed and exit availability should be queried.
     Tick,
+    /// Shutdown or runtime completion was requested.
     Stop,
 }
 
+/// Waits for either the next refresh tick or a stop signal.
 async fn wait_for_refresh(
     ticker: &mut tokio::time::Interval,
     stop: &StopToken,
@@ -243,6 +268,7 @@ async fn wait_for_refresh(
     }
 }
 
+/// Periodically queries live Onion TCP exits and updates gateway availability state.
 async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), GatewayError> {
     let mut ticker = tokio::time::interval(refresh.interval);
     loop {
@@ -277,6 +303,7 @@ async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), Gatewa
     }
 }
 
+/// Combines data-plane, status-updater, and teardown results without hiding any failure.
 fn combine_gateway_results(
     runtime: Result<(), GatewayError>,
     updater: Result<(), GatewayError>,

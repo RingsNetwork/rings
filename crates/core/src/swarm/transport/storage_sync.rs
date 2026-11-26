@@ -26,15 +26,23 @@ use crate::message::Principal;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
 
+/// Maximum number of pending storage-sync acknowledgment capabilities retained per transport.
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
 
+/// Map of pending outbound storage-sync ack capabilities keyed by transaction id.
 pub(super) type StorageSyncAckMap = BTreeMap<uuid::Uuid, StorageSyncAckCapability>;
 
+/// Send-time proof authorizing cleanup when a matching storage-sync report returns.
 pub(super) struct StorageSyncAckCapability {
+    /// Wall-clock timestamp in milliseconds when this capability was recorded.
     recorded_at_ms: i64,
+    /// Purpose of the outbound storage-sync transfer.
     purpose: StorageSyncPurpose,
+    /// Destination mode targeted by the outbound storage-sync transfer.
     destination: StorageSyncDestination,
+    /// Peer DID expected to sign and return the storage-sync report.
     expected_receiver: Did,
+    /// Entry acknowledgments that the report is authorized to confirm.
     expected_acks: Vec<SyncedEntryAck>,
 }
 
@@ -54,22 +62,28 @@ enum StorageSyncSend<'s, 't, D> {
 /// data-plane admission that maintenance must recompute and retry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StorageSyncOutcome {
+    /// All entries belonged to this node and were persisted locally.
     PersistedLocally,
+    /// Entries were submitted to a remote peer under the returned transaction id.
     Sent(uuid::Uuid),
+    /// Data-plane admission was cancelled; maintenance must recompute and retry.
     Deferred,
 }
 
 impl StorageSyncOutcome {
+    /// Return whether the sync payload was submitted to a remote peer.
     #[cfg(test)]
     pub(crate) const fn is_sent(self) -> bool {
         matches!(self, Self::Sent(_))
     }
 
+    /// Return whether the sync send was deferred due to cancelled data-plane admission.
     pub(crate) const fn is_deferred(self) -> bool {
         matches!(self, Self::Deferred)
     }
 }
 
+/// Determine the peer DID authorized to acknowledge a storage sync for `destination`.
 // Invariant: physical-owner sync proves the final owner identity. Placement-key
 // sync proves only the next hop visible from the sender, so a farther receiver
 // cannot use its report to delete local storage.
@@ -80,6 +94,7 @@ fn expected_storage_sync_receiver(destination: StorageSyncDestination, route_nex
     }
 }
 
+/// Build the expected [`SyncedEntryAck`] list with custody incarnations for `data`.
 fn expected_sync_acks(dht: &PeerRing, data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {
     data.iter()
         .map(|placed| {
@@ -98,6 +113,7 @@ fn expected_sync_acks(dht: &PeerRing, data: &[PlacedEntry]) -> Result<Vec<Synced
         .collect()
 }
 
+/// Verify that every reported ack matches a distinct entry in `expected_acks`.
 fn validate_report_acks(
     expected_acks: &[SyncedEntryAck],
     reported_acks: &[SyncedEntryAck],
@@ -118,6 +134,7 @@ fn validate_report_acks(
     Ok(matched)
 }
 
+/// Return whether `destination` authorizes persisting an entry placed at `placement`.
 fn storage_sync_destination_accepts_placement(
     destination: StorageSyncDestination,
     placement: Did,
@@ -128,16 +145,23 @@ fn storage_sync_destination_accepts_placement(
     }
 }
 
+/// Current execution phase of a [`StorageSyncBatch`].
 enum StorageSyncBatchPhase {
+    /// Validating inbound entries before any local persistence occurs.
     Validate,
+    /// Persisting validated entries into local storage one by one.
     Persist,
 }
 
+/// Progress result returned by a single step of [`StorageSyncBatch`].
 pub(crate) enum StorageSyncBatchStep {
+    /// More validation or persistence steps remain in this batch.
     Pending,
+    /// All accepted entries were persisted; carries the acknowledgments to report back.
     Complete(Vec<SyncedEntryAck>),
 }
 
+/// Incremental two-phase validator and persister for an inbound [`SyncEntriesWithSuccessor`] batch.
 pub(crate) struct StorageSyncBatch<'data> {
     /// Admission time shared by validation and persistence, so a value admitted in the
     /// validate phase cannot expire between phases and fail the batch half-written.
@@ -147,17 +171,24 @@ pub(crate) struct StorageSyncBatch<'data> {
     sender: Did,
     /// The principal that delivered the batch, charged with the removes it raises (#907).
     introducer: Principal,
+    /// Purpose carried by the inbound sync message.
     purpose: StorageSyncPurpose,
+    /// Destination filter carried by the inbound sync message.
     destination: StorageSyncDestination,
+    /// Inbound placed entries to validate and persist.
     data: &'data [PlacedEntry],
+    /// Index of the next entry in `data` to validate.
     validate_index: usize,
     /// The placement key and admitted value of every entry the batch persists and acknowledges.
     accepted: Vec<(Did, AdmittedEntry)>,
+    /// Index of the next entry in `accepted` to persist.
     persist_index: usize,
+    /// Active phase of the batch state machine.
     phase: StorageSyncBatchPhase,
 }
 
 impl<'data> StorageSyncBatch<'data> {
+    /// Create a new batch processor starting in the validation phase.
     pub(crate) fn new(
         msg: &'data SyncEntriesWithSuccessor,
         sender: Did,
@@ -178,6 +209,7 @@ impl<'data> StorageSyncBatch<'data> {
         }
     }
 
+    /// Drive the batch to completion, yielding between entries when per-entry yielding is enabled.
     async fn run(mut self, transport: &SwarmTransport) -> Result<Vec<SyncedEntryAck>> {
         let mut persistence_steps_without_yield = 0usize;
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -238,6 +270,7 @@ impl<'data> StorageSyncBatch<'data> {
         }
     }
 
+    /// Advance the batch by one validation or persistence step.
     pub(crate) async fn step(
         &mut self,
         transport: &SwarmTransport,
@@ -251,6 +284,7 @@ impl<'data> StorageSyncBatch<'data> {
         }
     }
 
+    /// Validate the next inbound entry, transitioning to `Persist` once all entries are checked.
     fn validate_one(&mut self, transport: &SwarmTransport) -> Result<Option<StorageSyncBatchStep>> {
         let Some(placed) = self.data.get(self.validate_index) else {
             self.phase = StorageSyncBatchPhase::Persist;
@@ -319,6 +353,7 @@ impl<'data> StorageSyncBatch<'data> {
         transport.dht.relocates_relay_from(self.sender)
     }
 
+    /// Persist the next accepted entry into local storage, or complete the batch if none remain.
     async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
         let Some((key, admitted)) = self.accepted.get(self.persist_index) else {
             return Ok(self.complete());
@@ -361,6 +396,7 @@ impl<'data> StorageSyncBatch<'data> {
         }
     }
 
+    /// Consume the accepted entries and produce the final completion step with their acks.
     fn complete(&mut self) -> StorageSyncBatchStep {
         StorageSyncBatchStep::Complete(
             mem::take(&mut self.accepted)
@@ -371,6 +407,7 @@ impl<'data> StorageSyncBatch<'data> {
     }
 }
 
+/// Return whether the batch runner should yield to the executor between entries.
 fn per_entry_yield_enabled() -> bool {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     {
@@ -395,6 +432,7 @@ fn test_per_entry_yield_ablation_reaches_real_storage_batch_policy() {
     assert!(!per_entry_yield_enabled());
 }
 
+/// Return whether this node is authorized and responsible for persisting `placed`.
 fn should_persist_synced_entry(
     transport: &SwarmTransport,
     destination: StorageSyncDestination,
@@ -426,6 +464,7 @@ fn should_persist_synced_entry(
     }
 }
 
+/// Evict the oldest pending sync ack capabilities until `pending` has room for a new entry.
 // Post: pending.len() < STORAGE_SYNC_ACK_CAPACITY.
 // Preservation: evicting an old pending capability before inserting a new one
 // can only make that old report fail validation; it cannot make an unproven
@@ -509,6 +548,7 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Discard any pending storage-sync ack capability recorded under `tx_id`.
     fn remove_pending_storage_sync_ack(&self, tx_id: uuid::Uuid) {
         if let Ok(mut pending) = self.pending_storage_sync_acks.lock() {
             pending.remove(&tx_id);

@@ -84,8 +84,11 @@ pub(crate) fn validate_seed_peers(
 /// the entry enters.
 #[derive(Eq, PartialEq)]
 pub(crate) struct ValidatedSeedPeer {
+    /// Expected DID of the seed peer.
     did: Did,
+    /// Validated public HTTP(S) RPC endpoint of the seed peer.
     endpoint: RemoteRpcEndpoint,
+    /// Optional bearer token for authenticating handshake RPC calls to this seed peer.
     api_token: Option<String>,
 }
 

@@ -38,8 +38,11 @@ use crate::util::expand_home;
 /// exposed to browsers by the CORS policy so a client reads it before joining.
 pub(crate) const NODE_VERSION_HEADER: HeaderName = HeaderName::from_static("x-node-version");
 
+/// Number of random bytes generated for a new API bearer token.
 const API_TOKEN_BYTES: usize = 32;
+/// Minimum accepted character length for a configured API bearer token.
 const MIN_API_TOKEN_LEN: usize = 32;
+/// Default filename for the API token stored beside the node configuration file.
 const DEFAULT_API_TOKEN_FILE: &str = "api-token";
 
 /// Errors raised while configuring API authentication or managing its token file.
@@ -75,7 +78,9 @@ pub enum ApiSecurityError {
 
 /// An API authentication token loaded from its owner-only file.
 pub struct LoadedApiToken {
+    /// Filesystem path from which the token was loaded or created.
     path: PathBuf,
+    /// Validated bearer token secret string.
     secret: String,
 }
 
@@ -130,8 +135,11 @@ impl ApiListener {
 
 /// Immutable authentication and browser-origin policy shared by both listeners of one node.
 pub struct ApiSecurity {
+    /// Expected bearer token secret compared in constant time.
     token: Box<str>,
+    /// Exact HTTP(S) origins permitted on the internal operator listener.
     allowed_origins: Vec<HeaderValue>,
+    /// Whether the external listener may bind to non-loopback addresses.
     allow_remote_external_api: bool,
 }
 
@@ -235,6 +243,7 @@ pub fn load_api_token_file(path: impl AsRef<Path>) -> Result<LoadedApiToken, Api
     read_api_token(path)
 }
 
+/// Resolves the API token file path relative to `config_path`, expanding `~` prefixes.
 fn resolve_api_token_path(
     config_path: impl AsRef<Path>,
     configured_path: Option<&str>,
@@ -257,6 +266,7 @@ fn resolve_api_token_path(
     }
 }
 
+/// Atomically creates a new owner-only API token file populated with random URL-safe base64.
 fn create_api_token(path: &Path) -> std::io::Result<String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -275,6 +285,7 @@ fn create_api_token(path: &Path) -> std::io::Result<String> {
     Ok(token)
 }
 
+/// Verifies file permissions, reads, trims, and validates an API token from `path`.
 fn read_api_token(path: PathBuf) -> Result<LoadedApiToken, ApiSecurityError> {
     ensure_private_permissions(&path)?;
     let secret = fs::read_to_string(&path)
@@ -288,6 +299,7 @@ fn read_api_token(path: PathBuf) -> Result<LoadedApiToken, ApiSecurityError> {
     Ok(LoadedApiToken { path, secret })
 }
 
+/// Verifies that `path` has no group or other permission bits set on Unix.
 #[cfg(unix)]
 fn ensure_private_permissions(path: &Path) -> Result<(), ApiSecurityError> {
     let metadata = fs::metadata(path).map_err(|source| ApiSecurityError::TokenFileIo {
@@ -303,11 +315,13 @@ fn ensure_private_permissions(path: &Path) -> Result<(), ApiSecurityError> {
     }
 }
 
+/// No-op permission check on non-Unix platforms.
 #[cfg(not(unix))]
 fn ensure_private_permissions(_path: &Path) -> Result<(), ApiSecurityError> {
     Ok(())
 }
 
+/// Checks that `token` meets the minimum length and contains no whitespace.
 fn validate_token(token: &str) -> Result<(), ApiSecurityError> {
     if token.len() < MIN_API_TOKEN_LEN || token.chars().any(char::is_whitespace) {
         Err(ApiSecurityError::InvalidToken)
@@ -316,6 +330,7 @@ fn validate_token(token: &str) -> Result<(), ApiSecurityError> {
     }
 }
 
+/// Parses and validates an exact HTTP(S) CORS origin header value.
 fn parse_allowed_origin(origin: &str) -> Result<HeaderValue, ApiSecurityError> {
     let parsed = reqwest::Url::parse(origin)
         .map_err(|_| ApiSecurityError::InvalidAllowedOrigin(origin.to_string()))?;

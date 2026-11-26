@@ -19,6 +19,7 @@ use crate::types::GatewayResponse;
 use crate::url::GatewayPrefix;
 use crate::url::TargetUrl;
 
+/// Default maximum request and response body size accepted by the gateway (8 MiB).
 const MAX_GATEWAY_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum response body a gateway transport may retain for one request.
@@ -76,14 +77,21 @@ pub trait GatewayTransport: GatewayTransportMaybeSend {
 /// headers are committed. Network I/O and response rewriting run outside that lock, so one slow
 /// upstream request cannot block unrelated page resources.
 pub struct ConcurrentWebviewGateway<T> {
+    /// Immutable rewriting and header normalization policy shared across requests.
     policy: GatewayResponsePolicy,
+    /// Underlying transport used to issue normalized upstream requests.
     transport: T,
+    /// Partitioned virtual cookie jar synchronized across concurrent requests.
     cookies: Mutex<CookieJar>,
 }
 
+/// Shared request/response normalization, rewriting, and bootstrap configuration.
 struct GatewayResponsePolicy {
+    /// Gateway route prefix used for URL rewriting.
     prefix: GatewayPrefix,
+    /// Request/response header normalization policy.
     header_policy: HeaderPolicy,
+    /// Optional runtime bootstrap script injected into HTML/XHTML documents.
     bootstrap_script: Option<BootstrapScript>,
 }
 
@@ -94,13 +102,18 @@ struct GatewayResponsePolicy {
 /// those points is independent of jar ownership and is therefore shared by both gateway
 /// adapters.
 struct GatewayRequestSession {
+    /// Privacy-normalized request retained for CORS validation and cookie scoping.
     cors_request: GatewayRequest,
+    /// Pending upstream request consumed once when sent.
     request: Option<GatewayRequest>,
+    /// Optional CORS preflight request sent before the main request.
     preflight: Option<GatewayRequest>,
+    /// Whether upstream `Set-Cookie` headers should be committed to the jar.
     stores_cookies: bool,
 }
 
 impl GatewayRequestSession {
+    /// Validate and prepare a request session while holding read access to `cookies`.
     fn prepare(
         policy: &GatewayResponsePolicy,
         cookies: &CookieJar,
@@ -124,6 +137,7 @@ impl GatewayRequestSession {
         })
     }
 
+    /// Execute any required CORS preflight and forward the main request through `transport`.
     async fn send<T>(
         &mut self,
         policy: &GatewayResponsePolicy,
@@ -152,6 +166,7 @@ impl GatewayRequestSession {
         Ok(response)
     }
 
+    /// Persist upstream `Set-Cookie` headers into `cookies` when the request permits cookies.
     fn commit_response_cookies(
         &self,
         policy: &GatewayResponsePolicy,
@@ -165,6 +180,7 @@ impl GatewayRequestSession {
         Ok(())
     }
 
+    /// Normalize headers, rewrite active document bodies, and recheck the post-rewrite body limit.
     fn finish(
         &self,
         policy: &GatewayResponsePolicy,
@@ -178,12 +194,16 @@ impl GatewayRequestSession {
     }
 }
 
+/// Strategy for supplying the injected browser runtime bootstrap script.
 enum BootstrapScript {
+    /// Fixed script string injected into every rewritten HTML/XHTML document.
     Static(String),
+    /// Callback computing a request-specific bootstrap script.
     PerRequest(fn(&GatewayRequest) -> String),
 }
 
 impl GatewayResponsePolicy {
+    /// Build a default response policy for `prefix` without a bootstrap script.
     fn new(prefix: GatewayPrefix) -> Self {
         Self {
             header_policy: HeaderPolicy::new(prefix.clone()),
@@ -192,6 +212,7 @@ impl GatewayResponsePolicy {
         }
     }
 
+    /// Normalize request headers and attach matching virtual cookies at timestamp `now`.
     fn prepare_request(
         &self,
         cookies: &CookieJar,
@@ -212,6 +233,7 @@ impl GatewayResponsePolicy {
         Ok(request)
     }
 
+    /// Store every `Set-Cookie` header from `response` into `cookies`.
     fn store_response_cookies(
         &self,
         cookies: &mut CookieJar,
@@ -229,6 +251,7 @@ impl GatewayResponsePolicy {
         Ok(())
     }
 
+    /// Normalize response headers, rewrite the body when required, and filter CORS-exposed headers.
     fn finish_response(
         &self,
         request: &GatewayRequest,
@@ -241,6 +264,7 @@ impl GatewayResponsePolicy {
         Ok(cors::filter_exposed_response_headers(request, response))
     }
 
+    /// Rewrite HTML, XHTML, SVG, or CSS response bodies and reject unsafe navigation media types.
     fn rewrite_body(
         &self,
         request: &GatewayRequest,
@@ -292,6 +316,7 @@ impl GatewayResponsePolicy {
         Ok(rewritten.into_bytes())
     }
 
+    /// Resolve the configured bootstrap script for `request`, if any.
     fn bootstrap_for(&self, request: &GatewayRequest) -> Option<String> {
         match &self.bootstrap_script {
             Some(BootstrapScript::Static(script)) => Some(script.clone()),
@@ -301,14 +326,20 @@ impl GatewayResponsePolicy {
     }
 }
 
+/// Active document format selected for response-body rewriting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RewriteKind {
+    /// Standard HTML document.
     Html,
+    /// XHTML document served as `application/xhtml+xml`.
     Xhtml,
+    /// SVG document served as `image/svg+xml`.
     Svg,
+    /// CSS stylesheet served as `text/css`.
     Css,
 }
 
+/// Verify that `response.body` does not exceed `body_limit`.
 fn validate_response_body_size(
     response: &GatewayResponse,
     body_limit: GatewayResponseBodyLimit,
@@ -323,6 +354,7 @@ fn validate_response_body_size(
     Ok(())
 }
 
+/// Verify that `request.body` does not exceed `MAX_GATEWAY_BODY_BYTES`.
 fn validate_request_body_size(request: &GatewayRequest) -> Result<()> {
     if request.body.len() > MAX_GATEWAY_BODY_BYTES {
         return Err(crate::error::TransportFailure::RequestBodyTooLarge {
@@ -334,6 +366,7 @@ fn validate_request_body_size(request: &GatewayRequest) -> Result<()> {
     Ok(())
 }
 
+/// Extract the trimmed, lowercased MIME essence from a `Content-Type` header value.
 fn normalize_media_type(value: &str) -> String {
     value
         .split(';')
@@ -343,6 +376,7 @@ fn normalize_media_type(value: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Map a normalized MIME type to its corresponding rewriter mode, if active.
 fn rewrite_kind_for_media_type(media_type: &str) -> Option<RewriteKind> {
     match media_type {
         "text/html" => Some(RewriteKind::Html),
@@ -366,6 +400,7 @@ fn rewrite_kind_for_response(content_type: Option<&str>, body: &[u8]) -> Option<
     }
 }
 
+/// Return whether `media_type` is an inert non-active format safe for navigation passthrough.
 fn is_inert_navigation_media_type(media_type: &str) -> bool {
     media_type == "text/plain"
         || media_type == "application/json"
@@ -388,6 +423,7 @@ fn is_inert_navigation_media_type(media_type: &str) -> bool {
         )
 }
 
+/// Sniff the leading bytes of an untyped response body for markup that requires HTML rewriting.
 fn sniff_active_document(body: &[u8]) -> Option<RewriteKind> {
     const SNIFF_PREFIX_BYTES: usize = 4096;
     let prefix_len = body.len().min(SNIFF_PREFIX_BYTES);
@@ -458,6 +494,7 @@ where T: GatewayTransport
         session.finish(&self.policy, response)
     }
 
+    /// Lock the shared virtual cookie jar, mapping lock poisoning to a typed error.
     fn lock_cookies(&self) -> Result<std::sync::MutexGuard<'_, CookieJar>> {
         self.cookies
             .lock()
@@ -465,6 +502,7 @@ where T: GatewayTransport
     }
 }
 
+/// Read the current wall-clock time as Unix-epoch milliseconds for cookie expiration checks.
 fn current_time_millis() -> Result<i64> {
     #[cfg(all(target_family = "wasm", feature = "browser"))]
     {
@@ -482,6 +520,7 @@ fn current_time_millis() -> Result<i64> {
     }
 }
 
+/// Convert a native `SystemTime` into saturating Unix-epoch milliseconds.
 #[cfg(not(target_family = "wasm"))]
 fn system_time_millis(time: SystemTime) -> i64 {
     let Ok(duration) = time.duration_since(UNIX_EPOCH) else {

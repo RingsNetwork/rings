@@ -15,6 +15,9 @@
 //! Neither needs a particular runtime: timers come from [`rings_runtime::sleep`], so the same
 //! code runs on tokio and on the browser's event loop.
 
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
+
 pub mod activity;
 #[cfg(feature = "swarm-observer")]
 pub mod observer;

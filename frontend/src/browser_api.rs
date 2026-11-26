@@ -8,6 +8,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
+/// Read a persisted setting value from `window.localStorage`.
 pub(crate) fn load_setting(key: &str) -> Option<String> {
     let storage = local_storage().ok()?;
     let get_item = js_method(&storage, "getItem").ok()?;
@@ -17,6 +18,7 @@ pub(crate) fn load_setting(key: &str) -> Option<String> {
         .and_then(|value| value.as_string())
 }
 
+/// Persist a setting value to `window.localStorage`, ignoring storage failures.
 pub(crate) fn save_setting(key: &str, value: &str) {
     let Some(storage) = local_storage().ok() else {
         return;
@@ -27,6 +29,7 @@ pub(crate) fn save_setting(key: &str, value: &str) {
     let _stored = set_item.call2(&storage, &JsValue::from_str(key), &JsValue::from_str(value));
 }
 
+/// Retrieve the global `localStorage` object if available.
 fn local_storage() -> Result<JsValue, String> {
     let storage = Reflect::get(&js_sys::global(), &JsValue::from_str("localStorage"))
         .map_err(js_error_label)?;
@@ -37,6 +40,7 @@ fn local_storage() -> Result<JsValue, String> {
     }
 }
 
+/// Copy `value` to the browser clipboard via `navigator.clipboard.writeText`.
 pub(crate) async fn copy_text_to_clipboard(value: String) -> Result<(), String> {
     let navigator =
         Reflect::get(&js_sys::global(), &JsValue::from_str("navigator")).map_err(js_error_label)?;
@@ -59,13 +63,18 @@ pub(crate) async fn copy_text_to_clipboard(value: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Outcome of attempting to open a browser debug or diagnostics URL.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DebugUrlOpenResult {
+    /// Opened directly in a new tab or window.
     Opened,
+    /// Browser-internal URL could not be opened directly, so it was copied to the clipboard.
     CopiedInternalUrl,
+    /// Browser-internal URL could not be opened or copied and must be pasted manually.
     ManualInternalUrl,
 }
 
+/// Open a browser debug URL via extension tabs, clipboard fallback for internal URLs, or `window.open`.
 pub(crate) fn open_debug_url(url: &str) -> Result<DebugUrlOpenResult, String> {
     if open_debug_url_with_extension_tabs("browser", url).is_ok()
         || open_debug_url_with_extension_tabs("chrome", url).is_ok()
@@ -126,6 +135,7 @@ pub(crate) fn open_webview_popup() -> Result<(), String> {
     Ok(())
 }
 
+/// Attempt to open `url` using the extension `<namespace>.tabs.create` API.
 fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Result<(), String> {
     let extension_api =
         Reflect::get(&js_sys::global(), &JsValue::from_str(namespace)).map_err(js_error_label)?;
@@ -150,6 +160,7 @@ fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Result<(), 
     Ok(())
 }
 
+/// Open `url` in a new browser tab via `window.open`.
 fn open_debug_url_with_window(url: &str) -> Result<(), String> {
     let window =
         Reflect::get(&js_sys::global(), &JsValue::from_str("window")).map_err(js_error_label)?;
@@ -173,10 +184,12 @@ fn open_debug_url_with_window(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Return `true` when `url` uses a browser-internal scheme (`chrome://` or `about:`).
 fn is_browser_internal_url(url: &str) -> bool {
     url.starts_with("chrome://") || url.starts_with("about:")
 }
 
+/// Fire-and-forget clipboard write for synchronous call sites.
 fn copy_text_to_clipboard_start(value: &str) -> Result<(), String> {
     let navigator =
         Reflect::get(&js_sys::global(), &JsValue::from_str("navigator")).map_err(js_error_label)?;
@@ -193,6 +206,7 @@ fn copy_text_to_clipboard_start(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Attach a no-op `.catch(...)` handler if `value` is a JS `Promise` to prevent unhandled rejections.
 fn observe_promise_rejection(value: JsValue) {
     let Ok(promise) = value.dyn_into::<Promise>() else {
         return;
@@ -206,16 +220,19 @@ fn observe_promise_rejection(value: JsValue) {
     let _ = catch.call1(&promise, &handler);
 }
 
+/// Await a JS `Promise` value and convert any rejection into a readable string.
 pub(crate) async fn await_js(value: JsValue) -> Result<JsValue, String> {
     JsFuture::from(Promise::from(value))
         .await
         .map_err(js_error_label)
 }
 
+/// Read a property from the JS global object.
 pub(crate) fn js_global_prop(name: &str) -> Result<JsValue, String> {
     Reflect::get(&js_sys::global(), &JsValue::from_str(name)).map_err(js_error_label)
 }
 
+/// Return `chrome.runtime.onMessage` when running inside a Chrome extension context.
 pub(crate) fn chrome_runtime_on_message() -> Option<JsValue> {
     let runtime = chrome_runtime()?;
     let on_message = js_prop(&runtime, "onMessage").ok()?;
@@ -226,6 +243,7 @@ pub(crate) fn chrome_runtime_on_message() -> Option<JsValue> {
     }
 }
 
+/// Return `chrome.runtime` if available on the global object.
 fn chrome_runtime() -> Option<JsValue> {
     let chrome = Reflect::get(&js_sys::global(), &JsValue::from_str("chrome")).ok()?;
     let runtime = js_prop(&chrome, "runtime").ok()?;
@@ -236,6 +254,7 @@ fn chrome_runtime() -> Option<JsValue> {
     }
 }
 
+/// Return `true` if `object[name]` exists and is a callable JS `Function`.
 pub(crate) fn is_callable(object: &JsValue, name: &str) -> bool {
     js_prop(object, name)
         .ok()
@@ -243,24 +262,28 @@ pub(crate) fn is_callable(object: &JsValue, name: &str) -> bool {
         .is_some()
 }
 
+/// Look up a callable JS method `name` on `object`.
 pub(crate) fn js_method(object: &JsValue, name: &str) -> Result<Function, String> {
     js_prop(object, name)?
         .dyn_into::<Function>()
         .map_err(|_| format!("{name} is not callable"))
 }
 
+/// Invoke a zero-argument JS method `name` on `object`.
 pub(crate) fn js_call0(object: &JsValue, name: &str) -> Result<JsValue, String> {
     js_method(object, name)?
         .call0(object)
         .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
 }
 
+/// Invoke a one-argument JS method `name` on `object`.
 pub(crate) fn js_call1(object: &JsValue, name: &str, a: &JsValue) -> Result<JsValue, String> {
     js_method(object, name)?
         .call1(object, a)
         .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
 }
 
+/// Invoke a two-argument JS method `name` on `object`.
 pub(crate) fn js_call2(
     object: &JsValue,
     name: &str,
@@ -272,6 +295,7 @@ pub(crate) fn js_call2(
         .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
 }
 
+/// Invoke a three-argument JS method `name` on `object`.
 pub(crate) fn js_call3(
     object: &JsValue,
     name: &str,
@@ -284,28 +308,33 @@ pub(crate) fn js_call3(
         .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
 }
 
+/// Read property `name` from a JS object via `Reflect.get`.
 pub(crate) fn js_prop(object: &JsValue, name: &str) -> Result<JsValue, String> {
     Reflect::get(object, &JsValue::from_str(name)).map_err(js_error_label)
 }
 
+/// Read a required string property `name` from a JS object.
 pub(crate) fn js_string_field(object: &JsValue, name: &str) -> Result<String, String> {
     js_prop(object, name)?
         .as_string()
         .ok_or_else(|| format!("missing string field {name}"))
 }
 
+/// Read a required boolean property `name` from a JS object.
 pub(crate) fn js_bool_field(object: &JsValue, name: &str) -> Result<bool, String> {
     js_prop(object, name)?
         .as_bool()
         .ok_or_else(|| format!("missing bool field {name}"))
 }
 
+/// Set property `name` on a JS `Object` via `Reflect.set`.
 pub(crate) fn js_set(object: &Object, name: &str, value: &JsValue) -> Result<(), String> {
     Reflect::set(object, &JsValue::from_str(name), value)
         .map(|_| ())
         .map_err(js_error_label)
 }
 
+/// Format an arbitrary JS error value into a concise single-line label.
 pub(crate) fn js_error_label(error: JsValue) -> String {
     if let Some(message) = js_error_message(&error) {
         return message;
@@ -316,6 +345,7 @@ pub(crate) fn js_error_label(error: JsValue) -> String {
     compact_js_error_text(&format!("{error:?}"))
 }
 
+/// Extract a formatted `name: message` string from a JS `Error`-like object.
 fn js_error_message(error: &JsValue) -> Option<String> {
     let message = string_property(error, "message")?;
     let name = string_property(error, "name");
@@ -327,6 +357,7 @@ fn js_error_message(error: &JsValue) -> Option<String> {
     }
 }
 
+/// Read a trimmed, non-empty string property from a JS value.
 fn string_property(object: &JsValue, name: &str) -> Option<String> {
     Reflect::get(object, &JsValue::from_str(name))
         .ok()
@@ -335,6 +366,7 @@ fn string_property(object: &JsValue, name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// Strip `JsValue(...)` wrapping and stack traces from a raw error string.
 fn compact_js_error_text(raw: &str) -> String {
     let mut text = raw.trim();
     if let Some(inner) = text

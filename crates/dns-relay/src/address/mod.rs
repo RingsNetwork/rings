@@ -75,7 +75,9 @@ impl Drop for AddressKey {
 
 /// The address map `addr` of one relay: its prefix and its key.
 pub struct AddressPlan {
+    /// IPv6 network prefix from which owner addresses are derived.
     prefix: Ipv6Net,
+    /// Secret HMAC key used to derive host bits within [`Self::prefix`].
     key: AddressKey,
 }
 
@@ -143,11 +145,17 @@ pub enum BookChange<O> {
 /// flushed to the journal before [`AddressBook::commit`] mutates the in-memory book.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PlannedBind<O> {
+    /// IPv6 address being bound.
     address: Ipv6Addr,
+    /// Owner the address is bound to.
     owner: O,
+    /// Timestamp when the relay answered with this address, in milliseconds since the Unix epoch.
     answered_at_ms: u64,
+    /// Answer timestamp recorded in the persisted journal for this binding.
     persisted_at_ms: u64,
+    /// Previously bound addresses evicted or expired by this transition.
     forgotten: Vec<Ipv6Addr>,
+    /// Journal mutations that must be persisted before committing this transition.
     changes: Vec<BookChange<O>>,
 }
 
@@ -174,8 +182,11 @@ struct Binding<O> {
 /// doc), with its retention and capacity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressBook<O> {
+    /// Active address-to-owner bindings keyed by IPv6 address.
     bindings: BTreeMap<Ipv6Addr, Binding<O>>,
+    /// Duration a binding is retained after its last answer, in milliseconds.
     retention_ms: u64,
+    /// Maximum number of bindings retained in the book.
     capacity: usize,
 }
 

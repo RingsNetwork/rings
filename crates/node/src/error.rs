@@ -406,6 +406,7 @@ impl Error {
         matches!(self, Self::SendMessage(error) if error.is_refused_before_acceptance())
     }
 
+    /// Returns the raw `repr(u32)` discriminant of this error variant.
     fn discriminant(&self) -> u32 {
         // SAFETY: Because `Self` is marked `repr(u32)`, its layout is a `repr(C)` `union`
         // between `repr(C)` structs, each of which has the `u32` discriminant as its first

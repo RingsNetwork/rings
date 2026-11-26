@@ -13,6 +13,7 @@ use super::InboundLane;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Command sent to the inbound actor to reserve, deliver, or cancel a sequenced event.
 pub(super) enum InboundCommand {
     /// The sequence of an event of `lane` ordered in `category` (`swarm::callback::inbound`'s
     /// per-category barrier), reserved before the event is ready.
@@ -22,20 +23,27 @@ pub(super) enum InboundCommand {
         lane: InboundLane,
         category: InboundLane,
     },
+    /// A decoded event ready for ordered dispatch in `category`.
     Ready {
+        /// Ordering category lane for the ready event.
         category: InboundLane,
+        /// Ready inbound event payload.
         event: Box<InboundEvent>,
     },
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     Cancel { sequence: u64, lane: InboundLane },
 }
 
+/// Sequenced sender handle for publishing [`InboundCommand`]s to the inbound actor.
 pub(super) struct InboundSender {
+    /// Underlying unbounded channel to the inbound actor.
     sender: mpsc::UnboundedSender<InboundCommand>,
+    /// Next monotonic sequence number to assign.
     next_sequence: u64,
 }
 
 impl InboundSender {
+    /// Construct a new [`InboundSender`] starting at sequence `0`.
     pub(super) fn new(sender: mpsc::UnboundedSender<InboundCommand>) -> Self {
         Self {
             sender,
@@ -43,6 +51,7 @@ impl InboundSender {
         }
     }
 
+    /// Assign the next sequence number and enqueue a ready event built by `build_event`.
     pub(super) fn submit_ready(
         &mut self,
         category: InboundLane,
@@ -90,6 +99,7 @@ impl InboundSender {
         })
     }
 
+    /// Return whether the inbound actor's receiving end has been closed.
     pub(super) fn is_closed(&self) -> bool {
         self.sender.is_closed()
     }

@@ -35,8 +35,11 @@ pub enum TcpFlowAdmission {
     Rejected(FlowRejectReason),
 }
 
+/// Per-flow TCP socket handle and liveness metadata tracked by `TcpStack`.
 struct TcpEndpoint {
+    /// Handle identifying the socket inside `TcpStack::sockets`.
     handle: SocketHandle,
+    /// Handshake/listen expiration deadline on the gateway clock, if still pending.
     pending_deadline: Option<Duration>,
     /// Gateway clock reading when the most recent client segment was consumed.
     last_client_segment: Duration,
@@ -99,11 +102,17 @@ impl TcpEndpointState {
 /// [`crate::FlowTable`] entry, and each packet passed to [`Self::ingest_segment`] or
 /// [`Self::reject_segment`] must have passed [`crate::classify_ipv4_packet`].
 pub struct TcpStack {
+    /// `smoltcp` virtual IPv4 interface handling packet framing and routing.
     interface: Interface,
+    /// In-memory packet queue bridging raw IP packets with `smoltcp`.
     device: PacketQueueDevice,
+    /// Active `smoltcp` TCP sockets owned by the stack.
     sockets: SocketSet<'static>,
+    /// Index mapping admitted `FlowId`s to their live `TcpEndpoint` metadata.
     endpoints: HashMap<FlowId, TcpEndpoint>,
+    /// Per-direction TCP socket buffer size in bytes.
     tcp_buffer_bytes: usize,
+    /// Idle timeout enforced on admitted TCP flows.
     flow_idle_timeout: Duration,
 }
 
@@ -404,6 +413,7 @@ impl TcpStack {
         Ok(true)
     }
 
+    /// Borrow the immutable `smoltcp` TCP socket associated with `flow`.
     fn socket(&self, flow: FlowId) -> Result<&tcp::Socket<'static>, TcpStackError> {
         let handle = self
             .endpoints
@@ -416,6 +426,7 @@ impl TcpStack {
         Ok(self.sockets.get::<tcp::Socket<'static>>(handle))
     }
 
+    /// Borrow the mutable `smoltcp` TCP socket associated with `flow`.
     fn socket_mut(&mut self, flow: FlowId) -> Result<&mut tcp::Socket<'static>, TcpStackError> {
         let handle = self
             .endpoints
@@ -426,6 +437,7 @@ impl TcpStack {
         Ok(self.sockets.get_mut::<tcp::Socket<'static>>(handle))
     }
 
+    /// Remove `flow`'s socket from `self.sockets` and its entry from `self.endpoints`.
     fn release_socket(&mut self, flow: FlowId) -> Result<(), TcpStackError> {
         let handle = self
             .endpoints
@@ -440,6 +452,7 @@ impl TcpStack {
     }
 }
 
+/// Convert a monotonic gateway `Duration` into a saturating `smoltcp::time::Instant`.
 fn timestamp(elapsed: Duration) -> Instant {
     let micros = elapsed.as_micros().min(i64::MAX as u128) as i64;
     Instant::from_micros(micros)

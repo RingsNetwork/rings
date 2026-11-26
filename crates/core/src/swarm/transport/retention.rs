@@ -85,6 +85,7 @@ struct RetentionEvidence {
 /// One admitted generation with the facts the eviction order ranks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RetentionCandidate {
+    /// Admitted peer generation being evaluated for eviction.
     attempt: PendingConnectionAttempt,
     /// `Dead(n, p)`.
     send_terminal: bool,
@@ -184,6 +185,7 @@ impl SwarmTransport {
             .await
     }
 
+    /// Retire the first evictable admitted connection, passing the computed eviction plan to `observe_plan`.
     async fn evict_unreferenced_connection_with(
         &self,
         now_ms: i64,

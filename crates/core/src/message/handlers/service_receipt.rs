@@ -31,23 +31,35 @@ use crate::message::ProvisionalServiceReceipt;
 use crate::message::ServiceReceiptError;
 use crate::message::Transaction;
 
+/// Classified handler effect for an inbound provisional probe transcript message.
 enum ProbeEffect<'payload> {
+    /// Reject a probe message that was relayed or addressed to another node.
     RejectNonDirect,
+    /// Answer a direct [`ProbeRequest`] with a signed [`ProbeOffer`].
     RespondToRequest {
+        /// Inbound payload carrying the probe request.
         ctx: &'payload MessagePayload,
+        /// Decoded probe request body.
         request: &'payload ProbeRequest,
     },
+    /// Verify a direct [`ProbeOffer`] and reply with a [`ProbeAcknowledgement`].
     RespondToOffer {
+        /// Inbound payload carrying the probe offer.
         ctx: &'payload MessagePayload,
+        /// Decoded probe offer body.
         offer: &'payload ProbeOffer,
     },
+    /// Verify and admit a direct [`ProbeAcknowledgement`] receipt.
     AdmitAcknowledgement {
+        /// Inbound payload carrying the probe acknowledgement.
         ctx: &'payload MessagePayload,
+        /// Decoded probe acknowledgement body.
         acknowledgement: &'payload ProbeAcknowledgement,
     },
 }
 
 impl<'payload> ProbeEffect<'payload> {
+    /// Require direct local delivery from the transaction origin, or return [`Self::RejectNonDirect`].
     fn direct_local_only(local: Did, ctx: &'payload MessagePayload, local_effect: Self) -> Self {
         if ctx.should_forward_from(local)
             || ctx.delegations().hop.delegator_did() != ctx.transaction.origin()
@@ -58,14 +70,17 @@ impl<'payload> ProbeEffect<'payload> {
         }
     }
 
+    /// Classify an inbound [`ProbeRequest`] for local node `local`.
     fn request(local: Did, ctx: &'payload MessagePayload, request: &'payload ProbeRequest) -> Self {
         Self::direct_local_only(local, ctx, Self::RespondToRequest { ctx, request })
     }
 
+    /// Classify an inbound [`ProbeOffer`] for local node `local`.
     fn offer(local: Did, ctx: &'payload MessagePayload, offer: &'payload ProbeOffer) -> Self {
         Self::direct_local_only(local, ctx, Self::RespondToOffer { ctx, offer })
     }
 
+    /// Classify an inbound [`ProbeAcknowledgement`] for local node `local`.
     fn acknowledgement(
         local: Did,
         ctx: &'payload MessagePayload,
@@ -78,17 +93,26 @@ impl<'payload> ProbeEffect<'payload> {
     }
 }
 
+/// Validated inputs prepared to construct a signed [`ProbeOffer`] response.
 struct ProbeOfferPlan {
+    /// Original signed probe request transaction.
     request: Transaction,
+    /// Local provider DID answering the probe.
     provider: Did,
+    /// Remote beneficiary DID that sent the probe request.
     beneficiary: Did,
+    /// Overlay network identifier for the claim.
     network_id: u32,
+    /// Accepted provisional wall-clock epoch from the request.
     epoch: ProvisionalEpoch,
+    /// Request nonce echoed into the completion and claim.
     nonce: [u8; 32],
+    /// Canonical digest bytes of the request transaction.
     request_digest: [u8; 32],
 }
 
 impl ProbeOfferPlan {
+    /// Sign the completion transaction and provider attestation to assemble a [`ProbeOffer`].
     fn build(
         self,
         completion_sequence: u64,
@@ -126,6 +150,7 @@ impl ProbeOfferPlan {
     }
 }
 
+/// Validate `request`'s provisional epoch at `observed_at_ms` and build a [`ProbeOfferPlan`].
 fn plan_probe_offer(
     ctx: &MessagePayload,
     request: &ProbeRequest,
@@ -154,6 +179,7 @@ fn plan_probe_offer(
     })
 }
 
+/// Sign the beneficiary attestation for `offer` and assemble a [`ProbeAcknowledgement`].
 fn build_probe_acknowledgement(
     offer: &ProbeOffer,
     signer: MessageSigner<impl Borrow<DelegateeKey>>,
@@ -168,6 +194,7 @@ fn build_probe_acknowledgement(
     Ok(ProbeAcknowledgement { receipt })
 }
 
+/// Verify that `acknowledgement`'s receipt names `provider` and `beneficiary` in their expected roles.
 fn validate_acknowledgement_roles(
     acknowledgement: &ProbeAcknowledgement,
     provider: Did,
@@ -182,16 +209,21 @@ fn validate_acknowledgement_roles(
     }
 }
 
+/// Effect interpreter executing classified [`ProbeEffect`] actions against a [`MessageHandler`].
 struct ProbeEffectInterpreter<'handler> {
+    /// Message handler providing transport, DHT, and signing capabilities.
     handler: &'handler MessageHandler,
+    /// Injected handler timestamp in milliseconds.
     now_ms: u128,
 }
 
 impl<'handler> ProbeEffectInterpreter<'handler> {
+    /// Create an interpreter for `handler` at timestamp `now_ms`.
     const fn new(handler: &'handler MessageHandler, now_ms: u128) -> Self {
         Self { handler, now_ms }
     }
 
+    /// Execute one classified [`ProbeEffect`].
     async fn run(&self, effect: ProbeEffect<'_>) -> Result<()> {
         match effect {
             ProbeEffect::RejectNonDirect => Err(Error::InvalidMessage(
@@ -208,6 +240,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
         }
     }
 
+    /// Answer an inbound [`ProbeRequest`] by reserving a completion sequence and sending a [`ProbeOffer`].
     async fn respond_to_request(&self, ctx: &MessagePayload, request: &ProbeRequest) -> Result<()> {
         let plan = plan_probe_offer(
             ctx,
@@ -239,6 +272,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .await
     }
 
+    /// Verify an inbound [`ProbeOffer`], match it against an outstanding liveness probe, and reply with an acknowledgement.
     async fn respond_to_offer(&self, ctx: &MessagePayload, offer: &ProbeOffer) -> Result<()> {
         let beneficiary = self.handler.dht.did;
         let provider = ctx.transaction.origin();
@@ -266,6 +300,7 @@ impl<'handler> ProbeEffectInterpreter<'handler> {
             .await
     }
 
+    /// Validate an inbound [`ProbeAcknowledgement`] and admit its provisional receipt into transport state.
     async fn admit_acknowledgement(
         &self,
         ctx: &MessagePayload,

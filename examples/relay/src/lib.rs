@@ -7,6 +7,8 @@
 //!
 //! These helpers are shared by the runnable examples (`tcp.rs`, `udp.rs`) and the
 //! integration test, so the demo and the test exercise exactly the same flow.
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 use std::error::Error;
 use std::net::SocketAddr;

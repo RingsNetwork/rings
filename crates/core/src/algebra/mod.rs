@@ -61,10 +61,15 @@
 //! Identities are functions rather than associated constants because several
 //! curve adapters obtain identity values through their native libraries.
 
+/// Field trait and law witnesses.
 mod field;
+/// Abelian group traits and law witnesses.
 mod group;
+/// Join-semilattice trait and law witnesses.
 mod lattice;
+/// Module action trait and law witnesses.
 mod module;
+/// Commutative ring traits and law witnesses.
 mod ring;
 
 #[cfg(test)]

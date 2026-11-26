@@ -1,4 +1,6 @@
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 //! Rings webview gateway primitives.
 //!
 //! This crate owns the reusable, UI-independent pieces required to serve remote

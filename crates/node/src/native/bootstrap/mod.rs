@@ -132,10 +132,15 @@ pub(crate) trait BootstrapPort: Send + Sync {
 
 /// The run-owned supervisor; see the module diagram.
 pub struct BootstrapSupervisor {
+    /// Managed bootstrap seed peers indexed by target DID.
     targets: BTreeMap<Did, Arc<ValidatedSeedPeer>>,
+    /// Effect port used to probe reachability and redial targets.
     port: Arc<dyn BootstrapPort>,
+    /// Shared admission and peer-loss evidence from the backend observer.
     evidence: Arc<ReachabilityEvidence>,
+    /// Per-target retry schedule and jittered backoff state.
     schedule: BootstrapSchedule,
+    /// Monotonic baseline instant for computing schedule timestamps.
     origin: Instant,
 }
 

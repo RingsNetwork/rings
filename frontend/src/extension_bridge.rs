@@ -23,28 +23,46 @@ use crate::onion;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 
+/// Global JS property name exposing the MV3 extension node bridge.
 const EXTENSION_NODE_BRIDGE: &str = "RingsExtensionNodeBridge";
+/// Maximum number of status polls while waiting for background node startup.
 const NODE_START_POLL_ATTEMPTS: usize = 240;
+/// Delay in milliseconds between background node startup status polls.
 const NODE_START_POLL_DELAY_MS: u64 = 750;
 
+/// User-configured runtime settings forwarded to the extension background node on start.
 pub(crate) struct ExtensionStartSettings {
+    /// Target Rings network identifier string.
     pub(crate) network_id: String,
+    /// Semicolon-separated ICE server URLs.
     pub(crate) ice_servers: String,
+    /// Stabilization interval in seconds as a decimal string.
     pub(crate) stabilize_interval: String,
+    /// IndexedDB storage instance name.
     pub(crate) storage_name: String,
+    /// Optional seed node HTTP URL to connect after startup.
     pub(crate) seed_url: String,
 }
 
+/// Snapshot of the offscreen background node state returned over the extension bridge.
 pub(crate) struct ExtensionNodeSnapshot {
+    /// Whether the background node is online and ready.
     pub(crate) online: bool,
+    /// Whether a background node startup is currently in progress.
     pub(crate) starting: bool,
+    /// Local node DID when online, or empty when offline.
     pub(crate) did: String,
+    /// Currently known connected peers.
     pub(crate) peers: Vec<PeerView>,
+    /// Active wallet account metadata when online.
     pub(crate) wallet_account: Option<WalletAccount>,
+    /// Human-readable status message from the background node.
     pub(crate) message: String,
+    /// Startup or runtime error message, if one occurred.
     pub(crate) error: Option<String>,
 }
 
+/// Apply an [`ExtensionNodeSnapshot`] to UI state handles if `token` is still current.
 pub(crate) fn apply_extension_snapshot(
     snapshot: ExtensionNodeSnapshot,
     did: &UseStateHandle<String>,
@@ -71,6 +89,7 @@ pub(crate) fn apply_extension_snapshot(
     true
 }
 
+/// Poll the extension bridge until the background node finishes starting, fails, or is superseded.
 pub(crate) async fn poll_extension_node_start(
     bridge: &JsValue,
     did: UseStateHandle<String>,
@@ -127,6 +146,7 @@ pub(crate) async fn poll_extension_node_start(
     Err(format!("node start timed out: {last_message}"))
 }
 
+/// Return the global `RingsExtensionNodeBridge` JS object when all required bridge methods exist.
 pub(crate) fn extension_node_bridge() -> Option<JsValue> {
     let bridge = Reflect::get(&js_sys::global(), &JsValue::from_str(EXTENSION_NODE_BRIDGE)).ok()?;
     if bridge.is_null()
@@ -145,6 +165,7 @@ pub(crate) fn extension_node_bridge() -> Option<JsValue> {
     Some(bridge)
 }
 
+/// Request the extension background node to start with the chosen wallet kind and settings.
 pub(crate) async fn extension_node_start(
     bridge: &JsValue,
     kind: WalletKind,
@@ -155,6 +176,7 @@ pub(crate) async fn extension_node_start(
     parse_extension_node_snapshot(&result, bridge)
 }
 
+/// Query the current status snapshot from the extension background node.
 pub(crate) async fn extension_node_status(
     bridge: &JsValue,
 ) -> Result<ExtensionNodeSnapshot, String> {
@@ -162,12 +184,14 @@ pub(crate) async fn extension_node_status(
     parse_extension_node_snapshot(&result, bridge)
 }
 
+/// Stop the extension background node and return its resulting status message.
 pub(crate) async fn extension_node_stop(bridge: &JsValue) -> Result<String, String> {
     let result = call_extension_bridge0(bridge, "stop").await?;
     let snapshot = parse_extension_node_snapshot(&result, bridge)?;
     Ok(snapshot.message)
 }
 
+/// Connect the extension background node to a remote seed HTTP endpoint.
 pub(crate) async fn extension_node_connect_http(
     bridge: &JsValue,
     endpoint: String,
@@ -177,6 +201,7 @@ pub(crate) async fn extension_node_connect_http(
     parse_extension_node_snapshot(&result, bridge)
 }
 
+/// Create a WebRTC SDP offer for `did` via the extension background node.
 pub(crate) async fn extension_node_create_offer(
     bridge: &JsValue,
     did: String,
@@ -185,6 +210,7 @@ pub(crate) async fn extension_node_create_offer(
     js_string_field(&result, "offer")
 }
 
+/// Answer an incoming WebRTC SDP offer via the extension background node.
 pub(crate) async fn extension_node_answer_offer(
     bridge: &JsValue,
     offer: String,
@@ -193,6 +219,7 @@ pub(crate) async fn extension_node_answer_offer(
     js_string_field(&result, "answer")
 }
 
+/// Accept a remote WebRTC SDP answer via the extension background node.
 pub(crate) async fn extension_node_accept_answer(
     bridge: &JsValue,
     answer: String,
@@ -202,6 +229,7 @@ pub(crate) async fn extension_node_accept_answer(
     parse_extension_node_snapshot(&result, bridge)
 }
 
+/// Resolve an onion proxy route through the extension background node.
 pub(crate) async fn extension_onion_proxy_route(
     bridge: &JsValue,
     request: onion::OnionProxyRouteRequest,
@@ -210,6 +238,7 @@ pub(crate) async fn extension_onion_proxy_route(
     onion::OnionProxyRoute::from_js(&result)
 }
 
+/// Execute an HTTP request over the onion proxy via the extension background node.
 pub(crate) async fn extension_onion_proxy_request(
     bridge: &JsValue,
     request: onion::OnionProxyHttpRequest,
@@ -219,6 +248,7 @@ pub(crate) async fn extension_onion_proxy_request(
 }
 
 impl ExtensionStartSettings {
+    /// Serialize these start settings and `kind` into a JS payload object for the bridge.
     fn to_js(&self, kind: WalletKind) -> Result<JsValue, String> {
         let object = Object::new();
         js_set(&object, "walletKind", &JsValue::from_str(kind.value()))?;
@@ -239,6 +269,7 @@ impl ExtensionStartSettings {
     }
 }
 
+/// Invoke a zero-argument async method on the JS extension bridge and await its result.
 async fn call_extension_bridge0(bridge: &JsValue, method: &str) -> Result<JsValue, String> {
     let value = js_method(bridge, method)?
         .call0(bridge)
@@ -246,6 +277,7 @@ async fn call_extension_bridge0(bridge: &JsValue, method: &str) -> Result<JsValu
     await_js(value).await
 }
 
+/// Invoke a single-argument async method on the JS extension bridge and await its result.
 async fn call_extension_bridge1(
     bridge: &JsValue,
     method: &str,
@@ -257,6 +289,7 @@ async fn call_extension_bridge1(
     await_js(value).await
 }
 
+/// Parse a JS bridge response object into an [`ExtensionNodeSnapshot`].
 fn parse_extension_node_snapshot(
     value: &JsValue,
     bridge: &JsValue,
@@ -304,6 +337,7 @@ fn parse_extension_node_snapshot(
     })
 }
 
+/// Parse the `peers` JS array field of a bridge snapshot into [`PeerView`] entries.
 fn parse_peer_views(value: &JsValue) -> Result<Vec<PeerView>, String> {
     let peers = js_prop(value, "peers").unwrap_or_else(|_| Array::new().into());
     if !Array::is_array(&peers) {

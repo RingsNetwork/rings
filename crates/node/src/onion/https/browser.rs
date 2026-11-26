@@ -1,3 +1,5 @@
+//! Browser `fetch`-based HTTPS exit transport implementation.
+
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -26,9 +28,12 @@ use crate::error::Result;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::target::validate_public_https_url;
 
+/// Default per-request timeout applied to browser HTTPS exit fetches.
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cancellation handle backed by a browser `AbortController`.
 struct BrowserFetchCancelTarget {
+    /// `AbortController` used to abort the underlying `fetch` call.
     controller: AbortController,
 }
 
@@ -49,7 +54,9 @@ impl FetchCancelTarget for BrowserFetchCancelTarget {
     }
 }
 
+/// In-flight browser `fetch` promise adapter for [`CancellableHttpsFetch`].
 struct BrowserHttpsFetch {
+    /// Unawaited JS `Promise` returned by global `fetch`.
     promise: Option<JsValue>,
 }
 
@@ -125,6 +132,7 @@ impl CancellableHttpsFetch for BrowserHttpsFetch {
     }
 }
 
+/// Execute `request` against `url` using browser `fetch`, enforcing `max_body_bytes` and byte accounting.
 pub(super) async fn execute_https_request(
     url: &str,
     target: &OnionProxyTarget,
@@ -161,6 +169,7 @@ pub(super) async fn execute_https_request(
     .await
 }
 
+/// Invoke `.cancel()` on a JS `ReadableStream` or reader if available.
 fn cancel_js_stream(stream: &JsValue) -> bool {
     let Ok(cancel) = Reflect::get(stream, JsValue::from_str("cancel").as_ref()) else {
         return false;
@@ -172,6 +181,7 @@ fn cancel_js_stream(stream: &JsValue) -> bool {
     true
 }
 
+/// Build the JS `RequestInit` dictionary for `request` bound to abort `signal`.
 fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     let init = Object::new();
     Reflect::set(
@@ -226,6 +236,7 @@ fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     Ok(init)
 }
 
+/// Collect all `(name, value)` header pairs from a JS `Response` object.
 fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     let headers =
         Reflect::get(response, JsValue::from_str("headers").as_ref()).map_err(js_error)?;
@@ -248,6 +259,7 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     Ok(collected)
 }
 
+/// Convert a JS exception value into [`Error::JsError`].
 fn js_error(error: JsValue) -> Error {
     Error::JsError(format!("{error:?}"))
 }

@@ -85,6 +85,7 @@ pub(crate) struct AdmittedConnection {
 }
 
 impl AdmittedConnection {
+    /// Wrap an active connection generation with its lifecycle boundary and registry handle.
     fn new(
         attempt: PendingConnectionAttempt,
         connection: SwarmConnection,
@@ -99,14 +100,17 @@ impl AdmittedConnection {
         }
     }
 
+    /// Return the connection attempt token bound to this handle.
     pub(crate) const fn attempt(&self) -> PendingConnectionAttempt {
         self.attempt
     }
 
+    /// Return the underlying raw transport connection.
     pub(crate) const fn connection(&self) -> &SwarmConnection {
         &self.connection
     }
 
+    /// Verify that this generation is still the peer's current sendable attempt.
     pub(crate) fn ensure_current(&self) -> Result<()> {
         let _lifecycle = self.lifecycle_boundary.lock()?;
         let lifecycles = self
@@ -154,6 +158,7 @@ impl AdmittedConnection {
     }
 }
 
+/// Result of removing a peer from the local topology during disconnect or failure handling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PeerRemovalOutcome {
     /// First live successor replacement selected while the peer was removed.
@@ -163,10 +168,12 @@ pub(crate) struct PeerRemovalOutcome {
 }
 
 impl PeerRemovalOutcome {
+    /// Return the first live successor replacement selected during removal, if any.
     pub(crate) const fn fallback(self) -> Option<Did> {
         self.fallback
     }
 
+    /// Return whether the peer was referenced in the topology when removed.
     pub(crate) const fn removal(self) -> TopologyRemoval {
         self.removal
     }
@@ -214,6 +221,7 @@ impl SwarmTransport {
         .flatten()
     }
 
+    /// Return `peer`'s current sendable attempt paired with its raw transport connection, if any.
     pub(crate) fn admitted_connection_with_attempt(
         &self,
         peer: Did,
@@ -229,12 +237,14 @@ impl SwarmTransport {
         })
     }
 
+    /// Return `peer`'s current sendable raw transport connection, if any.
     pub(crate) fn admitted_connection(&self, peer: Did) -> Result<Option<SwarmConnection>> {
         Ok(self
             .admitted_connection_with_attempt(peer)?
             .map(|(_, connection)| connection))
     }
 
+    /// Return a lifecycle-guarded [`AdmittedConnection`] for `peer`'s sendable generation, if any.
     pub(crate) fn admitted_send_connection(&self, peer: Did) -> Result<Option<AdmittedConnection>> {
         self.with_connection_lifecycle(|| {
             let Some(attempt) = self.peer_lifecycles()?.sendable_attempt(peer) else {
@@ -252,6 +262,7 @@ impl SwarmTransport {
         })
     }
 
+    /// Snapshot all admitted peer generations together with their raw transport connections.
     pub(crate) fn admitted_connection_snapshots(
         &self,
     ) -> Result<Vec<(PendingConnectionAttempt, Option<SwarmConnection>)>> {
@@ -264,6 +275,7 @@ impl SwarmTransport {
         })
     }
 
+    /// Return whether `attempt` has been marked send-terminal in the lifecycle registry.
     pub(crate) fn is_send_terminal_attempt(
         &self,
         attempt: PendingConnectionAttempt,
@@ -282,6 +294,7 @@ impl SwarmTransport {
             .collect()
     }
 
+    /// Return the DIDs of all currently active peer generations.
     fn active_peer_ids(&self) -> Vec<Did> {
         self.active_connections()
             .map(|active| active.iter().map(|attempt| attempt.peer).collect())
@@ -317,6 +330,7 @@ impl SwarmTransport {
         self.join_routable_peer_with_observer(peer, || {})
     }
 
+    /// Admit a routable active `peer` into the DHT, invoking `observe_admission` before committing.
     fn join_routable_peer_with_observer(
         &self,
         peer: Did,
@@ -408,6 +422,7 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Notify the DHT of a routable active predecessor `peer`, invoking `observe_admission` before committing.
     fn notify_admitted_predecessor_with_observer(
         &self,
         peer: Did,
@@ -618,6 +633,7 @@ impl SwarmTransport {
             .map(PeerRemovalOutcome::removal))
     }
 
+    /// Remove an unavailable `peer` from topology if its active generation matches `expected`.
     pub(crate) fn remove_unavailable_topology(
         &self,
         peer: Did,
@@ -651,15 +667,18 @@ impl SwarmTransport {
         })
     }
 
+    /// Return the closest live routable successor replacement for `removed`, if any.
     pub(crate) fn live_successor_fallback(&self, removed: Did) -> Result<Option<Did>> {
         Ok(self.live_successor_replacements(removed)?.first().copied())
     }
 
+    /// Collect live routable successor replacements for `removed` using the current active set.
     fn live_successor_replacements(&self, removed: Did) -> Result<Vec<Did>> {
         let active = self.active_connections()?;
         self.live_successor_replacements_from_active(removed, &active)
     }
 
+    /// Collect live routable successor replacements for `removed` from a snapshot of `active` peers.
     fn live_successor_replacements_from_active(
         &self,
         removed: Did,
@@ -695,6 +714,7 @@ impl SwarmTransport {
         Ok(replacements)
     }
 
+    /// Return whether `candidate` is in `active` and has a raw transport ready to make progress.
     pub(super) fn is_routable_active_candidate(
         &self,
         candidate: Did,
@@ -709,6 +729,7 @@ impl SwarmTransport {
         connection.readiness().can_make_progress()
     }
 
+    /// Retire active `attempt` using `removal` semantics and close its underlying transport.
     async fn disconnect_with_removal(
         &self,
         attempt: PendingConnectionAttempt,
@@ -783,6 +804,7 @@ impl SwarmTransport {
         Ok(outcome)
     }
 
+    /// Close `connection` within the bounded disconnect timeout, logging a warning on expiry.
     async fn close_connection_for_disconnect(&self, connection: &SwarmConnection) -> Result<()> {
         let close = async { self.close_if_current(connection).await.map(|_| ()) };
         if !await_bounded_connection_close(close).await? {
@@ -834,6 +856,7 @@ impl SwarmTransport {
         rings_transport::connections::dispatched_payload_frames(&self.transport)
     }
 
+    /// Wait up to the default channel-open timeout for `peer`'s sendable connection to become ready.
     pub(crate) async fn get_and_check_send_connection(
         &self,
         peer: Did,
@@ -842,6 +865,7 @@ impl SwarmTransport {
             .await
     }
 
+    /// Wait up to `wait_timeout` for `peer`'s sendable connection to become ready for sending.
     pub(crate) async fn get_and_check_send_connection_with_timeout(
         &self,
         peer: Did,
@@ -914,6 +938,7 @@ impl SwarmTransport {
     }
 }
 
+/// Wait until `connection` opens its data channel and reaches a ready (or terminal) state.
 async fn wait_for_transport_readiness(connection: &SwarmConnection) -> Result<()> {
     connection
         .connection

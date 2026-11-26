@@ -18,21 +18,32 @@ use crate::measure::MeasureImpl;
 use crate::measure::MeasurementBatch;
 use crate::measure::MeasurementEvent;
 
+/// Capacity of the coalesced measurement wake channel.
 const MEASUREMENT_WAKE_CAPACITY: usize = 1;
 
+/// Logical outbound send outcome reported to the measurement aggregator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutboundMeasurement {
-    Sent { useful_bytes: u64 },
+    /// A logical payload was sent, carrying `useful_bytes` of application/protocol payload.
+    Sent {
+        /// Useful payload bytes attributed to the sent transfer.
+        useful_bytes: u64,
+    },
+    /// A logical payload failed to send.
     FailedToSend,
 }
 
+/// Discriminant used to alternate draining sent and failed measurement aggregates.
 #[derive(Clone, Copy)]
 enum OutboundMeasurementKind {
+    /// Successful send aggregate.
     Sent,
+    /// Failed send aggregate.
     FailedToSend,
 }
 
 impl OutboundMeasurementKind {
+    /// Return the complementary measurement kind for round-robin draining.
     const fn other(self) -> Self {
         match self {
             Self::Sent => Self::FailedToSend,
@@ -41,14 +52,19 @@ impl OutboundMeasurementKind {
     }
 }
 
+/// Coalesced counts and byte totals awaiting delivery to the measurement sink.
 #[derive(Default)]
 struct PendingState {
+    /// Number of coalesced successful sends.
     sent_count: u64,
+    /// Sum of useful bytes across coalesced successful sends.
     sent_bytes: u64,
+    /// Number of coalesced send failures.
     failed_to_send: u64,
 }
 
 impl PendingState {
+    /// Fold `measurement` into the pending totals, returning `false` on arithmetic overflow.
     fn increment(&mut self, measurement: OutboundMeasurement) -> bool {
         match measurement {
             OutboundMeasurement::Sent { useful_bytes } => {
@@ -71,6 +87,7 @@ impl PendingState {
         true
     }
 
+    /// Take and reset the pending batch for `kind`, if non-empty.
     fn take(&mut self, kind: OutboundMeasurementKind) -> Option<MeasurementBatch> {
         match kind {
             OutboundMeasurementKind::Sent if self.sent_count > 0 => {
@@ -92,6 +109,7 @@ impl PendingState {
         }
     }
 
+    /// Take the next non-empty batch, checking `first` before its counterpart.
     fn take_next(
         &mut self,
         first: OutboundMeasurementKind,
@@ -102,21 +120,26 @@ impl PendingState {
     }
 }
 
+/// Thread-safe wrapper around [`PendingState`] shared by recorder and receiver.
 struct PendingMeasurements {
+    /// Synchronized pending measurement counters.
     state: Mutex<PendingState>,
 }
 
 impl PendingMeasurements {
+    /// Create an empty pending measurement aggregate.
     fn new() -> Self {
         Self {
             state: Mutex::new(PendingState::default()),
         }
     }
 
+    /// Record `measurement` into the shared aggregate.
     fn increment(&self, measurement: OutboundMeasurement) -> bool {
         lock_or_recover(&self.state).increment(measurement)
     }
 
+    /// Take the next available measurement batch, starting with `first`.
     fn take_next(
         &self,
         first: OutboundMeasurementKind,
@@ -125,19 +148,25 @@ impl PendingMeasurements {
     }
 }
 
+/// Lock `mutex`, recovering the inner guard if a prior holder panicked.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Producer handle that coalesces outbound measurements and wakes the receiver task.
 pub(super) struct MeasurementRecorder {
+    /// Single-slot wake channel signaling that pending measurements are ready.
     sender: mpsc::Sender<()>,
+    /// Shared pending aggregate updated synchronously under a short lock.
     pending: Arc<PendingMeasurements>,
+    /// Whether a measurement sink is configured and recording is active.
     enabled: bool,
 }
 
 impl MeasurementRecorder {
+    /// Create a paired recorder and receiver for peer `did` backed by `measure`.
     pub(super) fn channel(measure: Option<MeasureImpl>, did: Did) -> (Self, MeasurementReceiver) {
         let (sender, receiver) = mpsc::channel(MEASUREMENT_WAKE_CAPACITY);
         let pending = Arc::new(PendingMeasurements::new());
@@ -157,6 +186,7 @@ impl MeasurementRecorder {
         )
     }
 
+    /// Aggregate `measurement` and signal the receiver task if enabled.
     pub(super) fn record(&mut self, measurement: OutboundMeasurement) {
         if !self.enabled {
             return;
@@ -169,15 +199,22 @@ impl MeasurementRecorder {
     }
 }
 
+/// Consumer task that drains coalesced outbound measurements into the peer's `MeasureImpl`.
 pub(super) struct MeasurementReceiver {
+    /// Wake signal receiver driven by [`MeasurementRecorder`].
     receiver: mpsc::Receiver<()>,
+    /// Shared pending aggregate drained on each wakeup and before exit.
     pending: Arc<PendingMeasurements>,
+    /// Optional measurement sink receiving aggregated batches.
     measure: Option<MeasureImpl>,
+    /// Peer DID attributed to every recorded batch.
     did: Did,
+    /// Measurement kind checked first on the next drain cycle for fairness.
     next: OutboundMeasurementKind,
 }
 
 impl MeasurementReceiver {
+    /// Drain coalesced measurement batches until the recorder is dropped.
     pub(super) async fn run(mut self) {
         loop {
             while let Some((kind, batch)) = self.pending.take_next(self.next) {
@@ -190,6 +227,7 @@ impl MeasurementReceiver {
         }
     }
 
+    /// Apply a single aggregated `batch` to the configured measurement sink.
     async fn record(&self, batch: MeasurementBatch) {
         let Some(measure) = &self.measure else {
             return;

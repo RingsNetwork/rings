@@ -38,7 +38,9 @@ impl EvidenceDigest {
 /// Provider and beneficiary used for per-pair bounds.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EvidenceAccountPair<P> {
+    /// Service provider account identifier.
     provider: P,
+    /// Service beneficiary account identifier.
     beneficiary: P,
 }
 
@@ -65,9 +67,13 @@ impl<P> EvidenceAccountPair<P> {
 /// Live-collection replay key specified by the provisional protocol.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EvidenceFreshnessKey<P> {
+    /// Overlay network identifier scoping this replay key.
     network_id: u32,
+    /// Beneficiary account identifier bound to the receipt.
     beneficiary: P,
+    /// Provisional epoch slot in which the receipt was issued.
     epoch_slot: u64,
+    /// Unique 32-byte receipt nonce within `(network_id, beneficiary, epoch_slot)`.
     nonce: [u8; 32],
 }
 
@@ -106,25 +112,34 @@ impl<P> EvidenceFreshnessKey<P> {
 /// One already-verified provisional receipt in canonical wire form.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProvisionalEvidenceRecord<P> {
+    /// Ordered provider-beneficiary pair for per-pair capacity accounting.
     pair: EvidenceAccountPair<P>,
+    /// Epoch-scoped replay key for duplicate and conflict detection.
     freshness: EvidenceFreshnessKey<P>,
+    /// Canonical digest ordering key for this receipt.
     digest: EvidenceDigest,
+    /// Canonical serialized receipt bytes.
     #[serde(with = "canonical_bytes")]
     canonical_receipt: Vec<u8>,
+    /// Local observation timestamp used for eviction ordering.
     observed_at: UnixTime,
+    /// Monotonic replay floor active when this receipt was observed.
     replay_floor: u64,
 }
 
+/// Serde adapter encoding canonical receipt bytes as raw byte slices while accepting sequences.
 mod canonical_bytes {
     use serde::de;
     use serde::Deserializer;
     use serde::Serializer;
 
+    /// Serializes `bytes` as a serde byte slice.
     pub(super) fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
     where S: Serializer {
         serializer.serialize_bytes(bytes)
     }
 
+    /// Deserializes canonical receipt bytes from either a byte slice or an integer sequence.
     pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
     where D: Deserializer<'de> {
         struct BytesOrSeqVisitor;
@@ -208,6 +223,7 @@ impl<P> ProvisionalEvidenceRecord<P> {
         self.replay_floor
     }
 
+    /// Returns the length in bytes of the canonical receipt payload.
     fn byte_len(&self) -> usize {
         self.canonical_receipt.len()
     }
@@ -216,12 +232,16 @@ impl<P> ProvisionalEvidenceRecord<P> {
 /// Durable replay marker retained independently from evictable receipt bytes.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EvidenceReplayMarker<P> {
+    /// Ordered provider-beneficiary pair associated with the admitted receipt.
     pair: EvidenceAccountPair<P>,
+    /// Epoch-scoped freshness key occupied by this marker.
     freshness: EvidenceFreshnessKey<P>,
+    /// Canonical receipt digest bound to `freshness`.
     digest: EvidenceDigest,
 }
 
 impl<P> EvidenceReplayMarker<P> {
+    /// Extracts a durable replay marker from a verified evidence record.
     fn from_record(record: &ProvisionalEvidenceRecord<P>) -> Self
     where P: Clone {
         Self {
@@ -277,6 +297,7 @@ impl Default for EvidenceLimits {
     }
 }
 
+/// Constructs a `NonZeroUsize` from a known non-zero compile-time constant.
 #[allow(
     clippy::unwrap_used,
     reason = "the non-zero default literals are validated during const evaluation"
@@ -288,13 +309,21 @@ const fn nonzero(value: usize) -> NonZeroUsize {
 /// Aggregate evidence-store counters. Account identifiers are never labels.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EvidenceCounters {
+    /// Total receipts newly admitted into the store.
     admitted: u64,
+    /// Total exact duplicate receipts rejected.
     duplicates: u64,
+    /// Total freshness-key conflicts rejected.
     conflicts: u64,
+    /// Total retained records evicted to enforce bounds.
     evicted_records: u64,
+    /// Total canonical receipt bytes freed by eviction.
     evicted_bytes: u64,
+    /// Total records rejected as invalid, oversized, or stale.
     rejected_records: u64,
+    /// Total valid receipts rejected because replay marker capacity was full.
     replay_capacity_rejections: u64,
+    /// Total persisted replay markers rejected during restore.
     rejected_replay_markers: u64,
 }
 
@@ -359,8 +388,11 @@ pub enum EvidenceAdmission {
 /// One deterministically evicted evidence record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidenceEviction<P> {
+    /// Provider-beneficiary pair whose record was evicted.
     pair: EvidenceAccountPair<P>,
+    /// Canonical digest of the evicted receipt.
     digest: EvidenceDigest,
+    /// Number of canonical receipt bytes released.
     bytes: usize,
 }
 
@@ -384,7 +416,9 @@ impl<P> EvidenceEviction<P> {
 /// Result of one bounded admission transition.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidenceAdmissionReport<P> {
+    /// Admission outcome for the candidate receipt.
     admission: EvidenceAdmission,
+    /// Older records evicted to maintain configured bounds.
     evictions: Vec<EvidenceEviction<P>>,
 }
 
@@ -415,11 +449,52 @@ pub struct EvidenceSnapshot<P> {
     pub counters: EvidenceCounters,
 }
 
+/// One durably persisted incremental provisional-evidence admission.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvidenceAdmissionDelta<P> {
+    /// Schema version (`EVIDENCE_SNAPSHOT_VERSION`).
+    pub schema_version: u16,
+    /// Strictly monotonic sequence number within one node's evidence journal.
+    pub sequence: u64,
+    /// Admitted provisional evidence record.
+    pub record: ProvisionalEvidenceRecord<P>,
+}
+
+/// Versioned storage value stored under keys of `provisional-evidence`.
+///
+/// Steady-state admissions append O(1) [`Self::Delta`] (or [`Self::ReplayFloor`]) entries so
+/// admission durability never rewrites the full [`EvidenceSnapshot`]. Periodic compaction and
+/// clean flushes fold accumulated deltas into a single [`Self::Snapshot`] entry.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum EvidenceStorageEntry<P> {
+    /// Base checkpoint covering all deltas with `sequence <= compacted_through_sequence`.
+    Snapshot {
+        /// Greatest delta sequence included in `snapshot` (`0` before any delta existed).
+        compacted_through_sequence: u64,
+        /// Serialized evidence snapshot at this checkpoint.
+        snapshot: EvidenceSnapshot<P>,
+    },
+    /// Single admitted evidence record written after the latest compacted checkpoint.
+    Delta(EvidenceAdmissionDelta<P>),
+    /// Replay-floor advance emitted when a rejected admission raised `replay_floor`.
+    ReplayFloor {
+        /// Schema version (`EVIDENCE_SNAPSHOT_VERSION`).
+        schema_version: u16,
+        /// Strictly monotonic sequence number within one node's evidence journal.
+        sequence: u64,
+        /// Monotonic replay floor reached after the transition.
+        replay_floor: u64,
+    },
+}
+
 /// Summary of invalid records/markers skipped and valid records evicted during restore.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EvidenceLoadReport {
+    /// Number of persisted records rejected during restore.
     rejected_records: usize,
+    /// Number of valid records evicted to enforce active limits.
     evicted_records: usize,
+    /// Number of persisted replay markers rejected during restore.
     rejected_replay_markers: usize,
 }
 
@@ -438,12 +513,23 @@ impl EvidenceLoadReport {
     pub const fn rejected_replay_markers(self) -> usize {
         self.rejected_replay_markers
     }
+
+    /// Accumulate the counts of `other` into `self`.
+    pub fn merge(&mut self, other: Self) {
+        self.rejected_records = self.rejected_records.saturating_add(other.rejected_records);
+        self.evicted_records = self.evicted_records.saturating_add(other.evicted_records);
+        self.rejected_replay_markers = self
+            .rejected_replay_markers
+            .saturating_add(other.rejected_replay_markers);
+    }
 }
 
 /// One bounded page in canonical digest order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvidencePage<P> {
+    /// Evidence records returned in this page.
     records: Vec<ProvisionalEvidenceRecord<P>>,
+    /// Exclusive continuation digest if more records remain.
     next_cursor: Option<EvidenceDigest>,
 }
 
@@ -514,11 +600,17 @@ pub enum EvidenceError {
 /// Pure bounded provisional-evidence state.
 #[derive(Clone)]
 pub struct ProvisionalEvidenceStore<P> {
+    /// Hard global and per-pair resident-state bounds.
     limits: EvidenceLimits,
+    /// Retained canonical receipts keyed by digest.
     records: BTreeMap<EvidenceDigest, ProvisionalEvidenceRecord<P>>,
+    /// Durable replay markers keyed by epoch-scoped freshness key.
     freshness: BTreeMap<EvidenceFreshnessKey<P>, EvidenceReplayMarker<P>>,
+    /// Monotonic minimum admissible epoch slot.
     replay_floor: u64,
+    /// Total canonical receipt bytes currently resident in `records`.
     resident_bytes: usize,
+    /// Aggregate admission, eviction, and rejection counters.
     counters: EvidenceCounters,
 }
 
@@ -746,6 +838,55 @@ where P: Clone + Ord
         self.replay_floor
     }
 
+    /// Advance the monotonic replay floor when replaying a persisted `ReplayFloor` checkpoint.
+    pub fn restore_replay_floor(&mut self, floor: u64) {
+        self.advance_replay_floor(floor);
+    }
+
+    /// Replay one persisted [`EvidenceAdmissionDelta`] during startup restore.
+    ///
+    /// Returns [`EvidenceError::UnsupportedSnapshotVersion`] on an unrecognized schema version.
+    /// Invalid or corrupt records are isolated and skipped while preserving valid neighbors,
+    /// matching [`Self::from_snapshot_with_validator`].
+    pub fn replay_persisted_delta(
+        &mut self,
+        delta: EvidenceAdmissionDelta<P>,
+        validator: impl FnOnce(&ProvisionalEvidenceRecord<P>) -> bool,
+    ) -> Result<EvidenceLoadReport, EvidenceError> {
+        if delta.schema_version != EVIDENCE_SNAPSHOT_VERSION {
+            return Err(EvidenceError::UnsupportedSnapshotVersion {
+                found: delta.schema_version,
+            });
+        }
+        if !validator(&delta.record) {
+            self.counters.rejected_records = self.counters.rejected_records.saturating_add(1);
+            self.counters.rejected_replay_markers =
+                self.counters.rejected_replay_markers.saturating_add(1);
+            return Ok(EvidenceLoadReport {
+                rejected_records: 1,
+                evicted_records: 0,
+                rejected_replay_markers: 1,
+            });
+        }
+        match self.admit(delta.record) {
+            Ok(report) => Ok(EvidenceLoadReport {
+                rejected_records: 0,
+                evicted_records: report.evictions().len(),
+                rejected_replay_markers: 0,
+            }),
+            Err(_) => {
+                // `self.admit` already incremented `self.counters.rejected_records`.
+                self.counters.rejected_replay_markers =
+                    self.counters.rejected_replay_markers.saturating_add(1);
+                Ok(EvidenceLoadReport {
+                    rejected_records: 1,
+                    evicted_records: 0,
+                    rejected_replay_markers: 1,
+                })
+            }
+        }
+    }
+
     /// Produce the deterministic persistence form.
     pub fn snapshot(&self) -> EvidenceSnapshot<P> {
         EvidenceSnapshot {
@@ -757,6 +898,7 @@ where P: Clone + Ord
         }
     }
 
+    /// Raises `replay_floor` monotonically and prunes expired replay markers with no resident record.
     fn advance_replay_floor(&mut self, floor: u64) {
         self.replay_floor = self.replay_floor.max(floor);
         let records = &self.records;
@@ -765,10 +907,12 @@ where P: Clone + Ord
         });
     }
 
+    /// Returns whether `marker`'s pair beneficiary matches its freshness-key beneficiary.
     fn marker_is_structural(&self, marker: &EvidenceReplayMarker<P>) -> bool {
         marker.pair.beneficiary() == marker.freshness.beneficiary()
     }
 
+    /// Returns whether `marker` is structurally valid and does not conflict with restored markers.
     fn can_restore_marker(&self, marker: &EvidenceReplayMarker<P>) -> bool {
         self.marker_is_structural(marker)
             && !self.freshness.contains_key(&marker.freshness)
@@ -778,6 +922,7 @@ where P: Clone + Ord
                 .any(|existing| existing.digest == marker.digest && existing != marker)
     }
 
+    /// Checks that inserting `marker` stays within global and per-beneficiary replay marker limits.
     fn ensure_replay_capacity(
         &self,
         marker: &EvidenceReplayMarker<P>,
@@ -804,6 +949,7 @@ where P: Clone + Ord
         Ok(())
     }
 
+    /// Evicts oldest records for `pair` and then globally until all resident bounds hold.
     fn evict_to_bounds(
         &mut self,
         pair: &EvidenceAccountPair<P>,
@@ -829,6 +975,7 @@ where P: Clone + Ord
         evictions
     }
 
+    /// Validates that `record` is non-empty and fits within both global and per-pair byte limits.
     fn validate_size(
         &mut self,
         record: &ProvisionalEvidenceRecord<P>,
@@ -850,17 +997,20 @@ where P: Clone + Ord
         Ok(())
     }
 
+    /// Returns whether resident records or bytes for `pair` exceed per-pair limits.
     fn pair_over_bound(&self, pair: &EvidenceAccountPair<P>) -> bool {
         let (records, bytes) = self.pair_usage(pair);
         records > self.limits.max_records_per_pair.get()
             || bytes > self.limits.max_bytes_per_pair.get()
     }
 
+    /// Returns whether total resident records or bytes exceed global limits.
     fn global_over_bound(&self) -> bool {
         self.records.len() > self.limits.max_records.get()
             || self.resident_bytes > self.limits.max_bytes.get()
     }
 
+    /// Counts resident `(records, bytes)` currently held for `pair`.
     fn pair_usage(&self, pair: &EvidenceAccountPair<P>) -> (usize, usize) {
         self.records
             .values()
@@ -873,6 +1023,7 @@ where P: Clone + Ord
             })
     }
 
+    /// Finds the oldest resident digest (breaking ties by digest), excluding `excluded`.
     fn oldest_digest_excluding(
         &self,
         pair: Option<&EvidenceAccountPair<P>>,
@@ -887,6 +1038,7 @@ where P: Clone + Ord
             .map(|(digest, _)| *digest)
     }
 
+    /// Removes `digest` from resident records and updates byte and eviction counters.
     fn evict(&mut self, digest: EvidenceDigest) -> Option<EvidenceEviction<P>> {
         let record = self.records.remove(&digest)?;
         let bytes = record.byte_len();

@@ -1,4 +1,6 @@
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 //! Serde wire helpers backed by the Rings postcard codec.
 
@@ -57,6 +59,7 @@ impl From<postcard::Error> for Error {
 }
 
 impl Error {
+    /// Wrap a postcard error as a deserialization failure.
     fn deserialize(error: postcard::Error) -> Self {
         Self::Deserialize(error)
     }
@@ -93,6 +96,7 @@ where T: Deserialize<'de> {
     postcard::take_from_bytes(bytes).map_err(Error::deserialize)
 }
 
+/// Lightweight wrapper for decoding only an enum's wire discriminant.
 struct EnumVariant(u32);
 
 impl<'de> Deserialize<'de> for EnumVariant {
@@ -102,6 +106,7 @@ impl<'de> Deserialize<'de> for EnumVariant {
     }
 }
 
+/// Serde visitor that extracts only the enum variant index.
 struct EnumVariantVisitor;
 
 impl<'de> Visitor<'de> for EnumVariantVisitor {

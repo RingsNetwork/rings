@@ -12,7 +12,9 @@ use rand::CryptoRng;
 use rand::RngCore;
 use rand::SeedableRng;
 
+/// Version-4 nibble bits for generated UUIDs.
 const UUID_VERSION_4: u8 = 0x40;
+/// RFC 4122 variant bits for generated UUIDs.
 const UUID_RFC4122_VARIANT: u8 = 0x80;
 
 /// Object-safe cryptographically strong random byte stream usable across threads.
@@ -71,6 +73,7 @@ impl CryptoRng for SystemEntropy {}
 /// (`rng: &mut (impl CryptoRng + RngCore)`) can draw multiple values atomically without
 /// interleaving concurrent callers.
 pub struct SharedRngGuard<'a> {
+    /// Held mutex guard granting exclusive access to the boxed RNG stream.
     guard: MutexGuard<'a, Box<dyn CryptoRngCore>>,
 }
 
@@ -106,6 +109,7 @@ impl CryptoRng for SharedRngGuard<'_> {}
 /// inject [`SharedRng::seed_from_u64`], [`SharedRng::from_seed`], or [`SharedRng::from_rng`].
 #[derive(Clone)]
 pub struct SharedRng {
+    /// Shared mutex-guarded boxed cryptographic RNG.
     inner: Arc<Mutex<Box<dyn CryptoRngCore>>>,
 }
 

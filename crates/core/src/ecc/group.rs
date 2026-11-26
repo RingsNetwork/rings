@@ -233,12 +233,14 @@ pub trait CyclicModule: AbelianGroup + Sized {
 /// Generic group element for curve marker `C`.
 #[derive(Debug)]
 pub struct Point<C: CurveGroup> {
+    /// Native library point representation for curve `C`.
     inner: C::Point,
 }
 
 /// Generic scalar for curve marker `C`.
 #[derive(Debug)]
 pub struct Scalar<C: CurveGroup> {
+    /// Native library scalar representation for curve `C`.
     inner: C::Scalar,
 }
 
@@ -456,6 +458,7 @@ impl<C: CurveScalarField> AlgebraField for Scalar<C> {
     }
 }
 
+/// Implement [`CurveGroup`] for a curve marker by delegating each group and scalar operation to its native library.
 // The simple curve adapters below all have the same shape: the native library
 // already exposes identity, generator, addition, negation, scalar
 // multiplication, equality, and point conversion. Keeping that pattern in one

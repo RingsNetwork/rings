@@ -71,14 +71,20 @@ const FFI_MAX_SIGNATURE_LEN: usize = SignatureAlgorithm::Bls12381.signature_len(
 /// [`rings_node_provider_destroy`]. C callers must treat `ProviderHandle` as an
 /// incomplete type and must never inspect or copy its contents.
 pub struct ProviderHandle {
+    /// Underlying node provider exposed across the C ABI.
     provider: Arc<Provider>,
+    /// Dedicated Tokio runtime driving async operations for this handle.
     runtime: Arc<Runtime>,
+    /// Cooperative stop source signalled when the handle is destroyed.
     stop: StopSource,
+    /// Guard flag preventing duplicate listener threads from being spawned.
     listening: AtomicBool,
+    /// Join handles for spawned background listener threads joined during shutdown.
     listener_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 impl ProviderHandle {
+    /// Wraps `provider` and its dedicated `runtime` in an opaque FFI handle.
     fn new(provider: Arc<Provider>, runtime: Arc<Runtime>) -> Self {
         Self {
             provider,
@@ -89,6 +95,7 @@ impl ProviderHandle {
         }
     }
 
+    /// Dereferences a non-null C pointer to a live [`ProviderHandle`], returning `FFINulPtrError` if null.
     unsafe fn from_ptr<'a>(ptr: *const ProviderHandle) -> Result<&'a ProviderHandle> {
         if ptr.is_null() {
             return Err(Error::FFINulPtrError);
@@ -97,6 +104,7 @@ impl ProviderHandle {
         Ok(unsafe { &*ptr })
     }
 
+    /// Spawns the background listener thread once if it has not already been started.
     fn spawn_listener(&self) -> Result<()> {
         if self
             .listening
@@ -148,6 +156,7 @@ impl ProviderHandle {
         self.provider.set_backend()
     }
 
+    /// Stops listener threads, closes the provider cleanly, and drops the FFI handle.
     fn shutdown(self) {
         let Self {
             provider,
@@ -611,6 +620,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_serialized_config(
     }
 }
 
+/// Converts a non-null NUL-terminated C UTF-8 string pointer into an owned Rust `String`.
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
     if ptr.is_null() {
         return Err(Error::FFINulPtrError);

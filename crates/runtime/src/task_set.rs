@@ -39,19 +39,23 @@ use crate::task::Unscheduled;
 /// Cloning shares the set: a task spawned through any clone is counted by all of them.
 #[derive(Clone, Default)]
 pub struct TaskSet {
+    /// Shared liveness counter and drain waiters for this task set.
     live: Arc<Live>,
 }
 
 /// The live tasks of a set and the waiters of its drain.
 #[derive(Default)]
 struct Live {
+    /// Synchronized live task count and pending drain wakers.
     state: Mutex<LiveState>,
 }
 
 /// The count of live tasks, and the wakers of the [`Drained`] futures that saw it above zero.
 #[derive(Default)]
 struct LiveState {
+    /// Number of tasks currently live in the set.
     count: usize,
+    /// Wakers registered by [`Drained`] futures waiting for `count` to reach zero.
     waiters: Vec<Waker>,
 }
 

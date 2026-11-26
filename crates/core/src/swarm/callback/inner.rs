@@ -59,6 +59,7 @@ impl SwarmTransportCallback {
         Self::new_with_reassembly_clock(&transport, clock)
     }
 
+    /// Construct a transport callback using an explicit `reassembly_clock`.
     fn new_with_reassembly_clock(
         transport: &Arc<SwarmTransport>,
         reassembly_clock: ReassemblyClock,
@@ -116,6 +117,7 @@ impl SwarmTransportCallback {
 
 /// A connection's own state, which either form of its callback reads alike.
 impl<L> SwarmTransportCallback<L> {
+    /// Return the pending connection attempt bound to this callback, if any.
     pub(super) fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
         self.processor.pending_attempt()
     }
@@ -292,6 +294,7 @@ impl BoundCallback {
             .await
     }
 
+    /// Return whether `did` matches a pending connection attempt that has not yet been admitted.
     fn pending_disconnected_before_admission(&self, did: Did) -> bool {
         let Some(attempt) = self.pending_attempt() else {
             return false;
@@ -304,6 +307,7 @@ impl BoundCallback {
                 .is_active_connection_attempt(attempt)
     }
 
+    /// Return whether `did` refers to this local node, logging a warning if so.
     fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
         if did != self.processor.logical.transport.dht.did {
             return false;
@@ -312,6 +316,7 @@ impl BoundCallback {
         true
     }
 
+    /// Cancel and record disconnection for a pending attempt whose peer does not match `did`.
     async fn cancel_mismatched_pending_connection(
         &self,
         did: Did,
@@ -344,6 +349,7 @@ impl BoundCallback {
         Ok(true)
     }
 
+    /// Handle a terminal transport event for a pending attempt, failing it if still unadmitted.
     async fn handle_pending_terminal_event(
         &self,
         did: Did,
@@ -586,6 +592,7 @@ impl TransportCallback for SwarmTransportCallback {
 /// The events the transport reports for one connection, each handled by the callback bound to
 /// its transport for the event.
 impl BoundCallback {
+    /// Submit an admitted inbound transport message into the connection's inbound pipeline.
     async fn on_admitted_message(
         &self,
         message: AdmittedInboundMessage<'_>,
@@ -609,6 +616,7 @@ impl BoundCallback {
         }
     }
 
+    /// Record a receive failure when the transport rejects an invalid inbound frame.
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
         // Test builds: the transport rejected a frame that was sent; it arrived and is done.
         #[cfg(test)]
@@ -620,6 +628,7 @@ impl BoundCallback {
         Ok(())
     }
 
+    /// Handle a transport connection state transition for connection `cid`.
     async fn on_connection_state_change(
         &self,
         cid: &str,
@@ -677,6 +686,7 @@ impl BoundCallback {
         Ok(())
     }
 
+    /// Handle a data-channel open event for connection `cid`, admitting the pending connection if ready.
     async fn on_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
         self.processor.logical.transport.signal_link_transition();
         let Some(did) = self.connection_event_peer(cid, "data-channel open").await? else {
@@ -695,6 +705,7 @@ impl BoundCallback {
         Ok(())
     }
 
+    /// Handle a data-channel close event for connection `cid`, retiring the connection.
     async fn on_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let Some(did) = self
             .connection_event_peer(cid, "data-channel close")

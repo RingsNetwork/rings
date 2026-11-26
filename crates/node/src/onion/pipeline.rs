@@ -90,7 +90,9 @@ impl From<OnionWidthClass> for OnionValueType {
 /// `None`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionInvokeArguments {
+    /// Canonical backend name `ω ∈ Ω`.
     backend: OnionBackendName,
+    /// Inline client constants `ā′` sealed inside the 64-byte layer argument slot.
     constants: Vec<u8>,
 }
 
@@ -216,7 +218,9 @@ impl From<OnionPipelineError> for Error {
 /// One placed-to-be `invoke` stage `(f, (ω, ā′))` of a Kleisli pipeline (#834 D3, D4a).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionInvokeStage {
+    /// Closed `invoke` shape `f ∈ Σ_I`.
     shape: OnionInvokeShape,
+    /// Sealed backend name and inline constants `(ω, ā′)`.
     arguments: OnionInvokeArguments,
 }
 
@@ -261,6 +265,7 @@ impl OnionInvokeStage {
         self.into_pipeline().then_stage(next)
     }
 
+    /// Encode this stage as a Sphinx [`OnionApplication`].
     pub(crate) fn to_application(&self) -> OnionApplication {
         OnionApplication {
             symbol: OnionShape::Invoke(self.shape),
@@ -276,6 +281,7 @@ impl OnionInvokeStage {
 /// - `∀ k < n: OnionValueType::Fixed(stages[k - 1].shape.output()) == OnionValueType::from(stages[k].shape.input())`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionInvokePipeline {
+    /// Non-empty sequence of composed `invoke` stages.
     stages: Vec<OnionInvokeStage>,
 }
 
@@ -383,6 +389,7 @@ impl OnionInvokePipeline {
         OnionLoopClass::least_for_value_bytes(widest).unwrap_or(OnionLoopClass::MiB12)
     }
 
+    /// Encode every stage in pipeline order as a Sphinx [`OnionApplication`].
     pub(crate) fn applications(&self) -> Vec<OnionApplication> {
         self.stages
             .iter()
@@ -400,14 +407,20 @@ impl From<OnionInvokeStage> for OnionInvokePipeline {
 /// Morphism in `Free(G_Σ)` before normal-form `relay` elimination (#834 D4a, L1, L2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionPipelineTerm {
+    /// Domain value type `In_θ`.
     input: OnionValueType,
+    /// Codomain value type `Out_θ`.
     output: OnionValueType,
+    /// Non-relay atomic morphisms accumulated in composition order.
     non_relay: Vec<TermAtom>,
 }
 
+/// Non-relay atomic morphism in an [`OnionPipelineTerm`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TermAtom {
+    /// Intermediate `invoke` stage application.
     Invoke(OnionInvokeStage),
+    /// Terminal world-facing session service symbol.
     WorldFacing(OnionServiceName),
 }
 

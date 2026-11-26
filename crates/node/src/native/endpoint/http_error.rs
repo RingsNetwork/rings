@@ -2,9 +2,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 
+/// HTTP error responses returned by native JSON-RPC and status route handlers.
 #[derive(Debug)]
 pub enum HttpError {
+    /// Request was malformed or rejected as `400 Bad Request`.
     BadRequest,
+    /// Server encountered an internal error (`500 Internal Server Error`).
     Internal,
 }
 

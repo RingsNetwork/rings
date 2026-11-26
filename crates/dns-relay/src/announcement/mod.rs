@@ -175,7 +175,9 @@ fn is_sub_label(label: &str) -> bool {
 /// learns a connection's origin, and the TXT records it publishes under its name.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Announcement {
+    /// Served ports mapped to how each service receives the client's origin address.
     ports: BTreeMap<NonZeroU16, ProxyProtocol>,
+    /// Published TXT record values keyed by relative sub-name under the owner.
     txt: BTreeMap<SubName, Vec<TxtValue>>,
 }
 

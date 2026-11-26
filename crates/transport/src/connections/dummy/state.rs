@@ -94,20 +94,28 @@ pub(super) fn set_parked(gate: &'static LocalKey<watch::Sender<bool>>, parked: b
 
 /// Mutable controlled queue plus stable generation and sequence counters.
 pub(super) struct ControlledDeliveryState {
+    /// Pending delivery entries keyed by monotonic enqueue sequence.
     pub(super) queue: BTreeMap<u64, ControlledDeliveryEntry>,
+    /// Queue generation counter incremented on every mutation.
     generation: u64,
+    /// Next sequence number assigned to a newly enqueued event.
     next_sequence: u64,
 }
 
 /// One queued callback with stable identity and virtual enqueue metadata.
 pub(super) struct ControlledDeliveryEntry {
+    /// Monotonic enqueue sequence number.
     pub(super) sequence: u64,
+    /// Target dummy connection identifier.
     pub(super) connection_id: String,
+    /// Queued internal event awaiting delivery.
     pub(super) event: Event,
+    /// Virtual clock timestamp in milliseconds when enqueued.
     pub(super) enqueued_virtual_ms: u64,
 }
 
 impl ControlledDeliveryState {
+    /// Create an empty [`ControlledDeliveryState`].
     pub(super) const fn new() -> Self {
         Self {
             queue: BTreeMap::new(),
@@ -116,6 +124,7 @@ impl ControlledDeliveryState {
         }
     }
 
+    /// Append `(connection_id, event)` to the queue, advancing generation and notifying waiters.
     pub(super) fn push_back(&mut self, entry: (String, Event)) {
         let (connection_id, event) = entry;
         let sequence = self.next_sequence;
@@ -131,11 +140,13 @@ impl ControlledDeliveryState {
         DELIVERY_ENQUEUED.with(|signal| signal.notify_waiters());
     }
 
+    /// Remove and return the `index`-th queued entry in sequence order.
     pub(super) fn remove(&mut self, index: usize) -> Option<ControlledDeliveryEntry> {
         let sequence = self.queue.keys().nth(index).copied()?;
         self.remove_sequence(sequence)
     }
 
+    /// Remove and return the queued entry with exact `sequence`, advancing generation if present.
     pub(super) fn remove_sequence(&mut self, sequence: u64) -> Option<ControlledDeliveryEntry> {
         let entry = self.queue.remove(&sequence);
         if entry.is_some() {
@@ -144,6 +155,7 @@ impl ControlledDeliveryState {
         entry
     }
 
+    /// Drop all queued entries and advance generation if the queue was non-empty.
     pub(super) fn clear(&mut self) {
         if !self.queue.is_empty() {
             self.queue.clear();
@@ -151,16 +163,19 @@ impl ControlledDeliveryState {
         }
     }
 
+    /// Clear all queued entries, reset the sequence counter, and advance generation.
     pub(super) fn reset(&mut self) {
         self.queue.clear();
         self.next_sequence = 0;
         self.advance_generation();
     }
 
+    /// Take an atomic [`controlled::DeliverySnapshot`] of the queue length and generation.
     pub(super) fn snapshot(&self) -> controlled::DeliverySnapshot {
         controlled::DeliverySnapshot::new(self.queue.len(), self.generation)
     }
 
+    /// Inspect all queued entries with sequence strictly greater than `sequence`.
     pub(super) fn inspect_after(&self, sequence: Option<u64>) -> Vec<controlled::QueuedDelivery> {
         let lower = sequence.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
         self.queue
@@ -169,12 +184,14 @@ impl ControlledDeliveryState {
             .collect()
     }
 
+    /// Increment the queue generation counter with wrapping arithmetic.
     fn advance_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
 }
 
 impl ControlledDeliveryEntry {
+    /// Convert this queued entry into a public [`controlled::QueuedDelivery`] view.
     fn inspect(&self) -> controlled::QueuedDelivery {
         controlled::QueuedDelivery::new(
             self.sequence,

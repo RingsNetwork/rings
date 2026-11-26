@@ -32,7 +32,9 @@ pub const DEFAULT_MAIL_DESCRIPTOR_TTL: Duration = Duration::from_secs(90);
 /// publication is live.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MailOffer {
+    /// Interval between periodic mail descriptor heartbeats.
     heartbeat_interval: Duration,
+    /// Lifetime of each published mail descriptor.
     ttl: Duration,
 }
 
@@ -80,7 +82,9 @@ impl Default for MailOffer {
 /// The registration task publishing a recipient's mail descriptor.
 #[derive(Clone, Debug)]
 pub(crate) struct MailRegistration {
+    /// Validated mail publication schedule.
     offer: MailOffer,
+    /// DHT publisher managing heartbeat cadence and lease renewal.
     publisher: DhtRegistrationPublisher<[MailDescriptor; 1]>,
 }
 

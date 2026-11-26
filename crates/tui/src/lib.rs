@@ -1,10 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![cfg_attr(
     test,
     allow(
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::unwrap_used
     )
@@ -61,7 +63,9 @@ use crate::config::TuiArgs;
 use crate::error::Result;
 use crate::executor::execute_dispatched_command;
 
+/// Poll timeout slice used by the terminal input reader thread.
 const INPUT_POLL_SLICE: Duration = Duration::from_millis(50);
+/// Capacity of internal TUI event and command channels.
 const CHANNEL_CAPACITY: usize = 64;
 
 /// Guard that restores the terminal out of raw mode and alternate screen on drop.
@@ -83,7 +87,9 @@ impl Drop for TerminalGuard {
 /// RAII guard for the background terminal input reader thread that signals the thread to stop
 /// whenever the TUI exits (including on early `?` error returns, future cancellation, or unwind).
 struct InputReaderGuard {
+    /// Shared flag signaling the reader thread to exit.
     stop_flag: Arc<AtomicBool>,
+    /// Join handle for the spawned input reader thread.
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -457,7 +463,7 @@ mod tests {
             Ok(NodeSnapshot {
                 did: Some("0x1111222233334444555566667777888899990000".to_string()),
                 wire_version: Some(1),
-                version: Some("1.0.0-pre.11".to_string()),
+                version: Some("1.0.0-pre.12".to_string()),
                 swarm: Some(SwarmInfo {
                     peers: vec![PeerInfo {
                         did: "0xaaaa000000000000000000000000000000000001".to_string(),

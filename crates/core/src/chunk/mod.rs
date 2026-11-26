@@ -35,9 +35,12 @@
 //!             then payload = concat(data_i for i in 0..total)
 //! ```
 
+/// Chunk framing, splitting, and wire reserve definitions.
 mod framing;
+/// Reassembly byte, slot, and message-id limits.
 mod limits;
 mod progress;
+/// Bounded message reassembler and reassembly outcomes.
 mod reassembly;
 
 pub use framing::Chunk;

@@ -51,9 +51,13 @@ pub enum ZoneError {
 /// and any others) and the contact its SOA names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Zone {
+    /// Canonical lowercase origin name of the delegated zone.
     origin: LowerName,
+    /// Primary nameserver listed in the zone's SOA record.
     primary: Name,
+    /// Additional authoritative nameservers for the zone.
     secondaries: Vec<Name>,
+    /// Responsible mailbox name listed in the zone's SOA record.
     contact: Name,
 }
 

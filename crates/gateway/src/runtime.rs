@@ -43,19 +43,27 @@ use crate::TcpFlowAdmission;
 use crate::TcpStack;
 use crate::TcpStackError;
 
+/// Periodic cadence at which `smoltcp` timers and pending flows are polled.
 const TCP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Maximum byte chunk copied per bridge read/write step (16 KiB).
 const BRIDGE_IO_CHUNK_BYTES: usize = 16 * 1_024;
+/// Maximum raw IPv4 packet buffer allocated for reading from the packet device.
 const MAX_CAPTURED_PACKET_BYTES: usize = 65_536;
+/// Bridge event queue slots budgeted per configured flow.
 const EVENTS_PER_FLOW: usize = 4;
+/// Bounded capacity of the external runtime control channel.
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
+/// Control message delivered into the gateway loop from outside the packet task.
 enum RuntimeControl {
+    /// Update the observed availability of compatible Onion exits.
     ExitAvailability(ExitObservation),
 }
 
 /// Cloneable control capability for dependencies observed outside the packet loop.
 #[derive(Clone)]
 pub struct GatewayControlHandle {
+    /// Bounded channel sender delivering control messages to the running loop.
     sender: mpsc::Sender<RuntimeControl>,
 }
 
@@ -72,13 +80,18 @@ impl GatewayControlHandle {
     }
 }
 
+/// Downstream Onion payload chunk buffered until `smoltcp` accepts all of its bytes.
 struct PendingChunk {
+    /// Payload bytes received from the Onion stream bridge.
     bytes: Vec<u8>,
+    /// Index of the next unwritten byte in `bytes`.
     offset: usize,
+    /// Backpressure oneshot signaled once the entire chunk is written to TCP.
     consumed: Option<oneshot::Sender<()>>,
 }
 
 impl PendingChunk {
+    /// Wrap a newly received Onion chunk with its consumption acknowledgement channel.
     fn new(bytes: Vec<u8>, consumed: oneshot::Sender<()>) -> Self {
         Self {
             bytes,
@@ -87,18 +100,22 @@ impl PendingChunk {
         }
     }
 
+    /// Return the slice of bytes not yet written to the TCP socket.
     fn remaining(&self) -> &[u8] {
         self.bytes.get(self.offset..).unwrap_or_default()
     }
 
+    /// Advance the cursor by `count` written bytes, saturating at `self.bytes.len()`.
     fn advance(&mut self, count: usize) {
         self.offset = self.offset.saturating_add(count).min(self.bytes.len());
     }
 
+    /// Return whether every byte in this chunk has been written to TCP.
     fn is_empty(&self) -> bool {
         self.offset >= self.bytes.len()
     }
 
+    /// Signal the bridge that this chunk has been fully consumed by TCP.
     fn acknowledge(mut self) {
         if let Some(consumed) = self.consumed.take() {
             let _ = consumed.send(());
@@ -106,19 +123,28 @@ impl PendingChunk {
     }
 }
 
+/// Per-flow runtime bridge and half-close state paired with `GatewayServer` and `TcpStack`.
 struct RuntimeFlow {
+    /// Active Onion bridge handle once the TCP handshake completes.
     bridge: Option<BridgeHandle>,
     /// The probe of the opened Onion stream; set exactly when the flow establishes.
     probe: Option<BoxOnionStreamProbe>,
+    /// Reusable client upload buffer parked when no upload chunk is in flight.
     client_to_onion_buffer: Option<Vec<u8>>,
+    /// Queued downstream Onion chunks waiting for TCP send-window space.
     pending_to_client: VecDeque<PendingChunk>,
+    /// Whether `BridgeCommand::CloseWrite` has been sent after observing client FIN.
     client_eof_sent: bool,
+    /// Whether the bridge confirmed its write half toward Onion has shut down.
     client_write_flushed: bool,
+    /// Whether the upstream Onion stream reached EOF on its read half.
     onion_eof_seen: bool,
+    /// Whether the TCP write half toward the local client has been closed.
     client_write_closed: bool,
 }
 
 impl RuntimeFlow {
+    /// Initialize runtime tracking state for a newly admitted TCP flow.
     fn captured(chunk_bytes: usize) -> Self {
         Self {
             bridge: None,
@@ -133,16 +159,25 @@ impl RuntimeFlow {
     }
 }
 
+/// Event selected by one iteration of `GatewayRuntime::run`.
 enum LoopInput {
+    /// Raw IP packet read completion from the packet device.
     Packet(Result<usize, PacketIoError>),
+    /// Event received from one per-flow Onion bridge task.
     Bridge(Option<BridgeEvent>),
+    /// External control update from a `GatewayControlHandle`.
     Control(Option<RuntimeControl>),
+    /// Periodic TCP timer poll tick.
     Tick,
 }
 
+/// Scope of post-event flow reconciliation required after processing one `LoopInput`.
 enum ReconcileScope {
+    /// No flow reconciliation is needed.
     None,
+    /// Reconcile only the named flow.
     Flow(FlowId),
+    /// Reconcile every currently active flow.
     All,
 }
 
@@ -152,10 +187,12 @@ enum ReconcileScope {
 struct GatewayFatal(GatewayError);
 
 impl GatewayFatal {
+    /// Wrap a gateway-scoped failure as fatal to the runtime loop.
     fn gateway(error: impl Into<GatewayError>) -> Self {
         Self(error.into())
     }
 
+    /// Unwrap the underlying `GatewayError`.
     fn into_gateway(self) -> GatewayError {
         self.0
     }
@@ -167,15 +204,25 @@ impl GatewayFatal {
 /// byte bridges for all admitted flows. Platform setup and teardown remain the responsibility of
 /// [`crate::bindings::TunnelControl`].
 pub struct GatewayRuntime {
+    /// Validated runtime configuration and buffer limits.
     config: GatewayConfig,
+    /// Lifecycle and flow-state coordinator.
     server: GatewayServer,
+    /// Userspace `smoltcp` IPv4/TCP stack.
     tcp: TcpStack,
+    /// Factory opening upstream Onion streams for admitted flows.
     connector: Arc<dyn OnionStreamConnector>,
+    /// Per-flow bridge handles and half-close state keyed by `FlowId`.
     flows: HashMap<FlowId, RuntimeFlow>,
+    /// Sender cloned into each spawned flow bridge to report asynchronous events.
     bridge_events_tx: mpsc::Sender<BridgeEvent>,
+    /// Receiver polled by the main event loop for bridge events.
     bridge_events_rx: mpsc::Receiver<BridgeEvent>,
+    /// Shared status snapshot handle published after state transitions.
     status_handle: GatewayStatusHandle,
+    /// Sender backing cloned `GatewayControlHandle`s.
     control_tx: mpsc::Sender<RuntimeControl>,
+    /// Receiver polled by the main event loop for control updates.
     control_rx: mpsc::Receiver<RuntimeControl>,
 }
 
@@ -306,26 +353,31 @@ impl GatewayRuntime {
         }
     }
 
+    /// Publish the latest `GatewayServer` status snapshot to readers.
     fn publish_status(&self) {
         self.status_handle.publish(self.server.status());
     }
 
+    /// Return the per-chunk I/O buffer size bounded by `BRIDGE_IO_CHUNK_BYTES`.
     fn chunk_bytes(&self) -> usize {
         self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES)
     }
 
+    /// Borrow the immutable runtime state for `flow`.
     fn runtime_flow(&self, flow: FlowId) -> Result<&RuntimeFlow, TcpStackError> {
         self.flows
             .get(&flow)
             .ok_or(TcpStackError::UnknownFlow(flow))
     }
 
+    /// Borrow the mutable runtime state for `flow`.
     fn runtime_flow_mut(&mut self, flow: FlowId) -> Result<&mut RuntimeFlow, TcpStackError> {
         self.flows
             .get_mut(&flow)
             .ok_or(TcpStackError::UnknownFlow(flow))
     }
 
+    /// Dispatch one selected event-loop input and return which flows require reconciliation.
     fn process_input(
         &mut self,
         input: LoopInput,
@@ -384,6 +436,7 @@ impl GatewayRuntime {
         }
     }
 
+    /// Classify, admit if new, and deliver one captured IPv4 packet into `self.tcp`.
     fn ingest_packet(
         &mut self,
         packet: Vec<u8>,
@@ -418,6 +471,7 @@ impl GatewayRuntime {
         Ok(PacketOutcome::Consumed(segment.flow))
     }
 
+    /// Reserve capacity in `self.server` and `self.tcp` for a newly captured SYN flow.
     fn admit_flow(
         &mut self,
         segment: crate::TcpSegment,
@@ -448,6 +502,7 @@ impl GatewayRuntime {
         }
     }
 
+    /// Apply one asynchronous `BridgeEvent` to the corresponding flow's state and buffers.
     fn handle_bridge_event(
         &mut self,
         event: BridgeEvent,
@@ -528,6 +583,7 @@ impl GatewayRuntime {
         }
     }
 
+    /// Reconcile every currently tracked flow after a periodic TCP poll tick.
     fn reconcile_all(&mut self, elapsed: Duration) -> Result<(), GatewayFatal> {
         let flows = self.flows.keys().copied().collect::<Vec<_>>();
         for flow in flows {
@@ -536,6 +592,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Progress bridge startup, bidirectional byte forwarding, and closure for one `flow`.
     fn reconcile_flow(&mut self, flow: FlowId, elapsed: Duration) -> Result<(), GatewayFatal> {
         if !self.flows.contains_key(&flow) {
             return Ok(());
@@ -550,6 +607,7 @@ impl GatewayRuntime {
             .map_err(GatewayFatal::gateway)
     }
 
+    /// Spawn the Onion stream bridge once `flow`'s TCP handshake reaches `Established`.
     fn maybe_start_bridge(&mut self, flow: FlowId) -> Result<(), GatewayError> {
         if self.tcp.endpoint_state(flow)? != TcpEndpointState::Established
             || self.server.flow_state(flow) != Some(FlowState::TargetBound(flow))
@@ -570,6 +628,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Forward available client TCP bytes and client FIN half-close into `flow`'s Onion bridge.
     fn drive_client_to_onion(
         &mut self,
         flow: FlowId,
@@ -664,6 +723,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Drain queued downstream Onion chunks into `flow`'s TCP send buffer and propagate peer EOF.
     fn flush_pending_to_client(
         &mut self,
         flow: FlowId,
@@ -719,6 +779,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Transition an established flow into `FlowState::HalfClosed` on the first half-close.
     fn mark_half_closed(&mut self, flow: FlowId) -> Result<(), GatewayError> {
         if self.server.flow_state(flow) == Some(FlowState::Established(flow)) {
             self.server.transition_flow(flow, FlowEvent::HalfClose)?;
@@ -726,6 +787,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Release a closed TCP flow gracefully if both directions finished, or fail it otherwise.
     fn finish_if_closed(&mut self, flow: FlowId, elapsed: Duration) -> Result<(), GatewayError> {
         if self.tcp.endpoint_state(flow)? != TcpEndpointState::Closed {
             return Ok(());
@@ -797,6 +859,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Write all egress IPv4 packets emitted by `self.tcp` out to `device`.
     async fn flush_egress<D: PacketIo>(&mut self, device: &mut D) -> Result<(), GatewayError> {
         for packet in self.tcp.take_egress() {
             device.write_packet(&packet).await?;
@@ -804,6 +867,7 @@ impl GatewayRuntime {
         Ok(())
     }
 
+    /// Cooperatively stop the gateway, reset all live flows, flush final RST/FIN packets, and finish stopping.
     async fn stop<D: PacketIo>(
         &mut self,
         device: &mut D,
@@ -837,18 +901,21 @@ impl GatewayRuntime {
     }
 }
 
+/// Build the periodic `smoltcp` polling interval with missed-tick skipping enabled.
 fn tcp_poll_interval() -> tokio::time::Interval {
     let mut interval = tokio::time::interval(TCP_POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval
 }
 
+/// Preserve the first error encountered during multi-step shutdown cleanup.
 fn record_first_error(first_error: &mut Option<GatewayError>, result: Result<(), GatewayError>) {
     if first_error.is_none() {
         *first_error = result.err();
     }
 }
 
+/// Combine a primary runtime error with any secondary cleanup error encountered while stopping.
 fn with_cleanup_error(runtime: GatewayError, cleanup: Option<GatewayError>) -> GatewayError {
     match cleanup {
         Some(cleanup) => GatewayError::RuntimeCleanup {

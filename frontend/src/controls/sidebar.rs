@@ -1,3 +1,5 @@
+//! Collapsible node control sidebar, command deck, and telemetry rail.
+
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
@@ -14,21 +16,34 @@ use super::UiIcon;
 use crate::topology;
 use crate::wallet::WalletAccount;
 
+/// Derived display values for the control sidebar and its telemetry rail.
 struct ControlSidebarDerived {
+    /// Full local DID string or `"not started"`.
     did_value: String,
+    /// Whether the local DID is available to copy.
     can_copy_did: bool,
+    /// Whether the node is active or currently starting.
     node_control_active: bool,
+    /// Human-readable node lifecycle state (`"ready"`, `"starting"`, or `"offline"`).
     node_state: &'static str,
+    /// CSS class name corresponding to [`Self::node_state`].
     node_state_class: &'static str,
+    /// Active wallet standard label or `"none"`.
     account_standard: String,
+    /// Active account delegation type or `"not authorized"`.
     session_label: String,
+    /// Formatted connected peer count summary.
     peer_summary: String,
+    /// Transport status label (`"linked"` or `"standby"`).
     transport_state: String,
+    /// Shortened DID for the compact telemetry rail.
     rail_did: String,
+    /// Most recent node status message.
     last_signal: String,
 }
 
 impl ControlSidebarDerived {
+    /// Compute derived sidebar display fields from the current [`ControlView`].
     fn from_view(view: &ControlView<'_>) -> Self {
         let can_copy_did = !(**view.did).is_empty();
         Self {
@@ -47,15 +62,23 @@ impl ControlSidebarDerived {
     }
 }
 
+/// Shell-level controls and dialog state injected into the control sidebar.
 pub(crate) struct ControlSidebarShell {
+    /// Rendered workbench trigger and modal control.
     pub(crate) workbench_control: Html,
+    /// Optional WebView launch control rendered in the command deck.
     pub(crate) webview_control: Option<Html>,
+    /// Currently open modal dialog, if any.
     pub(crate) active_dialog: ActiveDialog,
+    /// Callbacks for opening and closing modal dialogs.
     pub(crate) dialog_actions: DialogActions,
+    /// Collapsed state handle for the web console sidebar.
     pub(crate) collapsed: UseStateHandle<bool>,
+    /// Whether the UI is running inside the browser extension side panel.
     pub(crate) extension_mode: bool,
 }
 
+/// Render the node control sidebar, command deck, telemetry rail, and settings dialog.
 pub(crate) fn control_sidebar(
     view: ControlView<'_>,
     actions: LaunchActions,
@@ -93,6 +116,7 @@ pub(crate) fn control_sidebar(
     }
 }
 
+/// Return the full DID string, or `"not started"` when the node is offline.
 fn did_value(did: &UseStateHandle<String>) -> String {
     if (**did).is_empty() {
         "not started".to_string()
@@ -101,6 +125,7 @@ fn did_value(did: &UseStateHandle<String>) -> String {
     }
 }
 
+/// Return the human-readable node lifecycle label.
 fn node_state(can_copy_did: bool, node_starting: bool) -> &'static str {
     if can_copy_did {
         "ready"
@@ -111,6 +136,7 @@ fn node_state(can_copy_did: bool, node_starting: bool) -> &'static str {
     }
 }
 
+/// Return the CSS class for the node lifecycle badge.
 fn node_state_class(can_copy_did: bool, node_starting: bool) -> &'static str {
     if can_copy_did {
         "rail-state ready"
@@ -121,18 +147,21 @@ fn node_state_class(can_copy_did: bool, node_starting: bool) -> &'static str {
     }
 }
 
+/// Return the display label for the connected wallet standard, or `"none"`.
 fn account_standard(account: Option<&WalletAccount>) -> String {
     account
         .map(|account| account.kind.label().to_string())
         .unwrap_or_else(|| "none".to_string())
 }
 
+/// Return the delegation account type label, or `"not authorized"`.
 fn session_label(account: Option<&WalletAccount>) -> String {
     account
         .map(|account| account.account_type.clone())
         .unwrap_or_else(|| "not authorized".to_string())
 }
 
+/// Format the connected peer count for the transport telemetry card.
 fn peer_summary(count: usize) -> String {
     match count {
         0 => "0 connected".to_string(),
@@ -141,6 +170,7 @@ fn peer_summary(count: usize) -> String {
     }
 }
 
+/// Return `"standby"` when no peers are connected, otherwise `"linked"`.
 fn transport_state(peers_empty: bool) -> String {
     if peers_empty {
         "standby".to_string()
@@ -149,6 +179,7 @@ fn transport_state(peers_empty: bool) -> String {
     }
 }
 
+/// Return the abbreviated DID for the sidebar rail, or `"not started"`.
 fn rail_did(did: &UseStateHandle<String>, can_copy_did: bool) -> String {
     if can_copy_did {
         topology::short_did((**did).as_str())
@@ -157,6 +188,7 @@ fn rail_did(did: &UseStateHandle<String>, can_copy_did: bool) -> String {
     }
 }
 
+/// Compute the CSS class list for the outer sidebar `<aside>` element.
 fn control_sidebar_class(extension_mode: bool, collapsed: bool) -> &'static str {
     if extension_mode {
         "control-sidebar extension-action-tabs"
@@ -167,6 +199,7 @@ fn control_sidebar_class(extension_mode: bool, collapsed: bool) -> &'static str 
     }
 }
 
+/// Render the button that collapses or expands the sidebar in web mode.
 fn sidebar_toggle_button(collapsed: bool, toggle_sidebar: Callback<MouseEvent>) -> Html {
     html! {
         <button
@@ -188,6 +221,7 @@ fn sidebar_toggle_button(collapsed: bool, toggle_sidebar: Callback<MouseEvent>) 
     }
 }
 
+/// Render the expanded sidebar body with the command deck and telemetry cards.
 fn sidebar_content(
     derived: &ControlSidebarDerived,
     actions: &LaunchActions,
@@ -210,6 +244,7 @@ fn sidebar_content(
     }
 }
 
+/// Render the header for the sidebar command deck showing the command count.
 fn command_panel_header(has_webview: bool) -> Html {
     html! {
         <div class="command-panel-header">
@@ -222,6 +257,7 @@ fn command_panel_header(has_webview: bool) -> Html {
     }
 }
 
+/// Render the primary Start/Stop node action button.
 fn node_action_button(derived: &ControlSidebarDerived, actions: &LaunchActions) -> Html {
     let label = if derived.node_control_active {
         "Stop"
@@ -254,6 +290,7 @@ fn node_action_button(derived: &ControlSidebarDerived, actions: &LaunchActions) 
     }
 }
 
+/// Render the button that opens the node settings dialog.
 fn settings_button(open_settings_dialog: Callback<MouseEvent>) -> Html {
     html! {
         <button class="secondary action-button command-button settings-button" type="button" aria-label="Settings" title="Settings" onclick={open_settings_dialog}>
@@ -266,6 +303,7 @@ fn settings_button(open_settings_dialog: Callback<MouseEvent>) -> Html {
     }
 }
 
+/// Render the stack of telemetry cards inside the sidebar rail.
 fn rail_telemetry(derived: &ControlSidebarDerived, on_copy_did: Callback<MouseEvent>) -> Html {
     html! {
         <div class="rail-telemetry" aria-label="Node telemetry">
@@ -277,6 +315,7 @@ fn rail_telemetry(derived: &ControlSidebarDerived, on_copy_did: Callback<MouseEv
     }
 }
 
+/// Render the node status, account standard, and delegation telemetry card.
 fn node_rail_card(derived: &ControlSidebarDerived) -> Html {
     html! {
         <section class="rail-card">
@@ -290,6 +329,7 @@ fn node_rail_card(derived: &ControlSidebarDerived) -> Html {
     }
 }
 
+/// Render the local DID telemetry card with a copy action button.
 fn identity_rail_card(derived: &ControlSidebarDerived, on_copy_did: Callback<MouseEvent>) -> Html {
     html! {
         <section class="rail-card">
@@ -309,6 +349,7 @@ fn identity_rail_card(derived: &ControlSidebarDerived, on_copy_did: Callback<Mou
     }
 }
 
+/// Render the transport exchange and peer count telemetry card.
 fn transport_rail_card(derived: &ControlSidebarDerived) -> Html {
     html! {
         <section class="rail-card">
@@ -322,6 +363,7 @@ fn transport_rail_card(derived: &ControlSidebarDerived) -> Html {
     }
 }
 
+/// Render the telemetry card displaying the latest status signal message.
 fn signal_rail_card(last_signal: &str) -> Html {
     html! {
         <section class="rail-card signal-card">
@@ -333,6 +375,7 @@ fn signal_rail_card(last_signal: &str) -> Html {
     }
 }
 
+/// Render the settings modal dialog when [`ActiveDialog::Settings`] is active.
 fn settings_dialog_if_open(
     active_dialog: ActiveDialog,
     view: &ControlView<'_>,

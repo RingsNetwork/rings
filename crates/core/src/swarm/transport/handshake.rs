@@ -136,8 +136,11 @@ pub(crate) type OfferOutcome = OfferReply<Option<CreatedAnswer>, CounterOffer>;
 
 /// Validated handshake continuation state claimed from a pending `Answering` slot.
 pub(super) struct ClaimedContinuation {
+    /// Pending answering generation claimed from the lifecycle registry.
     pub(super) attempt: PendingConnectionAttempt,
+    /// Existing raw transport connection for the peer, if one was already installed.
     pub(super) connection: Option<SwarmConnection>,
+    /// Handshake session identifier bound to the claimed answering attempt.
     pub(super) session_id: [u8; 16],
 }
 

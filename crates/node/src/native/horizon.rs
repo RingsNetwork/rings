@@ -244,7 +244,9 @@ enum HorizonAction {
 ///   most once (`warned_horizon_ms != Some(h)`).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HorizonSupervisorState {
+    /// Horizon timestamp for which the expiring warning has already been emitted.
     warned_horizon_ms: Option<u128>,
+    /// Horizon timestamp for which in-process renewal has already been attempted.
     attempted_horizon_ms: Option<u128>,
 }
 
@@ -311,6 +313,7 @@ fn bounded_horizon_sleep(wait_ms: u128) -> Duration {
     Duration::from_millis(u64::try_from(wait_ms).unwrap_or(u64::MAX)).min(HORIZON_POLL)
 }
 
+/// Logs the signing-horizon mute condition and returns the terminal [`Error`].
 fn log_mute_and_reach(horizon: DelegationHorizon) -> Error {
     tracing::error!(
         expires_at_ms = %horizon.expires_at_ms(),
@@ -321,6 +324,7 @@ fn log_mute_and_reach(horizon: DelegationHorizon) -> Error {
     horizon.reached()
 }
 
+/// Logs the one-time warning when the node's delegation nears its signing horizon.
 fn log_expiring_warning(horizon_ms: u128, remaining_ms: u128) {
     tracing::warn!(
         remaining_ms = %remaining_ms,

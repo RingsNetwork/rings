@@ -111,7 +111,15 @@ impl Node {
     /// entering its logical inbound stage (see
     /// [`InboundTap`](crate::swarm::transport::InboundTap)) in the node's inbox.
     pub fn build(builder: SwarmBuilder) -> Self {
-        let swarm = Arc::new(builder.observer(Arc::new(ActivityObserver)).build());
+        Self::build_with_observer(builder, Arc::new(ActivityObserver))
+    }
+
+    /// Build a test node from `builder` with an explicit [`SwarmObserver`].
+    pub(crate) fn build_with_observer(
+        builder: SwarmBuilder,
+        observer: crate::swarm::observer::SharedSwarmObserver,
+    ) -> Self {
+        let swarm = Arc::new(builder.observer(observer).build());
         let message_rx = swarm.transport.inbound_tap_for_test().subscribe();
         Self {
             swarm,

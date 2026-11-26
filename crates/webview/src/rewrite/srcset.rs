@@ -2,9 +2,12 @@
 
 use crate::error::Result;
 
+/// One tokenized image candidate from an HTML `srcset` attribute.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct SrcsetCandidate {
+    /// Normalized candidate URL token.
     pub(super) url: String,
+    /// Optional trimmed width or pixel-density descriptor.
     pub(super) descriptor: String,
 }
 
@@ -55,6 +58,7 @@ pub(super) fn visit_srcset_candidates(
     Ok(())
 }
 
+/// Advance `cursor` past ASCII whitespace and comma separators.
 fn skip_separators(input: &str, mut cursor: usize) -> usize {
     while let Some(character) = input[cursor..].chars().next() {
         if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ' | ',') {
@@ -65,6 +69,7 @@ fn skip_separators(input: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// Advance `cursor` past ASCII whitespace characters.
 fn skip_whitespace(input: &str, mut cursor: usize) -> usize {
     while let Some(character) = input[cursor..].chars().next() {
         if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ') {
@@ -75,6 +80,7 @@ fn skip_whitespace(input: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// Scan a `srcset` URL token until unquoted ASCII whitespace.
 fn scan_url_token(input: &str, mut cursor: usize) -> usize {
     let mut quote = None;
     let mut escaped = false;
@@ -95,6 +101,7 @@ fn scan_url_token(input: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// Scan a candidate descriptor until the next comma or end of input.
 fn scan_descriptor(input: &str, mut cursor: usize) -> usize {
     while let Some(character) = input[cursor..].chars().next() {
         if character == ',' {
@@ -105,6 +112,7 @@ fn scan_descriptor(input: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// Strip matching outer quotes and unescape backslashes in a candidate URL token.
 fn normalize_url(url: &str) -> String {
     let unquoted = match (url.chars().next(), url.chars().next_back()) {
         (Some('"'), Some('"')) | (Some('\''), Some('\'')) if url.len() >= 2 => {

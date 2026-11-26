@@ -35,7 +35,9 @@ use crate::utils::SystemEntropy;
 
 /// this is from `<https://docs.rs/bls-signatures/latest/src/bls_signatures/signature.rs.html#24>`
 const CSUITE: &[u8] = b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_NUL_";
+/// HKDF salt used when deriving a BLS12-381 scalar from a [`SecretKey`].
 const BLS_KEYGEN_SALT: &[u8] = b"BLS-SIG-KEYGEN-SALT-";
+/// HKDF info domain separator for BLS12-381 key derivation.
 const BLS_KEYGEN_INFO: &[u8] = b"rings-core:bls12-381:keygen:v1";
 
 /// Adapter over `sha2::Sha256` (0.11) for `ark-ff` 0.6's [`DefaultFieldHasher`], which bounds its
@@ -87,10 +89,12 @@ pub fn random_sk() -> Result<SecretKey> {
     random_sk_with_rng(&mut SystemEntropy)
 }
 
+/// Deserialize a compressed arkworks group element from a fixed-size byte array.
 fn from_compressed<T: CanonicalDeserialize, const S: usize>(a: &[u8; S]) -> Result<T> {
     T::deserialize_compressed(&a[..]).map_err(|_| Error::EccDeserializeFailed)
 }
 
+/// Serialize an arkworks group element into a fixed-size compressed byte array.
 fn to_compressed<T: CanonicalSerialize, const S: usize>(s: &T) -> Result<[u8; S]> {
     let mut data: Vec<u8> = vec![];
     s.serialize_compressed(&mut data)

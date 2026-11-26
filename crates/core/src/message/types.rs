@@ -460,6 +460,7 @@ pub enum FindSuccessorReportHandler {
     },
 }
 
+/// Invoke `$macro` with the canonical table of [`Message`] variants, wire indices, categories, and storage-route flags.
 macro_rules! with_message_variants {
     ($macro:ident) => {
         $macro! {
@@ -534,6 +535,7 @@ macro_rules! with_message_variants {
 }
 pub(crate) use with_message_variants;
 
+/// Expand a storage-route marker token to a boolean literal.
 macro_rules! message_requires_storage_route {
     (StorageRoute) => {
         true
@@ -543,6 +545,7 @@ macro_rules! message_requires_storage_route {
     };
 }
 
+/// Extract an optional [`StorageSyncDestination`] from a message variant body according to its storage-route marker.
 macro_rules! message_storage_destination {
     (StorageRoute, $body:expr) => {
         Some($body.destination)
@@ -553,6 +556,7 @@ macro_rules! message_storage_destination {
     }};
 }
 
+/// Generate the [`Message`] enum, `MessageKind`, and wire classification helpers from the variant table.
 macro_rules! define_message_model {
     ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident, $storage_route:ident ),+ $(,)?) => {
         /// A collection MessageType use for unified management.

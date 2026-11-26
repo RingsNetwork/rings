@@ -1,11 +1,13 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 #![cfg_attr(
     test,
     allow(
         clippy::expect_used,
         clippy::indexing_slicing,
+        clippy::missing_docs_in_private_items,
         clippy::panic,
         clippy::unwrap_used
     )
@@ -33,6 +35,7 @@ pub mod native;
 pub mod observability;
 pub mod onion;
 pub mod online;
+/// Global and per-peer quota tracking for bounded queues and sessions.
 mod peer_quota;
 pub mod prelude;
 pub mod processor;
@@ -45,6 +48,7 @@ pub mod remote_endpoint;
 mod rpc_dto;
 mod rpc_impl;
 pub mod seed;
+/// Synchronous mutex locking helpers with unified poison-error mapping.
 mod sync_lock;
 mod tasks;
 #[cfg(all(test, rings_native))]

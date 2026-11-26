@@ -1,6 +1,7 @@
 use super::border;
 use super::media;
 
+/// Appends all responsive media-query layout overrides to `css`.
 pub(super) fn append(css: &mut String) {
     append_wide_breakpoints(css);
     append_mid_breakpoint(css);
@@ -8,6 +9,7 @@ pub(super) fn append(css: &mut String) {
     append_small_breakpoint(css);
 }
 
+/// Appends wide-viewport (`<= 1260px` and `<= 1080px`) responsive rules.
 fn append_wide_breakpoints(css: &mut String) {
     media(css, "(max-width: 1260px)", &[
         (
@@ -39,6 +41,7 @@ fn append_wide_breakpoints(css: &mut String) {
     ]);
 }
 
+/// Appends mid-width (`<= 860px`) responsive layout and navigation rules.
 fn append_mid_breakpoint(css: &mut String) {
     media(
         css,
@@ -149,11 +152,13 @@ fn append_mid_breakpoint(css: &mut String) {
     );
 }
 
+/// Appends mobile (`<= 720px`) navigation and landing page overrides.
 fn append_mobile_breakpoint(css: &mut String) {
     append_mobile_navigation(css);
     append_mobile_landing(css);
 }
 
+/// Appends mobile (`<= 720px`) header and bottom navigation bar overrides.
 fn append_mobile_navigation(css: &mut String) {
     media(
         css,
@@ -244,6 +249,7 @@ fn append_mobile_navigation(css: &mut String) {
     );
 }
 
+/// Appends mobile (`<= 720px`) landing page section overrides.
 fn append_mobile_landing(css: &mut String) {
     media(
         css,
@@ -297,6 +303,7 @@ fn append_mobile_landing(css: &mut String) {
     );
 }
 
+/// Appends narrow-phone (`<= 520px`) responsive layout overrides.
 fn append_small_breakpoint(css: &mut String) {
     media(css, "(max-width: 520px)", &[
         (

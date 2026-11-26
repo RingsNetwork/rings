@@ -16,34 +16,61 @@ use crate::prelude::rings_core::dht::RelayReplication;
 
 /// ProcessorBuilder is used to initialize a [Processor] instance.
 pub struct ProcessorBuilder {
+    /// Overlay network identifier.
     pub(in crate::processor) network_id: u32,
+    /// Abstract network parameters customizing this node's transport.
     pub(in crate::processor) network_parameters: Arc<dyn NodeNetworkParameters>,
+    /// Initial delegated session key authorizing this node.
     pub(in crate::processor) delegatee_key: DelegateeKey,
+    /// Optional explicit onion process epoch; generated fresh when `None`.
     pub(in crate::processor) onion_process_epoch: Option<OnionProcessEpoch>,
+    /// Clock capability used by the swarm and registration daemons.
     pub(in crate::processor) clock: SharedClock,
+    /// Random number generator capability used by the swarm and onion router.
     pub(in crate::processor) rng: SharedRng,
+    /// Optional persistent storage backend for owned DHT entries.
     pub(in crate::processor) storage: Option<EntryStorage>,
+    /// Optional persistent storage backend for relayed DHT entries.
     pub(in crate::processor) relay_storage: Option<EntryStorage>,
+    /// Optional persistent storage backend for DHT removal tombstones.
     pub(in crate::processor) removal_storage: Option<RemovalStorage>,
+    /// Optional replication configuration for relayed DHT entries.
     pub(in crate::processor) relay_replication: Option<RelayReplication>,
+    /// Optional persistent storage backend for replay-protection markers.
     pub(in crate::processor) replay_storage: Option<ReplayStorage>,
+    /// Per-origin quota limits enforced on incoming DHT storage writes.
     pub(in crate::processor) origin_quota: OriginQuotaConfig,
+    /// Optional persistent storage backend for onion entry-guard selection state.
     pub(in crate::processor) onion_entry_guard_storage: Option<OnionEntryGuardStorage>,
+    /// Optional periodic peer measurement and provisional-evidence tracker.
     pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     /// The release witnesses of the file stores the processor is built over (#1085).
     pub(in crate::processor) stores_released: StoresReleased,
+    /// Interval between chord ring stabilization ticks.
     pub(in crate::processor) stabilize_interval: Duration,
+    /// Interval between online-node descriptor heartbeats.
     pub(in crate::processor) online_node_heartbeat_interval: Duration,
+    /// Freshness TTL of each published online-node descriptor.
     pub(in crate::processor) online_node_ttl: Duration,
+    /// Runtime family advertised in the online-node descriptor.
     pub(in crate::processor) online_node_type: OnlineNodeType,
+    /// Whether this node publishes its presence descriptor to the DHT.
     pub(in crate::processor) advertise_presence: bool,
+    /// Number of DHT virtual-node positions owned by this node.
     pub(in crate::processor) dht_virtual_nodes: u16,
+    /// Onion routing role and exit offer advertised by this node.
     pub(in crate::processor) onion_role: OnionRole<OnionExitOffer>,
+    /// Interval between onion-exit descriptor heartbeats.
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
+    /// Freshness TTL of each published onion-exit descriptor.
     pub(in crate::processor) onion_exit_ttl: Duration,
+    /// Cover-traffic floor for idle onion links.
     pub(in crate::processor) onion_idle_floor: OnionIdleFloor,
+    /// Socket binding and peer-IP admission settings for native `onion::udp` exits.
     pub(in crate::processor) onion_udp_bind_config: crate::onion::OnionUdpBindConfig,
+    /// Maximum number of entries in the Chord finger table.
     pub(in crate::processor) dht_finger_table_size: usize,
+    /// Limits bounding chunked message reassembly buffers.
     pub(in crate::processor) reassembly_limits: ReassemblyLimits,
     /// An observer chained after the processor's own `Observability`.
     pub(in crate::processor) observer: Option<rings_core::swarm::observer::SharedSwarmObserver>,
@@ -493,7 +520,9 @@ impl ProcessorBuilder {
 
 /// An observer that forwards every observation to two observers, in order.
 struct ChainedObserver {
+    /// Observer invoked first for each swarm event.
     first: rings_core::swarm::observer::SharedSwarmObserver,
+    /// Observer invoked second for each swarm event.
     second: rings_core::swarm::observer::SharedSwarmObserver,
 }
 

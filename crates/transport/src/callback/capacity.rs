@@ -35,6 +35,7 @@ pub(crate) fn data_channel_label(lane: ChannelLane) -> String {
     format!("{DATA_CHANNEL_LABEL_PREFIX}{}", lane.index())
 }
 
+/// Return whether an inbound wire frame of `bytes` exceeds [`MAX_CHANNEL_MESSAGE_SIZE`](crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE).
 pub(crate) const fn inbound_frame_exceeds_protocol_ceiling(bytes: usize) -> bool {
     bytes > crate::core::transport::MAX_CHANNEL_MESSAGE_SIZE
 }
@@ -48,6 +49,7 @@ pub struct AdmittedInboundFrame {
 }
 
 impl AdmittedInboundFrame {
+    /// Borrow the decoded payload bytes of this admitted frame.
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn payload(&self) -> &Bytes {
         &self.payload

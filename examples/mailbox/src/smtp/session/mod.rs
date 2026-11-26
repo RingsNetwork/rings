@@ -200,11 +200,17 @@ pub enum Next {
 /// One SMTP session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Session {
+    /// Operational role determining authentication and recipient rules.
     role: Role,
+    /// Server hostname advertised in SMTP greetings.
     host: String,
+    /// Maximum accepted message size in bytes.
     max_size: usize,
+    /// Maximum number of recipients accepted per transaction.
     max_recipients: usize,
+    /// Current STARTTLS availability and negotiation state.
     tls: Tls,
+    /// Current protocol phase of the SMTP state machine.
     phase: Phase,
 }
 

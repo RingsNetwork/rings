@@ -40,13 +40,24 @@ pub struct DwebResponse {
     pub body: String,
 }
 
+/// JSON wire message exchanged over the `dweb` protocol namespace.
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind")]
 enum DwebMsg {
+    /// Request for a hosted page at `path`.
     #[serde(rename = "req")]
-    Req { path: String },
+    Req {
+        /// Requested page path.
+        path: String,
+    },
+    /// Response carrying the HTML `body` for `path`.
     #[serde(rename = "res")]
-    Res { path: String, body: String },
+    Res {
+        /// Page path that was served.
+        path: String,
+        /// Rendered HTML body.
+        body: String,
+    },
 }
 
 /// Register the `dweb` namespace on a provider and return the owned callback closure.
@@ -65,6 +76,7 @@ pub fn register(
     Ok(handler)
 }
 
+/// Process an incoming `dweb` protocol event and return the updated state and outbound effects.
 fn handle(
     ctx: &JsValue,
     event: &JsValue,
@@ -91,11 +103,25 @@ fn handle(
     result.into()
 }
 
+/// Decoded inbound `dweb` protocol message.
 enum IncomingDweb {
-    Request { from: String, path: String },
-    Response { path: String, body: String },
+    /// Inbound page request from a remote peer.
+    Request {
+        /// Sender DID.
+        from: String,
+        /// Requested page path.
+        path: String,
+    },
+    /// Inbound page response from a remote peer.
+    Response {
+        /// Page path returned by the remote peer.
+        path: String,
+        /// HTML body returned by the remote peer.
+        body: String,
+    },
 }
 
+/// Decode a JS protocol event into an [`IncomingDweb`] message.
 fn decode_event(event: &JsValue) -> Option<IncomingDweb> {
     let payload = Reflect::get(event, &JsValue::from_str("payload")).ok()?;
     let bytes = Uint8Array::new(&payload).to_vec();
@@ -111,6 +137,7 @@ fn decode_event(event: &JsValue) -> Option<IncomingDweb> {
     }
 }
 
+/// Build an outbound effect object serving the hosted page for `path` back to `from`.
 fn response_effect(from: &str, path: &str, site: &Site) -> Option<JsValue> {
     let body = site
         .borrow()

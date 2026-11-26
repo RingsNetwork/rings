@@ -14,6 +14,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils;
 
+/// Format canonical delegation fields into the v1 signable payload string.
 pub(super) fn pack_delegation_parts(
     algorithm: &str,
     delegator_did: Did,
@@ -24,6 +25,7 @@ pub(super) fn pack_delegation_parts(
     format!("rings-delegation-v1\n{algorithm}\n{delegator_did}\n{delegatee_did}\n{ts_ms}\n{ttl_ms}")
 }
 
+/// Format a delegator [`Account`] and delegation parameters into the v1 signable payload string.
 pub(super) fn pack_delegation(
     delegator: &Account,
     delegatee_did: Did,

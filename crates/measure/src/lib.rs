@@ -1,4 +1,6 @@
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 
 //! Pure local peer measurement algorithms.
 //!
@@ -35,6 +37,7 @@ pub use event::MeasurementEvent;
 pub use event::Metric;
 pub use evidence::EvidenceAccountPair;
 pub use evidence::EvidenceAdmission;
+pub use evidence::EvidenceAdmissionDelta;
 pub use evidence::EvidenceAdmissionReport;
 pub use evidence::EvidenceCounters;
 pub use evidence::EvidenceDigest;
@@ -46,6 +49,7 @@ pub use evidence::EvidenceLoadReport;
 pub use evidence::EvidencePage;
 pub use evidence::EvidenceReplayMarker;
 pub use evidence::EvidenceSnapshot;
+pub use evidence::EvidenceStorageEntry;
 pub use evidence::ProvisionalEvidenceRecord;
 pub use evidence::ProvisionalEvidenceStore;
 pub use evidence::EVIDENCE_SNAPSHOT_VERSION;

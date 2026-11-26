@@ -1,3 +1,5 @@
+//! Pure Unix timestamp value type supplied by runtime adapters.
+
 use serde::Deserialize;
 use serde::Serialize;
 

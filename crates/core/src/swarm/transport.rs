@@ -27,6 +27,7 @@ use crate::delegation::Delegation;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::StorageSyncDeliveryCursor;
+use crate::dht::StorageSyncPurpose;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
@@ -42,9 +43,11 @@ use crate::swarm::observer::SharedSwarmObserver;
 use crate::utils::SharedClock;
 use crate::utils::SharedRng;
 
+/// Admitted peer connection wrappers and generation-bound handles.
 mod connection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 mod deadline_hold;
+/// Outbound frame delivery, chunking, and stall handling.
 mod delivery;
 pub(crate) mod egress;
 #[cfg(test)]
@@ -54,15 +57,21 @@ mod handshake;
 mod inbound_tap;
 mod link_control;
 mod liveness;
+/// Peer quality measurement and disconnect-duration tracking.
 mod measurement;
 mod outbound;
+/// Payload wire encoding, framing, and first-frame admission watching.
 mod payload_send;
 mod peer_operation;
+/// Pending handshake slots and generation tracking.
 mod pending;
+/// Connection readiness checks and transition notifications.
 mod readiness;
 mod rerouting;
 mod retention;
+/// DHT storage lookup coordination and answer clocks.
 mod storage_lookup;
+/// Periodic and repair DHT storage synchronization.
 mod storage_sync;
 pub(crate) mod store_reports;
 mod transaction_replay;
@@ -70,6 +79,7 @@ mod transaction_replay;
 pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatchStep;
+/// Transport handshake and delivery timeout constants.
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -182,31 +192,49 @@ pub(crate) struct SwarmTransportParts {
     pub(crate) rng: SharedRng,
 }
 
+/// Transport and connection-lifecycle coordinator backing a [`crate::swarm::Swarm`].
 pub struct SwarmTransport {
+    /// Network identifier separating independent overlay rings.
     pub(crate) network_id: u32,
+    /// Underlying transport backend managing physical connections.
     transport: SharedTransport,
+    /// Mutex serializing delegatee key rotation prepare/commit phases.
     delegatee_rotation_lock: Mutex<()>,
+    /// Active delegatee signing key for this node.
     delegatee_key: RwLock<DelegateeKey>,
+    /// Local Chord peer ring state and storage tables.
     pub(crate) dht: Arc<PeerRing>,
+    /// Replication factor for DHT storage entries.
     storage_redundancy: u16,
+    /// Number of virtual ring positions per storage owner.
     dht_virtual_nodes: u16,
+    /// Memory and timeout limits for inbound chunk reassembly.
     reassembly_limits: ReassemblyLimits,
+    /// Node-wide and per-peer inbound admission capacity ledger.
     inbound_capacity: Arc<InboundCapacity>,
+    /// Boundary serializing connection admission, retirement, and DHT membership transitions.
     connection_lifecycle: ConnectionLifecycleBoundary,
     /// Core's side of the application boundary (#935).
     application: ApplicationPort,
+    /// Per-peer locks serializing concurrent connection-creation attempts.
     connection_creation: PeerOperationLocks,
+    /// Shared per-peer connection lifecycle table tracking active and pending generations.
     peer_lifecycles: SharedConnectionLifecycles,
+    /// Pending finger-table update dials awaiting completion.
     pending_finger_updates: Mutex<PendingFingerUpdates>,
+    /// Per-peer liveness probe and activity state.
     peer_liveness: Mutex<PeerLivenessMap>,
     /// The exclusive right to run a probe pass; see [`ProbePass`].
     probe_pass: FuturesMutex<()>,
+    /// Observed storage lookup responses keyed by lookup transaction.
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     /// The reply marker of storage lookups; see [`StorageAnswerClock`].
     storage_answer_clock: StorageAnswerClock,
+    /// Pending storage synchronization acknowledgements keyed by peer and batch.
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     /// The store reports this node awaits for the reported operations it sent (#866).
     pub(crate) store_reports: self::store_reports::StoreReports,
+    /// Flag indicating that a storage repair pass has been requested.
     storage_repair_requested: AtomicBool,
     /// Test builds: the frames this node sent and received; see [`FrameLedger`].
     #[cfg(test)]
@@ -214,13 +242,21 @@ pub struct SwarmTransport {
     /// Test builds: every payload entering the logical inbound stage; see [`InboundTap`].
     #[cfg(test)]
     inbound_tap: InboundTap,
+    /// Cursor tracking progress across incremental storage repair passes.
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
+    /// Cooldowns suppressing redundant unchanged-topology additive storage repairs.
+    storage_repair_cooldowns: Mutex<StorageRepairCooldowns>,
+    /// Per-peer outbound frame schedulers.
     outbound_schedulers: OutboundSchedulers,
     /// The node's watcher of every detached send's first-frame admission.
     admission_watcher: payload_send::AdmissionWatcher,
+    /// Per-peer recorded disconnect timestamps for measurement and eviction.
     measured_disconnects: Mutex<MeasuredDisconnectMap>,
+    /// Exponential dial backoff state for failed candidate peers.
     candidate_dial_backoff: Mutex<CandidateDialBackoffMap>,
+    /// Optional peer quality measurement backend.
     measure: Option<MeasureImpl>,
+    /// Durable and volatile transaction replay deduplication engine.
     transaction_replay: Arc<TransactionReplay>,
     /// Synchronous bounded sink for semantic message and lookup activity.
     observer: SharedSwarmObserver,
@@ -230,31 +266,60 @@ pub struct SwarmTransport {
     rng: SharedRng,
 }
 
+/// Map from peer DID to its recorded disconnect timestamp and generation.
 type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
 
+/// Disconnect timestamp recorded for a specific connection generation of a peer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MeasuredDisconnect {
+    /// Connection generation that transitioned to disconnected.
     generation: u64,
+    /// Epoch timestamp in milliseconds when the disconnect was recorded.
     disconnected_since_ms: i64,
 }
 
+/// Initial backoff delay in milliseconds after a failed candidate dial.
 const CANDIDATE_DIAL_BACKOFF_BASE_MS: i64 = 30_000;
+/// Maximum backoff delay in milliseconds for repeated candidate dial failures.
 const CANDIDATE_DIAL_BACKOFF_MAX_MS: i64 = 300_000;
+/// Maximum number of peers retained in the candidate dial backoff map.
 const CANDIDATE_DIAL_BACKOFF_CAPACITY: usize = 64;
 
+/// Cooldown before resending the same steady-state [`StorageSyncPurpose::AdditiveRepair`]
+/// delivery when topology has not changed.
+pub(crate) const STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS: i64 = 180_000;
+/// Maximum number of repair delivery cursors tracked in [`StorageRepairCooldowns`].
+const STORAGE_REPAIR_COOLDOWN_MAX_ENTRIES: usize = 512;
+
+/// Per-epoch cooldown state suppressing redundant unchanged-topology additive repairs.
+#[derive(Debug, Default)]
+struct StorageRepairCooldowns {
+    /// Topology epoch for which `sent` timestamps were recorded.
+    topology_epoch: u64,
+    /// Last send timestamp (ms) keyed by destination/purpose cursor.
+    sent: BTreeMap<StorageSyncDeliveryCursor, i64>,
+}
+
+/// Backoff state for one candidate peer after consecutive dial failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CandidateDialBackoff {
+    /// Number of consecutive dial failures recorded for this peer.
     failures: u32,
+    /// Earliest epoch timestamp in milliseconds at which the peer may be dialed again.
     retry_after_ms: i64,
 }
 
+/// Map from candidate peer DID to its dial backoff state.
 type CandidateDialBackoffMap = BTreeMap<Did, CandidateDialBackoff>;
 
 /// Runtime settings used by [`SwarmTransport`].
 #[derive(Clone, Copy)]
 pub(crate) struct SwarmTransportSettings {
+    /// Replication factor for DHT storage entries.
     storage_redundancy: u16,
+    /// Number of virtual ring positions per storage owner.
     dht_virtual_nodes: u16,
+    /// Memory and timeout limits for inbound chunk reassembly.
     reassembly_limits: ReassemblyLimits,
 }
 
@@ -280,7 +345,9 @@ impl SwarmTransportSettings {
 /// therefore private to the generation-bound [`AdmittedConnection`] workflow.
 #[derive(Clone)]
 pub struct SwarmConnection {
+    /// Remote peer DID associated with this physical connection.
     peer: Did,
+    /// Underlying transport connection reference.
     connection: ConnectionRef<DynConnection>,
     /// Test builds: the owning transport's frame counts, charged by [`Self::send_data`].
     #[cfg(test)]
@@ -288,6 +355,7 @@ pub struct SwarmConnection {
 }
 
 impl SwarmTransport {
+    /// Lock and return the map of measured per-peer disconnect timestamps.
     fn measured_disconnects(&self) -> Result<MutexGuard<'_, MeasuredDisconnectMap>> {
         self.measured_disconnects
             .lock()
@@ -338,6 +406,7 @@ impl SwarmTransport {
             #[cfg(test)]
             inbound_tap: InboundTap::default(),
             storage_repair_cursor: Mutex::new(None),
+            storage_repair_cooldowns: Mutex::new(StorageRepairCooldowns::default()),
             outbound_schedulers: OutboundSchedulers::new_with_clock(measure.clone(), clock.clone()),
             admission_watcher: payload_send::AdmissionWatcher::default(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -503,6 +572,84 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Whether steady-state [`StorageSyncPurpose::AdditiveRepair`] for `cursor` is still inside
+    /// its unchanged-topology rebroadcast cooldown at `(topology_epoch, now_ms)`.
+    ///
+    /// [`StorageSyncPurpose::OwnershipHandoff`] is never throttled, and advancing
+    /// `topology_epoch` clears all cooldown entries immediately.
+    pub(crate) fn is_storage_repair_cooled_down(
+        &self,
+        cursor: &StorageSyncDeliveryCursor,
+        topology_epoch: u64,
+        now_ms: i64,
+    ) -> Result<bool> {
+        if cursor.purpose() != StorageSyncPurpose::AdditiveRepair {
+            return Ok(false);
+        }
+        let mut cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if cooldowns.topology_epoch != topology_epoch {
+            cooldowns.sent.clear();
+            cooldowns.topology_epoch = topology_epoch;
+            return Ok(false);
+        }
+        Ok(cooldowns.sent.get(cursor).is_some_and(|&sent_at| {
+            now_ms >= sent_at
+                && now_ms.saturating_sub(sent_at) < STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS
+        }))
+    }
+
+    /// Record that steady-state [`StorageSyncPurpose::AdditiveRepair`] for `cursor` was sent at
+    /// `(topology_epoch, now_ms)`, pruning expired entries and bounding table size.
+    pub(crate) fn record_storage_repair_sent(
+        &self,
+        cursor: StorageSyncDeliveryCursor,
+        topology_epoch: u64,
+        now_ms: i64,
+    ) -> Result<()> {
+        if cursor.purpose() != StorageSyncPurpose::AdditiveRepair {
+            return Ok(());
+        }
+        let mut cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        if cooldowns.topology_epoch != topology_epoch {
+            cooldowns.sent.clear();
+            cooldowns.topology_epoch = topology_epoch;
+        }
+        cooldowns.sent.retain(|_, &mut sent_at| {
+            now_ms >= sent_at
+                && now_ms.saturating_sub(sent_at) < STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS
+        });
+        if cooldowns.sent.len() >= STORAGE_REPAIR_COOLDOWN_MAX_ENTRIES
+            && !cooldowns.sent.contains_key(&cursor)
+        {
+            if let Some(oldest) = cooldowns
+                .sent
+                .iter()
+                .min_by_key(|(_, &sent_at)| sent_at)
+                .map(|(key, _)| key.clone())
+            {
+                cooldowns.sent.remove(&oldest);
+            }
+        }
+        cooldowns.sent.insert(cursor, now_ms);
+        Ok(())
+    }
+
+    /// Return the current entry count in the repair cooldown table for unit tests.
+    #[cfg(test)]
+    pub(crate) fn storage_repair_cooldown_len_for_test(&self) -> Result<usize> {
+        let cooldowns = self
+            .storage_repair_cooldowns
+            .lock()
+            .map_err(|_| Error::LockPoisoned)?;
+        Ok(cooldowns.sent.len())
+    }
+
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn storage_repair_cursor_for_simulation(&self) -> Result<Option<String>> {
         let cursor = self
@@ -591,6 +738,7 @@ impl SwarmTransport {
         self.dht_virtual_nodes
     }
 
+    /// Return the DHT protocol mode advertised and required by this transport.
     pub(crate) fn dht_protocol_mode(&self) -> DhtProtocolMode {
         DhtProtocolMode::new(
             self.network_id,
@@ -614,6 +762,7 @@ impl SwarmTransport {
         self.reassembly_limits
     }
 
+    /// Return a shared handle to the node-wide inbound capacity ledger.
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
     }
@@ -733,6 +882,7 @@ impl SwarmTransport {
             .and_then(|attempt| self.peer_disconnected_since_attempt_ms(attempt))
     }
 
+    /// Clear any recorded disconnect timestamp for `attempt` if it is still the active slot.
     pub(crate) fn clear_peer_disconnected(&self, attempt: PendingConnectionAttempt) {
         if let Err(error) = self.with_active_slot(attempt, || {
             self.measured_disconnects()?.remove(&attempt.peer);
@@ -824,10 +974,12 @@ impl SwarmConnection {
         delivery
     }
 
+    /// Close the underlying physical transport connection.
     async fn close(&self) -> Result<()> {
         self.connection.close().await.map_err(Into::into)
     }
 
+    /// Return the current physical transport connection state.
     pub fn connection_state(&self) -> TransportConnectionState {
         self.connection.connection_state()
     }

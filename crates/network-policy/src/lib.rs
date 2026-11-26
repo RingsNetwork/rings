@@ -1,4 +1,6 @@
 #![deny(missing_docs)]
+#![deny(clippy::missing_docs_in_private_items)]
+#![cfg_attr(test, allow(clippy::missing_docs_in_private_items))]
 //! Shared fail-closed admission predicates for network egress targets.
 //!
 //! URL admission and DNS resolution are separate proof obligations. This crate rejects
@@ -39,6 +41,7 @@ pub fn validate_public_url_host(url: &Url) -> Result<(), PublicHostError> {
     }
 }
 
+/// Ensure an IP literal is globally routable public unicast.
 fn validate_public_ip(address: IpAddr) -> Result<(), PublicHostError> {
     if is_public_ip(address) {
         Ok(())
@@ -47,6 +50,7 @@ fn validate_public_ip(address: IpAddr) -> Result<(), PublicHostError> {
     }
 }
 
+/// Reject empty, single-label, or local-suffix domain names.
 fn validate_public_domain(domain: &str) -> Result<(), PublicHostError> {
     let domain = domain.trim_end_matches('.').to_ascii_lowercase();
     let is_single_label = !domain.contains('.');
@@ -136,6 +140,7 @@ pub const fn is_public_ipv4([first, second, third, _fourth]: [u8; 4]) -> bool {
     )
 }
 
+/// Extract an IPv4 address embedded in an IPv4-compatible, IPv4-mapped, NAT64, or 6to4 IPv6 address.
 const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
     let compatible_prefix = octets[0] == 0
         && octets[1] == 0
@@ -175,6 +180,7 @@ const fn embedded_ipv4(octets: [u8; 16]) -> Option<[u8; 4]> {
     None
 }
 
+/// Return whether an IPv4 address is forbidden as a TURN-over-TCP egress target.
 const fn is_forbidden_turn_tcp_ipv4(v4: Ipv4Addr, host_is_explicit_loopback: bool) -> bool {
     let [first, ..] = v4.octets();
     v4.is_unspecified()

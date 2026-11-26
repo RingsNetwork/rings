@@ -79,7 +79,9 @@ pub(crate) enum OnionProxyFailureKind {
 /// Onion proxy error with a stable failure class and a diagnostic message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OnionProxyError {
+    /// Stable failure category used for browser-facing error handling.
     kind: OnionProxyFailureKind,
+    /// Human-readable diagnostic message.
     message: String,
 }
 
@@ -179,6 +181,7 @@ impl OnionProxyHttpRequest {
         Ok(object.into())
     }
 
+    /// Convert this frontend request into a core [`OnionHttpsClientRequest`].
     fn client_request(&self) -> OnionHttpsClientRequest {
         OnionHttpsClientRequest {
             method: self.method.clone(),
@@ -332,6 +335,7 @@ pub(crate) async fn request(
     })
 }
 
+/// Convert a core [`NodeOnionProxyRoute`] into a displayable [`OnionProxyRoute`].
 fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
     OnionProxyRoute {
         service: route.exit_service().to_string(),
@@ -345,6 +349,7 @@ fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
     }
 }
 
+/// Validate an HTTPS URL and extract its `host:port` target authority (defaulting to port 443).
 fn target_authority(url: &str) -> Result<String, String> {
     let parsed = Url::new(url).map_err(js_error_label)?;
     if parsed.protocol() != "https:" {
@@ -363,6 +368,7 @@ fn target_authority(url: &str) -> Result<String, String> {
     }
 }
 
+/// Parse an optional JS route field, returning `None` for `null` or `undefined`.
 fn optional_route_js(value: JsValue) -> Result<Option<OnionProxyRoute>, String> {
     if value.is_null() || value.is_undefined() {
         return Ok(None);
@@ -370,6 +376,7 @@ fn optional_route_js(value: JsValue) -> Result<Option<OnionProxyRoute>, String> 
     OnionProxyRoute::from_js(&value).map(Some)
 }
 
+/// Read and trim a required non-empty string property from a JS object.
 fn required_string_field(
     object: &JsValue,
     field: &'static str,
@@ -383,6 +390,7 @@ fn required_string_field(
     }
 }
 
+/// Parse a JS numeric HTTP status code into a `u16`.
 fn parse_status(value: JsValue) -> Result<u16, String> {
     let Some(status) = value.as_f64() else {
         return Err("response status must be a number".to_string());
@@ -396,6 +404,7 @@ fn parse_status(value: JsValue) -> Result<u16, String> {
     Ok(status as u16)
 }
 
+/// Parse a JS array of `[name, value]` header pairs.
 fn parse_headers_js(value: JsValue) -> Result<Vec<(String, String)>, String> {
     if value.is_null() || value.is_undefined() {
         return Ok(Vec::new());
@@ -420,6 +429,7 @@ fn parse_headers_js(value: JsValue) -> Result<Vec<(String, String)>, String> {
     Ok(headers)
 }
 
+/// Parse a JS array of strings into a `Vec<String>`.
 fn parse_string_array(value: JsValue) -> Result<Vec<String>, String> {
     let array = Array::from(&value);
     let mut out = Vec::new();
@@ -433,6 +443,7 @@ fn parse_string_array(value: JsValue) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// Parse a route exit DID from either a string or an object with a `did` field.
 fn parse_route_exit_js(value: &JsValue) -> Result<String, String> {
     if let Some(exit) = value.as_string() {
         return Ok(exit);
@@ -440,6 +451,7 @@ fn parse_route_exit_js(value: &JsValue) -> Result<String, String> {
     js_string_field(value, "did")
 }
 
+/// Parse an optional JS body value, returning an empty byte vector for `null` or `undefined`.
 fn optional_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     if value.is_null() || value.is_undefined() {
         return Ok(Vec::new());
@@ -447,6 +459,7 @@ fn optional_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     parse_body_js(value)
 }
 
+/// Parse a JS body value (string, `Uint8Array`, or numeric byte array) into raw bytes.
 fn parse_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     if let Some(body) = value.as_string() {
         return Ok(body.into_bytes());
@@ -470,6 +483,7 @@ fn parse_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     Ok(body)
 }
 
+/// Serialize HTTP header pairs into a JS array of `[name, value]` tuples.
 fn headers_js(headers: &[(String, String)]) -> Array {
     let array = Array::new();
     for (name, value) in headers {
@@ -481,6 +495,7 @@ fn headers_js(headers: &[(String, String)]) -> Array {
     array
 }
 
+/// Serialize raw body bytes into a JS array of numbers.
 fn body_js(body: &[u8]) -> Array {
     let array = Array::new();
     for byte in body {
@@ -489,6 +504,7 @@ fn body_js(body: &[u8]) -> Array {
     array
 }
 
+/// Serialize a slice of Rust strings into a JS `Array`.
 fn string_array_js(values: &[String]) -> Array {
     let array = Array::new();
     for value in values {

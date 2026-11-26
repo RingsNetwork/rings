@@ -29,7 +29,7 @@ fn append_console_shell(css: &mut String, theme: Theme) {
         ("pointer-events", "none"),
         (
             "background-image",
-            "url(\"assets/images/rings-market-hero.png\")",
+            "url(\"assets/images/rings-market-hero.webp\")",
         ),
         ("background-position", "center"),
         ("background-size", "cover"),
@@ -93,7 +93,7 @@ fn append_console_header(css: &mut String, theme: Theme) {
 /// Appends network stage, node band, and extension-mode stage rules.
 fn append_console_stage(css: &mut String) {
     rule(css, ".topology-shell .node-band", &[("background", "linear-gradient(90deg, rgba(180, 35, 24, 0.06), transparent 42%, rgba(15, 118, 110, 0.05)), rgba(255, 250, 240, 0.9)")]);
-    rule(css, ".topology-shell .network-stage", &[("background", "linear-gradient(90deg, rgba(243, 234, 216, 0.44) 0%, rgba(243, 234, 216, 0.28) 46%, rgba(243, 234, 216, 0.08) 100%), linear-gradient(180deg, rgba(255, 250, 240, 0.3), rgba(255, 246, 230, 0.18)), url(\"assets/images/rings-market-hero.png\") center / cover no-repeat"), ("backdrop-filter", "blur(2px)")]);
+    rule(css, ".topology-shell .network-stage", &[("background", "linear-gradient(90deg, rgba(243, 234, 216, 0.44) 0%, rgba(243, 234, 216, 0.28) 46%, rgba(243, 234, 216, 0.08) 100%), linear-gradient(180deg, rgba(255, 250, 240, 0.3), rgba(255, 246, 230, 0.18)), url(\"assets/images/rings-market-hero.webp\") center / cover no-repeat"), ("backdrop-filter", "blur(2px)")]);
     rule(css, ".topology-shell .network-stage:has(.modal-shell)", &[
         ("backdrop-filter", "none"),
     ]);

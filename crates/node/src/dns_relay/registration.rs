@@ -34,9 +34,13 @@ use crate::registration::RegistrationTask;
 /// the heartbeat that publishes them.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceOffer {
+    /// Served ports mapped to the proxy protocol expected by each local service.
     ports: BTreeMap<u16, ProxyProtocol>,
+    /// TXT records published alongside the served ports.
     txt: Vec<ServedTxt>,
+    /// Interval between periodic descriptor publication heartbeats.
     heartbeat_interval: Duration,
+    /// Lifetime of each published descriptor before expiry.
     ttl: Duration,
 }
 
@@ -104,7 +108,9 @@ impl ServiceOffer {
 /// The registration task publishing a node's service descriptor.
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceRegistration {
+    /// Validated service offer being advertised.
     offer: ServiceOffer,
+    /// DHT publisher managing heartbeat cadence and lease renewal.
     publisher: DhtRegistrationPublisher<[ServiceDescriptor; 1]>,
 }
 

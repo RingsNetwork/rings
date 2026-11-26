@@ -134,6 +134,7 @@ pub struct EntryDot {
 }
 
 impl EntryDot {
+    /// Construct an [`EntryDot`] for `version` and element `index`, failing if `index` overflows `u32`.
     pub(super) fn for_index(version: EntryVersion, index: usize) -> Result<Self> {
         let index = u32::try_from(index).map_err(|_| Error::EntryDotIndexOutOfBounds { index })?;
         Ok(Self { version, index })
@@ -198,11 +199,16 @@ impl EntryTombstone {
     }
 }
 
+/// Sentinel logical timestamp marking packed wire metadata dots.
 const SENTINEL_TIME_MS: u128 = u64::MAX as u128;
+/// Sentinel counter identifying a packed co-author add-dot marker.
 const CO_DOT_SENTINEL_COUNTER: u32 = u32::MAX;
+/// Sentinel counter identifying a packed co-author reset-floor marker.
 const CO_REGISTER_SENTINEL_COUNTER: u32 = u32::MAX - 1;
+/// Sentinel counter identifying the start of a packed author-proof bundle.
 pub(super) const PROOF_CHUNK_SENTINEL_COUNTER: u32 = u32::MAX - 2;
 
+/// Return whether `version` is a reserved wire sentinel with counter `sentinel_counter`.
 fn is_sentinel_version(version: EntryVersion, sentinel_counter: u32) -> bool {
     (version.logical_time_ms == SENTINEL_TIME_MS || version.logical_time_ms == u128::MAX)
         && version.counter == sentinel_counter
@@ -210,6 +216,7 @@ fn is_sentinel_version(version: EntryVersion, sentinel_counter: u32) -> bool {
         && version.operation.is_default()
 }
 
+/// Construct the wire sentinel version preceding a packed co-author dot.
 fn co_dot_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
@@ -219,6 +226,7 @@ fn co_dot_sentinel_version() -> EntryVersion {
     }
 }
 
+/// Construct the wire sentinel version preceding a packed co-author reset floor.
 fn co_register_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
@@ -228,6 +236,7 @@ fn co_register_sentinel_version() -> EntryVersion {
     }
 }
 
+/// Construct the wire sentinel version introducing a packed author-proof bundle.
 fn data_proof_sentinel_version() -> EntryVersion {
     EntryVersion {
         logical_time_ms: SENTINEL_TIME_MS,
@@ -237,9 +246,12 @@ fn data_proof_sentinel_version() -> EntryVersion {
     }
 }
 
+/// Number of raw proof-bundle bytes packed into one [`EntryDot`] chunk.
 const DOT_CHUNK_BYTES: usize = 52;
+/// Maximum serialized byte size allowed for a packed proof bundle.
 const MAX_PROOF_BUNDLE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Pack up to [`DOT_CHUNK_BYTES`] of a serialized proof bundle into an [`EntryDot`] at `chunk_index`.
 fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     let mut buf = [0u8; DOT_CHUNK_BYTES];
     if let Some(prefix) = buf.get_mut(..chunk.len()) {
@@ -274,6 +286,7 @@ fn pack_proof_chunk(chunk: &[u8], chunk_index: usize) -> EntryDot {
     }
 }
 
+/// Unpack a [`DOT_CHUNK_BYTES`] proof-bundle slice from `dot`, verifying its expected `expected_chunk_idx`.
 fn unpack_proof_chunk(dot: EntryDot, expected_chunk_idx: usize) -> Result<[u8; DOT_CHUNK_BYTES]> {
     if u32::try_from(expected_chunk_idx).ok() != Some(dot.index) {
         return Err(Error::DataEntryWriteUnauthorized);
@@ -324,11 +337,15 @@ pub struct EntryCrdt {
     pub proofs: Vec<super::provenance::SignedDataMutation>,
 }
 
+/// Backward-compatible 3-field wire/disk representation of [`EntryCrdt`].
 #[derive(Serialize, Deserialize)]
 #[serde(rename = "EntryCrdt")]
 struct WireEntryCrdt {
+    /// Greatest LWW reset floor for the entry payload.
     register: Option<EntryVersion>,
+    /// Element dots interleaved with sentinel-framed co-dots, co-registers, and proof chunks.
     dots: Vec<EntryDot>,
+    /// Covering remove tombstones.
     tombstones: Vec<EntryTombstone>,
 }
 
@@ -444,6 +461,7 @@ impl TryFrom<WireEntryCrdt> for EntryCrdt {
 }
 
 impl EntryCrdt {
+    /// Encode `proofs` as a sentinel-framed sequence of packed [`EntryDot`] chunks.
     pub(crate) fn encode_proof_dots(
         proofs: &[super::provenance::SignedDataMutation],
     ) -> Vec<EntryDot> {
@@ -464,6 +482,7 @@ impl EntryCrdt {
         dots
     }
 
+    /// Decode packed [`EntryDot`] proof chunks back into [`super::provenance::SignedDataMutation`] records.
     pub(crate) fn decode_proof_dots(
         dots: Vec<EntryDot>,
     ) -> Vec<super::provenance::SignedDataMutation> {
@@ -479,6 +498,7 @@ impl EntryCrdt {
         .unwrap_or_default()
     }
 
+    /// Return whether any register or dot carries an attributed non-default write witness.
     pub(super) fn has_write_witness(&self) -> bool {
         let witnessed = |version: &EntryVersion| {
             !version.actor.is_default() && (!version.operation.is_default() || version.counter != 0)
@@ -526,6 +546,7 @@ pub(super) fn insert_max<K: Ord, V: Ord>(map: &mut BTreeMap<K, V>, key: K, value
     }
 }
 
+/// Return whether `proofs` contains a verified register proof for `(actor, floor)`.
 fn has_register_proof(
     proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
     actor: Did,
@@ -537,6 +558,7 @@ fn has_register_proof(
             .is_some_and(|p| p.matches_register(floor))
 }
 
+/// Return whether `proofs` contains a verified element-add proof for `(digest, actor, dot)`.
 fn has_add_proof(
     proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
     digest: ElementDigest,
@@ -549,6 +571,7 @@ fn has_add_proof(
             .is_some_and(|p| p.matches_add(digest, dot))
 }
 
+/// Return whether `proofs` contains a verified element-remove proof for `(digest, actor, dot)`.
 fn has_remove_proof(
     proofs: &BTreeMap<super::provenance::DataProofKey, super::provenance::SignedDataMutation>,
     digest: ElementDigest,

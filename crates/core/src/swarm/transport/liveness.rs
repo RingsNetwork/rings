@@ -207,8 +207,11 @@ impl ProbeClock {
 /// so no other code can forge one. It is an owned value: an answer or an eviction while it is
 /// in flight leaves it to be sent and ignored.
 pub(crate) struct IssuedProbe {
+    /// Admitted connection generation that this probe targets.
     attempt: PendingConnectionAttempt,
+    /// Challenge nonce identifying the probe request.
     request: ProbeRequest,
+    /// Signed probe message payload to dispatch.
     payload: MessagePayload,
     /// How long the transfer may wait for credit: what is left of the answer deadline.
     deadline: Duration,
@@ -240,7 +243,9 @@ pub(crate) enum ProbeWork {
     /// `request` that has not reached the queue: a payload kept from its issue would carry a
     /// sequence its peer's replay window may have passed meanwhile.
     Resend {
+        /// Admitted connection generation whose outstanding probe is being resent.
         attempt: PendingConnectionAttempt,
+        /// Outstanding challenge nonce to re-sign and resend.
         request: ProbeRequest,
     },
 }
@@ -249,7 +254,9 @@ pub(crate) enum ProbeWork {
 /// pass, and the work it found. The right is released when the pass is dropped, completed or
 /// cut short.
 pub(crate) struct ProbePass<'transport> {
+    /// Mutex guard serializing probe passes on this transport.
     _exclusive: FuturesMutexGuard<'transport, ()>,
+    /// Probe issue and resend actions scheduled for this pass.
     work: Vec<ProbeWork>,
 }
 
@@ -269,10 +276,13 @@ fn remaining(clock: &ProbeClock, now_ms: i64) -> Duration {
 /// One admitted generation's liveness record.
 #[derive(Clone, Debug)]
 struct PeerLiveness {
+    /// Active connection generation tracked by this record.
     generation: u64,
+    /// Timestamp in milliseconds when this generation was admitted.
     connected_at_ms: i64,
     /// The latest authenticated inbound payload, read by retention, never by liveness.
     last_inbound_ms: i64,
+    /// Probe schedule and outstanding-challenge clock for this generation.
     clock: ProbeClock,
 }
 
@@ -296,21 +306,25 @@ impl PeerLiveness {
 /// resets liveness, so late observations from an old connection cannot prove the
 /// new connection live.
 pub(super) struct PeerLivenessMap {
+    /// Per-peer liveness records keyed by peer DID.
     peers: BTreeMap<Did, PeerLiveness>,
 }
 
 impl PeerLivenessMap {
+    /// Create an empty peer liveness map.
     pub(super) fn new() -> Self {
         Self {
             peers: BTreeMap::new(),
         }
     }
 
+    /// Initialize or reset `peer`'s liveness record for `generation` at `now_ms`.
     fn mark_connected(&mut self, peer: Did, generation: u64, now_ms: i64) {
         self.peers
             .insert(peer, PeerLiveness::new(generation, now_ms));
     }
 
+    /// Record an authenticated inbound payload timestamp for `peer`'s `generation` at `now_ms`.
     fn mark_inbound(&mut self, peer: Did, generation: u64, now_ms: i64) {
         match self.peers.get_mut(&peer) {
             Some(liveness) if liveness.generation == generation => {
@@ -320,6 +334,7 @@ impl PeerLivenessMap {
         }
     }
 
+    /// Remove `peer`'s liveness record, if present.
     pub(super) fn remove(&mut self, peer: Did) {
         self.peers.remove(&peer);
     }
@@ -338,6 +353,7 @@ impl PeerLivenessMap {
             .filter(|liveness| liveness.generation == generation)
     }
 
+    /// Retain only liveness entries matching a generation in `active`.
     fn retain_active(&mut self, active: &ActiveConnectionSet) {
         self.peers.retain(|peer, liveness| {
             active
@@ -382,6 +398,7 @@ impl PeerLivenessMap {
             .collect()
     }
 
+    /// Elapsed milliseconds since `peer`'s `generation` was admitted, if recorded.
     pub(super) fn connected_for_ms(&self, peer: Did, generation: u64, now_ms: i64) -> Option<i64> {
         self.generation(peer, generation)
             .map(|liveness| now_ms.saturating_sub(liveness.connected_at_ms))
@@ -423,12 +440,14 @@ impl PeerLivenessObservation {
 }
 
 impl SwarmTransport {
+    /// Acquire the mutex guarding the peer liveness map.
     pub(super) fn peer_liveness(&self) -> Result<MutexGuard<'_, PeerLivenessMap>> {
         self.peer_liveness
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
+    /// Apply a liveness `observation` for `attempt` if it still owns its peer's active slot.
     fn observe_peer_liveness(
         &self,
         attempt: PendingConnectionAttempt,
@@ -445,6 +464,7 @@ impl SwarmTransport {
         .map(|_| ())
     }
 
+    /// Record that `attempt` was admitted as an active connection.
     pub(crate) fn mark_peer_liveness_connected(&self, attempt: PendingConnectionAttempt) {
         if let Err(error) =
             self.observe_peer_liveness(attempt, PeerLivenessObservation::Connected, || {})
@@ -457,6 +477,7 @@ impl SwarmTransport {
         }
     }
 
+    /// Record an authenticated inbound payload on active `attempt` for retention idle tracking.
     pub(crate) fn mark_peer_liveness_inbound(&self, attempt: PendingConnectionAttempt) {
         if let Err(error) =
             self.observe_peer_liveness(attempt, PeerLivenessObservation::Inbound, || {})
@@ -597,6 +618,7 @@ impl SwarmTransport {
         self.answer_liveness_probe_at(provider, request, self.now_ms_i64())
     }
 
+    /// Record an answer to `request` from `provider` at `now_ms`, returning whether it matched the outstanding probe.
     pub(crate) fn answer_liveness_probe_at(
         &self,
         provider: Did,
@@ -642,6 +664,7 @@ impl SwarmTransport {
         })
     }
 
+    /// Return liveness expiry evidence for `attempt` at `now_ms` if its outstanding probe has timed out.
     pub(crate) fn peer_liveness_expiry(
         &self,
         attempt: PendingConnectionAttempt,

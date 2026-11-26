@@ -19,15 +19,21 @@ use crate::sync_lock::lock;
 #[cfg(all(test, rings_native))]
 use crate::test_support::BlockingSendProbe;
 
+/// Default maximum number of pending overlay sends across all peers.
 const MAX_PENDING_OVERLAY_SENDS: usize = 256;
+/// Default maximum number of pending overlay sends allowed per peer.
 const MAX_PENDING_OVERLAY_SENDS_PER_PEER: usize = 32;
 
+/// Synchronized state tracking per-peer FIFO send lanes and quota reservations.
 struct OutboxState {
+    /// Global and per-peer pending-send quota tracker.
     quota: PeerQuota,
+    /// Queued outbound payloads grouped by destination peer DID.
     lanes: HashMap<Did, VecDeque<Bytes>>,
 }
 
 impl OutboxState {
+    /// Creates an empty outbox state with the given global and per-peer limits.
     fn new(max_total: usize, max_per_peer: usize) -> Self {
         Self {
             quota: PeerQuota::new(max_total, max_per_peer),
@@ -39,8 +45,11 @@ impl OutboxState {
 /// Cleans up a peer's active lane and any in-flight/queued permits if `NodeTasks::stop` drops
 /// the drain worker mid-send.
 struct PeerLaneGuard {
+    /// Shared outbox state cleaned up when the drain worker exits early.
     state: Arc<Mutex<OutboxState>>,
+    /// Destination peer whose lane is guarded.
     peer: Did,
+    /// Whether cleanup is still armed (cleared on normal drain completion).
     active: bool,
 }
 
@@ -104,6 +113,7 @@ impl OverlayOutboxTestHook {
 /// Asynchronous per-peer FIFO overlay send queue that decouples outbound network I/O from a
 /// protocol's `transition_gate`.
 pub(crate) struct OverlayOutbox {
+    /// Synchronized per-peer send lanes and quota accounting.
     state: Arc<Mutex<OutboxState>>,
     #[cfg(all(test, rings_native))]
     test_hook: Option<Arc<OverlayOutboxTestHook>>,
@@ -124,6 +134,7 @@ impl OverlayOutbox {
         )
     }
 
+    /// Constructs an outbox with explicit global and per-peer pending-send limits.
     pub(crate) fn with_bounds(max_total: usize, max_per_peer: usize) -> Self {
         Self {
             state: Arc::new(Mutex::new(OutboxState::new(max_total, max_per_peer))),
@@ -194,6 +205,7 @@ impl OverlayOutbox {
     }
 }
 
+/// Drains a peer's FIFO outbox lane until empty, releasing each payload's quota slot after send.
 async fn drain_peer_lane(
     state: Arc<Mutex<OutboxState>>,
     scope: Scope,

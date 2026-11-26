@@ -1,3 +1,5 @@
+//! Attributable measurement events, batches, and transition outcomes.
+
 use std::num::NonZeroU64;
 
 use serde::Deserialize;
@@ -87,7 +89,9 @@ pub enum MeasurementEvent {
 /// without inventing zero-byte messages or exposing partial transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MeasurementBatch {
+    /// Homogeneous observation applied across all occurrences in this batch.
     event: MeasurementEvent,
+    /// Number of logical observations coalesced into this batch.
     occurrences: NonZeroU64,
 }
 

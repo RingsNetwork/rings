@@ -9,6 +9,7 @@ use crate::project_content::PROJECT_INTRODUCTION;
 use crate::project_content::PROJECT_NAME;
 use crate::project_content::PROJECT_TAGLINE;
 
+/// Render the Rings Network landing page.
 pub(crate) fn page(
     navigate_page: Callback<ShellPage>,
     active_architecture_layer: UseStateHandle<usize>,
@@ -31,6 +32,7 @@ pub(crate) fn page(
     }
 }
 
+/// Render the top hero section with tagline, introduction, and primary actions.
 fn hero_section(open_console: Callback<MouseEvent>) -> Html {
     html! {
         <section class="landing-hero" aria-labelledby="landing-title">
@@ -51,6 +53,7 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
     }
 }
 
+/// Render the four core capability feature cards.
 fn features_section() -> Html {
     html! {
         <section class="landing-section landing-feature-section" aria-label="Features">
@@ -58,15 +61,16 @@ fn features_section() -> Html {
                 <p>{ "Features" }</p>
             </div>
             <div class="landing-feature-grid">
-                { landing_feature("Browser-native peers and TURN", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels traverse NATs via UDP/TCP TURN and DHT-discovered multi-hop Onion TURN.", "assets/images/feature-network-background.png") }
-                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—across WebCrypto, MetaMask, Phantom, and C FFI signers.", "assets/images/feature-did-identity.png") }
-                { landing_feature("Structured peer routing", "A range-proved Chord DHT provides O(log N) finger convergence, non-transitive gap bridging, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation.", "assets/images/feature-peer-routing.png") }
-                { landing_feature("Protocol and onion runtime", "Application protocols run as pure Protocol::step machines under an Interpret capability shell, alongside Sphinx/AEZ onion loops for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines.", "assets/images/feature-protocol-runtime.png") }
+                { landing_feature("Browser-native peers and TURN", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels traverse NATs via UDP/TCP TURN and DHT-discovered multi-hop Onion TURN.", "assets/images/feature-network-background.webp") }
+                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—across WebCrypto, MetaMask, Phantom, and C FFI signers.", "assets/images/feature-did-identity.webp") }
+                { landing_feature("Structured peer routing", "A range-proved Chord DHT provides O(log N) finger convergence, non-transitive gap bridging, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation.", "assets/images/feature-peer-routing.webp") }
+                { landing_feature("Protocol and onion runtime", "Application protocols run as pure Protocol::step machines under an Interpret capability shell, alongside Sphinx/AEZ onion loops for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines.", "assets/images/feature-protocol-runtime.webp") }
             </div>
         </section>
     }
 }
 
+/// Render the interactive seven-layer architecture explorer.
 fn architecture_section(active_architecture_layer: UseStateHandle<usize>) -> Html {
     let selected_index = selected_architecture_index(*active_architecture_layer);
     let Some(selected_layer) = ARCHITECTURE_LAYERS.get(selected_index) else {
@@ -99,10 +103,12 @@ fn architecture_section(active_architecture_layer: UseStateHandle<usize>) -> Htm
     }
 }
 
+/// Clamp the active architecture layer index to the valid bounds of [`ARCHITECTURE_LAYERS`].
 fn selected_architecture_index(index: usize) -> usize {
     index.min(ARCHITECTURE_LAYERS.len().saturating_sub(1))
 }
 
+/// Render the detail panel for the currently selected architecture layer.
 fn architecture_layer_detail(layer: &ArchitectureLayer) -> Html {
     html! {
         <aside class="landing-layer-detail" aria-live="polite" aria-label="Selected architecture layer">
@@ -135,6 +141,7 @@ fn architecture_layer_detail(layer: &ArchitectureLayer) -> Html {
     }
 }
 
+/// Render the protocol-extension runtime code preview section.
 fn runtime_section() -> Html {
     html! {
         <section class="landing-section landing-runtime" aria-labelledby="landing-runtime-title">
@@ -152,6 +159,7 @@ fn runtime_section() -> Html {
     }
 }
 
+/// Render the built-in services showcase grid.
 fn services_section() -> Html {
     html! {
         <section class="landing-section landing-services" aria-labelledby="landing-services-title">
@@ -174,6 +182,7 @@ fn services_section() -> Html {
     }
 }
 
+/// Render the runnable repository examples section.
 fn examples_section() -> Html {
     html! {
         <section class="landing-section landing-examples" aria-labelledby="landing-examples-title">
@@ -193,6 +202,7 @@ fn examples_section() -> Html {
     }
 }
 
+/// Render the engineering blog highlights section.
 fn blog_section() -> Html {
     html! {
         <section class="landing-section landing-blog" aria-labelledby="landing-blog-title">
@@ -215,6 +225,7 @@ fn blog_section() -> Html {
     }
 }
 
+/// Render the closing call-to-action banner linking to the browser node console.
 fn final_section(open_console: Callback<MouseEvent>) -> Html {
     html! {
         <section class="landing-final" aria-label="Open Rings Node">
@@ -232,17 +243,27 @@ fn final_section(open_console: Callback<MouseEvent>) -> Html {
     }
 }
 
+/// Descriptor for one layer in the landing page's interactive architecture stack.
 struct ArchitectureLayer {
+    /// Two-digit ordinal label for the layer.
     index: &'static str,
+    /// Short layer identifier shown on the tab button.
     label: &'static str,
+    /// One-line role phrase shown beneath the tab label.
     role: &'static str,
+    /// Detailed layer heading displayed in the inspector pane.
     title: &'static str,
+    /// High-level summary of the layer.
     summary: &'static str,
+    /// Expanded description of the layer's responsibilities.
     detail: &'static str,
+    /// Workspace crates and modules implementing the layer.
     surface: &'static str,
+    /// Architectural contract or invariant upheld by the layer.
     contract: &'static str,
 }
 
+/// The seven Rings architecture layers rendered in the landing page explorer.
 const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
     ArchitectureLayer {
         index: "01",
@@ -316,6 +337,7 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
     },
 ];
 
+/// Render one illustrated feature card on the landing page.
 fn landing_feature(title: &'static str, body: &'static str, image_src: &'static str) -> Html {
     html! {
         <article class="landing-feature-card">
@@ -335,6 +357,7 @@ fn landing_feature(title: &'static str, body: &'static str, image_src: &'static 
     }
 }
 
+/// Render a selectable tab button for an architecture layer.
 fn architecture_layer_tab(
     index: usize,
     layer: &ArchitectureLayer,
@@ -361,6 +384,7 @@ fn architecture_layer_tab(
     }
 }
 
+/// Render an external-link card used in the services, examples, and blog sections.
 fn landing_link_card(title: &'static str, body: &'static str, href: &'static str) -> Html {
     html! {
         <a class="landing-example-card" href={href} target="_blank" rel="noreferrer">

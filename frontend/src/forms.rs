@@ -8,6 +8,7 @@ use web_sys::HtmlTextAreaElement;
 use web_sys::InputEvent;
 use yew::prelude::*;
 
+/// Render a labelled single-line text input bound to `state`.
 pub(crate) fn text_input(label: &'static str, state: UseStateHandle<String>) -> Html {
     text_field(label, state, None)
 }
@@ -33,7 +34,9 @@ pub(crate) fn text_input_with_suggestions(
 
 /// A `<datalist>` and the id an input names it by.
 struct Suggestions {
+    /// DOM `id` attribute shared between the `<input list=...>` and `<datalist>`.
     list_id: &'static str,
+    /// Suggested option values rendered inside the `<datalist>`.
     values: &'static [&'static str],
 }
 
@@ -66,6 +69,7 @@ fn text_field(
     }
 }
 
+/// Render a labelled multi-line textarea bound to `state`.
 pub(crate) fn textarea(label: &'static str, state: UseStateHandle<String>) -> Html {
     let oninput = {
         let state = state.clone();
@@ -83,6 +87,7 @@ pub(crate) fn textarea(label: &'static str, state: UseStateHandle<String>) -> Ht
     }
 }
 
+/// Render a read-only labelled textarea for displaying generated payloads.
 pub(crate) fn readonly_textarea(label: &'static str, value: String) -> Html {
     html! {
         <label class="field payload-output">
@@ -92,6 +97,7 @@ pub(crate) fn readonly_textarea(label: &'static str, value: String) -> Html {
     }
 }
 
+/// Read the current value from an `<input>` target of an `InputEvent`.
 fn input_value(event: &InputEvent) -> Option<String> {
     event
         .target()
@@ -99,6 +105,7 @@ fn input_value(event: &InputEvent) -> Option<String> {
         .map(|input| input.value())
 }
 
+/// Read the current value from a `<textarea>` target of an `InputEvent`.
 fn textarea_value(event: &InputEvent) -> Option<String> {
     event
         .target()
@@ -106,6 +113,7 @@ fn textarea_value(event: &InputEvent) -> Option<String> {
         .map(|input| input.value())
 }
 
+/// Read the selected value from a `<select>` target of a DOM `Event`.
 pub(crate) fn select_value(event: &Event) -> Option<String> {
     event
         .target()

@@ -4,6 +4,7 @@ use tun_rs::DeviceBuilder;
 
 use super::super::NativeTunnelOptions;
 
+/// Apply Linux `/dev/net/tun` options to a `tun_rs::DeviceBuilder`.
 pub(crate) fn configure(
     mut builder: DeviceBuilder,
     options: &NativeTunnelOptions,

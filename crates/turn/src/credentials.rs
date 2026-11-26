@@ -1,3 +1,5 @@
+//! TURN credential derivation, URL formatting, and session-ticket signing.
+
 use std::str::FromStr;
 
 use rings_core::delegation::Account;
@@ -166,6 +168,7 @@ pub fn extract_turn_server_pubkey(raw_url: &str) -> Option<PublicKey<33>> {
     None
 }
 
+/// Decodes a Base58-encoded 33-byte compressed secp256k1 public key and validates it is on-curve.
 fn decode_secp256k1_pubkey_b58(encoded: &str) -> Option<PublicKey<33>> {
     let pk = if let Ok(pk) = PublicKey::<33>::try_from_b58t(encoded) {
         pk
@@ -178,6 +181,7 @@ fn decode_secp256k1_pubkey_b58(encoded: &str) -> Option<PublicKey<33>> {
     Some(pk)
 }
 
+/// Removes any `pubkey=...` query parameter from a URL suffix while preserving other params and fragments.
 fn strip_pubkey_query_param(suffix: &str) -> String {
     let Some((before_q, after_q)) = suffix.split_once('?') else {
         return suffix.to_string();
@@ -207,6 +211,7 @@ fn strip_pubkey_query_param(suffix: &str) -> String {
     out
 }
 
+/// Computes the secp256k1 ECDH shared secret between `secret_key` and `peer_pubkey`.
 fn secp256k1_shared_secret(
     secret_key: &SecretKey,
     peer_pubkey: PublicKey<33>,
@@ -216,6 +221,7 @@ fn secp256k1_shared_secret(
     Ok(peer.shared_secret(&scalar))
 }
 
+/// Derives the Base58 TURN long-term credential password from `shared_secret` and `sig`.
 fn derive_turn_credential(shared_secret: &[u8; SHARED_SECRET_BYTES], sig: &[u8]) -> Result<String> {
     let mut preimage = Zeroizing::new(Vec::with_capacity(
         TURN_CREDENTIAL_KDF_DOMAIN.len() + SHARED_SECRET_BYTES + sig.len(),
@@ -622,6 +628,7 @@ impl TurnCredentials {
         Self::from_claim_sig_and_shared(claim_b58, signature.as_ref(), &shared)
     }
 
+    /// Packs a Base58 claim, signature, and ECDH shared secret into [`TurnCredentials`].
     fn from_claim_sig_and_shared(
         claim: String,
         sig: &[u8],
@@ -791,6 +798,7 @@ impl TurnCredentials {
         Err(Error::Decode)
     }
 
+    /// Verifies a pre-decoded TURN username for a new allocation at `at_ms`.
     #[cfg(all(feature = "server", not(target_family = "wasm")))]
     pub(crate) fn verify_decoded_at(
         decoded: DecodedTurnUsername<'_>,
@@ -800,6 +808,7 @@ impl TurnCredentials {
         Self::verify_decoded_with_mode(decoded, server_key, at_ms, false)
     }
 
+    /// Verifies a pre-decoded TURN username for an already-established allocation at `at_ms`.
     #[cfg(all(feature = "server", not(target_family = "wasm")))]
     pub(crate) fn verify_decoded_established_at(
         decoded: DecodedTurnUsername<'_>,
@@ -809,6 +818,7 @@ impl TurnCredentials {
         Self::verify_decoded_with_mode(decoded, server_key, at_ms, true)
     }
 
+    /// Decodes and verifies a TURN `username` in either fresh or established-allocation mode.
     fn verify_with_mode(
         username: &str,
         server_key: &SecretKey,
@@ -819,6 +829,7 @@ impl TurnCredentials {
         Self::verify_decoded_with_mode(decoded, server_key, at_ms, established)
     }
 
+    /// Verifies a decoded TURN username claim and derives its ECDH-backed credential.
     fn verify_decoded_with_mode(
         decoded: DecodedTurnUsername<'_>,
         server_key: &SecretKey,
@@ -890,6 +901,7 @@ impl TurnCredentials {
     }
 }
 
+/// Signs each TURN URL in a semicolon-delimited ICE server list that advertises a server pubkey.
 fn sign_ice_servers_with(
     ice_servers: &str,
     mut make_creds: impl FnMut(PublicKey<33>) -> Result<TurnCredentials>,

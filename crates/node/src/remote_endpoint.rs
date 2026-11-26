@@ -109,6 +109,7 @@ impl RemoteRpcProxy {
             .map(Self)
     }
 
+    /// Validates that `parsed` can construct a `reqwest::Proxy` on native targets.
     #[cfg(rings_native)]
     fn validate_native_proxy(parsed: reqwest::Url) -> Result<reqwest::Url> {
         reqwest::Proxy::all(parsed.as_str())
@@ -116,6 +117,7 @@ impl RemoteRpcProxy {
             .map_err(|error| Error::InvalidConfig(format!("invalid remote_rpc_proxy_url: {error}")))
     }
 
+    /// Passes `parsed` through unchanged on non-native targets where `reqwest::Proxy` is unused.
     #[cfg(not(rings_native))]
     #[allow(clippy::unnecessary_wraps)]
     const fn validate_native_proxy(parsed: reqwest::Url) -> Result<reqwest::Url> {

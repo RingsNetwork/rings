@@ -126,10 +126,15 @@ impl ImapService {
 /// One connection's state beside its session: the protocol flow it is in, and the response
 /// after which it closes.
 struct Connection {
+    /// Protocol framing and state machine for this IMAP connection.
     server: Server,
+    /// Mailbox session state associated with this connection.
     session: Session,
+    /// Command tag of an active `IDLE` command, if any.
     idling: Option<Tag<'static>>,
+    /// Command tag of an active `AUTHENTICATE` exchange, if any.
     authenticating: Option<Tag<'static>>,
+    /// Handle of the final response after which the connection should close.
     closing: Option<ResponseHandle>,
 }
 

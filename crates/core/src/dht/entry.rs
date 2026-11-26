@@ -111,21 +111,28 @@ impl TombstoneBound {
     }
 }
 
+/// Kind of CRDT stamp applied to an unstamped entry write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EntryStampKind {
+    /// Overwrite write that sets the register reset floor and element dots.
     Overwrite,
+    /// Delta write that sets element dots without overwriting the register floor.
     Delta,
 }
 
-// Canonical stamp input for EntryVersion.operation.
-//
-// This digest is an unreleased CRDT tie-break witness between nodes running the
-// same code, not a stable storage key or cross-version protocol identifier.
+/// Canonical stamp input for [`EntryVersion::operation`].
+///
+/// This digest is an unreleased CRDT tie-break witness between nodes running the
+/// same code, not a stable storage key or cross-version protocol identifier.
 #[derive(Serialize)]
 struct OperationDigest<'a> {
+    /// Entry kind being written.
     kind: EntryKind,
+    /// Storage key DID of the entry.
     did: Did,
+    /// Actor DID performing the operation.
     actor: Did,
+    /// Payload elements included in the operation.
     data: &'a [Bytes],
 }
 
@@ -567,6 +574,7 @@ impl TryFrom<(String, String)> for Entry {
 }
 
 impl Entry {
+    /// Assign sequential element dots stamped with `version` and clear auxiliary co-author metadata.
     fn with_element_dots(mut self, version: EntryVersion) -> Result<Self> {
         self.crdt.dots = self
             .data
@@ -580,15 +588,18 @@ impl Entry {
         Ok(self)
     }
 
+    /// Stamp an overwrite entry with both a register reset floor and element dots at `version`.
     fn stamp_overwrite(mut self, version: EntryVersion) -> Result<Self> {
         self.crdt.register = Some(version);
         self.with_element_dots(version)
     }
 
+    /// Stamp a delta entry with element dots at `version`.
     fn stamp_delta(self, version: EntryVersion) -> Result<Self> {
         self.with_element_dots(version)
     }
 
+    /// Stamp this entry at `version` according to `kind`.
     fn stamp(self, version: EntryVersion, kind: EntryStampKind) -> Result<Self> {
         match kind {
             EntryStampKind::Overwrite => self.stamp_overwrite(version),
@@ -596,6 +607,7 @@ impl Entry {
         }
     }
 
+    /// Compute the deterministic operation digest for `actor` writing `data` into this carrier.
     pub(super) fn operation_digest_for(&self, actor: Did, data: &[Bytes]) -> Result<Did> {
         let digest = OperationDigest {
             kind: self.kind,
@@ -607,10 +619,12 @@ impl Entry {
         Did::try_from(HashStr::from_bytes(&bytes))
     }
 
+    /// Compute the deterministic operation digest for `actor` writing `self.data`.
     fn operation_digest(&self, actor: Did) -> Result<Did> {
         self.operation_digest_for(actor, &self.data)
     }
 
+    /// Issue a fresh [`EntryVersion`] for `actor` strictly after `floor` at `now_ms`.
     fn issue_version_after(
         &self,
         now_ms: u128,
@@ -620,6 +634,7 @@ impl Entry {
         EntryVersion::new(now_ms, actor, self.operation_digest(actor)?).after(floor)
     }
 
+    /// Fill in any default/unattributed actor fields across CRDT metadata with `actor`.
     fn attribute_unattributed_versions(&mut self, actor: Did) {
         if actor.is_default() {
             return;
@@ -646,6 +661,7 @@ impl Entry {
         }
     }
 
+    /// Ensure this entry carries a write witness, stamping it after `floor` if unstamped.
     fn ensure_stamp_after(
         mut self,
         now_ms: u128,
@@ -698,6 +714,7 @@ impl Entry {
         self.versions().max()
     }
 
+    /// Verify that `other` targets the same entry kind and key DID as `self`.
     fn validate_same_carrier(&self, other: &Self) -> Result<()> {
         if !self.same_kind_as(other) {
             return Err(Error::EntryKindNotEqual);
@@ -708,6 +725,7 @@ impl Entry {
         Ok(())
     }
 
+    /// Return the add dot for the element at `index`, falling back to the legacy floor.
     fn dot_for_element(&self, index: usize) -> Result<EntryDot> {
         if let Some(dot) = self.crdt.dots.get(index).copied() {
             return Ok(dot);
@@ -912,14 +930,17 @@ impl Entry {
             .materialize_topic_buffer(self.raw_buffer()?.join(other.raw_buffer()?), expires_at_ms))
     }
 
+    /// Return whether this entry holds data-topic payloads rather than a relay inbox.
     fn is_data_entry(&self) -> bool {
         !self.kind.is_relay_inbox()
     }
 
+    /// Return whether `other` has the same [`EntryKind`] as `self`.
     fn same_kind_as(&self, other: &Self) -> bool {
         self.kind == other.kind
     }
 
+    /// Return whether `other` has the same key [`Did`] as `self`.
     fn same_key_as(&self, other: &Self) -> bool {
         self.did == other.did
     }

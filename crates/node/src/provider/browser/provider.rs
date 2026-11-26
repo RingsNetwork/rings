@@ -83,6 +83,7 @@ pub enum AddressType {
 #[derive(Clone)]
 #[wasm_export]
 pub struct ProviderRef {
+    /// Shared reference to the underlying browser [`Provider`].
     inner: Arc<Provider>,
 }
 
@@ -93,10 +94,12 @@ impl ProviderRef {
     }
 }
 
+/// Returns the default IndexedDB storage namespace scoped to a wallet `did`.
 fn default_wallet_storage_name(did: Did) -> String {
     format!("{DEFAULT_BROWSER_STORAGE_NAME}-{did}")
 }
 
+/// Wraps a JavaScript async signing callback as an [`AsyncSigner`] closure.
 fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     Box::new(
         move |data: String| -> Pin<Box<dyn Future<Output = NodeResult<Vec<u8>>>>> {
@@ -214,7 +217,7 @@ pub(super) async fn open_browser_provider_stores(
     .map(|storage| Box::new(storage) as MeasureStorage);
     let evidence_storage = Some(
         lock::LockedBrowserStorage::open_with_byte_cap(
-            2,
+            1024,
             DEFAULT_STORAGE_CAPACITY,
             &format!("{storage_name}/provisional-evidence"),
             RecordAuthority::Disposable,
@@ -739,6 +742,7 @@ impl Provider {
     }
 }
 
+/// Parses an address string into a [`Did`] according to `addr_type`.
 fn get_did(address: &str, addr_type: AddressType) -> Result<Did, JsError> {
     let did = match addr_type {
         AddressType::DEFAULT => {

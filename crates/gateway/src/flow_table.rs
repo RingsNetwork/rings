@@ -11,7 +11,9 @@ use crate::FlowTableError;
 ///
 /// Invariant: `len() <= capacity()` and terminal states are never retained.
 pub struct FlowTable {
+    /// Maximum number of concurrently active flows permitted.
     capacity: usize,
+    /// Live non-terminal flows keyed by their 4-tuple `FlowId`.
     states: HashMap<FlowId, FlowState>,
 }
 

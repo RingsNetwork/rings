@@ -609,6 +609,7 @@ impl PeerRing {
         self.clear_downstream_replications_for(target)
     }
 
+    /// Clear the downstream replica assignment on any pending hold targeting `target`.
     fn clear_downstream_replications_for(&self, target: Option<Did>) -> Result<()> {
         target
             .map(|target| -> Result<()> {

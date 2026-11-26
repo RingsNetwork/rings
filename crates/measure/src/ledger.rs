@@ -1,3 +1,5 @@
+//! Bounded local measurement ledger combining peer credit and reliability state.
+
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::ops::Bound::Excluded;
@@ -40,7 +42,9 @@ pub const DEFAULT_MAX_RETAINED_PEERS: NonZeroUsize = NonZeroUsize::new(16_384).u
 /// Pure credit and reliability state for one peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerRecord {
+    /// Persistent byte-credit totals and last authenticated observation time.
     credit: CreditRecord,
+    /// Short-term aligned reliability epoch evidence.
     reliability: ReliabilityWindow,
 }
 
@@ -71,6 +75,7 @@ impl PeerRecord {
         self.reliability
     }
 
+    /// Applies one attributable batch to a copy of this peer record atomically.
     fn transition_batch(
         self,
         authentication: Authentication,
@@ -100,6 +105,7 @@ impl PeerRecord {
         Ok(next)
     }
 
+    /// Validates internal invariants of a deserialized peer record.
     fn validate_snapshot(self) -> Result<(), MeasureError> {
         match (
             self.reliability.epoch_start(),
@@ -118,6 +124,7 @@ impl PeerRecord {
         }
     }
 
+    /// Reconciles this peer record against wall-clock regression and policy window changes.
     fn reconcile_runtime(
         &mut self,
         now: UnixTime,
@@ -133,16 +140,21 @@ impl PeerRecord {
     }
 }
 
+/// Per-record adjustments produced during runtime reconciliation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct RecordReconciliation {
+    /// Whether either the credit or reliability timestamp was clamped to `now`.
     clock_adjusted: bool,
+    /// Whether reliability evidence was cleared due to a window-duration change.
     reliability_reset: bool,
 }
 
 /// Complete result of applying an observation to a bounded ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyReport<P> {
+    /// Disposition of the observation at the authentication boundary.
     outcome: ApplyOutcome,
+    /// Stalest peer key evicted to make room at capacity, if any.
     evicted_peer: Option<P>,
 }
 
@@ -200,11 +212,14 @@ pub struct PeerMeasurement<P> {
 /// A peer whose retained state could not be projected or pruned independently.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerMeasurementFailure<P> {
+    /// Stable peer key associated with the failure.
     peer: P,
+    /// Isolated error encountered while projecting or pruning this peer.
     error: MeasureError,
 }
 
 impl<P> PeerMeasurementFailure<P> {
+    /// Constructs a per-peer measurement failure entry.
     fn new(peer: P, error: MeasureError) -> Self {
         Self { peer, error }
     }
@@ -226,15 +241,20 @@ impl<P> PeerMeasurementFailure<P> {
 /// adapters should expose `measurements` and log or meter `failures`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasurementProjection<P> {
+    /// Successfully projected peer measurements in stable key order.
     measurements: Vec<PeerMeasurement<P>>,
+    /// Per-peer failures isolated during projection.
     failures: Vec<PeerMeasurementFailure<P>>,
 }
 
 /// Bounded partial-success projection over a stable peer-key range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeasurementPage<P> {
+    /// Successfully projected peer measurements in this page.
     measurements: Vec<PeerMeasurement<P>>,
+    /// Per-peer failures isolated within this page.
     failures: Vec<PeerMeasurementFailure<P>>,
+    /// Exclusive continuation cursor if more records follow this page.
     next_cursor: Option<P>,
 }
 
@@ -286,7 +306,9 @@ impl<P> MeasurementProjection<P> {
 /// Partial-success result from retention pruning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruneReport<P> {
+    /// Peer keys removed because their credit retention expired.
     removed: Vec<P>,
+    /// Per-peer clock-regression failures that were left intact.
     failures: Vec<PeerMeasurementFailure<P>>,
 }
 
@@ -310,7 +332,9 @@ impl<P> PruneReport<P> {
 /// Summary of runtime-policy and wall-clock recovery transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LedgerReconciliation {
+    /// Count of records whose timestamps were clamped to `now`.
     clock_adjusted_records: usize,
+    /// Count of records whose reliability windows were reset for policy changes.
     reliability_reset_records: usize,
 }
 
@@ -339,7 +363,9 @@ impl LedgerReconciliation {
 /// succeeds, so every error preserves the prior ledger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementLedger<P> {
+    /// Retained per-peer records ordered by stable peer key.
     records: BTreeMap<P, PeerRecord>,
+    /// Hard capacity bound on retained peer records.
     max_records: NonZeroUsize,
 }
 
@@ -680,6 +706,7 @@ where P: Clone + Ord
     }
 }
 
+/// Projects one retained `PeerRecord` into a `PeerMeasurement` at `now`.
 fn project_record<P>(
     peer: P,
     record: PeerRecord,

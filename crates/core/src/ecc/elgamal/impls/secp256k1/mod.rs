@@ -54,9 +54,13 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Marker byte identifying reversible adapter-encoded field candidates.
 const FIELD_ENCODING_MARKER: u8 = 0x52;
+/// Header overhead (`bias || marker || len`) reserved in each 32-byte field candidate.
 const FIELD_ENCODING_OVERHEAD: usize = 3;
+/// Maximum plaintext bytes carried per 32-byte field candidate.
 const FIELD_CHUNK_SIZE: usize = 32 - FIELD_ENCODING_OVERHEAD;
+/// `FIELD_CHUNK_SIZE` as `u8` for header encoding.
 const FIELD_CHUNK_SIZE_U8: u8 = 29;
 
 /// Plaintext bytes carried by one secp256k1 point in this adapter.
@@ -70,6 +74,7 @@ pub type CiphertextBlock = (CurveEle<33>, CurveEle<33>);
 pub struct Field([u8; 32]);
 
 impl Field {
+    /// Wrap a 32-byte big-endian field candidate.
     fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -79,16 +84,23 @@ impl Field {
         self.0
     }
 
+    /// Return whether the least-significant bit of this field candidate is set.
     fn is_odd(&self) -> bool {
         self.0.last().copied().unwrap_or_default() & 1 == 1
     }
 }
 
+/// Current version of the ElGamal-wrapped ChaCha20-Poly1305 AEAD envelope.
 const AEAD_VERSION: u8 = 1;
+/// Length in bytes of the symmetric ChaCha20-Poly1305 key.
 const AEAD_KEY_LEN: usize = 32;
+/// Number of secp256k1 ElGamal blocks required to wrap one AEAD key.
 const AEAD_WRAPPED_KEY_BLOCKS: usize = AEAD_KEY_LEN.div_ceil(PLAINTEXT_BLOCK_SIZE);
+/// Length in bytes of the ChaCha20-Poly1305 nonce.
 const AEAD_NONCE_LEN: usize = 12;
+/// HKDF salt for deriving the ChaCha20-Poly1305 content key.
 const AEAD_HKDF_SALT: &[u8] = b"rings-core:secp256k1-elgamal-aead:salt";
+/// HKDF info string binding the derived key to this AEAD scheme.
 const AEAD_HKDF_INFO: &[u8] = b"rings-core:secp256k1-elgamal-aead:chacha20poly1305";
 
 /// KEM/DEM ciphertext using secp256k1 ElGamal to wrap a ChaCha20-Poly1305 key.
@@ -146,10 +158,14 @@ impl<'de> Deserialize<'de> for AeadCiphertext {
     }
 }
 
+/// Serialized transcript passed as ChaCha20-Poly1305 associated data.
 #[derive(Serialize)]
 struct AeadTranscript<'a> {
+    /// Envelope version bound into the AEAD tag.
     version: u8,
+    /// Wrapped key blocks bound into the AEAD tag.
     encrypted_key: &'a [CiphertextBlock],
+    /// Caller-supplied external associated data.
     aad: &'a [u8],
 }
 
@@ -166,6 +182,7 @@ pub fn bytes_to_field(bytes: &[u8]) -> Vec<Field> {
         .collect()
 }
 
+/// Encode a plaintext chunk of up to `FIELD_CHUNK_SIZE` bytes into a 32-byte field candidate.
 fn encode_field_candidate(chunk: &[u8]) -> [u8; 32] {
     let mut data = [0u8; 32];
     let payload_len = chunk.len().min(FIELD_CHUNK_SIZE);
@@ -192,6 +209,7 @@ pub fn field_to_bytes(f: &[Field]) -> Vec<u8> {
     })
 }
 
+/// Decode a 32-byte field element back into its original plaintext chunk bytes.
 fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
     let [_, marker, len_byte, payload @ ..] = bytes;
     let len = len_byte as usize;
@@ -208,6 +226,7 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
     bytes.into_iter().skip_while(|n| *n == 0u8).collect()
 }
 
+/// Fixed number of high-byte bias trials attempted by [`lift_x`].
 const LIFT_X_TRIALS: u8 = 64;
 
 /// Lift a field candidate into a secp256k1 affine point in constant iteration count.
@@ -359,9 +378,12 @@ pub fn decrypt_aead(
         .map_err(|_| Error::MessageDecryptionFailed("AEAD open failed".to_string()))
 }
 
+/// Direction of an AEAD operation, used to map key-derivation errors cleanly.
 #[derive(Clone, Copy)]
 enum AeadErrorSide {
+    /// Encryption / sealing path.
     Encrypt,
+    /// Decryption / opening path.
     Decrypt,
 }
 
@@ -400,6 +422,7 @@ fn derive_aead_key(
     Ok(key)
 }
 
+/// Serialize the AEAD transcript binding envelope version, wrapped key blocks, and external AAD.
 fn aead_associated_data(encrypted_key: &[CiphertextBlock], aad: &[u8]) -> Result<Vec<u8>> {
     rings_codec::serialize(&AeadTranscript {
         version: AEAD_VERSION,

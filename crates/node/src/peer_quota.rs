@@ -10,13 +10,18 @@ use crate::error::OnionQueueAdmissionReason;
 /// `total <= max_total`, and each peer count is at most `max_per_peer`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PeerQuota {
+    /// Current sum of active reservations across all peers.
     total: usize,
+    /// Active reservation counts keyed by peer DID.
     per_peer: HashMap<Did, usize>,
+    /// Upper bound on total reservations across all peers.
     max_total: usize,
+    /// Upper bound on reservations held by any single peer.
     max_per_peer: usize,
 }
 
 impl PeerQuota {
+    /// Creates an empty quota enforcing `max_total` global and `max_per_peer` per-peer bounds.
     pub(crate) fn new(max_total: usize, max_per_peer: usize) -> Self {
         Self {
             total: 0,
@@ -26,10 +31,12 @@ impl PeerQuota {
         }
     }
 
+    /// Returns the total number of active reservations across all peers.
     pub(crate) const fn total(&self) -> usize {
         self.total
     }
 
+    /// Returns the number of active reservations currently held by `peer`.
     pub(crate) fn peer_total(&self, peer: Did) -> usize {
         self.per_peer.get(&peer).copied().unwrap_or_default()
     }
@@ -39,6 +46,7 @@ impl PeerQuota {
         self.successor(peer).map(|_| ())
     }
 
+    /// Computes the next `(total, peer_total)` counts if `peer` reserves one unit, or returns the admission rejection reason.
     fn successor(&self, peer: Did) -> Result<(usize, usize), OnionQueueAdmissionReason> {
         let next_total = self
             .total

@@ -18,7 +18,9 @@ use crate::bindings::TunnelControl;
 use crate::GatewayError;
 use crate::GatewayPlan;
 
+/// Default deadline applied to one Unix helper control connection or exchange.
 const DEFAULT_UNIX_HELPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound permitted for `UnixTunnelOptions::control_timeout`.
 const MAX_UNIX_HELPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Connection options for the unprivileged Unix gateway client.
@@ -48,6 +50,7 @@ impl UnixTunnelOptions {
 
 /// Linear cleanup capability returned by the Unix helper.
 pub struct UnixTunnelLease {
+    /// Helper-assigned lease identifier required for deterministic teardown.
     id: UnixLeaseId,
 }
 
@@ -57,8 +60,11 @@ pub struct UnixTunnelLease {
 /// connection disappears early, the foreground helper retains the active interface and routes;
 /// constructing a new controller with the same plan resumes that fail-closed lease.
 pub struct UnixTunnelControl {
+    /// Helper socket path and control timeout configuration.
     options: UnixTunnelOptions,
+    /// Lease identifier of the currently active tunnel, if any.
     active: Option<UnixLeaseId>,
+    /// Persistent Unix domain stream shared across establish and teardown calls.
     stream: Option<Arc<Mutex<UnixStream>>>,
 }
 
@@ -72,6 +78,7 @@ impl UnixTunnelControl {
         }
     }
 
+    /// Connect to the Unix helper socket and send one control request with bounded timeout.
     async fn establish_via_helper(
         &self,
         request: UnixConfigRequest,
@@ -113,6 +120,7 @@ impl UnixTunnelControl {
             })?
     }
 
+    /// Send a control request over the already-open Unix helper stream and read its reply.
     async fn exchange(
         &self,
         request: UnixConfigRequest,
@@ -143,6 +151,7 @@ impl UnixTunnelControl {
             })?
     }
 
+    /// Validate that the configured control timeout is non-zero and within `MAX_UNIX_HELPER_CONTROL_TIMEOUT`.
     fn validated_control_timeout(&self) -> Result<Duration, GatewayError> {
         if self.options.control_timeout.is_zero() {
             return Err(GatewayError::Platform {
@@ -162,6 +171,7 @@ impl UnixTunnelControl {
     }
 }
 
+/// Put `stream` in blocking mode and apply read/write deadlines matching `control_timeout`.
 fn configure_control_stream(
     stream: &UnixStream,
     control_timeout: Duration,
@@ -176,6 +186,7 @@ fn configure_control_stream(
         })
 }
 
+/// Build a standardized platform error when a helper control operation times out.
 fn control_timeout_error(operation: &'static str, timeout: Duration) -> GatewayError {
     GatewayError::Platform {
         operation,
@@ -183,6 +194,7 @@ fn control_timeout_error(operation: &'static str, timeout: Duration) -> GatewayE
     }
 }
 
+/// Return whether `error` was produced by `control_timeout_error`.
 fn is_control_timeout(error: &GatewayError) -> bool {
     matches!(
         error,
@@ -191,9 +203,13 @@ fn is_control_timeout(error: &GatewayError) -> bool {
     )
 }
 
+/// Connected helper stream together with the decoded response and optional transferred FD.
 struct HelperReply {
+    /// Persistent control stream retained for subsequent teardown.
     stream: Arc<Mutex<UnixStream>>,
+    /// Decoded helper response message.
     response: UnixConfigResponse,
+    /// Optional TUN/utun file descriptor received via `SCM_RIGHTS`.
     descriptor: Option<std::os::fd::OwnedFd>,
 }
 
@@ -303,6 +319,7 @@ impl TunnelControl for UnixTunnelControl {
     }
 }
 
+/// Wrap a helper-reported failure into a `GatewayError::Platform`.
 fn helper_failure(operation: String, message: String) -> GatewayError {
     GatewayError::Platform {
         operation: "unix-helper-request",
@@ -310,6 +327,7 @@ fn helper_failure(operation: String, message: String) -> GatewayError {
     }
 }
 
+/// Build a platform error when the helper returns a response variant invalid for `operation`.
 fn unexpected_response(operation: &'static str, response: UnixConfigResponse) -> GatewayError {
     GatewayError::Platform {
         operation,
