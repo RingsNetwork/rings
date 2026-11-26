@@ -313,22 +313,20 @@ impl LogicalInbound {
     ) -> crate::error::Result<bool> {
         let local = self.transport.dht.did;
         match message {
-            Message::FindSuccessorSend(msg) => {
-                match self.message_handler.find_successor_for_query(msg)? {
-                    crate::dht::PeerRingAction::Some(_) if msg.accepts_local_successor(local) => {
-                        Ok(true)
-                    }
-                    crate::dht::PeerRingAction::Some(next)
-                    | crate::dht::PeerRingAction::RemoteAction(next, _) => Ok(self
-                        .transport
-                        .dht
-                        .delivery_step(next, crate::dht::delivery::RouteStage::TOWARD, |peer| {
-                            self.transport.get_connection(peer).is_some()
-                        })?
-                        .is_none()),
-                    _ => Ok(true),
-                }
-            }
+            Message::FindSuccessorSend(msg) => Ok(matches!(
+                self.message_handler.find_successor_for_query(msg)?,
+                crate::dht::PeerRingAction::Some(did)
+                    if msg.accepts_local_successor(local)
+                        || did == local
+                        || (self.transport.get_connection(did).is_none()
+                            && self
+                                .transport
+                                .dht
+                                .successors()
+                                .list()?
+                                .into_iter()
+                                .all(|peer| peer == local))
+            )),
             Message::FindRelayHolder(msg) => Ok(payload.is_relay_destination_for(local)
                 && matches!(
                     self.transport.dht.find_successor(msg.key)?,
