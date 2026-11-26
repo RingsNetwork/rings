@@ -95,6 +95,8 @@ function contentType(filePath: string): string {
       return "image/svg+xml";
     case ".wasm":
       return "application/wasm";
+    case ".webp":
+      return "image/webp";
     default:
       return "application/octet-stream";
   }

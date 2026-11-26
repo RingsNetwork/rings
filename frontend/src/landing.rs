@@ -58,10 +58,10 @@ fn features_section() -> Html {
                 <p>{ "Features" }</p>
             </div>
             <div class="landing-feature-grid">
-                { landing_feature("Browser-native peers and TURN", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels traverse NATs via UDP/TCP TURN and DHT-discovered multi-hop Onion TURN.", "assets/images/feature-network-background.png") }
-                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—across WebCrypto, MetaMask, Phantom, and C FFI signers.", "assets/images/feature-did-identity.png") }
-                { landing_feature("Structured peer routing", "A range-proved Chord DHT provides O(log N) finger convergence, non-transitive gap bridging, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation.", "assets/images/feature-peer-routing.png") }
-                { landing_feature("Protocol and onion runtime", "Application protocols run as pure Protocol::step machines under an Interpret capability shell, alongside Sphinx/AEZ onion loops for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines.", "assets/images/feature-protocol-runtime.png") }
+                { landing_feature("Browser-native peers and TURN", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. Direct WebRTC datachannels traverse NATs via UDP/TCP TURN and DHT-discovered multi-hop Onion TURN.", "assets/images/feature-network-background.webp") }
+                { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by 6 signature schemes—secp256k1, EIP-191, BIP-137, secp256r1, Ed25519, and BLS12-381—across WebCrypto, MetaMask, Phantom, and C FFI signers.", "assets/images/feature-did-identity.webp") }
+                { landing_feature("Structured peer routing", "A range-proved Chord DHT provides O(log N) finger convergence, non-transitive gap bridging, voluntary Leave handoffs, authenticated CRDT data topics, and network_id isolation.", "assets/images/feature-peer-routing.webp") }
+                { landing_feature("Protocol and onion runtime", "Application protocols run as pure Protocol::step machines under an Interpret capability shell, alongside Sphinx/AEZ onion loops for TCP, UDP, HTTPS, and composable Kleisli invoke pipelines.", "assets/images/feature-protocol-runtime.webp") }
             </div>
         </section>
     }
