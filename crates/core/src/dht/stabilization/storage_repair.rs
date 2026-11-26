@@ -82,6 +82,7 @@ impl StorageRepairDeferReason {
 const CHAIN_PROBE_PERIOD_MS: u64 = CHAIN_NEIGHBOUR_LIVENESS_PERIOD_MS.unsigned_abs();
 
 impl Stabilizer {
+    /// Plan, throttle, and dispatch storage-repair deliveries produced by DHT stabilization.
     async fn handle_storage_repair_action(
         &self,
         act: PeerRingAction,
@@ -135,6 +136,7 @@ impl Stabilizer {
         Ok(StorageRepairOutcome::Complete)
     }
 
+    /// Filter out repair deliveries still inside their unchanged-topology rebroadcast cooldown.
     fn filter_cooled_down_deliveries(
         &self,
         deliveries: Vec<StorageSyncDelivery>,
@@ -154,6 +156,8 @@ impl Stabilizer {
         Ok(eligible)
     }
 
+    /// Resolve the next hop for `delivery`, send it through tracked storage sync, and record the
+    /// repair cooldown only when the message was actually dispatched (`StorageSyncOutcome::Sent`).
     async fn send_planned_storage_repair(
         &self,
         delivery: StorageSyncDelivery,
@@ -668,6 +672,7 @@ mod tests {
         Ok(())
     }
 
+    /// Build coalesced `OwnershipHandoff` deliveries for cooldown exemption tests.
     fn handoff_deliveries(values: &[u32]) -> Result<Vec<StorageSyncDelivery>> {
         let actions = values
             .iter()
@@ -684,6 +689,7 @@ mod tests {
         PeerRingAction::MultiActions(actions).coalesced_storage_sync_deliveries()
     }
 
+    /// Verify additive-repair cooldown suppression, expiration, epoch reset, and handoff exemption.
     #[test]
     fn test_repair_cooldown_suppresses_unchanged_topology_expires_and_resets_on_epoch() -> Result<()>
     {
@@ -791,6 +797,7 @@ mod tests {
         Ok(())
     }
 
+    /// Verify that the tracked repair cooldown table never exceeds its bounded entry cap.
     #[test]
     fn test_repair_cooldown_map_is_bounded() -> Result<()> {
         let session = DelegateeKey::new_with_seckey(&SecretKey::random())?;
@@ -826,6 +833,7 @@ mod tests {
         Ok(())
     }
 
+    /// Verify that a deferred repair delivery does not enter the rebroadcast cooldown table.
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), tokio::test)]
     async fn test_deferred_repair_delivery_is_not_recorded_in_cooldown() -> Result<()> {

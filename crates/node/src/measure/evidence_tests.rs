@@ -68,6 +68,7 @@ impl KvStorageInterface<EvidenceStorageEntry<Did>> for FailingEvidenceStorage {
     }
 }
 
+/// In-memory evidence storage recording `put` and `remove` counts and exposing keyed entries.
 #[derive(Clone, Default)]
 struct MapEvidenceStorage {
     entries: Arc<std::sync::Mutex<BTreeMap<String, EvidenceStorageEntry<Did>>>>,
@@ -76,6 +77,7 @@ struct MapEvidenceStorage {
 }
 
 impl MapEvidenceStorage {
+    /// Clone a point-in-time snapshot of all currently persisted evidence storage entries.
     fn snapshot_entries(&self) -> BTreeMap<String, EvidenceStorageEntry<Did>> {
         lock_or_recover(&self.entries).clone()
     }
@@ -134,6 +136,7 @@ impl MeasureClock for ManualMeasureClock {
     }
 }
 
+/// Sign and assemble a valid `ProvisionalEvidenceRecord` owned by `provider` at `observed_at_seconds`.
 fn make_evidence_record_for_provider(
     provider: &DelegateeKey,
     observed_at_seconds: u64,
@@ -184,6 +187,7 @@ fn make_evidence_record_for_provider(
     )
 }
 
+/// Construct a fresh standalone provisional evidence record and its matching collector identity.
 fn provisional_evidence_fixture(
     tag: u8,
 ) -> (ProvisionalEvidenceRecord<Did>, EvidenceCollectorIdentity) {
@@ -811,6 +815,7 @@ async fn evidence_admission_does_not_block_on_slow_ledger_write_or_dirty_ledger(
     assert_eq!(evidence_storage.puts.load(Ordering::SeqCst), 2);
 }
 
+/// Verify that steady-state admissions write O(1) incremental `Delta` entries and survive restart without `flush()`.
 #[tokio::test]
 async fn incremental_admissions_write_deltas_and_survive_restart_without_flush() {
     let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
@@ -884,6 +889,7 @@ async fn incremental_admissions_write_deltas_and_survive_restart_without_flush()
     assert_eq!(after_restart_entries.len(), 4);
 }
 
+/// Verify that crossing the pending-delta threshold compacts deltas into a Snapshot checkpoint and prunes compacted keys.
 #[tokio::test]
 async fn delta_compaction_triggers_at_threshold_and_prunes_compacted_keys() {
     let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
@@ -969,6 +975,7 @@ async fn delta_compaction_triggers_at_threshold_and_prunes_compacted_keys() {
     assert_eq!(reopened.provisional_evidence_counters().await.admitted(), 5);
 }
 
+/// Verify that startup ignores stale delta files with `sequence <= compacted_through_sequence` left by a crash before cleanup.
 #[tokio::test]
 async fn startup_skips_stale_deltas_left_after_compaction_crash() {
     let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
@@ -1046,6 +1053,7 @@ async fn startup_skips_stale_deltas_left_after_compaction_crash() {
     }
 }
 
+/// Verify that startup isolates foreign or corrupt delta records without discarding valid neighboring deltas.
 #[tokio::test]
 async fn startup_isolates_foreign_or_corrupt_delta_while_preserving_valid_neighbors() {
     let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
@@ -1102,6 +1110,7 @@ async fn startup_isolates_foreign_or_corrupt_delta_while_preserving_valid_neighb
     assert_eq!(restored_digests, expected_digests);
 }
 
+/// Verify that explicit `flush()` folds pending deltas into one `Snapshot` checkpoint and prunes the delta entries.
 #[tokio::test]
 async fn explicit_flush_compacts_pending_deltas_into_snapshot() {
     let provider = DelegateeKey::new_with_seckey(&rings_core::ecc::SecretKey::random())
@@ -1174,6 +1183,7 @@ async fn explicit_flush_compacts_pending_deltas_into_snapshot() {
         .contains_key(&evidence_delta_key(3)));
 }
 
+/// Verify that a legacy bare `EvidenceSnapshot` file on `RecordAuthority::Disposable` storage is retired cleanly on startup.
 #[tokio::test]
 async fn legacy_bare_evidence_snapshot_file_is_retired_cleanly_on_startup() {
     let temp_dir =

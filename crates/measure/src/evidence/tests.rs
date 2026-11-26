@@ -311,6 +311,8 @@ fn admit_rejects_mismatched_pair_and_freshness_beneficiary() {
     assert_eq!(store.counters().rejected_records(), 1);
 }
 
+/// Verify that incremental delta replay restores valid records in sequence order while
+/// isolating corrupted or invalid records from valid neighbors.
 #[test]
 fn replay_persisted_delta_restores_valid_and_isolates_invalid_records() -> Result<(), EvidenceError>
 {

@@ -58,9 +58,12 @@ use rings_runtime::TimerError;
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
 const SNAPSHOT_KEY: &str = "MeasurementLedger";
 const EVIDENCE_SNAPSHOT_KEY: &str = "ProvisionalEvidence";
+/// Prefix for sequentially numbered incremental evidence log entries.
 const EVIDENCE_DELTA_KEY_PREFIX: &str = "ProvisionalEvidenceDelta/";
+/// Maximum uncompacted incremental evidence entries retained before snapshot compaction.
 const EVIDENCE_DELTA_COMPACTION_THRESHOLD: usize = 512;
 
+/// Format the deterministic storage key for incremental evidence entry `sequence`.
 fn evidence_delta_key(sequence: u64) -> String {
     format!("{EVIDENCE_DELTA_KEY_PREFIX}{sequence:020}")
 }
@@ -228,6 +231,7 @@ pub struct PeriodicMeasure {
 struct MeasureState {
     storage: SharedMeasureStorage,
     evidence_storage: SharedEvidenceStorage,
+    /// Uncompacted delta count that triggers background snapshot compaction.
     evidence_compaction_threshold: usize,
     /// Synchronous in-memory ledger and evidence state (`runtime` is a leaf never held across
     /// `.await`).
@@ -466,6 +470,7 @@ impl PeriodicMeasure {
         .await
     }
 
+    /// Load persisted state with an explicit collector binding and default compaction threshold.
     async fn new_with_clock_and_evidence(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,
@@ -482,6 +487,8 @@ impl PeriodicMeasure {
         .await
     }
 
+    /// Load persisted state and replay post-checkpoint evidence deltas with an explicit
+    /// compaction threshold.
     async fn new_with_clock_evidence_and_threshold(
         storage: MeasureStorage,
         evidence_storage: EvidenceStorage,
@@ -820,6 +827,8 @@ async fn persist_ledger_with_turn(
     result.map_err(MeasureRuntimeError::from)
 }
 
+/// Remove compacted incremental evidence keys from `evidence_storage`, returning any sequence
+/// numbers whose deletion failed so callers can keep cleanup dirty for retry.
 async fn prune_compacted_delta_keys(
     evidence_storage: &SharedEvidenceStorage,
     keys_to_prune: &[(u64, String)],
@@ -839,6 +848,7 @@ async fn prune_compacted_delta_keys(
     failed_seqs
 }
 
+/// Write a compacted provisional-evidence snapshot checkpoint and prune covered delta keys.
 async fn persist_pending_evidence(
     state: &MeasureState,
     force_compact_deltas: bool,
@@ -879,6 +889,7 @@ async fn persist_pending_evidence(
     result.map_err(MeasureRuntimeError::from)
 }
 
+/// Flush the measurement ledger under `ledger_turn` and compact any pending evidence state.
 async fn flush_state_with_ledger_turn(
     state: &MeasureState,
     ledger_turn: WriteTurnGuard<'_>,
@@ -964,18 +975,22 @@ fn mark_evidence_dirty(runtime: &mut RuntimeLedger) {
     }
 }
 
+/// Return whether evidence state requires writing a compacted snapshot checkpoint.
 fn evidence_persist_needed(runtime: &RuntimeLedger, force_compact_deltas: bool) -> bool {
     runtime.evidence_dirty
         || runtime.committed_evidence_override.is_some()
         || (force_compact_deltas && !runtime.pending_evidence_deltas.is_empty())
 }
 
+/// Capture an immutable measurement ledger snapshot and mark persistence in flight.
 fn prepare_ledger_snapshot(runtime: &mut RuntimeLedger) -> MeasurementSnapshot<Did> {
     runtime.persisting = true;
     runtime.mutated_while_persisting = false;
     runtime.ledger.snapshot()
 }
 
+/// Build a compacted provisional-evidence snapshot entry together with its sequence watermark
+/// and currently pending delta keys eligible for pruning after commit.
 fn prepare_evidence_snapshot(
     runtime: &mut RuntimeLedger,
 ) -> (EvidenceStorageEntry<Did>, u64, Vec<(u64, String)>) {
@@ -990,6 +1005,8 @@ fn prepare_evidence_snapshot(
     (entry, compacted_through_sequence, keys_to_prune)
 }
 
+/// Drop compacted delta entries through `compacted_through_sequence` (except `failed_seqs`) and
+/// report whether follow-up compaction/cleanup remains necessary.
 fn apply_compaction_cleanup(
     runtime: &mut RuntimeLedger,
     compacted_through_sequence: u64,
@@ -1002,14 +1019,22 @@ fn apply_compaction_cleanup(
     !failed_seqs.is_empty() || runtime.pending_evidence_deltas.len() >= compaction_threshold
 }
 
+/// Reconstructed in-memory evidence store and journal bookkeeping loaded during startup.
 struct RestoredEvidenceState {
+    /// Restored bounded provisional-evidence state after checkpoint and delta replay.
     evidence: ProvisionalEvidenceStore<Did>,
+    /// Merged counts of rejected or evicted entries observed during restore.
     load_report: EvidenceLoadReport,
+    /// Pending `(sequence, key)` delta/replay-floor entries present in storage.
     pending_deltas: Vec<(u64, String)>,
+    /// Next monotonic sequence number strictly above both checkpoint and journal entries.
     next_delta_seq: u64,
+    /// Whether orphaned or pre-checkpoint entries remain in storage requiring cleanup.
     has_stale_deltas: bool,
 }
 
+/// Reconstruct the bounded provisional-evidence store from the base snapshot checkpoint and
+/// any strictly newer delta or replay-floor journal entries in deterministic sequence order.
 fn restore_evidence_from_entries(
     raw_entries: Vec<(String, EvidenceStorageEntry<Did>)>,
     collector: Option<EvidenceCollectorIdentity>,
@@ -1320,6 +1345,7 @@ fn log_persistence_delay_error(result: Result<(), MeasureRuntimeError>) {
     }
 }
 
+/// Flush dirty ledger or dirty/compaction-pending evidence state once for the background worker.
 async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
     let (ledger_dirty, evidence_dirty) = {
         let runtime = lock_or_recover(&state.runtime);
@@ -1572,6 +1598,7 @@ impl Measure for PeriodicMeasure {
             wake: &self.persistence_wake,
             armed: true,
         };
+        /// Restore pre-admission in-memory evidence state and pending delta list after a failed write.
         #[allow(clippy::too_many_arguments)]
         fn rollback_admission(
             state: &MeasureState,

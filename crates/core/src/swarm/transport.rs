@@ -247,11 +247,15 @@ const CANDIDATE_DIAL_BACKOFF_CAPACITY: usize = 64;
 /// Cooldown before resending the same steady-state [`StorageSyncPurpose::AdditiveRepair`]
 /// delivery when topology has not changed.
 pub(crate) const STORAGE_REPAIR_REBROADCAST_COOLDOWN_MS: i64 = 180_000;
+/// Maximum number of repair delivery cursors tracked in [`StorageRepairCooldowns`].
 const STORAGE_REPAIR_COOLDOWN_MAX_ENTRIES: usize = 512;
 
+/// Per-epoch cooldown state suppressing redundant unchanged-topology additive repairs.
 #[derive(Debug, Default)]
 struct StorageRepairCooldowns {
+    /// Topology epoch for which `sent` timestamps were recorded.
     topology_epoch: u64,
+    /// Last send timestamp (ms) keyed by destination/purpose cursor.
     sent: BTreeMap<StorageSyncDeliveryCursor, i64>,
 }
 
@@ -585,6 +589,7 @@ impl SwarmTransport {
         Ok(())
     }
 
+    /// Return the current entry count in the repair cooldown table for unit tests.
     #[cfg(test)]
     pub(crate) fn storage_repair_cooldown_len_for_test(&self) -> Result<usize> {
         let cooldowns = self

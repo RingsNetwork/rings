@@ -347,17 +347,20 @@ pub struct ProbeRequest {
 impl ProbeRequest {
     /// Draw a fresh challenge nonce for `epoch` from `rng`.
     pub(crate) fn from_rng(epoch: ProvisionalEpoch, rng: &mut impl rand::RngCore) -> Self {
-        let mut nonce = [0_u8; 32];
-        rng.fill_bytes(&mut nonce);
+        // Sample directly into the fixed array via `rand::Rng::gen` rather than zero-initializing
+        // a buffer first, avoiding a constant array initializer in cryptographic nonce generation.
+        let nonce: [u8; 32] = rand::Rng::gen(rng);
         Self { epoch, nonce }
     }
 
+    /// Draw a fresh challenge nonce for `epoch` using system entropy.
     #[cfg(test)]
     pub(crate) fn random_for_epoch(epoch: ProvisionalEpoch) -> Self {
         Self::from_rng(epoch, &mut crate::utils::SystemEntropy)
     }
 }
 
+/// Construct a deterministic [`ProbeRequest`] fixture for tests using repeated byte `nonce`.
 #[cfg(test)]
 pub(crate) fn test_probe_request(nonce: u8) -> ProbeRequest {
     let seconds = u64::try_from(crate::utils::get_epoch_ms() / 1_000).unwrap_or(0);
