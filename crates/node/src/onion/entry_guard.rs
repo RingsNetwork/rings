@@ -164,6 +164,11 @@ struct GuardTimeoutState {
 }
 
 /// Persistent manager for local onion entry-guard selection, rotation, and timeout eviction.
+///
+/// Law (Lock order): `storage_gate ≺ timeout_state`. `storage_gate` serializes asynchronous
+/// read-modify-write persistence across [`Self::evict_guard`] and [`Self::select_relay_guards_at`]
+/// so a concurrent route selection never overwrites a concurrent timeout eviction; `timeout_state`
+/// is a synchronous leaf mutex never held across `.await`.
 pub(crate) struct OnionEntryGuards {
     /// Durable cache backend storing [`OnionEntryGuardState`] snapshots.
     storage: OnionEntryGuardStorage,
@@ -171,6 +176,8 @@ pub(crate) struct OnionEntryGuards {
     local_did: Option<Did>,
     /// Desired number of persisted entry guards per network.
     target_guard_count: usize,
+    /// Asynchronous RMW gate serializing persisted guard-set transitions.
+    storage_gate: futures::lock::Mutex<()>,
     /// Synchronized in-memory timeout and cooldown tracker.
     timeout_state: std::sync::Mutex<GuardTimeoutState>,
 }
@@ -182,6 +189,7 @@ impl OnionEntryGuards {
             storage,
             local_did: Some(local_did),
             target_guard_count: DEFAULT_ENTRY_GUARD_COUNT,
+            storage_gate: futures::lock::Mutex::new(()),
             timeout_state: std::sync::Mutex::new(GuardTimeoutState::default()),
         }
     }
@@ -195,6 +203,7 @@ impl OnionEntryGuards {
             storage,
             local_did: None,
             target_guard_count: target_guard_count.max(1),
+            storage_gate: futures::lock::Mutex::new(()),
             timeout_state: std::sync::Mutex::new(GuardTimeoutState::default()),
         }
     }
@@ -250,6 +259,11 @@ impl OnionEntryGuards {
 
     /// Remove `guard` from `network_id`'s persisted entry-guard set if present.
     pub(crate) async fn evict_guard(&self, network_id: u32, guard: Did) -> Result<bool> {
+        let _storage_turn = rings_core::utils::SlowLockGuard::acquire(
+            "OnionEntryGuards::storage_gate",
+            self.storage_gate.lock(),
+        )
+        .await;
         let key = self.state_key(network_id);
         let Some(mut stored) = self
             .storage
@@ -302,6 +316,11 @@ impl OnionEntryGuards {
         entropy: &mut impl RouteEntropy,
         first_hop_permitted: impl Fn(Did) -> bool,
     ) -> Result<OnionEntryGuardSet> {
+        let _storage_turn = rings_core::utils::SlowLockGuard::acquire(
+            "OnionEntryGuards::storage_gate",
+            self.storage_gate.lock(),
+        )
+        .await;
         let key = self.state_key(network_id);
         let stored = self
             .storage
@@ -1304,6 +1323,111 @@ mod tests {
             )
             .await?;
         assert!(rechecked_a.contains(relay_a.did));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_evict_and_select_do_not_resurrect_evicted_guard() -> Result<()> {
+        struct GatedPutStorage {
+            inner: MemStorage<OnionEntryGuardState>,
+            put_entered: tokio::sync::Notify,
+            put_release: tokio::sync::Notify,
+            gate_first_put: std::sync::atomic::AtomicBool,
+        }
+
+        #[async_trait::async_trait]
+        impl KvStorageInterface<OnionEntryGuardState> for std::sync::Arc<GatedPutStorage> {
+            async fn get(
+                &self,
+                key: &str,
+            ) -> rings_core::error::Result<Option<OnionEntryGuardState>> {
+                self.inner.get(key).await
+            }
+
+            async fn put(
+                &self,
+                key: &str,
+                value: &OnionEntryGuardState,
+            ) -> rings_core::error::Result<()> {
+                if self
+                    .gate_first_put
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    self.put_entered.notify_waiters();
+                    self.put_release.notified().await;
+                }
+                self.inner.put(key, value).await
+            }
+
+            async fn get_all(
+                &self,
+            ) -> rings_core::error::Result<Vec<(String, OnionEntryGuardState)>> {
+                self.inner.get_all().await
+            }
+
+            async fn remove(&self, key: &str) -> rings_core::error::Result<()> {
+                self.inner.remove(key).await
+            }
+
+            async fn clear(&self) -> rings_core::error::Result<()> {
+                self.inner.clear().await
+            }
+
+            async fn count(&self) -> rings_core::error::Result<u32> {
+                self.inner.count().await
+            }
+        }
+
+        let storage = std::sync::Arc::new(GatedPutStorage {
+            inner: MemStorage::new(),
+            put_entered: tokio::sync::Notify::new(),
+            put_release: tokio::sync::Notify::new(),
+            gate_first_put: std::sync::atomic::AtomicBool::new(false),
+        });
+        let manager = std::sync::Arc::new(OnionEntryGuards::new_with_target_count(
+            Box::new(std::sync::Arc::clone(&storage)),
+            1,
+        ));
+
+        let relay_a = relay()?;
+        let relay_b = relay()?;
+        let mut entropy = FixedEntropy::new([0]);
+        let initial = manager
+            .select_relay_guards_at(1, &[relay_a], &[], 10_000, &mut entropy, |_| true)
+            .await?;
+        assert_eq!(initial.dids, BTreeSet::from([relay_a.did]));
+
+        // Pause `evict_guard` mid-RMW right before `storage.put` completes, then launch a
+        // concurrent `select_relay_guards_at`: `storage_gate` must serialize the selection behind
+        // the eviction so `relay_a` is not resurrected from a stale `storage.get`.
+        storage
+            .gate_first_put
+            .store(true, std::sync::atomic::Ordering::Release);
+        let entered_fut = storage.put_entered.notified();
+        tokio::pin!(entered_fut);
+
+        for attempt in 0..ENTRY_GUARD_MAX_CONSECUTIVE_TIMEOUTS - 1 {
+            assert!(
+                !manager
+                    .record_route_outcome(1, relay_a.did, true, 11_000 + u128::from(attempt))
+                    .await?
+            );
+        }
+
+        let evict_fut = manager.record_route_outcome(1, relay_a.did, true, 12_000);
+        let relays = [relay_a, relay_b];
+        let mut select_entropy = FixedEntropy::new([0]);
+        let select_fut =
+            manager.select_relay_guards_at(1, &relays, &[], 12_001, &mut select_entropy, |_| true);
+        let coordinator = async {
+            entered_fut.await;
+            tokio::task::yield_now().await;
+            storage.put_release.notify_waiters();
+        };
+        let (evicted, selected, ()) = futures::join!(evict_fut, select_fut, coordinator);
+
+        assert!(evicted?);
+        assert_eq!(selected?.dids, BTreeSet::from([relay_b.did]));
         Ok(())
     }
 }

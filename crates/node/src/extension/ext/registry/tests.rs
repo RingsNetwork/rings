@@ -267,7 +267,7 @@ async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<
         runner_id: super::next_runner_id(),
         protocol: OrderedProtocol,
         interpret: Arc::clone(&interpreter),
-        state: Mutex::new(0),
+        state: Mutex::new(Some(0)),
         transition_gate: AsyncMutex::new(()),
         after_decode_for_test: None,
         after_commit_for_test: Some(commit_observer),
@@ -383,7 +383,7 @@ async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
         runner_id: super::next_runner_id(),
         protocol,
         interpret: Arc::clone(&interpreter),
-        state: Mutex::new(state),
+        state: Mutex::new(Some(state)),
         transition_gate: AsyncMutex::new(()),
         after_decode_for_test: Some(observer),
         after_commit_for_test: None,
@@ -931,5 +931,92 @@ async fn test_outbox_shell_does_not_hold_transition_gate_across_stalled_send() -
     tokio::time::timeout(bound, hook.wait_until_completed(stalled_peer))
         .await
         .map_err(|_| Error::ExtensionError("stalled peer send did not resume".to_string()))??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_runner_state_mutex_is_unlocked_during_protocol_step() -> Result<()> {
+    type WitnessRunnerSlot =
+        Arc<std::sync::OnceLock<Arc<Runner<StepUnlockWitness, NoopInterpret>>>>;
+
+    struct StepUnlockWitness {
+        runner_slot: WitnessRunnerSlot,
+        unlocked_during_step: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct NoopInterpret;
+
+    #[async_trait::async_trait]
+    impl Interpret for NoopInterpret {
+        type Effect = ();
+
+        async fn run(&self, _scope: &EffectScope, (): ()) -> Result<Vec<Bytes>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl Protocol for StepUnlockWitness {
+        type State = u32;
+        type Event = u32;
+        type Effect = ();
+
+        fn namespace(&self) -> &str {
+            "step-unlock-witness"
+        }
+
+        fn init(&self) -> u32 {
+            10
+        }
+
+        fn decode(&self, wire: Wire<'_>) -> std::result::Result<u32, Reject> {
+            Ok(u32::from(wire.payload.first().copied().unwrap_or(0)))
+        }
+
+        fn step(&self, ctx: Ctx<'_, u32>, event: u32) -> Transition<u32, ()> {
+            if let Some(runner) = self.runner_slot.get() {
+                if let Ok(guard) = runner.state.try_lock() {
+                    self.unlocked_during_step
+                        .store(guard.is_none(), std::sync::atomic::Ordering::Release);
+                }
+            }
+            Transition::pure(ctx.state.saturating_add(event))
+        }
+    }
+
+    let extensions = extensions()?;
+    let runner_slot: WitnessRunnerSlot = Arc::new(std::sync::OnceLock::new());
+    let unlocked_during_step = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runner = Arc::new(Runner {
+        runner_id: super::next_runner_id(),
+        protocol: StepUnlockWitness {
+            runner_slot: Arc::clone(&runner_slot),
+            unlocked_during_step: Arc::clone(&unlocked_during_step),
+        },
+        interpret: NoopInterpret,
+        state: Mutex::new(Some(10)),
+        transition_gate: AsyncMutex::new(()),
+        after_decode_for_test: None,
+        after_commit_for_test: None,
+        before_gate_wait_for_test: None,
+    });
+    let _ = runner_slot.set(Arc::clone(&runner));
+    let dyn_runner: Arc<DynHandler> = runner.clone();
+    extensions
+        .core
+        .handlers
+        .write()
+        .map_err(|_| Error::Lock)?
+        .insert("step-unlock-witness".to_string(), dyn_runner);
+
+    let from = extensions.core().did();
+    extensions
+        .core()
+        .dispatch(
+            from,
+            Envelope::new("step-unlock-witness", Bytes::from_static(&[5])),
+        )
+        .await?;
+    assert!(unlocked_during_step.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(*runner.state.lock().expect("state"), Some(15));
     Ok(())
 }

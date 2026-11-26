@@ -851,6 +851,10 @@ pub enum Error {
     #[error("Message invalid: {0}")]
     InvalidMessage(String),
 
+    /// An inbound probe transcript message arrived via relay or a non-origin hop.
+    #[error("probe transcript messages must be delivered directly without relaying")]
+    NonDirectProbeTranscript,
+
     /// Message encryption failed
     #[error("Message encryption failed")]
     MessageEncryptionFailed(String),

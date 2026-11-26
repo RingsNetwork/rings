@@ -99,6 +99,27 @@ fn test_oauth_credential_is_rejected() {
     );
 }
 
+#[test]
+fn test_debug_redacts_credential_and_default_uses_rfc7064_scheme() {
+    let secret = "super-secret-turn-token";
+    let server =
+        IceServer::from_str(&format!("turn://alice:{secret}@turn.example.com:3478")).unwrap();
+    let formatted = format!("{server:?}");
+    assert!(
+        !formatted.contains(secret),
+        "debug leaked secret: {formatted}"
+    );
+    assert!(formatted.contains("<redacted>"));
+
+    let default_server = IceServer::default();
+    assert_eq!(default_server.urls, vec!["stun:stun.l.google.com:19302"]);
+    assert_eq!(
+        IceServer::from_str("stun:stun.l.google.com:19302").unwrap(),
+        default_server
+    );
+    assert!(format!("{default_server:?}").contains(r#"credential: """#));
+}
+
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn test_transform() {
