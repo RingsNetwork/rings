@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium, type Route } from "playwright";
 
+/** Captured beacon payload sent by `/papers/papers-telemetry.js` to `POST /api/telemetry`. */
 type TelemetryPayload = {
   readonly event?: string;
   readonly paper?: string;
@@ -21,6 +22,7 @@ type TelemetryPayload = {
   readonly depth?: number;
 };
 
+/** Local loopback HTTP server and collected telemetry beacons. */
 type RunningServer = {
   readonly server: Server;
   readonly origin: string;
@@ -147,11 +149,13 @@ try {
   clearTimeout(watchdog);
 }
 
+/** Resolves the `frontend/` directory from either source or compiled `.generated/scripts` paths. */
 function frontendProjectRoot(currentScriptDir: string): string {
   const parentDir = dirname(currentScriptDir);
   return basename(parentDir) === ".generated" ? resolve(parentDir, "..") : resolve(currentScriptDir, "..");
 }
 
+/** Starts an ephemeral loopback server serving static site assets and mock telemetry endpoints. */
 async function startTestServer(root: string): Promise<RunningServer> {
   const beacons: TelemetryPayload[] = [];
   const server = createServer((request: IncomingMessage, response: ServerResponse): void => {
@@ -173,6 +177,7 @@ async function startTestServer(root: string): Promise<RunningServer> {
   };
 }
 
+/** Handles incoming static asset requests as well as `/api/telemetry` and `/api/telemetry/stats`. */
 async function handleRequest(
   root: string,
   beacons: TelemetryPayload[],
@@ -222,6 +227,7 @@ async function handleRequest(
   }
 }
 
+/** Maps a served file path extension to its HTTP `Content-Type` header. */
 function contentType(filePath: string): string {
   switch (extname(filePath)) {
     case ".css":
@@ -241,6 +247,7 @@ function contentType(filePath: string): string {
   }
 }
 
+/** Polls collected telemetry beacons until `predicate` matches or the 3s deadline expires. */
 async function waitForBeacon(
   beacons: TelemetryPayload[],
   predicate: (payload: TelemetryPayload) => boolean,
@@ -258,18 +265,21 @@ async function waitForBeacon(
   throw new Error(`${message}; received beacons: ${JSON.stringify(beacons)}`);
 }
 
+/** Closes the loopback HTTP server cleanly. */
 async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClosed, rejectClosed): void => {
     server.close((error?: Error): void => (error ? rejectClosed(error) : resolveClosed()));
   });
 }
 
+/** Asserts strict equality on a scalar test expectation. */
 function assertEqual<T>(actual: T, expected: T, message: string): void {
   if (actual !== expected) {
     throw new Error(`${message}: expected ${String(expected)}, received ${String(actual)}`);
   }
 }
 
+/** Asserts that a measured numeric count is at least `minimum`. */
 function assertAtLeast(actual: number, minimum: number, message: string): void {
   if (actual < minimum) {
     throw new Error(`${message}: expected at least ${String(minimum)}, received ${String(actual)}`);
