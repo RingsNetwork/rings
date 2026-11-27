@@ -38,7 +38,7 @@ Note: The reason for using a git path instead of a local path is that npm, after
 - **Lifecycle & locks**:
   - `const listener = provider.listen(); await listener.started();` starts swarm and stabilization loops (`listener.stop()`, `listener.is_stopped()`, `listener.task()`).
   - Opening browser stores acquires an exclusive Web Lock (`rings-node/<storage_name>`, `ifAvailable: true`), so a second tab targeting the same `storage_name` fails with `BrowserStorageLocked` (`823`).
-  - `await provider.leave()` performs best-effort carrier handoff and sends `Leave`; `await provider.close()` stops tasks, leaves, flushes storage, and releases the Web Lock.
+  - `await provider.leave()` performs acknowledged relay-carrier handoff and broadcasts authenticated `Leave` (backed by `r`-member chain custody if a browser tab closes abruptly); `await provider.close()` stops tasks, leaves, flushes storage, and releases the Web Lock.
 - **Networking, protocols & onion**:
   - `provider.address` (getter), `connect_peer_via_http(url)`, `connect_peer_via_http_with_token(url, token)`, `connect_with_address(addr, addr_type)`, `disconnect(addr, addr_type)`, `get_node_info()`, `get_peer_measurement(addr, addr_type)`, `lookup_service(name)`.
   - `provider.on(namespace, initial_state, handler)` registers a pure `(ctx, event) -> { state, effects }` extension protocol; `send_message(destination, namespace, Uint8Array)` dispatches to it.

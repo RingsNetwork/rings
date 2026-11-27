@@ -30,7 +30,10 @@ known-answer vectors, and rejection of every single-bit change at `τ ≥ 4`.
 A key is exactly 48 bytes, `K = I ‖ J ‖ L`, for which AEZ's `Extract` is the identity. A key
 with a zero subkey is rejected ([`KeyError::ZeroSubkey`]; Mennink, CT-RSA 2017). AEZ's
 security is birthday-bound per key (≈ 2^64 blocks; the key-recovery attacks of Fuhr–Leurent–Suder
-and Chaigneau–Gilbert need that volume under one key), so a key should process few messages.
+and Chaigneau–Gilbert need that volume under one key), so a key should process few messages; in
+Rings Sphinx circuits, fresh single-use 48-byte AEZ keys are derived per loop/segment via ECDH +
+HKDF and guarded by sliced-Bloom replay admission (`R_i[x]`), eliminating multi-message key-volume
+exposure by construction.
 
 ## Side channels
 

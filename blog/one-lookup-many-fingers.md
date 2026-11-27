@@ -109,6 +109,8 @@ And when a Rust test suite hangs with no output and no CPU, go look for an eager
 
 The change ships in Rings 0.26.0. It is a wire-format break, so an overlay upgrades together, and the finger table is finally a thing you can trust.
 
+Note: Since this 0.26.0 engineering log was written, Rings 1.0 completed the remaining pieces noted above: candidate dial backoff (`DialBackoff`) and persistent peer reliability memory (`ReliabilityWindow` in `rings-measure`) prevent unreachable peers from consuming repeated handshake slots, while quiet-window 1-RTT ICE settling, passive 1-hop non-transitive gap bridging, stateless UDP/TCP `rings-turn` (`TurnTcpBridge`), and DHT-discovered multi-hop Onion TURN (`rings-turn-service`) resolve browser NAT and firewall reachability end-to-end.
+
 ## Further reading
 
 - [Chord DHT & Network Layer](https://rings.rs/docs/advanced-topic/chord.html)

@@ -6,8 +6,9 @@ free every non-null request string, and destroy the provider exactly once.
 
 The Swift and Kotlin wrappers expose the same high-level desktop flow as the Python wrapper:
 node identity, offer/answer exchange, peer connection polling, E2E handshake and message sending,
-and E2E event/stream polling. They deliberately stop at the portable C ABI; mobile packaging and
-iOS NetworkExtension or Android VpnService integration are outside this release.
+and E2E event/stream polling. They target the portable `rings.h` C ABI directly so desktop and
+mobile host apps (including iOS `NetworkExtension` and Android `VpnService` hosts) own their own
+UI, wallet lifecycle, and OS packaging.
 
 Build the actual native library first:
 
@@ -40,8 +41,9 @@ RINGS_FFI_LIBRARY="$PWD/target/debug/librings_node.so" \
 ```
 
 Use `RingsRuntime.load(path)` with `librings_node.so` on Linux, `librings_node.dylib` on macOS, or
-`rings_node.dll` on Windows. As in the Python example, the application supplies an EIP-191 signer;
-neither wrapper chooses a wallet or stores private keys.
+`rings_node.dll` on Windows. The application supplies a callback signer for any of the 6 supported
+`accountType` schemes (`eip191` by default, plus `secp256k1`, `bip137`, `ed25519`, `secp256r1`,
+and `bls12-381`); neither wrapper locks callers to a specific wallet or stores private keys.
 
 The real-library load checks are intentionally narrower than the Python integration tests: Swift
 and Kotlin validate their own loader against the Rust ABI, while the deterministic fake validates

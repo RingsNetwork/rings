@@ -23,8 +23,10 @@ rings service lookup <name>
 `register` appends this node's DID to the data topic `name`; `lookup` prints the topic's elements,
 one per line. The topic is an ordinary [data topic](../advanced-topic/chord.md#data-topic-storage),
 the one `publishMessageToTopic` and `fetchTopicMessages` also address, so a lookup returns every
-text element written to it. A registration is a plain write and expires after 10 minutes: a
-provider runs `register` again within that period to stay listed.
+text element written to it. A CLI `register` call writes a 10-minute topic entry (renewed by
+re-running `register`), whereas long-lived daemons use the declarative `services:` section in
+`config.yaml` or `SignedDescriptor` lease heartbeats (`ProcessorBuilder::register_task`) for
+automatic, zero-tombstone renewal.
 
 The same calls over JSON-RPC ([API](../jsonrpc.md#registerservice)):
 

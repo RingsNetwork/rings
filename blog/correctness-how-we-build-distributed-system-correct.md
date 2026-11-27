@@ -34,6 +34,8 @@ Together, these paths change the acceptance bar for Rings. An implementation sho
 
 Ref: [https://github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings)
 
+Note: Building on this `2026Mid` algebraic foundation, Rings 1.0 extended the verified surface across actor-isolated Merkle CRDT provenance (`EntryCrdt`), factored `E(x) ⊔ R(x)` no-resurrection horizons, `RecordAuthority` (`C × M`) crash-consistent stores, cleanest-first `SlotRoster` 5-table admission, and Sphinx/AEZ v5 Kleisli onion pipelines—verified across 16 Stateright/BFS suites (9.50M reachable states, 54 refuted safety mutants) in the [Rings 1.0 Whitepaper](https://rings.rs/papers/rings/).
+
 ## Further reading
 
 - [Chord DHT & CRDT Storage](https://rings.rs/docs/advanced-topic/chord.html)

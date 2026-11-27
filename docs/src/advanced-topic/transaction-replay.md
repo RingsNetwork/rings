@@ -47,7 +47,7 @@ sending task.
 
 The per-class streams are stored one record per stream under `rings-core:transaction-replay` (see
 [Persistence and bounds](#persistence-and-bounds)). Nodes synchronize sequences strictly under
-the active `WIRE_VERSION` (`5`), so upgrades that introduce wire-format changes are coordinated
+the active `WIRE_VERSION` (`6`), so upgrades that introduce wire-format changes are coordinated
 across an overlay.
 
 Every transaction carries a mandatory `u64` sequence. The transaction signature transcript
@@ -112,10 +112,11 @@ runtimes at the same key-value store is not an atomic multi-writer protocol. If 
 coordinate, the destination reports their conflicting sequence as `Fork`. Restoring an identity
 backup without its allocator state has the same limitation and is unsupported.
 
-The receiver persists every admitted transition before application validation or dispatch. A
-crash after persistence but before dispatch may lose the event. This is the deliberate
-persistence-before-dispatch boundary: it prevents duplicate dispatch but is not exactly-once
-execution because replay storage and application handlers do not share a transaction.
+The receiver persists every admitted transition before application validation or dispatch so
+duplicate dispatch is prevented across crashes. For stored offline relay-inbox mail, atomic
+co-persistence of `(W_s, K_s)` re-queues untaken deliveries across restarts with zero silent loss,
+while live streaming protocols (TCP relay, onion sessions, E2E streams) layer end-to-end sequence
+recovery above this boundary.
 
 Link-local transactions are the exception. A transaction is link-local when all three
 hold: it is Application traffic, it arrived on the authenticated connection of its own origin,
@@ -130,7 +131,7 @@ and restarts. The onion data plane does, with its replay store and process epoch
 one namespace that declares it. Only the origin can present a link-local transaction again: its
 link is authenticated and encrypted, and the transaction names this node as its destination. So
 the durable window protected nothing there that the declaring namespace does not. The formal law is
-in the *Link-local transactions* section of the [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf) (`papers/rings.tex`).
+in the *Link-local transactions* section of the [Rings whitepaper](https://rings.rs/papers/rings/) (`papers/rings.tex`).
 
 Sender and receiver state are stored as one record per stream:
 
@@ -174,7 +175,7 @@ written gather into the next, and one store batch writes all of them:
 - On IndexedDB, the batch is one strict read-write transaction.
 
 The laws, stated in `crates/core/src/message/replay/commit.rs` and in the Group commit section of
-the [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf) (`papers/rings.tex`):
+the [Rings whitepaper](https://rings.rs/papers/rings/) (`papers/rings.tex`):
 
 - **Release.** No result is returned before its batch is durable. That holds for a refusal too,
   and for a reservation inside its lease that writes nothing.
@@ -218,9 +219,11 @@ edge, as the next section describes. There is no LRU eviction or sender-controll
 native daemon keeps
 the records in a dedicated 40 MiB authoritative file store, which evicts nothing: a write beyond its
 budget fails with `StorageBudgetExhausted`, and so does an open under a lowered budget. Browser
-providers keep them in a dedicated authoritative IndexedDB store with a row capacity of
-`TRANSACTION_REPLAY_STORE_MAX_RECORDS`, which evicts nothing either: a new record beyond it fails
-with `StorageBudgetExhausted`, and so does an open under a lowered capacity. Both are sized
+providers keep them in a dedicated authoritative IndexedDB store opened under an origin-wide
+exclusive Web Lock with both a row capacity of `TRANSACTION_REPLAY_STORE_MAX_RECORDS` and a
+canonical wire byte cap (`TRANSACTION_REPLAY_STORAGE_CAPACITY`), which evicts nothing either: a new
+record beyond either bound fails with `StorageBudgetExhausted`, and so does an open under a lowered
+capacity. Both are sized
 never to reach their limits, so the refusal is a bound, not an expected path. A custom
 `SwarmBuilder` or `ProcessorBuilder` must supply an authoritative `ReplayStorage`. Without one,
 the node refuses every reservation and admission with `TransactionReplayStorageUnavailable`, so
@@ -238,7 +241,7 @@ failures, unrestorable records and the calls refused on their streams.
 An origin is a key pair, free to mint, so a bound per origin bounds nothing: bounding per origin
 alone would let an adversary fill the receiver table with one transaction from each of 16,384
 fresh origins and refuse every new origin for good. The receiver table is accounted by connection
-slot ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf),
+slot ([Rings whitepaper](https://rings.rs/papers/rings/),
 Fair Admission & Load Bounds, Law 2). A node has `R = 2(160 + s + 1)` slots, `330` at the default
 four successors; an admitted connection takes the cleanest free slot (the one whose items use the
 least of their floor) and frees it when it is retired. A new stream is charged to its introducer:
@@ -281,21 +284,18 @@ that reads no carrier, or a carrier without the element, removes nothing: the re
 holder that a membership change just named, before its hand-off landed, and dropping custody on
 its word would refuse the hand-off's redelivery after a restart as a replay.
 
-The cost is liveness. An entry whose mail was admitted, not taken, and then lost at every member of
-its chain (a chain that churned out without a hand-off) stays until its transaction is spent, up to
-the proof's lifetime plus 7 days after its admission. The bound of 64 entries is shared by the whole
-store, so with 64 such entries every new relay delivery to the node, from every origin, waits
-(`RelayCustodyFull`, the pass ends and the mail stays stored) until the earliest of them is spent.
-A relay inbox that stays undelivered while mail is held for the node points to this stall. It ends
-by itself at that instant; removing the `transaction-replay` store ends it at once, at the cost of
-the replay guarantee (see [Bad records](#bad-records) for that reset). No read of the chain can free
-a lost entry earlier: even unanimous absence across all `r` members of an agreed, repaired
-chain cannot exclude a writer still resending an unacknowledged hold or a displaced keeper whose
-hand-off has not yet landed, with no tombstone before a take to refuse its join, and freeing custody
-on that absence would retire the later arrival as a replay.
-Forgetting a spent stream reopens no replay, so a refusal ends once a stream of the refused edge is
-spent. Each receiver record carries its introducer and spent instant, so a restart recovers the
-accounting.
+Age-gated `r = 8` chain replication (`M_r(k)`), acknowledged `Leave` handoffs, and 10-second
+event-driven digest repair keep relay carriers available across normal churn so custody entries
+drain promptly on `take`. In the extreme failure mode where an admitted, untaken entry were
+simultaneously lost across every member of its `r`-holder chain before repair, safety takes strict
+priority over premature release: the entry remains guarded in `K_s` until its transaction is spent
+(up to the proof's lifetime plus 7 days; bounded at 64 store-wide entries, returning
+`RelayCustodyFull` rather than dropping custody). Even unanimous absence across repaired chain
+members cannot safely free an unspent entry early, since a writer resending an unacknowledged hold
+or a delayed hand-off could still arrive later and would otherwise be misclassified as a replay.
+Once the spent horizon elapses, both the custody entry and spent stream retire automatically
+without reopening replay, and each receiver record persists its introducer and spent instant so
+restarts recover slot accounting intact.
 
 ## Bad records
 

@@ -7,7 +7,7 @@
     "author_url": "https://medium.com/@ryankung",
     "medium_url": "https://medium.com/@ryankung/we-removed-the-last-dark-cloud-over-rings-network-2ad3ed7c4685",
     "cover": "/assets/blog/we-removed-the-last-dark-cloud-over-rings-network/cover.png",
-    "summary": "When a user is on a symmetric NAT or mobile network where direct P2P hole-punching is impossible, Rings routes stateless cryptographic TURN allocations over multi-hop onion circuits—so the worst case degrades to Tor, never an ordinary relay network.",
+    "summary": "When a user is behind a Symmetric NAT or mobile carrier firewall where direct P2P hole-punching cannot succeed, Rings bridges stateless cryptographic TURN allocations across multi-hop onion::udp circuits—preserving Tor-grade endpoint separation with zero DID exposure.",
     "tags": ["TURN", "Onion Routing", "WebRTC", "NAT Traversal", "Cryptography"]
   },
   {

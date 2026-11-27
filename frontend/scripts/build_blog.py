@@ -253,7 +253,7 @@ def site_header_html() -> str:
         <a href="https://rings.rs/#node">Node</a>
         <a class="active" href="https://rings.rs/blog/" aria-current="page">Blog</a>
         <a href="https://rings.rs/docs/">Docs</a>
-        <a href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf">Whitepaper</a>
+        <a href="https://rings.rs/papers/">Whitepaper</a>
       </nav>
     </header>"""
 
@@ -292,7 +292,7 @@ def site_footer_html() -> str:
           <h3>Project</h3>
           <ul>
             <li><a href="https://rings.rs/blog/">Blog</a></li>
-            <li><a href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf">Whitepaper</a></li>
+            <li><a href="https://rings.rs/papers/">Whitepaper</a></li>
             <li><a href="https://github.com/RingsNetwork/rings/blob/master/SECURITY.md">Security model</a></li>
             <li><a href="https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md">Roadmap</a></li>
             <li><a href="https://github.com/sponsors/RingsNetwork">Sponsor</a></li>
@@ -306,7 +306,7 @@ def site_footer_html() -> str:
         <div><dt>Commercial use</dt><dd>Under AGPL-3.0-only, commercial use is permitted when its copyleft and network source-disclosure obligations are met. Commercial licensing outside AGPL-3.0-only terms is available from Rings Network on request.</dd></div>
         <div><dt>No warranty</dt><dd>The software and this site are provided as is, without warranty of any kind, express or implied, as set out in sections 15 and 16 of the AGPL.</dd></div>
         <div><dt>Security boundary</dt><dd>Rings combines wallet-backed session delegation, end-to-end encrypted peer-to-peer channels, and multi-hop Sphinx onion routing. Review the security model for cryptographic guarantees and deployment best practices.</dd></div>
-        <div><dt>Privacy</dt><dd>rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.</dd></div>
+        <div><dt>Privacy</dt><dd>rings.rs uses no accounts, no tracking cookies, and no third-party analytics; paper pages record anonymous, cookie-free aggregate read and download counts. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.</dd></div>
       </dl>
       <div class="rings-footer-bottom">
         <span>&copy; 2021&ndash;<span class="rings-footer-year">2026</span> Rings Network</span>

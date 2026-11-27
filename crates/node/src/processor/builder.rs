@@ -278,8 +278,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set the cover floor of this node's idle onion links (#880); the default is one unit per
-    /// second, and a constrained node (a browser) may lower it.
+    /// Set the background cover floor of this node's idle onion links (#880, #1314); defaults to
+    /// [`OnionIdleFloor::OFF`] (zero idle cover outside active dwell windows) and can be raised up
+    /// to [`OnionIdleFloor::DEFAULT`] (`1 unit/s`).
     pub fn onion_idle_floor(mut self, floor: OnionIdleFloor) -> Self {
         self.onion_idle_floor = floor;
         self

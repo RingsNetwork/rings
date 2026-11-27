@@ -1,4 +1,6 @@
-# Issue #787: gateway and webview decisions
+# Issue #787: gateway and webview decisions (Historical Archive)
+
+> **Historical maintenance record (2026-09-22):** Preserved for commit-provenance traceability of `#787`. In Rings 1.0, native TUN/helper tests, Playwright Chromium WebView suites, and headless Chrome WASM browser tests all run continuously as required CI gates in `.github/workflows/qaci.yml`.
 
 Baseline: `1dbdd5100d7c21f71d719a1b2879b97d9e82b5fd`, also the remote master observed
 on 2026-09-22. The issue had no comments at inspection. This work excludes transport,

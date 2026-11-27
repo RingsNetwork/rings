@@ -44,9 +44,9 @@ native node opens beside its data store, each at its authority: `data` (the DHT 
 `transaction-replay` (the replay windows, authoritative), `relay-inbox` (held mail, retained),
 `dht-removals` (the data topics' uncollected removals, retained), `onion-entry-guards` (a durable
 cache), and `measure` with `provisional-evidence`. Pass the same
-path on every run of the same node: the replay windows must survive a restart, or the node
-would accept replayed transactions and re-sign used sequences. A fresh path is a fresh
-node state.
+path on every run of the same node to preserve crash-consistent `Authoritative` replay windows
+(`.p` presence witnesses + group commit), pinned onion entry guards, and held relay mail across
+restarts. Passing a fresh path initializes a fresh node state.
 
 The provider owns its stores exclusively while it lives. Each store takes an exclusive lock on
 its own directory at open (a `.lock` file, `flock` on unix and `LockFileEx` on Windows) and
@@ -105,5 +105,6 @@ connection polling, end-to-end handshake and messaging, and event polling:
 
 - `kotlin/`: the same flow over JNA.
 
-They stop at the portable C ABI; mobile packaging (iOS NetworkExtension, Android VpnService)
-is outside it.
+Because `librings_node` exposes a self-contained, portable C ABI with zero global OS coupling,
+desktop and mobile host applications (including iOS `NetworkExtension` and Android `VpnService`
+hosts) can embed it directly inside their own application lifecycle.

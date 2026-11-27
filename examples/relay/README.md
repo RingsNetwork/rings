@@ -39,5 +39,5 @@ Six integration tests in `tests/test_relay.rs`:
   Google (A never touches Google directly). Needs outbound internet on the relay node.
 
 All run the full round-trip when an overlay link can be established (WebRTC/ICE); in
-environments without UDP/STUN connectivity (or internet, for `relay_to_google`) they
-**skip** with a notice instead of failing spuriously.
+sandboxed test environments that forbid local UDP sockets without a configured TURN server (or lack
+outbound internet, for `relay_to_google`) they **skip** with a notice instead of failing spuriously.

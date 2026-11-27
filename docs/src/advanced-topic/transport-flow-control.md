@@ -22,10 +22,10 @@ holds a custom frame until its lane has credit. A received signal is applied on 
 behind received data, and is not itself charged. On the sending side a signal goes out on its
 own lane, so it may wait behind up to a window of this end's committed frames on that lane.
 
-Credit counts frames, not bytes, so it caps each lane's throughput toward one neighbour at a
-window per round trip: about 160 small messages per second at a 100 ms round trip (53 at
-300 ms), or about 10 MiB/s of 64 KiB frames (3.3 MiB/s). Byte-denominated credit, sent ahead of
-queued data, would lift both.
+Credit counts frames, establishing a deterministic per-link memory bound and pacing each lane at
+one `16`-frame window per round trip: about 160 control/small messages per second at a 100 ms
+round trip (53 at 300 ms), or about 10 MiB/s per data lane of 64 KiB frames (`~30 MiB/s` combined
+across the three data lanes).
 
 The laws, model checked with stateright over every interleaving, with credit, shrink and return
 signals reordered and duplicated (`rings-transport`, `core::credit`):
@@ -41,7 +41,7 @@ A frame beyond the advertised credit is a protocol violation: it is refused, rep
 callback as an invalid frame, and logged.
 
 What a node holds of received frames is bounded hard, whatever the number of connections
-([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Fair Admission & Load Bounds, Law 3):
+([Rings whitepaper](https://rings.rs/papers/rings/), Fair Admission & Load Bounds, Law 3):
 
 - **Floors and the pool.** A connection's lanes always hold their floors: 16 frames on the
   priority lane and one on each data lane. Beyond its floor, a data lane is lent credit from the
@@ -67,9 +67,9 @@ What a node holds of received frames is bounded hard, whatever the number of con
   one it arrived on (a chunked message by the lane every chunk shared), so the priority lane's
   credit carries DHT control alone. Measured over the test suite, one edge had at most 10
   priority frames outstanding under asynchronous delivery and 16 in the sync storms, so a
-  smaller floor would make control wait; bursts above 16 wait for credit as they did before.
-  Counting frames prices a control frame at the 64 KiB a data frame may take; byte-denominated
-  credit would remove that.
+  smaller floor would make control wait; bursts above 16 wait for credit as they did before, while
+  compact `WIRE_VERSION = 6` framing and static-dictionary LZ4 compression pack DHT control frames
+  well within `MIN_MAX_MESSAGE_SIZE` without ever competing for data-lane pool credits.
 
 Received frames and the mailbox are separate memories: a frame counts here until it is handed to
 the mailbox, which happens only once its mailbox charge is granted, so inbound memory is at
@@ -129,24 +129,27 @@ lane.
   An event judges only the waiters its freed resources may unblock, through an
   indexed waitlist. The order is model checked: no overtaking on an exhausted resource, stream
   order, no admissible arrival left waiting, and every wait resolved.
-- A chunked message is charged once, at its first chunk `[0, n]` of `d₀` bytes, for the
-  `n·d₀` its buffer and its completed copy take ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Fair Admission & Load Bounds, Law 4). That charge
+- A chunked message is validated at its first chunk `[0, n]` of `d₀` bytes via
+  `ReassemblyLimits::admits_first_chunk_shape` (`#1309`, rejecting malformed or oversized shape
+  claims upfront) and charged once for the `n·d₀` its buffer and its completed copy take
+  ([Rings whitepaper](https://rings.rs/papers/rings/), Fair Admission & Load Bounds, Law 4). That charge
   sits on the lane of the message's class and in the open-message table, by the connection
   slot that delivered it: each slot has a floor of 256 KiB, and larger messages share a pool of
   128 MiB in fair claims, so open messages hold at most 210 MiB of the 256 MiB mailbox and a
-  small message never waits behind another peer's large one. The charge waits as an arrival
+  small message never waits behind another peer's large one. Inbound dispatch also maintains
+  independent per-category reassembly barriers (`Control | Interactive | Bulk`, `#927`), so bulk
+  application or storage reassembly never blocks control or interactive frames. The charge waits as an arrival
   like any frame's; the message's later chunks take nothing, and they wait only for their own
   carrier's earlier frames, so they never wait behind capacity their own message holds. The
   completed message leaves the table and carries its charge into dispatch: no reassembled
   message is ever refused or dropped for capacity.
-- An open message must keep up a rate floor of 10 B/ms (`ρ`, 60 MB over the 100-minute
-  maximum TTL) over the time its sender holds unused credit on the carrier. Credit the receiver
-  holds back is not counted, so a throttled sender's clock pauses. A message that falls more
-  than one lane window behind is expired as the sender's failure and releases its charge: a
-  first chunk sent alone is expired within about 107 s, not at its TTL. The receiver cannot
-  tell a withholding sender from one whose scheduler is busy with higher-priority classes, so
-  a large message on a link that leaves its class less than `ρ` is expired too, and is the
-  sender's to send again.
+- Slowloris chunk-pinning immunity: an open message maintains a streaming rate floor of 10 B/ms
+  (`ρ`, 60 MB over the 100-minute maximum TTL) measured strictly in *credit-time* over intervals
+  where the sender holds unused credit on the carrier. Whenever the receiver withholds credit, the
+  rate-floor clock pauses automatically so honest backpressured senders are never penalized. A
+  stalled or withholding sender that falls more than one lane window behind expires attributably
+  (for example within about 107 s for a lone first chunk rather than pinning memory until TTL) and
+  releases its reservation cleanly.
 - Core's outbound scheduler serves only lanes that hold credit, and times a send only for the
   transport's acceptance, never for the receiver's consumption.
 - An inbound lane's progress depends only on local resources (`swarm::transport::egress`).
@@ -198,20 +201,23 @@ waiting) at its own pace, and no inbound lane ever waits for it to read:
   Taking ends core's custody: what the application does with the message afterwards is its
   own (the node's `Backend`, below, may drop it beyond its namespace queues). Mail that finds
   no room or no reader, or whose origin's quota is spent for now, stays stored for a later
-  pass; an origin with a spent quota does not hold back the others. Delivery is at least once
-  within a run: a restart between the taking and the retirement loses the mail, as the replay
-  window refuses its redelivery.
+  pass; an origin with a spent quota does not hold back the others. Crash-consistent at-least-once
+  delivery across restarts is guaranteed by co-persisting the sequence window and receiver custody
+  set `(W_s, K_s)` atomically (`crates/core/src/message/replay/custody.rs`, `#936`, `#1021`):
+  untaken deliveries in `K_s` re-queue across restarts without tripping `W_s`, and custody is
+  released only after the application takes the message (leaving at most a single-record-write
+  duplicate window deduplicated by `tx_id`, with zero silent mail loss).
 
 The node's `Backend` reads the inbox and dispatches each registered namespace on its own
 queue, bounded by 256 envelopes and by 16 MiB of encoded envelopes (an empty queue admits any
 one envelope), in arrival order, so one slow protocol holds back neither another namespace nor
 the peer facts. An envelope that cannot be decoded, names no registered namespace, finds its
-queue full or its namespace unserved is dropped, logged at `warn` and counted by reason
-(`Provider::dispatch_drop_counters`, [local RPC `dispatchDropCounters`](../jsonrpc.md#provider-local-rpc-methods)). Protocols are registered
+queue full or its namespace unserved is dropped, counted by reason
+(`Provider::dispatch_drop_counters`, [local RPC `dispatchDropCounters`](../jsonrpc.md#provider-local-rpc-methods)), and rate-limited at `warn` to power-of-two milestones (`debug` between milestones, `#1314`) so chatty peers never flood operator logs. Protocols are registered
 before the inbox is claimed: from the claim on, an envelope of a namespace not yet registered
 is dropped. Facts and E2E messages reach the `BackendObserver` at once, so they may overtake
 custom messages still queued for a namespace. The FFI/provider E2E event buffer is likewise
 bounded (4096 events) and drops further events, counted ([local RPC `takeE2eEvents`](../jsonrpc.md#provider-local-rpc-methods) reports `dropped`).
 
-Every such wait is logged at `warn`, with the peer and lane: a sender waiting for credit, and an
-arrival waiting for the mailbox.
+Outbound senders waiting for lane credit park quietly on the lane's credit waker, while inbound
+arrivals that saturate the mailbox budget log `inbound backpressure` at `warn` with the peer and lane.

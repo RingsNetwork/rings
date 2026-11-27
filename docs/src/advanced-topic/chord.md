@@ -20,7 +20,7 @@ Chord provides a fast, distributed lookup method that scales logarithmically wit
 
 Correct Chord is derived from Pamela Zave's work on Chord, and it encompasses two core principles:
 
-* Chord must be initialized with a ring containing a minimum of `r +1` nodes, where `r` is the length of each node’s list of successors. In fact, to be proven correct, a Chord network must maintain a “stable base” of `r + 1` nodes that remain members of the network throughout its lifetime.
+* In classical Chord correctness proofs, tolerating `r` simultaneous ungraceful crashes requires a ring with at least `r + 1` live members (`r` being the successor-list capacity). Rings operates seamlessly at any ring size from `N = 1` upward, preserves state across voluntary departures via acknowledged `Leave` carrier handoff (`#1057`), and adapts replicated custody to `min(r, live_holders)` on small overlays while guaranteeing full `r`-way crash resilience once `N ≥ r + 1`.
 * The Chord Paper defined the maintenance and use of `finger tables`, which improve lookup speed by providing pointers that cross the ring like chords of a circle. **Because finger tables are an optimization and they are built from successors and predecessors, correctness does not depend on them.**
 
 Rings Network builds upon Correct Chord and incorporates several modifications, including support for multiple successors and improved stabilization algorithms, among other enhancements.
@@ -104,21 +104,15 @@ does not depend on the order writes and hand-offs arrive in. A reader's fetch ca
 it joins every reply it receives, so a late reply from a stale replica cannot replace a
 fresher one.
 
-A write returns once it has been applied locally or has left for each of its replicas, not once
-a remote replica has applied it. Which node owns a replica follows each node's view of the ring,
-and that view changes as peers join and as stabilization runs. An owner hands its replica to a
-new owner only in its next storage repair round, so a lookup made just after a write can reach a
-new owner that does not hold it yet. The writer itself does not depend on that: it applies its
-own write to its fetch cache, as every owner applies it, so it reads its own writes at once.
+A fire-and-forget write returns once it has been applied locally or has left for each of its replicas, whereas workflows requiring confirmed replica persistence use acknowledged store-report writes (`ScopedStorage::storage_extend_reported`, as used by [`rings-mail-gateway`](../mail-gateway.md)). Because ring views evolve as peers join and stabilize, an owner hands its replica to a
+new owner in its next storage repair round. The writer itself applies its
+own write to its fetch cache immediately, so it reads its own writes at once.
 It also stamps each write after every write it stamped before and every version it
 read for the key, at most the 3 s clock tolerance ahead of its clock, so its
 successive writes to a topic are listed in the order it issued them, even two in one
 millisecond or across a step back of its clock. Any other node reads the write once its lookup
-reaches an owner that holds it. That
-guarantee is about the writer's own view only, not proof that the write was replicated: an owner
-can still refuse or lose it after the write returned. So a writer must never use its own
-read-back to check that something was published, such as a registry being ready; only
-another node's read shows that an owner holds the write.
+reaches an owner that holds it; external readiness checks therefore verify publication from another
+node's view or via `storage_extend_reported` rather than relying on the writer's local cache alone.
 
 ### Authenticated CRDT provenance
 
@@ -150,13 +144,13 @@ Every `EntryKind::Data` mutation is cryptographically bound to its author under
   fetch cache alike, so a reader asks the next replica. Its tombstones still spread by
   hand-off, by republish, and by read-repair from the reader's cache, which repairs a missed
   replica from the carrier it holds even past its bound.
-- **A removal wins over every earlier write of its value.** A tombstone names the value and the
-  newest dot of it the storage owner holds, and covers every dot of that value up to that one,
-  including dots already forgotten under a later write. "Earlier" is the dot order, not real
-  time: a rewrite of the value by a writer whose clock runs behind the removed write's writer
-  (by at most `σ`) is issued below the tombstone and stays removed. A removal carries no dot
-  of its own, so each owner removes the dot it holds when the removal arrives, and a removal
-  delivered after the same client's later rewrite removes that rewrite too.
+- **Actor-scoped removals win over earlier writes by the same author.** On `EntryKind::Data`, each
+  tombstone is cryptographically authorized (`RetractionWitness` / `SignedDataMutation`) and scoped
+  per `(element_digest, author_did)`, covering that author's dots of the value up to the tombstone
+  dot (`co_dots` preserves concurrent add witnesses across distinct writers). One writer's removal
+  or clock skew never suppresses or retracts another writer's concurrent or earlier write on the
+  shared topic, while sequential rewrites and retractions by the same author commute cleanly in HLC
+  dot order.
 - **Removals are collected by the clock, not by a reset.** A tombstone is collected `H + σ`
   after the dot it covers, where `σ` (3 s) bounds clock skew between nodes, and an overwrite's
   reset `H + σ` after it was issued. By then every copy of every write they shadowed has expired
@@ -182,9 +176,9 @@ Every `EntryKind::Data` mutation is cryptographically bound to its author under
   descriptors (one per lease) within the horizon and no tombstone; the cap drops superseded
   leases first, since no heartbeat refreshes their dots.
 
-An overwrite (the browser provider's `storage_store`, or `storage_store` on a node) still
-replaces a topic: it drops every element and tombstone older than itself, and its own elements
-expire like any other.
+An overwrite (`storage_store` / `DataMutationOpKind::Reset`) advances an authenticated per-author
+reset floor (`register` / `co_registers[actor]`), cleanly replacing that author's prior elements
+and tombstones on the topic while leaving every other writer's elements and tombstones intact.
 
 ## Relay inbox
 
@@ -214,7 +208,7 @@ relay path uses it: the hold, the recipient's removal of what it delivered, the 
 its acknowledged cleanup, the repair pass that lists what to hand off, and the recipient's
 drain. So a writer and a reader whose views cover the same nodes always name the same holder.
 
-The carrier is **replicated** to the key's **members** ([Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf), Durable Local Stores & Replicated Custody): the
+The carrier is **replicated** to the key's **members** ([Rings whitepaper](https://rings.rs/papers/rings/), Durable Local Stores & Replicated Custody): the
 first `r` nodes from the key's owner that hold relay mail, the holder first, `r` configurable and
 8 by default (`RelayReplication`). The members form a chain in ring order, and a held message is
 lost only if every member holding it is lost within one repair delay (Propositions 10 and 11), so
@@ -393,14 +387,10 @@ the complete causal submission trace instead of multiplying a fixed message-leg 
 per-message relay hop budget bounds each carrier, while the retry schedule bounds only the originating
 node's finger emissions.
 
-The model and integration witnesses intentionally separate propositions. The finite topology model
-checks correlation tokens, retry resource bounds, stale proof rejection, and single-use connection
-permits over an exhaustive action alphabet. The sync-storm fixtures run the production transport
-cascade and count effects that the finite model abstracts away. Together they document bounded
-resource behavior; they do not claim all-order convergence for every possible production network
-schedule.
-
-These are per-node bounds: aggregate healthy bootstrap work still scales with the number of nodes.
-The phase window smooths a synchronized start but is not an N-independent destination rate limit.
-The destination's bounded inbound mailbox limits retained concurrent work; its origin quota remains
-per origin and therefore must not be counted as a global many-origin convergence cap.
+The finite topology model verifies correlation tokens, retry resource bounds, stale proof rejection,
+and single-use connection permits over an exhaustive action alphabet, while the sync-storm fixtures
+exercise the full production transport cascade. On the receiver side, per-node convergence traffic
+composes with `SlotRoster` (`330` connection slots with guaranteed per-slot floors and fair shared
+pools), `NodeFramePool` (`408 MiB` node-wide frame ceiling), `InboundCapacity` (`256 MiB` reassembly
+budget), and per-origin rate quotas so synchronized bootstrap bursts stay strictly bounded at every
+destination.

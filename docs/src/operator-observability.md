@@ -14,11 +14,10 @@ new HTTP route and no unauthenticated surface.
 
 ## Why the projection is separate from the default body
 
-Use the pull-based `/status?view=observability` endpoint (or external Prometheus exporters fed
-by it — `rings` does not serve a built-in `/metrics` route) for zero-overhead local health and
-telemetry, while reserving the default `GET /status` endpoint for full on-demand storage and
-topology inspection. [`rings-tui`](tui.md) renders live sparklines and latency histograms directly
-from this projection.
+Use the pull-based `/status?view=observability` endpoint (the unified `< 32 KiB` authenticated
+JSON telemetry surface consumed by [`rings-tui`](tui.md) and external collectors/exporters) for
+low-overhead health and latency monitoring, while reserving the default `GET /status` endpoint
+for full on-demand storage and topology inspection.
 
 `GET /status` returns a complete node inspection: besides peers and DHT topology, it serializes
 every persistent and cache storage value (up to the configured `data_storage.capacity`, 200 MB by
@@ -61,7 +60,7 @@ Lookup correlation identifiers and mailbox identifiers are never exported.
 | `session_key` | gauges and counters | Active delegation `valid`, `created_at_ms`, `expires_at_ms`, `remaining_ms`, `rotation_succeeded_total`, `rotation_failed_total`, and `runtime_rotation_supported`. When `delegator_key` is configured in `config.yaml`, `rings run` renews the delegation in process before the signing horizon (`expires_at_ms - 25 s`) and increments `rotation_succeeded_total` (or `rotation_failed_total` on failure); without `delegator_key`, or after a failed renewal, the daemon exits 25 s before `expires_at_ms` so a replacement key can be loaded on restart (see [Delegations and keys](cli.md#delegations-and-keys)). |
 | `mailboxes` | gauges and counter | Live `registered` relay-inbox carriers and `held_messages` retained by this node, plus `stored_total` offline-message holds during this process. |
 | `dht_lookups` | counters, gauge, histogram | `total`, `succeeded`, `failed`, `timed_out` (30 s bound), and `in_flight` rounds, plus `latency_sum_ms`, `latency_count`, and 12 cumulative `latency_buckets` (`le_ms`: `5`, `10`, `25`, `50`, `100`, `250`, `500`, `1000`, `2500`, `5000`, `10000`, `30000`). |
-| `peer_ratings` | bounded records | Up to 32 DID-sorted local assessments (`peer`, `reliability`, `credit_score`, `sent`, `failed_to_send`, `received`, `failed_to_receive`). Use `listPeerMeasurements` for the paginated complete set. These are advisory local assessments, not network-wide reputation. |
+| `peer_ratings` | bounded records | Up to 32 DID-sorted local quality assessments (`peer`, `reliability`, `credit_score`, `sent`, `failed_to_send`, `received`, `failed_to_receive`), paired at runtime with counterparty-signed `rings-service-receipt-v1` evidence collection. Use `listPeerMeasurements` for the paginated complete set. |
 | `health` | gauges | `process_api_healthy` (API handler assembled dependencies), `admitted_peer_count`, `has_admitted_peer`, `has_successor`, `has_predecessor`, and `overlay_ready` (`has_admitted_peer && has_successor &&` delegation before its signing horizon). |
 
 ### Sample response

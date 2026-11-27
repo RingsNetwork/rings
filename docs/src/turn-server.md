@@ -127,6 +127,7 @@ ice_servers: stun://stun.l.google.com:19302;turn://203.0.113.10:3478?transport=t
 ```
 
 - The node signs `turn://...?pubkey=<server_pubkey>` (and `turns://` / RFC 7065 `turn:`/`turns:`) entries dynamically with its active `DelegateeKey` and ECDH shared secret, and automatically rotates TURN credentials in lockstep whenever `DelegateeKey` is renewed in process (for example when `delegator_key` is configured in `config.yaml`).
+- When multiple TURN servers are configured for high availability, native WebRTC selects at most one TURN server per `RTCPeerConnection` in round-robin order (`#1316`), preventing redundant multi-server relay allocations.
 - Non-expiring account-level DID credentials are available programmatically for embedded/SDK callers via `WebrtcNetworkParameters::with_credential_mode(TurnCredentialMode::Account(...))`.
 - Explicit `turn://user:pass@host:port` entries are left untouched for third-party TURN servers.
 
@@ -209,9 +210,9 @@ Any client node can discover live `TurnServiceDescriptor` entries from `turn_ser
 
 ### Single-hop vs. multi-hop Onion TURN
 
-- **Single-hop private TURN (`multi_hop_onion_udp: false`, default)**: the TURN server binds a local UDP socket for each allocation. It observes the client's IP and remote peer's IP when relaying media, **but never learns the client's `Did` or overlay identity**.
-- **Multi-hop private TURN (`multi_hop_onion_udp: true`, experimental opt-in)**: `rings-turn-service` attaches `OnionUdpRelayFactory` to `TurnServer`, opening a dedicated 5-hop guard-closed [`onion::udp`](onion.md#world-facing-exits) session to a native exit node offering `udp` (`advertise_onion_exit: true`) for each `Allocate`:
+- **Single-hop private TURN (`multi_hop_onion_udp: false`, default)**: low-latency zero-DID profile. The TURN server binds a local UDP socket for each allocation and observes the client's IP and remote peer's IP when relaying media, **while never learning the client's `Did` or overlay identity**.
+- **Multi-hop split-trust TURN (`multi_hop_onion_udp: true`)**: Tor-grade endpoint-separation profile. `rings-turn-service` attaches `OnionUdpRelayFactory` to `TurnServer`, bridging each `Allocate` across a dedicated 5-hop guard-closed [`onion::udp`](onion.md#world-facing-exits) session to a native exit node offering `udp` (`advertise_onion_exit: true`):
   - `XOR-RELAYED-ADDRESS` returned to the unmodified WebRTC/TURN client is the exit's bound UDP socket (`E_exit`).
   - `CreatePermission` and `ChannelBind` enqueue stateful peer-IP pinholes (`OnionUdpPinholeTable`) onto the ordered `onion::udp` stream ahead of subsequent outbound datagrams, dropping unpermitted inbound peer traffic at the exit before consuming return SURBs.
-  - Intermediate `relay` hops observe only fixed-width AEZ-sealed Sphinx cells, while the exit observes `(E_exit, IP_peer)` without learning `IP_client` or `Did` (note that the entry TURN node still observes `IP_client`, `E_exit`, and `XOR-PEER-ADDRESS`, never `Did`).
-  - **Latency & head-of-line considerations**: socket opens pad to `250 ms` quanta, cells are paced by per-link constant-rate `send_outbox` slots across 6 overlay hops per round trip, and datagrams share an ordered reliable `OnionSession` stream (incurring HOL blocking on overlay packet loss). Leave `multi_hop_onion_udp: false` for standard low-latency deployments unless exit IP separation is explicitly needed.
+  - Intermediate `relay` hops observe only fixed-width AEZ-sealed Sphinx cells, while the exit observes `(E_exit, IP_peer)` without learning `IP_client` or `Did` (and the entry TURN node sees `IP_client` and `tkt-…` without emitting direct packets to `IP_peer` or learning `Did`).
+  - **Profile trade-offs**: socket opens quantize to `250 ms` windows, active bursts pace through `send_outbox` slots across 6 overlay hops per round trip (with zero idle cover overhead when inactive under `OnionIdleFloor::OFF`, `#1314`), and datagrams multiplex over an ordered reliable `OnionSession` stream. Choose `false` for minimum interactive media latency, or `true` (sizing ICE/DTLS timeouts accordingly) when full entry/exit IP separation is desired.

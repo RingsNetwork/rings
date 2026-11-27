@@ -21,9 +21,9 @@ communicate over direct WebRTC datachannels with no application server in the da
 
 - **A browser tab is a full peer.** It joins the DHT, routes and stores for others, and
   connects browser to browser, with no light client or gateway in between.
-- **Privacy is built in.** Onion loops with constant-rate cover and entry guards run natively
-  and in the browser; the [hosted console](https://rings.rs/#node) browses the web through
-  them from a tab.
+- **Privacy is built in.** Onion loops with zero-idle-cover burst shaping and pinned entry
+  guards run natively and in the browser; the [hosted console](https://rings.rs/#node) browses
+  the web through them from a tab.
 - **Wallet keys are identities.** secp256k1 (MetaMask), ed25519 (Phantom), WebCrypto P-256,
   and bip137 keys share one overlay.
 - **Protocols are pure state machines.** A protocol owns a namespace; its IO runs in a shell
@@ -193,12 +193,13 @@ live under [`contrib/`](./contrib/README.md).
 
 ## Whitepaper
 
-- [Rings whitepaper](./papers/rings.pdf) ([LaTeX](./papers/rings.tex), [build notes](./papers/README.md)):
+- [Rings whitepaper](https://rings.rs/papers/rings/) ([PDF](https://rings.rs/papers/rings.pdf), [LaTeX](./papers/rings.tex), [build notes](./papers/README.md)):
   the unified protocol specification, integrating range-proved and non-transitive Chord
   stabilization, CRDT removal stability, durable local stores and chain-replicated relay custody,
   fair slot-isolated admission and load bounds, and Sphinx onion Kleisli pipelines.
-- [DRanking](./papers/dranking.pdf): decentralized trust and ranking protocol for Rings 2.0, backed
-  by signed [service-receipt evidence](./docs/src/advanced-topic/dranking-service-receipts.md).
+- [DRanking](https://rings.rs/papers/dranking/) ([PDF](https://rings.rs/papers/dranking.pdf), [LaTeX](./papers/dranking.tex)):
+  decentralized trust and ranking protocol for Rings 2.0, backed by signed
+  [service-receipt evidence](./docs/src/advanced-topic/dranking-service-receipts.md).
 
 To cite Rings:
 
@@ -208,8 +209,8 @@ To cite Rings:
   title = {Rings: A peer-to-peer network for sovereign age},
   year = {2023},
   month = feb,
-  url = {https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf},
-  note = {Repository-owned whitepaper and LaTeX source: https://github.com/RingsNetwork/rings/tree/master/papers}
+  url = {https://rings.rs/papers/rings/},
+  note = {Online reader and PDF: https://rings.rs/papers/ ; LaTeX source: https://github.com/RingsNetwork/rings/tree/master/papers}
 }
 ```
 
