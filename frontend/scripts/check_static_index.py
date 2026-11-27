@@ -18,7 +18,7 @@ REQUIRED_LINKS = {
     "https://rings.rs/blog/",
     "https://rings.rs/docs/",
     REPOSITORY_URL,
-    "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf",
+    "https://rings.rs/papers/",
     "https://rings.rs/llms.txt",
 }
 REQUIRED_HREFLANGS = {

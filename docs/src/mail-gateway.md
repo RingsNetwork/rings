@@ -232,5 +232,7 @@ its INBOX, which a mail client reads over IMAP as before. Its recipient records 
 * **Distributed gateway throughput.** Gateway writes are governed by per-origin storage quotas at
   each DHT owner, and because different recipient DIDs hash to different owners around the ring,
   inbound load scales horizontally across the overlay.
-* **Outbound SMTP relay.** Sending outbound internet mail from `did@domain` with SPF, DKIM, and
-  reverse DNS is planned as a companion outbound relay capability.
+* **Outbound SMTP relay.** Direct peer-to-peer and `<did>.<zone>` outbound MX SMTP submission
+  ships today in `examples/mailbox` ([DNS Relay mailbox](dns-relay.md#example-a-mailbox)), while
+  shared-domain outbound internet mail from `did@domain` with SPF, DKIM, and reverse DNS is on the
+  companion roadmap track.

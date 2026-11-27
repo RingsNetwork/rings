@@ -114,7 +114,10 @@ services:
   With `proxy_protocol: v2` (default `off`), the relay sends a PROXY protocol v2 header naming
   the client and the relayed address before the client's bytes, for a service that reads one
   (Postfix's `smtpd_upstream_proxy_protocol`, HAProxy, the mailbox example) and so logs, rates
-  and filters by the real client. The header is unauthenticated: see [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md).
+  and filters by the real client. Delivery over the overlay tunnel is authenticated to the local
+  node's `dns-relay/<port>` mapping, while the client IP inside the PROXY v2 header is asserted by
+  the forwarding public DNS-relay ingress (for logging/rate-limiting rather than cryptographic
+  peer identity; see [SECURITY.md](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md)).
 * `txt`: TXT records under the node's name; `name` is relative to it, and empty for the name
   itself. An ACME DNS-01 challenge is published this way, so the node can hold a certificate for
   `<did>.<zone>` and end TLS itself.

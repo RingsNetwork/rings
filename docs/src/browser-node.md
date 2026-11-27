@@ -66,14 +66,16 @@ npm run package:frontend-extension
 The package is written to `frontend/dist-extension/`. Load that directory from
 `chrome://extensions` with developer mode on; after each rebuild, click Reload there.
 
-Two boundaries of the package are deliberate. The wallet bridge needs a normal wallet-enabled
-page open as the active tab, because that is where the wallet provider is injected; there is no
-centralized bridge site. The WebView renders proxied documents with a CSP `sandbox` and no
-`allow-same-origin`, so target script stays in an opaque origin; static and server-rendered
-pages with rewritten subresources are supported, and page-driven `fetch` or XHR to the gateway
-is not. The
+Two security guarantees of the package are deliberate. First, the wallet bridge signs directly
+through an active wallet-enabled `http`/`https` tab where the browser wallet provider is injected,
+requiring zero centralized bridge servers or third-party relays. Second, the hosted WebView
+renders proxied documents inside a strict CSP `sandbox` without `allow-same-origin`, isolating
+remote scripts in an opaque origin so static and server-rendered pages with rewritten subresources
+browse safely without exposing same-origin gateway `fetch` or XHR surfaces (custom embedders that
+require dynamic runtime requests can opt into `rings-webview`'s `browser` runtime-request bridge
+below). The
 [frontend README](https://github.com/RingsNetwork/rings/blob/master/frontend/README.md)
-records both in full, with the test suites that pin them.
+records both contracts in full, with the test suites that pin them.
 
 ## Onion WebView & `rings-webview` architecture
 
@@ -86,7 +88,9 @@ extension (`extension-assets/webview_frame.html`) share the primitives in `crate
   subresources so navigation remains inside the gateway prefix.
 - **Virtual cookies & CORS (`CookieJar`, `HeaderPolicy`)**: isolates per-target cookies inside the
   gateway session and enforces strict CSP `sandbox` without `allow-same-origin` so untrusted
-  remote scripts execute in an opaque origin away from node keys and IndexedDB stores.
+  remote scripts execute in an opaque origin away from node keys and IndexedDB stores (while
+  `rings-webview`'s optional `browser` feature provides a dedicated runtime-request bridge with
+  virtual `CookieJar` and CORS preflight validation for embedders).
 
 ## Embed the node in your own page
 

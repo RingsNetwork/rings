@@ -284,9 +284,8 @@ struct BrowserOnionLoop {
 
 impl BrowserOnionLoop {
     /// Quiesce the loop, so that none of its nodes emits into the tests that run after this one
-    /// in the same page: every admitted link carries constant-rate cover (#880), each cell a
-    /// strict commit to its receiver's authoritative replay store (#916), and stabilization
-    /// links nodes beyond the loop's own edges.
+    /// in the same page: active onion links carry dwell-window constant-rate cover (#880, #1314),
+    /// and stabilization links nodes beyond the loop's own edges.
     ///
     /// ```text
     /// stop every listener ─▶ await each settled      (no stabilization can link again)

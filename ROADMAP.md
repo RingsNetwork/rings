@@ -11,9 +11,9 @@ directly. *In progress* and *Planned* items are direction, not commitments.
   relay custody, fair slot-isolated admission and load bounds, and client-sealed Sphinx onion
   Kleisli pipelines (#834, #843, #880). Stabilizes the `1.0.x` public runtime contracts across the
   `1.0.x` release line; see [UPGRADING.md](./UPGRADING.md) and the unified
-  [Rings whitepaper](./papers/rings.pdf).
+  [Rings whitepaper](https://rings.rs/papers/rings/).
 - **2.0: DRanking & randomized topology.** Verifiable peer ranking from cryptographic service
-  receipts ([paper](./papers/dranking.pdf)) and epoch-randomized ring placement (#780).
+  receipts ([paper](https://rings.rs/papers/dranking/)) and epoch-randomized ring placement (#780).
 
 ## Shipped
 
@@ -26,22 +26,24 @@ directly. *In progress* and *Planned* items are direction, not commitments.
   binary `HandshakeStep` negotiation, WebRTC datachannels across native and browser peers
   (`webrtc = 0.17.3` + `web_sys`), built-in TURN-over-TCP & TURNS bridge (the built-in `turn_tcp` TURN-over-TCP/TLS bridge, #1287),
   quiet-window ICE settling (`#1288`), bounded static-dictionary LZ4 wire compression and compact
-  `WirePayload` encoding at `WIRE_VERSION = 6` (`#1280`, `#1283`, `#1315`), 4-lane credit flow control, and independent liveness probes
+  `WirePayload` encoding at `WIRE_VERSION = 6` (`480 B` max chunk envelope overhead, down from
+  `742 B`; `#1280`, `#1283`, `#1315`), 4-lane credit flow control, and independent liveness probes
   (`crates/transport`).
 - **TURN & Onion TURN:** standalone stateless signature+ECDH RFC 5766 UDP/TCP TURN server
   (`rings-turn`) plus `rings-turn-service` publishing `TurnServiceDescriptor` to `turn_services`,
-  issuing unlinkable `SessionTicket` credentials over `turn.ticket` onion `invoke`, and optionally
-  bridging allocations through multi-hop `onion::udp` circuits (`#1278`, `#1292`).
+  issuing unlinkable `SessionTicket` credentials over `turn.ticket` onion `invoke`, and
+  bridging allocations through split-trust multi-hop `onion::udp` circuits (`#1278`, `#1292`).
 - **Identity:** DIDs over secp256k1 (EIP-191, bip137), secp256r1, ed25519, and BLS12-381 keys;
   receiver-leased delegation references, in-process `delegator_key` rotation, and E2E ElGamal
   encryption to a DID after its handshake.
 - **Admission & storage:** at-most-once delivery through a group-committed per-origin replay
   window, slot-isolated resource accounting (`SlotRoster` / `TableAccounting`), per-origin rate
-  quotas, per-writer Merkle-authenticated CRDT data topics (`SignedDataMutation`, `#1179`, `#1220`),
+  quotas, actor-isolated Merkle-authenticated CRDT data topics (`SignedDataMutation`, `#1179`, `#1220`, `#1309`),
   clock-bounded removal stability, and chain-replicated relay-inbox custody.
-- **Privacy:** guard-closed Sphinx/AEZ v5 onion Kleisli pipelines (#834, #843, #880) over
-  fixed-width cells, constant-rate link emission with real cells substituted for cover, paid
-  admission, size classes, SURB reply blocks, persisted entry guards, world-facing
+- **Privacy:** guard-closed Sphinx/AEZ v5 onion Kleisli pipelines (#834, #843, #880, #1314) over
+  fixed-width cells, dormant-by-default outbound lanes (`OnionIdleFloor::OFF`) with active-window
+  constant-rate slot pacing (substituting real cells for cover, plus optional background cover floor),
+  paid admission, size classes, SURB reply blocks, persisted entry guards, world-facing
   `tcp`/`https`/`udp` exits, and composable `invoke<In, Out, L>` pipelines (`crates/node/src/onion`);
   the selective TUN gateway (`crates/gateway`) and onion WebView (`crates/webview`).
 - **Runtimes & tooling:** native daemon and `rings` CLI, `rings-tui` interactive terminal dashboard

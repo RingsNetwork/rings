@@ -2,7 +2,7 @@
 
 For a long time, there was a dark cloud hanging over Rings Network: when a user is on a symmetric network, a mobile network, or another environment where a peer-to-peer tunnel cannot be punched through at all, how do we achieve the decentralization we promised? The answer WebRTC gives is to relay traffic through a TURN network, yet doing that would reduce Rings Network from a pure P2P network into an ordinary relay network, making it equivalent to popular networks like Nostr.
 
-The Rings TURN Network we implemented recently was built to confront this elephant in the room head-on. Across our last two releases, we did a couple of things: first, we built a TURN server based on modern cryptography; second, we built a TURN relay network whose worst-case outcome is equivalent to the Tor network.
+The Rings TURN Network we implemented recently was built to confront this elephant in the room head-on. Across our recent releases, we did two things: first, we built a TURN server based on modern cryptography; second, we built a split-trust TURN relay network that preserves Tor-grade multi-hop anonymity even across strict NATs.
 
 Here is how it works.
 
@@ -16,42 +16,42 @@ In the new `rings-turn` implementation, we removed user accounts and password ta
 
 Because the server is completely stateless with respect to user accounts, any node with a public address in the Rings network can run a TURN service and register it directly on the Rings DHT ring. Nodes that need a relay do not read from a hardcoded company server list; they look up available TURN services from the DHT ring itself.
 
-## 2. A TURN Relay Network Whose Worst Case Is Equivalent to Tor
+## 2. A Split-Trust TURN Relay Network with Tor-Grade Endpoint Separation
 
 Replacing accounts with cryptography and discovering TURN nodes through the DHT solves the problem of who runs the servers, but by itself it still does not solve the topology problem.
 
-If a user behind a mobile network connects directly to a TURN node to relay traffic to another peer, that TURN node sits directly between the two communicating parties. It knows the sender's real IP address, and it knows the recipient's IP address. Even if that TURN node is run by a community participant rather than a company, the connection has still degenerated into a single-hop relay, which is structurally no different from a Nostr relay.
+If a user behind a mobile network connects directly to a TURN node that relays UDP packets straight to the remote peer from the same server, that single TURN node sits directly between the two communicating parties. It observes the sender's IP address and the recipient's IP address together. Even if that TURN node is run by a community participant rather than a company, a single hop still holds both sides of the transport link.
 
 ![From Central TURN Servers to Multi-Hop Onion TURN](/assets/blog/we-removed-the-last-dark-cloud-over-rings-network/onion-turn.png)
 
-To prevent that degradation, Rings combines TURN with the onion routing network that already runs on the ring.
+To eliminate single-server linkage while remaining 100% compatible with unmodified browser and native `RTCPeerConnection` stacks, Rings combines stateless TURN with its Sphinx onion network.
 
-First, when a node needs a relay allocation from a TURN node it found on the DHT, it does not contact that TURN node directly. It requests a short-lived relay ticket through a multi-hop onion loop on the ring. The TURN node can verify that the request and the ticket are valid, but because the request arrived through an onion loop, the TURN node never learns which identity or IP address asked for it.
+First, when a node needs a relay allocation from a TURN service it found on the DHT, it does not reveal its identity to that TURN node. It requests a short-lived, single-use `SessionTicket` (`tkt-…`) through a multi-hop onion `invoke` loop on the ring (`turn.ticket`). The TURN node verifies the cryptographic ticket in memory without ever learning which `Did` requested it.
 
-Second, when the node begins sending UDP traffic through the TURN allocation, it does not send those UDP packets directly from its own IP address to the TURN node either. Instead, it wraps the UDP traffic in multiple layers of onion encryption and routes it through several intermediate nodes on the Rings ring before the traffic finally exits to the TURN node.
+Second, in multi-hop mode (`multi_hop_onion_udp`), the entry `rings-turn-service` node never sends UDP packets directly to the remote peer from its own IP address. Instead, it bridges the allocation across a 5-hop guard-closed `onion::udp` circuit on the Rings ring to an independent `udp` onion exit node, returning that exit's bound UDP address (`XOR-RELAYED-ADDRESS`) to the WebRTC client.
 
-Just like in the Tor network, knowledge of the connection is deliberately divided among different participants along the path. The first node on the path knows the user's real IP address, because the user is connected to it directly, but it can remove only the outermost encryption layer and knows only which intermediate node to pass the data to next. It does not know that the traffic is headed to a TURN server, nor who the final peer is. The TURN server at the end of the onion path forwards the WebRTC traffic to the remote peer, but it sees only the last onion node and never learns the user's real IP address. Meanwhile, the inner WebRTC channel remains end-to-end encrypted between the two communicating peers, so none of the intermediate nodes or the TURN server can read the contents of the traffic.
+Just like in the Tor network, knowledge of the connection is deliberately divided among mutually untrusted participants along the path. The entry TURN node sees the client's IP address and unlinkable `tkt-…` ticket—never the client's `Did`—and hands fixed-width AEZ-encrypted Sphinx cells into the ring without directly contacting the remote peer. Intermediate `relay` nodes peel one layer at a time and learn only their immediate neighbors. The `onion::udp` exit node at the far end enforces stateful peer-IP pinholes and forwards the WebRTC datagrams to the remote peer, seeing `(E_exit, IP_peer)` while never learning the client's real IP address or `Did`. Meanwhile, the inner WebRTC DTLS/SCTP channel remains end-to-end encrypted and DID-authenticated between the two communicating peers, so none of the intermediate relays, entry TURN, or exit node can read the contents of the traffic.
 
 ## 3. Removing the Last Dark Cloud
 
-This design changes what happens to Rings when the underlying physical network is at its worst.
+This design transforms how Rings behaves on the most restrictive networks on Earth.
 
-When two nodes can punch a direct tunnel, Rings connects them directly peer-to-peer with no relay in between. When a user is on a mobile network or behind a symmetric NAT where direct hole-punching is impossible, Rings no longer has to choose between failing to connect and degenerating into a Nostr-style relay network. Even when traffic must pass through a TURN relay, the connection degrades at worst into a multi-hop anonymous circuit equivalent to the Tor network, where no single participant can observe both ends of the communication.
+When two nodes can punch a direct tunnel, Rings connects them directly peer-to-peer with no relay in between. When peers sit behind non-transitive NAT cliques, passive 1-hop overlay gap bridging routes across the bridge node with zero extra control frames. And when a user is on a mobile carrier network, behind a Symmetric NAT, or inside a UDP-blocked firewall, Rings seamlessly traverses via UDP/TCP cryptographic TURN and multi-hop `onion::udp` circuits—preserving sovereign peer-to-peer encryption and Tor-grade endpoint separation where no single relay observes identity and both endpoints together.
 
 With that, the last dark cloud hanging over Rings Network is gone.
 
 ## 4. BTW: Try Rings
 
-If you want to try Rings `v1.0.0-pre.8` today, you can install or upgrade the native node from [**rings.rs**](https://rings.rs/) in one line:
+If you want to try Rings today, you can install or upgrade the native node from [**rings.rs**](https://rings.rs/) in one line:
 
 ```sh
-curl -fsSL https://rings.rs/install.sh | sh -s -- --version v1.0.0-pre.8
+curl -fsSL https://rings.rs/install.sh | sh
 ```
 
 Or install the node and the terminal dashboard directly from crates.io:
 
 ```sh
-cargo install rings-node rings-tui --version 1.0.0-pre.8
+cargo +1.97.0 install --locked rings-node rings-tui
 ```
 
 ## Further reading

@@ -5,9 +5,10 @@
 //! the mobile breakpoint the fixed bottom navigation bar owns the same space, so the stylesheet
 //! hides it there (`styles::theme::responsive`).
 //!
-//! The documentation book renders the same footer from `docs/theme/index.hbs`, and the
-//! engineering blog renders it from `frontend/scripts/build_blog.py`. The three copies are
-//! written in different languages, so the test at the bottom of this module holds them equal.
+//! The documentation book renders the same footer from `docs/theme/index.hbs`, the engineering
+//! blog renders it from `frontend/scripts/build_blog.py`, and the paper hub renders it from
+//! `frontend/scripts/build_papers.py`. The four copies are written in different languages, so
+//! the test at the bottom of this module holds them equal.
 
 use yew::prelude::*;
 
@@ -150,7 +151,7 @@ const NOTICES: [Notice; 5] = [
     },
     Notice {
         title: "Privacy",
-        body: "rings.rs is a static site: no accounts, no analytics, no tracking cookies. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.",
+        body: "rings.rs uses no accounts, no tracking cookies, and no third-party analytics; paper pages record anonymous, cookie-free aggregate read and download counts. Browser-node keys, stores, and settings are kept locally in your browser's IndexedDB and local storage.",
     },
 ];
 
@@ -163,6 +164,9 @@ mod tests {
 
     /// The blog renderer script, which carries this footer in HTML template strings.
     const BLOG_SCRIPT: &str = include_str!("../scripts/build_blog.py");
+
+    /// The papers renderer script, which carries this footer in HTML template strings.
+    const PAPERS_SCRIPT: &str = include_str!("../scripts/build_papers.py");
 
     fn assert_footer_parity(template: &str, name: &str) {
         assert!(
@@ -197,11 +201,12 @@ mod tests {
     }
 
     /// Law: every statement and every destination of this footer appears verbatim in the
-    /// book's footer and the blog's footer, so the three copies cannot drift apart unnoticed.
+    /// book's, blog's, and papers' footers, so the four copies cannot drift apart unnoticed.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn test_book_footer_carries_the_same_statements_and_destinations() {
         assert_footer_parity(BOOK_TEMPLATE, "book");
         assert_footer_parity(BLOG_SCRIPT, "blog");
+        assert_footer_parity(PAPERS_SCRIPT, "papers");
     }
 }

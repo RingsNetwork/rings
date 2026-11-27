@@ -38,11 +38,13 @@ LoopOf(P):  cl → g → r_{0,2} → h_1 → r_{1,1} → r_{1,2} → ⋯ → h_n
   `onion-entry-guards` store (`RecordAuthority::DurableCache`), rotating them on a 30-day
   lifetime (24-hour unreachable grace, evicted after 3 consecutive timeouts with a 5-minute
   cooldown) to defend against long-term guard-discovery attacks.
-- **Constant-rate link pacing & admission**: relays pace outbound link cells at a constant
-  tick (substituting dummy cover cells when idle), bind ephemeral keys to a fresh process epoch
-  (`OnionProcessEpoch`) aligned to 5-quantum validity windows, deduplicate Sphinx tags in a
-  bounded Bloom filter (`ReplayStore`, false-positive rate `≤ 2⁻²⁰`), and charge admission against `SlotRoster`
-  per-connection budgets before performing ECDH work.
+- **Dormant-by-default link pacing & admission**: outbound onion lanes open in dormant mode with
+  zero idle cover traffic by default (`OnionIdleFloor::OFF`, `#1314`), wake automatically when real
+  onion cells arrive or depart, pace constant-rate real/cover slots across active bursts and bounded
+  30-second dwell windows (with configurable `OnionIdleFloor` background cover for dedicated relays),
+  bind ephemeral keys to a fresh process epoch (`OnionProcessEpoch`) aligned to 5-quantum validity
+  windows, deduplicate Sphinx tags in a bounded Bloom filter (`ReplayStore`, false-positive rate
+  `≤ 2⁻²⁰`), and charge admission against `SlotRoster` per-connection budgets before performing ECDH work.
 
 ## Operation alphabet (`Σ`) and node roles
 
@@ -103,7 +105,7 @@ fixed-width pure or service operations directly inside the loop:
 | `invoke` client (`onionInvoke`) | Yes | Yes |
 | `invoke` backend host | Yes (`OnionPipelineHandle`) | No |
 | `https` client (`onion_https_proxy`) | Yes | Yes |
-| `https` exit (`OnionExitService::Https`) | Yes (full exit policy) | Restricted (`new_https_exit_instance`, public IP-literal targets subject to browser CORS / MV3 host permissions) |
+| `https` exit (`OnionExitService::Https`) | Yes (full exit policy) | Yes (via `new_https_exit_instance`, governed by `rings-network-policy` plus browser CORS / MV3 host permissions) |
 | `tcp` client & exit | Yes | No |
 | `udp` client & exit | Yes | No |
 | Local HTTP `CONNECT` proxy & TUN gateway | Yes | No |

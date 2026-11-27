@@ -44,3 +44,7 @@ The Rings Network is a project that I am deeply passionate about and committed t
 
 Best Regards
 Yours Ryan
+
+---
+
+Note: This article preserves the historical October 2023 Cryptography mailing-list progress report verbatim. In **Rings 1.0**, the repository consolidated at [github.com/RingsNetwork/rings](https://github.com/RingsNetwork/rings) with the live browser node console and unified Chrome MV3 extension + Onion WebView at [rings.rs/#node](https://rings.rs/#node), actor-isolated Merkle-authenticated CRDT storage and `r`-replica chain relay custody, guard-closed Sphinx/AEZ v5 onion Kleisli pipelines, stateless UDP/TCP + Onion TURN, and the unified [Rings 1.0](https://rings.rs/papers/rings/) and [DRanking 2.0](https://rings.rs/papers/dranking/) specifications.

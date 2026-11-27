@@ -214,7 +214,7 @@ fn blog_section() -> Html {
                 </p>
             </div>
             <div class="landing-example-grid">
-                { landing_link_card("We Removed the Last Dark Cloud Over Rings Network", "Routing stateless cryptographic TURN allocations and UDP datagrams over multi-hop onion circuits so worst-case traversal degrades to Tor.", "https://rings.rs/blog/we-removed-the-last-dark-cloud-over-rings-network/") }
+                { landing_link_card("We Removed the Last Dark Cloud Over Rings Network", "Bridging stateless cryptographic TURN allocations over multi-hop onion::udp circuits so even Symmetric NAT traversal preserves Tor-grade endpoint separation.", "https://rings.rs/blog/we-removed-the-last-dark-cloud-over-rings-network/") }
                 { landing_link_card("From Onion Routing to Onion OP", "Expanding onion privacy from hiding communication endpoints to composing multi-step operations across mutually untrusted nodes.", "https://rings.rs/blog/from-onion-routing-to-onion-op-the-evolution-of-privacy-in-rings/") }
                 { landing_link_card("One Lookup, Many Fingers", "Range-proved finger table convergence for browser meshes and the Stateright finite-state models that verified it.", "https://rings.rs/blog/one-lookup-many-fingers/") }
             </div>
@@ -300,7 +300,7 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
         label: "privacy",
         role: "provides anonymous circuits.",
         title: "Sphinx/AEZ onion loops, exits, and Onion OP",
-        summary: "Client-sealed Sphinx/AEZ v5 loops with constant-rate cover, pinned entry guards, TCP/UDP/HTTPS exits, and Kleisli invoke pipelines.",
+        summary: "Client-sealed Sphinx/AEZ v5 loops with zero-idle-cover burst shaping, pinned entry guards, TCP/UDP/HTTPS exits, and Kleisli invoke pipelines.",
         detail: "The privacy layer builds guard-closed multi-hop onion loops using rings-aez wide-block enciphering. Each hop peels one layer and learns only its immediate predecessor and successor, while exits serve TCP, UDP, and HTTPS traffic, feed Onion TURN and selective TUN/WebView gateways, and execute composable invoke stages.",
         surface: "crates/node/src/onion, crates/aez, crates/gateway, crates/webview, crates/network-policy",
         contract: "Each hop learns only its immediate neighbors; SURB replies return along the guard-closed loop without revealing client identity.",

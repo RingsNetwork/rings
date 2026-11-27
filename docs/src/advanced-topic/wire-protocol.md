@@ -37,6 +37,7 @@ kind         = u8                 (0 = Payload, 1 = LinkControl, 2 = CompressedP
 
 - **`WireHopVerification`**: elides the duplicate delegation slot and identical `(ttl_ms, ts_ms)` stamps whenever the hop proof shares the origin's `DelegationRef` (`SameDelegationAndStamps` on every locally originated initial-hop frame, `SameDelegation` when only stamps differ, or `Distinct` on multi-hop relays).
 - **`WireRelay`**: elides `destination` when it equals `transaction.destination` (`redirected_destination: None`, saving 20 bytes) and elides `next_hop` when it equals `relay.destination` (`intermediate_next_hop: None`, saving another 20 bytes on direct or final-hop frames).
+- **Reduced chunk framing reserve (`MAX_CHUNK_ENVELOPE_OVERHEAD = 480`)**: fixed 65-byte secp256k1/EIP-191/BIP-137 signatures together with diagonal `WireHopVerification` and `WireRelay` elision cut the worst-case per-chunk envelope reserve from `742` bytes down to `480` bytes (`-35.3%`, `#1315`), leaving more channel capacity for payload data in every chunk.
 
 ### Version-cutover contract
 

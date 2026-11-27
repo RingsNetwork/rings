@@ -14,7 +14,7 @@ Rings Node (The node service of Rings Network)
 
 Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
 
-For protocol details, see the repository-owned [Rings Whitepaper](../../papers/rings.pdf).
+For protocol details, see the [Rings Whitepaper](https://rings.rs/papers/rings/) ([PDF](https://rings.rs/papers/rings.pdf)).
 For security assumptions, supported deployment models, and the Sybil-resistance
 boundary, see the repository [threat model](../../SECURITY.md).
 
@@ -67,7 +67,7 @@ rings [--log-level <LOG_LEVEL>] [--runtime <multi-thread|current-thread>] <COMMA
 
 ### Global Options
 
-- `--log-level <LOG_LEVEL>` (env `LOG_LEVEL`): sets tracing log verbosity (default `info`).
+- `--log-level <LOG_LEVEL>` (env `LOG_LEVEL`): sets tracing log verbosity (default `error`, with noisy third-party `webrtc`/`turn` targets clamped automatically).
 - `--runtime <RUNTIME>` (env `RUNTIME`): chooses the Tokio runtime scheduler (`multi-thread` default or `current-thread`).
 - `-h, --help`: displays usage information.
 - `-V, --version`: displays version information for `rings-node`.
@@ -76,7 +76,7 @@ rings [--log-level <LOG_LEVEL>] [--runtime <multi-thread|current-thread>] <COMMA
 
 - `init`: creates a default configuration file (`~/.rings/config.yaml` unless `--location` says otherwise) and generates key material and an owner-only `api-token` file. The generated file states every section explicitly, including a complete `gateway:` section with `enabled: false` (see [Native gateway](#native-gateway)).
 - `new-delegation`: generates or renews a delegated session signing key.
-- `run`: runs the foreground `rings-node` daemon (accepts `-c, --config <FILE>`, defaulting to `~/.rings/config.yaml`, plus `--gateway`, listener, ICE, storage, onion, and DNS overrides).
+- `run`: runs the foreground `rings-node` daemon (accepts `-c, --config <FILE>`, defaulting to `~/.rings/config.yaml`, plus `--gateway`, listener, ICE, storage, onion, and DNS overrides; automatically raises soft `RLIMIT_NOFILE` on startup and drains stores cleanly via `close_with_drain_timeout` on shutdown).
 - `pubsub`: subscribes to a topic stream over the node's local API.
 - `connect`: connects to peers (`node`, `did`, `seed`) or runs manual 3-step WebRTC handshakes (`offer`, `answer`, `accept`).
 - `peer`: lists connected peers or disconnects a peer (`list`, `disconnect`).

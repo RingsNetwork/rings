@@ -38,13 +38,14 @@ through the E2E handshake, it encrypts application payloads end-to-end (ECC ElGa
 destination DID.
 
 Circuit-level metadata privacy is provided by the dedicated privacy layer (`crates/node/src/onion`
-and `crates/aez`)—guard-closed Sphinx/AEZ v5 loops over direct edges, constant-rate link emission
-with real cells substituted for cover, pinned entry guards, paid `SlotRoster` admission, fixed cell
-size classes, world-facing `tcp`/`https`/`udp` exits (powering HTTP `CONNECT`, the selective
-IPv4/TCP TUN gateway, Onion WebView, and multi-hop Onion TURN), and composable Kleisli `invoke`
-pipelines. See [Onion Routing & Kleisli Pipelines](../onion.md), the
+and `crates/aez`)—guard-closed Sphinx/AEZ v5 loops over direct edges, dormant-by-default outbound
+lanes (`OnionIdleFloor::OFF`, `#1314`) with active-window constant-rate slot pacing (substituting
+real cells for cover, plus configurable background cover floors), pinned entry guards, paid
+`SlotRoster` admission, fixed cell size classes, world-facing `tcp`/`https`/`udp` exits (powering
+HTTP `CONNECT`, the selective IPv4/TCP TUN gateway, Onion WebView, and multi-hop Onion TURN), and
+composable Kleisli `invoke` pipelines. See [Onion Routing & Kleisli Pipelines](../onion.md), the
 [security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md#layer-contracts),
-and the [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf).
+and the [Rings whitepaper](https://rings.rs/papers/rings/).
 
 #### Protocol and Identity Layer
 

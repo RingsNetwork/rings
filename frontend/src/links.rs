@@ -81,9 +81,7 @@ impl ProjectLink {
             Self::Blog => "https://rings.rs/blog/",
             Self::Docs => docs_url!(""),
             Self::Repository => "https://github.com/RingsNetwork/rings",
-            Self::Whitepaper => {
-                "https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
-            }
+            Self::Whitepaper => "https://rings.rs/papers/",
             Self::Releases => "https://github.com/RingsNetwork/rings/releases",
             Self::CratesIo => "https://crates.io/crates/rings-node",
             Self::Npm => "https://www.npmjs.com/package/@ringsnetwork/rings-node",

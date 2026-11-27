@@ -76,9 +76,11 @@ Chord routing, and authenticated encryption for E2E streams.
   `udp` datagram relay), while one-shot intermediate operations advertise typed
   `invoke<In, Out, L>` shapes (`Σ_I`) paired with backend names `ω ∈ Ω` (such as `turn.ticket`) so
   clients and stages negotiate exact service semantics and width/latency bounds.
-- **Traffic shaping and paid admission:** links emit fixed-size-class cells at bounded active
-  or idle rates, substituting queued real cells for cover traffic under link credit
-  ([details](docs/src/advanced-topic/architecture.md)). Relays charge per-window admission
+- **Traffic shaping and paid admission:** outbound onion lanes open dormant with zero idle cover
+  traffic by default (`OnionIdleFloor::OFF`, #1314), pace fixed-size-class cells at a constant
+  slot rate across active bursts and bounded dwell windows (substituting queued real cells for
+  cover traffic under link credit, with configurable background cover floors for dedicated
+  relays; [details](docs/src/advanced-topic/architecture.md)). Relays charge per-window admission
   budgets before performing public-key operations and enforce single-use replay tags within
   each process epoch.
 - **Stream Completeness:** end-to-end sequence verification ensures that applications receive

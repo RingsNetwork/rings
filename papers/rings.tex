@@ -735,8 +735,9 @@ Invariant~\ref{inv:ring-fixpoint} guarantees exact owner resolution and $O(\log 
 Classical Chord refreshes one random finger slot per stabilization period,
 requiring $\Theta(m)$ periods ($m=160$) to converge and failing to distinguish
 unverified neighbor hints from proved entries~\cite{Stoica2003}.  Because
-Rings nodes include browsers whose WebRTC handshakes take seconds to minutes or
-fail, \code{rings-core} (\code{dht::finger::convergence}) specifies finger maintenance as
+Rings nodes span browser and WAN peers whose asynchronous NAT-traversing WebRTC
+handshakes are orders of magnitude costlier than local memory transitions,
+\code{rings-core} (\code{dht::finger::convergence}) specifies finger maintenance as
 a pure transition $\mathrm{step}:(S,\mathrm{Event})\to(S,\mathrm{Actions})$
 built on the Chord Range Lemma and four operational disciplines.
 
@@ -999,7 +1000,7 @@ preserves all four route-safety invariants on any underlay graph $G=(V,L)$:
 (1)~\texttt{Linked} ($\{n_k,n_{k+1}\}\in L$),
 (2)~\texttt{NeverOvershoots} ($\delta_{n_k}(n_{k+1})<\delta_{n_k}(\operatorname{aim})$ on every non-crossing hop),
 (3)~\texttt{SingleCrossing} and \texttt{Acyclic} (the boolean crossing bit transitions $\bot\to\top$ at most once, visiting no state $(n_k,\sigma_k)$ twice and bounding every route to $\le 2|V|$ hops), and
-(4)~all-pairs cross-clique delivery in $\le 3$ hops ($2$ hops from a clique local minimum or bridge-adjacent peer, $3$ hops when greedy advances through a closer clique mate first) between two cliques $V_1,V_2$ sharing bridge $C$ whenever $(V_1\cup V_2)\setminus\{C\}\subseteq\texttt{succ}_C\cup\operatorname{Preds}_K(C)$ (supporting up to $s+m$ total non-bridge peers under minimal $m$-clique notifications, or up to $s+K=2K=8$, i.e.\ $C_{\mathrm{sub}}\le 4$, when $\operatorname{Preds}_K(C)$ holds $K$ entries; larger or multi-bridge cliques fall back to TURN transport).
+(4)~all-pairs cross-clique delivery in $\le 3$ hops ($2$ hops from a clique local minimum or bridge-adjacent peer, $3$ hops when greedy advances through a closer clique mate first) between two cliques $V_1,V_2$ sharing bridge $C$ whenever $(V_1\cup V_2)\setminus\{C\}\subseteq\texttt{succ}_C\cup\operatorname{Preds}_K(C)$ (supporting up to $s+m$ total non-bridge peers under minimal $m$-clique notifications, or up to $s+K=2K=8$, i.e.\ $C_{\mathrm{sub}}\le 4$, when $\operatorname{Preds}_K(C)$ holds $K$ entries; larger or multi-bridge cliques establish direct WebRTC links seamlessly via Rings' DHT-discovered stateless cryptographic UDP/TCP TURN and multi-hop \code{onion::udp} Onion TURN in \code{rings-turn-service}).
 \end{theorem}
 \begin{proof}
 Because $0<\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)\iff \delta_{n_{k+1}}(a)=\delta_{n_k}(a)-\delta_{n_k}(n_{k+1})<\delta_{n_k}(a)$ on $R=\mathbb{Z}/2^{160}\mathbb{Z}$, Invariant~(2) implies $\delta_{n_k}(\operatorname{aim}(\sigma,T))\in\mathbb{N}$ strictly decreases across every non-crossing greedy hop within each fixed stage $\sigma$, visiting at most $|V|-1$ nodes.
@@ -1084,19 +1085,15 @@ A Rings data-topic carrier (\code{dht::entry}) is a 4-tuple
 \[
   x=(V,D,\rho,\beta),
 \]
-where $V:\mathrm{Bytes}\rightharpoonup\mathrm{Dot}$ maps live elements to
-addition dots, $D:\mathrm{Digest}\rightharpoonup\mathrm{Dot}$ maps Keccak-256
-element digests $h(v)$ to removal dots (tombstones), $\rho\in\mathrm{Ver}_\bot$
-is the overwrite floor register, and $\beta\in\mathbb{N}_\bot$ is the carrier
-liveness bound (joining by $\max$ with $\bot<t$).  Each version or dot $d$ carries a Hybrid Logical Clock (HLC) timestamp~\cite{Kulkarni2014}
+where $V:\mathrm{Bytes}\times R\rightharpoonup\mathrm{Dot}$ maps live elements and their writer DIDs (\code{dots} plus multi-writer \code{co\_dots}) to addition dots, $D:\mathrm{Digest}\times R\rightharpoonup\mathrm{Dot}$ maps Keccak-256 element digests $h(v)$ and writer DIDs $o\in R$ to per-author removal dots (tombstones; unscoped $D:\mathrm{Digest}\rightharpoonup\mathrm{Dot}$ is used only on single-recipient \code{RelayMessage} carriers), $\rho:R\rightharpoonup\mathrm{Ver}$ maps each writer DID to its reset floor register (\code{register} plus \code{co\_registers}), and $\beta\in\mathbb{N}_\bot$ is the carrier liveness bound (joining by $\max$ with $\bot<t$).  Each version or dot $d$ carries a Hybrid Logical Clock (HLC) timestamp~\cite{Kulkarni2014}
 \[
   \tau_{\mathrm{HLC}}(d)=(w,c,o),
 \]
 ordered lexicographically by wall-clock time $w=\tau(d)$, logical counter
-$c\in\mathbb{N}$, and writer/origin DID $o\in R$.  A removal $(e,r)\in D$
-\emph{covers} an addition $(v,d)\in V$ iff $h(v)=e\land d\le r$.  A carrier $x$
-is \emph{normalized} iff no addition in $V$ is covered by $D$ or $\le\rho$, and
-no removal in $D$ is $\le\rho$.  The delta-state join $x\sqcup y$~\cite{Almeida2018,Preguica2018} is pointwise $\max$
+$c\in\mathbb{N}$, and writer/origin DID $o\in R$.  On \code{EntryKind::Data}, a removal $((e,o),r)\in D$
+\emph{covers} an addition $((v,o'),d)\in V$ iff $o=o'\land h(v)=e\land d\le r$, and reset floor $\rho(o)$ covers only additions/removals authored by $o$ with $d\le\rho(o)$ (preserving strict non-interference across distinct writers $o\neq o'$).  A carrier $x$
+is \emph{normalized} iff no addition in $V$ is covered by $D$ or $\rho$, and
+no removal in $D$ is covered by $\rho$.  The delta-state join $x\sqcup y$~\cite{Almeida2018,Preguica2018} is pointwise $\max$
 followed by normalization.
 \end{definition}
 
@@ -1643,9 +1640,9 @@ $s=2$ length-preserving wide-block encipherments $\mathrm{E}^0_{k_{r_{k,j}}}$ ($
 \item \emph{SURB batching:} A Single-Use Reply Block for world-facing session
 $\varsigma$ is the $2\,979$-byte ($20+2\,919+32+8=2\,979\,\mathrm{B}$) client-sealed suffix $\upsilon=(\mathrm{next},\allowbreak\chi_\upsilon,\allowbreak\sigma_\upsilon,\allowbreak x_\upsilon)$~\cite{Chaum1981,Danezis2003}.
 After deducting the $16\,\mathrm{B}$ AEZ authenticator ($C_0=C_{16\,\mathrm{KiB}}-16=13\,449\,\mathrm{B}$) and $6\,\mathrm{B}$ credit-frame overhead, a $16\,\mathrm{KiB}$ credit loop leaves $13\,443\,\mathrm{B}$ for SURBs---batching $k=\lfloor 13\,443/2979\rfloor=4$ SURBs plus its own suffix ($k+1=5$ reply credits per forward loop, $Q_{\max}=256$)---whereas a $7\,\mathrm{B}$-framed stream data cell carries up to $C_0-7=13\,442\,\mathrm{B}$ of application payload.
-\item \emph{Constant-rate cover loops:} Active links emit at constant rate
+\item \emph{Dormant-by-default constant-rate cover loops:} Outbound onion lanes open in dormant mode (\code{open\_dormant}, emitting zero unsolicited cover cells on non-participating DHT links) and wake automatically when real onion cells arrive or depart. Across active bursts and their bounded dwell window $[t,t+D)$ ($D=Q=30\,\mathrm{s}$), links emit at constant rate
 $r=\rho B/V\approx 98.3\,\mathrm{units/s}$ ($\rho=0.9$, substituting cover cells when no real cell is
-queued) and maintain an idle floor $r_{\mathrm{idle}}=1\,\mathrm{unit/s}$, giving an analytical single-link paced emission ceiling of $98.3\times 13\,442\,\mathrm{B}\approx 1.32\,\mathrm{MB/s}$ at $b=16\,\mathrm{KiB}$ (sustaining $1.045\pm 0.003\,\mathrm{MB/s}$ end-to-end across a 5-node live WebRTC loopback, above the $1.00\,\mathrm{MB/s}$ CI throughput floor; Section~\ref{sec:verification}).
+queued), parking at zero idle overhead outside active dwell windows by default (\code{OnionIdleFloor::OFF}, with optional configurable background cover up to $r_{\mathrm{idle}}=1\,\mathrm{unit/s}$ via \code{OnionIdleFloor::DEFAULT}). This yields an analytical single-link paced emission ceiling of $98.3\times 13\,442\,\mathrm{B}\approx 1.32\,\mathrm{MB/s}$ at $b=16\,\mathrm{KiB}$ (sustaining $1.045\pm 0.003\,\mathrm{MB/s}$ end-to-end across a 5-node live WebRTC loopback, above the $1.00\,\mathrm{MB/s}$ CI throughput floor; Section~\ref{sec:verification}).
 \item \emph{\code{SlotRoster}-backed sliced-Bloom replay admission (Law L9):}
 Every received cell is charged $u(b)=b/16\,\mathrm{KiB}$ units against the sender
 DID's ledger $\Lambda_i(d)$ ($|\operatorname{dom}\Lambda_i|\le 2\mathcal{R}$,
@@ -2192,7 +2189,7 @@ Four methodological boundaries qualify the empirical and verification results re
 \begin{itemize}[leftmargin=1.5em]
 \item \emph{Single-host local execution environment:} Throughput and durability benchmarks ran on one Apple M1 Max workstation using in-memory overlay simulations, local APFS \code{F\_FULLFSYNC} barriers, and a 5-node loopback WebRTC/SCTP harness; geo-distributed WAN latency, asymmetric packet loss, hairpinned NAT traversal, and multi-browser Wasm/IndexedDB variance are deferred to multi-host testbed evaluation.
 \item \emph{Static-ring scaling vs.\ continuous live churn:} Figure~\ref{fig:finger-scaling} quantifies range-proved convergence on fixed $N$-node rings up to $N=1\,024$; under sustained high churn, overlapping epoch invalidations require range revalidation (Section~\ref{sec:finger-convergence}) alongside the bridge delegation fallback (Theorem~\ref{theo:bridge-safety}).
-\item \emph{Non-transitive clique capacity:} Passive 1-hop \code{TopoInfo} hints guarantee $100\%$ cross-clique delivery without loops for $C_{\mathrm{sub}}\le K=4$, degrading gracefully with $0\%$ loops beyond $2K=8$ articulation peers (Table~\ref{tab:two-clique}); larger isolated cliques require multiple bridge nodes or TURN relay fallback.
+\item \emph{Non-transitive clique capacity:} Passive 1-hop \code{TopoInfo} hints guarantee $100\%$ cross-clique delivery without loops for $C_{\mathrm{sub}}\le K=4$, remaining strictly loop-free ($0\%$ loops) beyond $2K=8$ articulation peers (Table~\ref{tab:two-clique}); larger Symmetric-NAT or UDP-blocked cliques form direct WebRTC edges without centralized servers via Rings' DHT-discovered stateless cryptographic UDP/TCP TURN (\code{rings-turn}) and split-trust multi-hop \code{onion::udp} Onion TURN (\code{rings-turn-service}).
 \item \emph{Finite-state model-checking bounds:} Stateright/BFS verification exhaustively checks bounded configurations and finite queue depths (Table~\ref{tab:formal-verification}), whereas unbounded majority Sybil capture and economic equilibrium fall outside Rings~1.0 and rely on the companion DRanking~2.0 admission layer (Section~\ref{sec:trust}).
 \end{itemize}
 

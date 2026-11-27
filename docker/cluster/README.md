@@ -84,18 +84,17 @@ Useful environment variables:
 - `RINGS_WEBRTC_UDP_PORT_MIN` and `RINGS_WEBRTC_UDP_PORT_MAX`: optional fixed native WebRTC UDP port range; publish the same range with `/udp` when browser peers must establish data channels to non-ingress nodes
 - `RINGS_ADVERTISE_ONION_RELAY`: publish relay capability from every node; default `true`
 - `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; requires `RINGS_ADVERTISE_ONION_RELAY`; default `true`
-- `RINGS_ONION_EXIT_SERVICES`: comma-separated service names; default `tcp,https`
+- `RINGS_ONION_EXIT_SERVICES`: comma-separated service names (supports `tcp`, `https`, `udp`); default `tcp,https`
 - `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; use `*:*` for all targets; default `*:*`
 - `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
 
-The reserved `https` onion service is handled by the native TCP exit runtime. Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard). A client outside the cluster, such as WorkBench, therefore needs `RINGS_NODE_COUNT` of at least `4`; a cluster node acting as the client never selects itself, so it needs at least `5`.
+The reserved `https` onion service is handled by the native TCP exit runtime, while adding `udp` enables `onion::udp` datagram exits (for example backing multi-hop `rings-turn-service`). Native nodes advertising the default services publish both `tcp` and `https`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster. Every route is a loop through four distinct relays besides the client (guard, relay, exit, relay, back to the guard). A client outside the cluster, such as WorkBench, therefore needs `RINGS_NODE_COUNT` of at least `4`; a cluster node acting as the client never selects itself, so it needs at least `5`.
 
-Process lifetime: every container start mints a fresh delegatee key per node, valid for
-`RINGS_SESSION_TTL_SECONDS` (default 30 days). A node can send nothing from 25 s before its key
-expires, so it exits there with a non-zero status, and the launcher then exits with that status
-too (#1063). Run long-lived clusters with `--restart unless-stopped` instead of `--rm`: the
-restart mints new keys and the nodes come back. Without a restart policy the container stops,
-rather than staying up with mute nodes.
+Process lifetime: standalone `rings run` daemons support zero-downtime in-process delegation
+renewal via `delegator_key` (`contrib/README.md`), whereas this demo launcher wipes root keys after
+`init` and mints a fresh delegatee key at container start, valid for `RINGS_SESSION_TTL_SECONDS`
+(default 30 days). A node without `delegator_key` exits 25 s before its key expires (#1063), and
+the launcher exits with that status so `--restart unless-stopped` mints fresh keys cleanly.
 
 Topology modes:
 

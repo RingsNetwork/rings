@@ -24,7 +24,11 @@ reliability.
 
 ## IndexedDB access and eviction
 
-An IndexedDB row stores `key`, `data`, and `access_stamp`. Recency is a
+An IndexedDB row stores `key`, `data`, `access_stamp`, and `byte_len` (`Option<u32>`). Browser
+providers open all seven node stores under an origin-wide exclusive Web Lock (`navigator.locks`)
+via `LockedBrowserStorage::open_with_byte_cap`, enforcing both row-count capacities and canonical
+wire byte budgets alongside `RecordAuthority` transaction durability (`{ durability: "strict" }`
+for `Authoritative`, `Retained`, and `DurableCache` stores). Recency is a
 store-wide **logical clock**, not wall-clock time: each database keeps one access
 counter in a companion object store, and every `put` and every successful `get`
 takes the next counter value as the row's stamp and advances the counter in the

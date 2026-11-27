@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "rings-paper-telemetry",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "invocation_logs": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.1
+    }
+  },
+  "routes": [
+    { "pattern": "rings.rs/api/telemetry*", "zone_name": "rings.rs" },
+    { "pattern": "rings.rs/papers/*.pdf", "zone_name": "rings.rs" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "TELEMETRY_DB",
+      "database_name": "rings-paper-telemetry",
+      "database_id": "REPLACE_WITH_D1_DATABASE_UUID"
+    }
+  ]
+}

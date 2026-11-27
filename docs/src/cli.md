@@ -120,18 +120,17 @@ complete on the counter-offering node with `rings connect accept <answer>`.
 
 ### Keeping a bootstrap peer reachable
 
-Each `rings connect` form connects once. A node that later loses its transport to that peer,
-and every other peer with it, stays partitioned until something reconnects it. For peers the
-node should always be able to reach, list them under `bootstrap.peers` in
-[config.yaml](advanced-topic/config.yaml.md#bootstrap), or hand `rings run` a seed document for
-one run:
+Each `rings connect` form performs an immediate one-shot dial. To keep persistent connectivity
+and heal automatically if all active links drop, configure target endpoints under
+`bootstrap.peers` in [config.yaml](advanced-topic/config.yaml.md#bootstrap) (`BootstrapSupervisor`),
+or pass `rings run` a seed document:
 
 ```bash
 rings run --bootstrap-seed file:///etc/rings/seed.json
 ```
 
-A `file://` document is read at startup; an `http(s)://` document is fetched once at startup,
-so the node does not start while the document's host is unreachable.
+A `file://` seed document loads offline at startup, while an `http(s)://` seed document validates
+reachability upfront before starting the daemon.
 
 `rings run` then supervises those targets: whenever one is no longer reachable through the
 overlay it is redialed through its HTTP endpoint, in a short burst first and then every five
@@ -152,8 +151,8 @@ rings send message <to-did> <namespace> <data>
 ```
 
 Delivers `data` to the protocol the peer registered under `namespace`. Receiving applications
-embed `rings-node` and install a namespaced extension protocol; the removed `/ws` endpoint is not
-an application-message boundary.
+embed `rings-node` (in Rust, Browser WASM, or C FFI) and install a namespace-isolated extension
+protocol.
 
 ```bash
 rings pubsub <topic>
@@ -170,11 +169,11 @@ rings service register <name>
 rings service lookup <name>
 ```
 
-`register` publishes this node as a provider of `name` in the DHT; `lookup` returns the DIDs
-currently providing it. A registration expires by the element lifetime rule of
-[DHT storage](advanced-topic/chord.md#data-topic-storage), so a provider runs `register` again
-periodically to stay listed. [Decentralized services](features/decentralized-services.md) describes
-the model.
+`register` performs a low-level 10-minute topic write advertising this node as a provider of
+`name` in the DHT (`lookup` returns the listed DIDs); production daemons automate continuous,
+zero-tombstone lease renewal via the declarative `services:` section in `config.yaml` or
+`ProcessorBuilder::register_task`. [Decentralized services](features/decentralized-services.md)
+describes the model.
 
 ## Inspect
 

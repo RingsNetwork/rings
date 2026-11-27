@@ -5,12 +5,12 @@ Stateless RFC 5766 TURN server for Rings Network using **"signature as password"
 <!-- ANCHOR: model -->
 ## When to Use `rings-turn`
 
-WebRTC peers normally establish direct UDP datachannels via STUN hole-punching (`typ host` / `typ srflx`). You only need `rings-turn` when direct hole-punching cannot succeed or when you want zero-secret relay access control:
+WebRTC peers normally establish direct UDP datachannels via STUN hole-punching (`typ host` / `typ srflx`), while pairwise non-transitive NAT gaps on the overlay are bridged automatically via multi-predecessors and passive 1-hop `TopoInfo` hints. Use `rings-turn` to establish direct WebRTC links across strict NATs/firewalls or enforce zero-secret relay access control:
 
 1. **Symmetric NAT & Carrier-Grade NAT (CGNAT)**:
-   When both peers are behind Symmetric NATs (common on 4G/5G mobile networks, residential CGNAT, or strict cloud NAT gateways) where external UDP port mappings change per destination, STUN cannot punch a direct path and a TURN relay (`typ relay`) is required.
-2. **Strict Corporate / Enterprise Firewalls**:
-   Environments that block arbitrary peer-to-peer UDP traffic and only allow UDP packets to known infrastructure IPs/ports (such as port `3478` and a bounded relay port range `--min-port` / `--max-port`).
+   When both peers are behind Symmetric NATs (common on 4G/5G mobile networks, residential CGNAT, or strict cloud NAT gateways) where external UDP port mappings change per destination, STUN cannot punch a direct path and a TURN relay (`typ relay`) completes the WebRTC edge.
+2. **Restricted-UDP & Completely UDP-Blocked Firewalls**:
+   Environments that block arbitrary peer-to-peer UDP traffic—either permitting UDP only to infrastructure ports (`3478` and `--min-port` / `--max-port`) or blocking outbound UDP altogether, where `rings-turn`'s dual UDP+TCP listener paired with `rings-transport`'s `TurnTcpBridge` (`?transport=tcp` and `turns://`) establishes full WebRTC datachannels over TCP/TLS.
 3. **Zero-Database, Zero-Shared-Secret Operations**:
    Traditional TURN deployments (`coturn`, etc.) require maintaining either a static `username:password` table or a shared REST HMAC secret (`use-auth-secret`) synchronized across auth servers and TURN instances. `rings-turn` requires **no database, no user registration, and no shared secret**—any node holding a valid Rings `DelegateeKey` or `Did` private key self-signs its own TURN credentials locally, and any `rings-turn` instance verifies them statelessly.
 4. **Private / Permissioned Overlay Relays**:
@@ -106,7 +106,7 @@ Usage: rings-turn [OPTIONS]
 
 Options:
       --listen <LISTEN>
-          UDP socket address to listen on for STUN/TURN requests
+          UDP and TCP socket address to listen on for STUN/TURN requests
           [env: RINGS_TURN_LISTEN=] [default: 0.0.0.0:3478]
       --realm <REALM>
           TURN authentication realm advertised in 401/438 challenges

@@ -67,7 +67,7 @@ Errors follow JSON-RPC 2.0:
   `9xx` files, `10xx` serialization, `11xx` core, `12xx` external signer / FFI, `15xx` extensions
   and runtime, `16xx` onion.
 * `210` is a handshake with a node of another wire version (see [Wire version](#wire-version)).
-  Its `data` names both: `{"ours": 5, "theirs": 4}`, with `theirs` null for a node from before
+  Its `data` names both: `{"ours": 6, "theirs": 5}`, with `theirs` null for a node from before
   wire versioning. A client matches the code and the data, never the message.
 
 ### Wire version
@@ -127,7 +127,7 @@ The DID of this node. Public on the external listener.
 
 ```json
 {"jsonrpc": "2.0", "id": 1,
- "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 5}}
+ "result": {"did": "0x11e807fcc88dd319270493fb2e822e388fe36ab0", "wire_version": 6}}
 ```
 
 ### nodeInfo

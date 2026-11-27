@@ -92,7 +92,8 @@ cargo run -p rings-mailbox-example --bin rings-mail-gateway -- \
 A browser node can receive at `<did>@<domain>` through the same gateway by opting in with
 `Provider.new_provider_with_mail`. See
 [Receiving in a browser](../../docs/src/mail-gateway.md#receiving-in-a-browser) for setup,
-the API, storage, and reload-loss semantics.
+the API, IndexedDB `strict`-durability inbox persistence, and ephemeral session-key forward secrecy
+across reloads.
 
 ## Module layout
 
