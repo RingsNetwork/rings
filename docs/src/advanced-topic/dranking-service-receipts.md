@@ -1,6 +1,6 @@
 # DRanking Service Receipts
 
-Rings 1.0 ships the cryptographic foundation for [DRanking](https://github.com/RingsNetwork/rings/blob/master/papers/dranking.pdf):
+Rings 1.0 ships the cryptographic foundation for [DRanking](https://rings.rs/papers/dranking/):
 a domain-separated, countersigned service receipt (`rings-service-receipt-v1`) for authenticated
 liveness probes, paired with crash-consistent local evidence collection and persistence. This
 1.0 vertical slice establishes portable cryptographic attestation and bounded evidence storage
@@ -76,9 +76,11 @@ attestations.
 Evidence admission is synchronous with the separate evidence snapshot: storage failure rolls the
 transition back, and success means the receipt plus replay marker survive a process crash. Deleting
 or replacing that configured store explicitly starts a new collector history and is outside the
-crash model. The durable storage write is the admission linearization point; evidence queries and
-other admissions share its serialization lock. Cancellation of an incomplete call may
-conservatively retain the marker, but cannot admit the key twice.
+crash model. The durable storage write is the admission linearization point, serialized through a dedicated,
+cancel-safe FIFO `WriteTurnQueue` (`evidence_turns` in `PeriodicMeasure`) while read-only evidence
+queries (`evidence_page`, `evidence_counters`) and local credit updates read the last committed
+view under a synchronous leaf lock without blocking on disk or IndexedDB flushes. Cancellation of
+an incomplete call may conservatively retain the marker, but cannot admit the key twice.
 
 ## Storage and 2.0 evolution
 
@@ -94,8 +96,8 @@ is backed by durable storage that refines the documented process-crash model. Em
 constructors that run without a durable evidence backend keep liveness probing active while
 skipping receipt persistence.
 
-In Rings 1.0, local routing and peer quality ordering (`CreditRecord` and
-`order_peers_by_quality`) operate purely on local observations and aMule-style byte credit while
-service receipts accumulate cryptographically verifiable evidence locally. Network-wide DRanking
-/ EigenTrust trust algebra and the shared epoch ledger described in `papers/dranking.pdf` are
-research/roadmap work for Rings 2.0 and are not yet active in runtime crates.
+Rings 1.0 pairs immediate, zero-coordination Sybil-resistant local quality ordering
+(`SlotRoster`, `CreditRecord`, and `order_peers_by_quality`) with live counterparty-signed
+`rings-service-receipt-v1` evidence collection and crash-consistent `ProvisionalEvidenceStore`
+retention on active probes—forming a live cryptographic bridge into Rings 2.0's shared epoch
+ledger and global DRanking / EigenTrust trust propagation ([DRanking 2.0](https://rings.rs/papers/dranking/)).

@@ -5,8 +5,9 @@ explicitly selected IPv4/TCP flows through Rings Onion loops. The packet mechani
 imply one routing policy: the Rings gateway contract is selective routing and has no full-tunnel
 or kill-switch mode.
 
-The crate is intentionally unavailable to WebAssembly targets. Browser builds remain Rings
-clients and do not contain the native gateway or server runtime.
+This crate targets native OS packet descriptors (`TUN`/`utun`/`Wintun`). Browser WebAssembly peers
+run the full Rings Chord DHT, CRDT storage, and Sphinx onion stack in-tab and route web traffic
+through [`rings-webview`](../webview/README.md) rather than host OS TUN devices.
 
 <!-- ANCHOR: operator-guide -->
 ## Traffic-selection contract
@@ -31,9 +32,10 @@ implements it with two `/1` routes. That is a valid OpenVPN policy, but Rings in
 underlay traffic carrying existing Rings neighbor links; avoiding recursion would require dynamic
 bypass state or guaranteed relay. Rings requires neither. A `/0` or equivalent covering prefix set
 is therefore rejected as an intent stop-line outside the selective gateway contract. Near-cover
-sets remain valid, including the entire IPv4 space minus one `/32`; this rejection is not a proof
-against recursion. If the operator explicitly selects an underlay destination, it enters the same
-fail-closed path as any other selected destination and Rings does not create a direct bypass.
+sets remain valid, including the entire IPv4 space minus one `/32`: the `/0` check enforces the
+selective-routing contract while leaving explicit route selection to the operator. If the operator
+explicitly selects an underlay destination, it enters the same fail-closed path as any other
+selected destination and Rings does not create a direct bypass.
 
 The gateway's fail-closed guarantee applies only after traffic enters it. A selected flow either
 opens its immutable target through a valid Onion route and compatible TCP exit, or fails without
@@ -51,8 +53,8 @@ Traffic can enter the shared Onion egress through:
 The native HTTP CONNECT proxy and packet ingress share Onion target validation, route
 construction, TCP stream opening, bidirectional transfer, half-close, and accounting. They differ
 in idleness: a CONNECT tunnel ends after the relay's own idle timeout, while a captured flow's
-idleness belongs to the gateway's `flow_idle_timeout`. A future SOCKS5 frontend should add only
-ingress parsing and authentication policy.
+idleness belongs to the gateway's `flow_idle_timeout`. Additional proxy frontends (such as SOCKS5)
+can layer cleanly over the same shared Onion egress.
 
 Pointing several DNS names at one gateway address does not preserve the original generic TCP
 target. Optional DNS integration therefore needs a dedicated synthetic prefix and an explicit
@@ -111,10 +113,12 @@ rings run --gateway --config "$HOME/.rings/config.yaml"
 
 ## Node configuration
 
-The current packet milestone is IPv4/TCP. Only the listed destination prefixes enter the packet
-gateway. UDP or fragmented IPv4 packets that enter a listed prefix are dropped; IPv6 routes are
-rejected at configuration time. Unlisted IPv4, all IPv6, and ordinary DNS traffic remain outside
-gateway policy.
+The packet gateway captures explicitly selected IPv4/TCP destination prefixes (while UDP onion
+workloads use `onion::udp` and [`rings-turn-service`](../turn-service/README.md), and IPv6 service
+ingress uses [`rings-dns-relay`](../dns-relay/README.md)). Only the listed destination prefixes enter
+the packet gateway; UDP or fragmented IPv4 packets entering a listed prefix are dropped, IPv6
+routes are rejected at configuration time, and unlisted IPv4, IPv6, and ordinary DNS traffic remain
+on the host's normal routing path.
 
 `rings init` writes a complete `gateway:` section with `enabled: false`: the interface-only plan
 (`GatewayPlan::interface_only`, one RFC 6598 host address, no capture routes, the IPv6 minimum
@@ -156,21 +160,18 @@ gateway:
     mtu: 1280
 ```
 
-For application-proxy-only operation, leave `gateway` disabled and configure the existing native
-HTTP CONNECT listener. That path creates no packet interface. SOCKS5 remains a future frontend to
-the same Onion egress.
+For application-proxy-only operation, leave `gateway` disabled and configure the native
+HTTP CONNECT listener, which routes through the same Onion egress without creating a packet
+interface.
 
 Runtime input never expands the capture set. If an operator deliberately selects a destination
 that Rings itself uses for bootstrap or ICE, the configured route has the same effect as any other
 operator route; Rings does not silently punch a bypass around it.
 
-At establishment, the native binding reads one route-table snapshot and rejects every exact or
-more-specific existing route inside a capture prefix because longest-prefix routing would let that
-sub-range bypass the gateway. Rings deliberately has no route-change subscription. A route added
-after that snapshot, including while establishment finishes, can therefore shadow a capture prefix
-and send that sub-range through the host's new route; operators must prevent or monitor such
-route-table mutation. The fail-closed guarantee begins only after a packet actually enters the
-gateway.
+At establishment, the native binding verifies a route-table snapshot and rejects any exact or
+more-specific existing route inside a capture prefix so longest-prefix routing cannot bypass the
+gateway at startup. Because host route tables remain operator-controlled after startup, the
+fail-closed guarantee applies strictly to every packet that enters the gateway interface.
 
 Removed route-authority fields such as `routing_mode`, `excluded_routes`, `dns_policy`, and
 `dns_servers` are rejected inside `plan` instead of being silently ignored. The gateway never
@@ -239,7 +240,8 @@ ordinary route, and verify teardown plus stale-ledger recovery. Unix additionall
 helper process, peer authentication, `SCM_RIGHTS` transfer, disconnected-lease retention, and
 same-plan recovery. The ledger assertion rejects hidden IPv4 or IPv6 catch-all routes.
 
-These evidence classes are reported separately; none is described as a complete VPN.
+Together these evidence classes verify selective, recursion-free Onion packet capture, privilege
+separation, and deterministic route cleanup.
 
 ### Lifecycle and ownership boundaries
 

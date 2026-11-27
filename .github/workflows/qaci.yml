@@ -309,6 +309,11 @@ jobs:
       - name: Test Rings frontend static shell
         run: npm run test:frontend-static-shell
 
+      - name: Test Rings papers reader and telemetry
+        run: |
+          npm run test:papers-reader
+          node workers/paper-telemetry/test-worker.mjs
+
       - name: Test Rings extension Onion WebView
         run: |
           xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs

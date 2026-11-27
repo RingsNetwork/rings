@@ -35,8 +35,8 @@ In a typical 2-step ICE exchange between Peer A and Peer B:
 The network layer implements a range-proved Chord DHT over 160-bit DIDs:
 
 - **Structured ring & lookup**: logarithmic $O(\log N)$ finger routing, periodic stabilization and finger repair, non-transitive bidirectional/relay gap bridging, and voluntary `Leave` carrier handoff.
-- **Fair admission & quotas**: connection `SlotRoster` accounting (`Principal::Slot`, `Principal::Local`, `Principal::Inbox`) paired with per-origin and per-relay quotas and replay protection (`WIRE_VERSION = 6`).
-- **Storage & replication**: multi-replica key-value storage, bounded caches, optional LZ4 payload compression, and authenticated CRDT topics (`SignedDataMutation`).
+- **Fair admission & quotas**: connection `SlotRoster` accounting (`Principal::Slot`, `Principal::Local`, `Principal::Inbox`) paired with per-origin and per-relay quotas, first-chunk shape validation (`admits_first_chunk_shape`) + credit-time slowloris protection, and replay protection (`WIRE_VERSION = 6`, `MAX_CHUNK_ENVELOPE_OVERHEAD = 480` B).
+- **Storage & replication**: multi-replica key-value storage, bounded caches, static-dictionary LZ4 payload compression, actor-isolated Merkle-authenticated CRDT topics (`SignedDataMutation`, factored `E(x) ⊔ R(x)` no-resurrection, zero-tombstone `LeaseHeartbeat`), and age-gated `r`-member chain-replicated relay custody.
 - **Threat model**: see the repository [security architecture and threat model](../../SECURITY.md).
 
 #### Protocol Layer

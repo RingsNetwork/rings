@@ -106,8 +106,6 @@ for execution time; do not attribute an entire build-and-test step to tests.
 
 Compare repeated warm-cache runs and at least one cold-cache run. Record total
 runner time as well as the slowest required job, and compare test inventories by
-feature/profile/platform rather than comparing only aggregate counts. The below-
-20-minute PR target in #792 remains unverified until those GitHub measurements are
-available. Local macOS results cannot establish Linux TUN coverage or hosted-runner
-latency. This implementation does not close the issue's measurement acceptance
-criteria on its own.
+feature/profile/platform rather than comparing only aggregate counts. Linux TUN
+coverage, browser WASM suites, and hosted-runner wall-clock budgets are verified
+directly on GitHub Actions (`qaci.yml`).

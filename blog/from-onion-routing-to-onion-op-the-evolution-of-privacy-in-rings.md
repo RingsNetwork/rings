@@ -62,7 +62,7 @@ In this sense, Onion OP is not only an extension of Rings’ current anonymous c
 
 If you’ve made it this far and want to experience what Rings can already do today, rather than just read about where it is heading, you can launch a browser node directly on [**rings.rs**](https://rings.rs/#node) or install the native node from [the documentation](https://rings.rs/docs/install-a-native-node.html).
 
-Note: When this essay was originally written ahead of 0.32, composable Onion OP and anonymous TURN were early design work. In Rings `1.0.0-pre.8`, guard-closed Sphinx/AEZ loops (`tcp`, `https`, `udp` exits), typed `invoke<In, Out, L>` Kleisli pipelines, and decentralized Onion TURN (`turn.ticket`) are shipped.
+Note: When this essay was originally written ahead of 0.32, composable Onion OP and anonymous TURN were early design work. In Rings 1.0, guard-closed Sphinx/AEZ v5 loops (`tcp`, `https`, `udp` exits) with zero idle cover traffic (`OnionIdleFloor::OFF`), typed `invoke<In, Out, L>` Kleisli pipelines, decentralized Onion TURN (`turn.ticket` + multi-hop `onion::udp`), and counterparty-signed provisional `ServiceReceipt` evidence collection bridging to DRanking 2.0 are shipped.
 
 ## Further reading
 

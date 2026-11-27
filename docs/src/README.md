@@ -4,8 +4,10 @@
 
 **Rings is a peer-to-peer network for the sovereign age.** Browser tabs and native daemons join
 a unified Chord DHT overlay, address each other by DIDs, and communicate over direct WebRTC
-datachannels with no application server in the data path. Bootstrap and signaling establish the
-initial peer links, with optional TURN relay support when configured.
+datachannels with no application server in the data path. Initial links establish via 1-RTT
+gathered ICE hole-punching, passive 1-hop non-transitive gap bridging, stateless cryptographic
+UDP/TCP TURN (`rings-turn` + `turn_tcp`), and DHT-discovered anonymous Onion TURN
+(`rings-turn-service`).
 
 The overlay layer provides authenticated DID routing and end-to-end ElGamal stream encryption
 after a peer handshake, while the privacy layer provides anonymous Sphinx onion circuits that
@@ -95,7 +97,7 @@ and to the JSON-RPC [API](jsonrpc.md) every runtime shares.
 ## Beyond the book
 
 - [Engineering Blog](https://rings.rs/blog/): deep dives on Onion TURN, Onion OP, Chord convergence, and algebraic correctness.
-- [Rings whitepaper](https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf): the unified protocol specification.
+- [Rings whitepaper](https://rings.rs/papers/): the unified [Rings 1.0 specification](https://rings.rs/papers/rings/) and [DRanking 2.0 paper](https://rings.rs/papers/dranking/).
 - [Security model](https://github.com/RingsNetwork/rings/blob/master/SECURITY.md): cryptographic identity and delegation, deployment models, and the contracts of the communication and privacy layers.
 - [Roadmap](https://github.com/RingsNetwork/rings/blob/master/ROADMAP.md): where the network layer and the privacy layer are heading.
 - [Source on GitHub](https://github.com/RingsNetwork/rings): the code, examples, and issues.
