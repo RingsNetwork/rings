@@ -208,6 +208,15 @@ a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: 0.
   color: var(--rings-ink-soft);
   font-size: 1rem;
 }
+.paper-abstract-preview p {
+  margin: 0 0 0.7em;
+}
+.paper-abstract-preview p:last-child {
+  margin-bottom: 0;
+}
+.paper-hub-card .paper-cite {
+  display: none;
+}
 .paper-tags {
   display: flex;
   flex-wrap: wrap;

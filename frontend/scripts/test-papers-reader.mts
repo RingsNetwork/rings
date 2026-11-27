@@ -10,7 +10,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Route } from "playwright";
+import { chromium, type Page, type Route } from "playwright";
 
 /** Captured beacon payload sent by `/papers/papers-telemetry.js` to `POST /api/telemetry`. */
 type TelemetryPayload = {
@@ -43,11 +43,13 @@ const running = await startTestServer(distRoot);
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ acceptDownloads: true });
-  await context.route("https://cdn.jsdelivr.net/**", async (route: Route): Promise<void> => {
+  const stubCdn = async (route: Route): Promise<void> => {
     const url = route.request().url();
     const contentType = url.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8";
     await route.fulfill({ status: 200, contentType, body: "" });
-  });
+  };
+  await context.route("https://cdnjs.cloudflare.com/**", stubCdn);
+  await context.route("https://cdn.jsdelivr.net/**", stubCdn);
 
   const page = await context.newPage();
   const pageErrors: string[] = [];
@@ -57,6 +59,7 @@ try {
 
   // 1. Verify `/papers/` hub view + stats hydration
   await page.goto(`${running.origin}/papers/`, { waitUntil: "load" });
+  await assertNoLatexLeaks(page, "hub");
   assertEqual(await page.locator(".paper-hub-card").count(), 2, "hub must list both protocol papers");
   await page.waitForFunction((): boolean => {
     const badge = document.querySelector('[data-paper-stats="rings"]');
@@ -70,6 +73,7 @@ try {
 
   // 2. Verify `/papers/rings/` native Web Full-Text reader + scroll milestones + cite + PDF preview + download
   await page.goto(`${running.origin}/papers/rings/`, { waitUntil: "load" });
+  await assertNoLatexLeaks(page, "rings");
   assertEqual(await page.locator("article#paper-manuscript h1").count(), 1, "rings reader must render one h1");
   assertAtLeast(await page.locator(".paper-table").count(), 12, "rings reader must render all 12 tables");
   assertAtLeast(await page.locator("article#paper-manuscript svg").count(), 11, "rings reader must render 11 SVGs");
@@ -129,6 +133,7 @@ try {
 
   // 3. Verify `/papers/dranking/` companion paper reader
   await page.goto(`${running.origin}/papers/dranking/`, { waitUntil: "load" });
+  await assertNoLatexLeaks(page, "dranking");
   assertEqual(await page.locator("article#paper-manuscript h1").count(), 1, "dranking reader must render one h1");
   assertEqual(await page.locator(".paper-table").count(), 2, "dranking reader must render 2 tables");
   assertEqual(await page.locator(".paper-algorithm").count(), 2, "dranking reader must render 2 algorithms");
@@ -283,5 +288,51 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 function assertAtLeast(actual: number, minimum: number, message: string): void {
   if (actual < minimum) {
     throw new Error(`${message}: expected at least ${String(minimum)}, received ${String(actual)}`);
+  }
+}
+
+/** Verifies zero stash placeholders, double-escaped anchors, unexpanded math macros, or raw prose LaTeX tokens. */
+async function assertNoLatexLeaks(page: Page, label: string): Promise<void> {
+  const issues = await page.evaluate((): readonly string[] => {
+    const found: string[] = [];
+    const html = document.documentElement.innerHTML;
+    if (html.includes("\u0000") || /(?:MATH|HTML|BIB)\d+/u.test(html)) {
+      found.push("leaked stash placeholder");
+    }
+    if (html.includes("&lt;a href=")) {
+      found.push("double-escaped anchor tag");
+    }
+    document.querySelectorAll(".paper-math-inline, .paper-math-display").forEach((el): void => {
+      const tex = el.textContent ?? "";
+      if (/\\(?:cite|ref|eqref|label|textsc|emph|code)\{/u.test(tex)) {
+        found.push(`unexpanded macro in math: ${tex.slice(0, 80)}`);
+      }
+    });
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode(node: Node): number {
+        const p = node.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        if (
+          p.closest(
+            "script, style, code, pre, .paper-math-inline, .paper-math-display, .katex, [hidden], a[href^='http']",
+          )
+        ) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    let current = walker.nextNode();
+    while (current) {
+      const txt = current.nodeValue ?? "";
+      if (/\\[A-Za-z]+|[$]|\\,/u.test(txt)) {
+        found.push(`raw LaTeX token in prose: ${txt.trim().slice(0, 80)}`);
+      }
+      current = walker.nextNode();
+    }
+    return found;
+  });
+  if (issues.length > 0) {
+    throw new Error(`${label} page contains LaTeX rendering defects: ${issues.slice(0, 5).join("; ")}`);
   }
 }
