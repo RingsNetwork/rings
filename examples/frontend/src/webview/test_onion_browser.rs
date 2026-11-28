@@ -214,7 +214,8 @@ async fn browser_onion_loop() -> WebviewResult<BrowserOnionLoop> {
         OnionRole::Exit(fixture_authority.as_str()),
     )
     .await?;
-    // Production order (#855), as `frontend/src/node.rs` runs a node: every node listens before
+    // Production order (#855), as `examples/frontend/src/node.rs` runs a node: every node listens
+    // before
     // it has an edge, so each first registration settles at its node alone, and its first
     // admitted edge publishes it again, under the registry guard of the publishers' heartbeat
     // (#985).

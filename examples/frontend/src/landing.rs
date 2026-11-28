@@ -196,7 +196,7 @@ fn examples_section() -> Html {
                 { landing_link_card("dweb", "Explore the decentralized-web application shape, serving and addressing web content directly across the Rings peer overlay.", "https://github.com/RingsNetwork/rings/tree/master/examples/dweb") }
                 { landing_link_card("mailbox", "Run a complete DID mailbox node and stateless SMTP MX gateway delivering sealed mail over the Chord DHT.", "https://github.com/RingsNetwork/rings/tree/master/examples/mailbox") }
                 { landing_link_card("ffi", "Drive a Rings node from Python, Swift, Kotlin, or C through the C ABI in rings.h to embed P2P networking in host apps.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
-                { landing_link_card("frontend & extension", "Inspect the Rust/Yew browser node console, Onion WebView service worker, and Chrome MV3 extension package.", "https://github.com/RingsNetwork/rings/tree/master/frontend") }
+                { landing_link_card("frontend & extension", "Inspect the Rust/Yew browser node console, Onion WebView service worker, and Chrome MV3 extension package.", "https://github.com/RingsNetwork/rings/tree/master/examples/frontend") }
             </div>
         </section>
     }
@@ -272,7 +272,7 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 7] = [
         title: "dWeb, TUI, mail, relay, and custom apps",
         summary: "Apps run directly over the peer-to-peer protocol layer with end-to-end sovereignty.",
         detail: "Application surfaces include the browser console, Chrome MV3 extension, rings-tui terminal workbench, DID mail gateway, and repository examples. They compose wallet login, dWeb content, relay tunnels, and custom protocol messages on top of the same peer runtime.",
-        surface: "frontend, crates/tui, examples/dweb, examples/relay, examples/mailbox, examples/ffi",
+        surface: "examples/frontend, crates/tui, examples/dweb, examples/relay, examples/mailbox, examples/ffi",
         contract: "Application code addresses peers and namespaces while lower layers manage overlay routing, privacy, and transport.",
     },
     ArchitectureLayer {

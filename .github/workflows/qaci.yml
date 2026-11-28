@@ -93,7 +93,7 @@ jobs:
         run: mdbook build docs --dest-dir target/site/docs
 
       - name: Finish the book as the deploy does
-        run: python3 frontend/scripts/finish_site.py target/site
+        run: python3 examples/frontend/scripts/finish_site.py target/site
 
   miri_core:
     name: Miri core invariants
@@ -269,7 +269,7 @@ jobs:
         uses: ./.github/actions/rust-cache
         with:
           workspaces: |
-            frontend
+            examples/frontend
             examples/dweb
 
       - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
@@ -316,18 +316,18 @@ jobs:
 
       - name: Test Rings extension Onion WebView
         run: |
-          xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs
-          xvfb-run -a node frontend/.generated/scripts/test-extension-webview-regressions.mjs
+          xvfb-run -a node examples/frontend/.generated/scripts/test-extension-webview.mjs
+          xvfb-run -a node examples/frontend/.generated/scripts/test-extension-webview-regressions.mjs
 
       - name: Run clippy for Rings frontend
         run: cargo clippy --target=wasm32-unknown-unknown --all-targets -- -D warnings
-        working-directory: ./frontend
+        working-directory: ./examples/frontend
 
       - name: Run Rings frontend tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: cargo test --release --target=wasm32-unknown-unknown
-          working-directory: ./frontend
+          working-directory: ./examples/frontend
 
       - name: Run dweb example browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1

@@ -3,7 +3,7 @@
  *
  * Loaded after mdBook's own stylesheets (`additional-css` in book.toml), so it only overrides.
  * The palette, type, cards, pills, code blocks, and footer are the ones the frontend defines
- * in `frontend/src/styles/theme` (WARM: page #f3ead8 / #fbf4e6, panel #fffaf0, line #dfd0b7,
+ * in `examples/frontend/src/styles/theme` (WARM: page #f3ead8 / #fbf4e6, panel #fffaf0, line #dfd0b7,
  * ink #101828, accent #b42318); `theme/index.hbs` provides the header and footer markup this
  * styles. mdBook sets the root font size to 62.5%, so 1rem is 10px throughout.
  */

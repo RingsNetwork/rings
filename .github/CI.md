@@ -51,7 +51,7 @@ The wasm32 gates are three parallel jobs, each over its own build graph:
 | Job | Coverage |
 | --- | --- |
 | Clippy for wasm crates | Clippy for core, runtime, aez, transport, and node on wasm32; the browser graph carries no native gateway dependency |
-| Build and test the frontend and dweb for wasm | Extension scripts and package, static shell, Onion WebView, frontend clippy and tests, dweb browser tests; caches the `frontend` and `examples/dweb` workspaces |
+| Build and test the frontend and dweb for wasm | Extension scripts and package, static shell, Onion WebView, frontend clippy and tests, dweb browser tests; caches the `examples/frontend` and `examples/dweb` workspaces |
 | Browser tests for wasm crates | Core (with the repair soak as its own invocation), runtime, aez, transport, and node browser tests |
 
 ## Caches

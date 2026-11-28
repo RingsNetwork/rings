@@ -154,7 +154,7 @@ try {
   clearTimeout(watchdog);
 }
 
-/** Resolves the `frontend/` directory from either source or compiled `.generated/scripts` paths. */
+/** Resolves the `examples/frontend/` directory from either source or compiled `.generated/scripts` paths. */
 function frontendProjectRoot(currentScriptDir: string): string {
   const parentDir = dirname(currentScriptDir);
   return basename(parentDir) === ".generated" ? resolve(parentDir, "..") : resolve(currentScriptDir, "..");

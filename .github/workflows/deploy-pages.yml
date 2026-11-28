@@ -1,5 +1,6 @@
-# Publishes the https://rings.rs site to GitHub Pages: the browser frontend (`frontend/`,
-# Trunk + Yew) at the root and the documentation book (`docs/`, mdBook) under `/docs/`.
+# Publishes the https://rings.rs site to GitHub Pages: the browser frontend
+# (`examples/frontend/`, Trunk + Yew, including `examples/frontend/article/`) at the root and the
+# documentation book (`docs/`, mdBook) under `/docs/`.
 #
 # Separation of concerns — QACI already compiles, lints, and tests the frontend and builds the
 # book on every PR; this workflow only *ships* them. It runs on master pushes that can change
@@ -7,8 +8,8 @@
 # master is what rings.rs serves. The deploy environment is `github-pages`, the one the Pages
 # integration owns; the `id-token` grant is the OIDC proof the Pages deployment API requires.
 #
-# The site is one Pages artifact: Trunk owns `frontend/dist` (it clears the directory on every
-# build), so the book is rendered into it afterwards, the repository's `llms.txt` and
+# The site is one Pages artifact: Trunk owns `examples/frontend/dist` (it clears the directory on
+# every build), so the book is rendered into it afterwards, the repository's `llms.txt` and
 # `install.sh` are copied to the site root beside it, and the SPA fallback is added. Last,
 # `finish_site.py` readies it for
 # search engines: a canonical address and a description of its own for each chapter, noindex
@@ -26,8 +27,7 @@ on:
     branches:
       - "master"
     paths:
-      - "frontend/**"
-      - "blog/**"
+      - "examples/frontend/**"
       - "papers/**"
       - "crates/**"
       - "docs/**"
@@ -70,7 +70,7 @@ jobs:
       - name: Cache cargo registry and build artifacts
         uses: ./.github/actions/rust-cache
         with:
-          workspaces: frontend
+          workspaces: examples/frontend
 
       # Trunk shells out to `wasm-bindgen`; pin the CLI to the crate version the frontend links
       # so the build does not depend on what Trunk would download at run time.
@@ -88,19 +88,19 @@ jobs:
         run: npm run build:frontend-web
 
       - name: Build the documentation book into the site
-        run: mdbook build docs --dest-dir frontend/dist/docs
+        run: mdbook build docs --dest-dir examples/frontend/dist/docs
 
       - name: Publish llms.txt at the site root
-        run: cp llms.txt frontend/dist/llms.txt
+        run: cp llms.txt examples/frontend/dist/llms.txt
 
       - name: Publish install.sh at the site root
-        run: cp install.sh frontend/dist/install.sh
+        run: cp install.sh examples/frontend/dist/install.sh
 
       - name: Add the SPA fallback for path-routed WebView URLs
-        run: cp frontend/dist/index.html frontend/dist/404.html
+        run: cp examples/frontend/dist/index.html examples/frontend/dist/404.html
 
       - name: Finish the site for search engines
-        run: python3 frontend/scripts/finish_site.py frontend/dist
+        run: python3 examples/frontend/scripts/finish_site.py examples/frontend/dist
 
       - name: Configure Pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
@@ -108,7 +108,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
-          path: frontend/dist
+          path: examples/frontend/dist
 
   deploy:
     name: Deploy to GitHub Pages
@@ -131,4 +131,4 @@ jobs:
 
       - name: Tell IndexNow the pages are new
         continue-on-error: true
-        run: python3 frontend/scripts/indexnow.py
+        run: python3 examples/frontend/scripts/indexnow.py

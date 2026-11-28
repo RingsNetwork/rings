@@ -45,7 +45,7 @@ Styles are split under `src/styles/` by responsibility:
 ## Run as a Web App
 
 ```sh
-cd frontend
+cd examples/frontend
 trunk serve --release true
 ```
 
@@ -59,19 +59,20 @@ the whitepaper; the node console and GitHub are entered from the landing page it
 
 The web app is published to GitHub Pages by `.github/workflows/deploy-pages.yml`,
 which serves `https://rings.rs` through the repository's Pages custom domain. It runs
-on every master push that touches `frontend/`, `blog/`, `crates/`, `docs/`, `llms.txt`,
-`install.sh`, or `.github/workflows/deploy-pages.yml` (and on manual dispatch), builds
-with `npm run build:frontend-web` (a release `trunk build` from the repository root),
-renders the documentation book (`docs/`, mdBook) into `frontend/dist/docs`, copies
-`llms.txt`, `install.sh`, and `404.html`, runs `frontend/scripts/finish_site.py` (which
-invokes `frontend/scripts/build_blog.py` to emit `/blog/`, `/blog/feed.xml`,
-`/blog/index.md`, and `/blog/<slug>.md`, writes `/index.md`, `/llms-full.txt`, and
-`/sitemap.xml`, and annotates book chapters with canonical URLs and JSON-LD), and
-uploads `frontend/dist`. After deploy, `frontend/scripts/indexnow.py` submits updated
-pages from `sitemap.xml` to IndexNow. The shell is hash-routed; the path-routed WebView
-gateway (`/webview`, `/webview/…`) is answered by the service worker, and `404.html`
-(marked `noindex`) is a copy of the shell so a cold load of such a path boots the app
-and registers it.
+on every master push that touches `examples/frontend/`, `papers/`, `crates/`, `docs/`,
+`llms.txt`, `install.sh`, or `.github/workflows/deploy-pages.yml` (and on manual
+dispatch), builds with `npm run build:frontend-web` (a release `trunk build` from the
+repository root), renders the documentation book (`docs/`, mdBook) into
+`examples/frontend/dist/docs`, copies `llms.txt`, `install.sh`, and `404.html`, runs
+`examples/frontend/scripts/finish_site.py` (which invokes
+`examples/frontend/scripts/build_article.py` to render `examples/frontend/article/`
+into `/blog/`, `/blog/feed.xml`, `/blog/index.md`, and `/blog/<slug>.md`, writes
+`/index.md`, `/llms-full.txt`, and `/sitemap.xml`, and annotates book chapters with
+canonical URLs and JSON-LD), and uploads `examples/frontend/dist`. After deploy,
+`examples/frontend/scripts/indexnow.py` submits updated pages from `sitemap.xml` to
+IndexNow. The shell is hash-routed; the path-routed WebView gateway (`/webview`,
+`/webview/…`) is answered by the service worker, and `404.html` (marked `noindex`) is
+a copy of the shell so a cold load of such a path boots the app and registers it.
 
 Link previews (Open Graph and Twitter cards) are the `<meta>` tags in `index.html` and
 the card at `assets/social/rings-card.png`, rendered from `assets/social/card.svg` with
@@ -133,7 +134,7 @@ website, install the repository JavaScript dependencies and run the local
 fixture test after packaging the extension:
 
 ```sh
-cd ..
+cd ../..
 npm ci --ignore-scripts
 npx playwright install chromium
 npm run test:frontend-extension-wallet
@@ -146,13 +147,13 @@ Phantom bridge calls against mock providers in the current tab.
 ## Check
 
 ```sh
-cd frontend
+cd examples/frontend
 cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
-npm --prefix .. ci --ignore-scripts
-npm --prefix .. run package:frontend-extension
-cd ..
+npm --prefix ../.. ci --ignore-scripts
+npm --prefix ../.. run package:frontend-extension
+cd ../..
 npx playwright install chromium
 npm run test:frontend-static-shell
 npm run test:frontend-extension-wallet

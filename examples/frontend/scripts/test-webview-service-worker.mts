@@ -29,7 +29,14 @@ const workerResponseAssetPath = resolve(projectRoot, "assets", "webview-worker-r
 const workerNavigationAssetPath = resolve(projectRoot, "assets", "webview-worker-navigation.js");
 const workerRequestAssetPath = resolve(projectRoot, "assets", "webview-worker-request.js");
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
-const canonicalGatewayCspPath = resolve(projectRoot, "..", "crates", "webview", "gateway-content-security-policy.txt");
+const canonicalGatewayCspPath = resolve(
+  projectRoot,
+  "..",
+  "..",
+  "crates",
+  "webview",
+  "gateway-content-security-policy.txt",
+);
 const hostAssetSource = await readFile(hostAssetPath, "utf8");
 const workerResponseAssetSource = await readFile(workerResponseAssetPath, "utf8");
 const workerNavigationAssetSource = await readFile(workerNavigationAssetPath, "utf8");

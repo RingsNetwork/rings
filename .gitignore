@@ -5,19 +5,19 @@ config*.yaml
 **/*.rs.bk
 **/*.ipynb
 **/*.js
-!frontend/assets/webview-worker-navigation.js
-!frontend/assets/webview-worker-request.js
+!examples/frontend/assets/webview-worker-navigation.js
+!examples/frontend/assets/webview-worker-request.js
 **/*.mjs
 !crates/webview/src/browser_runtime.mjs
 !crates/webview/src/browser_runtime_transforms.mjs
 !crates/webview/src/browser_runtime_transforms.test.mjs
 !workers/paper-telemetry/src/index.mjs
 !workers/paper-telemetry/test-worker.mjs
-!frontend/assets/webview-host.js
-!frontend/assets/webview-overlay.js
-!frontend/assets/webview-worker-response.js
-!frontend/rings-webview-service-worker.js
-frontend/dist-e2e/
+!examples/frontend/assets/webview-host.js
+!examples/frontend/assets/webview-overlay.js
+!examples/frontend/assets/webview-worker-response.js
+!examples/frontend/rings-webview-service-worker.js
+examples/frontend/dist-e2e/
 .ipynb_checkpoints
 # Local environment configuration
 .envrc
@@ -54,7 +54,7 @@ dist-extension/
 node_modules/
 .playwright-cli/
 output/
-frontend/.generated/
+examples/frontend/.generated/
 
 # mdBook output of docs/
 docs/book/

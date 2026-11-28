@@ -17,8 +17,8 @@ base64 = "0.22"
 futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"
-rings-node = { path = "../crates/node", default-features = false, features = ["browser"] }
-rings-webview = { path = "../crates/webview", features = ["browser"] }
+rings-node = { path = "../../crates/node", default-features = false, features = ["browser"] }
+rings-webview = { path = "../../crates/webview", features = ["browser"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
@@ -40,7 +40,7 @@ web-sys = { version = "=0.3.98", features = [
 yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
-rings-test-support = { path = "../crates/test-support", features = ["swarm-observer"] }
+rings-test-support = { path = "../../crates/test-support", features = ["swarm-observer"] }
 wasm-bindgen-test = "=0.3.71"
 
 # The shipped wasm (rings.rs and the extension package): Trunk selects this profile for

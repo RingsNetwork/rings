@@ -100,7 +100,7 @@ const sourceIconSvg = join(projectRoot, "assets", "icons", "rings.svg");
 const sourceFaviconSvg = join(projectRoot, "assets", "icons", "favicon.svg");
 const extensionAssets = resolve(projectRoot, ".generated", "extension-assets");
 const staticExtensionAssets = resolve(projectRoot, "extension-assets");
-const dependencyRoot = resolve(projectRoot, "..", "node_modules");
+const dependencyRoot = resolve(projectRoot, "..", "..", "node_modules");
 const moduleBundlerSourceArtifact = generatedArtifact("webview_worker_modules_source.js", "renderer");
 const EXTENSION_RUNTIME_ARTIFACTS: readonly ExtensionRuntimeArtifactPolicy[] = [
   compiledArtifact("wallet_bridge.js", "private"),
@@ -122,7 +122,7 @@ const EXTENSION_RUNTIME_ARTIFACTS: readonly ExtensionRuntimeArtifactPolicy[] = [
   staticArtifact("webview.css", "private"),
   copiedArtifact(join(projectRoot, "assets", "webview-worker-request.js"), "webview_request_body.js", "renderer"),
   copiedArtifact(
-    resolve(projectRoot, "..", "crates", "webview", "src", "browser_runtime_transforms.mjs"),
+    resolve(projectRoot, "..", "..", "crates", "webview", "src", "browser_runtime_transforms.mjs"),
     "webview_runtime_transforms.js",
     "renderer",
   ),

@@ -56,9 +56,9 @@ them by hand.
 | `assets/logo/rings.svg` | Light-background mark |
 | `assets/logo/rings-white.svg` | Dark-background mark |
 | `assets/logo/rings-spec.json` | Inputs, formulas, solved geometry, and palette measurements |
-| `frontend/assets/icons/rings.svg` | Frontend mark |
-| `frontend/assets/icons/favicon.svg` | Adaptive frontend favicon |
-| `frontend/assets/social/card.svg` | Social sharing card |
+| `examples/frontend/assets/icons/rings.svg` | Frontend mark |
+| `examples/frontend/assets/icons/favicon.svg` | Adaptive frontend favicon |
+| `examples/frontend/assets/social/card.svg` | Social sharing card |
 | `docs/src/assets/rings.svg` | Documentation mark |
 | `docs/theme/favicon.svg` | Adaptive documentation favicon |
 

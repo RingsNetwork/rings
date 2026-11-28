@@ -143,6 +143,7 @@ envelopes, and the protocol's shell runs the prover.
 
 | Example | Shows |
 |---|---|
+| [`frontend`](./examples/frontend) | Browser node console, landing & article site (`rings.rs`), Onion WebView, and Chrome MV3 extension |
 | [`native`](./examples/native) | A native node with a custom protocol |
 | [`relay`](./examples/relay) | TCP and UDP tunnels to a peer's service |
 | [`mailbox`](./examples/mailbox) | SMTP/IMAP mailbox and mail gateway over Rings |
@@ -188,7 +189,7 @@ live under [`contrib/`](./contrib/README.md).
 | [SECURITY.md](./SECURITY.md) | Security architecture, layer contracts, and vulnerability reporting |
 | [ROADMAP.md](./ROADMAP.md) | Milestones and tracks |
 | [llms.txt](./llms.txt) | Project map for AI agents |
-| [`frontend`](./frontend) | Source of rings.rs and the browser extension |
+| [`examples/frontend`](./examples/frontend) | Source of rings.rs (including `article/`) and the browser extension |
 | [@RingsNetworkio](https://x.com/RingsNetworkio) | Announcements |
 
 ## Whitepaper

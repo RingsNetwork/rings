@@ -72,11 +72,11 @@ npm run build:frontend-web
 npm run test:frontend-static-shell
 ```
 
-For documentation-book or blog changes:
+For documentation-book or article changes:
 
 ```sh
 mdbook build docs --dest-dir target/site/docs
-python3 frontend/scripts/finish_site.py target/site
+python3 examples/frontend/scripts/finish_site.py target/site
 ```
 
 If a change touches TOML files or prose, also run `taplo format --check` or `typos`
