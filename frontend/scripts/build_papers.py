@@ -88,8 +88,8 @@ PAPER_SPECS: tuple[PaperSpec, ...] = (
         pdf_file="rings.pdf",
         download_name="rings-whitepaper-1.0.pdf",
         published="2023-02-08",
-        updated="2026-11-27",
-        pages=22,
+        updated="2026-11-28",
+        pages=23,
         roman_sections=True,
         tags=(
             "Chord DHT",
@@ -98,6 +98,7 @@ PAPER_SPECS: tuple[PaperSpec, ...] = (
             "Crash Consistency",
             "SlotRoster Admission",
             "Sphinx & AEZ v5",
+            "TURN Onion Relay",
             "Stateright Verification",
         ),
         bibtex_key="rings-whitepaper-2026",
@@ -406,7 +407,7 @@ def normalize_math_for_katex(math_tex: str, ctx: CompilerContext | None = None) 
 
     out = math_tex
     out = re.sub(r"\\label\{[^}]*\}", "", out)
-    out = out.replace("\\allowbreak", "")
+    out = re.sub(r"\\allowbreak(?:\{\}|\s*)", "", out)
     out = out.replace("\\llbracket", "[\\![")
     out = out.replace("\\rrbracket", "]\\!]")
     out = out.replace("\\mbox{-}", "\\text{-}")
@@ -637,7 +638,7 @@ def render_inline_latex(text: str, ctx: CompilerContext) -> str:
 
     def render_code(inner: str) -> str:
         clean = (
-            inner.replace("\\allowbreak", "")
+            re.sub(r"\\allowbreak(?:\{\}|\s*)", "", inner)
             .replace("\\_", "_")
             .replace("\\{", "{")
             .replace("\\}", "}")
