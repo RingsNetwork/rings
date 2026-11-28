@@ -103,15 +103,15 @@ pub fn generate_assets() -> Result<Vec<GeneratedAsset>, LogoError> {
             contents: specification,
         },
         GeneratedAsset {
-            path: "frontend/assets/icons/rings.svg",
+            path: "examples/frontend/assets/icons/rings.svg",
             contents: dark_svg.clone(),
         },
         GeneratedAsset {
-            path: "frontend/assets/icons/favicon.svg",
+            path: "examples/frontend/assets/icons/favicon.svg",
             contents: adaptive_svg.clone(),
         },
         GeneratedAsset {
-            path: "frontend/assets/social/card.svg",
+            path: "examples/frontend/assets/social/card.svg",
             contents: social_card,
         },
         GeneratedAsset {

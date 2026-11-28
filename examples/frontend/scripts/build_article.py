@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Render the Rings Network engineering blog (`blog/`) into the built site (`<site>/blog/`).
+"""Render the Rings Network engineering articles (`examples/frontend/article/`) into `<site>/blog/`.
 
 Invoked by `finish_site.py` during both `qaci.yml` and `deploy-pages.yml` using only the Python
 standard library so CI needs no extra packages. Emits:
 - `<site>/blog/index.html` and `<site>/blog/index.md`
 - `<site>/blog/feed.xml` (Atom 1.0 feed)
-- `<site>/blog/<slug>/index.html` and `<site>/blog/<slug>.md` for every post in `blog/posts.json`
+- `<site>/blog/<slug>/index.html` and `<site>/blog/<slug>.md` for every post in `article/posts.json`
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from xml.sax.saxutils import escape as xml_escape
 
 SITE_URL = "https://rings.rs/"
 BLOG_URL = f"{SITE_URL}blog/"
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BLOG_SOURCE_DIR = REPO_ROOT / "blog"
+FRONTEND_ROOT = Path(__file__).resolve().parents[1]
+ARTICLE_SOURCE_DIR = FRONTEND_ROOT / "article"
 
 INLINE_CODE_RE = re.compile(r"`([^`]+)`")
 IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
@@ -31,7 +31,7 @@ ITALIC_RE = re.compile(r"\*([^*]+)\*")
 
 @dataclass(frozen=True)
 class BlogPost:
-    """One engineering blog post loaded from `blog/posts.json` and `blog/<slug>.md`."""
+    """One engineering article loaded from `article/posts.json` and `article/<slug>.md`."""
 
     slug: str
     title: str
@@ -59,19 +59,19 @@ class BlogPost:
         return f"{SITE_URL}{self.cover.lstrip('/')}"
 
 
-def load_posts(blog_dir: Path = BLOG_SOURCE_DIR) -> list[BlogPost]:
-    """Load and validate every post declared in `blog/posts.json`."""
+def load_posts(article_dir: Path = ARTICLE_SOURCE_DIR) -> list[BlogPost]:
+    """Load and validate every post declared in `article/posts.json`."""
 
-    manifest_path = blog_dir / "posts.json"
+    manifest_path = article_dir / "posts.json"
     if not manifest_path.is_file():
-        raise ValueError(f"missing blog manifest: {manifest_path}")
+        raise ValueError(f"missing article manifest: {manifest_path}")
     entries = json.loads(manifest_path.read_text(encoding="utf-8"))
     posts: list[BlogPost] = []
     for entry in entries:
         slug = str(entry["slug"]).strip()
-        md_path = blog_dir / f"{slug}.md"
+        md_path = article_dir / f"{slug}.md"
         if not md_path.is_file():
-            raise ValueError(f"missing markdown file for blog post '{slug}': {md_path}")
+            raise ValueError(f"missing markdown file for article '{slug}': {md_path}")
         posts.append(
             BlogPost(
                 slug=slug,
@@ -235,7 +235,7 @@ def render_markdown(markdown: str, skip_leading_cover: str | None = None) -> str
     return "\n".join(blocks)
 
 
-BLOG_STYLESHEET = (BLOG_SOURCE_DIR / "blog.css").read_text(encoding="utf-8").strip()
+BLOG_STYLESHEET = (ARTICLE_SOURCE_DIR / "article.css").read_text(encoding="utf-8").strip()
 
 
 def site_header_html() -> str:
@@ -259,7 +259,7 @@ def site_header_html() -> str:
 
 
 def site_footer_html() -> str:
-    """Return the shared Rings site footer matching `frontend/src/footer.rs`."""
+    """Return the shared Rings site footer matching `examples/frontend/src/footer.rs`."""
 
     return """\
     <footer class="rings-footer" aria-label="Site footer">
@@ -665,12 +665,12 @@ def render_post_markdown_artifact(post: BlogPost) -> str:
     )
 
 
-def finish_blog(site: Path, blog_dir: Path = BLOG_SOURCE_DIR) -> list[str]:
-    """Build the blog under `<site>/blog/` and return all indexable blog URLs."""
+def finish_article(site: Path, article_dir: Path = ARTICLE_SOURCE_DIR) -> list[str]:
+    """Build the articles under `<site>/blog/` and return all indexable blog URLs."""
 
-    if not (blog_dir / "posts.json").is_file():
+    if not (article_dir / "posts.json").is_file():
         return []
-    posts = load_posts(blog_dir)
+    posts = load_posts(article_dir)
     out_dir = site / "blog"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "index.html").write_text(render_blog_index_html(posts), encoding="utf-8")

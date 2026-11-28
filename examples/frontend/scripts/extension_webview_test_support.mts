@@ -253,7 +253,7 @@ export async function fixtureRequestCount(page: Page, target: string): Promise<n
 
 /** Builds the exact shared bootstrap sources with the Extension worker capability enabled. */
 export async function browserBootstrapFixture(frontendRoot: string): Promise<string> {
-  const webviewRoot = resolve(frontendRoot, "..", "crates", "webview", "src");
+  const webviewRoot = resolve(frontendRoot, "..", "..", "crates", "webview", "src");
   const [transforms, runtime] = await Promise.all([
     readFile(join(webviewRoot, "browser_runtime_transforms.mjs"), "utf8"),
     readFile(join(webviewRoot, "browser_runtime.mjs"), "utf8"),

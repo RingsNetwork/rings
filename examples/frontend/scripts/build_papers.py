@@ -21,7 +21,7 @@ from pathlib import Path
 
 SITE_URL = "https://rings.rs/"
 PAPERS_URL = f"{SITE_URL}papers/"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 PAPERS_SOURCE_DIR = REPO_ROOT / "papers"
 PAPERS_CSS = (PAPERS_SOURCE_DIR / "papers.css").read_text(encoding="utf-8").strip()
 
@@ -1968,7 +1968,7 @@ def site_header_html() -> str:
 
 
 def site_footer_html() -> str:
-    """Return the shared Rings site footer matching `frontend/src/footer.rs`."""
+    """Return the shared Rings site footer matching `examples/frontend/src/footer.rs`."""
 
     return """\
     <footer class="rings-footer" aria-label="Site footer">

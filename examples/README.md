@@ -19,13 +19,14 @@ gateways, and holds the mail gateway, tested over a stand-in DHT. `rings-native-
 ElGamal E2E stream round trip. `rings-relay-example` includes deterministic
 local TCP/UDP echo tests in addition to overlay relay tests.
 
-The browser frontend moved to the repository-level [`frontend`](../frontend)
-workspace because it also serves the landing guide and Chrome extension package:
+Run the browser frontend example (`examples/frontend`, which serves the landing page,
+engineering articles under `article/`, browser node console, Onion WebView, and Chrome MV3
+extension package from its own Cargo workspace):
 
 ```bash
-cd ../frontend && cargo check --target wasm32-unknown-unknown
-cd ../frontend && cargo test --release --target wasm32-unknown-unknown
-cd ../frontend && trunk serve --release true
+cd examples/frontend && cargo check --target wasm32-unknown-unknown
+cd examples/frontend && cargo test --release --target wasm32-unknown-unknown
+cd examples/frontend && trunk serve --release true
 ```
 
 Run the standalone dweb wasm/Yew demo from its own workspace:

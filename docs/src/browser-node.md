@@ -3,7 +3,7 @@
 The frontend at [rings.rs](https://rings.rs) is the same node compiled to WebAssembly and
 wrapped in a Rust/Yew application. It runs as a web app, and the same build packages as a
 Chrome extension. Its source is the repository's
-[`frontend`](https://github.com/RingsNetwork/rings/tree/master/frontend) workspace.
+[`examples/frontend`](https://github.com/RingsNetwork/rings/tree/master/examples/frontend) workspace.
 
 ## The hosted console
 
@@ -38,7 +38,7 @@ screen has a URL.
 Install [Trunk](https://trunkrs.dev/) and the `wasm32-unknown-unknown` target, then:
 
 ```bash
-cd frontend
+cd examples/frontend
 trunk serve --release true
 ```
 
@@ -63,7 +63,7 @@ npm ci --ignore-scripts
 npm run package:frontend-extension
 ```
 
-The package is written to `frontend/dist-extension/`. Load that directory from
+The package is written to `examples/frontend/dist-extension/`. Load that directory from
 `chrome://extensions` with developer mode on; after each rebuild, click Reload there.
 
 Two security guarantees of the package are deliberate. First, the wallet bridge signs directly
@@ -74,7 +74,7 @@ remote scripts in an opaque origin so static and server-rendered pages with rewr
 browse safely without exposing same-origin gateway `fetch` or XHR surfaces (custom embedders that
 require dynamic runtime requests can opt into `rings-webview`'s `browser` runtime-request bridge
 below). The
-[frontend README](https://github.com/RingsNetwork/rings/blob/master/frontend/README.md)
+[frontend README](https://github.com/RingsNetwork/rings/blob/master/examples/frontend/README.md)
 records both contracts in full, with the test suites that pin them.
 
 ## Onion WebView & `rings-webview` architecture

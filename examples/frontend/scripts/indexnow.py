@@ -5,10 +5,11 @@ Bing takes IndexNow, and through Bing so do the answer engines that search with 
 Naver, Seznam and others share what it is told. deploy-pages.yml runs this after each deploy,
 so they need not wait to crawl the site to learn of a change:
 
-    frontend/scripts/indexnow.py [--print]     --print shows the request and sends nothing
+    examples/frontend/scripts/indexnow.py [--print]     --print shows the request and sends nothing
 
-The pages are those the deployed sitemap.xml lists. The key is the name of `frontend/<key>.txt`,
-which the site serves at its root, so the engines can check that the request is the site's.
+The pages are those the deployed sitemap.xml lists. The key is the name of
+`examples/frontend/<key>.txt`, which the site serves at its root, so the engines can check that
+the request is the site's.
 """
 
 from __future__ import annotations
